@@ -126,12 +126,21 @@ Always respond with valid JSON only, no markdown formatting or explanation."""
             response = self._call_llm(prompt, system=system)
             data = self._parse_json_response(response)
 
+            # Ensure measurements is a list of dicts
+            measurements = data.get("measurements", [])
+            if isinstance(measurements, dict):
+                measurements = [measurements]
+            elif not isinstance(measurements, list):
+                measurements = []
+            # Ensure each measurement is a dict
+            measurements = [m if isinstance(m, dict) else {} for m in measurements]
+
             llm_entities = ExtractedEntities(
-                diagnoses=data.get("diagnoses", []),
-                procedures=data.get("procedures", []),
-                anatomic_sites=data.get("anatomic_sites", []),
-                measurements=data.get("measurements", []),
-                medications=data.get("medications", []),
+                diagnoses=data.get("diagnoses", []) or [],
+                procedures=data.get("procedures", []) or [],
+                anatomic_sites=data.get("anatomic_sites", []) or [],
+                measurements=measurements,
+                medications=data.get("medications", []) or [],
                 time_documentation=data.get("time_documentation"),
                 raw_entities=[],
             )
