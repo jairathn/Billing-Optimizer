@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DermBill AI - Billing Optimizer</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+
+        .main-card {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .input-section {
+            padding: 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .input-section label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .input-section textarea {
+            width: 100%;
+            height: 200px;
+            padding: 15px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+            resize: vertical;
+            transition: border-color 0.2s;
+        }
+
+        .input-section textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-row {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: #e9ecef;
+            color: #495057;
+        }
+
+        .btn-secondary:hover {
+            background: #dee2e6;
+        }
+
+        .tabs {
+            display: flex;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 15px 20px;
+            border: none;
+            background: none;
+            font-size: 14px;
+            font-weight: 600;
+            color: #6c757d;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-bottom: 3px solid transparent;
+        }
+
+        .tab:hover {
+            color: #495057;
+            background: #e9ecef;
+        }
+
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+            background: white;
+        }
+
+        .results-section {
+            padding: 30px;
+            min-height: 300px;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .placeholder {
+            text-align: center;
+            color: #adb5bd;
+            padding: 60px 20px;
+        }
+
+        .placeholder svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid #e9ecef;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .billing-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        .billing-table th,
+        .billing-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        .billing-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .billing-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .total-row {
+            font-weight: 700;
+            background: #e7f1ff !important;
+        }
+
+        .total-row td {
+            color: #667eea;
+        }
+
+        .wrvu-badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .status-supported {
+            color: #28a745;
+        }
+
+        .status-missing {
+            color: #dc3545;
+        }
+
+        .enhancement-card, .opportunity-card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+
+        .enhancement-card.high {
+            border-left-color: #dc3545;
+        }
+
+        .enhancement-card.medium {
+            border-left-color: #ffc107;
+        }
+
+        .enhancement-card h4 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .enhancement-card p, .opportunity-card p {
+            margin: 8px 0;
+            color: #666;
+            font-size: 14px;
+        }
+
+        .delta-positive {
+            color: #28a745;
+            font-weight: 600;
+        }
+
+        .suggested-text {
+            background: #e7f1ff;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 13px;
+            margin: 10px 0;
+            border: 1px solid #b8daff;
+        }
+
+        .optimized-note {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            border: 1px solid #e9ecef;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .copy-btn {
+            padding: 8px 16px;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+
+        .summary-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .summary-box h3 {
+            margin-bottom: 15px;
+        }
+
+        .summary-stats {
+            display: flex;
+            gap: 30px;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+
+        .gap-list {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+        }
+
+        .gap-list h4 {
+            color: #856404;
+            margin-bottom: 10px;
+        }
+
+        .gap-list ul {
+            margin-left: 20px;
+            color: #856404;
+        }
+
+        .gap-list li {
+            margin: 5px 0;
+        }
+
+        .entities-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .entity-box {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .entity-box h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .entity-box ul {
+            list-style: none;
+        }
+
+        .entity-box li {
+            padding: 4px 0;
+            color: #495057;
+            font-size: 14px;
+        }
+
+        .compliance-notice {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #6c757d;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .category-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        .category-comorbidity { background: #d4edda; color: #155724; }
+        .category-procedure { background: #cce5ff; color: #004085; }
+        .category-visit_level { background: #fff3cd; color: #856404; }
+        .category-documentation { background: #e2e3e5; color: #383d41; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏥 DermBill AI</h1>
+            <p>Dermatology Billing Optimization System</p>
+        </header>
+
+        <div class="main-card">
+            <div class="input-section">
+                <label for="clinical-note">Paste Clinical Note:</label>
+                <textarea id="clinical-note" placeholder="Enter the clinical note here...
+
+Example:
+Patient presents for follow-up of plaque psoriasis on bilateral elbows and knees.
+Current treatment: clobetasol cream BID.
+Exam: Thick plaques on bilateral elbows, knees. Nail exam reveals pitting on 8 nails.
+Performed nail debridement.
+Plan: Continue current therapy. Return in 3 months."></textarea>
+                <div class="button-row">
+                    <button class="btn-primary" id="analyze-btn" onclick="analyzeNote()">
+                        Analyze Note
+                    </button>
+                    <button class="btn-secondary" onclick="loadExample()">
+                        Load Example
+                    </button>
+                    <button class="btn-secondary" onclick="clearAll()">
+                        Clear
+                    </button>
+                </div>
+            </div>
+
+            <div class="tabs">
+                <button class="tab active" data-tab="entities">1. Entities</button>
+                <button class="tab" data-tab="current">2. Current Billing</button>
+                <button class="tab" data-tab="enhancements">3. Enhancements</button>
+                <button class="tab" data-tab="opportunities">4. Opportunities</button>
+            </div>
+
+            <div class="results-section">
+                <div id="placeholder" class="placeholder">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    <p>Enter a clinical note and click "Analyze Note" to get billing optimization recommendations.</p>
+                </div>
+
+                <div id="loading" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Analyzing clinical note...</p>
+                </div>
+
+                <div id="error" class="error-message" style="display: none;"></div>
+
+                <div id="results" style="display: none;">
+                    <div id="tab-entities" class="tab-content active"></div>
+                    <div id="tab-current" class="tab-content"></div>
+                    <div id="tab-enhancements" class="tab-content"></div>
+                    <div id="tab-opportunities" class="tab-content"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        function loadExample() {
+            document.getElementById('clinical-note').value = `Patient presents for follow-up of plaque psoriasis on bilateral elbows and knees.
+Current treatment: clobetasol cream BID, not well controlled.
+
+HPI: 45-year-old male with 10-year history of plaque psoriasis. Reports morning stiffness lasting 30 minutes. Denies joint swelling.
+
+Exam:
+- Thick erythematous plaques on bilateral elbows (4x3 cm each)
+- Similar plaques on bilateral knees (5x4 cm each)
+- Nail exam: pitting on 8 nails with subungual debris
+- BSA approximately 5%
+
+Assessment: Plaque psoriasis, moderate severity, with nail involvement
+
+Plan:
+1. Nail debridement performed today
+2. IL triamcinolone 10mg/mL injected into 4 thick plaques (bilateral elbows)
+3. Discussed biologic therapy options given inadequate response to topicals
+4. Return in 6 weeks to reassess and potentially initiate systemic therapy`;
+        }
+
+        function clearAll() {
+            document.getElementById('clinical-note').value = '';
+            document.getElementById('placeholder').style.display = 'block';
+            document.getElementById('results').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+        }
+
+        async function analyzeNote() {
+            const note = document.getElementById('clinical-note').value.trim();
+            if (!note) {
+                alert('Please enter a clinical note');
+                return;
+            }
+
+            document.getElementById('placeholder').style.display = 'none';
+            document.getElementById('results').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('analyze-btn').disabled = true;
+
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ note: note })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Analysis failed');
+                }
+
+                const data = await response.json();
+                displayResults(data);
+            } catch (err) {
+                document.getElementById('error').textContent = 'Error: ' + err.message;
+                document.getElementById('error').style.display = 'block';
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('analyze-btn').disabled = false;
+            }
+        }
+
+        function displayResults(data) {
+            // Entities tab
+            const entitiesHtml = `
+                <h3>Extracted Entities</h3>
+                <div class="entities-grid">
+                    <div class="entity-box">
+                        <h4>Diagnoses</h4>
+                        <ul>${data.entities.diagnoses.map(d => `<li>${d}</li>`).join('') || '<li>None found</li>'}</ul>
+                    </div>
+                    <div class="entity-box">
+                        <h4>Procedures</h4>
+                        <ul>${data.entities.procedures.map(p => `<li>${p}</li>`).join('') || '<li>None found</li>'}</ul>
+                    </div>
+                    <div class="entity-box">
+                        <h4>Anatomic Sites</h4>
+                        <ul>${data.entities.anatomic_sites.map(s => `<li>${s}</li>`).join('') || '<li>None found</li>'}</ul>
+                    </div>
+                    <div class="entity-box">
+                        <h4>Medications</h4>
+                        <ul>${data.entities.medications.map(m => `<li>${m}</li>`).join('') || '<li>None found</li>'}</ul>
+                    </div>
+                </div>
+                ${data.entities.measurements.length ? `
+                    <div class="entity-box" style="margin-top: 15px;">
+                        <h4>Measurements</h4>
+                        <ul>${data.entities.measurements.map(m => `<li>${m.type}: ${m.value} ${m.unit || ''}</li>`).join('')}</ul>
+                    </div>
+                ` : ''}
+            `;
+            document.getElementById('tab-entities').innerHTML = entitiesHtml;
+
+            // Current billing tab
+            const currentBilling = data.current_billing;
+            let currentHtml = `
+                <div class="summary-box">
+                    <h3>Current Maximum Billing</h3>
+                    <div class="summary-stats">
+                        <div class="stat">
+                            <div class="stat-value">${currentBilling.total_wRVU.toFixed(2)}</div>
+                            <div class="stat-label">Total wRVU</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${currentBilling.codes.length}</div>
+                            <div class="stat-label">Billable Codes</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            if (currentBilling.codes.length) {
+                currentHtml += `
+                    <table class="billing-table">
+                        <thead>
+                            <tr>
+                                <th>Code</th>
+                                <th>Modifier</th>
+                                <th>Description</th>
+                                <th>wRVU</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${currentBilling.codes.map(c => `
+                                <tr>
+                                    <td><strong>${c.code}</strong></td>
+                                    <td>${c.modifier || '-'}</td>
+                                    <td>${c.description}</td>
+                                    <td><span class="wrvu-badge">${c.wRVU.toFixed(2)}</span></td>
+                                    <td class="${c.status === 'supported' ? 'status-supported' : 'status-missing'}">${c.status}</td>
+                                </tr>
+                            `).join('')}
+                            <tr class="total-row">
+                                <td colspan="3"><strong>TOTAL</strong></td>
+                                <td><span class="wrvu-badge">${currentBilling.total_wRVU.toFixed(2)}</span></td>
+                                <td></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                `;
+            }
+
+            if (currentBilling.documentation_gaps.length) {
+                currentHtml += `
+                    <div class="gap-list">
+                        <h4>⚠️ Documentation Gaps</h4>
+                        <ul>${currentBilling.documentation_gaps.map(g => `<li>${g}</li>`).join('')}</ul>
+                    </div>
+                `;
+            }
+            document.getElementById('tab-current').innerHTML = currentHtml;
+
+            // Enhancements tab
+            const enhancements = data.documentation_enhancements;
+            let enhHtml = `
+                <div class="summary-box">
+                    <h3>Documentation Enhancements</h3>
+                    <div class="summary-stats">
+                        <div class="stat">
+                            <div class="stat-value">+${enhancements.improvement.toFixed(2)}</div>
+                            <div class="stat-label">Potential wRVU Gain</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${enhancements.enhanced_total_wRVU.toFixed(2)}</div>
+                            <div class="stat-label">Enhanced Total</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            if (enhancements.enhancements.length) {
+                enhHtml += enhancements.enhancements.map(e => `
+                    <div class="enhancement-card ${e.priority}">
+                        <h4>${e.issue}</h4>
+                        ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${e.current_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                        ${e.enhanced_code ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${e.enhanced_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                        <p class="delta-positive">+${e.delta_wRVU.toFixed(2)} wRVU improvement</p>
+                        <div class="suggested-text">${e.suggested_addition}</div>
+                    </div>
+                `).join('');
+            } else {
+                enhHtml += '<p>No documentation enhancements identified.</p>';
+            }
+
+            if (enhancements.optimized_note) {
+                enhHtml += `
+                    <h3 style="margin-top: 30px;">Optimized Note</h3>
+                    <div class="optimized-note">${enhancements.optimized_note}</div>
+                    <button class="btn-secondary copy-btn" onclick="copyText('${encodeURIComponent(enhancements.optimized_note)}')">📋 Copy to Clipboard</button>
+                `;
+            }
+            document.getElementById('tab-enhancements').innerHTML = enhHtml;
+
+            // Opportunities tab
+            const opportunities = data.future_opportunities;
+            let oppHtml = `
+                <div class="summary-box">
+                    <h3>Future Opportunities ("Next Time")</h3>
+                    <div class="summary-stats">
+                        <div class="stat">
+                            <div class="stat-value">+${opportunities.total_potential_additional_wRVU.toFixed(2)}</div>
+                            <div class="stat-label">Potential Additional wRVU</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${opportunities.opportunities.length}</div>
+                            <div class="stat-label">Opportunities</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            if (opportunities.opportunities.length) {
+                oppHtml += opportunities.opportunities.map(o => `
+                    <div class="opportunity-card">
+                        <span class="category-badge category-${o.category}">${o.category}</span>
+                        <h4>${o.finding}</h4>
+                        <p><strong>Opportunity:</strong> ${o.opportunity}</p>
+                        <p><strong>Action:</strong> ${o.action}</p>
+                        ${o.potential_code ? `<p><strong>If done:</strong> ${o.potential_code.code} - ${o.potential_code.description} (<span class="delta-positive">+${o.potential_code.wRVU.toFixed(2)} wRVU</span>)</p>` : ''}
+                        <p style="font-style: italic; color: #667eea;">💡 ${o.teaching_point}</p>
+                    </div>
+                `).join('');
+            } else {
+                oppHtml += '<p>No additional opportunities identified.</p>';
+            }
+
+            if (opportunities.optimized_note) {
+                oppHtml += `
+                    <h3 style="margin-top: 30px;">Optimized Note (All Opportunities)</h3>
+                    <div class="optimized-note">${opportunities.optimized_note}</div>
+                    <button class="btn-secondary copy-btn" onclick="copyText('${encodeURIComponent(opportunities.optimized_note)}')">📋 Copy to Clipboard</button>
+                `;
+            }
+
+            oppHtml += `<div class="compliance-notice">${data.compliance_notice}</div>`;
+            document.getElementById('tab-opportunities').innerHTML = oppHtml;
+
+            document.getElementById('results').style.display = 'block';
+        }
+
+        function copyText(encodedText) {
+            const text = decodeURIComponent(encodedText);
+            navigator.clipboard.writeText(text).then(() => {
+                alert('Copied to clipboard!');
+            });
+        }
+    </script>
+</body>
+</html>
