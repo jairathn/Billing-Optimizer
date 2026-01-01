@@ -136,8 +136,8 @@ async def analyze_note(request: AnalyzeRequest):
     try:
         print("[ANALYZE] Getting analyzer...", flush=True)
         analyzer = get_analyzer()
-        print("[ANALYZE] Calling analyze()...", flush=True)
-        result = analyzer.analyze(request.note)
+        print("[ANALYZE] Calling analyze_async()...", flush=True)
+        result = await analyzer.analyze_async(request.note)
         print("[ANALYZE] Analysis complete!", flush=True)
         return result
     except ValueError as e:
