@@ -1,3 +1,5 @@
+python -m uvicorn dermbill.api:app --reload --host 0.0.0.0 --port 8000
+
 # DermBill AI: Dermatology Billing Optimization System
 
 ## Project Overview
