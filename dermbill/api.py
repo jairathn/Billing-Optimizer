@@ -10,11 +10,14 @@ Endpoints:
 """
 
 import os
+from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 from .models import (
@@ -78,9 +81,18 @@ app.add_middleware(
 )
 
 
+# Serve static files
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
 @app.get("/", include_in_schema=False)
 async def root():
-    """Root endpoint redirect to docs."""
+    """Serve the main UI."""
+    index_file = static_dir / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return {
         "name": "DermBill AI",
         "version": __version__,
