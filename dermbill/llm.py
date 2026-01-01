@@ -789,6 +789,65 @@ Respond with valid JSON only."""
                 total_potential_additional_wRVU=0.0,
             )
 
+    async def regenerate_note_async(
+        self,
+        original_note: str,
+        selected_enhancements: list[dict],
+        selected_opportunities: list[dict],
+    ) -> str:
+        """
+        Regenerate an optimized note based on selected recommendations.
+
+        Args:
+            original_note: Original clinical note
+            selected_enhancements: List of selected enhancement dicts
+            selected_opportunities: List of selected opportunity dicts
+
+        Returns:
+            Regenerated optimized note text
+        """
+        # Build the list of changes to apply
+        changes_to_apply = []
+
+        for e in selected_enhancements:
+            changes_to_apply.append(f"ENHANCEMENT: {e.get('issue', '')} - {e.get('suggested_addition', '')}")
+
+        for o in selected_opportunities:
+            changes_to_apply.append(f"OPPORTUNITY: {o.get('opportunity', '')} - {o.get('action', '')}")
+
+        if not changes_to_apply:
+            return original_note
+
+        prompt = f"""Rewrite this clinical note incorporating ONLY the selected recommendations.
+
+ORIGINAL NOTE:
+{original_note}
+
+SELECTED CHANGES TO INCORPORATE:
+{chr(10).join(changes_to_apply)}
+
+INSTRUCTIONS:
+1. Start with the original note as the base
+2. Add ONLY the documentation from the selected changes
+3. Integrate changes naturally into the note flow
+4. Do NOT add any changes that weren't selected
+5. Keep the note professional and clinically appropriate
+6. Output ONLY the complete rewritten note - no explanations
+
+OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
+
+        system = """You are a medical documentation expert.
+Rewrite clinical notes incorporating specific documentation additions.
+Only add what is explicitly requested - nothing more.
+Maintain professional medical documentation standards.
+Output only the complete note text, no commentary."""
+
+        try:
+            response = await self._call_llm_async(prompt, system=system, max_tokens=4096)
+            return response.strip()
+        except Exception as e:
+            return f"Error regenerating note: {str(e)}"
+
 
 # Global instance
 _llm_client: Optional[LLMClient] = None
