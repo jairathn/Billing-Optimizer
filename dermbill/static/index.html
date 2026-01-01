@@ -422,7 +422,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>🏥 DermBill AI</h1>
+            <h1>DermBill AI</h1>
             <p>Dermatology Billing Optimization System</p>
         </header>
 
@@ -641,7 +641,7 @@ Plan:
             if (currentBilling.documentation_gaps.length) {
                 currentHtml += `
                     <div class="gap-list">
-                        <h4>⚠️ Documentation Gaps</h4>
+                        <h4>Documentation Gaps</h4>
                         <ul>${currentBilling.documentation_gaps.map(g => `<li>${g}</li>`).join('')}</ul>
                     </div>
                 `;
@@ -684,7 +684,7 @@ Plan:
                 enhHtml += `
                     <h3 style="margin-top: 30px;">Optimized Note</h3>
                     <div class="optimized-note">${enhancements.optimized_note}</div>
-                    <button class="btn-secondary copy-btn" onclick="copyText('${encodeURIComponent(enhancements.optimized_note)}')">📋 Copy to Clipboard</button>
+                    <button class="btn-secondary copy-btn" onclick="copyToClipboard(this.previousElementSibling.textContent)">Copy to Clipboard</button>
                 `;
             }
             document.getElementById('tab-enhancements').innerHTML = enhHtml;
@@ -715,7 +715,7 @@ Plan:
                         <p><strong>Opportunity:</strong> ${o.opportunity}</p>
                         <p><strong>Action:</strong> ${o.action}</p>
                         ${o.potential_code ? `<p><strong>If done:</strong> ${o.potential_code.code} - ${o.potential_code.description} (<span class="delta-positive">+${o.potential_code.wRVU.toFixed(2)} wRVU</span>)</p>` : ''}
-                        <p style="font-style: italic; color: #667eea;">💡 ${o.teaching_point}</p>
+                        <p style="font-style: italic; color: #667eea;">${o.teaching_point}</p>
                     </div>
                 `).join('');
             } else {
@@ -726,7 +726,7 @@ Plan:
                 oppHtml += `
                     <h3 style="margin-top: 30px;">Optimized Note (All Opportunities)</h3>
                     <div class="optimized-note">${opportunities.optimized_note}</div>
-                    <button class="btn-secondary copy-btn" onclick="copyText('${encodeURIComponent(opportunities.optimized_note)}')">📋 Copy to Clipboard</button>
+                    <button class="btn-secondary copy-btn" onclick="copyToClipboard(this.previousElementSibling.textContent)">Copy to Clipboard</button>
                 `;
             }
 
@@ -736,8 +736,7 @@ Plan:
             document.getElementById('results').style.display = 'block';
         }
 
-        function copyText(encodedText) {
-            const text = decodeURIComponent(encodedText);
+        function copyToClipboard(text) {
             navigator.clipboard.writeText(text).then(() => {
                 alert('Copied to clipboard!');
             });
