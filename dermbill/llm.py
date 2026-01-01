@@ -94,17 +94,34 @@ class LLMClient:
         Returns:
             Parsed JSON dict
         """
-        # Try to extract JSON from markdown code blocks
-        if "```json" in response:
-            start = response.index("```json") + 7
-            end = response.index("```", start)
-            response = response[start:end].strip()
-        elif "```" in response:
-            start = response.index("```") + 3
-            end = response.index("```", start)
-            response = response[start:end].strip()
+        original_response = response
 
-        return json.loads(response)
+        # Try to extract JSON from markdown code blocks
+        try:
+            if "```json" in response:
+                start = response.index("```json") + 7
+                end = response.index("```", start)
+                response = response[start:end].strip()
+            elif "```" in response:
+                start = response.index("```") + 3
+                end = response.index("```", start)
+                response = response[start:end].strip()
+        except ValueError:
+            # No closing ``` found, try to parse the whole response
+            pass
+
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            # Try to find any JSON object in the response
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', original_response)
+            if json_match:
+                try:
+                    return json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    pass
+            raise ValueError(f"Failed to parse JSON from LLM response: {e}. Response: {original_response[:500]}")
 
     def extract_entities(self, note_text: str) -> ExtractedEntities:
         """
