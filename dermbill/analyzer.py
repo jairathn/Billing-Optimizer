@@ -171,10 +171,17 @@ class DermBillAnalyzer:
         Returns:
             Complete AnalysisResult
         """
+        import time
+        print("[ANALYZER] Starting analysis...", flush=True)
+
         llm = self._get_llm_client()
+        print(f"[ANALYZER] Using model: {llm.model}", flush=True)
 
         # Step 1: Entity Extraction
+        print("[ANALYZER] Step 1: Extracting entities...", flush=True)
+        start = time.time()
         entities = llm.extract_entities(note_text)
+        print(f"[ANALYZER] Step 1 complete in {time.time()-start:.1f}s", flush=True)
 
         # Match scenarios based on entities
         scenario_matches = self.scenario_matcher.match_scenarios(note_text)
@@ -199,11 +206,14 @@ class DermBillAnalyzer:
         corpus_context = self._build_corpus_context(entities, rules_to_load)
 
         # Step 2: Current Maximum Billing
+        print("[ANALYZER] Step 2: Analyzing billing...", flush=True)
+        start = time.time()
         current_billing = llm.analyze_current_billing(
             note_text,
             entities,
             corpus_context,
         )
+        print(f"[ANALYZER] Step 2 complete in {time.time()-start:.1f}s", flush=True)
 
         # Check G2211 eligibility
         if is_g2211_eligible(entities.diagnoses):
@@ -220,21 +230,28 @@ class DermBillAnalyzer:
                     )
 
         # Step 3: Documentation Enhancement
+        print("[ANALYZER] Step 3: Finding enhancements...", flush=True)
+        start = time.time()
         doc_enhancements = llm.identify_enhancements(
             note_text,
             entities,
             current_billing,
             corpus_context,
         )
+        print(f"[ANALYZER] Step 3 complete in {time.time()-start:.1f}s", flush=True)
 
         # Step 4: Future Opportunities
+        print("[ANALYZER] Step 4: Finding opportunities...", flush=True)
+        start = time.time()
         future_opps = llm.identify_opportunities(
             note_text,
             entities,
             scenario_content,
             corpus_context,
         )
+        print(f"[ANALYZER] Step 4 complete in {time.time()-start:.1f}s", flush=True)
 
+        print("[ANALYZER] All steps complete!", flush=True)
         return AnalysisResult(
             entities=entities,
             current_billing=current_billing,

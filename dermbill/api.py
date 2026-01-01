@@ -130,15 +130,22 @@ async def analyze_note(request: AnalyzeRequest):
     - Future opportunities
     """
     import traceback
+    import sys
+    print(f"[ANALYZE] Starting analysis, note length: {len(request.note)}", flush=True)
+    sys.stdout.flush()
     try:
+        print("[ANALYZE] Getting analyzer...", flush=True)
         analyzer = get_analyzer()
+        print("[ANALYZE] Calling analyze()...", flush=True)
         result = analyzer.analyze(request.note)
+        print("[ANALYZE] Analysis complete!", flush=True)
         return result
     except ValueError as e:
+        print(f"[ANALYZE] ValueError: {e}", flush=True)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         error_detail = f"Analysis error: {str(e)}\n{traceback.format_exc()}"
-        print(error_detail)  # Log to console
+        print(f"[ANALYZE] Exception: {error_detail}", flush=True)
         raise HTTPException(status_code=500, detail=error_detail)
 
 
