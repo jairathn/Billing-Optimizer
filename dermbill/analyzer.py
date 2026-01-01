@@ -161,9 +161,9 @@ class DermBillAnalyzer:
 
         return "\n\n".join(context_parts)
 
-    def analyze(self, note_text: str) -> AnalysisResult:
+    async def analyze_async(self, note_text: str) -> AnalysisResult:
         """
-        Perform complete billing optimization analysis.
+        Perform complete billing optimization analysis with parallel LLM calls.
 
         Args:
             note_text: Clinical note text to analyze
@@ -172,12 +172,13 @@ class DermBillAnalyzer:
             Complete AnalysisResult
         """
         import time
+        import asyncio
         print("[ANALYZER] Starting analysis...", flush=True)
 
         llm = self._get_llm_client()
         print(f"[ANALYZER] Using model: {llm.model}", flush=True)
 
-        # Step 1: Entity Extraction
+        # Step 1: Entity Extraction (must be done first)
         print("[ANALYZER] Step 1: Extracting entities...", flush=True)
         start = time.time()
         entities = llm.extract_entities(note_text)
@@ -188,7 +189,6 @@ class DermBillAnalyzer:
         scenario_content = ""
         if scenario_matches:
             scenario_content = scenario_matches[0].content
-            # Add additional matches if relevant
             for match in scenario_matches[1:3]:
                 scenario_content += f"\n\n---\n\n# Additional: {match.name}\n{match.content}"
 
@@ -205,51 +205,31 @@ class DermBillAnalyzer:
         # Build corpus context
         corpus_context = self._build_corpus_context(entities, rules_to_load)
 
-        # Step 2: Current Maximum Billing
-        print("[ANALYZER] Step 2: Analyzing billing...", flush=True)
+        # Steps 2+3 and 4 run in PARALLEL
+        print("[ANALYZER] Steps 2-3 & 4: Running billing/enhancements and opportunities in parallel...", flush=True)
         start = time.time()
-        current_billing = llm.analyze_current_billing(
-            note_text,
-            entities,
-            corpus_context,
+
+        # Run both LLM calls concurrently
+        enhancements_task = llm.identify_enhancements_async(note_text, entities, corpus_context)
+        opportunities_task = llm.identify_opportunities_async(note_text, entities, scenario_content, corpus_context)
+
+        (current_billing, doc_enhancements), future_opps = await asyncio.gather(
+            enhancements_task,
+            opportunities_task
         )
-        print(f"[ANALYZER] Step 2 complete in {time.time()-start:.1f}s", flush=True)
+
+        print(f"[ANALYZER] Steps 2-4 complete in {time.time()-start:.1f}s (parallel)", flush=True)
 
         # Check G2211 eligibility
         if is_g2211_eligible(entities.diagnoses):
-            # Check if G2211 is already in the billing
             has_g2211 = any(c.code == "G2211" for c in current_billing.codes)
             if not has_g2211:
-                # Check if there's an E/M code to attach it to
                 em_codes = ["99212", "99213", "99214", "99215"]
                 has_em = any(c.code in em_codes for c in current_billing.codes)
                 if has_em:
-                    # Add G2211 as a documentation gap note
                     current_billing.documentation_gaps.append(
                         "G2211 (chronic condition add-on, +0.33 wRVU) may be applicable - ensure chronic condition is documented"
                     )
-
-        # Step 3: Documentation Enhancement
-        print("[ANALYZER] Step 3: Finding enhancements...", flush=True)
-        start = time.time()
-        doc_enhancements = llm.identify_enhancements(
-            note_text,
-            entities,
-            current_billing,
-            corpus_context,
-        )
-        print(f"[ANALYZER] Step 3 complete in {time.time()-start:.1f}s", flush=True)
-
-        # Step 4: Future Opportunities
-        print("[ANALYZER] Step 4: Finding opportunities...", flush=True)
-        start = time.time()
-        future_opps = llm.identify_opportunities(
-            note_text,
-            entities,
-            scenario_content,
-            corpus_context,
-        )
-        print(f"[ANALYZER] Step 4 complete in {time.time()-start:.1f}s", flush=True)
 
         print("[ANALYZER] All steps complete!", flush=True)
         return AnalysisResult(
@@ -259,6 +239,13 @@ class DermBillAnalyzer:
             future_opportunities=future_opps,
             original_note=note_text,
         )
+
+    def analyze(self, note_text: str) -> AnalysisResult:
+        """
+        Synchronous wrapper for analyze_async.
+        """
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(self.analyze_async(note_text))
 
     def lookup_code(self, code: str) -> Optional[dict]:
         """

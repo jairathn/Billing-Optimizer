@@ -10,10 +10,11 @@ Handles all interactions with the Anthropic Claude API for:
 
 import os
 import json
+import asyncio
 from typing import Optional
 from pathlib import Path
 
-from anthropic import Anthropic
+from anthropic import Anthropic, AsyncAnthropic
 
 from .models import (
     ExtractedEntities,
@@ -48,7 +49,8 @@ class LLMClient:
             raise ValueError("ANTHROPIC_API_KEY not set")
 
         self.model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-        self.client = Anthropic(api_key=self.api_key, timeout=120.0)  # 2 minute timeout per call
+        self.client = Anthropic(api_key=self.api_key, timeout=120.0)
+        self.async_client = AsyncAnthropic(api_key=self.api_key, timeout=120.0)
 
     def _call_llm(
         self,
@@ -82,6 +84,29 @@ class LLMClient:
             kwargs["system"] = system
 
         response = self.client.messages.create(**kwargs)
+        return response.content[0].text
+
+    async def _call_llm_async(
+        self,
+        prompt: str,
+        system: Optional[str] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+    ) -> str:
+        """Async version of _call_llm."""
+        messages = [{"role": "user", "content": prompt}]
+
+        kwargs = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "temperature": temperature,
+        }
+
+        if system:
+            kwargs["system"] = system
+
+        response = await self.async_client.messages.create(**kwargs)
         return response.content[0].text
 
     def _parse_json_response(self, response: str) -> dict:
@@ -263,43 +288,44 @@ Respond with valid JSON only."""
         self,
         note_text: str,
         entities: ExtractedEntities,
-        current_billing: CurrentBilling,
         corpus_context: str,
-    ) -> DocumentationEnhancements:
+    ) -> tuple[CurrentBilling, DocumentationEnhancements]:
         """
-        Identify documentation enhancements to increase billing.
+        Analyze current billing AND identify documentation enhancements.
 
         Args:
             note_text: Original clinical note
             entities: Extracted entities
-            current_billing: Current billing analysis
             corpus_context: Relevant corpus content
 
         Returns:
-            DocumentationEnhancements object
+            Tuple of (CurrentBilling, DocumentationEnhancements)
         """
-        prompt = f"""Analyze this clinical note and suggest documentation enhancements to capture additional legitimate revenue.
+        prompt = f"""Analyze this dermatology clinical note for billing optimization.
 
 CLINICAL NOTE:
 {note_text}
 
-CURRENT BILLING:
-{json.dumps(current_billing.model_dump(), indent=2)}
+EXTRACTED ENTITIES:
+{json.dumps(entities.model_dump(), indent=2)}
 
 REFERENCE INFORMATION:
 {corpus_context}
 
-For each enhancement opportunity:
-1. Identify the documentation gap
-2. Provide specific language to add
-3. Calculate the wRVU improvement
-
-Also provide:
-1. A complete suggested addendum
-2. A fully optimized version of the note (copy-pasteable plain text)
+You must:
+1. First identify ALL billable codes from the note AS WRITTEN
+2. Then suggest documentation enhancements to capture additional legitimate revenue
 
 Respond with JSON:
 {{
+    "current_billing": {{
+        "codes": [
+            {{"code": "99214", "modifier": "-25", "description": "Office visit level 4", "wRVU": 1.92, "units": 1, "status": "supported"}},
+            ...
+        ],
+        "total_wRVU": 3.45,
+        "documentation_gaps": ["Gap 1", "Gap 2"]
+    }},
     "enhancements": [
         {{
             "issue": "Closure type not documented",
@@ -315,13 +341,15 @@ Respond with JSON:
     "suggested_addendum": "Addendum: ...",
     "optimized_note": "Complete optimized note text...",
     "enhanced_total_wRVU": 4.50,
-    "improvement": 1.13
+    "improvement": 1.05
 }}"""
 
         system = """You are a dermatology billing optimization expert.
-Identify documentation improvements that would allow legitimate additional billing.
+First analyze what can be billed from the note as written.
+Then identify documentation improvements for additional legitimate billing.
 Focus on capturing work that was actually performed but not fully documented.
 Never suggest adding documentation for work that wasn't done.
+Apply proper modifier logic and NCCI edit rules.
 Provide specific, copy-pasteable language additions.
 Respond with valid JSON only."""
 
@@ -329,6 +357,27 @@ Respond with valid JSON only."""
             response = self._call_llm(prompt, system=system, max_tokens=8192)
             data = self._parse_json_response(response)
 
+            # Parse current billing
+            cb_data = data.get("current_billing", {})
+            codes = [
+                BillingCode(
+                    code=c["code"],
+                    modifier=c.get("modifier"),
+                    description=c.get("description", ""),
+                    wRVU=float(c.get("wRVU", 0)),
+                    units=int(c.get("units", 1)),
+                    status=c.get("status", "supported"),
+                    documentation_note=c.get("documentation_note"),
+                )
+                for c in cb_data.get("codes", [])
+            ]
+            current_billing = CurrentBilling(
+                codes=codes,
+                total_wRVU=float(cb_data.get("total_wRVU", sum(c.wRVU * c.units for c in codes))),
+                documentation_gaps=cb_data.get("documentation_gaps", []),
+            )
+
+            # Parse enhancements
             enhancements = [
                 DocumentationEnhancement(
                     issue=e["issue"],
@@ -343,20 +392,132 @@ Respond with valid JSON only."""
                 for e in data.get("enhancements", [])
             ]
 
-            return DocumentationEnhancements(
+            doc_enhancements = DocumentationEnhancements(
                 enhancements=enhancements,
                 suggested_addendum=data.get("suggested_addendum"),
                 optimized_note=data.get("optimized_note"),
                 enhanced_total_wRVU=float(data.get("enhanced_total_wRVU", 0)),
                 improvement=float(data.get("improvement", 0)),
             )
+
+            return current_billing, doc_enhancements
         except Exception as e:
-            return DocumentationEnhancements(
-                enhancements=[],
-                suggested_addendum=None,
-                optimized_note=None,
-                enhanced_total_wRVU=current_billing.total_wRVU,
-                improvement=0.0,
+            return (
+                CurrentBilling(codes=[], total_wRVU=0.0, documentation_gaps=[f"Error: {str(e)}"]),
+                DocumentationEnhancements(enhancements=[], enhanced_total_wRVU=0.0, improvement=0.0),
+            )
+
+    async def identify_enhancements_async(
+        self,
+        note_text: str,
+        entities: ExtractedEntities,
+        corpus_context: str,
+    ) -> tuple[CurrentBilling, DocumentationEnhancements]:
+        """Async version of identify_enhancements."""
+        prompt = f"""Analyze this dermatology clinical note for billing optimization.
+
+CLINICAL NOTE:
+{note_text}
+
+EXTRACTED ENTITIES:
+{json.dumps(entities.model_dump(), indent=2)}
+
+REFERENCE INFORMATION:
+{corpus_context}
+
+You must:
+1. First identify ALL billable codes from the note AS WRITTEN
+2. Then suggest documentation enhancements to capture additional legitimate revenue
+
+Respond with JSON:
+{{
+    "current_billing": {{
+        "codes": [
+            {{"code": "99214", "modifier": "-25", "description": "Office visit level 4", "wRVU": 1.92, "units": 1, "status": "supported"}},
+            ...
+        ],
+        "total_wRVU": 3.45,
+        "documentation_gaps": ["Gap 1", "Gap 2"]
+    }},
+    "enhancements": [
+        {{
+            "issue": "Closure type not documented",
+            "current_code": "12001",
+            "current_wRVU": 0.82,
+            "suggested_addition": "Add: 'Wound edges undermined. Layered closure with deep dermal 4-0 Vicryl.'",
+            "enhanced_code": "12031",
+            "enhanced_wRVU": 1.95,
+            "delta_wRVU": 1.13,
+            "priority": "high"
+        }}
+    ],
+    "suggested_addendum": "Addendum: ...",
+    "optimized_note": "Complete optimized note text...",
+    "enhanced_total_wRVU": 4.50,
+    "improvement": 1.05
+}}"""
+
+        system = """You are a dermatology billing optimization expert.
+First analyze what can be billed from the note as written.
+Then identify documentation improvements for additional legitimate billing.
+Focus on capturing work that was actually performed but not fully documented.
+Never suggest adding documentation for work that wasn't done.
+Apply proper modifier logic and NCCI edit rules.
+Provide specific, copy-pasteable language additions.
+Respond with valid JSON only."""
+
+        try:
+            response = await self._call_llm_async(prompt, system=system, max_tokens=8192)
+            data = self._parse_json_response(response)
+
+            # Parse current billing
+            cb_data = data.get("current_billing", {})
+            codes = [
+                BillingCode(
+                    code=c["code"],
+                    modifier=c.get("modifier"),
+                    description=c.get("description", ""),
+                    wRVU=float(c.get("wRVU", 0)),
+                    units=int(c.get("units", 1)),
+                    status=c.get("status", "supported"),
+                    documentation_note=c.get("documentation_note"),
+                )
+                for c in cb_data.get("codes", [])
+            ]
+            current_billing = CurrentBilling(
+                codes=codes,
+                total_wRVU=float(cb_data.get("total_wRVU", sum(c.wRVU * c.units for c in codes))),
+                documentation_gaps=cb_data.get("documentation_gaps", []),
+            )
+
+            # Parse enhancements
+            enhancements = [
+                DocumentationEnhancement(
+                    issue=e["issue"],
+                    current_code=e.get("current_code"),
+                    current_wRVU=float(e.get("current_wRVU", 0)),
+                    suggested_addition=e["suggested_addition"],
+                    enhanced_code=e.get("enhanced_code"),
+                    enhanced_wRVU=float(e.get("enhanced_wRVU", 0)),
+                    delta_wRVU=float(e.get("delta_wRVU", 0)),
+                    priority=e.get("priority", "medium"),
+                )
+                for e in data.get("enhancements", [])
+            ]
+
+            doc_enhancements = DocumentationEnhancements(
+                enhancements=enhancements,
+                suggested_addendum=data.get("suggested_addendum"),
+                optimized_note=data.get("optimized_note"),
+                enhanced_total_wRVU=float(data.get("enhanced_total_wRVU", 0)),
+                improvement=float(data.get("improvement", 0)),
+            )
+
+            return current_billing, doc_enhancements
+        except Exception as e:
+            return (
+                CurrentBilling(codes=[], total_wRVU=0.0, documentation_gaps=[f"Error: {str(e)}"]),
+                DocumentationEnhancements(enhancements=[], enhanced_total_wRVU=0.0, improvement=0.0),
             )
 
     def identify_opportunities(
@@ -434,6 +595,104 @@ Respond with valid JSON only."""
 
         try:
             response = self._call_llm(prompt, system=system, max_tokens=8192)
+            data = self._parse_json_response(response)
+
+            opportunities = []
+            for o in data.get("opportunities", []):
+                potential_code = None
+                if o.get("potential_code"):
+                    pc = o["potential_code"]
+                    potential_code = PotentialCode(
+                        code=pc["code"],
+                        description=pc.get("description", ""),
+                        wRVU=float(pc.get("wRVU", 0)),
+                    )
+
+                opportunities.append(FutureOpportunity(
+                    category=o["category"],
+                    finding=o["finding"],
+                    opportunity=o["opportunity"],
+                    action=o["action"],
+                    potential_code=potential_code,
+                    teaching_point=o["teaching_point"],
+                ))
+
+            return FutureOpportunities(
+                opportunities=opportunities,
+                optimized_note=data.get("optimized_note"),
+                total_potential_additional_wRVU=float(data.get("total_potential_additional_wRVU", 0)),
+            )
+        except Exception as e:
+            return FutureOpportunities(
+                opportunities=[],
+                optimized_note=None,
+                total_potential_additional_wRVU=0.0,
+            )
+
+    async def identify_opportunities_async(
+        self,
+        note_text: str,
+        entities: ExtractedEntities,
+        scenario_content: str,
+        corpus_context: str,
+    ) -> FutureOpportunities:
+        """Async version of identify_opportunities."""
+        prompt = f"""Analyze this clinical note and identify opportunities for future visits.
+These are things the provider could have done or looked for that would generate additional legitimate revenue.
+
+CLINICAL NOTE:
+{note_text}
+
+EXTRACTED ENTITIES:
+{json.dumps(entities.model_dump(), indent=2)}
+
+RELEVANT SCENARIO GUIDANCE:
+{scenario_content}
+
+REFERENCE INFORMATION:
+{corpus_context}
+
+For each opportunity:
+1. Category: comorbidity, procedure, visit_level, or documentation
+2. What was found in the note
+3. What opportunity was missed
+4. What to do next time
+5. Potential code and wRVU if action is taken
+6. Teaching point explanation
+
+Also provide:
+1. An optimized version of the note as if these opportunities were captured (copy-pasteable plain text)
+
+Respond with JSON:
+{{
+    "opportunities": [
+        {{
+            "category": "comorbidity",
+            "finding": "Psoriasis documented",
+            "opportunity": "Nail involvement not assessed",
+            "action": "Examine nails for pitting, onycholysis",
+            "potential_code": {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53}},
+            "teaching_point": "50% of psoriasis patients have nail involvement."
+        }}
+    ],
+    "optimized_note": "Complete optimized note with all opportunities captured...",
+    "total_potential_additional_wRVU": 1.50
+}}"""
+
+        system = """You are a dermatology billing educator.
+Identify missed opportunities that could generate legitimate additional revenue.
+Focus on:
+1. Comorbidities that should be screened for
+2. Procedures that could have been performed
+3. Visit level optimizations
+4. Documentation improvements
+
+These are TEACHING moments for the provider.
+Be specific about what to look for and do next time.
+Respond with valid JSON only."""
+
+        try:
+            response = await self._call_llm_async(prompt, system=system, max_tokens=8192)
             data = self._parse_json_response(response)
 
             opportunities = []
