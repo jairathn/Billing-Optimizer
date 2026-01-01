@@ -129,6 +129,7 @@ async def analyze_note(request: AnalyzeRequest):
     - Documentation enhancements
     - Future opportunities
     """
+    import traceback
     try:
         analyzer = get_analyzer()
         result = analyzer.analyze(request.note)
@@ -136,7 +137,9 @@ async def analyze_note(request: AnalyzeRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+        error_detail = f"Analysis error: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)  # Log to console
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @app.get("/codes/{code}", response_model=CodeLookupResponse, tags=["Reference"])
