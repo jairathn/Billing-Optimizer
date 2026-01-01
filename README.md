@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-DermBill AI is an LLM-powered billing optimization tool for dermatologists. It analyzes clinical notes and provides actionable recommendations to capture legitimate revenue that is commonly left on the table due to documentation gaps, measurement errors, and missed opportunities.
+DermBill AI is an LLM-powered billing optimization tool for dermatologists. It analyzes clinical notes and provides actionable recommendations to capture legitimate revenue that is commonly left on the table due to documentation gaps, measurement errors, and missed opportunities. The goal is to find the opportunities that would MAXIMIZE the RVUs generated for each encounter. You have available to you a master list of ALL potential dermatologic billing codes and their RVUs, and you are powered by Claude Opus 4.5. You have as reference many examples of billing optimizations, and you have a full corpus of knowledge, architecture and rules to draw from. Your task is to build a bot that most efficiently uses this corpus of knowledge, and maximizes the abilities of Claude Opus 4.5, to output recommendations for physicians using the tool that would maximize their potential RVUs. For user input, you will simply intake the physician's current clinical note. 
 
 **This is NOT a fraud tool.** This system helps providers bill correctly for work actually performed and teaches them to recognize billable opportunities during patient encounters.
 
@@ -80,6 +80,7 @@ Identify what WORDING CHANGES would increase billing:
 - Specific language to add to the note
 - Before/after wRVU comparison
 - Priority ranking by impact
+- OUTPUT the note as you think it should be written to maximize RVU capture (copy-pasteable with a single click)
 
 **Output format:**
 ```json
@@ -109,6 +110,7 @@ Identify what CLINICAL ACTIONS could have generated additional revenue:
 - Questions to ask patients
 - Examination findings to look for
 - wRVU value of each missed opportunity
+- OUTPUT the note as you think it should be written to maximize RVU capture (copy-pasteable with a single click)
 
 **This is the teaching layer.** It says things like:
 - "Did you check for nail involvement in this psoriasis patient? If present, nail debridement (11721) adds 0.53 wRVU"
@@ -314,7 +316,7 @@ print(f"Potential additional: {result.future_opportunities.total_potential_wRVU}
 
 ---
 
-## Key Optimization Patterns to Implement
+## Examples of Optimization Patterns to Implement
 
 ### 1. Excision Margin Calculation
 ```python
