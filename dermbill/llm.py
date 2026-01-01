@@ -301,7 +301,7 @@ Respond with valid JSON only."""
         Returns:
             Tuple of (CurrentBilling, DocumentationEnhancements)
         """
-        prompt = f"""Analyze this dermatology clinical note for billing optimization.
+        prompt = f"""Analyze this dermatology clinical note for MAXIMUM billing optimization.
 
 CLINICAL NOTE:
 {note_text}
@@ -314,7 +314,22 @@ REFERENCE INFORMATION:
 
 You must:
 1. First identify ALL billable codes from the note AS WRITTEN
-2. Then suggest documentation enhancements to capture additional legitimate revenue
+2. Then suggest documentation enhancements that INCREASE BILLING
+
+CRITICAL RULE: Every enhancement MUST result in either:
+- A code upgrade (higher wRVU code)
+- An additional billable code
+- Meeting a billing threshold (e.g., going from 7 to 8+ lesions for IL injection codes)
+
+DO NOT recommend:
+- Increased work without billing benefit (e.g., treating 6 lesions when threshold is 8)
+- Documentation changes that don't change the billable code
+- Partial increases that don't cross billing thresholds
+
+For procedures with tiered thresholds, know the exact cutoffs:
+- AK destruction: 1-14 lesions vs 15+ lesions
+- IL injections: 1-7 lesions vs 8+ lesions
+- Wart destruction: 1-14 vs 15+ lesions
 
 Respond with JSON:
 {{
@@ -344,13 +359,18 @@ Respond with JSON:
     "improvement": 1.05
 }}"""
 
-        system = """You are a dermatology billing optimization expert.
-First analyze what can be billed from the note as written.
-Then identify documentation improvements for additional legitimate billing.
-Focus on capturing work that was actually performed but not fully documented.
-Never suggest adding documentation for work that wasn't done.
+        system = """You are a dermatology billing MAXIMIZATION expert.
+Your goal is to identify the MAXIMUM legitimate billing from each note.
+
+STRICT RULES:
+1. Every enhancement must result in INCREASED wRVU - no exceptions
+2. Never recommend increased clinical work without crossing a billing threshold
+3. Know exact code thresholds (e.g., IL injections: 8+ lesions for higher code)
+4. Only suggest documentation for work that was actually performed
+5. Calculate exact delta_wRVU for each enhancement
+
+If an enhancement doesn't increase billing, DO NOT include it.
 Apply proper modifier logic and NCCI edit rules.
-Provide specific, copy-pasteable language additions.
 Respond with valid JSON only."""
 
         try:
@@ -414,7 +434,7 @@ Respond with valid JSON only."""
         corpus_context: str,
     ) -> tuple[CurrentBilling, DocumentationEnhancements]:
         """Async version of identify_enhancements."""
-        prompt = f"""Analyze this dermatology clinical note for billing optimization.
+        prompt = f"""Analyze this dermatology clinical note for MAXIMUM billing optimization.
 
 CLINICAL NOTE:
 {note_text}
@@ -427,7 +447,22 @@ REFERENCE INFORMATION:
 
 You must:
 1. First identify ALL billable codes from the note AS WRITTEN
-2. Then suggest documentation enhancements to capture additional legitimate revenue
+2. Then suggest documentation enhancements that INCREASE BILLING
+
+CRITICAL RULE: Every enhancement MUST result in either:
+- A code upgrade (higher wRVU code)
+- An additional billable code
+- Meeting a billing threshold (e.g., going from 7 to 8+ lesions for IL injection codes)
+
+DO NOT recommend:
+- Increased work without billing benefit (e.g., treating 6 lesions when threshold is 8)
+- Documentation changes that don't change the billable code
+- Partial increases that don't cross billing thresholds
+
+For procedures with tiered thresholds, know the exact cutoffs:
+- AK destruction: 1-14 lesions vs 15+ lesions
+- IL injections: 1-7 lesions vs 8+ lesions
+- Wart destruction: 1-14 vs 15+ lesions
 
 Respond with JSON:
 {{
@@ -457,13 +492,18 @@ Respond with JSON:
     "improvement": 1.05
 }}"""
 
-        system = """You are a dermatology billing optimization expert.
-First analyze what can be billed from the note as written.
-Then identify documentation improvements for additional legitimate billing.
-Focus on capturing work that was actually performed but not fully documented.
-Never suggest adding documentation for work that wasn't done.
+        system = """You are a dermatology billing MAXIMIZATION expert.
+Your goal is to identify the MAXIMUM legitimate billing from each note.
+
+STRICT RULES:
+1. Every enhancement must result in INCREASED wRVU - no exceptions
+2. Never recommend increased clinical work without crossing a billing threshold
+3. Know exact code thresholds (e.g., IL injections: 8+ lesions for higher code)
+4. Only suggest documentation for work that was actually performed
+5. Calculate exact delta_wRVU for each enhancement
+
+If an enhancement doesn't increase billing, DO NOT include it.
 Apply proper modifier logic and NCCI edit rules.
-Provide specific, copy-pasteable language additions.
 Respond with valid JSON only."""
 
         try:
@@ -539,8 +579,7 @@ Respond with valid JSON only."""
         Returns:
             FutureOpportunities object
         """
-        prompt = f"""Analyze this clinical note and identify opportunities for future visits.
-These are things the provider could have done or looked for that would generate additional legitimate revenue.
+        prompt = f"""Analyze this clinical note and identify opportunities for INCREASED BILLING on future visits.
 
 CLINICAL NOTE:
 {note_text}
@@ -554,43 +593,55 @@ RELEVANT SCENARIO GUIDANCE:
 REFERENCE INFORMATION:
 {corpus_context}
 
+CRITICAL RULE: Every opportunity MUST have a specific CPT code and wRVU that would be ADDED to billing.
+DO NOT include opportunities without concrete billing codes.
+DO NOT suggest increased work that doesn't cross billing thresholds.
+
 For each opportunity:
 1. Category: comorbidity, procedure, visit_level, or documentation
-2. What was found in the note
-3. What opportunity was missed
-4. What to do next time
-5. Potential code and wRVU if action is taken
-6. Teaching point explanation
+2. What was found in the note (the trigger)
+3. What specific billable opportunity was missed
+4. What to do next time (specific action)
+5. The EXACT CPT code and wRVU that would be added
+6. Teaching point with billing rationale
 
-Also provide:
-1. An optimized version of the note as if these opportunities were captured (copy-pasteable plain text)
+For procedures with tiered thresholds, know the exact cutoffs:
+- AK destruction: 1-14 lesions vs 15+ lesions
+- IL injections: 1-7 lesions vs 8+ lesions
+- Wart destruction: 1-14 vs 15+ lesions
+- Nail debridement: 1-5 nails vs 6+ nails
 
 Respond with JSON:
 {{
     "opportunities": [
         {{
             "category": "comorbidity",
-            "finding": "Psoriasis documented",
-            "opportunity": "Nail involvement not assessed",
-            "action": "Examine nails for pitting, onycholysis",
+            "finding": "Psoriasis documented with nail pitting on 8 nails",
+            "opportunity": "Nail debridement not performed despite pathology",
+            "action": "Perform nail debridement on affected nails (6+ threshold met)",
             "potential_code": {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53}},
-            "teaching_point": "50% of psoriasis patients have nail involvement."
+            "teaching_point": "With 8 nails affected, debridement meets the 6+ threshold for 11721 (+0.53 wRVU)"
         }}
     ],
     "optimized_note": "Complete optimized note with all opportunities captured...",
     "total_potential_additional_wRVU": 1.50
 }}"""
 
-        system = """You are a dermatology billing educator.
-Identify missed opportunities that could generate legitimate additional revenue.
-Focus on:
-1. Comorbidities that should be screened for
-2. Procedures that could have been performed
-3. Visit level optimizations
-4. Documentation improvements
+        system = """You are a dermatology billing MAXIMIZATION educator.
+Your goal is to teach providers how to capture MAXIMUM legitimate billing.
 
-These are TEACHING moments for the provider.
-Be specific about what to look for and do next time.
+STRICT RULES:
+1. Every opportunity MUST include a specific CPT code and wRVU
+2. Never suggest increased work without crossing a billing threshold
+3. Know exact code thresholds and only recommend when thresholds can be met
+4. Calculate exact wRVU gain for each opportunity
+5. Focus on high-value opportunities first
+
+DO NOT include:
+- Vague suggestions without specific codes
+- Incremental work that doesn't hit billing thresholds
+- Opportunities without quantified wRVU benefit
+
 Respond with valid JSON only."""
 
         try:
@@ -637,8 +688,7 @@ Respond with valid JSON only."""
         corpus_context: str,
     ) -> FutureOpportunities:
         """Async version of identify_opportunities."""
-        prompt = f"""Analyze this clinical note and identify opportunities for future visits.
-These are things the provider could have done or looked for that would generate additional legitimate revenue.
+        prompt = f"""Analyze this clinical note and identify opportunities for INCREASED BILLING on future visits.
 
 CLINICAL NOTE:
 {note_text}
@@ -652,43 +702,55 @@ RELEVANT SCENARIO GUIDANCE:
 REFERENCE INFORMATION:
 {corpus_context}
 
+CRITICAL RULE: Every opportunity MUST have a specific CPT code and wRVU that would be ADDED to billing.
+DO NOT include opportunities without concrete billing codes.
+DO NOT suggest increased work that doesn't cross billing thresholds.
+
 For each opportunity:
 1. Category: comorbidity, procedure, visit_level, or documentation
-2. What was found in the note
-3. What opportunity was missed
-4. What to do next time
-5. Potential code and wRVU if action is taken
-6. Teaching point explanation
+2. What was found in the note (the trigger)
+3. What specific billable opportunity was missed
+4. What to do next time (specific action)
+5. The EXACT CPT code and wRVU that would be added
+6. Teaching point with billing rationale
 
-Also provide:
-1. An optimized version of the note as if these opportunities were captured (copy-pasteable plain text)
+For procedures with tiered thresholds, know the exact cutoffs:
+- AK destruction: 1-14 lesions vs 15+ lesions
+- IL injections: 1-7 lesions vs 8+ lesions
+- Wart destruction: 1-14 vs 15+ lesions
+- Nail debridement: 1-5 nails vs 6+ nails
 
 Respond with JSON:
 {{
     "opportunities": [
         {{
             "category": "comorbidity",
-            "finding": "Psoriasis documented",
-            "opportunity": "Nail involvement not assessed",
-            "action": "Examine nails for pitting, onycholysis",
+            "finding": "Psoriasis documented with nail pitting on 8 nails",
+            "opportunity": "Nail debridement not performed despite pathology",
+            "action": "Perform nail debridement on affected nails (6+ threshold met)",
             "potential_code": {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53}},
-            "teaching_point": "50% of psoriasis patients have nail involvement."
+            "teaching_point": "With 8 nails affected, debridement meets the 6+ threshold for 11721 (+0.53 wRVU)"
         }}
     ],
     "optimized_note": "Complete optimized note with all opportunities captured...",
     "total_potential_additional_wRVU": 1.50
 }}"""
 
-        system = """You are a dermatology billing educator.
-Identify missed opportunities that could generate legitimate additional revenue.
-Focus on:
-1. Comorbidities that should be screened for
-2. Procedures that could have been performed
-3. Visit level optimizations
-4. Documentation improvements
+        system = """You are a dermatology billing MAXIMIZATION educator.
+Your goal is to teach providers how to capture MAXIMUM legitimate billing.
 
-These are TEACHING moments for the provider.
-Be specific about what to look for and do next time.
+STRICT RULES:
+1. Every opportunity MUST include a specific CPT code and wRVU
+2. Never suggest increased work without crossing a billing threshold
+3. Know exact code thresholds and only recommend when thresholds can be met
+4. Calculate exact wRVU gain for each opportunity
+5. Focus on high-value opportunities first
+
+DO NOT include:
+- Vague suggestions without specific codes
+- Incremental work that doesn't hit billing thresholds
+- Opportunities without quantified wRVU benefit
+
 Respond with valid JSON only."""
 
         try:
@@ -726,6 +788,65 @@ Respond with valid JSON only."""
                 optimized_note=None,
                 total_potential_additional_wRVU=0.0,
             )
+
+    async def regenerate_note_async(
+        self,
+        original_note: str,
+        selected_enhancements: list[dict],
+        selected_opportunities: list[dict],
+    ) -> str:
+        """
+        Regenerate an optimized note based on selected recommendations.
+
+        Args:
+            original_note: Original clinical note
+            selected_enhancements: List of selected enhancement dicts
+            selected_opportunities: List of selected opportunity dicts
+
+        Returns:
+            Regenerated optimized note text
+        """
+        # Build the list of changes to apply
+        changes_to_apply = []
+
+        for e in selected_enhancements:
+            changes_to_apply.append(f"ENHANCEMENT: {e.get('issue', '')} - {e.get('suggested_addition', '')}")
+
+        for o in selected_opportunities:
+            changes_to_apply.append(f"OPPORTUNITY: {o.get('opportunity', '')} - {o.get('action', '')}")
+
+        if not changes_to_apply:
+            return original_note
+
+        prompt = f"""Rewrite this clinical note incorporating ONLY the selected recommendations.
+
+ORIGINAL NOTE:
+{original_note}
+
+SELECTED CHANGES TO INCORPORATE:
+{chr(10).join(changes_to_apply)}
+
+INSTRUCTIONS:
+1. Start with the original note as the base
+2. Add ONLY the documentation from the selected changes
+3. Integrate changes naturally into the note flow
+4. Do NOT add any changes that weren't selected
+5. Keep the note professional and clinically appropriate
+6. Output ONLY the complete rewritten note - no explanations
+
+OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
+
+        system = """You are a medical documentation expert.
+Rewrite clinical notes incorporating specific documentation additions.
+Only add what is explicitly requested - nothing more.
+Maintain professional medical documentation standards.
+Output only the complete note text, no commentary."""
+
+        try:
+            response = await self._call_llm_async(prompt, system=system, max_tokens=4096)
+            return response.strip()
+        except Exception as e:
+            return f"Error regenerating note: {str(e)}"
 
 
 # Global instance

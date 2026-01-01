@@ -514,11 +514,15 @@ Plan:
 4. Return in 6 weeks to reassess and potentially initiate systemic therapy`;
         }
 
+        // Global storage for analysis results
+        let currentAnalysisData = null;
+
         function clearAll() {
             document.getElementById('clinical-note').value = '';
             document.getElementById('placeholder').style.display = 'block';
             document.getElementById('results').style.display = 'none';
             document.getElementById('error').style.display = 'none';
+            currentAnalysisData = null;
         }
 
         async function analyzeNote() {
@@ -563,6 +567,7 @@ Plan:
                     throw new Error(data.detail || 'Analysis failed');
                 }
 
+                currentAnalysisData = data;
                 displayResults(data);
             } catch (err) {
                 if (err.name === 'AbortError') {
@@ -687,26 +692,43 @@ Plan:
             `;
 
             if (enhancements.enhancements.length) {
-                enhHtml += enhancements.enhancements.map(e => `
+                enhHtml += '<div id="enhancement-list">';
+                enhHtml += enhancements.enhancements.map((e, idx) => `
                     <div class="enhancement-card ${e.priority}">
-                        <h4>${e.issue}</h4>
-                        ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${e.current_wRVU.toFixed(2)} wRVU)</p>` : ''}
-                        ${e.enhanced_code ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${e.enhanced_wRVU.toFixed(2)} wRVU)</p>` : ''}
-                        <p class="delta-positive">+${e.delta_wRVU.toFixed(2)} wRVU improvement</p>
-                        <div class="suggested-text">${e.suggested_addition}</div>
+                        <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
+                            <input type="checkbox" class="enhancement-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
+                            <div style="flex: 1;">
+                                <h4 style="margin: 0;">${e.issue}</h4>
+                                ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${e.current_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                                ${e.enhanced_code ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${e.enhanced_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                                <p class="delta-positive">+${e.delta_wRVU.toFixed(2)} wRVU improvement</p>
+                                <div class="suggested-text">${e.suggested_addition}</div>
+                            </div>
+                        </label>
                     </div>
                 `).join('');
+                enhHtml += '</div>';
             } else {
                 enhHtml += '<p>No documentation enhancements identified.</p>';
             }
 
-            if (enhancements.optimized_note) {
+            // Add regenerate button if there are enhancements
+            if (enhancements.enhancements.length) {
                 enhHtml += `
-                    <h3 style="margin-top: 30px;">Optimized Note</h3>
-                    <div class="optimized-note">${enhancements.optimized_note}</div>
-                    <button class="btn-secondary copy-btn" onclick="copyToClipboard(this.previousElementSibling.textContent)">Copy to Clipboard</button>
+                    <div style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px;">
+                        <button class="btn-primary" onclick="regenerateNote('enhancements')" id="regenerate-enh-btn">
+                            Regenerate Note with Selected Enhancements
+                        </button>
+                        <span id="regenerate-enh-status" style="margin-left: 10px; color: #666;"></span>
+                    </div>
                 `;
             }
+
+            enhHtml += `
+                <h3 style="margin-top: 30px;">Optimized Note</h3>
+                <div class="optimized-note" id="optimized-note-enhancements">${enhancements.optimized_note || 'No optimized note available'}</div>
+                <button class="btn-secondary copy-btn" onclick="copyToClipboard(document.getElementById('optimized-note-enhancements').textContent)">Copy to Clipboard</button>
+            `;
             document.getElementById('tab-enhancements').innerHTML = enhHtml;
 
             // Opportunities tab
@@ -728,27 +750,44 @@ Plan:
             `;
 
             if (opportunities.opportunities.length) {
-                oppHtml += opportunities.opportunities.map(o => `
+                oppHtml += '<div id="opportunity-list">';
+                oppHtml += opportunities.opportunities.map((o, idx) => `
                     <div class="opportunity-card">
-                        <span class="category-badge category-${o.category}">${o.category}</span>
-                        <h4>${o.finding}</h4>
-                        <p><strong>Opportunity:</strong> ${o.opportunity}</p>
-                        <p><strong>Action:</strong> ${o.action}</p>
-                        ${o.potential_code ? `<p><strong>If done:</strong> ${o.potential_code.code} - ${o.potential_code.description} (<span class="delta-positive">+${o.potential_code.wRVU.toFixed(2)} wRVU</span>)</p>` : ''}
-                        <p style="font-style: italic; color: #667eea;">${o.teaching_point}</p>
+                        <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
+                            <input type="checkbox" class="opportunity-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
+                            <div style="flex: 1;">
+                                <span class="category-badge category-${o.category}">${o.category}</span>
+                                <h4>${o.finding}</h4>
+                                <p><strong>Opportunity:</strong> ${o.opportunity}</p>
+                                <p><strong>Action:</strong> ${o.action}</p>
+                                ${o.potential_code ? `<p><strong>If done:</strong> ${o.potential_code.code} - ${o.potential_code.description} (<span class="delta-positive">+${o.potential_code.wRVU.toFixed(2)} wRVU</span>)</p>` : ''}
+                                <p style="font-style: italic; color: #667eea;">${o.teaching_point}</p>
+                            </div>
+                        </label>
                     </div>
                 `).join('');
+                oppHtml += '</div>';
             } else {
                 oppHtml += '<p>No additional opportunities identified.</p>';
             }
 
-            if (opportunities.optimized_note) {
+            // Add regenerate button if there are opportunities
+            if (opportunities.opportunities.length) {
                 oppHtml += `
-                    <h3 style="margin-top: 30px;">Optimized Note (All Opportunities)</h3>
-                    <div class="optimized-note">${opportunities.optimized_note}</div>
-                    <button class="btn-secondary copy-btn" onclick="copyToClipboard(this.previousElementSibling.textContent)">Copy to Clipboard</button>
+                    <div style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px;">
+                        <button class="btn-primary" onclick="regenerateNote('opportunities')" id="regenerate-opp-btn">
+                            Regenerate Note with Selected Opportunities
+                        </button>
+                        <span id="regenerate-opp-status" style="margin-left: 10px; color: #666;"></span>
+                    </div>
                 `;
             }
+
+            oppHtml += `
+                <h3 style="margin-top: 30px;">Optimized Note (All Opportunities)</h3>
+                <div class="optimized-note" id="optimized-note-opportunities">${opportunities.optimized_note || 'No optimized note available'}</div>
+                <button class="btn-secondary copy-btn" onclick="copyToClipboard(document.getElementById('optimized-note-opportunities').textContent)">Copy to Clipboard</button>
+            `;
 
             oppHtml += `<div class="compliance-notice">${data.compliance_notice}</div>`;
             document.getElementById('tab-opportunities').innerHTML = oppHtml;
@@ -760,6 +799,86 @@ Plan:
             navigator.clipboard.writeText(text).then(() => {
                 alert('Copied to clipboard!');
             });
+        }
+
+        async function regenerateNote(type) {
+            if (!currentAnalysisData) {
+                alert('No analysis data available. Please analyze a note first.');
+                return;
+            }
+
+            const btnId = type === 'enhancements' ? 'regenerate-enh-btn' : 'regenerate-opp-btn';
+            const statusId = type === 'enhancements' ? 'regenerate-enh-status' : 'regenerate-opp-status';
+            const noteId = type === 'enhancements' ? 'optimized-note-enhancements' : 'optimized-note-opportunities';
+
+            const btn = document.getElementById(btnId);
+            const status = document.getElementById(statusId);
+
+            // Get selected items
+            let selectedEnhancements = [];
+            let selectedOpportunities = [];
+
+            if (type === 'enhancements') {
+                const checkboxes = document.querySelectorAll('.enhancement-checkbox:checked');
+                checkboxes.forEach(cb => {
+                    const idx = parseInt(cb.dataset.index);
+                    selectedEnhancements.push(currentAnalysisData.documentation_enhancements.enhancements[idx]);
+                });
+            } else {
+                const checkboxes = document.querySelectorAll('.opportunity-checkbox:checked');
+                checkboxes.forEach(cb => {
+                    const idx = parseInt(cb.dataset.index);
+                    selectedOpportunities.push(currentAnalysisData.future_opportunities.opportunities[idx]);
+                });
+            }
+
+            if (selectedEnhancements.length === 0 && selectedOpportunities.length === 0) {
+                alert('Please select at least one recommendation to include.');
+                return;
+            }
+
+            // Disable button and show loading
+            btn.disabled = true;
+            btn.textContent = 'Regenerating...';
+            status.textContent = 'Processing...';
+
+            try {
+                const response = await fetch('/regenerate-note', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        original_note: currentAnalysisData.original_note,
+                        selected_enhancements: selectedEnhancements,
+                        selected_opportunities: selectedOpportunities
+                    })
+                });
+
+                const text = await response.text();
+                let data;
+                try {
+                    data = JSON.parse(text);
+                } catch (e) {
+                    throw new Error('Invalid response');
+                }
+
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Regeneration failed');
+                }
+
+                // Update the optimized note
+                document.getElementById(noteId).textContent = data.optimized_note;
+                status.textContent = `✓ Note regenerated with ${data.included_enhancements + data.included_opportunities} recommendations`;
+                status.style.color = '#28a745';
+
+            } catch (err) {
+                status.textContent = 'Error: ' + err.message;
+                status.style.color = '#dc3545';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = type === 'enhancements'
+                    ? 'Regenerate Note with Selected Enhancements'
+                    : 'Regenerate Note with Selected Opportunities';
+            }
         }
     </script>
 </body>

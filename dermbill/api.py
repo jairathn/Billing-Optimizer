@@ -27,10 +27,13 @@ from .models import (
     ScenarioListResponse,
     ScenarioResponse,
     HealthResponse,
+    RegenerateNoteRequest,
+    RegenerateNoteResponse,
 )
 from .analyzer import DermBillAnalyzer
 from .codes import get_code_database
 from .scenarios import get_scenario_matcher
+from .llm import get_llm_client
 from . import __version__
 
 
@@ -146,6 +149,35 @@ async def analyze_note(request: AnalyzeRequest):
     except Exception as e:
         error_detail = f"Analysis error: {str(e)}\n{traceback.format_exc()}"
         print(f"[ANALYZE] Exception: {error_detail}", flush=True)
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/regenerate-note", response_model=RegenerateNoteResponse, tags=["Analysis"])
+async def regenerate_note(request: RegenerateNoteRequest):
+    """
+    Regenerate an optimized note based on selected recommendations.
+
+    Allows users to select which enhancements and opportunities to include,
+    then generates a new optimized note with only those changes.
+    """
+    import traceback
+    print(f"[REGENERATE] Starting with {len(request.selected_enhancements)} enhancements, {len(request.selected_opportunities)} opportunities", flush=True)
+    try:
+        llm = get_llm_client()
+        optimized_note = await llm.regenerate_note_async(
+            request.original_note,
+            request.selected_enhancements,
+            request.selected_opportunities,
+        )
+        print("[REGENERATE] Note regenerated successfully", flush=True)
+        return RegenerateNoteResponse(
+            optimized_note=optimized_note,
+            included_enhancements=len(request.selected_enhancements),
+            included_opportunities=len(request.selected_opportunities),
+        )
+    except Exception as e:
+        error_detail = f"Regeneration error: {str(e)}\n{traceback.format_exc()}"
+        print(f"[REGENERATE] Exception: {error_detail}", flush=True)
         raise HTTPException(status_code=500, detail=error_detail)
 
 

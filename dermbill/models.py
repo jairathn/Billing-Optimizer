@@ -142,6 +142,20 @@ class AnalyzeRequest(BaseModel):
     note: str = Field(..., min_length=10, description="Clinical note text to analyze")
 
 
+class RegenerateNoteRequest(BaseModel):
+    """Request body for the /regenerate-note endpoint."""
+    original_note: str = Field(..., description="Original clinical note")
+    selected_enhancements: list[dict] = Field(default_factory=list, description="Selected enhancement recommendations")
+    selected_opportunities: list[dict] = Field(default_factory=list, description="Selected future opportunities")
+
+
+class RegenerateNoteResponse(BaseModel):
+    """Response for the /regenerate-note endpoint."""
+    optimized_note: str = Field(..., description="Regenerated optimized note")
+    included_enhancements: int = Field(..., description="Number of enhancements included")
+    included_opportunities: int = Field(..., description="Number of opportunities included")
+
+
 class CodeLookupResponse(BaseModel):
     """Response for code lookup endpoint."""
     code: str
