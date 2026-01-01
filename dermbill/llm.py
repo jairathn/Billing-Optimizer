@@ -48,7 +48,7 @@ class LLMClient:
             raise ValueError("ANTHROPIC_API_KEY not set")
 
         self.model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-        self.client = Anthropic(api_key=self.api_key)
+        self.client = Anthropic(api_key=self.api_key, timeout=120.0)  # 2 minute timeout per call
 
     def _call_llm(
         self,
