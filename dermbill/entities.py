@@ -19,7 +19,7 @@ Return a JSON object with these fields:
 - diagnoses: list of conditions/diagnoses mentioned (strings)
 - procedures: list of procedures performed (strings, include technique details)
 - anatomic_sites: list of body locations mentioned (strings)
-- measurements: list of objects with {type, value, unit, context} for any sizes, counts, or lengths
+- measurements: list of objects with {{type, value, unit, context}} for any sizes, counts, or lengths
 - medications: list of medications prescribed or administered (strings)
 - time_documentation: string with any time documentation found, or null
 
