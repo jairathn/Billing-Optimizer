@@ -159,19 +159,23 @@ async def regenerate_note(request: RegenerateNoteRequest):
 
     Allows users to select which enhancements and opportunities to include,
     then generates a new optimized note with only those changes.
+    Returns both the note and the billing codes that should be used.
     """
     import traceback
     print(f"[REGENERATE] Starting with {len(request.selected_enhancements)} enhancements, {len(request.selected_opportunities)} opportunities", flush=True)
     try:
         llm = get_llm_client()
-        optimized_note = await llm.regenerate_note_async(
+        result = await llm.regenerate_note_async(
             request.original_note,
             request.selected_enhancements,
             request.selected_opportunities,
+            request.current_billing_codes,
         )
         print("[REGENERATE] Note regenerated successfully", flush=True)
         return RegenerateNoteResponse(
-            optimized_note=optimized_note,
+            optimized_note=result["optimized_note"],
+            billing_codes=result["billing_codes"],
+            total_wRVU=result["total_wRVU"],
             included_enhancements=len(request.selected_enhancements),
             included_opportunities=len(request.selected_opportunities),
         )

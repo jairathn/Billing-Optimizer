@@ -843,13 +843,17 @@ Plan:
             status.textContent = 'Processing...';
 
             try {
+                // Get current billing codes from Step 2
+                const currentBillingCodes = currentAnalysisData.current_billing?.codes || [];
+
                 const response = await fetch('/regenerate-note', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         original_note: currentAnalysisData.original_note,
                         selected_enhancements: selectedEnhancements,
-                        selected_opportunities: selectedOpportunities
+                        selected_opportunities: selectedOpportunities,
+                        current_billing_codes: currentBillingCodes
                     })
                 });
 
@@ -865,9 +869,33 @@ Plan:
                     throw new Error(data.detail || 'Regeneration failed');
                 }
 
-                // Update the optimized note
-                document.getElementById(noteId).textContent = data.optimized_note;
-                status.textContent = `✓ Note regenerated with ${data.included_enhancements + data.included_opportunities} recommendations`;
+                // Build billing codes display
+                let billingHtml = '<div style="background: #e8f5e9; border-radius: 8px; padding: 15px; margin-bottom: 15px;">';
+                billingHtml += '<h4 style="margin: 0 0 10px 0; color: #2e7d32;">Billing Codes for Optimized Note</h4>';
+                billingHtml += '<table style="width: 100%; border-collapse: collapse;">';
+                billingHtml += '<tr style="background: #c8e6c9;"><th style="padding: 8px; text-align: left;">Code</th><th style="padding: 8px; text-align: left;">Modifier</th><th style="padding: 8px; text-align: left;">Description</th><th style="padding: 8px; text-align: right;">wRVU</th></tr>';
+
+                if (data.billing_codes && data.billing_codes.length > 0) {
+                    data.billing_codes.forEach(code => {
+                        billingHtml += `<tr style="border-bottom: 1px solid #ddd;">
+                            <td style="padding: 8px; font-weight: bold;">${code.code}</td>
+                            <td style="padding: 8px;">${code.modifier || '-'}</td>
+                            <td style="padding: 8px;">${code.description}</td>
+                            <td style="padding: 8px; text-align: right;">${code.wRVU.toFixed(2)}</td>
+                        </tr>`;
+                    });
+                    billingHtml += `<tr style="background: #c8e6c9; font-weight: bold;">
+                        <td colspan="3" style="padding: 8px;">TOTAL</td>
+                        <td style="padding: 8px; text-align: right;">${data.total_wRVU.toFixed(2)}</td>
+                    </tr>`;
+                }
+                billingHtml += '</table></div>';
+
+                // Update the optimized note section with billing codes + note
+                const noteContainer = document.getElementById(noteId);
+                noteContainer.innerHTML = billingHtml + '<div style="white-space: pre-wrap;">' + data.optimized_note + '</div>';
+
+                status.textContent = `✓ Note regenerated with ${data.included_enhancements + data.included_opportunities} recommendations (${data.total_wRVU.toFixed(2)} wRVU)`;
                 status.style.color = '#28a745';
 
             } catch (err) {

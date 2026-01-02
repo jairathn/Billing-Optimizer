@@ -314,28 +314,32 @@ REFERENCE:
 
 TASK:
 1. Identify ALL billable codes from note AS WRITTEN
-2. Suggest DOCUMENTATION enhancements for work ACTUALLY DONE (not new procedures)
+2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
 
-VALID ENHANCEMENTS (documentation for work done):
-- Code upgrades: Add details for higher code (simple→intermediate repair)
-- Unbundling: Separate procedures under different diagnoses
-- Modifier support: Documentation for -25, -59, etc.
-- Missing details: Sizes, counts, measurements for higher tiers
+CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
-Thresholds: AK/warts 15+, IL injections 8+
+VALID Step 3 Enhancements (things that WERE done):
+- G2211 add-on: Chronic condition relationship EXISTS → document it
+- E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
+- Code upgrades: Repair WAS done → document technique for intermediate vs simple
+- Unbundling: Multiple procedures WERE done → separate under different diagnoses
+
+INVALID for Step 3 (move to Step 4):
+- "Injection not documented" when NO injection was given
+- "Exam not performed" → that's a missed opportunity, not an enhancement
+- Any procedure that COULD have been done but WASN'T
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}"""
 
-        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION improvements only.
+        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
-RULES:
-1. Only suggest documentation for work ACTUALLY DONE - never new procedures
-2. Include unbundling (separate procedures under different diagnoses)
-3. Every enhancement must increase wRVU
-4. Apply modifier logic and NCCI edits
+CRITICAL: Only include enhancements for services that WERE PERFORMED.
+- If procedure wasn't done → Step 4, not here
+- If exam wasn't performed → Step 4, not here
+- G2211, E/M upgrades, unbundling for work done → YES
 Respond with valid JSON only."""
 
         try:
@@ -412,28 +416,32 @@ REFERENCE:
 
 TASK:
 1. Identify ALL billable codes from note AS WRITTEN
-2. Suggest DOCUMENTATION enhancements for work ACTUALLY DONE (not new procedures)
+2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
 
-VALID ENHANCEMENTS (documentation for work done):
-- Code upgrades: Add details for higher code (simple→intermediate repair)
-- Unbundling: Separate procedures under different diagnoses
-- Modifier support: Documentation for -25, -59, etc.
-- Missing details: Sizes, counts, measurements for higher tiers
+CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
-Thresholds: AK/warts 15+, IL injections 8+
+VALID Step 3 Enhancements (things that WERE done):
+- G2211 add-on: Chronic condition relationship EXISTS → document it
+- E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
+- Code upgrades: Repair WAS done → document technique for intermediate vs simple
+- Unbundling: Multiple procedures WERE done → separate under different diagnoses
+
+INVALID for Step 3 (move to Step 4):
+- "Injection not documented" when NO injection was given
+- "Exam not performed" → that's a missed opportunity, not an enhancement
+- Any procedure that COULD have been done but WASN'T
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}"""
 
-        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION improvements only.
+        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
-RULES:
-1. Only suggest documentation for work ACTUALLY DONE - never new procedures
-2. Include unbundling (separate procedures under different diagnoses)
-3. Every enhancement must increase wRVU
-4. Apply modifier logic and NCCI edits
+CRITICAL: Only include enhancements for services that WERE PERFORMED.
+- If procedure wasn't done → Step 4, not here
+- If exam wasn't performed → Step 4, not here
+- G2211, E/M upgrades, unbundling for work done → YES
 Respond with valid JSON only."""
 
         try:
@@ -664,7 +672,8 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
         original_note: str,
         selected_enhancements: list[dict],
         selected_opportunities: list[dict],
-    ) -> str:
+        current_billing_codes: list[dict] = None,
+    ) -> dict:
         """
         Regenerate an optimized note based on selected recommendations.
 
@@ -672,21 +681,58 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
             original_note: Original clinical note
             selected_enhancements: List of selected enhancement dicts
             selected_opportunities: List of selected opportunity dicts
+            current_billing_codes: List of current billing codes from Step 2
 
         Returns:
-            Regenerated optimized note text
+            Dict with optimized_note, billing_codes, and total_wRVU
         """
         # Build the list of changes to apply
         changes_to_apply = []
+        billing_codes = []
 
+        # Start with current billing codes if provided
+        if current_billing_codes:
+            for c in current_billing_codes:
+                billing_codes.append({
+                    "code": c.get("code", ""),
+                    "modifier": c.get("modifier"),
+                    "description": c.get("description", ""),
+                    "wRVU": float(c.get("wRVU", 0)),
+                })
+
+        # Process selected enhancements - update or add billing codes
         for e in selected_enhancements:
             changes_to_apply.append(f"ENHANCEMENT: {e.get('issue', '')} - {e.get('suggested_addition', '')}")
+            # If enhancement has an enhanced_code, update billing
+            enhanced_code = e.get("enhanced_code", "")
+            if enhanced_code and enhanced_code != e.get("current_code", ""):
+                # Add the enhanced code
+                billing_codes.append({
+                    "code": enhanced_code.split()[0] if " " in enhanced_code else enhanced_code,
+                    "modifier": None,
+                    "description": e.get("issue", ""),
+                    "wRVU": float(e.get("enhanced_wRVU", 0)),
+                })
 
+        # Process selected opportunities - add their billing codes
         for o in selected_opportunities:
             changes_to_apply.append(f"OPPORTUNITY: {o.get('opportunity', '')} - {o.get('action', '')}")
+            potential_code = o.get("potential_code", {})
+            if potential_code and potential_code.get("code"):
+                billing_codes.append({
+                    "code": potential_code.get("code", ""),
+                    "modifier": None,
+                    "description": potential_code.get("description", ""),
+                    "wRVU": float(potential_code.get("wRVU", 0)),
+                })
 
         if not changes_to_apply:
-            return original_note
+            total_wRVU = sum(c.get("wRVU", 0) for c in billing_codes)
+            return {
+                "optimized_note": original_note,
+                "billing_codes": billing_codes,
+                "total_wRVU": total_wRVU,
+            }
 
         prompt = f"""Rewrite this clinical note incorporating ONLY the selected recommendations.
 
@@ -714,9 +760,18 @@ Output only the complete note text, no commentary."""
 
         try:
             response = await self._call_llm_async(prompt, system=system, max_tokens=4096)
-            return response.strip()
+            total_wRVU = sum(c.get("wRVU", 0) for c in billing_codes)
+            return {
+                "optimized_note": response.strip(),
+                "billing_codes": billing_codes,
+                "total_wRVU": total_wRVU,
+            }
         except Exception as e:
-            return f"Error regenerating note: {str(e)}"
+            return {
+                "optimized_note": f"Error regenerating note: {str(e)}",
+                "billing_codes": billing_codes,
+                "total_wRVU": 0.0,
+            }
 
 
 # Global instance

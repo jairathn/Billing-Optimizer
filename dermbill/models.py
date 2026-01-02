@@ -147,11 +147,22 @@ class RegenerateNoteRequest(BaseModel):
     original_note: str = Field(..., description="Original clinical note")
     selected_enhancements: list[dict] = Field(default_factory=list, description="Selected enhancement recommendations")
     selected_opportunities: list[dict] = Field(default_factory=list, description="Selected future opportunities")
+    current_billing_codes: list[dict] = Field(default_factory=list, description="Current billing codes from Step 2")
+
+
+class RegenerateBillingCode(BaseModel):
+    """Billing code for regenerated note."""
+    code: str = Field(..., description="CPT/HCPCS code")
+    modifier: Optional[str] = Field(None, description="Modifier if applicable")
+    description: str = Field(..., description="Code description")
+    wRVU: float = Field(..., description="Work RVU value")
 
 
 class RegenerateNoteResponse(BaseModel):
     """Response for the /regenerate-note endpoint."""
     optimized_note: str = Field(..., description="Regenerated optimized note")
+    billing_codes: list[RegenerateBillingCode] = Field(default_factory=list, description="Billing codes for the optimized note")
+    total_wRVU: float = Field(0.0, description="Total wRVU for all billing codes")
     included_enhancements: int = Field(..., description="Number of enhancements included")
     included_opportunities: int = Field(..., description="Number of opportunities included")
 
