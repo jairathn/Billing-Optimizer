@@ -1430,6 +1430,40 @@ Plan:
             const currentBilling = currentAnalysisData.current_billing;
             const opportunities = currentAnalysisData.future_opportunities.opportunities;
             const baselineWRVU = currentBilling.total_wRVU;
+            const baselineCodes = currentBilling.codes || [];
+
+            // Helper to find related baseline code that would be replaced
+            // e.g., 10061 replaces 10060, 99214 replaces 99213
+            function findReplacedBaselineCode(newCode) {
+                if (!newCode) return null;
+
+                // Define upgrade families - codes in same family are mutually exclusive
+                const upgradeFamilies = {
+                    // I&D family
+                    '10060': '10060', '10061': '10060',
+                    // E/M established patient
+                    '99211': '99211', '99212': '99211', '99213': '99211', '99214': '99211', '99215': '99211',
+                    // E/M new patient
+                    '99201': '99201', '99202': '99201', '99203': '99201', '99204': '99201', '99205': '99201',
+                    // Biopsy tangential
+                    '11102': '11102', '11103': '11102',
+                    // Biopsy punch
+                    '11104': '11104', '11105': '11104',
+                    // Biopsy incisional
+                    '11106': '11106', '11107': '11106',
+                };
+
+                const family = upgradeFamilies[newCode];
+                if (!family) return null;
+
+                // Find baseline code in same family
+                for (const bc of baselineCodes) {
+                    if (upgradeFamilies[bc.code] === family && bc.code !== newCode) {
+                        return bc;
+                    }
+                }
+                return null;
+            }
 
             // Track aggregated counts by code family
             let familyCounts = {};
@@ -1477,14 +1511,27 @@ Plan:
                     return;
                 }
 
+                // Check if this code would replace a baseline code
+                const replacedCode = findReplacedBaselineCode(code);
+                let deltaWRVU = wRVU;
+                let displayDesc = desc;
+
+                if (replacedCode) {
+                    // This is an upgrade - calculate delta
+                    deltaWRVU = wRVU - (replacedCode.wRVU || 0);
+                    displayDesc = `Upgrade from ${replacedCode.code}: ${desc}`;
+                }
+
                 // Deduplicate by code
                 if (!opportunityCodes.find(c => c.code === code)) {
                     opportunityCodes.push({
                         code: code,
-                        description: desc,
-                        wRVU: wRVU
+                        description: displayDesc,
+                        wRVU: deltaWRVU,
+                        fullWRVU: wRVU,
+                        isUpgrade: !!replacedCode
                     });
-                    totalDelta += wRVU;
+                    totalDelta += deltaWRVU;
                 }
             });
 
