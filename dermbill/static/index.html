@@ -778,28 +778,26 @@ Plan:
             '11103': { mue: 14, wRVU: 0.37, addOn: true },
             '11104': { mue: 1, wRVU: 0.81 },
             '11105': { mue: 9, wRVU: 0.44, addOn: true },
-            // Mohs surgery
-            '17311': { mue: 2, wRVU: 10.10 },  // Stage 1, H/N/HF, ≤5 blocks (max 2 lesions/visit)
-            '17312': { mue: 20, wRVU: 0.95, addOn: true },  // Additional blocks beyond 5
-            '17313': { mue: 8, wRVU: 6.57, addOn: true },   // Stage 2+, ≤5 blocks
-            '17314': { mue: 40, wRVU: 0.44, addOn: true },  // Stage 2+ additional blocks
-            '17315': { mue: 2, wRVU: 7.99 },   // Stage 1, trunk/extremities
-            '17316': { mue: 20, wRVU: 0.74, addOn: true },  // T/E additional blocks
-            '17317': { mue: 8, wRVU: 5.21, addOn: true },   // T/E stage 2+
-            // Repairs - intermediate
-            '12031': { mue: 3, wRVU: 2.12 },  // Scalp/trunk 2.5cm or less
-            '12032': { mue: 3, wRVU: 2.25 },  // Scalp/trunk 2.6-7.5cm
-            '12034': { mue: 3, wRVU: 2.50 },  // Scalp/trunk 7.6-12.5cm
-            '12051': { mue: 3, wRVU: 2.62 },  // Face 2.5cm or less
+            // Mohs surgery - wRVU from CPT_Master_Reference.xlsx
+            '17311': { mue: 2, wRVU: 6.05 },   // Stage 1, H/N/HF/G, ≤5 blocks (max 2 lesions/visit)
+            '17312': { mue: 20, wRVU: 3.22, addOn: true },  // Additional stage, H/N/HF/G
+            '17313': { mue: 8, wRVU: 5.42 },   // Stage 1, trunk/arms/legs
+            '17314': { mue: 40, wRVU: 2.98, addOn: true },  // Additional stage, T/A/L
+            '17315': { mue: 20, wRVU: 0.85, addOn: true },  // Additional block
+            // Repairs - intermediate (wRVU from CPT_Master_Reference.xlsx)
+            '12031': { mue: 3, wRVU: 1.95 },  // Scalp/trunk 2.5cm or less
+            '12032': { mue: 3, wRVU: 2.46 },  // Scalp/trunk 2.6-7.5cm
+            '12034': { mue: 3, wRVU: 2.90 },  // Scalp/trunk 7.6-12.5cm
+            '12051': { mue: 3, wRVU: 2.27 },  // Face 2.5cm or less
             '12052': { mue: 3, wRVU: 2.80 },  // Face 2.6-5.0cm
-            '12053': { mue: 3, wRVU: 3.15 },  // Face 5.1-7.5cm
+            '12053': { mue: 3, wRVU: 3.09 },  // Face 5.1-7.5cm
             // Repairs - complex
-            '13131': { mue: 3, wRVU: 4.75 },  // Complex, face 1.1-2.5cm
-            '13132': { mue: 3, wRVU: 5.82 },  // Complex, face 2.6-7.5cm
+            '13131': { mue: 3, wRVU: 3.64 },  // Complex, face 1.1-2.5cm
+            '13132': { mue: 3, wRVU: 4.66 },  // Complex, face 2.6-7.5cm
             // Flaps
-            '14060': { mue: 3, wRVU: 8.09 },  // Advancement flap, face ≤10 sq cm
-            '14061': { mue: 3, wRVU: 10.44 }, // Advancement flap, face 10.1-30 sq cm
-            '15260': { mue: 3, wRVU: 8.99 },  // Full thickness graft, nose/eyelids ≤20 sq cm
+            '14060': { mue: 3, wRVU: 9.00 },  // Tissue transfer, face ≤10 sq cm
+            '14061': { mue: 3, wRVU: 11.19 }, // Tissue transfer, face 10.1-30 sq cm
+            '15260': { mue: 3, wRVU: 11.35 }, // Full thickness graft, nose/eyelids ≤20 sq cm
         };
 
         // Helper to sanitize codes: filter non-billable and correct wRVU from MUE_DATA
