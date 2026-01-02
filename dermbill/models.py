@@ -87,6 +87,14 @@ class PotentialCode(BaseModel):
     wRVU: float = Field(..., ge=0.0, description="Work RVUs")
 
 
+class CodeOption(BaseModel):
+    """A tiered code option for procedures with thresholds."""
+    code: str = Field(..., description="CPT code")
+    description: str = Field(..., description="Code description")
+    wRVU: float = Field(default=0.0, ge=0.0, description="wRVU value")
+    threshold: str = Field(..., description="Threshold like '<6 nails' or '6+ nails'")
+
+
 class FutureOpportunity(BaseModel):
     """A single future opportunity ('next time' recommendation)."""
     category: str = Field(..., description="comorbidity, procedure, visit_level, or documentation")
@@ -94,6 +102,7 @@ class FutureOpportunity(BaseModel):
     opportunity: str = Field(..., description="What was missed")
     action: str = Field(..., description="What to do next time")
     potential_code: Optional[PotentialCode] = Field(default=None, description="Code if action taken")
+    code_options: Optional[list[CodeOption]] = Field(default=None, description="Tiered code options for procedures with thresholds")
     teaching_point: str = Field(..., description="Educational explanation")
 
 

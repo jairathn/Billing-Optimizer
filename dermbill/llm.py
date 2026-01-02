@@ -531,28 +531,34 @@ SCENARIO:
 REFERENCE:
 {corpus_context}
 
-OPPORTUNITY TYPES (things that COULD have been done this visit):
+OPPORTUNITY TYPES:
 1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
 2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
-3. TIERED PROCEDURES (show BOTH code options with thresholds):
-   - Nail debridement: 11720 (1-5 nails, 0.34 wRVU) OR 11721 (6+ nails, 0.53 wRVU)
-   - IL injections: 11900 (1-7 lesions, 0.80 wRVU) OR 11901 (8+ lesions, 1.10 wRVU)
-   - AK destruction: 17000+17003 (1-14, ~1.0 wRVU) OR 17004 (15+, 3.28 wRVU)
-   - Wart destruction: 17110 (1-14, 1.00 wRVU) OR 17111 (15+, 2.10 wRVU)
+3. TIERED PROCEDURES - return code_options array with BOTH tiers:
+   - Nail debridement: 11720 (1-5 nails) OR 11721 (6+ nails)
+   - IL injections: 11900 (1-7 lesions) OR 11901 (8+ lesions)
+   - AK destruction: 17000 (1-14) OR 17004 (15+)
+   - Wart destruction: 17110 (1-14) OR 17111 (15+)
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
-For tiered procedures, include BOTH code options in teaching_point so provider knows thresholds.
+JSON format - use code_options for tiered procedures, potential_code for non-tiered:
+{{"opportunities": [
+  {{"category": "procedure", "finding": "X", "opportunity": "X", "action": "X",
+    "code_options": [{{"code": "11720", "description": "Nail debridement 1-5", "wRVU": 0.34, "threshold": "1-5 nails"}},
+                     {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53, "threshold": "6+ nails"}}],
+    "teaching_point": "X"}},
+  {{"category": "visit_level", "finding": "X", "opportunity": "X", "action": "X",
+    "potential_code": {{"code": "99214", "description": "Level 4 E/M", "wRVU": 1.92}},
+    "teaching_point": "X"}}
+], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
 
-JSON format:
-{{"opportunities": [{{"category": "visit_level|procedure|comorbidity", "finding": "X", "opportunity": "X", "action": "X", "potential_code": {{"code": "X", "description": "X", "wRVU": 0}}, "teaching_point": "X"}}],
-"optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
+        system = """Dermatology billing educator. Identify intra-encounter opportunities.
 
-        system = """Dermatology billing educator. Identify what COULD have been done intra-encounter.
-
-For TIERED PROCEDURES, always show both code options in teaching_point:
-- "11720 (1-5 nails, 0.34 wRVU) or 11721 (6+ nails, 0.53 wRVU)"
-- Use the HIGHER tier code as potential_code when threshold likely met
-Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only."""
+For TIERED PROCEDURES (nail debridement, IL injections, AK/wart destruction):
+- Return code_options array with BOTH tier options
+- Each option has: code, description, wRVU, threshold
+For NON-TIERED opportunities: use potential_code
+Respond with valid JSON only."""
 
         try:
             response = self._call_llm(prompt, system=system, max_tokens=8192)
@@ -569,12 +575,26 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
                         wRVU=float(pc.get("wRVU", 0)),
                     )
 
+                code_options = None
+                if o.get("code_options"):
+                    from .models import CodeOption
+                    code_options = [
+                        CodeOption(
+                            code=co["code"],
+                            description=co.get("description", ""),
+                            wRVU=float(co.get("wRVU", 0)),
+                            threshold=co.get("threshold", ""),
+                        )
+                        for co in o["code_options"]
+                    ]
+
                 opportunities.append(FutureOpportunity(
                     category=o["category"],
                     finding=o["finding"],
                     opportunity=o["opportunity"],
                     action=o["action"],
                     potential_code=potential_code,
+                    code_options=code_options,
                     teaching_point=o["teaching_point"],
                 ))
 
@@ -612,28 +632,34 @@ SCENARIO:
 REFERENCE:
 {corpus_context}
 
-OPPORTUNITY TYPES (things that COULD have been done this visit):
+OPPORTUNITY TYPES:
 1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
 2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
-3. TIERED PROCEDURES (show BOTH code options with thresholds):
-   - Nail debridement: 11720 (1-5 nails, 0.34 wRVU) OR 11721 (6+ nails, 0.53 wRVU)
-   - IL injections: 11900 (1-7 lesions, 0.80 wRVU) OR 11901 (8+ lesions, 1.10 wRVU)
-   - AK destruction: 17000+17003 (1-14, ~1.0 wRVU) OR 17004 (15+, 3.28 wRVU)
-   - Wart destruction: 17110 (1-14, 1.00 wRVU) OR 17111 (15+, 2.10 wRVU)
+3. TIERED PROCEDURES - return code_options array with BOTH tiers:
+   - Nail debridement: 11720 (1-5 nails) OR 11721 (6+ nails)
+   - IL injections: 11900 (1-7 lesions) OR 11901 (8+ lesions)
+   - AK destruction: 17000 (1-14) OR 17004 (15+)
+   - Wart destruction: 17110 (1-14) OR 17111 (15+)
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
-For tiered procedures, include BOTH code options in teaching_point so provider knows thresholds.
+JSON format - use code_options for tiered procedures, potential_code for non-tiered:
+{{"opportunities": [
+  {{"category": "procedure", "finding": "X", "opportunity": "X", "action": "X",
+    "code_options": [{{"code": "11720", "description": "Nail debridement 1-5", "wRVU": 0.34, "threshold": "1-5 nails"}},
+                     {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53, "threshold": "6+ nails"}}],
+    "teaching_point": "X"}},
+  {{"category": "visit_level", "finding": "X", "opportunity": "X", "action": "X",
+    "potential_code": {{"code": "99214", "description": "Level 4 E/M", "wRVU": 1.92}},
+    "teaching_point": "X"}}
+], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
 
-JSON format:
-{{"opportunities": [{{"category": "visit_level|procedure|comorbidity", "finding": "X", "opportunity": "X", "action": "X", "potential_code": {{"code": "X", "description": "X", "wRVU": 0}}, "teaching_point": "X"}}],
-"optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
+        system = """Dermatology billing educator. Identify intra-encounter opportunities.
 
-        system = """Dermatology billing educator. Identify what COULD have been done intra-encounter.
-
-For TIERED PROCEDURES, always show both code options in teaching_point:
-- "11720 (1-5 nails, 0.34 wRVU) or 11721 (6+ nails, 0.53 wRVU)"
-- Use the HIGHER tier code as potential_code when threshold likely met
-Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only."""
+For TIERED PROCEDURES (nail debridement, IL injections, AK/wart destruction):
+- Return code_options array with BOTH tier options
+- Each option has: code, description, wRVU, threshold
+For NON-TIERED opportunities: use potential_code
+Respond with valid JSON only."""
 
         try:
             response = await self._call_llm_async(prompt, system=system, max_tokens=8192)
@@ -650,12 +676,26 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
                         wRVU=float(pc.get("wRVU", 0)),
                     )
 
+                code_options = None
+                if o.get("code_options"):
+                    from .models import CodeOption
+                    code_options = [
+                        CodeOption(
+                            code=co["code"],
+                            description=co.get("description", ""),
+                            wRVU=float(co.get("wRVU", 0)),
+                            threshold=co.get("threshold", ""),
+                        )
+                        for co in o["code_options"]
+                    ]
+
                 opportunities.append(FutureOpportunity(
                     category=o["category"],
                     finding=o["finding"],
                     opportunity=o["opportunity"],
                     action=o["action"],
                     potential_code=potential_code,
+                    code_options=code_options,
                     teaching_point=o["teaching_point"],
                 ))
 
