@@ -729,6 +729,7 @@ Plan:
         }
 
         // Apply appropriate modifiers to billing codes
+        // Strategy: Apply -XS to LOWEST value codes first to minimize payment reduction
         function applyModifiers(codes) {
             if (!codes || codes.length === 0) return codes;
 
@@ -759,21 +760,37 @@ Plan:
                 if (proc.code.startsWith('173')) site = 'peel'; // 17360
 
                 if (!siteGroups[site]) siteGroups[site] = [];
-                siteGroups[site].push({ proc, idx });
+                siteGroups[site].push({ proc, idx, wRVU: proc.wRVU || 0 });
             });
 
-            // If multiple different site groups, mark secondary codes with -XS
+            // If multiple different site groups, apply -XS to lower-value secondary codes
             const siteGroupKeys = Object.keys(siteGroups);
             if (siteGroupKeys.length > 1) {
-                let isFirst = true;
+                // Flatten all procedures with their site info
+                let allProcsWithSite = [];
                 siteGroupKeys.forEach(site => {
                     siteGroups[site].forEach(item => {
-                        if (!isFirst && !item.proc.modifier) {
-                            item.proc.modifier = '-XS';
-                            item.proc.modifierReason = 'Separate anatomic structure';
-                        }
-                        isFirst = false;
+                        allProcsWithSite.push({ ...item, site });
                     });
+                });
+
+                // Sort by wRVU DESCENDING - highest value first gets NO modifier
+                // Lower value codes get -XS modifier (payment reduction applies to them)
+                allProcsWithSite.sort((a, b) => (b.wRVU || 0) - (a.wRVU || 0));
+
+                // Track which sites we've seen - first occurrence of each site gets no modifier
+                // But we want the HIGHEST value code to avoid modifiers
+                // So: assign -XS to all except the single highest-value procedure
+                let isFirst = true;
+                allProcsWithSite.forEach(item => {
+                    if (isFirst) {
+                        // Highest value procedure - no modifier (primary procedure)
+                        isFirst = false;
+                    } else if (!item.proc.modifier) {
+                        // All other procedures get -XS
+                        item.proc.modifier = '-XS';
+                        item.proc.modifierReason = 'Separate anatomic structure (applied to lower-value code)';
+                    }
                 });
             }
 
@@ -896,27 +913,34 @@ Plan:
             `;
 
             if (currentBilling.codes.length) {
+                // Apply modifiers to current billing codes
+                const currentCodesWithModifiers = applyModifiers([...currentBilling.codes]);
+
                 currentHtml += `
                     <table class="billing-table">
                         <thead>
                             <tr>
                                 <th>Code</th>
-                                <th>Modifier</th>
+                                <th>Mod</th>
                                 <th>Description</th>
                                 <th>wRVU</th>
                                 <th>Status</th>
                             </tr>
                         </thead>
                         <tbody>
-                            ${currentBilling.codes.map(c => `
+                            ${currentCodesWithModifiers.map(c => {
+                                const modifierDisplay = c.modifier ?
+                                    `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
+                                    '-';
+                                return `
                                 <tr>
                                     <td><strong>${c.code}</strong></td>
-                                    <td>${c.modifier || '-'}</td>
+                                    <td>${modifierDisplay}</td>
                                     <td>${c.description}</td>
                                     <td><span class="wrvu-badge">${c.wRVU.toFixed(2)}</span></td>
                                     <td class="${c.status === 'supported' ? 'status-supported' : 'status-missing'}">${c.status}</td>
                                 </tr>
-                            `).join('')}
+                            `}).join('')}
                             <tr class="total-row">
                                 <td colspan="3"><strong>TOTAL</strong></td>
                                 <td><span class="wrvu-badge">${currentBilling.total_wRVU.toFixed(2)}</span></td>
