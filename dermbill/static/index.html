@@ -548,6 +548,29 @@
             margin-top: 5px;
         }
 
+        .opp-code-header {
+            margin: 5px 0 10px 0;
+            font-size: 14px;
+        }
+
+        .code-highlight {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .code-legal {
+            display: inline-block;
+            background: #6c757d;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
         .modifier-badge {
             display: inline-block;
             background: #ffc107;
@@ -1293,8 +1316,27 @@ Plan:
                         detectedFamily = detectCodeFamily(o.code_options[0].code);
                     }
 
-                    // If it's a count-based family, render count input instead of radio buttons
-                    if (detectedFamily && CODE_FAMILIES[detectedFamily]) {
+                    // Categories that should NOT show count input
+                    const noCountCategories = ['visit_level', 'comorbidity', 'medicolegal'];
+                    const isNoCountCategory = noCountCategories.includes(o.category);
+
+                    // E/M family shouldn't show count input either
+                    const isEmFamily = detectedFamily === 'em_established';
+
+                    // Show code prominently at top (like enhancements)
+                    let codeHeader = '';
+                    if (o.potential_code && o.potential_code.code) {
+                        const code = o.potential_code.code;
+                        const wRVU = o.potential_code.wRVU || 0;
+                        if (code === 'LEGAL') {
+                            codeHeader = `<p class="opp-code-header"><strong>Type:</strong> <span class="code-legal">LEGAL</span> (Liability Protection)</p>`;
+                        } else {
+                            codeHeader = `<p class="opp-code-header"><strong>Code:</strong> <span class="code-highlight">${code}</span> (${wRVU.toFixed(2)} wRVU)</p>`;
+                        }
+                    }
+
+                    // If it's a count-based family AND not a no-count category, render count input
+                    if (detectedFamily && CODE_FAMILIES[detectedFamily] && !isNoCountCategory && !isEmFamily) {
                         const family = CODE_FAMILIES[detectedFamily];
                         // Extract default count from potential_code description or code_options
                         let defaultCount = 1;
@@ -1303,6 +1345,7 @@ Plan:
                             if (countMatch) defaultCount = parseInt(countMatch[1]);
                         }
                         codeDisplay = `
+                            ${codeHeader}
                             <div class="count-input-group" data-family="${detectedFamily}">
                                 <label>Number of lesions/sites:</label>
                                 <input type="number" class="count-input"
@@ -1334,7 +1377,8 @@ Plan:
                             </div>
                         `;
                     } else if (o.potential_code) {
-                        codeDisplay = `<p><strong>Code:</strong> ${o.potential_code.code} - ${o.potential_code.description} (<span class="delta-positive">+${o.potential_code.wRVU.toFixed(2)} wRVU</span>)</p>`;
+                        // For simple code display (E/M, medicolegal, comorbidity)
+                        codeDisplay = codeHeader;
                     }
 
                     return `
@@ -1459,13 +1503,15 @@ Plan:
             // Apply modifiers to complete codes
             const codesWithModifiers = applyModifiers(completeCodes);
 
-            // Update the billing table - show COMPLETE billing codes
+            // Update the billing table - show COMPLETE billing codes (excluding LEGAL)
             const tbody = document.getElementById('enh-billing-tbody');
+            // Filter out LEGAL codes - they're for recommendation cards only, not billing
+            const billableCodes = codesWithModifiers.filter(c => c.code !== 'LEGAL');
             if (tbody) {
-                if (codesWithModifiers.length === 0) {
+                if (billableCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
-                    tbody.innerHTML = codesWithModifiers.map(c => {
+                    tbody.innerHTML = billableCodes.map(c => {
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
@@ -1634,13 +1680,15 @@ Plan:
             // Apply modifiers to complete codes
             const codesWithModifiers = applyModifiers(completeCodes);
 
-            // Update the billing table - show COMPLETE billing codes
+            // Update the billing table - show COMPLETE billing codes (excluding LEGAL)
             const tbody = document.getElementById('opp-billing-tbody');
+            // Filter out LEGAL codes - they're for recommendation cards only, not billing
+            const billableCodes = codesWithModifiers.filter(c => c.code !== 'LEGAL');
             if (tbody) {
-                if (codesWithModifiers.length === 0) {
+                if (billableCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
-                    tbody.innerHTML = codesWithModifiers.map(c => {
+                    tbody.innerHTML = billableCodes.map(c => {
                         const rowClass = c.fromBaseline ? '' : 'style="background: #e8f5e9;"';
                         const upgradeIcon = c.upgraded ? '↑ ' : '';
                         const aggregatedIcon = c.isAggregated ? '⊕ ' : '';

@@ -729,7 +729,34 @@ NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
 The -25 modifier is added when billing E/M same-day with a procedure - mention this in description.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 8: COMORBIDITY CAPTURE
+CATEGORY 8: PROCEDURE UPGRADES (treat more sites to bump tier)
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: Look for procedures that were ALREADY DONE but could be UPGRADED by treating additional sites.
+
+NAIL DEBRIDEMENT UPGRADE:
+• If nail debridement was done on 1-5 nails BUT patient has 6+ dystrophic nails → suggest treating all to upgrade 11720 → 11721
+• Example: Note says "nail debridement performed" + "8 nails with pitting" → recommend treating all 8
+
+IL INJECTION UPGRADE:
+• If IL injections given to <7 lesions BUT more injection-worthy lesions exist → suggest treating 8+ for 11900 → 11901
+
+AK DESTRUCTION UPGRADE:
+• If treating <15 AKs BUT patient has more → suggest treating 15+ for 17004 flat rate
+
+For upgrade opportunities:
+- category: "procedure"
+- finding: "[X procedure done on Y sites, but Z additional sites could be treated]"
+- opportunity: "Upgrade [code] by treating additional sites"
+- potential_code: Use the UPGRADED code (e.g., 11721 not 11720)
+
+Example: {{"category": "procedure", "finding": "Nail debridement performed but 8 nails show dystrophy",
+  "opportunity": "Upgrade nail debridement to 11721 by treating all 8 nails",
+  "action": "Debride all 8 dystrophic nails to qualify for 11721 (6+)",
+  "potential_code": {{"code": "11721", "description": "Nail debridement 6+ nails", "wRVU": 0.53}},
+  "teaching_point": "Treating 6+ nails upgrades from 11720 (0.31) to 11721 (0.53)"}}
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 9: COMORBIDITY CAPTURE
 ═══════════════════════════════════════════════════════════════════════════════
 Look for unaddressed conditions that could warrant separate work:
 • Psoriatic arthritis screening in psoriasis patients
@@ -738,7 +765,7 @@ Look for unaddressed conditions that could warrant separate work:
 • Eye involvement in rosacea
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 9: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
+CATEGORY 10: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
 ═══════════════════════════════════════════════════════════════════════════════
 Safety documentation that SHOULD be added even though it doesn't increase billing:
 • Patient counseling on warning signs (ABCDE, non-healing lesions, when to return)
@@ -772,6 +799,8 @@ OUTPUT RULES
 
 5. Be SPECIFIC about clinical findings that triggered each opportunity
 
+6. LOOK FOR PROCEDURE UPGRADES: If a procedure was done but more sites could be treated to bump tier
+
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
   {{"category": "procedure|visit_level|comorbidity|medicolegal",
@@ -797,6 +826,7 @@ CRITICAL RULES:
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
 6. Include ONE medicolegal card for missing safety documentation (code: "LEGAL", wRVU: 0)
+7. PROCEDURE UPGRADES: If a count-based procedure was done, check if treating more sites could bump the tier
 
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
@@ -1037,7 +1067,34 @@ NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
 The -25 modifier is added when billing E/M same-day with a procedure - mention this in description.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 8: COMORBIDITY CAPTURE
+CATEGORY 8: PROCEDURE UPGRADES (treat more sites to bump tier)
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: Look for procedures that were ALREADY DONE but could be UPGRADED by treating additional sites.
+
+NAIL DEBRIDEMENT UPGRADE:
+• If nail debridement was done on 1-5 nails BUT patient has 6+ dystrophic nails → suggest treating all to upgrade 11720 → 11721
+• Example: Note says "nail debridement performed" + "8 nails with pitting" → recommend treating all 8
+
+IL INJECTION UPGRADE:
+• If IL injections given to <7 lesions BUT more injection-worthy lesions exist → suggest treating 8+ for 11900 → 11901
+
+AK DESTRUCTION UPGRADE:
+• If treating <15 AKs BUT patient has more → suggest treating 15+ for 17004 flat rate
+
+For upgrade opportunities:
+- category: "procedure"
+- finding: "[X procedure done on Y sites, but Z additional sites could be treated]"
+- opportunity: "Upgrade [code] by treating additional sites"
+- potential_code: Use the UPGRADED code (e.g., 11721 not 11720)
+
+Example: {{"category": "procedure", "finding": "Nail debridement performed but 8 nails show dystrophy",
+  "opportunity": "Upgrade nail debridement to 11721 by treating all 8 nails",
+  "action": "Debride all 8 dystrophic nails to qualify for 11721 (6+)",
+  "potential_code": {{"code": "11721", "description": "Nail debridement 6+ nails", "wRVU": 0.53}},
+  "teaching_point": "Treating 6+ nails upgrades from 11720 (0.31) to 11721 (0.53)"}}
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 9: COMORBIDITY CAPTURE
 ═══════════════════════════════════════════════════════════════════════════════
 Look for unaddressed conditions that could warrant separate work:
 • Psoriatic arthritis screening in psoriasis patients
@@ -1046,7 +1103,7 @@ Look for unaddressed conditions that could warrant separate work:
 • Eye involvement in rosacea
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 9: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
+CATEGORY 10: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
 ═══════════════════════════════════════════════════════════════════════════════
 Safety documentation that SHOULD be added even though it doesn't increase billing:
 • Patient counseling on warning signs (ABCDE, non-healing lesions, when to return)
@@ -1080,6 +1137,8 @@ OUTPUT RULES
 
 5. Be SPECIFIC about clinical findings that triggered each opportunity
 
+6. LOOK FOR PROCEDURE UPGRADES: If a procedure was done but more sites could be treated to bump tier
+
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
   {{"category": "procedure|visit_level|comorbidity|medicolegal",
@@ -1105,6 +1164,7 @@ CRITICAL RULES:
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
 6. Include ONE medicolegal card for missing safety documentation (code: "LEGAL", wRVU: 0)
+7. PROCEDURE UPGRADES: If a count-based procedure was done, check if treating more sites could bump the tier
 
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
