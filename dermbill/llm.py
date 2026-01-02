@@ -756,6 +756,27 @@ BILLING REFERENCE:
 YOUR TASK: Identify what the provider COULD HAVE DONE during this encounter to increase billing. These are NOT documentation fixes - these are actual clinical interventions that were missed.
 
 ═══════════════════════════════════════════════════════════════════════════════
+CRITICAL FIRST CHECKS - ALWAYS PERFORM THESE BEFORE OTHER CATEGORIES:
+═══════════════════════════════════════════════════════════════════════════════
+1. PROCEDURE UPGRADE CHECK: If ANY count-based procedure was performed, check if MORE
+   sites could have been treated to reach a higher billing tier:
+   - Nail debridement done + more dystrophic nails on exam → upgrade to 11721 (6+)
+   - IL injection done + more treatable plaques on exam → upgrade to 11901 (8+)
+   - AK destruction done + more AKs on exam → upgrade to 17004 (15+)
+
+2. COUNT EXTRACTION FROM ANATOMY: When suggesting opportunities, extract counts from:
+   - "bilateral" = 2 (bilateral elbows = 2, bilateral knees = 2)
+   - "both" = 2
+   - Specific counts: "4 plaques", "8 nails", "6 lesions"
+   - Use these counts as default_count in potential_code description
+
+Example: Note says "nail debridement performed" + exam shows "8 nails with pitting"
+→ MUST output upgrade opportunity: "Upgrade to 11721 by debriding all 8 dystrophic nails"
+
+Example: Suggesting "inject bilateral knee plaques"
+→ default count should be 2 (bilateral = 2), NOT 1
+
+═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
 ═══════════════════════════════════════════════════════════════════════════════
 CLINICAL TRIGGERS:
@@ -901,31 +922,29 @@ NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
 The -25 modifier is added when billing E/M same-day with a procedure - mention this in description.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 8: PROCEDURE UPGRADES (treat more sites to bump tier)
+CATEGORY 8: PROCEDURE UPGRADES (treat more sites to bump tier) - HIGHEST PRIORITY
 ═══════════════════════════════════════════════════════════════════════════════
-CRITICAL: Look for procedures that were ALREADY DONE but could be UPGRADED by treating additional sites.
+**MANDATORY CHECK**: If ANY of these procedures were done, ALWAYS check for upgrade opportunities:
 
-NAIL DEBRIDEMENT UPGRADE:
-• If nail debridement was done on 1-5 nails BUT patient has 6+ dystrophic nails → suggest treating all to upgrade 11720 → 11721
-• Example: Note says "nail debridement performed" + "8 nails with pitting" → recommend treating all 8
+NAIL DEBRIDEMENT UPGRADE (MUST CHECK):
+• Trigger: Note mentions "nail debridement" or "nails debrided" AND exam shows dystrophic nails
+• If exam shows 6+ dystrophic nails → ALWAYS suggest upgrade to 11721
+• Example: "nail debridement performed" + "pitting on 8 nails" → OUTPUT REQUIRED:
+  {{"category": "procedure", "finding": "8 nails with dystrophy (pitting, debris) - upgrade opportunity",
+    "opportunity": "Upgrade nail debridement to 11721", "action": "Debride all 8 dystrophic nails",
+    "potential_code": {{"code": "11721", "description": "Nail debridement 8 nails", "wRVU": 0.53}},
+    "teaching_point": "Treating 6+ nails upgrades from 11720 (0.31) to 11721 (0.53) - +0.22 wRVU"}}
 
 IL INJECTION UPGRADE:
-• If IL injections given to <7 lesions BUT more injection-worthy lesions exist → suggest treating 8+ for 11900 → 11901
+• If IL injections given to <7 lesions BUT more injection-worthy plaques/lesions exist
+• Suggest treating additional sites to reach 8+ for 11900 → 11901 upgrade
 
 AK DESTRUCTION UPGRADE:
-• If treating <15 AKs BUT patient has more → suggest treating 15+ for 17004 flat rate
+• If treating <15 AKs BUT more are present → suggest treating 15+ for 17004 flat rate
 
-For upgrade opportunities:
+For ALL upgrade opportunities:
 - category: "procedure"
-- finding: "[X procedure done on Y sites, but Z additional sites could be treated]"
-- opportunity: "Upgrade [code] by treating additional sites"
-- potential_code: Use the UPGRADED code (e.g., 11721 not 11720)
-
-Example: {{"category": "procedure", "finding": "Nail debridement performed but 8 nails show dystrophy",
-  "opportunity": "Upgrade nail debridement to 11721 by treating all 8 nails",
-  "action": "Debride all 8 dystrophic nails to qualify for 11721 (6+)",
-  "potential_code": {{"code": "11721", "description": "Nail debridement 6+ nails", "wRVU": 0.53}},
-  "teaching_point": "Treating 6+ nails upgrades from 11720 (0.31) to 11721 (0.53)"}}
+- potential_code: Use the UPGRADED tier code with specific count in description
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 9: COMORBIDITY CAPTURE
@@ -966,8 +985,11 @@ OUTPUT RULES
    - Medicolegal = one card for all safety documentation
    - DO NOT mix different code families in one card
 
-2. FOR COUNT-BASED CODES: Use potential_code with estimated count in description
-   Example: {{"code": "11900", "description": "IL injection ~4 lesions", "wRVU": 0.52}}
+2. FOR COUNT-BASED CODES: Extract count from anatomy and include in description
+   - "bilateral knees" = 2, "bilateral elbows and knees" = 4
+   - "8 nails with pitting" = 8
+   Example: {{"code": "11900", "description": "IL injection ~2 lesions (bilateral knees)", "wRVU": 0.52}}
+   Example: {{"code": "11721", "description": "Nail debridement 8 nails", "wRVU": 0.53}}
 
 3. FOR TIER-BASED CODES: Use code_options with 2-3 tiers max
    Example: [{{"code": "54050", "description": "Simple", "wRVU": 0.61, "threshold": "1-2 lesions"}},
@@ -1102,6 +1124,27 @@ BILLING REFERENCE:
 YOUR TASK: Identify what the provider COULD HAVE DONE during this encounter to increase billing. These are NOT documentation fixes - these are actual clinical interventions that were missed.
 
 ═══════════════════════════════════════════════════════════════════════════════
+CRITICAL FIRST CHECKS - ALWAYS PERFORM THESE BEFORE OTHER CATEGORIES:
+═══════════════════════════════════════════════════════════════════════════════
+1. PROCEDURE UPGRADE CHECK: If ANY count-based procedure was performed, check if MORE
+   sites could have been treated to reach a higher billing tier:
+   - Nail debridement done + more dystrophic nails on exam → upgrade to 11721 (6+)
+   - IL injection done + more treatable plaques on exam → upgrade to 11901 (8+)
+   - AK destruction done + more AKs on exam → upgrade to 17004 (15+)
+
+2. COUNT EXTRACTION FROM ANATOMY: When suggesting opportunities, extract counts from:
+   - "bilateral" = 2 (bilateral elbows = 2, bilateral knees = 2)
+   - "both" = 2
+   - Specific counts: "4 plaques", "8 nails", "6 lesions"
+   - Use these counts as default_count in potential_code description
+
+Example: Note says "nail debridement performed" + exam shows "8 nails with pitting"
+→ MUST output upgrade opportunity: "Upgrade to 11721 by debriding all 8 dystrophic nails"
+
+Example: Suggesting "inject bilateral knee plaques"
+→ default count should be 2 (bilateral = 2), NOT 1
+
+═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
 ═══════════════════════════════════════════════════════════════════════════════
 CLINICAL TRIGGERS:
@@ -1247,31 +1290,29 @@ NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
 The -25 modifier is added when billing E/M same-day with a procedure - mention this in description.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 8: PROCEDURE UPGRADES (treat more sites to bump tier)
+CATEGORY 8: PROCEDURE UPGRADES (treat more sites to bump tier) - HIGHEST PRIORITY
 ═══════════════════════════════════════════════════════════════════════════════
-CRITICAL: Look for procedures that were ALREADY DONE but could be UPGRADED by treating additional sites.
+**MANDATORY CHECK**: If ANY of these procedures were done, ALWAYS check for upgrade opportunities:
 
-NAIL DEBRIDEMENT UPGRADE:
-• If nail debridement was done on 1-5 nails BUT patient has 6+ dystrophic nails → suggest treating all to upgrade 11720 → 11721
-• Example: Note says "nail debridement performed" + "8 nails with pitting" → recommend treating all 8
+NAIL DEBRIDEMENT UPGRADE (MUST CHECK):
+• Trigger: Note mentions "nail debridement" or "nails debrided" AND exam shows dystrophic nails
+• If exam shows 6+ dystrophic nails → ALWAYS suggest upgrade to 11721
+• Example: "nail debridement performed" + "pitting on 8 nails" → OUTPUT REQUIRED:
+  {{"category": "procedure", "finding": "8 nails with dystrophy (pitting, debris) - upgrade opportunity",
+    "opportunity": "Upgrade nail debridement to 11721", "action": "Debride all 8 dystrophic nails",
+    "potential_code": {{"code": "11721", "description": "Nail debridement 8 nails", "wRVU": 0.53}},
+    "teaching_point": "Treating 6+ nails upgrades from 11720 (0.31) to 11721 (0.53) - +0.22 wRVU"}}
 
 IL INJECTION UPGRADE:
-• If IL injections given to <7 lesions BUT more injection-worthy lesions exist → suggest treating 8+ for 11900 → 11901
+• If IL injections given to <7 lesions BUT more injection-worthy plaques/lesions exist
+• Suggest treating additional sites to reach 8+ for 11900 → 11901 upgrade
 
 AK DESTRUCTION UPGRADE:
-• If treating <15 AKs BUT patient has more → suggest treating 15+ for 17004 flat rate
+• If treating <15 AKs BUT more are present → suggest treating 15+ for 17004 flat rate
 
-For upgrade opportunities:
+For ALL upgrade opportunities:
 - category: "procedure"
-- finding: "[X procedure done on Y sites, but Z additional sites could be treated]"
-- opportunity: "Upgrade [code] by treating additional sites"
-- potential_code: Use the UPGRADED code (e.g., 11721 not 11720)
-
-Example: {{"category": "procedure", "finding": "Nail debridement performed but 8 nails show dystrophy",
-  "opportunity": "Upgrade nail debridement to 11721 by treating all 8 nails",
-  "action": "Debride all 8 dystrophic nails to qualify for 11721 (6+)",
-  "potential_code": {{"code": "11721", "description": "Nail debridement 6+ nails", "wRVU": 0.53}},
-  "teaching_point": "Treating 6+ nails upgrades from 11720 (0.31) to 11721 (0.53)"}}
+- potential_code: Use the UPGRADED tier code with specific count in description
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 9: COMORBIDITY CAPTURE
@@ -1312,8 +1353,11 @@ OUTPUT RULES
    - Medicolegal = one card for all safety documentation
    - DO NOT mix different code families in one card
 
-2. FOR COUNT-BASED CODES: Use potential_code with estimated count in description
-   Example: {{"code": "11900", "description": "IL injection ~4 lesions", "wRVU": 0.52}}
+2. FOR COUNT-BASED CODES: Extract count from anatomy and include in description
+   - "bilateral knees" = 2, "bilateral elbows and knees" = 4
+   - "8 nails with pitting" = 8
+   Example: {{"code": "11900", "description": "IL injection ~2 lesions (bilateral knees)", "wRVU": 0.52}}
+   Example: {{"code": "11721", "description": "Nail debridement 8 nails", "wRVU": 0.53}}
 
 3. FOR TIER-BASED CODES: Use code_options with 2-3 tiers max
    Example: [{{"code": "54050", "description": "Simple", "wRVU": 0.61, "threshold": "1-2 lesions"}},
