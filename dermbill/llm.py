@@ -758,18 +758,19 @@ YOUR TASK: Identify clinical interventions that COULD HAVE BEEN DONE to increase
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For count-based procedures, compare what was treated to what
-   could have been treated. If more treatable sites exist on exam than were addressed,
-   suggest treating all to reach higher billing tiers.
+1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check exam
+   findings to see if more treatable sites exist. If treating more would reach a
+   higher billing tier, suggest the upgrade.
+
+   Process: Plan says "X performed" → Exam shows "N sites with pathology" →
+   If N exceeds current tier threshold → recommend treating all N
 
 2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
-   "4 plaques" = 4). Use specific counts in recommendations, not defaults of 1.
+   "4 plaques" = 4). Use specific counts in recommendations.
 
-3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable
-   given the clinical context - not every trigger requires action.
+3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable.
 
-4. ONE CARD PER CODE FAMILY: Aggregate related opportunities (e.g., all IL injections
-   in one card, all AK destruction in one card).
+4. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
@@ -1100,18 +1101,19 @@ YOUR TASK: Identify clinical interventions that COULD HAVE BEEN DONE to increase
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For count-based procedures, compare what was treated to what
-   could have been treated. If more treatable sites exist on exam than were addressed,
-   suggest treating all to reach higher billing tiers.
+1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check exam
+   findings to see if more treatable sites exist. If treating more would reach a
+   higher billing tier, suggest the upgrade.
+
+   Process: Plan says "X performed" → Exam shows "N sites with pathology" →
+   If N exceeds current tier threshold → recommend treating all N
 
 2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
-   "4 plaques" = 4). Use specific counts in recommendations, not defaults of 1.
+   "4 plaques" = 4). Use specific counts in recommendations.
 
-3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable
-   given the clinical context - not every trigger requires action.
+3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable.
 
-4. ONE CARD PER CODE FAMILY: Aggregate related opportunities (e.g., all IL injections
-   in one card, all AK destruction in one card).
+4. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
