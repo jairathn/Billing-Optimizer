@@ -691,7 +691,46 @@ Plan:
                 </div>
             `;
 
+            // Build enhanced billing codes table for Step 3
             if (enhancements.enhancements.length) {
+                // Collect all enhanced codes
+                let enhancedCodes = [...currentBilling.codes]; // Start with current
+                enhancements.enhancements.forEach(e => {
+                    if (e.enhanced_code) {
+                        enhancedCodes.push({
+                            code: e.enhanced_code,
+                            modifier: null,
+                            description: e.issue,
+                            wRVU: e.enhanced_wRVU || 0
+                        });
+                    }
+                });
+
+                enhHtml += `
+                    <h4 style="margin-top: 20px;">Billing Codes (with all enhancements)</h4>
+                    <table class="billing-table">
+                        <thead>
+                            <tr><th>Code</th><th>Description</th><th>wRVU</th></tr>
+                        </thead>
+                        <tbody>
+                            ${enhancedCodes.map(c => `
+                                <tr>
+                                    <td><strong>${c.code}</strong></td>
+                                    <td>${c.description}</td>
+                                    <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
+                                </tr>
+                            `).join('')}
+                            <tr class="total-row">
+                                <td colspan="2"><strong>TOTAL</strong></td>
+                                <td><span class="wrvu-badge">${enhancements.enhanced_total_wRVU.toFixed(2)}</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                `;
+            }
+
+            if (enhancements.enhancements.length) {
+                enhHtml += '<h4 style="margin-top: 20px;">Enhancement Recommendations</h4>';
                 enhHtml += '<div id="enhancement-list">';
                 enhHtml += enhancements.enhancements.map((e, idx) => `
                     <div class="enhancement-card ${e.priority}">
@@ -735,7 +774,7 @@ Plan:
             const opportunities = data.future_opportunities;
             let oppHtml = `
                 <div class="summary-box">
-                    <h3>Future Opportunities ("Next Time")</h3>
+                    <h3>Intra-Encounter Opportunities</h3>
                     <div class="summary-stats">
                         <div class="stat">
                             <div class="stat-value">+${opportunities.total_potential_additional_wRVU.toFixed(2)}</div>
@@ -749,7 +788,46 @@ Plan:
                 </div>
             `;
 
+            // Build potential billing codes table for Step 4
             if (opportunities.opportunities.length) {
+                // Start with current billing and add opportunity codes
+                let potentialCodes = [...currentBilling.codes];
+                opportunities.opportunities.forEach(o => {
+                    if (o.potential_code) {
+                        potentialCodes.push({
+                            code: o.potential_code.code,
+                            description: o.potential_code.description,
+                            wRVU: o.potential_code.wRVU || 0
+                        });
+                    }
+                });
+                const potentialTotal = currentBilling.total_wRVU + opportunities.total_potential_additional_wRVU;
+
+                oppHtml += `
+                    <h4 style="margin-top: 20px;">Billing Codes (if all opportunities captured)</h4>
+                    <table class="billing-table">
+                        <thead>
+                            <tr><th>Code</th><th>Description</th><th>wRVU</th></tr>
+                        </thead>
+                        <tbody>
+                            ${potentialCodes.map(c => `
+                                <tr>
+                                    <td><strong>${c.code}</strong></td>
+                                    <td>${c.description}</td>
+                                    <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
+                                </tr>
+                            `).join('')}
+                            <tr class="total-row">
+                                <td colspan="2"><strong>TOTAL</strong></td>
+                                <td><span class="wrvu-badge">${potentialTotal.toFixed(2)}</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                `;
+            }
+
+            if (opportunities.opportunities.length) {
+                oppHtml += '<h4 style="margin-top: 20px;">Opportunity Recommendations</h4>';
                 oppHtml += '<div id="opportunity-list">';
                 oppHtml += opportunities.opportunities.map((o, idx) => `
                     <div class="opportunity-card">
@@ -760,7 +838,7 @@ Plan:
                                 <h4>${o.finding}</h4>
                                 <p><strong>Opportunity:</strong> ${o.opportunity}</p>
                                 <p><strong>Action:</strong> ${o.action}</p>
-                                ${o.potential_code ? `<p><strong>If done:</strong> ${o.potential_code.code} - ${o.potential_code.description} (<span class="delta-positive">+${o.potential_code.wRVU.toFixed(2)} wRVU</span>)</p>` : ''}
+                                ${o.potential_code ? `<p><strong>Code:</strong> ${o.potential_code.code} - ${o.potential_code.description} (<span class="delta-positive">+${o.potential_code.wRVU.toFixed(2)} wRVU</span>)</p>` : ''}
                                 <p style="font-style: italic; color: #667eea;">${o.teaching_point}</p>
                             </div>
                         </label>
