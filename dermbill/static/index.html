@@ -761,54 +761,33 @@ Plan:
                     <h3>Documentation Enhancements</h3>
                     <div class="summary-stats">
                         <div class="stat">
-                            <div class="stat-value">+${enhancements.improvement.toFixed(2)}</div>
-                            <div class="stat-label">Potential wRVU Gain</div>
+                            <div class="stat-value" id="enh-delta-display">+${enhancements.improvement.toFixed(2)}</div>
+                            <div class="stat-label">Additional wRVU (Selected)</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${enhancements.enhanced_total_wRVU.toFixed(2)}</div>
-                            <div class="stat-label">Enhanced Total</div>
+                            <div class="stat-value" id="enh-total-display">${enhancements.enhanced_total_wRVU.toFixed(2)}</div>
+                            <div class="stat-label">Total wRVU (with Selected)</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${currentBilling.total_wRVU.toFixed(2)}</div>
+                            <div class="stat-label">Baseline wRVU</div>
                         </div>
                     </div>
                 </div>
             `;
 
             // Build enhanced billing codes table for Step 3
-            if (enhancements.enhancements.length) {
-                // Collect all enhanced codes
-                let enhancedCodes = [...currentBilling.codes]; // Start with current
-                enhancements.enhancements.forEach(e => {
-                    if (e.enhanced_code) {
-                        enhancedCodes.push({
-                            code: e.enhanced_code,
-                            modifier: null,
-                            description: e.issue,
-                            wRVU: e.enhanced_wRVU || 0
-                        });
-                    }
-                });
-
-                enhHtml += `
-                    <h4 style="margin-top: 20px;">Billing Codes (with all enhancements)</h4>
-                    <table class="billing-table">
-                        <thead>
-                            <tr><th>Code</th><th>Description</th><th>wRVU</th></tr>
-                        </thead>
-                        <tbody>
-                            ${enhancedCodes.map(c => `
-                                <tr>
-                                    <td><strong>${c.code}</strong></td>
-                                    <td>${c.description}</td>
-                                    <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
-                                </tr>
-                            `).join('')}
-                            <tr class="total-row">
-                                <td colspan="2"><strong>TOTAL</strong></td>
-                                <td><span class="wrvu-badge">${enhancements.enhanced_total_wRVU.toFixed(2)}</span></td>
-                            </tr>
-                        </tbody>
-                    </table>
-                `;
-            }
+            // Table ID for dynamic updates
+            enhHtml += `
+                <h4 style="margin-top: 20px;">Final Billing Codes (with selected enhancements)</h4>
+                <table class="billing-table" id="enh-billing-table">
+                    <thead>
+                        <tr><th>Code</th><th>Description</th><th>wRVU</th><th>Source</th></tr>
+                    </thead>
+                    <tbody id="enh-billing-tbody">
+                    </tbody>
+                </table>
+            `;
 
             if (enhancements.enhancements.length) {
                 enhHtml += '<h4 style="margin-top: 20px;">Enhancement Recommendations</h4>';
@@ -960,9 +939,127 @@ Plan:
 
             document.getElementById('results').style.display = 'block';
 
-            // Set up event listeners for dynamic totals in Step 4
+            // Set up event listeners for dynamic totals
+            setupEnhancementListeners();
+            updateEnhancementTotals();
             setupOpportunityListeners();
             updateOpportunityTotals();
+        }
+
+        function setupEnhancementListeners() {
+            document.querySelectorAll('.enhancement-checkbox').forEach(cb => {
+                cb.addEventListener('change', updateEnhancementTotals);
+            });
+        }
+
+        function updateEnhancementTotals() {
+            if (!currentAnalysisData) return;
+
+            const currentBilling = currentAnalysisData.current_billing;
+            const enhancements = currentAnalysisData.documentation_enhancements.enhancements;
+            const baselineWRVU = currentBilling.total_wRVU;
+
+            // Start with current billing codes
+            let finalCodes = currentBilling.codes.map(c => ({
+                code: c.code,
+                description: c.description,
+                wRVU: c.wRVU || 0,
+                source: 'Current',
+                isEM: /^99\d{3}$/.test(c.code)
+            }));
+
+            // Track the best E/M code and add-ons to apply
+            let bestEMCode = finalCodes.find(c => c.isEM);
+            let addOnCodes = [];
+
+            // Process selected enhancements
+            enhancements.forEach((e, idx) => {
+                const checkbox = document.querySelector(`.enhancement-checkbox[data-index="${idx}"]`);
+                if (!checkbox || !checkbox.checked) return;
+
+                const enhCode = e.enhanced_code;
+                const currCode = e.current_code;
+
+                if (!enhCode) return;
+
+                // Check if this is an E/M upgrade (99xxx -> 99xxx)
+                const isEMUpgrade = /^99\d{3}$/.test(enhCode) && /^99\d{3}$/.test(currCode);
+                // Check if this is an add-on code (G2211, etc)
+                const isAddOn = /^G\d{4}$/.test(enhCode) || enhCode.includes('+');
+
+                if (isEMUpgrade) {
+                    // Replace E/M code with upgraded version if higher
+                    if (!bestEMCode || parseFloat(e.enhanced_wRVU) > bestEMCode.wRVU) {
+                        bestEMCode = {
+                            code: enhCode,
+                            description: e.issue,
+                            wRVU: e.enhanced_wRVU || 0,
+                            source: 'Enhanced',
+                            isEM: true
+                        };
+                    }
+                } else if (isAddOn) {
+                    // Add-on codes go alongside E/M
+                    addOnCodes.push({
+                        code: enhCode,
+                        description: e.issue,
+                        wRVU: e.enhanced_wRVU || 0,
+                        source: 'Enhanced',
+                        isEM: false
+                    });
+                } else {
+                    // Other procedure codes - add if not already present
+                    if (!finalCodes.find(c => c.code === enhCode)) {
+                        finalCodes.push({
+                            code: enhCode,
+                            description: e.issue,
+                            wRVU: e.enhanced_wRVU || 0,
+                            source: 'Enhanced',
+                            isEM: false
+                        });
+                    }
+                }
+            });
+
+            // Build final code list: non-E/M codes + best E/M + add-ons
+            let consolidatedCodes = finalCodes.filter(c => !c.isEM);
+            if (bestEMCode) {
+                consolidatedCodes.unshift(bestEMCode); // E/M first
+            }
+            addOnCodes.forEach(addon => {
+                if (!consolidatedCodes.find(c => c.code === addon.code)) {
+                    consolidatedCodes.push(addon);
+                }
+            });
+
+            // Calculate total
+            const totalWRVU = consolidatedCodes.reduce((sum, c) => sum + (c.wRVU || 0), 0);
+            const deltaWRVU = totalWRVU - baselineWRVU;
+
+            // Update the summary display
+            const deltaDisplay = document.getElementById('enh-delta-display');
+            const totalDisplay = document.getElementById('enh-total-display');
+            if (deltaDisplay) deltaDisplay.textContent = '+' + deltaWRVU.toFixed(2);
+            if (totalDisplay) totalDisplay.textContent = totalWRVU.toFixed(2);
+
+            // Update the billing table
+            const tbody = document.getElementById('enh-billing-tbody');
+            if (tbody) {
+                tbody.innerHTML = consolidatedCodes.map(c => `
+                    <tr class="${c.source === 'Enhanced' ? 'opportunity-row' : ''}">
+                        <td><strong>${c.code}</strong></td>
+                        <td>${c.description}</td>
+                        <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
+                        <td><span style="color: ${c.source === 'Enhanced' ? '#28a745' : '#6c757d'}; font-size: 12px;">${c.source}</span></td>
+                    </tr>
+                `).join('') + `
+                    <tr class="total-row">
+                        <td colspan="2"><strong>TOTAL</strong></td>
+                        <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
+                        <td><span class="delta-highlight">+${deltaWRVU.toFixed(2)} vs baseline</span></td>
+                    </tr>
+                `;
+            }
         }
 
         function setupOpportunityListeners() {
