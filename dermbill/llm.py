@@ -753,7 +753,9 @@ CLINICAL SCENARIO GUIDANCE:
 BILLING REFERENCE:
 {corpus_context}
 
-YOUR TASK: Identify clinical interventions that COULD HAVE BEEN DONE to increase billing. These are actual procedures/services - not documentation fixes.
+YOUR TASK: Identify opportunities to increase billing through:
+1. UPGRADES: Procedures that WERE done but could have treated MORE sites to reach higher tiers
+2. ADDITIONS: Procedures that were NOT done but clinical findings support
 
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
@@ -1096,7 +1098,9 @@ CLINICAL SCENARIO GUIDANCE:
 BILLING REFERENCE:
 {corpus_context}
 
-YOUR TASK: Identify clinical interventions that COULD HAVE BEEN DONE to increase billing. These are actual procedures/services - not documentation fixes.
+YOUR TASK: Identify opportunities to increase billing through:
+1. UPGRADES: Procedures that WERE done but could have treated MORE sites to reach higher tiers
+2. ADDITIONS: Procedures that were NOT done but clinical findings support
 
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
