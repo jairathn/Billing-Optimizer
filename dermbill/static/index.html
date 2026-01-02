@@ -1849,7 +1849,7 @@ Plan:
                 const checkbox = document.querySelector(`.opportunity-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
-                // Handle count-based families
+                // Handle count-based families (only if count input exists)
                 const familyId = checkbox.dataset.family;
                 if (familyId && CODE_FAMILIES[familyId]) {
                     const countInput = document.querySelector(`.count-input[data-opp-index="${idx}"]`);
@@ -1857,8 +1857,9 @@ Plan:
                         const count = parseInt(countInput.value) || 0;
                         if (!familyCounts[familyId]) familyCounts[familyId] = 0;
                         familyCounts[familyId] += count;
+                        return; // Only return early if we actually processed a count input
                     }
-                    return;
+                    // If no count input (e.g., E/M upgrade), fall through to potential_code handling
                 }
 
                 let code, wRVU, desc;
