@@ -341,9 +341,16 @@ OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
 - Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
 - AVOID: Speculative language, unnecessary adjectives, redundant details
 - AVOID: Documenting things you didn't examine or can't defend
-- DO: Use standard medical terminology, objective findings, brief clinical rationale
-- The note should defend the billing, not provide ammunition for plaintiff attorneys
-- If you didn't do it, don't document it. If you did it, document it briefly."""
+
+HOWEVER - ALWAYS DOCUMENT SAFETY-CRITICAL ITEMS (failure to document = failure to do):
+- Suspicious lesions noted and clinical reasoning (biopsy performed OR why deferred)
+- Patient counseling on warning signs (ABCDE changes, non-healing lesions)
+- Patient refusal of recommended biopsy/treatment (informed refusal)
+- Instructions for follow-up and when to return sooner
+- Red flags ruled out when relevant to differential
+- Skin cancer risk factors acknowledged in high-risk patients
+
+BALANCE: Minimal on routine details, thorough on safety documentation."""
 
         system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
@@ -352,10 +359,11 @@ CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
 
-DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
 - Over-documentation creates malpractice liability - every detail can be cross-examined
-- Concise, factual notes are legally safer than verbose, detailed ones
+- BUT: Always document safety-critical items (suspicious lesions, patient counseling, refusals, follow-up)
+- "If it wasn't documented, it wasn't done" - applies to safety items
 - Never include Time, Coding, or billing code sections
 
 Respond with valid JSON only."""
@@ -461,9 +469,16 @@ OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
 - Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
 - AVOID: Speculative language, unnecessary adjectives, redundant details
 - AVOID: Documenting things you didn't examine or can't defend
-- DO: Use standard medical terminology, objective findings, brief clinical rationale
-- The note should defend the billing, not provide ammunition for plaintiff attorneys
-- If you didn't do it, don't document it. If you did it, document it briefly."""
+
+HOWEVER - ALWAYS DOCUMENT SAFETY-CRITICAL ITEMS (failure to document = failure to do):
+- Suspicious lesions noted and clinical reasoning (biopsy performed OR why deferred)
+- Patient counseling on warning signs (ABCDE changes, non-healing lesions)
+- Patient refusal of recommended biopsy/treatment (informed refusal)
+- Instructions for follow-up and when to return sooner
+- Red flags ruled out when relevant to differential
+- Skin cancer risk factors acknowledged in high-risk patients
+
+BALANCE: Minimal on routine details, thorough on safety documentation."""
 
         system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
@@ -472,10 +487,11 @@ CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
 
-DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
 - Over-documentation creates malpractice liability - every detail can be cross-examined
-- Concise, factual notes are legally safer than verbose, detailed ones
+- BUT: Always document safety-critical items (suspicious lesions, patient counseling, refusals, follow-up)
+- "If it wasn't documented, it wasn't done" - applies to safety items
 - Never include Time, Coding, or billing code sections
 
 Respond with valid JSON only."""
@@ -760,9 +776,16 @@ OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
 - Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
 - AVOID: Speculative language, unnecessary adjectives, redundant details
 - AVOID: Documenting things you didn't examine or can't defend
-- DO: Use standard medical terminology, objective findings, brief clinical rationale
-- The note should defend the billing, not provide ammunition for plaintiff attorneys
-- If you didn't do it, don't document it. If you did it, document it briefly."""
+
+HOWEVER - ALWAYS DOCUMENT SAFETY-CRITICAL ITEMS (failure to document = failure to do):
+- Suspicious lesions noted and clinical reasoning (biopsy performed OR why deferred)
+- Patient counseling on warning signs (ABCDE changes, non-healing lesions)
+- Patient refusal of recommended biopsy/treatment (informed refusal)
+- Instructions for follow-up and when to return sooner
+- Red flags ruled out when relevant to differential
+- Skin cancer risk factors acknowledged in high-risk patients
+
+BALANCE: Minimal on routine details, thorough on safety documentation."""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -777,10 +800,11 @@ E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actu
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
 
-DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
 - Over-documentation creates malpractice liability - every detail can be cross-examined
-- Concise, factual notes are legally safer than verbose, detailed ones
+- BUT: Always document safety-critical items (suspicious lesions, patient counseling, refusals, follow-up)
+- "If it wasn't documented, it wasn't done" - applies to safety items
 - Never include Time, Coding, or billing code sections
 
 USE potential_code (single code) for:
@@ -1059,9 +1083,16 @@ OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
 - Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
 - AVOID: Speculative language, unnecessary adjectives, redundant details
 - AVOID: Documenting things you didn't examine or can't defend
-- DO: Use standard medical terminology, objective findings, brief clinical rationale
-- The note should defend the billing, not provide ammunition for plaintiff attorneys
-- If you didn't do it, don't document it. If you did it, document it briefly."""
+
+HOWEVER - ALWAYS DOCUMENT SAFETY-CRITICAL ITEMS (failure to document = failure to do):
+- Suspicious lesions noted and clinical reasoning (biopsy performed OR why deferred)
+- Patient counseling on warning signs (ABCDE changes, non-healing lesions)
+- Patient refusal of recommended biopsy/treatment (informed refusal)
+- Instructions for follow-up and when to return sooner
+- Red flags ruled out when relevant to differential
+- Skin cancer risk factors acknowledged in high-risk patients
+
+BALANCE: Minimal on routine details, thorough on safety documentation."""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -1076,10 +1107,11 @@ E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actu
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
 
-DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
 - Over-documentation creates malpractice liability - every detail can be cross-examined
-- Concise, factual notes are legally safer than verbose, detailed ones
+- BUT: Always document safety-critical items (suspicious lesions, patient counseling, refusals, follow-up)
+- "If it wasn't documented, it wasn't done" - applies to safety items
 - Never include Time, Coding, or billing code sections
 
 USE potential_code (single code) for:
@@ -1233,8 +1265,15 @@ MEDICOLEGAL DOCUMENTATION PRINCIPLES - CRITICAL:
 - LESS IS MORE: Excessive detail creates litigation risk - every word can be cross-examined
 - Be CONCISE: Brief, factual statements only - no elaborate descriptions
 - AVOID: Speculative language, unnecessary adjectives, redundant details, flowery prose
-- DO: Use standard medical terminology, objective findings, brief clinical rationale
-- The note should defend the billing, NOT provide ammunition for plaintiff attorneys
+
+HOWEVER - ALWAYS DOCUMENT SAFETY-CRITICAL ITEMS (failure to document = failure to do):
+- Suspicious lesions noted and clinical reasoning (biopsy performed OR why deferred)
+- Patient counseling on warning signs (ABCDE changes, non-healing lesions)
+- Patient refusal of recommended biopsy/treatment (informed refusal)
+- Instructions for follow-up and when to return sooner
+- Skin cancer risk factors acknowledged in high-risk patients
+
+BALANCE: Minimal on routine details, thorough on safety documentation.
 
 Match the original note's structure and formatting style exactly.
 OUTPUT ONLY CLINICAL DOCUMENTATION - no time, no coding, no billing codes.
@@ -1257,7 +1296,8 @@ MEDICOLEGAL DOCUMENTATION PHILOSOPHY:
 - Document the MINIMUM NECESSARY to justify each billing code
 - Over-documentation creates malpractice liability - every detail can be cross-examined by attorneys
 - Concise, factual notes are legally safer than verbose, detailed ones
-- Less description = less ammunition for litigation
+- BUT: Always document safety-critical items (suspicious lesions, patient counseling, refusals, follow-up)
+- "If it wasn't documented, it wasn't done" - this applies to safety items especially
 - Use standard terminology, brief statements, objective findings
 
 NEVER include Time, Coding, or billing code sections. Output only pure clinical documentation.
