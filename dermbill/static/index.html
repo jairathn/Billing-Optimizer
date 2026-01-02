@@ -547,6 +547,21 @@
             font-style: italic;
             margin-top: 5px;
         }
+
+        .modifier-badge {
+            display: inline-block;
+            background: #ffc107;
+            color: #212529;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: help;
+        }
+
+        .modifier-badge:hover {
+            background: #e0a800;
+        }
     </style>
 </head>
 <body>
@@ -711,6 +726,59 @@ Plan:
                 }
             }
             return { code: null, wRVU: 0, desc: '' };
+        }
+
+        // Apply appropriate modifiers to billing codes
+        function applyModifiers(codes) {
+            if (!codes || codes.length === 0) return codes;
+
+            // Identify E/M codes and procedure codes
+            const emCodes = codes.filter(c => /^99\d{3}$/.test(c.code));
+            const procedureCodes = codes.filter(c => !/^99\d{3}$/.test(c.code) && !/^G\d{4}$/.test(c.code));
+            const addOnCodes = codes.filter(c => /^G\d{4}$/.test(c.code));
+
+            // Apply -25 to E/M if there are procedures
+            if (emCodes.length > 0 && procedureCodes.length > 0) {
+                emCodes.forEach(em => {
+                    em.modifier = '-25';
+                    em.modifierReason = 'Separate E/M with same-day procedure';
+                });
+            }
+
+            // Apply -59 or -XS to secondary procedures at different sites
+            // Group procedures by anatomic site (approximate based on code family)
+            const siteGroups = {};
+            procedureCodes.forEach((proc, idx) => {
+                // Determine site group from code
+                let site = 'general';
+                if (proc.code.startsWith('117')) site = 'nail'; // 11720, 11721
+                if (proc.code.startsWith('119')) site = 'injection'; // 11900, 11901
+                if (proc.code.startsWith('170') || proc.code.startsWith('171')) site = 'destruction';
+                if (proc.code.startsWith('111')) site = 'biopsy'; // 11102-11107
+                if (proc.code.startsWith('100')) site = 'surgery'; // 10040, etc.
+                if (proc.code.startsWith('173')) site = 'peel'; // 17360
+
+                if (!siteGroups[site]) siteGroups[site] = [];
+                siteGroups[site].push({ proc, idx });
+            });
+
+            // If multiple different site groups, mark secondary codes with -XS
+            const siteGroupKeys = Object.keys(siteGroups);
+            if (siteGroupKeys.length > 1) {
+                let isFirst = true;
+                siteGroupKeys.forEach(site => {
+                    siteGroups[site].forEach(item => {
+                        if (!isFirst && !item.proc.modifier) {
+                            item.proc.modifier = '-XS';
+                            item.proc.modifierReason = 'Separate anatomic structure';
+                        }
+                        isFirst = false;
+                    });
+                });
+            }
+
+            // Combine back
+            return [...emCodes, ...procedureCodes, ...addOnCodes];
         }
 
         function clearAll() {
@@ -897,7 +965,7 @@ Plan:
                 <h4 style="margin-top: 20px;">Additional Codes from Selected Enhancements</h4>
                 <table class="billing-table" id="enh-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Description</th><th>+wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>+wRVU</th></tr>
                     </thead>
                     <tbody id="enh-billing-tbody">
                     </tbody>
@@ -975,7 +1043,7 @@ Plan:
                 <h4 style="margin-top: 20px;">Additional Codes from Selected Opportunities</h4>
                 <table class="billing-table" id="opp-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Description</th><th>+wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>+wRVU</th></tr>
                     </thead>
                     <tbody id="opp-billing-tbody">
                     </tbody>
@@ -1178,21 +1246,30 @@ Plan:
             if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
             if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
 
+            // Apply modifiers to enhanced codes
+            const codesWithModifiers = applyModifiers(enhancedCodes);
+
             // Update the billing table - ONLY show enhanced codes
             const tbody = document.getElementById('enh-billing-tbody');
             if (tbody) {
-                if (enhancedCodes.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #6c757d;">No enhancements selected</td></tr>`;
+                if (codesWithModifiers.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No enhancements selected</td></tr>`;
                 } else {
-                    tbody.innerHTML = enhancedCodes.map(c => `
-                        <tr class="opportunity-row">
-                            <td><strong>${c.code}</strong></td>
-                            <td>${c.description}</td>
-                            <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
-                        </tr>
-                    `).join('') + `
+                    tbody.innerHTML = codesWithModifiers.map(c => {
+                        const modifierDisplay = c.modifier ?
+                            `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
+                            '-';
+                        return `
+                            <tr class="opportunity-row">
+                                <td><strong>${c.code}</strong></td>
+                                <td>${modifierDisplay}</td>
+                                <td>${c.description}</td>
+                                <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
+                            </tr>
+                        `;
+                    }).join('') + `
                         <tr class="total-row">
-                            <td colspan="2"><strong>ADDITIONAL wRVU</strong></td>
+                            <td colspan="3"><strong>ADDITIONAL wRVU</strong></td>
                             <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
                         </tr>
                     `;
@@ -1305,25 +1382,32 @@ Plan:
             if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
             if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
 
+            // Apply modifiers to opportunity codes
+            const codesWithModifiers = applyModifiers(opportunityCodes);
+
             // Update the billing table - ONLY show opportunity codes
             const tbody = document.getElementById('opp-billing-tbody');
             if (tbody) {
-                if (opportunityCodes.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #6c757d;">No opportunities selected</td></tr>`;
+                if (codesWithModifiers.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No opportunities selected</td></tr>`;
                 } else {
-                    tbody.innerHTML = opportunityCodes.map(c => {
+                    tbody.innerHTML = codesWithModifiers.map(c => {
                         const aggregatedClass = c.isAggregated ? 'style="background: #e8f5e9 !important;"' : '';
                         const aggregatedIcon = c.isAggregated ? '<span title="Aggregated from multiple opportunities">⊕</span> ' : '';
+                        const modifierDisplay = c.modifier ?
+                            `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
+                            '-';
                         return `
                             <tr class="opportunity-row" ${aggregatedClass}>
                                 <td><strong>${aggregatedIcon}${c.code}</strong></td>
+                                <td>${modifierDisplay}</td>
                                 <td>${c.description}</td>
                                 <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
                     }).join('') + `
                         <tr class="total-row">
-                            <td colspan="2"><strong>ADDITIONAL wRVU</strong></td>
+                            <td colspan="3"><strong>ADDITIONAL wRVU</strong></td>
                             <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
                         </tr>
                     `;
