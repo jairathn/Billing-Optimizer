@@ -655,11 +655,15 @@ WHAT SUPPORTS EACH LEVEL:
 - Drug requiring intensive monitoring (biologics, immunosuppressants)
 - Decision about hospitalization or referral for emergency
 
-USE CLINICAL JUDGMENT:
-- Simple acne follow-up → 99213 max (99214 only if multiple conditions or Rx issues)
-- Psoriasis on biologic → 99214-99215 (complex management, drug monitoring)
-- Eczema with infection → 99214 (acute on chronic)
-- Melanoma follow-up with new suspicious lesions → 99215 (high risk)
+USE CLINICAL JUDGMENT - PICK ONE CODE, NEVER A RANGE:
+- Simple acne follow-up → 99213 (single condition, stable)
+- Acne with multiple components (inflammatory + PIH + cystic) → 99214 (multiple treatment decisions)
+- Psoriasis on biologic → 99214 (drug monitoring qualifies as moderate)
+- Psoriasis flare requiring biologic switch → 99215 (high-risk drug decision)
+- Eczema with secondary infection → 99214 (acute on chronic)
+- Melanoma follow-up with new suspicious lesion → 99215 (high risk)
+
+NEVER output "99214-99215" or any range. Pick the SINGLE highest defensible code.
 
 ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
 
@@ -719,9 +723,9 @@ CRITICAL RULES:
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
 
-E/M CRITICAL: For E/M levels, use clinical judgment to determine the MAXIMUM REASONABLE
-achievable code - the one that would actually be paid by insurance. DO NOT offer a range
-of E/M options. Pick ONE specific level and tell the provider exactly what to document.
+E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
+NEVER output a range like "99214-99215". Output exactly "99214-25" OR "99215-25", not both.
+Tell the provider exactly what to document to support that specific level.
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
@@ -930,11 +934,15 @@ WHAT SUPPORTS EACH LEVEL:
 - Drug requiring intensive monitoring (biologics, immunosuppressants)
 - Decision about hospitalization or referral for emergency
 
-USE CLINICAL JUDGMENT:
-- Simple acne follow-up → 99213 max (99214 only if multiple conditions or Rx issues)
-- Psoriasis on biologic → 99214-99215 (complex management, drug monitoring)
-- Eczema with infection → 99214 (acute on chronic)
-- Melanoma follow-up with new suspicious lesions → 99215 (high risk)
+USE CLINICAL JUDGMENT - PICK ONE CODE, NEVER A RANGE:
+- Simple acne follow-up → 99213 (single condition, stable)
+- Acne with multiple components (inflammatory + PIH + cystic) → 99214 (multiple treatment decisions)
+- Psoriasis on biologic → 99214 (drug monitoring qualifies as moderate)
+- Psoriasis flare requiring biologic switch → 99215 (high-risk drug decision)
+- Eczema with secondary infection → 99214 (acute on chronic)
+- Melanoma follow-up with new suspicious lesion → 99215 (high risk)
+
+NEVER output "99214-99215" or any range. Pick the SINGLE highest defensible code.
 
 ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
 
@@ -994,9 +1002,9 @@ CRITICAL RULES:
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
 
-E/M CRITICAL: For E/M levels, use clinical judgment to determine the MAXIMUM REASONABLE
-achievable code - the one that would actually be paid by insurance. DO NOT offer a range
-of E/M options. Pick ONE specific level and tell the provider exactly what to document.
+E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
+NEVER output a range like "99214-99215". Output exactly "99214-25" OR "99215-25", not both.
+Tell the provider exactly what to document to support that specific level.
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
