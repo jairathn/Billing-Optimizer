@@ -1,0 +1,1067 @@
+{
+  "meta": {
+    "name": "DermBill AI Knowledge Base",
+    "version": "1.0",
+    "description": "Dermatology billing optimization corpus for LLM consumption",
+    "usage": "Process priority_codes first for common scenarios, then reference full_codes for edge cases"
+  },
+
+  "priority_codes": {
+    "_description": "Most commonly used dermatology codes - check these FIRST",
+    
+    "evaluation_management": {
+      "99213": {
+        "description": "Office visit, established patient, low complexity",
+        "wRVU": 1.30,
+        "mue": 2,
+        "global_period": "XXX",
+        "when_to_use": "Stable chronic condition, single acute minor problem",
+        "mdm_requirements": ["2+ self-limited problems OR 1 chronic stable", "minimal data review", "low risk"],
+        "common_errors": ["Using for complex visits that qualify for 99214", "Not adding G2211 for chronic conditions"],
+        "optimization": "If ANY chronic condition managed, add G2211 (+0.33 wRVU)"
+      },
+      "99214": {
+        "description": "Office visit, established patient, moderate complexity",
+        "wRVU": 1.92,
+        "mue": 2,
+        "global_period": "XXX",
+        "when_to_use": "Chronic condition with mild exacerbation, multiple conditions, prescription drug monitoring",
+        "mdm_requirements": ["Multiple chronic conditions OR mild exacerbation", "moderate data review", "moderate risk (Rx requiring monitoring)"],
+        "upgrade_triggers": ["multiple diagnoses", "prescription requiring monitoring", "data review documented", "care coordination"],
+        "common_errors": ["Downcoding to 99213 when 99214 supported"],
+        "optimization": "Look for: lab review, imaging review, drug interactions, multiple conditions"
+      },
+      "99215": {
+        "description": "Office visit, established patient, high complexity",
+        "wRVU": 2.80,
+        "mue": 1,
+        "global_period": "XXX",
+        "when_to_use": "Severe exacerbation, threat to life/function, high-risk drug management",
+        "mdm_requirements": ["Severe exacerbation OR threat to bodily function", "extensive data review", "high risk"],
+        "common_errors": ["Overuse without documentation support"],
+        "optimization": "Reserve for true high complexity - immunosuppressant management, severe flares"
+      },
+      "G2211": {
+        "description": "Visit complexity add-on for chronic conditions",
+        "wRVU": 0.33,
+        "mue": 1,
+        "global_period": "XXX",
+        "add_on": true,
+        "when_to_use": "ANY established visit for ongoing chronic condition management",
+        "eligible_conditions": ["psoriasis", "eczema", "atopic dermatitis", "rosacea", "acne", "hidradenitis suppurativa", "alopecia areata", "vitiligo", "seborrheic dermatitis", "chronic urticaria", "lichen planus", "skin cancer surveillance", "lupus", "dermatomyositis", "morphea", "scleroderma"],
+        "common_errors": ["Forgetting to add - MASSIVE underutilization", "Not applicable to new patients"],
+        "optimization": "Add to EVERY chronic condition follow-up. Most missed code in dermatology.",
+        "annual_impact_example": "20 patients/day × 60% chronic × 0.33 wRVU × 220 days = 871 wRVU/year"
+      }
+    },
+
+    "biopsy": {
+      "11102": {
+        "description": "Tangential biopsy (shave), first lesion",
+        "wRVU": 0.64,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Superficial lesions, suspected SK, superficial BCC/SCC, diagnosis clinically apparent",
+        "technique": "Tangential/shave technique",
+        "common_errors": ["Using when punch would be more appropriate for inflammatory conditions"],
+        "optimization": "Punch (11104) pays more AND is better for inflammatory dermatoses"
+      },
+      "11103": {
+        "description": "Tangential biopsy (shave), each additional lesion",
+        "wRVU": 0.37,
+        "mue": 14,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["11102"],
+        "common_errors": ["Not counting all biopsies"],
+        "optimization": "Count every separate lesion biopsied"
+      },
+      "11104": {
+        "description": "Punch biopsy, first lesion",
+        "wRVU": 0.81,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Inflammatory dermatoses, alopecia, deep processes, when full-thickness specimen needed",
+        "technique": "Punch technique with full-thickness specimen",
+        "preferred_for": ["lichen planus", "psoriasis", "alopecia", "panniculitis", "vasculitis", "any inflammatory condition"],
+        "common_errors": ["Using shave when punch indicated - loses diagnostic yield AND revenue"],
+        "optimization": "Punch is +0.17 wRVU over shave AND better for inflammatory conditions"
+      },
+      "11105": {
+        "description": "Punch biopsy, each additional lesion",
+        "wRVU": 0.44,
+        "mue": 9,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["11104"],
+        "optimization": "Count every separate punch biopsy"
+      },
+      "11106": {
+        "description": "Incisional biopsy, first lesion",
+        "wRVU": 0.98,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Deep processes, panniculitis, need subcutaneous fat in specimen",
+        "optimization": "Highest biopsy wRVU - use when clinically indicated for deep specimens"
+      },
+      "11107": {
+        "description": "Incisional biopsy, each additional lesion",
+        "wRVU": 0.53,
+        "mue": 3,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["11106"]
+      }
+    },
+
+    "destruction_premalignant": {
+      "17000": {
+        "description": "Destruction of premalignant lesion (AK), first lesion",
+        "wRVU": 0.61,
+        "mue": 1,
+        "global_period": "010",
+        "when_to_use": "Actinic keratoses - first lesion",
+        "common_errors": ["Not documenting count - prevents billing add-ons"],
+        "optimization": "ALWAYS document exact count and locations"
+      },
+      "17003": {
+        "description": "Destruction of premalignant lesion (AK), 2-14, each",
+        "wRVU": 0.09,
+        "mue": 13,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["17000"],
+        "billing_formula": "17000 + (count - 1) × 17003",
+        "example": "10 AKs = 17000 + 9 units of 17003 = 0.61 + 0.81 = 1.42 wRVU",
+        "common_errors": ["Not counting each AK", "Documenting 'multiple' instead of exact count"],
+        "optimization": "COUNT EVERY AK. Document by location: '4 on scalp, 3 on right cheek, 2 on left hand'"
+      },
+      "17004": {
+        "description": "Destruction of premalignant lesions (AK), 15 or more",
+        "wRVU": 2.59,
+        "mue": 1,
+        "global_period": "010",
+        "when_to_use": "When 15 or more AKs treated",
+        "billing_note": "Flat rate - replaces 17000 + 17003 series when ≥15 lesions",
+        "threshold": "Use when count ≥ 15",
+        "optimization": "At exactly 15 AKs: 17004 (2.59) vs 17000+17003×14 (1.87) - use 17004"
+      }
+    },
+
+    "destruction_benign": {
+      "17110": {
+        "description": "Destruction of benign lesions, 1-14",
+        "wRVU": 0.68,
+        "mue": 1,
+        "global_period": "010",
+        "when_to_use": "Warts, molluscum, seborrheic keratoses (if medical necessity), skin tags (alternative to 11200)",
+        "common_diagnoses": ["B07.9 - warts", "B08.1 - molluscum", "L82.1 - SK"],
+        "common_errors": ["Not documenting lesion count", "Missing medical necessity for benign lesions"],
+        "optimization": "Count every lesion. If ≥15, use 17111 instead"
+      },
+      "17111": {
+        "description": "Destruction of benign lesions, 15 or more",
+        "wRVU": 0.95,
+        "mue": 1,
+        "global_period": "010",
+        "when_to_use": "When 15+ warts, molluscum, or other benign lesions treated",
+        "threshold": "Use when count ≥ 15",
+        "optimization": "Flat rate for 15+ lesions"
+      }
+    },
+
+    "skin_tags": {
+      "11200": {
+        "description": "Removal of skin tags, up to 15",
+        "wRVU": 0.80,
+        "mue": 1,
+        "global_period": "010",
+        "when_to_use": "Skin tag removal by any method",
+        "common_errors": ["Using 17110 instead - 11200 pays more"],
+        "optimization": "11200 (0.80) > 17110 (0.68) for skin tags"
+      },
+      "11201": {
+        "description": "Removal of skin tags, each additional 10",
+        "wRVU": 0.28,
+        "mue": 9,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["11200"],
+        "optimization": "Bill per each additional 10 tags"
+      }
+    },
+
+    "shave_removal": {
+      "11300": {
+        "description": "Shave removal, trunk/arms/legs, ≤0.5cm",
+        "wRVU": 0.68,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "0.0-0.5cm"
+      },
+      "11301": {
+        "description": "Shave removal, trunk/arms/legs, 0.6-1.0cm",
+        "wRVU": 0.86,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "0.6-1.0cm"
+      },
+      "11302": {
+        "description": "Shave removal, trunk/arms/legs, 1.1-2.0cm",
+        "wRVU": 1.02,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "1.1-2.0cm"
+      },
+      "11305": {
+        "description": "Shave removal, scalp/neck/hands/feet/genitalia, ≤0.5cm",
+        "wRVU": 0.77,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "scalp_neck_hands_feet",
+        "size_range": "0.0-0.5cm"
+      },
+      "11306": {
+        "description": "Shave removal, scalp/neck/hands/feet/genitalia, 0.6-1.0cm",
+        "wRVU": 0.98,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "scalp_neck_hands_feet",
+        "size_range": "0.6-1.0cm"
+      },
+      "11310": {
+        "description": "Shave removal, face/eyelids/nose/lips/ears, ≤0.5cm",
+        "wRVU": 0.81,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "0.0-0.5cm"
+      },
+      "11311": {
+        "description": "Shave removal, face/eyelids/nose/lips/ears, 0.6-1.0cm",
+        "wRVU": 1.13,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "0.6-1.0cm"
+      },
+      "11312": {
+        "description": "Shave removal, face/eyelids/nose/lips/ears, 1.1-2.0cm",
+        "wRVU": 1.28,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "1.1-2.0cm"
+      }
+    },
+
+    "excision_benign": {
+      "_measurement_rule": "CRITICAL: Excised diameter = Lesion + (2 × Margin)",
+      "11400": {
+        "description": "Excision benign, trunk/arms/legs, ≤0.5cm",
+        "wRVU": 0.88,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "0.0-0.5cm"
+      },
+      "11401": {
+        "description": "Excision benign, trunk/arms/legs, 0.6-1.0cm",
+        "wRVU": 1.25,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "0.6-1.0cm"
+      },
+      "11402": {
+        "description": "Excision benign, trunk/arms/legs, 1.1-2.0cm",
+        "wRVU": 1.41,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "1.1-2.0cm"
+      },
+      "11403": {
+        "description": "Excision benign, trunk/arms/legs, 2.1-3.0cm",
+        "wRVU": 1.79,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "2.1-3.0cm"
+      },
+      "11404": {
+        "description": "Excision benign, trunk/arms/legs, 3.1-4.0cm",
+        "wRVU": 2.06,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "3.1-4.0cm"
+      },
+      "11406": {
+        "description": "Excision benign, trunk/arms/legs, >4.0cm",
+        "wRVU": 3.43,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": ">4.0cm"
+      },
+      "11440": {
+        "description": "Excision benign, face, ≤0.5cm",
+        "wRVU": 1.02,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "0.0-0.5cm"
+      },
+      "11441": {
+        "description": "Excision benign, face, 0.6-1.0cm",
+        "wRVU": 1.49,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "0.6-1.0cm"
+      },
+      "11442": {
+        "description": "Excision benign, face, 1.1-2.0cm",
+        "wRVU": 1.73,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "1.1-2.0cm"
+      },
+      "11443": {
+        "description": "Excision benign, face, 2.1-3.0cm",
+        "wRVU": 2.28,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "2.1-3.0cm"
+      },
+      "11444": {
+        "description": "Excision benign, face, 3.1-4.0cm",
+        "wRVU": 3.11,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "3.1-4.0cm"
+      },
+      "11446": {
+        "description": "Excision benign, face, >4.0cm",
+        "wRVU": 4.68,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": ">4.0cm"
+      }
+    },
+
+    "excision_malignant": {
+      "_measurement_rule": "CRITICAL: Excised diameter = Lesion + (2 × Margin). Standard NMSC margin is 4mm = adds 8mm to lesion size",
+      "11600": {
+        "description": "Excision malignant, trunk/arms/legs, ≤0.5cm",
+        "wRVU": 1.59,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "0.0-0.5cm"
+      },
+      "11601": {
+        "description": "Excision malignant, trunk/arms/legs, 0.6-1.0cm",
+        "wRVU": 2.02,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "0.6-1.0cm"
+      },
+      "11602": {
+        "description": "Excision malignant, trunk/arms/legs, 1.1-2.0cm",
+        "wRVU": 2.21,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "1.1-2.0cm"
+      },
+      "11603": {
+        "description": "Excision malignant, trunk/arms/legs, 2.1-3.0cm",
+        "wRVU": 2.75,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "2.1-3.0cm"
+      },
+      "11604": {
+        "description": "Excision malignant, trunk/arms/legs, 3.1-4.0cm",
+        "wRVU": 3.42,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": "3.1-4.0cm"
+      },
+      "11606": {
+        "description": "Excision malignant, trunk/arms/legs, >4.0cm",
+        "wRVU": 4.19,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "trunk_extremities",
+        "size_range": ">4.0cm"
+      },
+      "11640": {
+        "description": "Excision malignant, face, ≤0.5cm",
+        "wRVU": 1.63,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "0.0-0.5cm"
+      },
+      "11641": {
+        "description": "Excision malignant, face, 0.6-1.0cm",
+        "wRVU": 2.12,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "0.6-1.0cm"
+      },
+      "11642": {
+        "description": "Excision malignant, face, 1.1-2.0cm",
+        "wRVU": 2.55,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "1.1-2.0cm"
+      },
+      "11643": {
+        "description": "Excision malignant, face, 2.1-3.0cm",
+        "wRVU": 3.33,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "2.1-3.0cm"
+      },
+      "11644": {
+        "description": "Excision malignant, face, 3.1-4.0cm",
+        "wRVU": 4.01,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": "3.1-4.0cm"
+      },
+      "11646": {
+        "description": "Excision malignant, face, >4.0cm",
+        "wRVU": 5.48,
+        "mue": 1,
+        "global_period": "010",
+        "anatomic_group": "face",
+        "size_range": ">4.0cm"
+      }
+    },
+
+    "repairs": {
+      "_aggregation_rule": "Sum lengths of repairs with SAME complexity AND SAME anatomic group",
+      "_measurement_rule": "Measure SUTURED LENGTH including dog ears, NOT defect size",
+      
+      "simple_trunk": {
+        "12001": {"description": "Simple repair, trunk/ext, ≤2.5cm", "wRVU": 0.82, "size_range": "0.0-2.5cm"},
+        "12002": {"description": "Simple repair, trunk/ext, 2.6-7.5cm", "wRVU": 1.11, "size_range": "2.6-7.5cm"},
+        "12004": {"description": "Simple repair, trunk/ext, 7.6-12.5cm", "wRVU": 1.49, "size_range": "7.6-12.5cm"},
+        "12005": {"description": "Simple repair, trunk/ext, 12.6-20.0cm", "wRVU": 1.99, "size_range": "12.6-20.0cm"},
+        "12006": {"description": "Simple repair, trunk/ext, 20.1-30.0cm", "wRVU": 2.42, "size_range": "20.1-30.0cm"},
+        "12007": {"description": "Simple repair, trunk/ext, >30.0cm", "wRVU": 3.02, "size_range": ">30.0cm"}
+      },
+      "simple_face": {
+        "12011": {"description": "Simple repair, face, ≤2.5cm", "wRVU": 1.06, "size_range": "0.0-2.5cm"},
+        "12013": {"description": "Simple repair, face, 2.6-5.0cm", "wRVU": 1.30, "size_range": "2.6-5.0cm"},
+        "12014": {"description": "Simple repair, face, 5.1-7.5cm", "wRVU": 1.48, "size_range": "5.1-7.5cm"},
+        "12015": {"description": "Simple repair, face, 7.6-12.5cm", "wRVU": 2.02, "size_range": "7.6-12.5cm"}
+      },
+      "intermediate_trunk": {
+        "_upgrade_triggers": ["undermining", "layered closure", "deep dermal sutures"],
+        "12031": {"description": "Intermediate repair, trunk/ext, ≤2.5cm", "wRVU": 1.95, "size_range": "0.0-2.5cm"},
+        "12032": {"description": "Intermediate repair, trunk/ext, 2.6-7.5cm", "wRVU": 2.46, "size_range": "2.6-7.5cm"},
+        "12034": {"description": "Intermediate repair, trunk/ext, 7.6-12.5cm", "wRVU": 2.90, "size_range": "7.6-12.5cm"},
+        "12035": {"description": "Intermediate repair, trunk/ext, 12.6-20.0cm", "wRVU": 3.57, "size_range": "12.6-20.0cm"},
+        "12036": {"description": "Intermediate repair, trunk/ext, 20.1-30.0cm", "wRVU": 4.15, "size_range": "20.1-30.0cm"},
+        "12037": {"description": "Intermediate repair, trunk/ext, >30.0cm", "wRVU": 5.16, "size_range": ">30.0cm"}
+      },
+      "intermediate_face": {
+        "_upgrade_triggers": ["undermining", "layered closure", "deep dermal sutures"],
+        "12051": {"description": "Intermediate repair, face, ≤2.5cm", "wRVU": 2.27, "size_range": "0.0-2.5cm"},
+        "12052": {"description": "Intermediate repair, face, 2.6-5.0cm", "wRVU": 2.80, "size_range": "2.6-5.0cm"},
+        "12053": {"description": "Intermediate repair, face, 5.1-7.5cm", "wRVU": 3.09, "size_range": "5.1-7.5cm"},
+        "12054": {"description": "Intermediate repair, face, 7.6-12.5cm", "wRVU": 3.79, "size_range": "7.6-12.5cm"},
+        "12055": {"description": "Intermediate repair, face, 12.6-20.0cm", "wRVU": 4.46, "size_range": "12.6-20.0cm"},
+        "12056": {"description": "Intermediate repair, face, 20.1-30.0cm", "wRVU": 5.37, "size_range": "20.1-30.0cm"},
+        "12057": {"description": "Intermediate repair, face, >30.0cm", "wRVU": 5.87, "size_range": ">30.0cm"}
+      },
+      "complex_trunk": {
+        "_upgrade_triggers": ["debridement", "scar revision", "extensive undermining", "stents", "retention sutures"],
+        "13100": {"description": "Complex repair, trunk, 1.1-2.5cm", "wRVU": 2.94, "size_range": "1.1-2.5cm"},
+        "13101": {"description": "Complex repair, trunk, 2.6-7.5cm", "wRVU": 3.64, "size_range": "2.6-7.5cm"},
+        "13102": {"description": "Complex repair, trunk, each +5cm", "wRVU": 1.24, "add_on": true}
+      },
+      "complex_face": {
+        "13131": {"description": "Complex repair, face, 1.1-2.5cm", "wRVU": 3.64, "size_range": "1.1-2.5cm"},
+        "13132": {"description": "Complex repair, face, 2.6-7.5cm", "wRVU": 4.66, "size_range": "2.6-7.5cm"},
+        "13133": {"description": "Complex repair, face, each +5cm", "wRVU": 1.51, "add_on": true}
+      },
+      "complex_special": {
+        "13151": {"description": "Complex repair, eyelid/nose/ear/lip, 1.1-2.5cm", "wRVU": 4.23, "size_range": "1.1-2.5cm"},
+        "13152": {"description": "Complex repair, eyelid/nose/ear/lip, 2.6-7.5cm", "wRVU": 5.21, "size_range": "2.6-7.5cm"},
+        "13153": {"description": "Complex repair, eyelid/nose/ear/lip, each +5cm", "wRVU": 1.89, "add_on": true}
+      }
+    },
+
+    "flaps": {
+      "_measurement_rule": "CRITICAL: Total flap = Primary defect + Secondary defect(s). Most common underbilling error.",
+      "14000": {"description": "Adjacent tissue transfer, trunk, ≤10 sq cm", "wRVU": 6.21, "anatomic_group": "trunk", "size_range": "0.0-10.0 sq cm"},
+      "14001": {"description": "Adjacent tissue transfer, trunk, 10.1-30 sq cm", "wRVU": 8.56, "anatomic_group": "trunk", "size_range": "10.1-30.0 sq cm"},
+      "14020": {"description": "Adjacent tissue transfer, scalp/arms/legs, ≤10 sq cm", "wRVU": 7.04, "anatomic_group": "scalp_extremities", "size_range": "0.0-10.0 sq cm"},
+      "14021": {"description": "Adjacent tissue transfer, scalp/arms/legs, 10.1-30 sq cm", "wRVU": 9.48, "anatomic_group": "scalp_extremities", "size_range": "10.1-30.0 sq cm"},
+      "14040": {"description": "Adjacent tissue transfer, face, ≤10 sq cm", "wRVU": 8.39, "anatomic_group": "face", "size_range": "0.0-10.0 sq cm"},
+      "14041": {"description": "Adjacent tissue transfer, face, 10.1-30 sq cm", "wRVU": 10.56, "anatomic_group": "face", "size_range": "10.1-30.0 sq cm"},
+      "14060": {"description": "Adjacent tissue transfer, eyelid/nose/ear/lip, ≤10 sq cm", "wRVU": 9.00, "anatomic_group": "special_face", "size_range": "0.0-10.0 sq cm"},
+      "14061": {"description": "Adjacent tissue transfer, eyelid/nose/ear/lip, 10.1-30 sq cm", "wRVU": 11.19, "anatomic_group": "special_face", "size_range": "10.1-30.0 sq cm"}
+    },
+
+    "mohs": {
+      "_block_counting": "Count ALL tissue blocks processed. Blocks >5 generate add-on codes.",
+      "17311": {
+        "description": "Mohs, head/neck/hands/feet/genitalia, stage 1, ≤5 blocks",
+        "wRVU": 10.10,
+        "mue": 2,
+        "global_period": "000",
+        "includes": "Up to 5 tissue blocks"
+      },
+      "17312": {
+        "description": "Mohs, H/N/H/F/G, stage 1, each additional block",
+        "wRVU": 0.95,
+        "mue": 20,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["17311"],
+        "when_to_use": "Each block beyond 5 in stage 1"
+      },
+      "17313": {
+        "description": "Mohs, H/N/H/F/G, stage 2+, ≤5 blocks",
+        "wRVU": 6.57,
+        "mue": 8,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["17311"],
+        "when_to_use": "Each additional stage (2, 3, 4, etc.)"
+      },
+      "17314": {
+        "description": "Mohs, H/N/H/F/G, stage 2+, each additional block",
+        "wRVU": 0.44,
+        "mue": 40,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["17313"],
+        "when_to_use": "Each block beyond 5 in stages 2+"
+      },
+      "17315": {
+        "description": "Mohs, trunk/arms/legs, stage 1, ≤5 blocks",
+        "wRVU": 8.34,
+        "mue": 2,
+        "global_period": "000"
+      }
+    },
+
+    "incision_drainage": {
+      "10060": {
+        "description": "I&D of abscess, simple/single",
+        "wRVU": 1.19,
+        "mue": 1,
+        "global_period": "010",
+        "when_to_use": "Small, single-loculated abscess",
+        "common_errors": ["Using for complicated abscesses that qualify for 10061"]
+      },
+      "10061": {
+        "description": "I&D of abscess, complicated/multiple",
+        "wRVU": 2.39,
+        "mue": 1,
+        "global_period": "010",
+        "when_to_use": "Large, multiple, or complicated abscesses",
+        "upgrade_triggers": ["multiple loculations", "extensive drainage", "packing required", "deep cavity", "multiple abscesses"],
+        "common_errors": ["Downcoding HS abscesses to 10060 - they usually qualify for 10061"],
+        "optimization": "HS abscesses are typically complicated (2.39 vs 1.19 = +1.20 wRVU)"
+      }
+    },
+
+    "intralesional_injection": {
+      "11900": {
+        "description": "Intralesional injection, ≤7 lesions",
+        "wRVU": 0.51,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "IL steroid for keloids, alopecia areata, cysts, psoriatic plaques, granuloma annulare",
+        "common_errors": ["Not counting lesions", "Using for chemotherapy agents (should be 96405)"],
+        "threshold": "Use for 1-7 lesions, switch to 11901 for 8+"
+      },
+      "11901": {
+        "description": "Intralesional injection, >7 lesions",
+        "wRVU": 0.78,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "IL steroid for 8+ lesions",
+        "optimization": "Count every injection site. 8+ lesions = 0.78 vs 0.51 = +0.27 wRVU"
+      },
+      "96405": {
+        "description": "Chemotherapy injection, intralesional, ≤7 lesions",
+        "wRVU": 0.52,
+        "mue": 1,
+        "when_to_use": "5-FU or bleomycin injection for warts",
+        "common_errors": ["Using 11900 for chemo agents - WRONG CODE"]
+      },
+      "96406": {
+        "description": "Chemotherapy injection, intralesional, >7 lesions",
+        "wRVU": 0.80,
+        "mue": 1,
+        "when_to_use": "5-FU or bleomycin injection for 8+ warts"
+      }
+    },
+
+    "nail_procedures": {
+      "11720": {
+        "description": "Debridement of nails, 1-5",
+        "wRVU": 0.31,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Mycotic or dystrophic nail debridement, 1-5 nails"
+      },
+      "11721": {
+        "description": "Debridement of nails, 6 or more",
+        "wRVU": 0.53,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Mycotic or dystrophic nail debridement, 6+ nails",
+        "optimization": "If debriding 6+ nails, 11721 (0.53) vs 11720 (0.31) = +0.22 wRVU"
+      },
+      "11730": {
+        "description": "Avulsion of nail plate, partial or complete, first",
+        "wRVU": 1.02,
+        "mue": 1,
+        "global_period": "010"
+      },
+      "11732": {
+        "description": "Avulsion of nail plate, each additional",
+        "wRVU": 0.37,
+        "mue": 9,
+        "global_period": "ZZZ",
+        "add_on": true,
+        "add_on_to": ["11730"]
+      },
+      "11750": {
+        "description": "Excision of nail and matrix, permanent removal",
+        "wRVU": 1.54,
+        "mue": 1,
+        "global_period": "010"
+      },
+      "11755": {
+        "description": "Biopsy of nail unit",
+        "wRVU": 1.22,
+        "mue": 1,
+        "global_period": "000"
+      },
+      "G0127": {
+        "description": "Trimming dystrophic nails, any number (Medicare)",
+        "wRVU": 0.17,
+        "when_to_use": "Medicare patients with systemic condition (diabetes) affecting nails"
+      }
+    },
+
+    "wound_care": {
+      "11042": {
+        "description": "Debridement, subcutaneous, first 20 sq cm",
+        "wRVU": 0.98,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Wound debridement to subcutaneous level"
+      },
+      "11043": {
+        "description": "Debridement, muscle/fascia, first 20 sq cm",
+        "wRVU": 2.63,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Deep wound debridement to muscle/fascia level"
+      },
+      "11044": {
+        "description": "Debridement, bone, first 20 sq cm",
+        "wRVU": 4.00,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Wound debridement to bone level"
+      }
+    },
+
+    "other_common": {
+      "10040": {
+        "description": "Acne surgery (comedone extraction)",
+        "wRVU": 0.89,
+        "mue": 1,
+        "global_period": "010",
+        "optimization": "Billable when extracting comedones during acne visit"
+      },
+      "17360": {
+        "description": "Chemical exfoliation (peel) for actinic/medical",
+        "wRVU": 0.75,
+        "mue": 1,
+        "global_period": "000",
+        "when_to_use": "Medical chemical peel for actinic damage, PIH, melasma (not cosmetic)",
+        "optimization": "Billable for post-inflammatory hyperpigmentation treatment"
+      },
+      "96900": {
+        "description": "Actinotherapy (UV light)",
+        "wRVU": 0.26,
+        "mue": 1,
+        "when_to_use": "NB-UVB phototherapy session",
+        "optimization": "Bill per session. 30 sessions = 7.8 wRVU"
+      },
+      "96910": {
+        "description": "Photochemotherapy (PUVA)",
+        "wRVU": 0.41,
+        "mue": 1,
+        "when_to_use": "PUVA phototherapy session"
+      },
+      "95044": {
+        "description": "Patch/application test, each allergen",
+        "wRVU": 0.00,
+        "mue": 80,
+        "when_to_use": "Patch testing - per allergen",
+        "optimization": "Standard 80-allergen panel = 80 units. High-value procedure."
+      }
+    }
+  },
+
+  "rules": {
+    "measurement": {
+      "excision": {
+        "formula": "excised_diameter = lesion_diameter + (2 × margin)",
+        "common_margins_mm": {
+          "benign": 1,
+          "bcc_standard": 4,
+          "scc_standard": 4,
+          "melanoma_in_situ": 5,
+          "melanoma_1mm": 10
+        },
+        "example": {
+          "scenario": "6mm BCC with 4mm margins",
+          "calculation": "6 + (2 × 4) = 14mm = 1.4cm",
+          "code_selection": "Use 1.1-2.0cm size bracket"
+        },
+        "common_error": "Billing based on lesion size only, not excised specimen size"
+      },
+      "repair": {
+        "formula": "Bill based on sutured wound length, including any dog ears",
+        "common_error": "Measuring defect size instead of final sutured length"
+      },
+      "flap": {
+        "formula": "total_area = primary_defect + secondary_defect(s)",
+        "example": {
+          "scenario": "Bilobed flap on nose",
+          "calculation": "Primary 2 sq cm + First lobe 1.5 sq cm + Second lobe 0.8 sq cm = 4.3 sq cm",
+          "code_selection": "14060 (≤10 sq cm)"
+        },
+        "common_error": "Only measuring primary defect - MISSES 50% of billable area"
+      }
+    },
+
+    "repair_aggregation": {
+      "rule": "Sum lengths of repairs with SAME complexity AND SAME anatomic group",
+      "anatomic_groups": {
+        "simple": {
+          "group_A": ["scalp", "axilla", "trunk", "extremities"],
+          "group_B": ["neck", "hands", "feet", "external genitalia"],
+          "group_C": ["face", "ears", "eyelids", "nose", "lips", "mucous membranes"]
+        },
+        "intermediate": {
+          "group_A": ["trunk", "extremities"],
+          "group_B": ["scalp", "axilla", "neck", "hands", "feet", "external genitalia"],
+          "group_C": ["face", "ears", "eyelids", "nose", "lips", "mucous membranes"]
+        },
+        "complex": {
+          "group_A": ["trunk"],
+          "group_B": ["scalp", "arms", "legs"],
+          "group_C": ["forehead", "cheeks", "chin", "mouth", "neck", "axilla", "genitalia", "hands", "feet"],
+          "group_D": ["eyelids", "nose", "ears", "lips"]
+        }
+      },
+      "example": {
+        "scenario": "2cm intermediate repair on cheek + 1.5cm intermediate repair on chin",
+        "calculation": "Same complexity (intermediate) + Same group (face) = Sum lengths = 3.5cm",
+        "code_selection": "12052 (2.6-5.0cm)"
+      }
+    },
+
+    "modifiers": {
+      "25": {
+        "description": "Significant, separately identifiable E/M",
+        "when_to_use": "E/M is separate and significant work beyond procedure decision",
+        "audit_risk": "HIGH - most scrutinized modifier",
+        "documentation": "E/M note must stand alone as separately identifiable service",
+        "common_errors": ["Using for routine pre-procedure assessment", "No separate documentation"]
+      },
+      "59": {
+        "description": "Distinct procedural service",
+        "when_to_use": "Same code performed on different site/lesion/session",
+        "note": "X modifiers preferred for Medicare"
+      },
+      "XE": {
+        "description": "Separate encounter",
+        "when_to_use": "Service performed during separate encounter same day"
+      },
+      "XS": {
+        "description": "Separate structure",
+        "when_to_use": "Service performed on separate organ/structure"
+      },
+      "XP": {
+        "description": "Separate practitioner",
+        "when_to_use": "Service performed by different practitioner"
+      },
+      "XU": {
+        "description": "Unusual non-overlapping service",
+        "when_to_use": "Service is distinct and doesn't overlap usual components"
+      },
+      "51": {
+        "description": "Multiple procedures",
+        "when_to_use": "Multiple procedures same session (payment reduced)"
+      },
+      "76": {
+        "description": "Repeat procedure, same physician",
+        "when_to_use": "Same procedure repeated same day by same physician"
+      },
+      "LT_RT": {
+        "description": "Left/Right laterality",
+        "when_to_use": "Bilateral procedures on paired structures"
+      }
+    },
+
+    "ncci_bundles": {
+      "_description": "Procedures bundled together - cannot usually bill separately",
+      "biopsy_excision": {
+        "rule": "Biopsy bundled into excision of same lesion same day",
+        "exception": "Different lesions can be billed separately"
+      },
+      "simple_repair_excision": {
+        "rule": "Simple repair bundled into excision",
+        "exception": "Intermediate/complex repair separately billable"
+      },
+      "em_procedure": {
+        "rule": "E/M bundled into procedure unless modifier -25",
+        "requirement": "Separately identifiable, significant E/M work"
+      },
+      "flap_repair": {
+        "rule": "Repair of flap donor site bundled into flap code",
+        "note": "Flap codes include closure of both primary and secondary defects"
+      }
+    },
+
+    "g2211_eligibility": {
+      "description": "Visit complexity inherent to E/M for ongoing care of chronic conditions",
+      "requirements": ["Established patient", "Ongoing relationship", "Chronic condition requiring management"],
+      "eligible_conditions": [
+        "psoriasis", "eczema", "atopic dermatitis", "rosacea", "acne", 
+        "hidradenitis suppurativa", "alopecia areata", "vitiligo",
+        "seborrheic dermatitis", "chronic urticaria", "lichen planus",
+        "morphea", "scleroderma", "lupus", "dermatomyositis",
+        "skin cancer surveillance", "dysplastic nevus syndrome",
+        "chronic wound", "venous stasis", "pemphigus", "pemphigoid"
+      ],
+      "not_applicable": ["New patients", "Single acute visits", "Procedures only"],
+      "common_error": "Forgetting to add - single highest-impact missed code"
+    }
+  },
+
+  "scenarios": {
+    "_description": "Condition-specific optimization patterns. Match patient diagnosis to scenario.",
+    
+    "psoriasis": {
+      "triggers": ["psoriasis", "plaque psoriasis", "guttate", "pustular psoriasis"],
+      "base_em": "99213-99214",
+      "always_add": ["G2211"],
+      "look_for": {
+        "nail_involvement": {
+          "finding": "nail pitting, onycholysis, dystrophy",
+          "action": "Examine all nails",
+          "if_positive": {"code": "11721", "wRVU": 0.53, "description": "Nail debridement 6+"}
+        },
+        "thick_plaques": {
+          "finding": "thick, resistant plaques",
+          "action": "Consider IL injection",
+          "if_positive": {"code": "11900", "wRVU": 0.51, "description": "IL injection ≤7"}
+        },
+        "psa_screening": {
+          "finding": "joint symptoms, morning stiffness",
+          "action": "Document PsA screening",
+          "if_positive": "Increases MDM, supports 99214"
+        },
+        "scalp_involvement": {
+          "finding": "scalp plaques",
+          "action": "Document, separate treatment"
+        }
+      },
+      "typical_visit_range": "1.63 - 3.59 wRVU"
+    },
+
+    "acne": {
+      "triggers": ["acne", "acne vulgaris", "cystic acne", "comedonal acne"],
+      "base_em": "99213",
+      "always_add": ["G2211"],
+      "look_for": {
+        "inflamed_cysts": {
+          "finding": "tender nodules, cysts",
+          "action": "IL injection",
+          "if_positive": {"code": "11900", "wRVU": 0.51}
+        },
+        "comedones": {
+          "finding": "open/closed comedones",
+          "action": "Extraction",
+          "if_positive": {"code": "10040", "wRVU": 0.89}
+        },
+        "pih": {
+          "finding": "post-inflammatory hyperpigmentation",
+          "action": "Chemical peel",
+          "if_positive": {"code": "17360", "wRVU": 0.75}
+        }
+      },
+      "typical_visit_range": "1.63 - 4.48 wRVU"
+    },
+
+    "skin_check": {
+      "triggers": ["skin check", "skin exam", "mole check", "skin cancer screening"],
+      "base_em": "99213",
+      "always_add": ["G2211 if history of skin cancer"],
+      "systematic_exam": ["scalp", "face", "ears", "neck", "trunk", "arms", "hands", "legs", "feet", "nails"],
+      "look_for": {
+        "aks": {
+          "finding": "rough, scaly papules sun-exposed areas",
+          "action": "Treat with cryotherapy",
+          "if_positive": {"codes": ["17000", "17003"], "note": "COUNT every AK"}
+        },
+        "suspicious_lesions": {
+          "finding": "changing, atypical lesions",
+          "action": "Biopsy",
+          "if_positive": {"code": "11102 or 11104"}
+        },
+        "seborrheic_keratoses": {
+          "finding": "symptomatic SKs",
+          "action": "Remove if catching, irritated",
+          "if_positive": {"code": "17110"}
+        }
+      }
+    },
+
+    "hidradenitis": {
+      "triggers": ["hidradenitis", "HS", "hidradenitis suppurativa"],
+      "base_em": "99214",
+      "always_add": ["G2211"],
+      "look_for": {
+        "acute_abscess": {
+          "finding": "fluctuant, tender nodule",
+          "action": "I&D - usually COMPLICATED",
+          "if_positive": {"code": "10061", "wRVU": 2.39, "note": "HS abscesses usually qualify as complicated"}
+        },
+        "sinus_tracts": {
+          "finding": "draining sinus tracts",
+          "action": "Consider unroofing/excision"
+        },
+        "multiple_sites": {
+          "finding": "axillary, inguinal, inframammary involvement",
+          "action": "Document all sites",
+          "impact": "Increases MDM"
+        }
+      },
+      "documentation_tip": "Document Hurley stage"
+    },
+
+    "alopecia_areata": {
+      "triggers": ["alopecia areata", "AA", "patchy hair loss"],
+      "base_em": "99213-99214",
+      "always_add": ["G2211"],
+      "look_for": {
+        "patches": {
+          "finding": "smooth, circular patches",
+          "action": "IL injection - FIRST LINE",
+          "if_positive": {"code": "11900 or 11901", "note": "Count each patch. 8+ = 11901"}
+        },
+        "nail_involvement": {
+          "finding": "nail pitting",
+          "action": "Document",
+          "impact": "Increases complexity"
+        }
+      },
+      "teaching_point": "IL steroid is most effective AND billable - offer at first visit"
+    },
+
+    "mohs_surgery": {
+      "triggers": ["mohs", "BCC", "SCC", "skin cancer"],
+      "codes_to_optimize": {
+        "stages": "Count each stage separately (17311 first, 17313 additional)",
+        "blocks": "Count ALL blocks. >5 blocks = add-on codes (17312, 17314)",
+        "reconstruction": "Flap/graft/repair separately billable"
+      },
+      "flap_reminder": "MEASURE BOTH PRIMARY AND SECONDARY DEFECTS",
+      "typical_range": "18-45+ wRVU depending on complexity"
+    }
+  },
+
+  "documentation_templates": {
+    "g2211_support": "Ongoing management of [chronic condition]. Established care relationship with patient for [condition] management.",
+    "intermediate_repair": "Wound edges undermined. Layered closure with [suture] deep dermal and [suture] epidermal sutures. Sutured length: X cm.",
+    "complex_repair": "Wound edges debrided. Extensive undermining performed. [Scar revision/tissue rearrangement] required. Sutured length: X cm.",
+    "complicated_id": "Large/deep abscess cavity explored. Multiple loculations broken up. Copious purulent drainage. Wound irrigated and packed.",
+    "excision_measurement": "[Lesion type] measuring [X]cm excised with [Y]mm margins. Excised specimen diameter: [calculated]cm.",
+    "flap_measurement": "Primary defect: X × Y cm = Z sq cm. Secondary defect from [flap type]: A × B cm = C sq cm. Total flap: [sum] sq cm.",
+    "ak_count": "[N] actinic keratoses treated with cryotherapy: [count by location, e.g., '4 on scalp, 3 on right cheek, 2 on left dorsal hand']."
+  },
+
+  "high_value_opportunities": {
+    "_description": "Ranked by frequency × impact",
+    "1_g2211": {
+      "code": "G2211",
+      "wRVU": 0.33,
+      "frequency": "Most chronic visits",
+      "annual_impact": "800+ wRVU if captured consistently"
+    },
+    "2_intermediate_repair": {
+      "upgrade": "Simple (12001) → Intermediate (12031)",
+      "wRVU_gain": 1.13,
+      "trigger": "ANY undermining or layered closure"
+    },
+    "3_complicated_id": {
+      "upgrade": "Simple (10060) → Complicated (10061)",
+      "wRVU_gain": 1.20,
+      "trigger": "HS, large, deep, or multiloculated abscesses"
+    },
+    "4_ak_counting": {
+      "code": "17003",
+      "wRVU_per_ak": 0.09,
+      "common_miss": "Not documenting count"
+    },
+    "5_punch_over_shave": {
+      "upgrade": "Shave (11102) → Punch (11104)",
+      "wRVU_gain": 0.17,
+      "indication": "Inflammatory dermatoses - better specimen AND higher pay"
+    },
+    "6_nail_debridement_count": {
+      "upgrade": "11720 → 11721",
+      "wRVU_gain": 0.22,
+      "trigger": "6+ nails debrided"
+    },
+    "7_il_injection_count": {
+      "upgrade": "11900 → 11901",
+      "wRVU_gain": 0.27,
+      "trigger": "8+ lesions injected"
+    },
+    "8_flap_secondary_defect": {
+      "common_miss": "Only measuring primary defect",
+      "impact": "May miss tier upgrade (e.g., 10 to 10.1 sq cm)"
+    },
+    "9_excision_margins": {
+      "common_miss": "Billing lesion size not excised specimen size",
+      "impact": "Frequently drops to lower size tier"
+    }
+  }
+}

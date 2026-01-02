@@ -667,37 +667,161 @@ Plan:
             'il_injection': {
                 name: 'IL Injections',
                 tiers: [
-                    { min: 1, max: 7, code: '11900', wRVU: 0.52, desc: 'IL injection 1-7 lesions' },
-                    { min: 8, max: 999, code: '11901', wRVU: 0.82, desc: 'IL injection 8+ lesions' }
+                    { min: 1, max: 7, code: '11900', wRVU: 0.51, desc: 'IL injection 1-7 lesions' },
+                    { min: 8, max: 999, code: '11901', wRVU: 0.78, desc: 'IL injection 8+ lesions' }
                 ],
-                patterns: ['11900', '11901']
+                patterns: ['11900', '11901'],
+                mutuallyExclusive: true,
+                mue: 1
             },
             'ak_destruction': {
                 name: 'AK Destruction',
                 tiers: [
                     { min: 1, max: 1, code: '17000', wRVU: 0.61, desc: 'AK destruction first lesion' },
                     { min: 2, max: 14, code: '17000+17003', wRVU: null, desc: 'AK destruction 2-14', perUnit: 0.09, baseWRVU: 0.61 },
-                    { min: 15, max: 999, code: '17004', wRVU: 2.19, desc: 'AK destruction 15+' }
+                    { min: 15, max: 999, code: '17004', wRVU: 2.59, desc: 'AK destruction 15+' }
                 ],
-                patterns: ['17000', '17003', '17004']
+                patterns: ['17000', '17003', '17004'],
+                mutuallyExclusive: true,
+                mue: 1
             },
             'benign_destruction': {
                 name: 'Benign Lesion Destruction',
                 tiers: [
-                    { min: 1, max: 14, code: '17110', wRVU: 0.70, desc: 'Benign destruction 1-14' },
-                    { min: 15, max: 999, code: '17111', wRVU: 1.23, desc: 'Benign destruction 15+' }
+                    { min: 1, max: 14, code: '17110', wRVU: 0.68, desc: 'Benign destruction 1-14' },
+                    { min: 15, max: 999, code: '17111', wRVU: 0.95, desc: 'Benign destruction 15+' }
                 ],
-                patterns: ['17110', '17111']
+                patterns: ['17110', '17111'],
+                mutuallyExclusive: true,
+                mue: 1
             },
             'nail_debridement': {
                 name: 'Nail Debridement',
                 tiers: [
-                    { min: 1, max: 5, code: '11720', wRVU: 0.34, desc: 'Nail debridement 1-5' },
+                    { min: 1, max: 5, code: '11720', wRVU: 0.31, desc: 'Nail debridement 1-5' },
                     { min: 6, max: 999, code: '11721', wRVU: 0.53, desc: 'Nail debridement 6+' }
                 ],
-                patterns: ['11720', '11721']
+                patterns: ['11720', '11721'],
+                mutuallyExclusive: true,
+                mue: 1
+            },
+            'id_abscess': {
+                name: 'I&D Abscess',
+                tiers: [
+                    { min: 1, max: 1, code: '10060', wRVU: 1.19, desc: 'I&D simple abscess' },
+                    { min: 2, max: 999, code: '10061', wRVU: 2.39, desc: 'I&D complicated abscess' }
+                ],
+                patterns: ['10060', '10061'],
+                mutuallyExclusive: true,
+                mue: 1
+            },
+            'em_established': {
+                name: 'E/M Established',
+                tiers: [
+                    { min: 1, max: 1, code: '99211', wRVU: 0.18, desc: 'E/M minimal' },
+                    { min: 2, max: 2, code: '99212', wRVU: 0.70, desc: 'E/M straightforward' },
+                    { min: 3, max: 3, code: '99213', wRVU: 1.30, desc: 'E/M low complexity' },
+                    { min: 4, max: 4, code: '99214', wRVU: 1.92, desc: 'E/M moderate complexity' },
+                    { min: 5, max: 5, code: '99215', wRVU: 2.80, desc: 'E/M high complexity' }
+                ],
+                patterns: ['99211', '99212', '99213', '99214', '99215'],
+                mutuallyExclusive: true,
+                mue: 2
             }
         };
+
+        // MUE (Medically Unlikely Edits) data
+        const MUE_DATA = {
+            // E/M codes
+            '99213': { mue: 2, wRVU: 1.30 },
+            '99214': { mue: 2, wRVU: 1.92 },
+            '99215': { mue: 1, wRVU: 2.80 },
+            'G2211': { mue: 1, wRVU: 0.33, addOn: true },
+            // Procedures
+            '11720': { mue: 1, wRVU: 0.31, family: 'nail_debridement' },
+            '11721': { mue: 1, wRVU: 0.53, family: 'nail_debridement' },
+            '11900': { mue: 1, wRVU: 0.51, family: 'il_injection' },
+            '11901': { mue: 1, wRVU: 0.78, family: 'il_injection' },
+            '10060': { mue: 1, wRVU: 1.19, family: 'id_abscess' },
+            '10061': { mue: 1, wRVU: 2.39, family: 'id_abscess' },
+            '10040': { mue: 1, wRVU: 0.89 },
+            '17360': { mue: 1, wRVU: 0.75 },
+            '17000': { mue: 1, wRVU: 0.61, family: 'ak_destruction' },
+            '17003': { mue: 13, wRVU: 0.09, addOn: true },
+            '17004': { mue: 1, wRVU: 2.59, family: 'ak_destruction' },
+            '17110': { mue: 1, wRVU: 0.68, family: 'benign_destruction' },
+            '17111': { mue: 1, wRVU: 0.95, family: 'benign_destruction' },
+            '11102': { mue: 1, wRVU: 0.64 },
+            '11103': { mue: 14, wRVU: 0.37, addOn: true },
+            '11104': { mue: 1, wRVU: 0.81 },
+            '11105': { mue: 9, wRVU: 0.44, addOn: true },
+        };
+
+        // Build complete billing codes by merging baseline + changes
+        // Handles: code upgrades, MUE limits, mutually exclusive families
+        function buildCompleteBillingCodes(baselineCodes, additionalCodes) {
+            const result = new Map(); // code -> {code, description, wRVU, ...}
+            const familyBest = new Map(); // family -> best code in that family
+
+            // Helper to get family for a code
+            function getFamily(code) {
+                if (MUE_DATA[code]?.family) return MUE_DATA[code].family;
+                // Check E/M
+                if (/^99\d{3}$/.test(code)) return 'em_established';
+                return null;
+            }
+
+            // Helper to compare codes in same family (higher wRVU wins)
+            function isBetterCode(newCode, existingCode, family) {
+                const newWRVU = MUE_DATA[newCode]?.wRVU || 0;
+                const existingWRVU = MUE_DATA[existingCode]?.wRVU || 0;
+                return newWRVU > existingWRVU;
+            }
+
+            // Process baseline codes first
+            (baselineCodes || []).forEach(c => {
+                const code = c.code;
+                const family = getFamily(code);
+
+                if (family) {
+                    if (!familyBest.has(family) || isBetterCode(code, familyBest.get(family).code, family)) {
+                        familyBest.set(family, { ...c, fromBaseline: true });
+                    }
+                } else {
+                    result.set(code, { ...c, fromBaseline: true });
+                }
+            });
+
+            // Process additional codes (upgrades/opportunities)
+            (additionalCodes || []).forEach(c => {
+                const code = c.code;
+                const family = getFamily(code);
+
+                if (family) {
+                    // Mutually exclusive - keep the better one
+                    if (!familyBest.has(family) || isBetterCode(code, familyBest.get(family).code, family)) {
+                        familyBest.set(family, { ...c, upgraded: familyBest.has(family) });
+                    }
+                } else if (MUE_DATA[code]?.addOn) {
+                    // Add-on codes can be added (respect MUE)
+                    if (!result.has(code)) {
+                        result.set(code, c);
+                    }
+                } else {
+                    // Regular codes - add if not already present
+                    if (!result.has(code)) {
+                        result.set(code, c);
+                    }
+                }
+            });
+
+            // Merge family bests into result
+            familyBest.forEach((codeData, family) => {
+                result.set(codeData.code, codeData);
+            });
+
+            return Array.from(result.values());
+        }
 
         // Detect code family from a code string
         function detectCodeFamily(code) {
@@ -1065,12 +1189,12 @@ Plan:
             `;
 
             // Build enhanced billing codes table for Step 3
-            // Table ID for dynamic updates - ONLY shows additional codes from enhancements
+            // Shows COMPLETE billable codes (baseline + selected enhancements) for EMR entry
             enhHtml += `
-                <h4 style="margin-top: 20px;">Additional Codes from Selected Enhancements</h4>
+                <h4 style="margin-top: 20px;">Complete Billing Codes (for EMR Entry)</h4>
                 <table class="billing-table" id="enh-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>+wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>wRVU</th></tr>
                     </thead>
                     <tbody id="enh-billing-tbody">
                     </tbody>
@@ -1143,12 +1267,12 @@ Plan:
             `;
 
             // Build dynamic billing codes table for Step 4
-            // ONLY shows additional codes from opportunities
+            // Shows COMPLETE billable codes (baseline + enhancements + opportunities) for EMR entry
             oppHtml += `
-                <h4 style="margin-top: 20px;">Additional Codes from Selected Opportunities</h4>
+                <h4 style="margin-top: 20px;">Complete Billing Codes (for EMR Entry)</h4>
                 <table class="billing-table" id="opp-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>+wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>wRVU</th></tr>
                     </thead>
                     <tbody id="opp-billing-tbody">
                     </tbody>
@@ -1275,25 +1399,19 @@ Plan:
 
             const currentBilling = currentAnalysisData.current_billing;
             const enhancements = currentAnalysisData.documentation_enhancements.enhancements;
+            const baselineCodes = currentBilling.codes || [];
             const baselineWRVU = currentBilling.total_wRVU;
 
-            // Helper to extract clean CPT code from potentially malformed strings
-            // e.g., "99213 (with complete documentation)" -> "99213"
+            // Helper to extract clean CPT code
             function cleanCode(code) {
                 if (!code) return null;
-                // Extract just the CPT code (5 digits or G + 4 digits)
                 const match = code.match(/^(99\d{3}|G\d{4}|\d{5})/);
                 return match ? match[1] : code.trim();
             }
 
-            // Only collect ENHANCED codes (what's being added/upgraded)
-            let enhancedCodes = [];
-            let totalDelta = 0;
-            let hasEMUpgrade = false;
-            let emUpgradeCode = null;
-            let emUpgradeDelta = 0;
+            // Collect enhancement codes (upgrades and additions)
+            let enhancementCodes = [];
 
-            // Process selected enhancements
             enhancements.forEach((e, idx) => {
                 const checkbox = document.querySelector(`.enhancement-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
@@ -1302,106 +1420,69 @@ Plan:
                 if (!rawEnhCode) return;
 
                 const enhCode = cleanCode(rawEnhCode);
-                const currentCode = cleanCode(e.current_code);
 
-                // Check if enhanced_code is a composite like "99213 + G2211"
+                // Check for composite code like "99213 + G2211"
                 const compositeMatch = rawEnhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
                 if (compositeMatch) {
-                    const addOnCode = compositeMatch[1];
-                    const addOnWRVU = e.delta_wRVU || 0.33;
-                    if (!enhancedCodes.find(c => c.code === addOnCode)) {
-                        enhancedCodes.push({
-                            code: addOnCode,
-                            description: 'Chronic care management add-on',
-                            wRVU: addOnWRVU
-                        });
-                        totalDelta += addOnWRVU;
-                    }
+                    enhancementCodes.push({
+                        code: compositeMatch[1],
+                        description: 'Chronic care management add-on',
+                        wRVU: MUE_DATA[compositeMatch[1]]?.wRVU || 0.33
+                    });
                     return;
                 }
 
-                // Check if this is an E/M code (99xxx)
-                const isEMCode = /^99\d{3}$/.test(enhCode);
-                const isCurrentEM = currentCode && /^99\d{3}$/.test(currentCode);
-
-                if (isEMCode) {
-                    // E/M code - check if it's an upgrade or just documentation improvement
-                    if (isCurrentEM && enhCode !== currentCode) {
-                        // This is an E/M upgrade (e.g., 99213 -> 99214)
-                        // Only keep the highest upgrade
-                        if (!hasEMUpgrade || e.delta_wRVU > emUpgradeDelta) {
-                            emUpgradeCode = {
-                                code: enhCode,
-                                description: `E/M upgrade (from ${currentCode})`,
-                                wRVU: e.delta_wRVU || 0
-                            };
-                            emUpgradeDelta = e.delta_wRVU || 0;
-                            hasEMUpgrade = true;
-                        }
-                    }
-                    // If it's the same E/M code with "better documentation", skip it
-                    // (you can't bill the same code twice for "better" docs)
-                    return;
-                } else if (/^G\d{4}$/.test(enhCode)) {
-                    // Add-on code (like G2211)
-                    if (!enhancedCodes.find(c => c.code === enhCode)) {
-                        enhancedCodes.push({
-                            code: enhCode,
-                            description: e.issue,
-                            wRVU: e.delta_wRVU || 0
-                        });
-                        totalDelta += e.delta_wRVU || 0;
-                    }
-                } else {
-                    // Other procedure codes
-                    if (!enhancedCodes.find(c => c.code === enhCode)) {
-                        enhancedCodes.push({
-                            code: enhCode,
-                            description: e.issue,
-                            wRVU: e.delta_wRVU || e.enhanced_wRVU || 0
-                        });
-                        totalDelta += e.delta_wRVU || e.enhanced_wRVU || 0;
-                    }
+                if (enhCode) {
+                    const wRVU = MUE_DATA[enhCode]?.wRVU || e.enhanced_wRVU || 0;
+                    enhancementCodes.push({
+                        code: enhCode,
+                        description: e.issue || `Enhanced code`,
+                        wRVU: wRVU
+                    });
                 }
             });
 
-            // Add the E/M upgrade if we have one (only one allowed)
-            if (hasEMUpgrade && emUpgradeCode) {
-                enhancedCodes.unshift(emUpgradeCode); // Add at beginning
-                totalDelta += emUpgradeDelta;
-            }
+            // Build COMPLETE billing codes using the merge function
+            // This handles mutually exclusive families and code upgrades
+            const completeCodes = buildCompleteBillingCodes(baselineCodes, enhancementCodes);
+
+            // Calculate total wRVU and delta
+            const totalWRVU = completeCodes.reduce((sum, c) => sum + (c.wRVU || 0), 0);
+            const deltaWRVU = totalWRVU - baselineWRVU;
 
             // Update the summary display
             const deltaDisplay = document.getElementById('enh-delta-display');
             const totalDisplay = document.getElementById('enh-total-display');
-            if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
-            if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
+            if (deltaDisplay) deltaDisplay.textContent = '+' + deltaWRVU.toFixed(2);
+            if (totalDisplay) totalDisplay.textContent = totalWRVU.toFixed(2);
 
-            // Apply modifiers to enhanced codes
-            const codesWithModifiers = applyModifiers(enhancedCodes);
+            // Apply modifiers to complete codes
+            const codesWithModifiers = applyModifiers(completeCodes);
 
-            // Update the billing table - ONLY show enhanced codes
+            // Update the billing table - show COMPLETE billing codes
             const tbody = document.getElementById('enh-billing-tbody');
             if (tbody) {
                 if (codesWithModifiers.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No enhancements selected</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
                     tbody.innerHTML = codesWithModifiers.map(c => {
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
+                        const rowClass = c.fromBaseline ? '' : 'style="background: #e8f5e9;"';
+                        const upgradeIcon = c.upgraded ? '↑ ' : '';
                         return `
-                            <tr class="opportunity-row">
-                                <td><strong>${c.code}</strong></td>
+                            <tr ${rowClass}>
+                                <td><strong>${upgradeIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
                                 <td>${c.description}</td>
-                                <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
+                                <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
                     }).join('') + `
                         <tr class="total-row">
-                            <td colspan="3"><strong>ADDITIONAL wRVU</strong></td>
-                            <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
+                            <td colspan="3"><strong>TOTAL wRVU</strong></td>
+                            <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
                         </tr>
                     `;
                 }
@@ -1430,8 +1511,8 @@ Plan:
             const currentBilling = currentAnalysisData.current_billing;
             const opportunities = currentAnalysisData.future_opportunities.opportunities;
             const enhancements = currentAnalysisData.documentation_enhancements?.enhancements || [];
-            const baselineWRVU = currentBilling.total_wRVU;
             const baselineCodes = currentBilling.codes || [];
+            const baselineWRVU = currentBilling.total_wRVU;
 
             // Helper to extract clean CPT code
             function cleanCode(code) {
@@ -1440,50 +1521,8 @@ Plan:
                 return match ? match[1] : code.trim();
             }
 
-            // Helper to find related baseline code that would be replaced
-            // e.g., 10061 replaces 10060, 99214 replaces 99213
-            function findReplacedBaselineCode(newCode) {
-                if (!newCode) return null;
-
-                // Define upgrade families - codes in same family are mutually exclusive
-                const upgradeFamilies = {
-                    // I&D family
-                    '10060': '10060', '10061': '10060',
-                    // E/M established patient
-                    '99211': '99211', '99212': '99211', '99213': '99211', '99214': '99211', '99215': '99211',
-                    // E/M new patient
-                    '99201': '99201', '99202': '99201', '99203': '99201', '99204': '99201', '99205': '99201',
-                    // Biopsy tangential
-                    '11102': '11102', '11103': '11102',
-                    // Biopsy punch
-                    '11104': '11104', '11105': '11104',
-                    // Biopsy incisional
-                    '11106': '11106', '11107': '11106',
-                };
-
-                const family = upgradeFamilies[newCode];
-                if (!family) return null;
-
-                // Find baseline code in same family
-                for (const bc of baselineCodes) {
-                    if (upgradeFamilies[bc.code] === family && bc.code !== newCode) {
-                        return bc;
-                    }
-                }
-                return null;
-            }
-
-            // Track aggregated counts by code family
-            let familyCounts = {};
-            // Track non-family codes separately
-            let opportunityCodes = [];
-            let totalDelta = 0;
-
-            // FIRST: Include selected enhancements from Step 3
-            // Section 4 should be the "maximum" version including all enhancements
-            let hasEMUpgrade = false;
-            let emUpgradeCode = null;
-            let emUpgradeDelta = 0;
+            // Collect enhancement codes first
+            let additionalCodes = [];
 
             enhancements.forEach((e, idx) => {
                 const checkbox = document.querySelector(`.enhancement-checkbox[data-index="${idx}"]`);
@@ -1492,93 +1531,49 @@ Plan:
                 const rawEnhCode = e.enhanced_code;
                 if (!rawEnhCode) return;
 
-                const enhCode = cleanCode(rawEnhCode);
-                const currentCode = cleanCode(e.current_code);
-
-                // Check if enhanced_code is a composite like "99213 + G2211"
+                // Check for composite code like "99213 + G2211"
                 const compositeMatch = rawEnhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
                 if (compositeMatch) {
-                    const addOnCode = compositeMatch[1];
-                    const addOnWRVU = e.delta_wRVU || 0.33;
-                    if (!opportunityCodes.find(c => c.code === addOnCode)) {
-                        opportunityCodes.push({
-                            code: addOnCode,
-                            description: 'Chronic care management add-on',
-                            wRVU: addOnWRVU,
-                            fromEnhancement: true
-                        });
-                        totalDelta += addOnWRVU;
-                    }
+                    additionalCodes.push({
+                        code: compositeMatch[1],
+                        description: 'Chronic care management add-on',
+                        wRVU: MUE_DATA[compositeMatch[1]]?.wRVU || 0.33
+                    });
                     return;
                 }
 
-                // Check if this is an E/M code
-                const isEMCode = /^99\d{3}$/.test(enhCode);
-                const isCurrentEM = currentCode && /^99\d{3}$/.test(currentCode);
-
-                if (isEMCode) {
-                    if (isCurrentEM && enhCode !== currentCode) {
-                        // E/M upgrade - track highest
-                        if (!hasEMUpgrade || e.delta_wRVU > emUpgradeDelta) {
-                            emUpgradeCode = {
-                                code: enhCode,
-                                description: `E/M upgrade (from ${currentCode})`,
-                                wRVU: e.delta_wRVU || 0,
-                                fromEnhancement: true
-                            };
-                            emUpgradeDelta = e.delta_wRVU || 0;
-                            hasEMUpgrade = true;
-                        }
-                    }
-                    return;
-                } else if (/^G\d{4}$/.test(enhCode)) {
-                    // Add-on code (like G2211)
-                    if (!opportunityCodes.find(c => c.code === enhCode)) {
-                        opportunityCodes.push({
-                            code: enhCode,
-                            description: e.issue,
-                            wRVU: e.delta_wRVU || 0,
-                            fromEnhancement: true
-                        });
-                        totalDelta += e.delta_wRVU || 0;
-                    }
-                } else {
-                    // Other procedure codes from enhancements
-                    if (!opportunityCodes.find(c => c.code === enhCode)) {
-                        opportunityCodes.push({
-                            code: enhCode,
-                            description: e.issue,
-                            wRVU: e.delta_wRVU || e.enhanced_wRVU || 0,
-                            fromEnhancement: true
-                        });
-                        totalDelta += e.delta_wRVU || e.enhanced_wRVU || 0;
-                    }
+                const enhCode = cleanCode(rawEnhCode);
+                if (enhCode) {
+                    additionalCodes.push({
+                        code: enhCode,
+                        description: e.issue || 'Enhanced code',
+                        wRVU: MUE_DATA[enhCode]?.wRVU || e.enhanced_wRVU || 0
+                    });
                 }
             });
 
-            // SECOND: Go through each opportunity
+            // Track family counts for count-based codes
+            let familyCounts = {};
+
+            // Process opportunities
             opportunities.forEach((o, idx) => {
                 const checkbox = document.querySelector(`.opportunity-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
-                // Check if this opportunity belongs to a count-based family
+                // Handle count-based families
                 const familyId = checkbox.dataset.family;
                 if (familyId && CODE_FAMILIES[familyId]) {
-                    // Get count from input field
                     const countInput = document.querySelector(`.count-input[data-opp-index="${idx}"]`);
                     if (countInput) {
                         const count = parseInt(countInput.value) || 0;
-                        if (!familyCounts[familyId]) {
-                            familyCounts[familyId] = 0;
-                        }
+                        if (!familyCounts[familyId]) familyCounts[familyId] = 0;
                         familyCounts[familyId] += count;
                     }
-                    return; // Don't process as regular code
+                    return;
                 }
 
                 let code, wRVU, desc;
 
-                // Check if this opportunity has tiered options (non-count-based)
                 if (o.code_options && o.code_options.length > 0) {
                     const selectedRadio = document.querySelector(`input[name="tier-${idx}"]:checked`);
                     if (selectedRadio) {
@@ -1590,116 +1585,80 @@ Plan:
                     }
                 } else if (o.potential_code) {
                     code = o.potential_code.code;
-                    wRVU = o.potential_code.wRVU || 0;
+                    wRVU = MUE_DATA[code]?.wRVU || o.potential_code.wRVU || 0;
                     desc = o.potential_code.description;
                 } else {
                     return;
                 }
 
-                // Check if this is an E/M code from opportunity
-                const isEMCode = /^99\d{3}$/.test(code);
-                if (isEMCode) {
-                    // E/M from opportunity - check if it's better than enhancement E/M
-                    const replacedCode = findReplacedBaselineCode(code);
-                    const deltaWRVU = replacedCode ? wRVU - (replacedCode.wRVU || 0) : wRVU;
-
-                    if (!hasEMUpgrade || deltaWRVU > emUpgradeDelta) {
-                        emUpgradeCode = {
-                            code: code,
-                            description: replacedCode
-                                ? `Upgrade from ${replacedCode.code}: ${desc}`
-                                : desc,
-                            wRVU: deltaWRVU,
-                            fromOpportunity: true
-                        };
-                        emUpgradeDelta = deltaWRVU;
-                        hasEMUpgrade = true;
-                    }
-                    return; // Don't add directly, will be added at end
-                }
-
-                // Check if this code would replace a baseline code
-                const replacedCode = findReplacedBaselineCode(code);
-                let deltaWRVU = wRVU;
-                let displayDesc = desc;
-
-                if (replacedCode) {
-                    // This is an upgrade - calculate delta
-                    deltaWRVU = wRVU - (replacedCode.wRVU || 0);
-                    displayDesc = `Upgrade from ${replacedCode.code}: ${desc}`;
-                }
-
-                // Deduplicate by code
-                if (!opportunityCodes.find(c => c.code === code)) {
-                    opportunityCodes.push({
+                if (code) {
+                    additionalCodes.push({
                         code: code,
-                        description: displayDesc,
-                        wRVU: deltaWRVU,
-                        fullWRVU: wRVU,
-                        isUpgrade: !!replacedCode
+                        description: desc,
+                        wRVU: wRVU,
+                        fromOpportunity: true
                     });
-                    totalDelta += deltaWRVU;
                 }
             });
 
-            // Add the E/M upgrade if we have one (only one allowed - highest from either section)
-            if (hasEMUpgrade && emUpgradeCode) {
-                opportunityCodes.unshift(emUpgradeCode);
-                totalDelta += emUpgradeDelta;
-            }
-
-            // Now process aggregated family counts and add to opportunityCodes
+            // Process family counts and add the appropriate tier code
             for (const [familyId, totalCount] of Object.entries(familyCounts)) {
                 if (totalCount > 0) {
                     const result = calculateFamilyWRVU(familyId, totalCount);
                     if (result.code) {
                         const family = CODE_FAMILIES[familyId];
-                        opportunityCodes.push({
+                        additionalCodes.push({
                             code: result.code,
                             description: `${family.name} (${totalCount} total)`,
                             wRVU: result.wRVU,
-                            isAggregated: true,
-                            familyId: familyId,
-                            count: totalCount
+                            isAggregated: true
                         });
-                        totalDelta += result.wRVU;
                     }
                 }
             }
 
+            // Build COMPLETE billing codes using the merge function
+            // This handles mutually exclusive families and prevents duplicates
+            const completeCodes = buildCompleteBillingCodes(baselineCodes, additionalCodes);
+
+            // Calculate total wRVU and delta
+            const totalWRVU = completeCodes.reduce((sum, c) => sum + (c.wRVU || 0), 0);
+            const deltaWRVU = totalWRVU - baselineWRVU;
+
             // Update the summary display
             const deltaDisplay = document.getElementById('opp-delta-display');
             const totalDisplay = document.getElementById('opp-total-display');
-            if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
-            if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
+            if (deltaDisplay) deltaDisplay.textContent = '+' + deltaWRVU.toFixed(2);
+            if (totalDisplay) totalDisplay.textContent = totalWRVU.toFixed(2);
 
-            // Apply modifiers to opportunity codes
-            const codesWithModifiers = applyModifiers(opportunityCodes);
+            // Apply modifiers to complete codes
+            const codesWithModifiers = applyModifiers(completeCodes);
 
-            // Update the billing table - ONLY show opportunity codes
+            // Update the billing table - show COMPLETE billing codes
             const tbody = document.getElementById('opp-billing-tbody');
             if (tbody) {
                 if (codesWithModifiers.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No opportunities selected</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
                     tbody.innerHTML = codesWithModifiers.map(c => {
-                        const aggregatedClass = c.isAggregated ? 'style="background: #e8f5e9 !important;"' : '';
-                        const aggregatedIcon = c.isAggregated ? '<span title="Aggregated from multiple opportunities">⊕</span> ' : '';
+                        const rowClass = c.fromBaseline ? '' : 'style="background: #e8f5e9;"';
+                        const upgradeIcon = c.upgraded ? '↑ ' : '';
+                        const aggregatedIcon = c.isAggregated ? '⊕ ' : '';
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
                         return `
-                            <tr class="opportunity-row" ${aggregatedClass}>
-                                <td><strong>${aggregatedIcon}${c.code}</strong></td>
+                            <tr ${rowClass}>
+                                <td><strong>${upgradeIcon}${aggregatedIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
                                 <td>${c.description}</td>
-                                <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
+                                <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
                     }).join('') + `
                         <tr class="total-row">
-                            <td colspan="3"><strong>ADDITIONAL wRVU</strong></td>
-                            <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
+                            <td colspan="3"><strong>TOTAL wRVU</strong></td>
+                            <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
                         </tr>
                     `;
                 }
