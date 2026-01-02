@@ -636,14 +636,38 @@ BILLING CODES (use potential_code):
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 7: E/M LEVEL OPTIMIZATION
 ═══════════════════════════════════════════════════════════════════════════════
-CLINICAL TRIGGERS for higher E/M:
-• Multiple conditions requiring management decisions
-• Prescription drug management with monitoring
-• Shared decision-making (biologics, systemic agents)
-• Time spent counseling (if >50% of visit)
+CRITICAL: DO NOT use code_options for E/M. Determine the SINGLE MAXIMUM REASONABLE
+achievable code and use potential_code. Then specify EXACTLY what to document.
 
-UPGRADE PATH: 99213 (1.30) → 99214 (1.92) → 99215 (2.80)
-ADD-ON: G2211 (+0.33 wRVU) for ongoing care of chronic conditions
+E/M LEVELS (Established):
+• 99213 (1.30 wRVU): Straightforward MDM - single self-limited condition
+• 99214 (1.92 wRVU): Moderate MDM - multiple conditions, Rx management, or chronic illness
+• 99215 (2.80 wRVU): High MDM - severe/life-threatening, multiple Rx, or extensive counseling
+
+WHAT SUPPORTS EACH LEVEL:
+99214 requires ONE of:
+- 2+ chronic conditions requiring management decisions
+- Prescription drug requiring monitoring (labs, side effects)
+- Condition with mild exacerbation or uncertain diagnosis
+
+99215 requires ONE of:
+- Condition with severe exacerbation or significant risk
+- Drug requiring intensive monitoring (biologics, immunosuppressants)
+- Decision about hospitalization or referral for emergency
+
+USE CLINICAL JUDGMENT:
+- Simple acne follow-up → 99213 max (99214 only if multiple conditions or Rx issues)
+- Psoriasis on biologic → 99214-99215 (complex management, drug monitoring)
+- Eczema with infection → 99214 (acute on chronic)
+- Melanoma follow-up with new suspicious lesions → 99215 (high risk)
+
+ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+
+OUTPUT FORMAT for E/M:
+{{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
+  "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
+  "potential_code": {{"code": "99214-25", "description": "Moderate MDM with procedure", "wRVU": 1.92}},
+  "teaching_point": "[Why this level is appropriate and defensible]"}}
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 8: COMORBIDITY CAPTURE
@@ -694,6 +718,19 @@ CRITICAL RULES:
 3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
+
+E/M CRITICAL: For E/M levels, use clinical judgment to determine the MAXIMUM REASONABLE
+achievable code - the one that would actually be paid by insurance. DO NOT offer a range
+of E/M options. Pick ONE specific level and tell the provider exactly what to document.
+
+USE potential_code (single code) for:
+- E/M levels (determine best achievable)
+- Count-based procedures (injections, AKs, nails, biopsies)
+- Single clear recommendations
+
+USE code_options (2-3 choices) ONLY for:
+- Truly mutually exclusive tiers (genital destruction: simple vs extensive)
+- Non-count-based procedure choices
 
 OUTPUT: Valid JSON only. No markdown, no explanation outside JSON."""
 
@@ -874,14 +911,38 @@ BILLING CODES (use potential_code):
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 7: E/M LEVEL OPTIMIZATION
 ═══════════════════════════════════════════════════════════════════════════════
-CLINICAL TRIGGERS for higher E/M:
-• Multiple conditions requiring management decisions
-• Prescription drug management with monitoring
-• Shared decision-making (biologics, systemic agents)
-• Time spent counseling (if >50% of visit)
+CRITICAL: DO NOT use code_options for E/M. Determine the SINGLE MAXIMUM REASONABLE
+achievable code and use potential_code. Then specify EXACTLY what to document.
 
-UPGRADE PATH: 99213 (1.30) → 99214 (1.92) → 99215 (2.80)
-ADD-ON: G2211 (+0.33 wRVU) for ongoing care of chronic conditions
+E/M LEVELS (Established):
+• 99213 (1.30 wRVU): Straightforward MDM - single self-limited condition
+• 99214 (1.92 wRVU): Moderate MDM - multiple conditions, Rx management, or chronic illness
+• 99215 (2.80 wRVU): High MDM - severe/life-threatening, multiple Rx, or extensive counseling
+
+WHAT SUPPORTS EACH LEVEL:
+99214 requires ONE of:
+- 2+ chronic conditions requiring management decisions
+- Prescription drug requiring monitoring (labs, side effects)
+- Condition with mild exacerbation or uncertain diagnosis
+
+99215 requires ONE of:
+- Condition with severe exacerbation or significant risk
+- Drug requiring intensive monitoring (biologics, immunosuppressants)
+- Decision about hospitalization or referral for emergency
+
+USE CLINICAL JUDGMENT:
+- Simple acne follow-up → 99213 max (99214 only if multiple conditions or Rx issues)
+- Psoriasis on biologic → 99214-99215 (complex management, drug monitoring)
+- Eczema with infection → 99214 (acute on chronic)
+- Melanoma follow-up with new suspicious lesions → 99215 (high risk)
+
+ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+
+OUTPUT FORMAT for E/M:
+{{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
+  "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
+  "potential_code": {{"code": "99214-25", "description": "Moderate MDM with procedure", "wRVU": 1.92}},
+  "teaching_point": "[Why this level is appropriate and defensible]"}}
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 8: COMORBIDITY CAPTURE
@@ -932,6 +993,19 @@ CRITICAL RULES:
 3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
+
+E/M CRITICAL: For E/M levels, use clinical judgment to determine the MAXIMUM REASONABLE
+achievable code - the one that would actually be paid by insurance. DO NOT offer a range
+of E/M options. Pick ONE specific level and tell the provider exactly what to document.
+
+USE potential_code (single code) for:
+- E/M levels (determine best achievable)
+- Count-based procedures (injections, AKs, nails, biopsies)
+- Single clear recommendations
+
+USE code_options (2-3 choices) ONLY for:
+- Truly mutually exclusive tiers (genital destruction: simple vs extensive)
+- Non-count-based procedure choices
 
 OUTPUT: Valid JSON only. No markdown, no explanation outside JSON."""
 
