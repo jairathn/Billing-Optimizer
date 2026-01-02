@@ -534,11 +534,36 @@ REFERENCE:
 OPPORTUNITY TYPES:
 1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
 2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
-3. TIERED PROCEDURES - return code_options array with BOTH tiers:
-   - Nail debridement: 11720 (1-5 nails) OR 11721 (6+ nails)
-   - IL injections: 11900 (1-7 lesions) OR 11901 (8+ lesions)
-   - AK destruction: 17000 (1-14) OR 17004 (15+)
-   - Wart destruction: 17110 (1-14) OR 17111 (15+)
+3. TIERED PROCEDURES - return code_options array with ALL applicable tiers:
+
+   DESTRUCTION:
+   - Nail debridement: 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
+   - IL injections: 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
+   - AK destruction: 17000 (first, 0.61) + 17003 (2-14 ea, 0.04) OR 17004 (15+, 2.19)
+   - Benign lesion destruction: 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
+   - Genital lesions male: 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
+   - Genital lesions female: 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+
+   SHAVE REMOVAL (trunk/extremities):
+   - 11300 (≤0.5cm, 0.56) OR 11301 (0.6-1.0cm, 0.70) OR 11302 (1.1-2.0cm, 0.93) OR 11303 (>2.0cm, 1.26)
+   SHAVE REMOVAL (face/ears/eyelids/nose/lips):
+   - 11305 (≤0.5cm, 0.60) OR 11306 (0.6-1.0cm, 0.80) OR 11307 (1.1-2.0cm, 1.05) OR 11308 (>2.0cm, 1.35)
+
+   EXCISION BENIGN (trunk/extremities):
+   - 11400 (≤0.5cm, 0.90) → 11401 (0.6-1.0cm, 1.22) → 11402 (1.1-2.0cm, 1.58) → 11403 (2.1-3.0cm, 1.89) → 11404 (3.1-4.0cm, 2.47) → 11406 (>4.0cm, 3.05)
+   EXCISION BENIGN (face/scalp/neck):
+   - 11420-11426 same size tiers, higher wRVU
+
+   BIOPSY (by method and count):
+   - Tangential: 11102 (first, 0.56) + 11103 (each add'l, 0.23)
+   - Punch: 11104 (first, 0.69) + 11105 (each add'l, 0.33)
+   - Incisional: 11106 (first, 1.01) + 11107 (each add'l, 0.56)
+
+   REPAIR (by length):
+   - Simple trunk: 12001 (≤2.5cm, 0.78) → 12002 (2.6-7.5cm, 1.14) → 12004 (7.6-12.5cm, 1.47) → 12005 (12.6-20cm, 2.00) → 12006 (20.1-30cm, 2.54)
+   - Intermediate face: 12051 (≤2.5cm, 1.78) → 12052 (2.6-5.0cm, 2.11) → 12053 (5.1-7.5cm, 2.60)
+   - Complex: 13100+ series
+
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
 JSON format - use code_options for tiered procedures, potential_code for non-tiered:
@@ -554,9 +579,10 @@ JSON format - use code_options for tiered procedures, potential_code for non-tie
 
         system = """Dermatology billing educator. Identify intra-encounter opportunities.
 
-For TIERED PROCEDURES (nail debridement, IL injections, AK/wart destruction):
-- Return code_options array with BOTH tier options
-- Each option has: code, description, wRVU, threshold
+For TIERED PROCEDURES (destruction, shave, excision, biopsy, repair):
+- Return code_options array with ALL relevant tier options
+- Each option: code, description, wRVU, threshold
+- Include size-based tiers when applicable
 For NON-TIERED opportunities: use potential_code
 Respond with valid JSON only."""
 
@@ -635,11 +661,36 @@ REFERENCE:
 OPPORTUNITY TYPES:
 1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
 2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
-3. TIERED PROCEDURES - return code_options array with BOTH tiers:
-   - Nail debridement: 11720 (1-5 nails) OR 11721 (6+ nails)
-   - IL injections: 11900 (1-7 lesions) OR 11901 (8+ lesions)
-   - AK destruction: 17000 (1-14) OR 17004 (15+)
-   - Wart destruction: 17110 (1-14) OR 17111 (15+)
+3. TIERED PROCEDURES - return code_options array with ALL applicable tiers:
+
+   DESTRUCTION:
+   - Nail debridement: 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
+   - IL injections: 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
+   - AK destruction: 17000 (first, 0.61) + 17003 (2-14 ea, 0.04) OR 17004 (15+, 2.19)
+   - Benign lesion destruction: 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
+   - Genital lesions male: 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
+   - Genital lesions female: 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+
+   SHAVE REMOVAL (trunk/extremities):
+   - 11300 (≤0.5cm, 0.56) OR 11301 (0.6-1.0cm, 0.70) OR 11302 (1.1-2.0cm, 0.93) OR 11303 (>2.0cm, 1.26)
+   SHAVE REMOVAL (face/ears/eyelids/nose/lips):
+   - 11305 (≤0.5cm, 0.60) OR 11306 (0.6-1.0cm, 0.80) OR 11307 (1.1-2.0cm, 1.05) OR 11308 (>2.0cm, 1.35)
+
+   EXCISION BENIGN (trunk/extremities):
+   - 11400 (≤0.5cm, 0.90) → 11401 (0.6-1.0cm, 1.22) → 11402 (1.1-2.0cm, 1.58) → 11403 (2.1-3.0cm, 1.89) → 11404 (3.1-4.0cm, 2.47) → 11406 (>4.0cm, 3.05)
+   EXCISION BENIGN (face/scalp/neck):
+   - 11420-11426 same size tiers, higher wRVU
+
+   BIOPSY (by method and count):
+   - Tangential: 11102 (first, 0.56) + 11103 (each add'l, 0.23)
+   - Punch: 11104 (first, 0.69) + 11105 (each add'l, 0.33)
+   - Incisional: 11106 (first, 1.01) + 11107 (each add'l, 0.56)
+
+   REPAIR (by length):
+   - Simple trunk: 12001 (≤2.5cm, 0.78) → 12002 (2.6-7.5cm, 1.14) → 12004 (7.6-12.5cm, 1.47) → 12005 (12.6-20cm, 2.00) → 12006 (20.1-30cm, 2.54)
+   - Intermediate face: 12051 (≤2.5cm, 1.78) → 12052 (2.6-5.0cm, 2.11) → 12053 (5.1-7.5cm, 2.60)
+   - Complex: 13100+ series
+
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
 JSON format - use code_options for tiered procedures, potential_code for non-tiered:
@@ -655,9 +706,10 @@ JSON format - use code_options for tiered procedures, potential_code for non-tie
 
         system = """Dermatology billing educator. Identify intra-encounter opportunities.
 
-For TIERED PROCEDURES (nail debridement, IL injections, AK/wart destruction):
-- Return code_options array with BOTH tier options
-- Each option has: code, description, wRVU, threshold
+For TIERED PROCEDURES (destruction, shave, excision, biopsy, repair):
+- Return code_options array with ALL relevant tier options
+- Each option: code, description, wRVU, threshold
+- Include size-based tiers when applicable
 For NON-TIERED opportunities: use potential_code
 Respond with valid JSON only."""
 
