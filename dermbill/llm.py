@@ -350,11 +350,20 @@ For COUNT_CLARIFICATION cards, use this format in enhancements:
   "count_family": "nail_debridement", "default_count": 1}}
 
 VALID Step 3 Enhancements (things that WERE done):
-- G2211 add-on: Chronic condition relationship EXISTS → document it
+- G2211 add-on: Chronic condition relationship EXISTS → document it (+0.33 wRVU)
+- G2212 add-on: Prolonged visit (>40min established, >60min new) → document time (+0.61 wRVU)
 - E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 - COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
+
+ADD-ON CODES (bill WITH primary codes when applicable):
+• Biopsies: 11103/11105/11107 for each additional lesion biopsied
+• Skin tags: 11201 (+0.28 wRVU) for each additional 10 tags removed beyond first 15
+• Nail avulsion: 11732 (+0.37 wRVU) for each additional nail beyond first
+• Complex repairs: 13102/13122/13133/13153 for each additional 5cm repaired
+• Tissue transfer: 14302 (+3.64 wRVU) for each additional 30 sq cm
+• Full-thickness graft: 15261 (+2.17 wRVU) for each additional graft area
 
 MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
 These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
@@ -371,12 +380,32 @@ INVALID for Step 3 (move to Step 4):
 - Treating MORE lesions/nails than were actually treated (that's Step 4)
 
 JSON format:
-{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
-"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal"}}],
+{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported|count_unspecified"}}], "total_wRVU": 0, "documentation_gaps": []}},
+"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal|count_clarification", "count_family": "optional", "default_count": 1}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
 
-For MEDICOLEGAL enhancements, use: enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
-Example: {{"issue": "Missing safety documentation", "current_code": null, "current_wRVU": 0, "suggested_addition": "Add: Patient counseled on sun protection and self-skin exams. Return if new or changing lesions.", "enhanced_code": "LEGAL", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
+ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
+
+1. COUNT_CLARIFICATION (count-based procedure done but count not specified):
+   {{"issue": "Nail debridement count unspecified", "current_code": "11720", "current_wRVU": 0.31,
+     "suggested_addition": "Enter actual count performed", "enhanced_code": "COUNT_CLARIFY",
+     "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "count_clarification",
+     "count_family": "nail_debridement", "default_count": 1}}
+
+   COUNT FAMILIES: nail_debridement, il_injection, ak_destruction, benign_destruction
+
+2. MEDICOLEGAL (safety documentation, no wRVU):
+   {{"issue": "Missing safety documentation", "current_code": null, "current_wRVU": 0,
+     "suggested_addition": "Add: Patient counseled on...", "enhanced_code": "LEGAL",
+     "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
+
+3. BILLING ENHANCEMENT (code upgrade, unbundling, G2211):
+   {{"issue": "G2211 chronic care add-on", "current_code": "99214", "current_wRVU": 1.92,
+     "suggested_addition": "Add: Ongoing management of chronic condition...",
+     "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
+
+CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
+with count_family and default_count. Do NOT suggest a specific count - let the user input it.
 
 OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
@@ -385,18 +414,19 @@ OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 
         system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
-CRITICAL: Only include enhancements for services that WERE PERFORMED.
-- If procedure wasn't done → Step 4, not here
-- If exam wasn't performed → Step 4, not here
-- G2211, E/M upgrades, unbundling for work done → YES
-- Medicolegal documentation gaps → YES (as priority: "medicolegal" cards)
+CRITICAL RULES:
+1. Only include enhancements for services that WERE PERFORMED
+2. COUNT-BASED PROCEDURES (nail debridement, injections, AK/benign destruction):
+   - If count is NOT specified in note → create COUNT_CLARIFICATION card (priority: "count_clarification")
+   - NEVER assume count from exam findings (observed ≠ treated)
+   - NEVER suggest a specific count - use count_family and default_count: 1
+3. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
+4. G2211, E/M upgrades, unbundling → priority: "high"
 
 DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
-- Over-documentation creates malpractice liability - every detail can be cross-examined
-- BUT: Always document safety-critical items as SEPARATE MEDICOLEGAL ENHANCEMENT CARDS
-- These cards have enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
-- Never include Time, Coding, or billing code sections in optimized notes
+- Over-documentation creates malpractice liability
+- Safety-critical items → MEDICOLEGAL ENHANCEMENT CARDS
 
 Respond with valid JSON only."""
 
@@ -512,11 +542,20 @@ For COUNT_CLARIFICATION cards, use this format in enhancements:
   "count_family": "nail_debridement", "default_count": 1}}
 
 VALID Step 3 Enhancements (things that WERE done):
-- G2211 add-on: Chronic condition relationship EXISTS → document it
+- G2211 add-on: Chronic condition relationship EXISTS → document it (+0.33 wRVU)
+- G2212 add-on: Prolonged visit (>40min established, >60min new) → document time (+0.61 wRVU)
 - E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 - COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
+
+ADD-ON CODES (bill WITH primary codes when applicable):
+• Biopsies: 11103/11105/11107 for each additional lesion biopsied
+• Skin tags: 11201 (+0.28 wRVU) for each additional 10 tags removed beyond first 15
+• Nail avulsion: 11732 (+0.37 wRVU) for each additional nail beyond first
+• Complex repairs: 13102/13122/13133/13153 for each additional 5cm repaired
+• Tissue transfer: 14302 (+3.64 wRVU) for each additional 30 sq cm
+• Full-thickness graft: 15261 (+2.17 wRVU) for each additional graft area
 
 MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
 These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
@@ -533,12 +572,32 @@ INVALID for Step 3 (move to Step 4):
 - Treating MORE lesions/nails than were actually treated (that's Step 4)
 
 JSON format:
-{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
-"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal"}}],
+{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported|count_unspecified"}}], "total_wRVU": 0, "documentation_gaps": []}},
+"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal|count_clarification", "count_family": "optional", "default_count": 1}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
 
-For MEDICOLEGAL enhancements, use: enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
-Example: {{"issue": "Missing safety documentation", "current_code": null, "current_wRVU": 0, "suggested_addition": "Add: Patient counseled on sun protection and self-skin exams. Return if new or changing lesions.", "enhanced_code": "LEGAL", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
+ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
+
+1. COUNT_CLARIFICATION (count-based procedure done but count not specified):
+   {{"issue": "Nail debridement count unspecified", "current_code": "11720", "current_wRVU": 0.31,
+     "suggested_addition": "Enter actual count performed", "enhanced_code": "COUNT_CLARIFY",
+     "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "count_clarification",
+     "count_family": "nail_debridement", "default_count": 1}}
+
+   COUNT FAMILIES: nail_debridement, il_injection, ak_destruction, benign_destruction
+
+2. MEDICOLEGAL (safety documentation, no wRVU):
+   {{"issue": "Missing safety documentation", "current_code": null, "current_wRVU": 0,
+     "suggested_addition": "Add: Patient counseled on...", "enhanced_code": "LEGAL",
+     "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
+
+3. BILLING ENHANCEMENT (code upgrade, unbundling, G2211):
+   {{"issue": "G2211 chronic care add-on", "current_code": "99214", "current_wRVU": 1.92,
+     "suggested_addition": "Add: Ongoing management of chronic condition...",
+     "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
+
+CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
+with count_family and default_count. Do NOT suggest a specific count - let the user input it.
 
 OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
@@ -547,18 +606,19 @@ OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 
         system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
-CRITICAL: Only include enhancements for services that WERE PERFORMED.
-- If procedure wasn't done → Step 4, not here
-- If exam wasn't performed → Step 4, not here
-- G2211, E/M upgrades, unbundling for work done → YES
-- Medicolegal documentation gaps → YES (as priority: "medicolegal" cards)
+CRITICAL RULES:
+1. Only include enhancements for services that WERE PERFORMED
+2. COUNT-BASED PROCEDURES (nail debridement, injections, AK/benign destruction):
+   - If count is NOT specified in note → create COUNT_CLARIFICATION card (priority: "count_clarification")
+   - NEVER assume count from exam findings (observed ≠ treated)
+   - NEVER suggest a specific count - use count_family and default_count: 1
+3. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
+4. G2211, E/M upgrades, unbundling → priority: "high"
 
 DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
-- Over-documentation creates malpractice liability - every detail can be cross-examined
-- BUT: Always document safety-critical items as SEPARATE MEDICOLEGAL ENHANCEMENT CARDS
-- These cards have enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
-- Never include Time, Coding, or billing code sections in optimized notes
+- Over-documentation creates malpractice liability
+- Safety-critical items → MEDICOLEGAL ENHANCEMENT CARDS
 
 Respond with valid JSON only."""
 
@@ -785,7 +845,9 @@ USE CLINICAL JUDGMENT - PICK ONE CODE, NEVER A RANGE:
 
 NEVER output "99214-99215" or any range. Pick the SINGLE highest defensible code.
 
-ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+ADD-ONS:
+• G2211 (+0.33 wRVU): Established ongoing care relationship (chronic condition management)
+• G2212 (+0.61 wRVU): Prolonged visit - document total face-to-face time >40min est/60min new
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
@@ -1123,7 +1185,9 @@ USE CLINICAL JUDGMENT - PICK ONE CODE, NEVER A RANGE:
 
 NEVER output "99214-99215" or any range. Pick the SINGLE highest defensible code.
 
-ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+ADD-ONS:
+• G2211 (+0.33 wRVU): Established ongoing care relationship (chronic condition management)
+• G2212 (+0.61 wRVU): Prolonged visit - document total face-to-face time >40min est/60min new
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",

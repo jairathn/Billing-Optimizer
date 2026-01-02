@@ -768,21 +768,136 @@ Plan:
             '10060': { mue: 1, wRVU: 1.19, family: 'id_abscess' },
             '10061': { mue: 1, wRVU: 2.39, family: 'id_abscess' },
             '10040': { mue: 1, wRVU: 0.89 },
-            '17360': { mue: 1, wRVU: 0.75 },
-            '17000': { mue: 1, wRVU: 0.61, family: 'ak_destruction' },
-            '17003': { mue: 13, wRVU: 0.09, addOn: true },
-            '17004': { mue: 1, wRVU: 2.59, family: 'ak_destruction' },
+            '17360': { mue: 1, wRVU: 1.42 },  // Chemical exfoliation
+            '17000': { mue: 1, wRVU: 0.59, family: 'ak_destruction' },
+            '17003': { mue: 13, wRVU: 0.04, addOn: true },
+            '17004': { mue: 1, wRVU: 1.34, family: 'ak_destruction' },
             '17110': { mue: 1, wRVU: 0.68, family: 'benign_destruction' },
             '17111': { mue: 1, wRVU: 0.95, family: 'benign_destruction' },
             '11102': { mue: 1, wRVU: 0.64 },
             '11103': { mue: 14, wRVU: 0.37, addOn: true },
             '11104': { mue: 1, wRVU: 0.81 },
             '11105': { mue: 9, wRVU: 0.44, addOn: true },
+            // Mohs surgery - wRVU from CPT_Master_Reference.xlsx
+            '17311': { mue: 2, wRVU: 6.05 },   // Stage 1, H/N/HF/G, ≤5 blocks (max 2 lesions/visit)
+            '17312': { mue: 20, wRVU: 3.22, addOn: true },  // Additional stage, H/N/HF/G
+            '17313': { mue: 8, wRVU: 5.42 },   // Stage 1, trunk/arms/legs
+            '17314': { mue: 40, wRVU: 2.98, addOn: true },  // Additional stage, T/A/L
+            '17315': { mue: 20, wRVU: 0.85, addOn: true },  // Additional block
+            // Repairs - intermediate (wRVU from CPT_Master_Reference.xlsx)
+            '12031': { mue: 3, wRVU: 1.95 },  // Scalp/trunk 2.5cm or less
+            '12032': { mue: 3, wRVU: 2.46 },  // Scalp/trunk 2.6-7.5cm
+            '12034': { mue: 3, wRVU: 2.90 },  // Scalp/trunk 7.6-12.5cm
+            '12051': { mue: 3, wRVU: 2.27 },  // Face 2.5cm or less
+            '12052': { mue: 3, wRVU: 2.80 },  // Face 2.6-5.0cm
+            '12053': { mue: 3, wRVU: 3.09 },  // Face 5.1-7.5cm
+            // Repairs - complex
+            '13131': { mue: 3, wRVU: 3.64 },  // Complex, face 1.1-2.5cm
+            '13132': { mue: 3, wRVU: 4.66 },  // Complex, face 2.6-7.5cm
+            // Flaps
+            '14060': { mue: 3, wRVU: 9.00 },  // Tissue transfer, face ≤10 sq cm
+            '14061': { mue: 3, wRVU: 11.19 }, // Tissue transfer, face 10.1-30 sq cm
+            '15260': { mue: 3, wRVU: 11.35 }, // Full thickness graft, nose/eyelids ≤20 sq cm
+            '15261': { mue: 4, wRVU: 2.17, addOn: true },  // FT graft nose/eyelids ea addl (add-on to 15260)
+            // Additional G-codes
+            'G0127': { mue: 1, wRVU: 0.17 },  // Trim nail(s) - Medicare specific
+            'G0429': { mue: 1, wRVU: 1.16 },  // Dermal filler injection(s)
+            'G2212': { mue: 2, wRVU: 0.61, addOn: true },  // Prolonged outpatient visit (add-on for extended time)
+            // Add-on codes - biopsies
+            '11106': { mue: 1, wRVU: 0.98 },  // Incisional biopsy skin first lesion
+            '11107': { mue: 9, wRVU: 0.53, addOn: true },  // Incisional biopsy ea addl (add-on to 11106)
+            // Add-on codes - skin tags
+            '11200': { mue: 1, wRVU: 0.80, family: 'skin_tags' },  // Skin tag removal up to 15
+            '11201': { mue: 10, wRVU: 0.28, addOn: true },  // Skin tag removal ea addl 10 (add-on to 11200)
+            // Add-on codes - nail procedures
+            '11730': { mue: 1, wRVU: 1.02 },  // Nail avulsion simple first
+            '11732': { mue: 9, wRVU: 0.37, addOn: true },  // Nail avulsion ea addl (add-on to 11730)
+            // Add-on codes - debridement
+            '11000': { mue: 1, wRVU: 0.59 },  // Debridement eczematous/infected skin <10%
+            '11001': { mue: 9, wRVU: 0.29, addOn: true },  // Debridement ea addl 10% (add-on to 11000)
+            // Add-on codes - complex repairs
+            '13100': { mue: 3, wRVU: 2.93 },  // Complex repair trunk 1.1-2.5cm
+            '13101': { mue: 3, wRVU: 3.41 },  // Complex repair trunk 2.6-7.5cm
+            '13102': { mue: 6, wRVU: 1.21, addOn: true },  // Complex repair trunk addl ≤5cm (add-on to 13100/13101)
+            '13120': { mue: 3, wRVU: 3.15 },  // Complex repair s/a/l 1.1-2.5cm
+            '13121': { mue: 3, wRVU: 3.90 },  // Complex repair s/a/l 2.6-7.5cm
+            '13122': { mue: 6, wRVU: 1.40, addOn: true },  // Complex repair s/a/l addl ≤5cm (add-on to 13120/13121)
+            '13133': { mue: 6, wRVU: 2.14, addOn: true },  // Complex repair face/etc addl ≤5cm (add-on to 13131/13132)
+            '13151': { mue: 3, wRVU: 4.23 },  // Complex repair e/n/e/l 1.1-2.5cm
+            '13152': { mue: 3, wRVU: 5.21 },  // Complex repair e/n/e/l 2.6-7.5cm
+            '13153': { mue: 6, wRVU: 2.32, addOn: true },  // Complex repair e/n/e/l addl ≤5cm (add-on to 13151/13152)
+            // Add-on codes - flaps/grafts
+            '14301': { mue: 3, wRVU: 12.33 },  // Tissue transfer 30.1-60 sq cm
+            '14302': { mue: 6, wRVU: 3.64, addOn: true },  // Tissue transfer ea addl 30 sq cm (add-on to 14301)
         };
+
+        // Helper to sanitize codes: filter non-billable and correct wRVU from MUE_DATA
+        function sanitizeBillingCodes(codes) {
+            if (!codes || !Array.isArray(codes)) return [];
+            return codes
+                .filter(c => {
+                    // Filter out non-billable codes
+                    const codeUpper = (c.code || '').toUpperCase().trim();
+                    return codeUpper !== 'LEGAL' && codeUpper !== 'COUNT_CLARIFY' && codeUpper !== '';
+                })
+                .map(c => {
+                    // Correct wRVU from MUE_DATA if available
+                    const mueData = MUE_DATA[c.code];
+                    return {
+                        ...c,
+                        wRVU: mueData?.wRVU ?? c.wRVU ?? 0
+                    };
+                });
+        }
+
+        // MUE enforcement: check codes against limits, cap at MUE, return warnings
+        // Returns: { codes: [...with mueExceeded flag], warnings: [...] }
+        function applyMUELimits(codes) {
+            if (!codes || !Array.isArray(codes)) return { codes: [], warnings: [] };
+
+            const warnings = [];
+            const codeCount = {}; // Track how many times each code appears
+
+            // Count occurrences
+            codes.forEach(c => {
+                const code = c.code;
+                codeCount[code] = (codeCount[code] || 0) + (c.units || 1);
+            });
+
+            // Check against MUE and flag
+            const processedCodes = codes.map(c => {
+                const code = c.code;
+                const mueData = MUE_DATA[code];
+                const mueLimit = mueData?.mue;
+                const totalUnits = codeCount[code] || 1;
+
+                if (mueLimit && totalUnits > mueLimit) {
+                    // Exceeds MUE - flag it
+                    warnings.push({
+                        code: code,
+                        requested: totalUnits,
+                        limit: mueLimit,
+                        message: `${code} exceeds MUE limit: ${totalUnits} requested, max ${mueLimit}/visit. Only ${mueLimit} will be reimbursed.`
+                    });
+                    return {
+                        ...c,
+                        mueExceeded: true,
+                        mueLimit: mueLimit,
+                        requestedUnits: totalUnits
+                    };
+                }
+                return c;
+            });
+
+            return { codes: processedCodes, warnings };
+        }
 
         // Build complete billing codes by merging baseline + changes
         // Handles: code upgrades, MUE limits, mutually exclusive families
         function buildCompleteBillingCodes(baselineCodes, additionalCodes) {
+            // Sanitize inputs first - filter non-billable and correct wRVU
+            baselineCodes = sanitizeBillingCodes(baselineCodes);
+            additionalCodes = sanitizeBillingCodes(additionalCodes);
             const result = new Map(); // code -> {code, description, wRVU, ...}
             const familyBest = new Map(); // family -> best code in that family
 
@@ -1124,25 +1239,28 @@ Plan:
 
             // Current billing tab
             const currentBilling = data.current_billing;
+            // Sanitize codes early: filter non-billable and correct wRVU from MUE_DATA
+            const sanitizedCurrentCodes = sanitizeBillingCodes(currentBilling.codes);
+            const correctedCurrentTotalWRVU = sanitizedCurrentCodes.reduce((sum, c) => sum + (c.wRVU || 0), 0);
+
             let currentHtml = `
                 <div class="summary-box">
                     <h3>Current Maximum Billing</h3>
                     <div class="summary-stats">
                         <div class="stat">
-                            <div class="stat-value">${currentBilling.total_wRVU.toFixed(2)}</div>
+                            <div class="stat-value">${correctedCurrentTotalWRVU.toFixed(2)}</div>
                             <div class="stat-label">Total wRVU</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${currentBilling.codes.length}</div>
+                            <div class="stat-value">${sanitizedCurrentCodes.length}</div>
                             <div class="stat-label">Billable Codes</div>
                         </div>
                     </div>
                 </div>
             `;
 
-            if (currentBilling.codes.length) {
-                // Apply modifiers to current billing codes
-                const currentCodesWithModifiers = applyModifiers([...currentBilling.codes]);
+            if (sanitizedCurrentCodes.length) {
+                const currentCodesWithModifiers = applyModifiers(sanitizedCurrentCodes);
 
                 currentHtml += `
                     <table class="billing-table">
@@ -1165,13 +1283,13 @@ Plan:
                                     <td><strong>${c.code}</strong></td>
                                     <td>${modifierDisplay}</td>
                                     <td>${c.description}</td>
-                                    <td><span class="wrvu-badge">${c.wRVU.toFixed(2)}</span></td>
+                                    <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                                     <td class="${c.status === 'supported' ? 'status-supported' : 'status-missing'}">${c.status}</td>
                                 </tr>
                             `}).join('')}
                             <tr class="total-row">
                                 <td colspan="3"><strong>TOTAL</strong></td>
-                                <td><span class="wrvu-badge">${currentBilling.total_wRVU.toFixed(2)}</span></td>
+                                <td><span class="wrvu-badge">${correctedCurrentTotalWRVU.toFixed(2)}</span></td>
                                 <td></td>
                             </tr>
                         </tbody>
@@ -1268,16 +1386,21 @@ Plan:
                     }
 
                     // Regular enhancement card (non-count-clarify)
+                    // Use MUE_DATA wRVU if available
+                    const currentWRVU = e.current_code && MUE_DATA[e.current_code] ? MUE_DATA[e.current_code].wRVU : e.current_wRVU;
+                    const enhancedWRVU = e.enhanced_code && MUE_DATA[e.enhanced_code] ? MUE_DATA[e.enhanced_code].wRVU : e.enhanced_wRVU;
+                    const deltaWRVU = enhancedWRVU - currentWRVU;
+
                     return `
                         <div class="enhancement-card ${e.priority}">
                             <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
                                 <input type="checkbox" class="enhancement-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
                                 <div style="flex: 1;">
                                     <h4 style="margin: 0;">${e.issue}</h4>
-                                    ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${e.current_wRVU.toFixed(2)} wRVU)</p>` : ''}
-                                    ${e.enhanced_code && e.enhanced_code !== 'LEGAL' ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${e.enhanced_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                                    ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${currentWRVU.toFixed(2)} wRVU)</p>` : ''}
+                                    ${e.enhanced_code && e.enhanced_code !== 'LEGAL' ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${enhancedWRVU.toFixed(2)} wRVU)</p>` : ''}
                                     ${e.enhanced_code === 'LEGAL' ? `<p><strong>Type:</strong> <span class="code-legal">LEGAL</span> (Liability Protection)</p>` : ''}
-                                    ${e.delta_wRVU > 0 ? `<p class="delta-positive">+${e.delta_wRVU.toFixed(2)} wRVU improvement</p>` : ''}
+                                    ${deltaWRVU > 0 ? `<p class="delta-positive">+${deltaWRVU.toFixed(2)} wRVU improvement</p>` : ''}
                                     <div class="suggested-text">${e.suggested_addition}</div>
                                 </div>
                             </label>
@@ -1429,12 +1552,10 @@ Plan:
                             <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
                                 <input type="checkbox" class="opportunity-checkbox" data-index="${idx}" data-family="${detectedFamily || ''}" checked style="margin-top: 5px; transform: scale(1.3);">
                                 <div style="flex: 1;">
-                                    <span class="category-badge category-${o.category}">${o.category}</span>
-                                    <h4>${o.finding}</h4>
-                                    <p><strong>Opportunity:</strong> ${o.opportunity}</p>
-                                    <p><strong>Action:</strong> ${o.action}</p>
+                                    <span class="category-badge category-${o.category}">${o.category.toUpperCase()}</span>
+                                    <h4 style="margin: 5px 0;">${o.finding}</h4>
                                     ${codeDisplay}
-                                    <p style="font-style: italic; color: #667eea;">${o.teaching_point}</p>
+                                    <div class="suggested-text">${o.action}</div>
                                 </div>
                             </label>
                         </div>
@@ -1600,21 +1721,46 @@ Plan:
                 const codeUpper = (c.code || '').toUpperCase().trim();
                 return codeUpper !== 'LEGAL' && codeUpper !== 'COUNT_CLARIFY';
             });
+
+            // Apply MUE limits and get warnings
+            const { codes: mueCheckedCodes, warnings: mueWarnings } = applyMUELimits(billableCodes);
+
+            // Display MUE warnings
+            let warningContainer = document.getElementById('enh-mue-warnings');
+            if (!warningContainer) {
+                warningContainer = document.createElement('div');
+                warningContainer.id = 'enh-mue-warnings';
+                const table = document.getElementById('enh-billing-table');
+                if (table) table.parentNode.insertBefore(warningContainer, table);
+            }
+            if (mueWarnings.length > 0) {
+                warningContainer.innerHTML = mueWarnings.map(w => `
+                    <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; color: #856404;">
+                        <strong>⚠️ MUE Warning:</strong> ${w.message}
+                    </div>
+                `).join('');
+            } else {
+                warningContainer.innerHTML = '';
+            }
+
             if (tbody) {
-                if (billableCodes.length === 0) {
+                if (mueCheckedCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
-                    tbody.innerHTML = billableCodes.map(c => {
+                    tbody.innerHTML = mueCheckedCodes.map(c => {
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
-                        const rowClass = c.fromBaseline ? '' : 'style="background: #e8f5e9;"';
+                        const rowStyle = c.mueExceeded
+                            ? 'style="background: #fff3cd;"'
+                            : (c.fromBaseline ? '' : 'style="background: #e8f5e9;"');
                         const upgradeIcon = c.upgraded ? '↑ ' : '';
+                        const mueIcon = c.mueExceeded ? '⚠️ ' : '';
                         return `
-                            <tr ${rowClass}>
-                                <td><strong>${upgradeIcon}${c.code}</strong></td>
+                            <tr ${rowStyle}>
+                                <td><strong>${mueIcon}${upgradeIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
-                                <td>${c.description}</td>
+                                <td>${c.description}${c.mueExceeded ? ` <small>(MUE: ${c.mueLimit})</small>` : ''}</td>
                                 <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
@@ -1660,15 +1806,18 @@ Plan:
                 return match ? match[1] : code.trim();
             }
 
-            // Collect enhancement codes first
+            // Collect enhancement codes first - SKIP LEGAL/medicolegal codes
             let additionalCodes = [];
 
             enhancements.forEach((e, idx) => {
                 const checkbox = document.querySelector(`.enhancement-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
+                // Skip medicolegal and LEGAL codes - they don't affect billing
+                if (e.priority === 'medicolegal' || e.priority === 'count_clarification') return;
                 const rawEnhCode = e.enhanced_code;
                 if (!rawEnhCode) return;
+                if (rawEnhCode.toUpperCase().trim() === 'LEGAL' || rawEnhCode.toUpperCase().trim() === 'COUNT_CLARIFY') return;
 
                 // Check for composite code like "99213 + G2211"
                 const compositeMatch = rawEnhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
@@ -1683,6 +1832,7 @@ Plan:
 
                 const enhCode = cleanCode(rawEnhCode);
                 if (enhCode) {
+                    // Always use MUE_DATA wRVU if available
                     additionalCodes.push({
                         code: enhCode,
                         description: e.issue || 'Enhanced code',
@@ -1780,22 +1930,47 @@ Plan:
                 const codeUpper = (c.code || '').toUpperCase().trim();
                 return codeUpper !== 'LEGAL' && codeUpper !== 'COUNT_CLARIFY';
             });
+
+            // Apply MUE limits and get warnings
+            const { codes: mueCheckedCodes, warnings: mueWarnings } = applyMUELimits(billableCodes);
+
+            // Display MUE warnings
+            let warningContainer = document.getElementById('opp-mue-warnings');
+            if (!warningContainer) {
+                warningContainer = document.createElement('div');
+                warningContainer.id = 'opp-mue-warnings';
+                const table = document.getElementById('opp-billing-table');
+                if (table) table.parentNode.insertBefore(warningContainer, table);
+            }
+            if (mueWarnings.length > 0) {
+                warningContainer.innerHTML = mueWarnings.map(w => `
+                    <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; color: #856404;">
+                        <strong>⚠️ MUE Warning:</strong> ${w.message}
+                    </div>
+                `).join('');
+            } else {
+                warningContainer.innerHTML = '';
+            }
+
             if (tbody) {
-                if (billableCodes.length === 0) {
+                if (mueCheckedCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
-                    tbody.innerHTML = billableCodes.map(c => {
-                        const rowClass = c.fromBaseline ? '' : 'style="background: #e8f5e9;"';
+                    tbody.innerHTML = mueCheckedCodes.map(c => {
+                        const rowStyle = c.mueExceeded
+                            ? 'style="background: #fff3cd;"'
+                            : (c.fromBaseline ? '' : 'style="background: #e8f5e9;"');
                         const upgradeIcon = c.upgraded ? '↑ ' : '';
                         const aggregatedIcon = c.isAggregated ? '⊕ ' : '';
+                        const mueIcon = c.mueExceeded ? '⚠️ ' : '';
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
                         return `
-                            <tr ${rowClass}>
-                                <td><strong>${upgradeIcon}${aggregatedIcon}${c.code}</strong></td>
+                            <tr ${rowStyle}>
+                                <td><strong>${mueIcon}${upgradeIcon}${aggregatedIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
-                                <td>${c.description}</td>
+                                <td>${c.description}${c.mueExceeded ? ` <small>(MUE: ${c.mueLimit})</small>` : ''}</td>
                                 <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
