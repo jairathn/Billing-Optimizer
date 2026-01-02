@@ -1429,8 +1429,16 @@ Plan:
 
             const currentBilling = currentAnalysisData.current_billing;
             const opportunities = currentAnalysisData.future_opportunities.opportunities;
+            const enhancements = currentAnalysisData.documentation_enhancements?.enhancements || [];
             const baselineWRVU = currentBilling.total_wRVU;
             const baselineCodes = currentBilling.codes || [];
+
+            // Helper to extract clean CPT code
+            function cleanCode(code) {
+                if (!code) return null;
+                const match = code.match(/^(99\d{3}|G\d{4}|\d{5})/);
+                return match ? match[1] : code.trim();
+            }
 
             // Helper to find related baseline code that would be replaced
             // e.g., 10061 replaces 10060, 99214 replaces 99213
@@ -1471,7 +1479,84 @@ Plan:
             let opportunityCodes = [];
             let totalDelta = 0;
 
-            // Go through each opportunity
+            // FIRST: Include selected enhancements from Step 3
+            // Section 4 should be the "maximum" version including all enhancements
+            let hasEMUpgrade = false;
+            let emUpgradeCode = null;
+            let emUpgradeDelta = 0;
+
+            enhancements.forEach((e, idx) => {
+                const checkbox = document.querySelector(`.enhancement-checkbox[data-index="${idx}"]`);
+                if (!checkbox || !checkbox.checked) return;
+
+                const rawEnhCode = e.enhanced_code;
+                if (!rawEnhCode) return;
+
+                const enhCode = cleanCode(rawEnhCode);
+                const currentCode = cleanCode(e.current_code);
+
+                // Check if enhanced_code is a composite like "99213 + G2211"
+                const compositeMatch = rawEnhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
+                if (compositeMatch) {
+                    const addOnCode = compositeMatch[1];
+                    const addOnWRVU = e.delta_wRVU || 0.33;
+                    if (!opportunityCodes.find(c => c.code === addOnCode)) {
+                        opportunityCodes.push({
+                            code: addOnCode,
+                            description: 'Chronic care management add-on',
+                            wRVU: addOnWRVU,
+                            fromEnhancement: true
+                        });
+                        totalDelta += addOnWRVU;
+                    }
+                    return;
+                }
+
+                // Check if this is an E/M code
+                const isEMCode = /^99\d{3}$/.test(enhCode);
+                const isCurrentEM = currentCode && /^99\d{3}$/.test(currentCode);
+
+                if (isEMCode) {
+                    if (isCurrentEM && enhCode !== currentCode) {
+                        // E/M upgrade - track highest
+                        if (!hasEMUpgrade || e.delta_wRVU > emUpgradeDelta) {
+                            emUpgradeCode = {
+                                code: enhCode,
+                                description: `E/M upgrade (from ${currentCode})`,
+                                wRVU: e.delta_wRVU || 0,
+                                fromEnhancement: true
+                            };
+                            emUpgradeDelta = e.delta_wRVU || 0;
+                            hasEMUpgrade = true;
+                        }
+                    }
+                    return;
+                } else if (/^G\d{4}$/.test(enhCode)) {
+                    // Add-on code (like G2211)
+                    if (!opportunityCodes.find(c => c.code === enhCode)) {
+                        opportunityCodes.push({
+                            code: enhCode,
+                            description: e.issue,
+                            wRVU: e.delta_wRVU || 0,
+                            fromEnhancement: true
+                        });
+                        totalDelta += e.delta_wRVU || 0;
+                    }
+                } else {
+                    // Other procedure codes from enhancements
+                    if (!opportunityCodes.find(c => c.code === enhCode)) {
+                        opportunityCodes.push({
+                            code: enhCode,
+                            description: e.issue,
+                            wRVU: e.delta_wRVU || e.enhanced_wRVU || 0,
+                            fromEnhancement: true
+                        });
+                        totalDelta += e.delta_wRVU || e.enhanced_wRVU || 0;
+                    }
+                }
+            });
+
+            // SECOND: Go through each opportunity
             opportunities.forEach((o, idx) => {
                 const checkbox = document.querySelector(`.opportunity-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
@@ -1511,6 +1596,28 @@ Plan:
                     return;
                 }
 
+                // Check if this is an E/M code from opportunity
+                const isEMCode = /^99\d{3}$/.test(code);
+                if (isEMCode) {
+                    // E/M from opportunity - check if it's better than enhancement E/M
+                    const replacedCode = findReplacedBaselineCode(code);
+                    const deltaWRVU = replacedCode ? wRVU - (replacedCode.wRVU || 0) : wRVU;
+
+                    if (!hasEMUpgrade || deltaWRVU > emUpgradeDelta) {
+                        emUpgradeCode = {
+                            code: code,
+                            description: replacedCode
+                                ? `Upgrade from ${replacedCode.code}: ${desc}`
+                                : desc,
+                            wRVU: deltaWRVU,
+                            fromOpportunity: true
+                        };
+                        emUpgradeDelta = deltaWRVU;
+                        hasEMUpgrade = true;
+                    }
+                    return; // Don't add directly, will be added at end
+                }
+
                 // Check if this code would replace a baseline code
                 const replacedCode = findReplacedBaselineCode(code);
                 let deltaWRVU = wRVU;
@@ -1534,6 +1641,12 @@ Plan:
                     totalDelta += deltaWRVU;
                 }
             });
+
+            // Add the E/M upgrade if we have one (only one allowed - highest from either section)
+            if (hasEMUpgrade && emUpgradeCode) {
+                opportunityCodes.unshift(emUpgradeCode);
+                totalDelta += emUpgradeDelta;
+            }
 
             // Now process aggregated family counts and add to opportunityCodes
             for (const [familyId, totalCount] of Object.entries(familyCounts)) {
