@@ -316,14 +316,45 @@ TASK:
 1. Identify ALL billable codes from note AS WRITTEN
 2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
 3. Suggest MEDICOLEGAL enhancements for missing safety documentation
+4. Flag COUNT-BASED PROCEDURES where count is UNSPECIFIED (critical for billing accuracy)
 
 CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
+
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: COUNT CLARIFICATION FOR AMBIGUOUS PROCEDURES
+═══════════════════════════════════════════════════════════════════════════════
+When a count-based procedure is documented as PERFORMED but the COUNT is NOT SPECIFIED:
+- NEVER assume the count from observed exam findings
+- OBSERVED findings ≠ TREATED findings (e.g., "8 nails with pitting" ≠ "8 nails debrided")
+- Create a COUNT_CLARIFICATION enhancement card to ask the user how many were actually done
+
+Count-based procedure families requiring explicit counts:
+• Nail debridement (11720/11721): Note must specify HOW MANY nails were debrided
+• IL injections (11900/11901): Note must specify HOW MANY lesions were injected
+• AK destruction (17000/17003/17004): Note must specify HOW MANY AKs were treated
+• Benign destruction (17110/17111): Note must specify HOW MANY lesions were destroyed
+
+EXAMPLE - WRONG (assumes count):
+Note says: "Nail debridement performed. Exam shows pitting on 8 nails."
+WRONG: current_billing includes 11721 (6+ nails) assuming all 8 were treated
+RIGHT: current_billing includes 11720 with status: "count_unspecified", create COUNT_CLARIFICATION card
+
+EXAMPLE - CORRECT (count specified):
+Note says: "Nail debridement of 3 nails performed."
+CORRECT: current_billing includes 11720 (1-5 nails) with status: "supported"
+
+For COUNT_CLARIFICATION cards, use this format in enhancements:
+{{"issue": "Nail debridement count unspecified", "current_code": "11720", "current_wRVU": 0.31,
+  "suggested_addition": "CLARIFY: How many nails were actually debrided? Enter count to determine correct billing code.",
+  "enhanced_code": "COUNT_CLARIFY", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "count_clarification",
+  "count_family": "nail_debridement", "default_count": 1}}
 
 VALID Step 3 Enhancements (things that WERE done):
 - G2211 add-on: Chronic condition relationship EXISTS → document it
 - E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
+- COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
 
 MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
 These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
@@ -337,6 +368,7 @@ INVALID for Step 3 (move to Step 4):
 - "Injection not documented" when NO injection was given
 - "Exam not performed" → that's a missed opportunity, not an enhancement
 - Any procedure that COULD have been done but WASN'T
+- Treating MORE lesions/nails than were actually treated (that's Step 4)
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
@@ -403,6 +435,8 @@ Respond with valid JSON only."""
                     enhanced_wRVU=float(e.get("enhanced_wRVU", 0)),
                     delta_wRVU=float(e.get("delta_wRVU", 0)),
                     priority=e.get("priority", "medium"),
+                    count_family=e.get("count_family"),
+                    default_count=int(e["default_count"]) if e.get("default_count") else None,
                 )
                 for e in data.get("enhancements", [])
             ]
@@ -444,14 +478,45 @@ TASK:
 1. Identify ALL billable codes from note AS WRITTEN
 2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
 3. Suggest MEDICOLEGAL enhancements for missing safety documentation
+4. Flag COUNT-BASED PROCEDURES where count is UNSPECIFIED (critical for billing accuracy)
 
 CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
+
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: COUNT CLARIFICATION FOR AMBIGUOUS PROCEDURES
+═══════════════════════════════════════════════════════════════════════════════
+When a count-based procedure is documented as PERFORMED but the COUNT is NOT SPECIFIED:
+- NEVER assume the count from observed exam findings
+- OBSERVED findings ≠ TREATED findings (e.g., "8 nails with pitting" ≠ "8 nails debrided")
+- Create a COUNT_CLARIFICATION enhancement card to ask the user how many were actually done
+
+Count-based procedure families requiring explicit counts:
+• Nail debridement (11720/11721): Note must specify HOW MANY nails were debrided
+• IL injections (11900/11901): Note must specify HOW MANY lesions were injected
+• AK destruction (17000/17003/17004): Note must specify HOW MANY AKs were treated
+• Benign destruction (17110/17111): Note must specify HOW MANY lesions were destroyed
+
+EXAMPLE - WRONG (assumes count):
+Note says: "Nail debridement performed. Exam shows pitting on 8 nails."
+WRONG: current_billing includes 11721 (6+ nails) assuming all 8 were treated
+RIGHT: current_billing includes 11720 with status: "count_unspecified", create COUNT_CLARIFICATION card
+
+EXAMPLE - CORRECT (count specified):
+Note says: "Nail debridement of 3 nails performed."
+CORRECT: current_billing includes 11720 (1-5 nails) with status: "supported"
+
+For COUNT_CLARIFICATION cards, use this format in enhancements:
+{{"issue": "Nail debridement count unspecified", "current_code": "11720", "current_wRVU": 0.31,
+  "suggested_addition": "CLARIFY: How many nails were actually debrided? Enter count to determine correct billing code.",
+  "enhanced_code": "COUNT_CLARIFY", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "count_clarification",
+  "count_family": "nail_debridement", "default_count": 1}}
 
 VALID Step 3 Enhancements (things that WERE done):
 - G2211 add-on: Chronic condition relationship EXISTS → document it
 - E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
+- COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
 
 MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
 These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
@@ -465,6 +530,7 @@ INVALID for Step 3 (move to Step 4):
 - "Injection not documented" when NO injection was given
 - "Exam not performed" → that's a missed opportunity, not an enhancement
 - Any procedure that COULD have been done but WASN'T
+- Treating MORE lesions/nails than were actually treated (that's Step 4)
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
@@ -531,6 +597,8 @@ Respond with valid JSON only."""
                     enhanced_wRVU=float(e.get("enhanced_wRVU", 0)),
                     delta_wRVU=float(e.get("delta_wRVU", 0)),
                     priority=e.get("priority", "medium"),
+                    count_family=e.get("count_family"),
+                    default_count=int(e["default_count"]) if e.get("default_count") else None,
                 )
                 for e in data.get("enhancements", [])
             ]

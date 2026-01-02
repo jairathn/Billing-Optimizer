@@ -64,7 +64,10 @@ class DocumentationEnhancement(BaseModel):
     enhanced_code: Optional[str] = Field(default=None, description="Enhanced code after documentation fix")
     enhanced_wRVU: float = Field(default=0.0, ge=0.0, description="Enhanced wRVU")
     delta_wRVU: float = Field(default=0.0, description="Improvement in wRVU")
-    priority: str = Field(default="medium", description="high, medium, or low priority")
+    priority: str = Field(default="medium", description="high, medium, low, medicolegal, or count_clarification priority")
+    # Count clarification fields - used when a count-based procedure was done but count not specified
+    count_family: Optional[str] = Field(default=None, description="Code family for count clarification (e.g., nail_debridement, il_injection)")
+    default_count: Optional[int] = Field(default=None, description="Default count to show in input field")
 
 
 class DocumentationEnhancements(BaseModel):

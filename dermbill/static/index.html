@@ -1227,20 +1227,63 @@ Plan:
             if (enhancements.enhancements.length) {
                 enhHtml += '<h4 style="margin-top: 20px;">Enhancement Recommendations</h4>';
                 enhHtml += '<div id="enhancement-list">';
-                enhHtml += enhancements.enhancements.map((e, idx) => `
-                    <div class="enhancement-card ${e.priority}">
-                        <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
-                            <input type="checkbox" class="enhancement-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
-                            <div style="flex: 1;">
-                                <h4 style="margin: 0;">${e.issue}</h4>
-                                ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${e.current_wRVU.toFixed(2)} wRVU)</p>` : ''}
-                                ${e.enhanced_code ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${e.enhanced_wRVU.toFixed(2)} wRVU)</p>` : ''}
-                                <p class="delta-positive">+${e.delta_wRVU.toFixed(2)} wRVU improvement</p>
-                                <div class="suggested-text">${e.suggested_addition}</div>
+                enhHtml += enhancements.enhancements.map((e, idx) => {
+                    // Check if this is a count clarification card
+                    const isCountClarify = e.priority === 'count_clarification' || e.enhanced_code === 'COUNT_CLARIFY';
+                    const countFamily = e.count_family || null;
+                    const defaultCount = e.default_count || 1;
+
+                    if (isCountClarify && countFamily) {
+                        // Render count clarification card with input
+                        const family = CODE_FAMILIES[countFamily];
+                        const familyName = family ? family.name : countFamily;
+                        return `
+                            <div class="enhancement-card count_clarification" style="border-left-color: #17a2b8;">
+                                <div style="display: flex; align-items: flex-start; gap: 10px;">
+                                    <input type="checkbox" class="enhancement-checkbox count-clarify-checkbox"
+                                           data-index="${idx}" data-family="${countFamily}"
+                                           checked style="margin-top: 5px; transform: scale(1.3);">
+                                    <div style="flex: 1;">
+                                        <span class="category-badge" style="background: #17a2b8; color: white;">COUNT NEEDED</span>
+                                        <h4 style="margin: 5px 0;">${e.issue}</h4>
+                                        <p style="color: #856404; background: #fff3cd; padding: 10px; border-radius: 4px; margin: 10px 0;">
+                                            <strong>⚠️ Action Required:</strong> The note does not specify the count. Please enter the actual number performed.
+                                        </p>
+                                        <div class="count-input-group" data-family="${countFamily}">
+                                            <label>Actual count:</label>
+                                            <input type="number" class="count-input count-clarify-input"
+                                                   data-enh-index="${idx}"
+                                                   data-family="${countFamily}"
+                                                   min="1" max="99" value="${defaultCount}">
+                                            <span class="code-family-badge">${familyName}</span>
+                                            <span id="count-clarify-result-${idx}" style="margin-left: 10px; font-weight: 600; color: #28a745;"></span>
+                                        </div>
+                                        <p style="font-size: 12px; color: #6c757d; margin-top: 5px;">
+                                            Enter the count to calculate the correct billing code. Billing will update automatically.
+                                        </p>
+                                    </div>
+                                </div>
                             </div>
-                        </label>
-                    </div>
-                `).join('');
+                        `;
+                    }
+
+                    // Regular enhancement card (non-count-clarify)
+                    return `
+                        <div class="enhancement-card ${e.priority}">
+                            <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
+                                <input type="checkbox" class="enhancement-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
+                                <div style="flex: 1;">
+                                    <h4 style="margin: 0;">${e.issue}</h4>
+                                    ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${e.current_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                                    ${e.enhanced_code && e.enhanced_code !== 'LEGAL' ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${e.enhanced_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                                    ${e.enhanced_code === 'LEGAL' ? `<p><strong>Type:</strong> <span class="code-legal">LEGAL</span> (Liability Protection)</p>` : ''}
+                                    ${e.delta_wRVU > 0 ? `<p class="delta-positive">+${e.delta_wRVU.toFixed(2)} wRVU improvement</p>` : ''}
+                                    <div class="suggested-text">${e.suggested_addition}</div>
+                                </div>
+                            </label>
+                        </div>
+                    `;
+                }).join('');
                 enhHtml += '</div>';
             } else {
                 enhHtml += '<p>No documentation enhancements identified.</p>';
@@ -1436,6 +1479,11 @@ Plan:
             document.querySelectorAll('.enhancement-checkbox').forEach(cb => {
                 cb.addEventListener('change', updateEnhancementTotals);
             });
+            // Listen for count clarification input changes
+            document.querySelectorAll('.count-clarify-input').forEach(input => {
+                input.addEventListener('input', updateEnhancementTotals);
+                input.addEventListener('change', updateEnhancementTotals);
+            });
         }
 
         function updateEnhancementTotals() {
@@ -1455,10 +1503,36 @@ Plan:
 
             // Collect enhancement codes (upgrades and additions)
             let enhancementCodes = [];
+            // Track family counts from count-clarification cards
+            let familyCounts = {};
 
             enhancements.forEach((e, idx) => {
                 const checkbox = document.querySelector(`.enhancement-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
+
+                // Handle COUNT_CLARIFICATION cards - calculate billing code from user-entered count
+                if (e.priority === 'count_clarification' || e.enhanced_code === 'COUNT_CLARIFY') {
+                    const countInput = document.querySelector(`.count-clarify-input[data-enh-index="${idx}"]`);
+                    const countFamily = e.count_family;
+                    if (countInput && countFamily && CODE_FAMILIES[countFamily]) {
+                        const count = parseInt(countInput.value) || 1;
+                        if (!familyCounts[countFamily]) familyCounts[countFamily] = 0;
+                        familyCounts[countFamily] += count;
+
+                        // Update the result display
+                        const result = calculateFamilyWRVU(countFamily, count);
+                        const resultSpan = document.getElementById(`count-clarify-result-${idx}`);
+                        if (resultSpan && result.code) {
+                            resultSpan.textContent = `→ ${result.code} (${result.wRVU.toFixed(2)} wRVU)`;
+                        }
+                    }
+                    return;
+                }
+
+                // Skip medicolegal and LEGAL codes - they don't affect billing
+                if (e.priority === 'medicolegal' || e.enhanced_code?.toUpperCase() === 'LEGAL') {
+                    return;
+                }
 
                 const rawEnhCode = e.enhanced_code;
                 if (!rawEnhCode) return;
@@ -1486,6 +1560,22 @@ Plan:
                 }
             });
 
+            // Process family counts from count-clarification cards and add proper billing codes
+            for (const [familyId, totalCount] of Object.entries(familyCounts)) {
+                if (totalCount > 0) {
+                    const result = calculateFamilyWRVU(familyId, totalCount);
+                    if (result.code) {
+                        const family = CODE_FAMILIES[familyId];
+                        enhancementCodes.push({
+                            code: result.code.split('+')[0], // Get base code for mutually exclusive handling
+                            description: `${family.name} (${totalCount} total)`,
+                            wRVU: result.wRVU,
+                            isFromCountClarify: true
+                        });
+                    }
+                }
+            }
+
             // Build COMPLETE billing codes using the merge function
             // This handles mutually exclusive families and code upgrades
             const completeCodes = buildCompleteBillingCodes(baselineCodes, enhancementCodes);
@@ -1503,10 +1593,13 @@ Plan:
             // Apply modifiers to complete codes
             const codesWithModifiers = applyModifiers(completeCodes);
 
-            // Update the billing table - show COMPLETE billing codes (excluding LEGAL)
+            // Update the billing table - show COMPLETE billing codes (excluding non-billable codes)
             const tbody = document.getElementById('enh-billing-tbody');
-            // Filter out LEGAL codes - they're for recommendation cards only, not billing
-            const billableCodes = codesWithModifiers.filter(c => c.code !== 'LEGAL');
+            // Filter out LEGAL and COUNT_CLARIFY codes - they're for recommendation cards only, not billing
+            const billableCodes = codesWithModifiers.filter(c => {
+                const codeUpper = (c.code || '').toUpperCase().trim();
+                return codeUpper !== 'LEGAL' && codeUpper !== 'COUNT_CLARIFY';
+            });
             if (tbody) {
                 if (billableCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
@@ -1680,10 +1773,13 @@ Plan:
             // Apply modifiers to complete codes
             const codesWithModifiers = applyModifiers(completeCodes);
 
-            // Update the billing table - show COMPLETE billing codes (excluding LEGAL)
+            // Update the billing table - show COMPLETE billing codes (excluding non-billable codes)
             const tbody = document.getElementById('opp-billing-tbody');
-            // Filter out LEGAL codes - they're for recommendation cards only, not billing
-            const billableCodes = codesWithModifiers.filter(c => c.code !== 'LEGAL');
+            // Filter out LEGAL and COUNT_CLARIFY codes - they're for recommendation cards only, not billing
+            const billableCodes = codesWithModifiers.filter(c => {
+                const codeUpper = (c.code || '').toUpperCase().trim();
+                return codeUpper !== 'LEGAL' && codeUpper !== 'COUNT_CLARIFY';
+            });
             if (tbody) {
                 if (billableCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
