@@ -332,7 +332,13 @@ INVALID for Step 3 (move to Step 4):
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
-"suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}"""
+"suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
+
+OPTIMIZED NOTE RULES:
+- Output ONLY the clinical note text
+- Do NOT include "Time:" or face-to-face time
+- Do NOT include "Coding:" or billing codes
+- The note should be pure clinical documentation ready for the medical record"""
 
         system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
@@ -340,6 +346,8 @@ CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If procedure wasn't done → Step 4, not here
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
+
+OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
 Respond with valid JSON only."""
 
         try:
@@ -434,7 +442,13 @@ INVALID for Step 3 (move to Step 4):
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
-"suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}"""
+"suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
+
+OPTIMIZED NOTE RULES:
+- Output ONLY the clinical note text
+- Do NOT include "Time:" or face-to-face time
+- Do NOT include "Coding:" or billing codes
+- The note should be pure clinical documentation ready for the medical record"""
 
         system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
@@ -442,6 +456,8 @@ CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If procedure wasn't done → Step 4, not here
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
+
+OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
 Respond with valid JSON only."""
 
         try:
@@ -715,7 +731,13 @@ RESPOND WITH JSON ONLY:
     "potential_code": {{"code": "X", "description": "X", "wRVU": 0.00}},
     "teaching_point": "[Billing tip]"}}
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
-"total_potential_additional_wRVU": 0.00}}"""
+"total_potential_additional_wRVU": 0.00}}
+
+OPTIMIZED NOTE RULES:
+- Output ONLY the clinical note text
+- Do NOT include "Time:" or face-to-face time
+- Do NOT include "Coding:" or billing codes
+- The note should be pure clinical documentation ready for the medical record"""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -729,6 +751,8 @@ CRITICAL RULES:
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
+
+OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
@@ -997,7 +1021,13 @@ RESPOND WITH JSON ONLY:
     "potential_code": {{"code": "X", "description": "X", "wRVU": 0.00}},
     "teaching_point": "[Billing tip]"}}
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
-"total_potential_additional_wRVU": 0.00}}"""
+"total_potential_additional_wRVU": 0.00}}
+
+OPTIMIZED NOTE RULES:
+- Output ONLY the clinical note text
+- Do NOT include "Time:" or face-to-face time
+- Do NOT include "Coding:" or billing codes
+- The note should be pure clinical documentation ready for the medical record"""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -1011,6 +1041,8 @@ CRITICAL RULES:
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
+
+OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
@@ -1156,8 +1188,11 @@ INSTRUCTIONS:
 5. The final note should fully support billing all selected codes
 6. Keep the note professional and clinically appropriate
 7. Output ONLY the complete rewritten note - no explanations
+8. Do NOT include "Time:" or face-to-face time sections
+9. Do NOT include "Coding:" or billing code sections - just clinical documentation
 
 CRITICAL: Match the original note's structure and formatting style exactly.
+OUTPUT ONLY CLINICAL DOCUMENTATION - no time, no coding, no billing codes.
 
 OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
 
@@ -1172,6 +1207,8 @@ Write the note AS IF all selected items were actually performed during the visit
 - If an injection opportunity is selected, document that the injection WAS done
 - If an E/M upgrade is selected, document the MDM complexity that supports it
 - The note should be copy-paste ready to support billing all selected codes
+
+NEVER include Time, Coding, or billing code sections. Output only pure clinical documentation.
 Output only the complete note text, no commentary."""
 
         try:
