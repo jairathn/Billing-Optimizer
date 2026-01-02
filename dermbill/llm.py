@@ -334,12 +334,24 @@ Count-based procedure families requiring explicit counts:
 • AK destruction (17000/17003/17004): Note must specify HOW MANY AKs were treated
 • Benign destruction (17110/17111): Note must specify HOW MANY lesions were destroyed
 
-EXAMPLE - WRONG (assumes count):
+VALID COUNT SPECIFICATIONS (count IS specified - use status: "supported"):
+- "Nail debridement of 3 nails" → count = 3
+- "IL triamcinolone injected into 4 thick plaques" → count = 4
+- "Injections to bilateral elbows and knees" → count = 4 (2 + 2)
+- "Treated 6 AKs on scalp" → count = 6
+- "Destroyed 12 verrucae" → count = 12
+
+AMBIGUOUS (count NOT specified - use COUNT_CLARIFICATION):
+- "Nail debridement performed" → HOW MANY nails?
+- "IL injection given to plaques" → HOW MANY plaques?
+- "AKs treated with cryotherapy" → HOW MANY AKs?
+
+EXAMPLE - WRONG (assumes count from exam):
 Note says: "Nail debridement performed. Exam shows pitting on 8 nails."
 WRONG: current_billing includes 11721 (6+ nails) assuming all 8 were treated
 RIGHT: current_billing includes 11720 with status: "count_unspecified", create COUNT_CLARIFICATION card
 
-EXAMPLE - CORRECT (count specified):
+EXAMPLE - CORRECT (count specified in procedure):
 Note says: "Nail debridement of 3 nails performed."
 CORRECT: current_billing includes 11720 (1-5 nails) with status: "supported"
 
@@ -365,13 +377,22 @@ ADD-ON CODES (bill WITH primary codes when applicable):
 • Tissue transfer: 14302 (+3.64 wRVU) for each additional 30 sq cm
 • Full-thickness graft: 15261 (+2.17 wRVU) for each additional graft area
 
-MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
-These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
-- Missing patient counseling: If counseling likely given but not documented → add it
-- Missing follow-up instructions: If return visit timing not specified → add it
-- Missing warning signs education: If skin self-exam not documented → add it
-- Suspicious lesion reasoning: If lesion noted but clinical reasoning absent → add it
-- Risk factor acknowledgment: If high-risk patient but risks not documented → add it
+MEDICOLEGAL ENHANCEMENTS (enhanced_code: "LEGAL", delta_wRVU: 0):
+CRITICAL PRINCIPLE: Avoid selective risk documentation. If documenting one risk in detail,
+document ALL relevant risks - or document none. Selective documentation creates liability:
+"You documented skin cancer risk but not infection - why the inconsistency?"
+
+USE SPARINGLY - Only suggest medicolegal enhancement when documentation is:
+1. MISSING a critical safety element that was clearly discussed (e.g., follow-up timing)
+2. INCOMPLETE for shared decision-making (e.g., "discussed biologics" without any risk mention)
+
+AVOID suggesting medicolegal additions when:
+- Risk discussion is ALREADY documented (even briefly) - don't expand selectively
+- The note says "risks/benefits discussed" - this is legally sufficient
+- Adding would create INCONSISTENT depth (one risk detailed, others brief)
+
+Example: If note says "discussed biologic therapy including risks and benefits" → SUFFICIENT
+Do NOT add separate "skin cancer surveillance" documentation unless ALL other risks are equally expanded
 
 INVALID for Step 3 (move to Step 4):
 - "Injection not documented" when NO injection was given
@@ -526,12 +547,24 @@ Count-based procedure families requiring explicit counts:
 • AK destruction (17000/17003/17004): Note must specify HOW MANY AKs were treated
 • Benign destruction (17110/17111): Note must specify HOW MANY lesions were destroyed
 
-EXAMPLE - WRONG (assumes count):
+VALID COUNT SPECIFICATIONS (count IS specified - use status: "supported"):
+- "Nail debridement of 3 nails" → count = 3
+- "IL triamcinolone injected into 4 thick plaques" → count = 4
+- "Injections to bilateral elbows and knees" → count = 4 (2 + 2)
+- "Treated 6 AKs on scalp" → count = 6
+- "Destroyed 12 verrucae" → count = 12
+
+AMBIGUOUS (count NOT specified - use COUNT_CLARIFICATION):
+- "Nail debridement performed" → HOW MANY nails?
+- "IL injection given to plaques" → HOW MANY plaques?
+- "AKs treated with cryotherapy" → HOW MANY AKs?
+
+EXAMPLE - WRONG (assumes count from exam):
 Note says: "Nail debridement performed. Exam shows pitting on 8 nails."
 WRONG: current_billing includes 11721 (6+ nails) assuming all 8 were treated
 RIGHT: current_billing includes 11720 with status: "count_unspecified", create COUNT_CLARIFICATION card
 
-EXAMPLE - CORRECT (count specified):
+EXAMPLE - CORRECT (count specified in procedure):
 Note says: "Nail debridement of 3 nails performed."
 CORRECT: current_billing includes 11720 (1-5 nails) with status: "supported"
 
@@ -557,13 +590,22 @@ ADD-ON CODES (bill WITH primary codes when applicable):
 • Tissue transfer: 14302 (+3.64 wRVU) for each additional 30 sq cm
 • Full-thickness graft: 15261 (+2.17 wRVU) for each additional graft area
 
-MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
-These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
-- Missing patient counseling: If counseling likely given but not documented → add it
-- Missing follow-up instructions: If return visit timing not specified → add it
-- Missing warning signs education: If skin self-exam not documented → add it
-- Suspicious lesion reasoning: If lesion noted but clinical reasoning absent → add it
-- Risk factor acknowledgment: If high-risk patient but risks not documented → add it
+MEDICOLEGAL ENHANCEMENTS (enhanced_code: "LEGAL", delta_wRVU: 0):
+CRITICAL PRINCIPLE: Avoid selective risk documentation. If documenting one risk in detail,
+document ALL relevant risks - or document none. Selective documentation creates liability:
+"You documented skin cancer risk but not infection - why the inconsistency?"
+
+USE SPARINGLY - Only suggest medicolegal enhancement when documentation is:
+1. MISSING a critical safety element that was clearly discussed (e.g., follow-up timing)
+2. INCOMPLETE for shared decision-making (e.g., "discussed biologics" without any risk mention)
+
+AVOID suggesting medicolegal additions when:
+- Risk discussion is ALREADY documented (even briefly) - don't expand selectively
+- The note says "risks/benefits discussed" - this is legally sufficient
+- Adding would create INCONSISTENT depth (one risk detailed, others brief)
+
+Example: If note says "discussed biologic therapy including risks and benefits" → SUFFICIENT
+Do NOT add separate "skin cancer surveillance" documentation unless ALL other risks are equally expanded
 
 INVALID for Step 3 (move to Step 4):
 - "Injection not documented" when NO injection was given
@@ -897,11 +939,17 @@ Look for unaddressed conditions that could warrant separate work:
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 10: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
 ═══════════════════════════════════════════════════════════════════════════════
-Safety documentation that SHOULD be added even though it doesn't increase billing:
-• Patient counseling on warning signs (ABCDE, non-healing lesions, when to return)
-• Skin cancer risk factor acknowledgment for high-risk patients
-• Follow-up timing and instructions
-• Clinical reasoning for any observed but not biopsied lesions
+CRITICAL PRINCIPLE: Avoid selective risk documentation. Either document ALL relevant
+risks or none - inconsistent depth creates liability ("Why skin cancer but not infection?")
+
+Only suggest medicolegal additions when:
+• Follow-up timing is COMPLETELY missing (not just brief)
+• Risk discussion is ABSENT when high-risk treatment discussed
+• Clinical reasoning needed for atypical lesion NOT biopsied
+
+DO NOT suggest when:
+• "Risks and benefits discussed" already present - legally sufficient
+• Expanding one risk would create inconsistent documentation depth
 
 For medicolegal opportunities, use:
 - category: "medicolegal"
@@ -1237,11 +1285,17 @@ Look for unaddressed conditions that could warrant separate work:
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 10: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
 ═══════════════════════════════════════════════════════════════════════════════
-Safety documentation that SHOULD be added even though it doesn't increase billing:
-• Patient counseling on warning signs (ABCDE, non-healing lesions, when to return)
-• Skin cancer risk factor acknowledgment for high-risk patients
-• Follow-up timing and instructions
-• Clinical reasoning for any observed but not biopsied lesions
+CRITICAL PRINCIPLE: Avoid selective risk documentation. Either document ALL relevant
+risks or none - inconsistent depth creates liability ("Why skin cancer but not infection?")
+
+Only suggest medicolegal additions when:
+• Follow-up timing is COMPLETELY missing (not just brief)
+• Risk discussion is ABSENT when high-risk treatment discussed
+• Clinical reasoning needed for atypical lesion NOT biopsied
+
+DO NOT suggest when:
+• "Risks and benefits discussed" already present - legally sufficient
+• Expanding one risk would create inconsistent documentation depth
 
 For medicolegal opportunities, use:
 - category: "medicolegal"
