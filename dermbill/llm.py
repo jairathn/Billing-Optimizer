@@ -753,23 +753,27 @@ CLINICAL SCENARIO GUIDANCE:
 BILLING REFERENCE:
 {corpus_context}
 
-YOUR TASK: Identify clinical interventions that COULD HAVE BEEN DONE to increase billing. These are actual procedures/services - not documentation fixes.
+YOUR TASK: Identify opportunities to increase billing through:
+1. UPGRADES: Procedures that WERE done but billing is limited by:
+   - Explicit undertreatment: Fewer sites treated than exist (e.g., "4 plaques injected" but 8 on exam)
+   - Ambiguous count: Count not documented, so only baseline tier justifiable (e.g., "nail debridement
+     performed" with no count → can only bill 11720, but exam shows 8 nails → upgrade opportunity)
+2. ADDITIONS: Procedures that were NOT done but clinical findings support
 
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For count-based procedures, compare what was treated to what
-   could have been treated. If more treatable sites exist on exam than were addressed,
-   suggest treating all to reach higher billing tiers.
+1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check:
+   - Was a specific count documented? If not, only baseline tier is billable
+   - Does exam show more treatable sites than were documented/treated?
+   - If exam findings support higher tier → suggest treating/documenting to that level
 
 2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
-   "4 plaques" = 4). Use specific counts in recommendations, not defaults of 1.
+   "4 plaques" = 4). Use specific counts in recommendations.
 
-3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable
-   given the clinical context - not every trigger requires action.
+3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable.
 
-4. ONE CARD PER CODE FAMILY: Aggregate related opportunities (e.g., all IL injections
-   in one card, all AK destruction in one card).
+4. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
@@ -1095,23 +1099,27 @@ CLINICAL SCENARIO GUIDANCE:
 BILLING REFERENCE:
 {corpus_context}
 
-YOUR TASK: Identify clinical interventions that COULD HAVE BEEN DONE to increase billing. These are actual procedures/services - not documentation fixes.
+YOUR TASK: Identify opportunities to increase billing through:
+1. UPGRADES: Procedures that WERE done but billing is limited by:
+   - Explicit undertreatment: Fewer sites treated than exist (e.g., "4 plaques injected" but 8 on exam)
+   - Ambiguous count: Count not documented, so only baseline tier justifiable (e.g., "nail debridement
+     performed" with no count → can only bill 11720, but exam shows 8 nails → upgrade opportunity)
+2. ADDITIONS: Procedures that were NOT done but clinical findings support
 
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For count-based procedures, compare what was treated to what
-   could have been treated. If more treatable sites exist on exam than were addressed,
-   suggest treating all to reach higher billing tiers.
+1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check:
+   - Was a specific count documented? If not, only baseline tier is billable
+   - Does exam show more treatable sites than were documented/treated?
+   - If exam findings support higher tier → suggest treating/documenting to that level
 
 2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
-   "4 plaques" = 4). Use specific counts in recommendations, not defaults of 1.
+   "4 plaques" = 4). Use specific counts in recommendations.
 
-3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable
-   given the clinical context - not every trigger requires action.
+3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable.
 
-4. ONE CARD PER CODE FAMILY: Aggregate related opportunities (e.g., all IL injections
-   in one card, all AK destruction in one card).
+4. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
