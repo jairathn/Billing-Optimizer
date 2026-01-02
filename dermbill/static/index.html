@@ -982,10 +982,28 @@ Plan:
 
                 if (!enhCode) return;
 
+                // Check if enhanced_code is a composite like "99213 + G2211"
+                // If so, extract just the add-on code (G2211)
+                const compositeMatch = enhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
+                if (compositeMatch) {
+                    // This is "99xxx + Gxxxx" format - extract just the add-on
+                    const addOnCode = compositeMatch[1];
+                    // G2211 is 0.33 wRVU, calculate delta from the composite
+                    const addOnWRVU = e.delta_wRVU || 0.33; // Use delta as the add-on value
+                    addOnCodes.push({
+                        code: addOnCode,
+                        description: 'Chronic care management add-on',
+                        wRVU: addOnWRVU,
+                        source: 'Enhanced',
+                        isEM: false
+                    });
+                    return;
+                }
+
                 // Check if this is an E/M upgrade (99xxx -> 99xxx)
                 const isEMUpgrade = /^99\d{3}$/.test(enhCode) && /^99\d{3}$/.test(currCode);
-                // Check if this is an add-on code (G2211, etc)
-                const isAddOn = /^G\d{4}$/.test(enhCode) || enhCode.includes('+');
+                // Check if this is a standalone add-on code (G2211, etc)
+                const isAddOn = /^G\d{4}$/.test(enhCode);
 
                 if (isEMUpgrade) {
                     // Replace E/M code with upgraded version if higher
@@ -1003,7 +1021,7 @@ Plan:
                     addOnCodes.push({
                         code: enhCode,
                         description: e.issue,
-                        wRVU: e.enhanced_wRVU || 0,
+                        wRVU: e.delta_wRVU || e.enhanced_wRVU || 0,
                         source: 'Enhanced',
                         isEM: false
                     });
@@ -1080,70 +1098,135 @@ Plan:
             const opportunities = currentAnalysisData.future_opportunities.opportunities;
             const baselineWRVU = currentBilling.total_wRVU;
 
-            // Build billing codes from current billing + selected opportunities
-            let billingCodes = currentBilling.codes.map(c => ({
+            // Start with current billing codes, marking E/M codes
+            let finalCodes = currentBilling.codes.map(c => ({
                 code: c.code,
                 description: c.description,
                 wRVU: c.wRVU || 0,
-                source: 'Current'
+                source: 'Current',
+                isEM: /^99\d{3}$/.test(c.code)
             }));
 
-            let additionalWRVU = 0;
+            // Track the best E/M code and add-on codes
+            let bestEMCode = finalCodes.find(c => c.isEM);
+            let addOnCodes = [];
+            let procedureCodes = [];
 
             // Go through each opportunity
             opportunities.forEach((o, idx) => {
                 const checkbox = document.querySelector(`.opportunity-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
+                let code, wRVU, desc;
+
                 // Check if this opportunity has tiered options
                 if (o.code_options && o.code_options.length > 0) {
                     const selectedRadio = document.querySelector(`input[name="tier-${idx}"]:checked`);
                     if (selectedRadio) {
-                        const code = selectedRadio.dataset.code;
-                        const wRVU = parseFloat(selectedRadio.dataset.wrvu) || 0;
-                        const desc = selectedRadio.dataset.desc;
-                        billingCodes.push({
+                        code = selectedRadio.dataset.code;
+                        wRVU = parseFloat(selectedRadio.dataset.wrvu) || 0;
+                        desc = selectedRadio.dataset.desc;
+                    } else {
+                        return;
+                    }
+                } else if (o.potential_code) {
+                    code = o.potential_code.code;
+                    wRVU = o.potential_code.wRVU || 0;
+                    desc = o.potential_code.description;
+                } else {
+                    return;
+                }
+
+                // Classify the code
+                const isEM = /^99\d{3}$/.test(code);
+                const isAddOn = /^G\d{4}$/.test(code);
+
+                if (isEM) {
+                    // E/M codes are mutually exclusive - keep the highest
+                    if (!bestEMCode || wRVU > bestEMCode.wRVU) {
+                        bestEMCode = {
                             code: code,
                             description: desc,
                             wRVU: wRVU,
-                            source: 'Opportunity'
-                        });
-                        additionalWRVU += wRVU;
+                            source: 'Opportunity',
+                            isEM: true
+                        };
                     }
-                } else if (o.potential_code) {
-                    billingCodes.push({
-                        code: o.potential_code.code,
-                        description: o.potential_code.description,
-                        wRVU: o.potential_code.wRVU || 0,
-                        source: 'Opportunity'
-                    });
-                    additionalWRVU += o.potential_code.wRVU || 0;
+                } else if (isAddOn) {
+                    // Add-on codes - deduplicate
+                    if (!addOnCodes.find(c => c.code === code)) {
+                        addOnCodes.push({
+                            code: code,
+                            description: desc,
+                            wRVU: wRVU,
+                            source: 'Opportunity',
+                            isEM: false
+                        });
+                    }
+                } else {
+                    // Procedure codes - deduplicate
+                    if (!procedureCodes.find(c => c.code === code)) {
+                        procedureCodes.push({
+                            code: code,
+                            description: desc,
+                            wRVU: wRVU,
+                            source: 'Opportunity',
+                            isEM: false
+                        });
+                    }
                 }
             });
 
-            const totalWRVU = baselineWRVU + additionalWRVU;
+            // Build final consolidated list
+            let consolidatedCodes = [];
+
+            // Add best E/M code first
+            if (bestEMCode) {
+                consolidatedCodes.push(bestEMCode);
+            }
+
+            // Add add-on codes (go with E/M)
+            addOnCodes.forEach(c => consolidatedCodes.push(c));
+
+            // Add non-E/M codes from current billing
+            finalCodes.filter(c => !c.isEM).forEach(c => {
+                if (!consolidatedCodes.find(x => x.code === c.code)) {
+                    consolidatedCodes.push(c);
+                }
+            });
+
+            // Add procedure codes from opportunities
+            procedureCodes.forEach(c => {
+                if (!consolidatedCodes.find(x => x.code === c.code)) {
+                    consolidatedCodes.push(c);
+                }
+            });
+
+            // Calculate totals
+            const totalWRVU = consolidatedCodes.reduce((sum, c) => sum + (c.wRVU || 0), 0);
+            const deltaWRVU = totalWRVU - baselineWRVU;
 
             // Update the summary display
             const deltaDisplay = document.getElementById('opp-delta-display');
             const totalDisplay = document.getElementById('opp-total-display');
-            if (deltaDisplay) deltaDisplay.textContent = '+' + additionalWRVU.toFixed(2);
+            if (deltaDisplay) deltaDisplay.textContent = '+' + deltaWRVU.toFixed(2);
             if (totalDisplay) totalDisplay.textContent = totalWRVU.toFixed(2);
 
             // Update the billing table
             const tbody = document.getElementById('opp-billing-tbody');
             if (tbody) {
-                tbody.innerHTML = billingCodes.map(c => `
+                tbody.innerHTML = consolidatedCodes.map(c => `
                     <tr class="${c.source === 'Opportunity' ? 'opportunity-row' : ''}">
                         <td><strong>${c.code}</strong></td>
                         <td>${c.description}</td>
-                        <td><span class="wrvu-badge">${c.wRVU.toFixed(2)}</span></td>
+                        <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                         <td><span style="color: ${c.source === 'Opportunity' ? '#28a745' : '#6c757d'}; font-size: 12px;">${c.source}</span></td>
                     </tr>
                 `).join('') + `
                     <tr class="total-row">
                         <td colspan="2"><strong>TOTAL</strong></td>
                         <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
-                        <td><span class="delta-highlight">+${additionalWRVU.toFixed(2)} vs baseline</span></td>
+                        <td><span class="delta-highlight">+${deltaWRVU.toFixed(2)} vs baseline</span></td>
                     </tr>
                 `;
             }
