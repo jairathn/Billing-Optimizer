@@ -334,11 +334,16 @@ JSON format:
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
 
-OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- MINIMAL NECESSARY DOCUMENTATION: Document the minimum required to support billing codes
+- LESS IS MORE: Excessive detail creates litigation risk - every word can be scrutinized
+- Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
+- AVOID: Speculative language, unnecessary adjectives, redundant details
+- AVOID: Documenting things you didn't examine or can't defend
+- DO: Use standard medical terminology, objective findings, brief clinical rationale
+- The note should defend the billing, not provide ammunition for plaintiff attorneys
+- If you didn't do it, don't document it. If you did it, document it briefly."""
 
         system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
@@ -347,7 +352,12 @@ CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+- Document the minimum necessary to justify billing codes
+- Over-documentation creates malpractice liability - every detail can be cross-examined
+- Concise, factual notes are legally safer than verbose, detailed ones
+- Never include Time, Coding, or billing code sections
+
 Respond with valid JSON only."""
 
         try:
@@ -444,11 +454,16 @@ JSON format:
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
 
-OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- MINIMAL NECESSARY DOCUMENTATION: Document the minimum required to support billing codes
+- LESS IS MORE: Excessive detail creates litigation risk - every word can be scrutinized
+- Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
+- AVOID: Speculative language, unnecessary adjectives, redundant details
+- AVOID: Documenting things you didn't examine or can't defend
+- DO: Use standard medical terminology, objective findings, brief clinical rationale
+- The note should defend the billing, not provide ammunition for plaintiff attorneys
+- If you didn't do it, don't document it. If you did it, document it briefly."""
 
         system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
@@ -457,7 +472,12 @@ CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+- Document the minimum necessary to justify billing codes
+- Over-documentation creates malpractice liability - every detail can be cross-examined
+- Concise, factual notes are legally safer than verbose, detailed ones
+- Never include Time, Coding, or billing code sections
+
 Respond with valid JSON only."""
 
         try:
@@ -733,11 +753,16 @@ RESPOND WITH JSON ONLY:
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
 "total_potential_additional_wRVU": 0.00}}
 
-OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- MINIMAL NECESSARY DOCUMENTATION: Document the minimum required to support billing codes
+- LESS IS MORE: Excessive detail creates litigation risk - every word can be scrutinized
+- Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
+- AVOID: Speculative language, unnecessary adjectives, redundant details
+- AVOID: Documenting things you didn't examine or can't defend
+- DO: Use standard medical terminology, objective findings, brief clinical rationale
+- The note should defend the billing, not provide ammunition for plaintiff attorneys
+- If you didn't do it, don't document it. If you did it, document it briefly."""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -752,7 +777,11 @@ E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actu
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+- Document the minimum necessary to justify billing codes
+- Over-documentation creates malpractice liability - every detail can be cross-examined
+- Concise, factual notes are legally safer than verbose, detailed ones
+- Never include Time, Coding, or billing code sections
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
@@ -1023,11 +1052,16 @@ RESPOND WITH JSON ONLY:
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
 "total_potential_additional_wRVU": 0.00}}
 
-OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+OPTIMIZED NOTE RULES - MEDICOLEGAL DOCUMENTATION PRINCIPLES:
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- MINIMAL NECESSARY DOCUMENTATION: Document the minimum required to support billing codes
+- LESS IS MORE: Excessive detail creates litigation risk - every word can be scrutinized
+- Be CONCISE and FACTUAL: State what was done, not elaborate descriptions
+- AVOID: Speculative language, unnecessary adjectives, redundant details
+- AVOID: Documenting things you didn't examine or can't defend
+- DO: Use standard medical terminology, objective findings, brief clinical rationale
+- The note should defend the billing, not provide ammunition for plaintiff attorneys
+- If you didn't do it, don't document it. If you did it, document it briefly."""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -1042,7 +1076,11 @@ E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actu
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal, defensible documentation.
+- Document the minimum necessary to justify billing codes
+- Over-documentation creates malpractice liability - every detail can be cross-examined
+- Concise, factual notes are legally safer than verbose, detailed ones
+- Never include Time, Coding, or billing code sections
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
@@ -1186,17 +1224,24 @@ INSTRUCTIONS:
 3. For opportunities (things that weren't done): document them as if they WERE done
 4. For enhancements: add the documentation details that support higher billing
 5. The final note should fully support billing all selected codes
-6. Keep the note professional and clinically appropriate
-7. Output ONLY the complete rewritten note - no explanations
-8. Do NOT include "Time:" or face-to-face time sections
-9. Do NOT include "Coding:" or billing code sections - just clinical documentation
+6. Output ONLY the complete rewritten note - no explanations
+7. Do NOT include "Time:" or face-to-face time sections
+8. Do NOT include "Coding:" or billing code sections - just clinical documentation
 
-CRITICAL: Match the original note's structure and formatting style exactly.
+MEDICOLEGAL DOCUMENTATION PRINCIPLES - CRITICAL:
+- MINIMAL NECESSARY: Document the MINIMUM required to support billing codes
+- LESS IS MORE: Excessive detail creates litigation risk - every word can be cross-examined
+- Be CONCISE: Brief, factual statements only - no elaborate descriptions
+- AVOID: Speculative language, unnecessary adjectives, redundant details, flowery prose
+- DO: Use standard medical terminology, objective findings, brief clinical rationale
+- The note should defend the billing, NOT provide ammunition for plaintiff attorneys
+
+Match the original note's structure and formatting style exactly.
 OUTPUT ONLY CLINICAL DOCUMENTATION - no time, no coding, no billing codes.
 
 OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
 
-        system = """Medical documentation expert. Create notes that support maximum billing.
+        system = """Medical documentation expert. Create minimal, defensible notes that support billing.
 
 CRITICAL: Preserve the original note's format and structure:
 - If input has sections (HPI, Physical Exam, Assessment, Plan), keep those sections
@@ -1207,6 +1252,13 @@ Write the note AS IF all selected items were actually performed during the visit
 - If an injection opportunity is selected, document that the injection WAS done
 - If an E/M upgrade is selected, document the MDM complexity that supports it
 - The note should be copy-paste ready to support billing all selected codes
+
+MEDICOLEGAL DOCUMENTATION PHILOSOPHY:
+- Document the MINIMUM NECESSARY to justify each billing code
+- Over-documentation creates malpractice liability - every detail can be cross-examined by attorneys
+- Concise, factual notes are legally safer than verbose, detailed ones
+- Less description = less ammunition for litigation
+- Use standard terminology, brief statements, objective findings
 
 NEVER include Time, Coding, or billing code sections. Output only pure clinical documentation.
 Output only the complete note text, no commentary."""
