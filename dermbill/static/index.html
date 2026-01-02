@@ -778,6 +778,28 @@ Plan:
             '11103': { mue: 14, wRVU: 0.37, addOn: true },
             '11104': { mue: 1, wRVU: 0.81 },
             '11105': { mue: 9, wRVU: 0.44, addOn: true },
+            // Mohs surgery
+            '17311': { mue: 2, wRVU: 10.10 },  // Stage 1, H/N/HF, ≤5 blocks (max 2 lesions/visit)
+            '17312': { mue: 20, wRVU: 0.95, addOn: true },  // Additional blocks beyond 5
+            '17313': { mue: 8, wRVU: 6.57, addOn: true },   // Stage 2+, ≤5 blocks
+            '17314': { mue: 40, wRVU: 0.44, addOn: true },  // Stage 2+ additional blocks
+            '17315': { mue: 2, wRVU: 7.99 },   // Stage 1, trunk/extremities
+            '17316': { mue: 20, wRVU: 0.74, addOn: true },  // T/E additional blocks
+            '17317': { mue: 8, wRVU: 5.21, addOn: true },   // T/E stage 2+
+            // Repairs - intermediate
+            '12031': { mue: 3, wRVU: 2.12 },  // Scalp/trunk 2.5cm or less
+            '12032': { mue: 3, wRVU: 2.25 },  // Scalp/trunk 2.6-7.5cm
+            '12034': { mue: 3, wRVU: 2.50 },  // Scalp/trunk 7.6-12.5cm
+            '12051': { mue: 3, wRVU: 2.62 },  // Face 2.5cm or less
+            '12052': { mue: 3, wRVU: 2.80 },  // Face 2.6-5.0cm
+            '12053': { mue: 3, wRVU: 3.15 },  // Face 5.1-7.5cm
+            // Repairs - complex
+            '13131': { mue: 3, wRVU: 4.75 },  // Complex, face 1.1-2.5cm
+            '13132': { mue: 3, wRVU: 5.82 },  // Complex, face 2.6-7.5cm
+            // Flaps
+            '14060': { mue: 3, wRVU: 8.09 },  // Advancement flap, face ≤10 sq cm
+            '14061': { mue: 3, wRVU: 10.44 }, // Advancement flap, face 10.1-30 sq cm
+            '15260': { mue: 3, wRVU: 8.99 },  // Full thickness graft, nose/eyelids ≤20 sq cm
         };
 
         // Helper to sanitize codes: filter non-billable and correct wRVU from MUE_DATA
@@ -797,6 +819,48 @@ Plan:
                         wRVU: mueData?.wRVU ?? c.wRVU ?? 0
                     };
                 });
+        }
+
+        // MUE enforcement: check codes against limits, cap at MUE, return warnings
+        // Returns: { codes: [...with mueExceeded flag], warnings: [...] }
+        function applyMUELimits(codes) {
+            if (!codes || !Array.isArray(codes)) return { codes: [], warnings: [] };
+
+            const warnings = [];
+            const codeCount = {}; // Track how many times each code appears
+
+            // Count occurrences
+            codes.forEach(c => {
+                const code = c.code;
+                codeCount[code] = (codeCount[code] || 0) + (c.units || 1);
+            });
+
+            // Check against MUE and flag
+            const processedCodes = codes.map(c => {
+                const code = c.code;
+                const mueData = MUE_DATA[code];
+                const mueLimit = mueData?.mue;
+                const totalUnits = codeCount[code] || 1;
+
+                if (mueLimit && totalUnits > mueLimit) {
+                    // Exceeds MUE - flag it
+                    warnings.push({
+                        code: code,
+                        requested: totalUnits,
+                        limit: mueLimit,
+                        message: `${code} exceeds MUE limit: ${totalUnits} requested, max ${mueLimit}/visit. Only ${mueLimit} will be reimbursed.`
+                    });
+                    return {
+                        ...c,
+                        mueExceeded: true,
+                        mueLimit: mueLimit,
+                        requestedUnits: totalUnits
+                    };
+                }
+                return c;
+            });
+
+            return { codes: processedCodes, warnings };
         }
 
         // Build complete billing codes by merging baseline + changes
@@ -1628,21 +1692,46 @@ Plan:
                 const codeUpper = (c.code || '').toUpperCase().trim();
                 return codeUpper !== 'LEGAL' && codeUpper !== 'COUNT_CLARIFY';
             });
+
+            // Apply MUE limits and get warnings
+            const { codes: mueCheckedCodes, warnings: mueWarnings } = applyMUELimits(billableCodes);
+
+            // Display MUE warnings
+            let warningContainer = document.getElementById('enh-mue-warnings');
+            if (!warningContainer) {
+                warningContainer = document.createElement('div');
+                warningContainer.id = 'enh-mue-warnings';
+                const table = document.getElementById('enh-billing-table');
+                if (table) table.parentNode.insertBefore(warningContainer, table);
+            }
+            if (mueWarnings.length > 0) {
+                warningContainer.innerHTML = mueWarnings.map(w => `
+                    <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; color: #856404;">
+                        <strong>⚠️ MUE Warning:</strong> ${w.message}
+                    </div>
+                `).join('');
+            } else {
+                warningContainer.innerHTML = '';
+            }
+
             if (tbody) {
-                if (billableCodes.length === 0) {
+                if (mueCheckedCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
-                    tbody.innerHTML = billableCodes.map(c => {
+                    tbody.innerHTML = mueCheckedCodes.map(c => {
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
-                        const rowClass = c.fromBaseline ? '' : 'style="background: #e8f5e9;"';
+                        const rowStyle = c.mueExceeded
+                            ? 'style="background: #fff3cd;"'
+                            : (c.fromBaseline ? '' : 'style="background: #e8f5e9;"');
                         const upgradeIcon = c.upgraded ? '↑ ' : '';
+                        const mueIcon = c.mueExceeded ? '⚠️ ' : '';
                         return `
-                            <tr ${rowClass}>
-                                <td><strong>${upgradeIcon}${c.code}</strong></td>
+                            <tr ${rowStyle}>
+                                <td><strong>${mueIcon}${upgradeIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
-                                <td>${c.description}</td>
+                                <td>${c.description}${c.mueExceeded ? ` <small>(MUE: ${c.mueLimit})</small>` : ''}</td>
                                 <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
@@ -1812,22 +1901,47 @@ Plan:
                 const codeUpper = (c.code || '').toUpperCase().trim();
                 return codeUpper !== 'LEGAL' && codeUpper !== 'COUNT_CLARIFY';
             });
+
+            // Apply MUE limits and get warnings
+            const { codes: mueCheckedCodes, warnings: mueWarnings } = applyMUELimits(billableCodes);
+
+            // Display MUE warnings
+            let warningContainer = document.getElementById('opp-mue-warnings');
+            if (!warningContainer) {
+                warningContainer = document.createElement('div');
+                warningContainer.id = 'opp-mue-warnings';
+                const table = document.getElementById('opp-billing-table');
+                if (table) table.parentNode.insertBefore(warningContainer, table);
+            }
+            if (mueWarnings.length > 0) {
+                warningContainer.innerHTML = mueWarnings.map(w => `
+                    <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; color: #856404;">
+                        <strong>⚠️ MUE Warning:</strong> ${w.message}
+                    </div>
+                `).join('');
+            } else {
+                warningContainer.innerHTML = '';
+            }
+
             if (tbody) {
-                if (billableCodes.length === 0) {
+                if (mueCheckedCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
-                    tbody.innerHTML = billableCodes.map(c => {
-                        const rowClass = c.fromBaseline ? '' : 'style="background: #e8f5e9;"';
+                    tbody.innerHTML = mueCheckedCodes.map(c => {
+                        const rowStyle = c.mueExceeded
+                            ? 'style="background: #fff3cd;"'
+                            : (c.fromBaseline ? '' : 'style="background: #e8f5e9;"');
                         const upgradeIcon = c.upgraded ? '↑ ' : '';
                         const aggregatedIcon = c.isAggregated ? '⊕ ' : '';
+                        const mueIcon = c.mueExceeded ? '⚠️ ' : '';
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
                         return `
-                            <tr ${rowClass}>
-                                <td><strong>${upgradeIcon}${aggregatedIcon}${c.code}</strong></td>
+                            <tr ${rowStyle}>
+                                <td><strong>${mueIcon}${upgradeIcon}${aggregatedIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
-                                <td>${c.description}</td>
+                                <td>${c.description}${c.mueExceeded ? ` <small>(MUE: ${c.mueLimit})</small>` : ''}</td>
                                 <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
