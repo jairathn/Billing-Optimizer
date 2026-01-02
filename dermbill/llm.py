@@ -754,18 +754,19 @@ BILLING REFERENCE:
 {corpus_context}
 
 YOUR TASK: Identify opportunities to increase billing through:
-1. UPGRADES: Procedures that WERE done but could have treated MORE sites to reach higher tiers
+1. UPGRADES: Procedures that WERE done but billing is limited by:
+   - Explicit undertreatment: Fewer sites treated than exist (e.g., "4 plaques injected" but 8 on exam)
+   - Ambiguous count: Count not documented, so only baseline tier justifiable (e.g., "nail debridement
+     performed" with no count → can only bill 11720, but exam shows 8 nails → upgrade opportunity)
 2. ADDITIONS: Procedures that were NOT done but clinical findings support
 
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check exam
-   findings to see if more treatable sites exist. If treating more would reach a
-   higher billing tier, suggest the upgrade.
-
-   Process: Plan says "X performed" → Exam shows "N sites with pathology" →
-   If N exceeds current tier threshold → recommend treating all N
+1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check:
+   - Was a specific count documented? If not, only baseline tier is billable
+   - Does exam show more treatable sites than were documented/treated?
+   - If exam findings support higher tier → suggest treating/documenting to that level
 
 2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
    "4 plaques" = 4). Use specific counts in recommendations.
@@ -1099,18 +1100,19 @@ BILLING REFERENCE:
 {corpus_context}
 
 YOUR TASK: Identify opportunities to increase billing through:
-1. UPGRADES: Procedures that WERE done but could have treated MORE sites to reach higher tiers
+1. UPGRADES: Procedures that WERE done but billing is limited by:
+   - Explicit undertreatment: Fewer sites treated than exist (e.g., "4 plaques injected" but 8 on exam)
+   - Ambiguous count: Count not documented, so only baseline tier justifiable (e.g., "nail debridement
+     performed" with no count → can only bill 11720, but exam shows 8 nails → upgrade opportunity)
 2. ADDITIONS: Procedures that were NOT done but clinical findings support
 
 ═══════════════════════════════════════════════════════════════════════════════
 CORE PRINCIPLES
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check exam
-   findings to see if more treatable sites exist. If treating more would reach a
-   higher billing tier, suggest the upgrade.
-
-   Process: Plan says "X performed" → Exam shows "N sites with pathology" →
-   If N exceeds current tier threshold → recommend treating all N
+1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check:
+   - Was a specific count documented? If not, only baseline tier is billable
+   - Does exam show more treatable sites than were documented/treated?
+   - If exam findings support higher tier → suggest treating/documenting to that level
 
 2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
    "4 plaques" = 4). Use specific counts in recommendations.
