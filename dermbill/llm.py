@@ -670,8 +670,11 @@ ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
   "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
-  "potential_code": {{"code": "99214-25", "description": "Moderate MDM with procedure", "wRVU": 1.92}},
+  "potential_code": {{"code": "99214", "description": "Moderate MDM (add -25 mod if billing with procedure)", "wRVU": 1.92}},
   "teaching_point": "[Why this level is appropriate and defensible]"}}
+
+NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
+The -25 modifier is added when billing E/M same-day with a procedure - mention this in description.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 8: COMORBIDITY CAPTURE
@@ -724,8 +727,8 @@ CRITICAL RULES:
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
 
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
-NEVER output a range like "99214-99215". Output exactly "99214-25" OR "99215-25", not both.
-Tell the provider exactly what to document to support that specific level.
+NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
+Mention the -25 modifier in the description if procedures are being billed same-day.
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
@@ -949,8 +952,11 @@ ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
   "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
-  "potential_code": {{"code": "99214-25", "description": "Moderate MDM with procedure", "wRVU": 1.92}},
+  "potential_code": {{"code": "99214", "description": "Moderate MDM (add -25 mod if billing with procedure)", "wRVU": 1.92}},
   "teaching_point": "[Why this level is appropriate and defensible]"}}
+
+NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
+The -25 modifier is added when billing E/M same-day with a procedure - mention this in description.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 8: COMORBIDITY CAPTURE
@@ -1003,8 +1009,8 @@ CRITICAL RULES:
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
 
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
-NEVER output a range like "99214-99215". Output exactly "99214-25" OR "99215-25", not both.
-Tell the provider exactly what to document to support that specific level.
+NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
+Mention the -25 modifier in the description if procedures are being billed same-day.
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
