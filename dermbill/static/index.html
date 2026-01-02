@@ -547,6 +547,21 @@
             font-style: italic;
             margin-top: 5px;
         }
+
+        .modifier-badge {
+            display: inline-block;
+            background: #ffc107;
+            color: #212529;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: help;
+        }
+
+        .modifier-badge:hover {
+            background: #e0a800;
+        }
     </style>
 </head>
 <body>
@@ -713,6 +728,157 @@ Plan:
             return { code: null, wRVU: 0, desc: '' };
         }
 
+        // Apply appropriate modifiers to billing codes
+        // Strategy: Apply modifiers to LOWEST value codes first to minimize payment reduction
+        function applyModifiers(codes) {
+            if (!codes || codes.length === 0) return codes;
+
+            // Identify E/M codes and procedure codes
+            const emCodes = codes.filter(c => /^99\d{3}$/.test(c.code));
+            const procedureCodes = codes.filter(c => !/^99\d{3}$/.test(c.code) && !/^G\d{4}$/.test(c.code));
+            const addOnCodes = codes.filter(c => /^G\d{4}$/.test(c.code));
+
+            // Apply -25 to E/M if there are procedures
+            if (emCodes.length > 0 && procedureCodes.length > 0) {
+                emCodes.forEach(em => {
+                    em.modifier = '-25';
+                    em.modifierReason = 'Separate E/M with same-day procedure';
+                });
+            }
+
+            // Helper to extract anatomic site from description
+            function extractSite(desc) {
+                if (!desc) return 'general';
+                const d = desc.toLowerCase();
+                // Check for laterality first
+                if (d.includes('left') || d.includes(' l ') || d.includes('(l)')) return 'left';
+                if (d.includes('right') || d.includes(' r ') || d.includes('(r)')) return 'right';
+                if (d.includes('bilateral')) return 'bilateral';
+                // Check for body regions
+                if (d.includes('face') || d.includes('forehead') || d.includes('cheek') || d.includes('nose') || d.includes('lip') || d.includes('eyelid')) return 'face';
+                if (d.includes('scalp') || d.includes('head')) return 'scalp';
+                if (d.includes('neck')) return 'neck';
+                if (d.includes('trunk') || d.includes('chest') || d.includes('back') || d.includes('abdomen')) return 'trunk';
+                if (d.includes('arm') || d.includes('forearm') || d.includes('elbow') || d.includes('wrist')) return 'arm';
+                if (d.includes('hand') || d.includes('finger')) return 'hand';
+                if (d.includes('leg') || d.includes('thigh') || d.includes('knee') || d.includes('ankle')) return 'leg';
+                if (d.includes('foot') || d.includes('toe')) return 'foot';
+                if (d.includes('nail')) return 'nail';
+                if (d.includes('genital')) return 'genital';
+                return 'general';
+            }
+
+            // Helper to get procedure type from code
+            function getProcedureType(code) {
+                if (!code) return 'other';
+                if (code.startsWith('117')) return 'nail';
+                if (code.startsWith('119')) return 'injection';
+                if (code.startsWith('170') || code.startsWith('171')) return 'destruction';
+                if (code.startsWith('111')) return 'biopsy';
+                if (code.startsWith('114') || code.startsWith('116')) return 'excision';
+                if (code.startsWith('100')) return 'surgery';
+                if (code.startsWith('173')) return 'peel';
+                if (code.startsWith('540') || code.startsWith('565')) return 'genital';
+                return 'other';
+            }
+
+            // STEP 1: Handle bilateral procedures (-50 or -LT/-RT)
+            // Group by procedure code to find duplicates
+            const codeGroups = {};
+            procedureCodes.forEach((proc, idx) => {
+                if (!codeGroups[proc.code]) codeGroups[proc.code] = [];
+                codeGroups[proc.code].push({ proc, idx });
+            });
+
+            // Check for bilateral indicators
+            Object.entries(codeGroups).forEach(([code, items]) => {
+                if (items.length === 2) {
+                    // Two of the same code - check if left/right
+                    const sites = items.map(i => extractSite(i.proc.description));
+                    if ((sites[0] === 'left' && sites[1] === 'right') ||
+                        (sites[0] === 'right' && sites[1] === 'left')) {
+                        // Apply -LT and -RT
+                        items.forEach(item => {
+                            const site = extractSite(item.proc.description);
+                            if (site === 'left') {
+                                item.proc.modifier = '-LT';
+                                item.proc.modifierReason = 'Left side';
+                            } else if (site === 'right') {
+                                item.proc.modifier = '-RT';
+                                item.proc.modifierReason = 'Right side';
+                            }
+                        });
+                    }
+                } else if (items.length === 1) {
+                    // Single code - check if bilateral in description
+                    const desc = items[0].proc.description?.toLowerCase() || '';
+                    if (desc.includes('bilateral')) {
+                        items[0].proc.modifier = '-50';
+                        items[0].proc.modifierReason = 'Bilateral procedure';
+                    }
+                }
+            });
+
+            // STEP 2: Apply -XS or -59 to distinct procedures
+            // Group by anatomic site (from description) AND procedure type
+            const siteTypeGroups = {};
+            procedureCodes.forEach((proc, idx) => {
+                const site = extractSite(proc.description);
+                const procType = getProcedureType(proc.code);
+                const key = `${site}:${procType}`;
+
+                if (!siteTypeGroups[key]) siteTypeGroups[key] = [];
+                siteTypeGroups[key].push({ proc, idx, wRVU: proc.wRVU || 0, site, procType });
+            });
+
+            // Determine which modifier to use
+            // -XS: Different anatomic structure (preferred in derm)
+            // -59: Same structure but distinct procedure (fallback)
+            const groupKeys = Object.keys(siteTypeGroups);
+
+            if (groupKeys.length > 1) {
+                // Multiple distinct groups - flatten and sort by wRVU descending
+                let allProcs = [];
+                groupKeys.forEach(key => {
+                    siteTypeGroups[key].forEach(item => {
+                        allProcs.push({ ...item, groupKey: key });
+                    });
+                });
+
+                // Sort by wRVU DESCENDING - highest value first gets NO modifier
+                allProcs.sort((a, b) => (b.wRVU || 0) - (a.wRVU || 0));
+
+                // Track sites we've seen to determine XS vs 59
+                const seenSites = new Set();
+                let isFirst = true;
+
+                allProcs.forEach(item => {
+                    if (item.proc.modifier) return; // Already has modifier (bilateral)
+
+                    if (isFirst) {
+                        // Highest value procedure - no additional modifier (primary)
+                        seenSites.add(item.site);
+                        isFirst = false;
+                    } else {
+                        // Determine appropriate modifier
+                        if (!seenSites.has(item.site) || item.site === 'general') {
+                            // Different site - use -XS
+                            item.proc.modifier = '-XS';
+                            item.proc.modifierReason = 'Separate anatomic structure';
+                            seenSites.add(item.site);
+                        } else {
+                            // Same site, different procedure type - use -59
+                            item.proc.modifier = '-59';
+                            item.proc.modifierReason = 'Distinct procedural service';
+                        }
+                    }
+                });
+            }
+
+            // Combine back
+            return [...emCodes, ...procedureCodes, ...addOnCodes];
+        }
+
         function clearAll() {
             document.getElementById('clinical-note').value = '';
             document.getElementById('placeholder').style.display = 'block';
@@ -828,27 +994,34 @@ Plan:
             `;
 
             if (currentBilling.codes.length) {
+                // Apply modifiers to current billing codes
+                const currentCodesWithModifiers = applyModifiers([...currentBilling.codes]);
+
                 currentHtml += `
                     <table class="billing-table">
                         <thead>
                             <tr>
                                 <th>Code</th>
-                                <th>Modifier</th>
+                                <th>Mod</th>
                                 <th>Description</th>
                                 <th>wRVU</th>
                                 <th>Status</th>
                             </tr>
                         </thead>
                         <tbody>
-                            ${currentBilling.codes.map(c => `
+                            ${currentCodesWithModifiers.map(c => {
+                                const modifierDisplay = c.modifier ?
+                                    `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
+                                    '-';
+                                return `
                                 <tr>
                                     <td><strong>${c.code}</strong></td>
-                                    <td>${c.modifier || '-'}</td>
+                                    <td>${modifierDisplay}</td>
                                     <td>${c.description}</td>
                                     <td><span class="wrvu-badge">${c.wRVU.toFixed(2)}</span></td>
                                     <td class="${c.status === 'supported' ? 'status-supported' : 'status-missing'}">${c.status}</td>
                                 </tr>
-                            `).join('')}
+                            `}).join('')}
                             <tr class="total-row">
                                 <td colspan="3"><strong>TOTAL</strong></td>
                                 <td><span class="wrvu-badge">${currentBilling.total_wRVU.toFixed(2)}</span></td>
@@ -897,7 +1070,7 @@ Plan:
                 <h4 style="margin-top: 20px;">Additional Codes from Selected Enhancements</h4>
                 <table class="billing-table" id="enh-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Description</th><th>+wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>+wRVU</th></tr>
                     </thead>
                     <tbody id="enh-billing-tbody">
                     </tbody>
@@ -975,7 +1148,7 @@ Plan:
                 <h4 style="margin-top: 20px;">Additional Codes from Selected Opportunities</h4>
                 <table class="billing-table" id="opp-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Description</th><th>+wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>+wRVU</th></tr>
                     </thead>
                     <tbody id="opp-billing-tbody">
                     </tbody>
@@ -1178,21 +1351,30 @@ Plan:
             if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
             if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
 
+            // Apply modifiers to enhanced codes
+            const codesWithModifiers = applyModifiers(enhancedCodes);
+
             // Update the billing table - ONLY show enhanced codes
             const tbody = document.getElementById('enh-billing-tbody');
             if (tbody) {
-                if (enhancedCodes.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #6c757d;">No enhancements selected</td></tr>`;
+                if (codesWithModifiers.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No enhancements selected</td></tr>`;
                 } else {
-                    tbody.innerHTML = enhancedCodes.map(c => `
-                        <tr class="opportunity-row">
-                            <td><strong>${c.code}</strong></td>
-                            <td>${c.description}</td>
-                            <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
-                        </tr>
-                    `).join('') + `
+                    tbody.innerHTML = codesWithModifiers.map(c => {
+                        const modifierDisplay = c.modifier ?
+                            `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
+                            '-';
+                        return `
+                            <tr class="opportunity-row">
+                                <td><strong>${c.code}</strong></td>
+                                <td>${modifierDisplay}</td>
+                                <td>${c.description}</td>
+                                <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
+                            </tr>
+                        `;
+                    }).join('') + `
                         <tr class="total-row">
-                            <td colspan="2"><strong>ADDITIONAL wRVU</strong></td>
+                            <td colspan="3"><strong>ADDITIONAL wRVU</strong></td>
                             <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
                         </tr>
                     `;
@@ -1305,25 +1487,32 @@ Plan:
             if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
             if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
 
+            // Apply modifiers to opportunity codes
+            const codesWithModifiers = applyModifiers(opportunityCodes);
+
             // Update the billing table - ONLY show opportunity codes
             const tbody = document.getElementById('opp-billing-tbody');
             if (tbody) {
-                if (opportunityCodes.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #6c757d;">No opportunities selected</td></tr>`;
+                if (codesWithModifiers.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No opportunities selected</td></tr>`;
                 } else {
-                    tbody.innerHTML = opportunityCodes.map(c => {
+                    tbody.innerHTML = codesWithModifiers.map(c => {
                         const aggregatedClass = c.isAggregated ? 'style="background: #e8f5e9 !important;"' : '';
                         const aggregatedIcon = c.isAggregated ? '<span title="Aggregated from multiple opportunities">⊕</span> ' : '';
+                        const modifierDisplay = c.modifier ?
+                            `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
+                            '-';
                         return `
                             <tr class="opportunity-row" ${aggregatedClass}>
                                 <td><strong>${aggregatedIcon}${c.code}</strong></td>
+                                <td>${modifierDisplay}</td>
                                 <td>${c.description}</td>
                                 <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
                             </tr>
                         `;
                     }).join('') + `
                         <tr class="total-row">
-                            <td colspan="2"><strong>ADDITIONAL wRVU</strong></td>
+                            <td colspan="3"><strong>ADDITIONAL wRVU</strong></td>
                             <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
                         </tr>
                     `;
