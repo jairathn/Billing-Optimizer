@@ -1293,16 +1293,21 @@ Plan:
                     }
 
                     // Regular enhancement card (non-count-clarify)
+                    // Use MUE_DATA wRVU if available
+                    const currentWRVU = e.current_code && MUE_DATA[e.current_code] ? MUE_DATA[e.current_code].wRVU : e.current_wRVU;
+                    const enhancedWRVU = e.enhanced_code && MUE_DATA[e.enhanced_code] ? MUE_DATA[e.enhanced_code].wRVU : e.enhanced_wRVU;
+                    const deltaWRVU = enhancedWRVU - currentWRVU;
+
                     return `
                         <div class="enhancement-card ${e.priority}">
                             <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
                                 <input type="checkbox" class="enhancement-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
                                 <div style="flex: 1;">
                                     <h4 style="margin: 0;">${e.issue}</h4>
-                                    ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${e.current_wRVU.toFixed(2)} wRVU)</p>` : ''}
-                                    ${e.enhanced_code && e.enhanced_code !== 'LEGAL' ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${e.enhanced_wRVU.toFixed(2)} wRVU)</p>` : ''}
+                                    ${e.current_code ? `<p>Current: <strong>${e.current_code}</strong> (${currentWRVU.toFixed(2)} wRVU)</p>` : ''}
+                                    ${e.enhanced_code && e.enhanced_code !== 'LEGAL' ? `<p>Enhanced: <strong>${e.enhanced_code}</strong> (${enhancedWRVU.toFixed(2)} wRVU)</p>` : ''}
                                     ${e.enhanced_code === 'LEGAL' ? `<p><strong>Type:</strong> <span class="code-legal">LEGAL</span> (Liability Protection)</p>` : ''}
-                                    ${e.delta_wRVU > 0 ? `<p class="delta-positive">+${e.delta_wRVU.toFixed(2)} wRVU improvement</p>` : ''}
+                                    ${deltaWRVU > 0 ? `<p class="delta-positive">+${deltaWRVU.toFixed(2)} wRVU improvement</p>` : ''}
                                     <div class="suggested-text">${e.suggested_addition}</div>
                                 </div>
                             </label>
