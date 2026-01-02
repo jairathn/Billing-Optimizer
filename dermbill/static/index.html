@@ -1277,20 +1277,35 @@ Plan:
             const enhancements = currentAnalysisData.documentation_enhancements.enhancements;
             const baselineWRVU = currentBilling.total_wRVU;
 
+            // Helper to extract clean CPT code from potentially malformed strings
+            // e.g., "99213 (with complete documentation)" -> "99213"
+            function cleanCode(code) {
+                if (!code) return null;
+                // Extract just the CPT code (5 digits or G + 4 digits)
+                const match = code.match(/^(99\d{3}|G\d{4}|\d{5})/);
+                return match ? match[1] : code.trim();
+            }
+
             // Only collect ENHANCED codes (what's being added/upgraded)
             let enhancedCodes = [];
             let totalDelta = 0;
+            let hasEMUpgrade = false;
+            let emUpgradeCode = null;
+            let emUpgradeDelta = 0;
 
             // Process selected enhancements
             enhancements.forEach((e, idx) => {
                 const checkbox = document.querySelector(`.enhancement-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
-                const enhCode = e.enhanced_code;
-                if (!enhCode) return;
+                const rawEnhCode = e.enhanced_code;
+                if (!rawEnhCode) return;
+
+                const enhCode = cleanCode(rawEnhCode);
+                const currentCode = cleanCode(e.current_code);
 
                 // Check if enhanced_code is a composite like "99213 + G2211"
-                const compositeMatch = enhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
+                const compositeMatch = rawEnhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
                 if (compositeMatch) {
                     const addOnCode = compositeMatch[1];
                     const addOnWRVU = e.delta_wRVU || 0.33;
@@ -1305,25 +1320,30 @@ Plan:
                     return;
                 }
 
-                // For E/M upgrades, show the delta (upgrade benefit)
-                const isEMUpgrade = /^99\d{3}$/.test(enhCode) && /^99\d{3}$/.test(e.current_code);
-                if (isEMUpgrade) {
-                    // Only add if not already added (take highest upgrade)
-                    const existing = enhancedCodes.find(c => /^99\d{3}$/.test(c.code));
-                    if (!existing || e.delta_wRVU > existing.wRVU) {
-                        if (existing) {
-                            totalDelta -= existing.wRVU;
-                            enhancedCodes = enhancedCodes.filter(c => c.code !== existing.code);
+                // Check if this is an E/M code (99xxx)
+                const isEMCode = /^99\d{3}$/.test(enhCode);
+                const isCurrentEM = currentCode && /^99\d{3}$/.test(currentCode);
+
+                if (isEMCode) {
+                    // E/M code - check if it's an upgrade or just documentation improvement
+                    if (isCurrentEM && enhCode !== currentCode) {
+                        // This is an E/M upgrade (e.g., 99213 -> 99214)
+                        // Only keep the highest upgrade
+                        if (!hasEMUpgrade || e.delta_wRVU > emUpgradeDelta) {
+                            emUpgradeCode = {
+                                code: enhCode,
+                                description: `E/M upgrade (from ${currentCode})`,
+                                wRVU: e.delta_wRVU || 0
+                            };
+                            emUpgradeDelta = e.delta_wRVU || 0;
+                            hasEMUpgrade = true;
                         }
-                        enhancedCodes.push({
-                            code: enhCode,
-                            description: `E/M upgrade (from ${e.current_code})`,
-                            wRVU: e.delta_wRVU || 0
-                        });
-                        totalDelta += e.delta_wRVU || 0;
                     }
+                    // If it's the same E/M code with "better documentation", skip it
+                    // (you can't bill the same code twice for "better" docs)
+                    return;
                 } else if (/^G\d{4}$/.test(enhCode)) {
-                    // Add-on code
+                    // Add-on code (like G2211)
                     if (!enhancedCodes.find(c => c.code === enhCode)) {
                         enhancedCodes.push({
                             code: enhCode,
@@ -1344,6 +1364,12 @@ Plan:
                     }
                 }
             });
+
+            // Add the E/M upgrade if we have one (only one allowed)
+            if (hasEMUpgrade && emUpgradeCode) {
+                enhancedCodes.unshift(emUpgradeCode); // Add at beginning
+                totalDelta += emUpgradeDelta;
+            }
 
             // Update the summary display
             const deltaDisplay = document.getElementById('enh-delta-display');
