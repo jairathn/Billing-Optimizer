@@ -87,6 +87,14 @@ class PotentialCode(BaseModel):
     wRVU: float = Field(..., ge=0.0, description="Work RVUs")
 
 
+class CodeOption(BaseModel):
+    """A tiered code option for procedures with thresholds."""
+    code: str = Field(..., description="CPT code")
+    description: str = Field(..., description="Code description")
+    wRVU: float = Field(default=0.0, ge=0.0, description="wRVU value")
+    threshold: str = Field(..., description="Threshold like '<6 nails' or '6+ nails'")
+
+
 class FutureOpportunity(BaseModel):
     """A single future opportunity ('next time' recommendation)."""
     category: str = Field(..., description="comorbidity, procedure, visit_level, or documentation")
@@ -94,6 +102,7 @@ class FutureOpportunity(BaseModel):
     opportunity: str = Field(..., description="What was missed")
     action: str = Field(..., description="What to do next time")
     potential_code: Optional[PotentialCode] = Field(default=None, description="Code if action taken")
+    code_options: Optional[list[CodeOption]] = Field(default=None, description="Tiered code options for procedures with thresholds")
     teaching_point: str = Field(..., description="Educational explanation")
 
 
@@ -147,11 +156,22 @@ class RegenerateNoteRequest(BaseModel):
     original_note: str = Field(..., description="Original clinical note")
     selected_enhancements: list[dict] = Field(default_factory=list, description="Selected enhancement recommendations")
     selected_opportunities: list[dict] = Field(default_factory=list, description="Selected future opportunities")
+    current_billing_codes: list[dict] = Field(default_factory=list, description="Current billing codes from Step 2")
+
+
+class RegenerateBillingCode(BaseModel):
+    """Billing code for regenerated note."""
+    code: str = Field(..., description="CPT/HCPCS code")
+    modifier: Optional[str] = Field(None, description="Modifier if applicable")
+    description: str = Field(..., description="Code description")
+    wRVU: float = Field(..., description="Work RVU value")
 
 
 class RegenerateNoteResponse(BaseModel):
     """Response for the /regenerate-note endpoint."""
     optimized_note: str = Field(..., description="Regenerated optimized note")
+    billing_codes: list[RegenerateBillingCode] = Field(default_factory=list, description="Billing codes for the optimized note")
+    total_wRVU: float = Field(0.0, description="Total wRVU for all billing codes")
     included_enhancements: int = Field(..., description="Number of enhancements included")
     included_opportunities: int = Field(..., description="Number of opportunities included")
 

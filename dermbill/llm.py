@@ -314,28 +314,32 @@ REFERENCE:
 
 TASK:
 1. Identify ALL billable codes from note AS WRITTEN
-2. Suggest DOCUMENTATION enhancements for work ACTUALLY DONE (not new procedures)
+2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
 
-VALID ENHANCEMENTS (documentation for work done):
-- Code upgrades: Add details for higher code (simple→intermediate repair)
-- Unbundling: Separate procedures under different diagnoses
-- Modifier support: Documentation for -25, -59, etc.
-- Missing details: Sizes, counts, measurements for higher tiers
+CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
-Thresholds: AK/warts 15+, IL injections 8+
+VALID Step 3 Enhancements (things that WERE done):
+- G2211 add-on: Chronic condition relationship EXISTS → document it
+- E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
+- Code upgrades: Repair WAS done → document technique for intermediate vs simple
+- Unbundling: Multiple procedures WERE done → separate under different diagnoses
+
+INVALID for Step 3 (move to Step 4):
+- "Injection not documented" when NO injection was given
+- "Exam not performed" → that's a missed opportunity, not an enhancement
+- Any procedure that COULD have been done but WASN'T
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}"""
 
-        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION improvements only.
+        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
-RULES:
-1. Only suggest documentation for work ACTUALLY DONE - never new procedures
-2. Include unbundling (separate procedures under different diagnoses)
-3. Every enhancement must increase wRVU
-4. Apply modifier logic and NCCI edits
+CRITICAL: Only include enhancements for services that WERE PERFORMED.
+- If procedure wasn't done → Step 4, not here
+- If exam wasn't performed → Step 4, not here
+- G2211, E/M upgrades, unbundling for work done → YES
 Respond with valid JSON only."""
 
         try:
@@ -412,28 +416,32 @@ REFERENCE:
 
 TASK:
 1. Identify ALL billable codes from note AS WRITTEN
-2. Suggest DOCUMENTATION enhancements for work ACTUALLY DONE (not new procedures)
+2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
 
-VALID ENHANCEMENTS (documentation for work done):
-- Code upgrades: Add details for higher code (simple→intermediate repair)
-- Unbundling: Separate procedures under different diagnoses
-- Modifier support: Documentation for -25, -59, etc.
-- Missing details: Sizes, counts, measurements for higher tiers
+CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
-Thresholds: AK/warts 15+, IL injections 8+
+VALID Step 3 Enhancements (things that WERE done):
+- G2211 add-on: Chronic condition relationship EXISTS → document it
+- E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
+- Code upgrades: Repair WAS done → document technique for intermediate vs simple
+- Unbundling: Multiple procedures WERE done → separate under different diagnoses
+
+INVALID for Step 3 (move to Step 4):
+- "Injection not documented" when NO injection was given
+- "Exam not performed" → that's a missed opportunity, not an enhancement
+- Any procedure that COULD have been done but WASN'T
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
 "enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}"""
 
-        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION improvements only.
+        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
 
-RULES:
-1. Only suggest documentation for work ACTUALLY DONE - never new procedures
-2. Include unbundling (separate procedures under different diagnoses)
-3. Every enhancement must increase wRVU
-4. Apply modifier logic and NCCI edits
+CRITICAL: Only include enhancements for services that WERE PERFORMED.
+- If procedure wasn't done → Step 4, not here
+- If exam wasn't performed → Step 4, not here
+- G2211, E/M upgrades, unbundling for work done → YES
 Respond with valid JSON only."""
 
         try:
@@ -523,26 +531,60 @@ SCENARIO:
 REFERENCE:
 {corpus_context}
 
-OPPORTUNITY TYPES (things that COULD have been done this visit):
-1. E/M LEVEL UPGRADES: Discussions/counseling that upgrade 99213→99214→99215, or 99203→99205
-   - Medication management discussions, treatment options counseling, risk/benefit discussions
-2. ADDITIONAL CODES: In Mohs, add 99203 for complex closure discussion. Add G2211 for chronic conditions.
-3. MISSED PROCEDURES: Nail debridement (6+), IL injections (8+), AK treatment (15+)
+OPPORTUNITY TYPES:
+1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
+2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
+3. TIERED PROCEDURES - return code_options array with ALL applicable tiers:
+
+   DESTRUCTION:
+   - Nail debridement: 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
+   - IL injections: 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
+   - AK destruction: 17000 (first, 0.61) + 17003 (2-14 ea, 0.04) OR 17004 (15+, 2.19)
+   - Benign lesion destruction: 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
+   - Genital lesions male: 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
+   - Genital lesions female: 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+
+   SHAVE REMOVAL (trunk/extremities):
+   - 11300 (≤0.5cm, 0.56) OR 11301 (0.6-1.0cm, 0.70) OR 11302 (1.1-2.0cm, 0.93) OR 11303 (>2.0cm, 1.26)
+   SHAVE REMOVAL (face/ears/eyelids/nose/lips):
+   - 11305 (≤0.5cm, 0.60) OR 11306 (0.6-1.0cm, 0.80) OR 11307 (1.1-2.0cm, 1.05) OR 11308 (>2.0cm, 1.35)
+
+   EXCISION BENIGN (trunk/extremities):
+   - 11400 (≤0.5cm, 0.90) → 11401 (0.6-1.0cm, 1.22) → 11402 (1.1-2.0cm, 1.58) → 11403 (2.1-3.0cm, 1.89) → 11404 (3.1-4.0cm, 2.47) → 11406 (>4.0cm, 3.05)
+   EXCISION BENIGN (face/scalp/neck):
+   - 11420-11426 same size tiers, higher wRVU
+
+   BIOPSY (by method and count):
+   - Tangential: 11102 (first, 0.56) + 11103 (each add'l, 0.23)
+   - Punch: 11104 (first, 0.69) + 11105 (each add'l, 0.33)
+   - Incisional: 11106 (first, 1.01) + 11107 (each add'l, 0.56)
+
+   REPAIR (by length):
+   - Simple trunk: 12001 (≤2.5cm, 0.78) → 12002 (2.6-7.5cm, 1.14) → 12004 (7.6-12.5cm, 1.47) → 12005 (12.6-20cm, 2.00) → 12006 (20.1-30cm, 2.54)
+   - Intermediate face: 12051 (≤2.5cm, 1.78) → 12052 (2.6-5.0cm, 2.11) → 12053 (5.1-7.5cm, 2.60)
+   - Complex: 13100+ series
+
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
-Every opportunity MUST have a specific CPT code and wRVU. Thresholds: nails 6+, IL 8+, AK/warts 15+
+JSON format - use code_options for tiered procedures, potential_code for non-tiered:
+{{"opportunities": [
+  {{"category": "procedure", "finding": "X", "opportunity": "X", "action": "X",
+    "code_options": [{{"code": "11720", "description": "Nail debridement 1-5", "wRVU": 0.34, "threshold": "1-5 nails"}},
+                     {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53, "threshold": "6+ nails"}}],
+    "teaching_point": "X"}},
+  {{"category": "visit_level", "finding": "X", "opportunity": "X", "action": "X",
+    "potential_code": {{"code": "99214", "description": "Level 4 E/M", "wRVU": 1.92}},
+    "teaching_point": "X"}}
+], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
 
-JSON format:
-{{"opportunities": [{{"category": "visit_level|procedure|comorbidity", "finding": "X", "opportunity": "X", "action": "X", "potential_code": {{"code": "X", "description": "X", "wRVU": 0}}, "teaching_point": "X"}}],
-"optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
+        system = """Dermatology billing educator. Identify intra-encounter opportunities.
 
-        system = """Dermatology billing educator. Identify what COULD have been done intra-encounter to boost billing.
-
-Focus on:
-- E/M level upgrades through discussions (medication management, counseling → 99215/99205)
-- Additional billable codes (Mohs + 99203 for complex closure, G2211 for chronic)
-- Missed procedures meeting thresholds
-Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only."""
+For TIERED PROCEDURES (destruction, shave, excision, biopsy, repair):
+- Return code_options array with ALL relevant tier options
+- Each option: code, description, wRVU, threshold
+- Include size-based tiers when applicable
+For NON-TIERED opportunities: use potential_code
+Respond with valid JSON only."""
 
         try:
             response = self._call_llm(prompt, system=system, max_tokens=8192)
@@ -559,12 +601,26 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
                         wRVU=float(pc.get("wRVU", 0)),
                     )
 
+                code_options = None
+                if o.get("code_options"):
+                    from .models import CodeOption
+                    code_options = [
+                        CodeOption(
+                            code=co["code"],
+                            description=co.get("description", ""),
+                            wRVU=float(co.get("wRVU", 0)),
+                            threshold=co.get("threshold", ""),
+                        )
+                        for co in o["code_options"]
+                    ]
+
                 opportunities.append(FutureOpportunity(
                     category=o["category"],
                     finding=o["finding"],
                     opportunity=o["opportunity"],
                     action=o["action"],
                     potential_code=potential_code,
+                    code_options=code_options,
                     teaching_point=o["teaching_point"],
                 ))
 
@@ -602,26 +658,60 @@ SCENARIO:
 REFERENCE:
 {corpus_context}
 
-OPPORTUNITY TYPES (things that COULD have been done this visit):
-1. E/M LEVEL UPGRADES: Discussions/counseling that upgrade 99213→99214→99215, or 99203→99205
-   - Medication management discussions, treatment options counseling, risk/benefit discussions
-2. ADDITIONAL CODES: In Mohs, add 99203 for complex closure discussion. Add G2211 for chronic conditions.
-3. MISSED PROCEDURES: Nail debridement (6+), IL injections (8+), AK treatment (15+)
+OPPORTUNITY TYPES:
+1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
+2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
+3. TIERED PROCEDURES - return code_options array with ALL applicable tiers:
+
+   DESTRUCTION:
+   - Nail debridement: 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
+   - IL injections: 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
+   - AK destruction: 17000 (first, 0.61) + 17003 (2-14 ea, 0.04) OR 17004 (15+, 2.19)
+   - Benign lesion destruction: 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
+   - Genital lesions male: 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
+   - Genital lesions female: 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+
+   SHAVE REMOVAL (trunk/extremities):
+   - 11300 (≤0.5cm, 0.56) OR 11301 (0.6-1.0cm, 0.70) OR 11302 (1.1-2.0cm, 0.93) OR 11303 (>2.0cm, 1.26)
+   SHAVE REMOVAL (face/ears/eyelids/nose/lips):
+   - 11305 (≤0.5cm, 0.60) OR 11306 (0.6-1.0cm, 0.80) OR 11307 (1.1-2.0cm, 1.05) OR 11308 (>2.0cm, 1.35)
+
+   EXCISION BENIGN (trunk/extremities):
+   - 11400 (≤0.5cm, 0.90) → 11401 (0.6-1.0cm, 1.22) → 11402 (1.1-2.0cm, 1.58) → 11403 (2.1-3.0cm, 1.89) → 11404 (3.1-4.0cm, 2.47) → 11406 (>4.0cm, 3.05)
+   EXCISION BENIGN (face/scalp/neck):
+   - 11420-11426 same size tiers, higher wRVU
+
+   BIOPSY (by method and count):
+   - Tangential: 11102 (first, 0.56) + 11103 (each add'l, 0.23)
+   - Punch: 11104 (first, 0.69) + 11105 (each add'l, 0.33)
+   - Incisional: 11106 (first, 1.01) + 11107 (each add'l, 0.56)
+
+   REPAIR (by length):
+   - Simple trunk: 12001 (≤2.5cm, 0.78) → 12002 (2.6-7.5cm, 1.14) → 12004 (7.6-12.5cm, 1.47) → 12005 (12.6-20cm, 2.00) → 12006 (20.1-30cm, 2.54)
+   - Intermediate face: 12051 (≤2.5cm, 1.78) → 12052 (2.6-5.0cm, 2.11) → 12053 (5.1-7.5cm, 2.60)
+   - Complex: 13100+ series
+
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
-Every opportunity MUST have a specific CPT code and wRVU. Thresholds: nails 6+, IL 8+, AK/warts 15+
+JSON format - use code_options for tiered procedures, potential_code for non-tiered:
+{{"opportunities": [
+  {{"category": "procedure", "finding": "X", "opportunity": "X", "action": "X",
+    "code_options": [{{"code": "11720", "description": "Nail debridement 1-5", "wRVU": 0.34, "threshold": "1-5 nails"}},
+                     {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53, "threshold": "6+ nails"}}],
+    "teaching_point": "X"}},
+  {{"category": "visit_level", "finding": "X", "opportunity": "X", "action": "X",
+    "potential_code": {{"code": "99214", "description": "Level 4 E/M", "wRVU": 1.92}},
+    "teaching_point": "X"}}
+], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
 
-JSON format:
-{{"opportunities": [{{"category": "visit_level|procedure|comorbidity", "finding": "X", "opportunity": "X", "action": "X", "potential_code": {{"code": "X", "description": "X", "wRVU": 0}}, "teaching_point": "X"}}],
-"optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
+        system = """Dermatology billing educator. Identify intra-encounter opportunities.
 
-        system = """Dermatology billing educator. Identify what COULD have been done intra-encounter to boost billing.
-
-Focus on:
-- E/M level upgrades through discussions (medication management, counseling → 99215/99205)
-- Additional billable codes (Mohs + 99203 for complex closure, G2211 for chronic)
-- Missed procedures meeting thresholds
-Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only."""
+For TIERED PROCEDURES (destruction, shave, excision, biopsy, repair):
+- Return code_options array with ALL relevant tier options
+- Each option: code, description, wRVU, threshold
+- Include size-based tiers when applicable
+For NON-TIERED opportunities: use potential_code
+Respond with valid JSON only."""
 
         try:
             response = await self._call_llm_async(prompt, system=system, max_tokens=8192)
@@ -638,12 +728,26 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
                         wRVU=float(pc.get("wRVU", 0)),
                     )
 
+                code_options = None
+                if o.get("code_options"):
+                    from .models import CodeOption
+                    code_options = [
+                        CodeOption(
+                            code=co["code"],
+                            description=co.get("description", ""),
+                            wRVU=float(co.get("wRVU", 0)),
+                            threshold=co.get("threshold", ""),
+                        )
+                        for co in o["code_options"]
+                    ]
+
                 opportunities.append(FutureOpportunity(
                     category=o["category"],
                     finding=o["finding"],
                     opportunity=o["opportunity"],
                     action=o["action"],
                     potential_code=potential_code,
+                    code_options=code_options,
                     teaching_point=o["teaching_point"],
                 ))
 
@@ -664,7 +768,8 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
         original_note: str,
         selected_enhancements: list[dict],
         selected_opportunities: list[dict],
-    ) -> str:
+        current_billing_codes: list[dict] = None,
+    ) -> dict:
         """
         Regenerate an optimized note based on selected recommendations.
 
@@ -672,51 +777,101 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
             original_note: Original clinical note
             selected_enhancements: List of selected enhancement dicts
             selected_opportunities: List of selected opportunity dicts
+            current_billing_codes: List of current billing codes from Step 2
 
         Returns:
-            Regenerated optimized note text
+            Dict with optimized_note, billing_codes, and total_wRVU
         """
         # Build the list of changes to apply
         changes_to_apply = []
+        billing_codes = []
 
+        # Start with current billing codes if provided
+        if current_billing_codes:
+            for c in current_billing_codes:
+                billing_codes.append({
+                    "code": c.get("code", ""),
+                    "modifier": c.get("modifier"),
+                    "description": c.get("description", ""),
+                    "wRVU": float(c.get("wRVU", 0)),
+                })
+
+        # Process selected enhancements - update or add billing codes
         for e in selected_enhancements:
             changes_to_apply.append(f"ENHANCEMENT: {e.get('issue', '')} - {e.get('suggested_addition', '')}")
+            # If enhancement has an enhanced_code, update billing
+            enhanced_code = e.get("enhanced_code", "")
+            if enhanced_code and enhanced_code != e.get("current_code", ""):
+                # Add the enhanced code
+                billing_codes.append({
+                    "code": enhanced_code.split()[0] if " " in enhanced_code else enhanced_code,
+                    "modifier": None,
+                    "description": e.get("issue", ""),
+                    "wRVU": float(e.get("enhanced_wRVU", 0)),
+                })
 
+        # Process selected opportunities - add their billing codes
         for o in selected_opportunities:
             changes_to_apply.append(f"OPPORTUNITY: {o.get('opportunity', '')} - {o.get('action', '')}")
+            potential_code = o.get("potential_code", {})
+            if potential_code and potential_code.get("code"):
+                billing_codes.append({
+                    "code": potential_code.get("code", ""),
+                    "modifier": None,
+                    "description": potential_code.get("description", ""),
+                    "wRVU": float(potential_code.get("wRVU", 0)),
+                })
 
         if not changes_to_apply:
-            return original_note
+            total_wRVU = sum(c.get("wRVU", 0) for c in billing_codes)
+            return {
+                "optimized_note": original_note,
+                "billing_codes": billing_codes,
+                "total_wRVU": total_wRVU,
+            }
 
-        prompt = f"""Rewrite this clinical note incorporating ONLY the selected recommendations.
+        prompt = f"""Rewrite this clinical note AS IF all selected recommendations were actually performed and documented.
 
 ORIGINAL NOTE:
 {original_note}
 
-SELECTED CHANGES TO INCORPORATE:
+SELECTED ITEMS TO DOCUMENT (write as if these were all done):
 {chr(10).join(changes_to_apply)}
 
 INSTRUCTIONS:
-1. Start with the original note as the base
-2. Add ONLY the documentation from the selected changes
-3. Integrate changes naturally into the note flow
-4. Do NOT add any changes that weren't selected
+1. Write the note AS IF all selected procedures/services were actually performed
+2. For opportunities (things that weren't done): document them as if they WERE done
+3. For enhancements: add the documentation details that support higher billing
+4. The final note should fully support billing all selected codes
 5. Keep the note professional and clinically appropriate
 6. Output ONLY the complete rewritten note - no explanations
 
+This is a TEMPLATE showing what the provider should document to bill these codes.
+
 OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
 
-        system = """You are a medical documentation expert.
-Rewrite clinical notes incorporating specific documentation additions.
-Only add what is explicitly requested - nothing more.
-Maintain professional medical documentation standards.
+        system = """Medical documentation expert. Create notes that support maximum billing.
+
+Write the note AS IF all selected items were actually performed during the visit.
+- If an injection opportunity is selected, document that the injection WAS done
+- If an E/M upgrade is selected, document the MDM complexity that supports it
+- The note should be copy-paste ready to support billing all selected codes
 Output only the complete note text, no commentary."""
 
         try:
             response = await self._call_llm_async(prompt, system=system, max_tokens=4096)
-            return response.strip()
+            total_wRVU = sum(c.get("wRVU", 0) for c in billing_codes)
+            return {
+                "optimized_note": response.strip(),
+                "billing_codes": billing_codes,
+                "total_wRVU": total_wRVU,
+            }
         except Exception as e:
-            return f"Error regenerating note: {str(e)}"
+            return {
+                "optimized_note": f"Error regenerating note: {str(e)}",
+                "billing_codes": billing_codes,
+                "total_wRVU": 0.0,
+            }
 
 
 # Global instance
