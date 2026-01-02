@@ -734,28 +734,32 @@ Every opportunity needs specific CPT code and wRVU. Respond with valid JSON only
                 "total_wRVU": total_wRVU,
             }
 
-        prompt = f"""Rewrite this clinical note incorporating ONLY the selected recommendations.
+        prompt = f"""Rewrite this clinical note AS IF all selected recommendations were actually performed and documented.
 
 ORIGINAL NOTE:
 {original_note}
 
-SELECTED CHANGES TO INCORPORATE:
+SELECTED ITEMS TO DOCUMENT (write as if these were all done):
 {chr(10).join(changes_to_apply)}
 
 INSTRUCTIONS:
-1. Start with the original note as the base
-2. Add ONLY the documentation from the selected changes
-3. Integrate changes naturally into the note flow
-4. Do NOT add any changes that weren't selected
+1. Write the note AS IF all selected procedures/services were actually performed
+2. For opportunities (things that weren't done): document them as if they WERE done
+3. For enhancements: add the documentation details that support higher billing
+4. The final note should fully support billing all selected codes
 5. Keep the note professional and clinically appropriate
 6. Output ONLY the complete rewritten note - no explanations
 
+This is a TEMPLATE showing what the provider should document to bill these codes.
+
 OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
 
-        system = """You are a medical documentation expert.
-Rewrite clinical notes incorporating specific documentation additions.
-Only add what is explicitly requested - nothing more.
-Maintain professional medical documentation standards.
+        system = """Medical documentation expert. Create notes that support maximum billing.
+
+Write the note AS IF all selected items were actually performed during the visit.
+- If an injection opportunity is selected, document that the injection WAS done
+- If an E/M upgrade is selected, document the MDM complexity that supports it
+- The note should be copy-paste ready to support billing all selected codes
 Output only the complete note text, no commentary."""
 
         try:
