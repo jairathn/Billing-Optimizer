@@ -498,6 +498,55 @@
         .opportunity-row:hover {
             background: #e6ffed !important;
         }
+
+        .count-input-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 10px 0;
+            padding: 10px;
+            background: #f0f7ff;
+            border: 1px solid #b8daff;
+            border-radius: 6px;
+        }
+
+        .count-input-group label {
+            font-weight: 600;
+            color: #004085;
+        }
+
+        .count-input {
+            width: 60px;
+            padding: 8px;
+            border: 2px solid #667eea;
+            border-radius: 4px;
+            font-size: 16px;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .count-input:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 5px rgba(102, 126, 234, 0.5);
+        }
+
+        .code-family-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            background: #e9ecef;
+            border-radius: 3px;
+            font-size: 11px;
+            color: #6c757d;
+            margin-left: 8px;
+        }
+
+        .aggregated-note {
+            font-size: 12px;
+            color: #28a745;
+            font-style: italic;
+            margin-top: 5px;
+        }
     </style>
 </head>
 <body>
@@ -597,6 +646,72 @@ Plan:
 
         // Global storage for analysis results
         let currentAnalysisData = null;
+
+        // Code family definitions for count-based aggregation
+        const CODE_FAMILIES = {
+            'il_injection': {
+                name: 'IL Injections',
+                tiers: [
+                    { min: 1, max: 7, code: '11900', wRVU: 0.52, desc: 'IL injection 1-7 lesions' },
+                    { min: 8, max: 999, code: '11901', wRVU: 0.82, desc: 'IL injection 8+ lesions' }
+                ],
+                patterns: ['11900', '11901']
+            },
+            'ak_destruction': {
+                name: 'AK Destruction',
+                tiers: [
+                    { min: 1, max: 1, code: '17000', wRVU: 0.61, desc: 'AK destruction first lesion' },
+                    { min: 2, max: 14, code: '17000+17003', wRVU: null, desc: 'AK destruction 2-14', perUnit: 0.09, baseWRVU: 0.61 },
+                    { min: 15, max: 999, code: '17004', wRVU: 2.19, desc: 'AK destruction 15+' }
+                ],
+                patterns: ['17000', '17003', '17004']
+            },
+            'benign_destruction': {
+                name: 'Benign Lesion Destruction',
+                tiers: [
+                    { min: 1, max: 14, code: '17110', wRVU: 0.70, desc: 'Benign destruction 1-14' },
+                    { min: 15, max: 999, code: '17111', wRVU: 1.23, desc: 'Benign destruction 15+' }
+                ],
+                patterns: ['17110', '17111']
+            },
+            'nail_debridement': {
+                name: 'Nail Debridement',
+                tiers: [
+                    { min: 1, max: 5, code: '11720', wRVU: 0.34, desc: 'Nail debridement 1-5' },
+                    { min: 6, max: 999, code: '11721', wRVU: 0.53, desc: 'Nail debridement 6+' }
+                ],
+                patterns: ['11720', '11721']
+            }
+        };
+
+        // Detect code family from a code string
+        function detectCodeFamily(code) {
+            if (!code) return null;
+            for (const [familyId, family] of Object.entries(CODE_FAMILIES)) {
+                for (const pattern of family.patterns) {
+                    if (code.includes(pattern)) return familyId;
+                }
+            }
+            return null;
+        }
+
+        // Calculate wRVU for a code family given count
+        function calculateFamilyWRVU(familyId, count) {
+            const family = CODE_FAMILIES[familyId];
+            if (!family) return { code: null, wRVU: 0, desc: '' };
+
+            for (const tier of family.tiers) {
+                if (count >= tier.min && count <= tier.max) {
+                    if (tier.perUnit) {
+                        // Count-based like AK: 17000 + (count-1) * 17003
+                        const wRVU = tier.baseWRVU + (count - 1) * tier.perUnit;
+                        return { code: `17000+17003x${count-1}`, wRVU, desc: `AK destruction ${count} lesions` };
+                    }
+                    return { code: tier.code, wRVU: tier.wRVU, desc: tier.desc };
+                }
+            }
+            return { code: null, wRVU: 0, desc: '' };
+        }
 
         function clearAll() {
             document.getElementById('clinical-note').value = '';
@@ -873,8 +988,37 @@ Plan:
                 oppHtml += opportunities.opportunities.map((o, idx) => {
                     let codeDisplay = '';
 
-                    // Check if this opportunity has tiered code options
-                    if (o.code_options && o.code_options.length > 0) {
+                    // Detect if this is a count-based code family
+                    let detectedFamily = null;
+                    if (o.potential_code) {
+                        detectedFamily = detectCodeFamily(o.potential_code.code);
+                    } else if (o.code_options && o.code_options.length > 0) {
+                        detectedFamily = detectCodeFamily(o.code_options[0].code);
+                    }
+
+                    // If it's a count-based family, render count input instead of radio buttons
+                    if (detectedFamily && CODE_FAMILIES[detectedFamily]) {
+                        const family = CODE_FAMILIES[detectedFamily];
+                        // Extract default count from potential_code description or code_options
+                        let defaultCount = 1;
+                        if (o.potential_code && o.potential_code.description) {
+                            const countMatch = o.potential_code.description.match(/(\d+)\s*(lesion|nail|site)/i);
+                            if (countMatch) defaultCount = parseInt(countMatch[1]);
+                        }
+                        codeDisplay = `
+                            <div class="count-input-group" data-family="${detectedFamily}">
+                                <label>Number of lesions/sites:</label>
+                                <input type="number" class="count-input"
+                                       data-opp-index="${idx}"
+                                       data-family="${detectedFamily}"
+                                       min="1" max="99" value="${defaultCount}">
+                                <span class="code-family-badge">${family.name}</span>
+                            </div>
+                            <p class="aggregated-note">Counts from same family are aggregated to determine final tier</p>
+                        `;
+                    }
+                    // Check if this opportunity has tiered code options (non-count-based)
+                    else if (o.code_options && o.code_options.length > 0) {
                         codeDisplay = `
                             <div class="tier-options">
                                 <strong>Select Tier:</strong>
@@ -897,9 +1041,9 @@ Plan:
                     }
 
                     return `
-                        <div class="opportunity-card">
+                        <div class="opportunity-card" data-family="${detectedFamily || ''}">
                             <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
-                                <input type="checkbox" class="opportunity-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
+                                <input type="checkbox" class="opportunity-checkbox" data-index="${idx}" data-family="${detectedFamily || ''}" checked style="margin-top: 5px; transform: scale(1.3);">
                                 <div style="flex: 1;">
                                     <span class="category-badge category-${o.category}">${o.category}</span>
                                     <h4>${o.finding}</h4>
@@ -1065,6 +1209,11 @@ Plan:
             document.querySelectorAll('.tier-radio').forEach(radio => {
                 radio.addEventListener('change', updateOpportunityTotals);
             });
+            // Listen for count input changes (for count-based families)
+            document.querySelectorAll('.count-input').forEach(input => {
+                input.addEventListener('input', updateOpportunityTotals);
+                input.addEventListener('change', updateOpportunityTotals);
+            });
         }
 
         function updateOpportunityTotals() {
@@ -1074,7 +1223,9 @@ Plan:
             const opportunities = currentAnalysisData.future_opportunities.opportunities;
             const baselineWRVU = currentBilling.total_wRVU;
 
-            // Only collect OPPORTUNITY codes (what's being added)
+            // Track aggregated counts by code family
+            let familyCounts = {};
+            // Track non-family codes separately
             let opportunityCodes = [];
             let totalDelta = 0;
 
@@ -1083,9 +1234,24 @@ Plan:
                 const checkbox = document.querySelector(`.opportunity-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
+                // Check if this opportunity belongs to a count-based family
+                const familyId = checkbox.dataset.family;
+                if (familyId && CODE_FAMILIES[familyId]) {
+                    // Get count from input field
+                    const countInput = document.querySelector(`.count-input[data-opp-index="${idx}"]`);
+                    if (countInput) {
+                        const count = parseInt(countInput.value) || 0;
+                        if (!familyCounts[familyId]) {
+                            familyCounts[familyId] = 0;
+                        }
+                        familyCounts[familyId] += count;
+                    }
+                    return; // Don't process as regular code
+                }
+
                 let code, wRVU, desc;
 
-                // Check if this opportunity has tiered options
+                // Check if this opportunity has tiered options (non-count-based)
                 if (o.code_options && o.code_options.length > 0) {
                     const selectedRadio = document.querySelector(`input[name="tier-${idx}"]:checked`);
                     if (selectedRadio) {
@@ -1114,6 +1280,25 @@ Plan:
                 }
             });
 
+            // Now process aggregated family counts and add to opportunityCodes
+            for (const [familyId, totalCount] of Object.entries(familyCounts)) {
+                if (totalCount > 0) {
+                    const result = calculateFamilyWRVU(familyId, totalCount);
+                    if (result.code) {
+                        const family = CODE_FAMILIES[familyId];
+                        opportunityCodes.push({
+                            code: result.code,
+                            description: `${family.name} (${totalCount} total)`,
+                            wRVU: result.wRVU,
+                            isAggregated: true,
+                            familyId: familyId,
+                            count: totalCount
+                        });
+                        totalDelta += result.wRVU;
+                    }
+                }
+            }
+
             // Update the summary display
             const deltaDisplay = document.getElementById('opp-delta-display');
             const totalDisplay = document.getElementById('opp-total-display');
@@ -1126,13 +1311,17 @@ Plan:
                 if (opportunityCodes.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #6c757d;">No opportunities selected</td></tr>`;
                 } else {
-                    tbody.innerHTML = opportunityCodes.map(c => `
-                        <tr class="opportunity-row">
-                            <td><strong>${c.code}</strong></td>
-                            <td>${c.description}</td>
-                            <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
-                        </tr>
-                    `).join('') + `
+                    tbody.innerHTML = opportunityCodes.map(c => {
+                        const aggregatedClass = c.isAggregated ? 'style="background: #e8f5e9 !important;"' : '';
+                        const aggregatedIcon = c.isAggregated ? '<span title="Aggregated from multiple opportunities">⊕</span> ' : '';
+                        return `
+                            <tr class="opportunity-row" ${aggregatedClass}>
+                                <td><strong>${aggregatedIcon}${c.code}</strong></td>
+                                <td>${c.description}</td>
+                                <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
+                            </tr>
+                        `;
+                    }).join('') + `
                         <tr class="total-row">
                             <td colspan="2"><strong>ADDITIONAL wRVU</strong></td>
                             <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
