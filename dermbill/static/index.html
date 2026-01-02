@@ -729,7 +729,7 @@ Plan:
         }
 
         // Apply appropriate modifiers to billing codes
-        // Strategy: Apply -XS to LOWEST value codes first to minimize payment reduction
+        // Strategy: Apply modifiers to LOWEST value codes first to minimize payment reduction
         function applyModifiers(codes) {
             if (!codes || codes.length === 0) return codes;
 
@@ -746,50 +746,131 @@ Plan:
                 });
             }
 
-            // Apply -59 or -XS to secondary procedures at different sites
-            // Group procedures by anatomic site (approximate based on code family)
-            const siteGroups = {};
-            procedureCodes.forEach((proc, idx) => {
-                // Determine site group from code
-                let site = 'general';
-                if (proc.code.startsWith('117')) site = 'nail'; // 11720, 11721
-                if (proc.code.startsWith('119')) site = 'injection'; // 11900, 11901
-                if (proc.code.startsWith('170') || proc.code.startsWith('171')) site = 'destruction';
-                if (proc.code.startsWith('111')) site = 'biopsy'; // 11102-11107
-                if (proc.code.startsWith('100')) site = 'surgery'; // 10040, etc.
-                if (proc.code.startsWith('173')) site = 'peel'; // 17360
+            // Helper to extract anatomic site from description
+            function extractSite(desc) {
+                if (!desc) return 'general';
+                const d = desc.toLowerCase();
+                // Check for laterality first
+                if (d.includes('left') || d.includes(' l ') || d.includes('(l)')) return 'left';
+                if (d.includes('right') || d.includes(' r ') || d.includes('(r)')) return 'right';
+                if (d.includes('bilateral')) return 'bilateral';
+                // Check for body regions
+                if (d.includes('face') || d.includes('forehead') || d.includes('cheek') || d.includes('nose') || d.includes('lip') || d.includes('eyelid')) return 'face';
+                if (d.includes('scalp') || d.includes('head')) return 'scalp';
+                if (d.includes('neck')) return 'neck';
+                if (d.includes('trunk') || d.includes('chest') || d.includes('back') || d.includes('abdomen')) return 'trunk';
+                if (d.includes('arm') || d.includes('forearm') || d.includes('elbow') || d.includes('wrist')) return 'arm';
+                if (d.includes('hand') || d.includes('finger')) return 'hand';
+                if (d.includes('leg') || d.includes('thigh') || d.includes('knee') || d.includes('ankle')) return 'leg';
+                if (d.includes('foot') || d.includes('toe')) return 'foot';
+                if (d.includes('nail')) return 'nail';
+                if (d.includes('genital')) return 'genital';
+                return 'general';
+            }
 
-                if (!siteGroups[site]) siteGroups[site] = [];
-                siteGroups[site].push({ proc, idx, wRVU: proc.wRVU || 0 });
+            // Helper to get procedure type from code
+            function getProcedureType(code) {
+                if (!code) return 'other';
+                if (code.startsWith('117')) return 'nail';
+                if (code.startsWith('119')) return 'injection';
+                if (code.startsWith('170') || code.startsWith('171')) return 'destruction';
+                if (code.startsWith('111')) return 'biopsy';
+                if (code.startsWith('114') || code.startsWith('116')) return 'excision';
+                if (code.startsWith('100')) return 'surgery';
+                if (code.startsWith('173')) return 'peel';
+                if (code.startsWith('540') || code.startsWith('565')) return 'genital';
+                return 'other';
+            }
+
+            // STEP 1: Handle bilateral procedures (-50 or -LT/-RT)
+            // Group by procedure code to find duplicates
+            const codeGroups = {};
+            procedureCodes.forEach((proc, idx) => {
+                if (!codeGroups[proc.code]) codeGroups[proc.code] = [];
+                codeGroups[proc.code].push({ proc, idx });
             });
 
-            // If multiple different site groups, apply -XS to lower-value secondary codes
-            const siteGroupKeys = Object.keys(siteGroups);
-            if (siteGroupKeys.length > 1) {
-                // Flatten all procedures with their site info
-                let allProcsWithSite = [];
-                siteGroupKeys.forEach(site => {
-                    siteGroups[site].forEach(item => {
-                        allProcsWithSite.push({ ...item, site });
+            // Check for bilateral indicators
+            Object.entries(codeGroups).forEach(([code, items]) => {
+                if (items.length === 2) {
+                    // Two of the same code - check if left/right
+                    const sites = items.map(i => extractSite(i.proc.description));
+                    if ((sites[0] === 'left' && sites[1] === 'right') ||
+                        (sites[0] === 'right' && sites[1] === 'left')) {
+                        // Apply -LT and -RT
+                        items.forEach(item => {
+                            const site = extractSite(item.proc.description);
+                            if (site === 'left') {
+                                item.proc.modifier = '-LT';
+                                item.proc.modifierReason = 'Left side';
+                            } else if (site === 'right') {
+                                item.proc.modifier = '-RT';
+                                item.proc.modifierReason = 'Right side';
+                            }
+                        });
+                    }
+                } else if (items.length === 1) {
+                    // Single code - check if bilateral in description
+                    const desc = items[0].proc.description?.toLowerCase() || '';
+                    if (desc.includes('bilateral')) {
+                        items[0].proc.modifier = '-50';
+                        items[0].proc.modifierReason = 'Bilateral procedure';
+                    }
+                }
+            });
+
+            // STEP 2: Apply -XS or -59 to distinct procedures
+            // Group by anatomic site (from description) AND procedure type
+            const siteTypeGroups = {};
+            procedureCodes.forEach((proc, idx) => {
+                const site = extractSite(proc.description);
+                const procType = getProcedureType(proc.code);
+                const key = `${site}:${procType}`;
+
+                if (!siteTypeGroups[key]) siteTypeGroups[key] = [];
+                siteTypeGroups[key].push({ proc, idx, wRVU: proc.wRVU || 0, site, procType });
+            });
+
+            // Determine which modifier to use
+            // -XS: Different anatomic structure (preferred in derm)
+            // -59: Same structure but distinct procedure (fallback)
+            const groupKeys = Object.keys(siteTypeGroups);
+
+            if (groupKeys.length > 1) {
+                // Multiple distinct groups - flatten and sort by wRVU descending
+                let allProcs = [];
+                groupKeys.forEach(key => {
+                    siteTypeGroups[key].forEach(item => {
+                        allProcs.push({ ...item, groupKey: key });
                     });
                 });
 
                 // Sort by wRVU DESCENDING - highest value first gets NO modifier
-                // Lower value codes get -XS modifier (payment reduction applies to them)
-                allProcsWithSite.sort((a, b) => (b.wRVU || 0) - (a.wRVU || 0));
+                allProcs.sort((a, b) => (b.wRVU || 0) - (a.wRVU || 0));
 
-                // Track which sites we've seen - first occurrence of each site gets no modifier
-                // But we want the HIGHEST value code to avoid modifiers
-                // So: assign -XS to all except the single highest-value procedure
+                // Track sites we've seen to determine XS vs 59
+                const seenSites = new Set();
                 let isFirst = true;
-                allProcsWithSite.forEach(item => {
+
+                allProcs.forEach(item => {
+                    if (item.proc.modifier) return; // Already has modifier (bilateral)
+
                     if (isFirst) {
-                        // Highest value procedure - no modifier (primary procedure)
+                        // Highest value procedure - no additional modifier (primary)
+                        seenSites.add(item.site);
                         isFirst = false;
-                    } else if (!item.proc.modifier) {
-                        // All other procedures get -XS
-                        item.proc.modifier = '-XS';
-                        item.proc.modifierReason = 'Separate anatomic structure (applied to lower-value code)';
+                    } else {
+                        // Determine appropriate modifier
+                        if (!seenSites.has(item.site) || item.site === 'general') {
+                            // Different site - use -XS
+                            item.proc.modifier = '-XS';
+                            item.proc.modifierReason = 'Separate anatomic structure';
+                            seenSites.add(item.site);
+                        } else {
+                            // Same site, different procedure type - use -59
+                            item.proc.modifier = '-59';
+                            item.proc.modifierReason = 'Distinct procedural service';
+                        }
                     }
                 });
             }
