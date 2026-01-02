@@ -798,6 +798,37 @@ Plan:
             '14060': { mue: 3, wRVU: 9.00 },  // Tissue transfer, face ≤10 sq cm
             '14061': { mue: 3, wRVU: 11.19 }, // Tissue transfer, face 10.1-30 sq cm
             '15260': { mue: 3, wRVU: 11.35 }, // Full thickness graft, nose/eyelids ≤20 sq cm
+            '15261': { mue: 4, wRVU: 2.17, addOn: true },  // FT graft nose/eyelids ea addl (add-on to 15260)
+            // Additional G-codes
+            'G0127': { mue: 1, wRVU: 0.17 },  // Trim nail(s) - Medicare specific
+            'G0429': { mue: 1, wRVU: 1.16 },  // Dermal filler injection(s)
+            'G2212': { mue: 2, wRVU: 0.61, addOn: true },  // Prolonged outpatient visit (add-on for extended time)
+            // Add-on codes - biopsies
+            '11106': { mue: 1, wRVU: 0.98 },  // Incisional biopsy skin first lesion
+            '11107': { mue: 9, wRVU: 0.53, addOn: true },  // Incisional biopsy ea addl (add-on to 11106)
+            // Add-on codes - skin tags
+            '11200': { mue: 1, wRVU: 0.80, family: 'skin_tags' },  // Skin tag removal up to 15
+            '11201': { mue: 10, wRVU: 0.28, addOn: true },  // Skin tag removal ea addl 10 (add-on to 11200)
+            // Add-on codes - nail procedures
+            '11730': { mue: 1, wRVU: 1.02 },  // Nail avulsion simple first
+            '11732': { mue: 9, wRVU: 0.37, addOn: true },  // Nail avulsion ea addl (add-on to 11730)
+            // Add-on codes - debridement
+            '11000': { mue: 1, wRVU: 0.59 },  // Debridement eczematous/infected skin <10%
+            '11001': { mue: 9, wRVU: 0.29, addOn: true },  // Debridement ea addl 10% (add-on to 11000)
+            // Add-on codes - complex repairs
+            '13100': { mue: 3, wRVU: 2.93 },  // Complex repair trunk 1.1-2.5cm
+            '13101': { mue: 3, wRVU: 3.41 },  // Complex repair trunk 2.6-7.5cm
+            '13102': { mue: 6, wRVU: 1.21, addOn: true },  // Complex repair trunk addl ≤5cm (add-on to 13100/13101)
+            '13120': { mue: 3, wRVU: 3.15 },  // Complex repair s/a/l 1.1-2.5cm
+            '13121': { mue: 3, wRVU: 3.90 },  // Complex repair s/a/l 2.6-7.5cm
+            '13122': { mue: 6, wRVU: 1.40, addOn: true },  // Complex repair s/a/l addl ≤5cm (add-on to 13120/13121)
+            '13133': { mue: 6, wRVU: 2.14, addOn: true },  // Complex repair face/etc addl ≤5cm (add-on to 13131/13132)
+            '13151': { mue: 3, wRVU: 4.23 },  // Complex repair e/n/e/l 1.1-2.5cm
+            '13152': { mue: 3, wRVU: 5.21 },  // Complex repair e/n/e/l 2.6-7.5cm
+            '13153': { mue: 6, wRVU: 2.32, addOn: true },  // Complex repair e/n/e/l addl ≤5cm (add-on to 13151/13152)
+            // Add-on codes - flaps/grafts
+            '14301': { mue: 3, wRVU: 12.33 },  // Tissue transfer 30.1-60 sq cm
+            '14302': { mue: 6, wRVU: 3.64, addOn: true },  // Tissue transfer ea addl 30 sq cm (add-on to 14301)
         };
 
         // Helper to sanitize codes: filter non-billable and correct wRVU from MUE_DATA

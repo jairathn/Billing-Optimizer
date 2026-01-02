@@ -350,11 +350,20 @@ For COUNT_CLARIFICATION cards, use this format in enhancements:
   "count_family": "nail_debridement", "default_count": 1}}
 
 VALID Step 3 Enhancements (things that WERE done):
-- G2211 add-on: Chronic condition relationship EXISTS → document it
+- G2211 add-on: Chronic condition relationship EXISTS → document it (+0.33 wRVU)
+- G2212 add-on: Prolonged visit (>40min established, >60min new) → document time (+0.61 wRVU)
 - E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 - COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
+
+ADD-ON CODES (bill WITH primary codes when applicable):
+• Biopsies: 11103/11105/11107 for each additional lesion biopsied
+• Skin tags: 11201 (+0.28 wRVU) for each additional 10 tags removed beyond first 15
+• Nail avulsion: 11732 (+0.37 wRVU) for each additional nail beyond first
+• Complex repairs: 13102/13122/13133/13153 for each additional 5cm repaired
+• Tissue transfer: 14302 (+3.64 wRVU) for each additional 30 sq cm
+• Full-thickness graft: 15261 (+2.17 wRVU) for each additional graft area
 
 MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
 These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
@@ -533,11 +542,20 @@ For COUNT_CLARIFICATION cards, use this format in enhancements:
   "count_family": "nail_debridement", "default_count": 1}}
 
 VALID Step 3 Enhancements (things that WERE done):
-- G2211 add-on: Chronic condition relationship EXISTS → document it
+- G2211 add-on: Chronic condition relationship EXISTS → document it (+0.33 wRVU)
+- G2212 add-on: Prolonged visit (>40min established, >60min new) → document time (+0.61 wRVU)
 - E/M upgrade: MDM/counseling DID happen → document complexity to support higher level
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 - COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
+
+ADD-ON CODES (bill WITH primary codes when applicable):
+• Biopsies: 11103/11105/11107 for each additional lesion biopsied
+• Skin tags: 11201 (+0.28 wRVU) for each additional 10 tags removed beyond first 15
+• Nail avulsion: 11732 (+0.37 wRVU) for each additional nail beyond first
+• Complex repairs: 13102/13122/13133/13153 for each additional 5cm repaired
+• Tissue transfer: 14302 (+3.64 wRVU) for each additional 30 sq cm
+• Full-thickness graft: 15261 (+2.17 wRVU) for each additional graft area
 
 MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
 These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
@@ -827,7 +845,9 @@ USE CLINICAL JUDGMENT - PICK ONE CODE, NEVER A RANGE:
 
 NEVER output "99214-99215" or any range. Pick the SINGLE highest defensible code.
 
-ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+ADD-ONS:
+• G2211 (+0.33 wRVU): Established ongoing care relationship (chronic condition management)
+• G2212 (+0.61 wRVU): Prolonged visit - document total face-to-face time >40min est/60min new
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
@@ -1165,7 +1185,9 @@ USE CLINICAL JUDGMENT - PICK ONE CODE, NEVER A RANGE:
 
 NEVER output "99214-99215" or any range. Pick the SINGLE highest defensible code.
 
-ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+ADD-ONS:
+• G2211 (+0.33 wRVU): Established ongoing care relationship (chronic condition management)
+• G2212 (+0.61 wRVU): Prolonged visit - document total face-to-face time >40min est/60min new
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
