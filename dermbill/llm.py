@@ -533,57 +533,49 @@ REFERENCE:
 
 OPPORTUNITY TYPES:
 1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
-2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
-3. TIERED PROCEDURES - return code_options array with ALL applicable tiers:
+2. ADD-ON CODES: G2211 for chronic conditions, complex closure discussions
+3. PROCEDURE OPPORTUNITIES - ONE CARD PER CODE FAMILY, each as SEPARATE opportunity:
 
-   DESTRUCTION:
-   - Nail debridement: 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
-   - IL injections: 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
-   - AK destruction: 17000 (first, 0.61) + 17003 (2-14 ea, 0.04) OR 17004 (15+, 2.19)
-   - Benign lesion destruction: 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
-   - Genital lesions male: 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
-   - Genital lesions female: 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+   DESTRUCTION (each is separate opportunity):
+   - AK destruction: potential_code 17000+17003 (1.70 avg for ~10 AKs), note "Document exact count"
+   - Benign destruction: code_options 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
+   - Genital male: code_options 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
+   - Genital female: code_options 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
 
-   SHAVE REMOVAL (trunk/extremities):
-   - 11300 (≤0.5cm, 0.56) OR 11301 (0.6-1.0cm, 0.70) OR 11302 (1.1-2.0cm, 0.93) OR 11303 (>2.0cm, 1.26)
-   SHAVE REMOVAL (face/ears/eyelids/nose/lips):
-   - 11305 (≤0.5cm, 0.60) OR 11306 (0.6-1.0cm, 0.80) OR 11307 (1.1-2.0cm, 1.05) OR 11308 (>2.0cm, 1.35)
+   INJECTIONS (separate opportunity):
+   - IL injections: code_options 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
 
-   EXCISION BENIGN (trunk/extremities):
-   - 11400 (≤0.5cm, 0.90) → 11401 (0.6-1.0cm, 1.22) → 11402 (1.1-2.0cm, 1.58) → 11403 (2.1-3.0cm, 1.89) → 11404 (3.1-4.0cm, 2.47) → 11406 (>4.0cm, 3.05)
-   EXCISION BENIGN (face/scalp/neck):
-   - 11420-11426 same size tiers, higher wRVU
+   DEBRIDEMENT (separate opportunity):
+   - Nail debridement: code_options 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
 
-   BIOPSY (by method and count):
-   - Tangential: 11102 (first, 0.56) + 11103 (each add'l, 0.23)
-   - Punch: 11104 (first, 0.69) + 11105 (each add'l, 0.33)
-   - Incisional: 11106 (first, 1.01) + 11107 (each add'l, 0.56)
-
-   REPAIR (by length):
-   - Simple trunk: 12001 (≤2.5cm, 0.78) → 12002 (2.6-7.5cm, 1.14) → 12004 (7.6-12.5cm, 1.47) → 12005 (12.6-20cm, 2.00) → 12006 (20.1-30cm, 2.54)
-   - Intermediate face: 12051 (≤2.5cm, 1.78) → 12052 (2.6-5.0cm, 2.11) → 12053 (5.1-7.5cm, 2.60)
-   - Complex: 13100+ series
+   BIOPSY (separate opportunity per suspicious lesion):
+   - Use potential_code: 11102 (tangential, 0.56) or 11104 (punch, 0.69) or 11106 (incisional, 1.01)
 
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
-JSON format - use code_options for tiered procedures, potential_code for non-tiered:
+IMPORTANT RULES:
+- Each DIFFERENT code family = SEPARATE opportunity card (don't mix 17xxx with 11xxx)
+- Use code_options ONLY for mutually exclusive choices within SAME family
+- Use potential_code for single recommended code
+- Keep code_options to 2-3 meaningful tiers max (not every permutation)
+
+JSON format:
 {{"opportunities": [
-  {{"category": "procedure", "finding": "X", "opportunity": "X", "action": "X",
-    "code_options": [{{"code": "11720", "description": "Nail debridement 1-5", "wRVU": 0.34, "threshold": "1-5 nails"}},
-                     {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53, "threshold": "6+ nails"}}],
-    "teaching_point": "X"}},
-  {{"category": "visit_level", "finding": "X", "opportunity": "X", "action": "X",
-    "potential_code": {{"code": "99214", "description": "Level 4 E/M", "wRVU": 1.92}},
-    "teaching_point": "X"}}
+  {{"category": "procedure", "finding": "Sun damage with AKs", "opportunity": "AK destruction billing", "action": "Document exact AK count per site",
+    "potential_code": {{"code": "17000+17003", "description": "AK destruction (document count)", "wRVU": 1.50}},
+    "teaching_point": "Each AK adds 0.09 wRVU via 17003. 15+ uses 17004 (2.19)"}},
+  {{"category": "procedure", "finding": "Nail changes", "opportunity": "Nail debridement", "action": "Document nail count",
+    "code_options": [{{"code": "11720", "description": "1-5 nails", "wRVU": 0.34, "threshold": "1-5"}},
+                     {{"code": "11721", "description": "6+ nails", "wRVU": 0.53, "threshold": "6+"}}],
+    "teaching_point": "Count all affected nails"}},
+  {{"category": "visit_level", "finding": "Chronic condition", "opportunity": "Add G2211", "action": "Document ongoing management",
+    "potential_code": {{"code": "G2211", "description": "Visit complexity add-on", "wRVU": 0.33}},
+    "teaching_point": "Chronic care qualifies"}}
 ], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
 
-        system = """Dermatology billing educator. Identify intra-encounter opportunities.
-
-For TIERED PROCEDURES (destruction, shave, excision, biopsy, repair):
-- Return code_options array with ALL relevant tier options
-- Each option: code, description, wRVU, threshold
-- Include size-based tiers when applicable
-For NON-TIERED opportunities: use potential_code
+        system = """Dermatology billing educator. Return opportunities as SEPARATE cards per code family.
+CRITICAL: Different code families (17xxx vs 11xxx) must be SEPARATE opportunities.
+Use code_options only for 2-3 mutually exclusive tiers within same family.
 Respond with valid JSON only."""
 
         try:
@@ -660,57 +652,49 @@ REFERENCE:
 
 OPPORTUNITY TYPES:
 1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
-2. ADDITIONAL CODES: Mohs + 99203 for complex closure, G2211 for chronic conditions
-3. TIERED PROCEDURES - return code_options array with ALL applicable tiers:
+2. ADD-ON CODES: G2211 for chronic conditions, complex closure discussions
+3. PROCEDURE OPPORTUNITIES - ONE CARD PER CODE FAMILY, each as SEPARATE opportunity:
 
-   DESTRUCTION:
-   - Nail debridement: 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
-   - IL injections: 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
-   - AK destruction: 17000 (first, 0.61) + 17003 (2-14 ea, 0.04) OR 17004 (15+, 2.19)
-   - Benign lesion destruction: 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
-   - Genital lesions male: 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
-   - Genital lesions female: 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+   DESTRUCTION (each is separate opportunity):
+   - AK destruction: potential_code 17000+17003 (1.70 avg for ~10 AKs), note "Document exact count"
+   - Benign destruction: code_options 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
+   - Genital male: code_options 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
+   - Genital female: code_options 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
 
-   SHAVE REMOVAL (trunk/extremities):
-   - 11300 (≤0.5cm, 0.56) OR 11301 (0.6-1.0cm, 0.70) OR 11302 (1.1-2.0cm, 0.93) OR 11303 (>2.0cm, 1.26)
-   SHAVE REMOVAL (face/ears/eyelids/nose/lips):
-   - 11305 (≤0.5cm, 0.60) OR 11306 (0.6-1.0cm, 0.80) OR 11307 (1.1-2.0cm, 1.05) OR 11308 (>2.0cm, 1.35)
+   INJECTIONS (separate opportunity):
+   - IL injections: code_options 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
 
-   EXCISION BENIGN (trunk/extremities):
-   - 11400 (≤0.5cm, 0.90) → 11401 (0.6-1.0cm, 1.22) → 11402 (1.1-2.0cm, 1.58) → 11403 (2.1-3.0cm, 1.89) → 11404 (3.1-4.0cm, 2.47) → 11406 (>4.0cm, 3.05)
-   EXCISION BENIGN (face/scalp/neck):
-   - 11420-11426 same size tiers, higher wRVU
+   DEBRIDEMENT (separate opportunity):
+   - Nail debridement: code_options 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
 
-   BIOPSY (by method and count):
-   - Tangential: 11102 (first, 0.56) + 11103 (each add'l, 0.23)
-   - Punch: 11104 (first, 0.69) + 11105 (each add'l, 0.33)
-   - Incisional: 11106 (first, 1.01) + 11107 (each add'l, 0.56)
-
-   REPAIR (by length):
-   - Simple trunk: 12001 (≤2.5cm, 0.78) → 12002 (2.6-7.5cm, 1.14) → 12004 (7.6-12.5cm, 1.47) → 12005 (12.6-20cm, 2.00) → 12006 (20.1-30cm, 2.54)
-   - Intermediate face: 12051 (≤2.5cm, 1.78) → 12052 (2.6-5.0cm, 2.11) → 12053 (5.1-7.5cm, 2.60)
-   - Complex: 13100+ series
+   BIOPSY (separate opportunity per suspicious lesion):
+   - Use potential_code: 11102 (tangential, 0.56) or 11104 (punch, 0.69) or 11106 (incisional, 1.01)
 
 4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
 
-JSON format - use code_options for tiered procedures, potential_code for non-tiered:
+IMPORTANT RULES:
+- Each DIFFERENT code family = SEPARATE opportunity card (don't mix 17xxx with 11xxx)
+- Use code_options ONLY for mutually exclusive choices within SAME family
+- Use potential_code for single recommended code
+- Keep code_options to 2-3 meaningful tiers max (not every permutation)
+
+JSON format:
 {{"opportunities": [
-  {{"category": "procedure", "finding": "X", "opportunity": "X", "action": "X",
-    "code_options": [{{"code": "11720", "description": "Nail debridement 1-5", "wRVU": 0.34, "threshold": "1-5 nails"}},
-                     {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53, "threshold": "6+ nails"}}],
-    "teaching_point": "X"}},
-  {{"category": "visit_level", "finding": "X", "opportunity": "X", "action": "X",
-    "potential_code": {{"code": "99214", "description": "Level 4 E/M", "wRVU": 1.92}},
-    "teaching_point": "X"}}
+  {{"category": "procedure", "finding": "Sun damage with AKs", "opportunity": "AK destruction billing", "action": "Document exact AK count per site",
+    "potential_code": {{"code": "17000+17003", "description": "AK destruction (document count)", "wRVU": 1.50}},
+    "teaching_point": "Each AK adds 0.09 wRVU via 17003. 15+ uses 17004 (2.19)"}},
+  {{"category": "procedure", "finding": "Nail changes", "opportunity": "Nail debridement", "action": "Document nail count",
+    "code_options": [{{"code": "11720", "description": "1-5 nails", "wRVU": 0.34, "threshold": "1-5"}},
+                     {{"code": "11721", "description": "6+ nails", "wRVU": 0.53, "threshold": "6+"}}],
+    "teaching_point": "Count all affected nails"}},
+  {{"category": "visit_level", "finding": "Chronic condition", "opportunity": "Add G2211", "action": "Document ongoing management",
+    "potential_code": {{"code": "G2211", "description": "Visit complexity add-on", "wRVU": 0.33}},
+    "teaching_point": "Chronic care qualifies"}}
 ], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
 
-        system = """Dermatology billing educator. Identify intra-encounter opportunities.
-
-For TIERED PROCEDURES (destruction, shave, excision, biopsy, repair):
-- Return code_options array with ALL relevant tier options
-- Each option: code, description, wRVU, threshold
-- Include size-based tiers when applicable
-For NON-TIERED opportunities: use potential_code
+        system = """Dermatology billing educator. Return opportunities as SEPARATE cards per code family.
+CRITICAL: Different code families (17xxx vs 11xxx) must be SEPARATE opportunities.
+Use code_options only for 2-3 mutually exclusive tiers within same family.
 Respond with valid JSON only."""
 
         try:
@@ -839,18 +823,24 @@ SELECTED ITEMS TO DOCUMENT (write as if these were all done):
 {chr(10).join(changes_to_apply)}
 
 INSTRUCTIONS:
-1. Write the note AS IF all selected procedures/services were actually performed
-2. For opportunities (things that weren't done): document them as if they WERE done
-3. For enhancements: add the documentation details that support higher billing
-4. The final note should fully support billing all selected codes
-5. Keep the note professional and clinically appropriate
-6. Output ONLY the complete rewritten note - no explanations
+1. PRESERVE THE ORIGINAL NOTE FORMAT - if input has HPI/Physical/Assessment/Plan sections, output must have same structure
+2. Write the note AS IF all selected procedures/services were actually performed
+3. For opportunities (things that weren't done): document them as if they WERE done
+4. For enhancements: add the documentation details that support higher billing
+5. The final note should fully support billing all selected codes
+6. Keep the note professional and clinically appropriate
+7. Output ONLY the complete rewritten note - no explanations
 
-This is a TEMPLATE showing what the provider should document to bill these codes.
+CRITICAL: Match the original note's structure and formatting style exactly.
 
 OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
 
         system = """Medical documentation expert. Create notes that support maximum billing.
+
+CRITICAL: Preserve the original note's format and structure:
+- If input has sections (HPI, Physical Exam, Assessment, Plan), keep those sections
+- If input is SOAP format, output SOAP format
+- If input is free-text paragraph, output paragraph
 
 Write the note AS IF all selected items were actually performed during the visit.
 - If an injection opportunity is selected, document that the injection WAS done

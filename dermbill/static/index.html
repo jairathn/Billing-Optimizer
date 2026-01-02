@@ -498,6 +498,55 @@
         .opportunity-row:hover {
             background: #e6ffed !important;
         }
+
+        .count-input-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 10px 0;
+            padding: 10px;
+            background: #f0f7ff;
+            border: 1px solid #b8daff;
+            border-radius: 6px;
+        }
+
+        .count-input-group label {
+            font-weight: 600;
+            color: #004085;
+        }
+
+        .count-input {
+            width: 60px;
+            padding: 8px;
+            border: 2px solid #667eea;
+            border-radius: 4px;
+            font-size: 16px;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .count-input:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 5px rgba(102, 126, 234, 0.5);
+        }
+
+        .code-family-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            background: #e9ecef;
+            border-radius: 3px;
+            font-size: 11px;
+            color: #6c757d;
+            margin-left: 8px;
+        }
+
+        .aggregated-note {
+            font-size: 12px;
+            color: #28a745;
+            font-style: italic;
+            margin-top: 5px;
+        }
     </style>
 </head>
 <body>
@@ -597,6 +646,72 @@ Plan:
 
         // Global storage for analysis results
         let currentAnalysisData = null;
+
+        // Code family definitions for count-based aggregation
+        const CODE_FAMILIES = {
+            'il_injection': {
+                name: 'IL Injections',
+                tiers: [
+                    { min: 1, max: 7, code: '11900', wRVU: 0.52, desc: 'IL injection 1-7 lesions' },
+                    { min: 8, max: 999, code: '11901', wRVU: 0.82, desc: 'IL injection 8+ lesions' }
+                ],
+                patterns: ['11900', '11901']
+            },
+            'ak_destruction': {
+                name: 'AK Destruction',
+                tiers: [
+                    { min: 1, max: 1, code: '17000', wRVU: 0.61, desc: 'AK destruction first lesion' },
+                    { min: 2, max: 14, code: '17000+17003', wRVU: null, desc: 'AK destruction 2-14', perUnit: 0.09, baseWRVU: 0.61 },
+                    { min: 15, max: 999, code: '17004', wRVU: 2.19, desc: 'AK destruction 15+' }
+                ],
+                patterns: ['17000', '17003', '17004']
+            },
+            'benign_destruction': {
+                name: 'Benign Lesion Destruction',
+                tiers: [
+                    { min: 1, max: 14, code: '17110', wRVU: 0.70, desc: 'Benign destruction 1-14' },
+                    { min: 15, max: 999, code: '17111', wRVU: 1.23, desc: 'Benign destruction 15+' }
+                ],
+                patterns: ['17110', '17111']
+            },
+            'nail_debridement': {
+                name: 'Nail Debridement',
+                tiers: [
+                    { min: 1, max: 5, code: '11720', wRVU: 0.34, desc: 'Nail debridement 1-5' },
+                    { min: 6, max: 999, code: '11721', wRVU: 0.53, desc: 'Nail debridement 6+' }
+                ],
+                patterns: ['11720', '11721']
+            }
+        };
+
+        // Detect code family from a code string
+        function detectCodeFamily(code) {
+            if (!code) return null;
+            for (const [familyId, family] of Object.entries(CODE_FAMILIES)) {
+                for (const pattern of family.patterns) {
+                    if (code.includes(pattern)) return familyId;
+                }
+            }
+            return null;
+        }
+
+        // Calculate wRVU for a code family given count
+        function calculateFamilyWRVU(familyId, count) {
+            const family = CODE_FAMILIES[familyId];
+            if (!family) return { code: null, wRVU: 0, desc: '' };
+
+            for (const tier of family.tiers) {
+                if (count >= tier.min && count <= tier.max) {
+                    if (tier.perUnit) {
+                        // Count-based like AK: 17000 + (count-1) * 17003
+                        const wRVU = tier.baseWRVU + (count - 1) * tier.perUnit;
+                        return { code: `17000+17003x${count-1}`, wRVU, desc: `AK destruction ${count} lesions` };
+                    }
+                    return { code: tier.code, wRVU: tier.wRVU, desc: tier.desc };
+                }
+            }
+            return { code: null, wRVU: 0, desc: '' };
+        }
 
         function clearAll() {
             document.getElementById('clinical-note').value = '';
@@ -777,12 +892,12 @@ Plan:
             `;
 
             // Build enhanced billing codes table for Step 3
-            // Table ID for dynamic updates
+            // Table ID for dynamic updates - ONLY shows additional codes from enhancements
             enhHtml += `
-                <h4 style="margin-top: 20px;">Final Billing Codes (with selected enhancements)</h4>
+                <h4 style="margin-top: 20px;">Additional Codes from Selected Enhancements</h4>
                 <table class="billing-table" id="enh-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Description</th><th>wRVU</th><th>Source</th></tr>
+                        <tr><th>Code</th><th>Description</th><th>+wRVU</th></tr>
                     </thead>
                     <tbody id="enh-billing-tbody">
                     </tbody>
@@ -855,11 +970,12 @@ Plan:
             `;
 
             // Build dynamic billing codes table for Step 4
+            // ONLY shows additional codes from opportunities
             oppHtml += `
-                <h4 style="margin-top: 20px;">Billing Codes (based on selections)</h4>
+                <h4 style="margin-top: 20px;">Additional Codes from Selected Opportunities</h4>
                 <table class="billing-table" id="opp-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Description</th><th>wRVU</th><th>Source</th></tr>
+                        <tr><th>Code</th><th>Description</th><th>+wRVU</th></tr>
                     </thead>
                     <tbody id="opp-billing-tbody">
                     </tbody>
@@ -872,8 +988,37 @@ Plan:
                 oppHtml += opportunities.opportunities.map((o, idx) => {
                     let codeDisplay = '';
 
-                    // Check if this opportunity has tiered code options
-                    if (o.code_options && o.code_options.length > 0) {
+                    // Detect if this is a count-based code family
+                    let detectedFamily = null;
+                    if (o.potential_code) {
+                        detectedFamily = detectCodeFamily(o.potential_code.code);
+                    } else if (o.code_options && o.code_options.length > 0) {
+                        detectedFamily = detectCodeFamily(o.code_options[0].code);
+                    }
+
+                    // If it's a count-based family, render count input instead of radio buttons
+                    if (detectedFamily && CODE_FAMILIES[detectedFamily]) {
+                        const family = CODE_FAMILIES[detectedFamily];
+                        // Extract default count from potential_code description or code_options
+                        let defaultCount = 1;
+                        if (o.potential_code && o.potential_code.description) {
+                            const countMatch = o.potential_code.description.match(/(\d+)\s*(lesion|nail|site)/i);
+                            if (countMatch) defaultCount = parseInt(countMatch[1]);
+                        }
+                        codeDisplay = `
+                            <div class="count-input-group" data-family="${detectedFamily}">
+                                <label>Number of lesions/sites:</label>
+                                <input type="number" class="count-input"
+                                       data-opp-index="${idx}"
+                                       data-family="${detectedFamily}"
+                                       min="1" max="99" value="${defaultCount}">
+                                <span class="code-family-badge">${family.name}</span>
+                            </div>
+                            <p class="aggregated-note">Counts from same family are aggregated to determine final tier</p>
+                        `;
+                    }
+                    // Check if this opportunity has tiered code options (non-count-based)
+                    else if (o.code_options && o.code_options.length > 0) {
                         codeDisplay = `
                             <div class="tier-options">
                                 <strong>Select Tier:</strong>
@@ -896,9 +1041,9 @@ Plan:
                     }
 
                     return `
-                        <div class="opportunity-card">
+                        <div class="opportunity-card" data-family="${detectedFamily || ''}">
                             <label class="checkbox-label" style="display: flex; align-items: flex-start; gap: 10px;">
-                                <input type="checkbox" class="opportunity-checkbox" data-index="${idx}" checked style="margin-top: 5px; transform: scale(1.3);">
+                                <input type="checkbox" class="opportunity-checkbox" data-index="${idx}" data-family="${detectedFamily || ''}" checked style="margin-top: 5px; transform: scale(1.3);">
                                 <div style="flex: 1;">
                                     <span class="category-badge category-${o.category}">${o.category}</span>
                                     <h4>${o.finding}</h4>
@@ -959,18 +1104,9 @@ Plan:
             const enhancements = currentAnalysisData.documentation_enhancements.enhancements;
             const baselineWRVU = currentBilling.total_wRVU;
 
-            // Start with current billing codes
-            let finalCodes = currentBilling.codes.map(c => ({
-                code: c.code,
-                description: c.description,
-                wRVU: c.wRVU || 0,
-                source: 'Current',
-                isEM: /^99\d{3}$/.test(c.code)
-            }));
-
-            // Track the best E/M code and add-ons to apply
-            let bestEMCode = finalCodes.find(c => c.isEM);
-            let addOnCodes = [];
+            // Only collect ENHANCED codes (what's being added/upgraded)
+            let enhancedCodes = [];
+            let totalDelta = 0;
 
             // Process selected enhancements
             enhancements.forEach((e, idx) => {
@@ -978,105 +1114,89 @@ Plan:
                 if (!checkbox || !checkbox.checked) return;
 
                 const enhCode = e.enhanced_code;
-                const currCode = e.current_code;
-
                 if (!enhCode) return;
 
                 // Check if enhanced_code is a composite like "99213 + G2211"
-                // If so, extract just the add-on code (G2211)
                 const compositeMatch = enhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
                 if (compositeMatch) {
-                    // This is "99xxx + Gxxxx" format - extract just the add-on
                     const addOnCode = compositeMatch[1];
-                    // G2211 is 0.33 wRVU, calculate delta from the composite
-                    const addOnWRVU = e.delta_wRVU || 0.33; // Use delta as the add-on value
-                    addOnCodes.push({
-                        code: addOnCode,
-                        description: 'Chronic care management add-on',
-                        wRVU: addOnWRVU,
-                        source: 'Enhanced',
-                        isEM: false
-                    });
+                    const addOnWRVU = e.delta_wRVU || 0.33;
+                    if (!enhancedCodes.find(c => c.code === addOnCode)) {
+                        enhancedCodes.push({
+                            code: addOnCode,
+                            description: 'Chronic care management add-on',
+                            wRVU: addOnWRVU
+                        });
+                        totalDelta += addOnWRVU;
+                    }
                     return;
                 }
 
-                // Check if this is an E/M upgrade (99xxx -> 99xxx)
-                const isEMUpgrade = /^99\d{3}$/.test(enhCode) && /^99\d{3}$/.test(currCode);
-                // Check if this is a standalone add-on code (G2211, etc)
-                const isAddOn = /^G\d{4}$/.test(enhCode);
-
+                // For E/M upgrades, show the delta (upgrade benefit)
+                const isEMUpgrade = /^99\d{3}$/.test(enhCode) && /^99\d{3}$/.test(e.current_code);
                 if (isEMUpgrade) {
-                    // Replace E/M code with upgraded version if higher
-                    if (!bestEMCode || parseFloat(e.enhanced_wRVU) > bestEMCode.wRVU) {
-                        bestEMCode = {
+                    // Only add if not already added (take highest upgrade)
+                    const existing = enhancedCodes.find(c => /^99\d{3}$/.test(c.code));
+                    if (!existing || e.delta_wRVU > existing.wRVU) {
+                        if (existing) {
+                            totalDelta -= existing.wRVU;
+                            enhancedCodes = enhancedCodes.filter(c => c.code !== existing.code);
+                        }
+                        enhancedCodes.push({
                             code: enhCode,
-                            description: e.issue,
-                            wRVU: e.enhanced_wRVU || 0,
-                            source: 'Enhanced',
-                            isEM: true
-                        };
-                    }
-                } else if (isAddOn) {
-                    // Add-on codes go alongside E/M
-                    addOnCodes.push({
-                        code: enhCode,
-                        description: e.issue,
-                        wRVU: e.delta_wRVU || e.enhanced_wRVU || 0,
-                        source: 'Enhanced',
-                        isEM: false
-                    });
-                } else {
-                    // Other procedure codes - add if not already present
-                    if (!finalCodes.find(c => c.code === enhCode)) {
-                        finalCodes.push({
-                            code: enhCode,
-                            description: e.issue,
-                            wRVU: e.enhanced_wRVU || 0,
-                            source: 'Enhanced',
-                            isEM: false
+                            description: `E/M upgrade (from ${e.current_code})`,
+                            wRVU: e.delta_wRVU || 0
                         });
+                        totalDelta += e.delta_wRVU || 0;
+                    }
+                } else if (/^G\d{4}$/.test(enhCode)) {
+                    // Add-on code
+                    if (!enhancedCodes.find(c => c.code === enhCode)) {
+                        enhancedCodes.push({
+                            code: enhCode,
+                            description: e.issue,
+                            wRVU: e.delta_wRVU || 0
+                        });
+                        totalDelta += e.delta_wRVU || 0;
+                    }
+                } else {
+                    // Other procedure codes
+                    if (!enhancedCodes.find(c => c.code === enhCode)) {
+                        enhancedCodes.push({
+                            code: enhCode,
+                            description: e.issue,
+                            wRVU: e.delta_wRVU || e.enhanced_wRVU || 0
+                        });
+                        totalDelta += e.delta_wRVU || e.enhanced_wRVU || 0;
                     }
                 }
             });
-
-            // Build final code list: non-E/M codes + best E/M + add-ons
-            let consolidatedCodes = finalCodes.filter(c => !c.isEM);
-            if (bestEMCode) {
-                consolidatedCodes.unshift(bestEMCode); // E/M first
-            }
-            addOnCodes.forEach(addon => {
-                if (!consolidatedCodes.find(c => c.code === addon.code)) {
-                    consolidatedCodes.push(addon);
-                }
-            });
-
-            // Calculate total
-            const totalWRVU = consolidatedCodes.reduce((sum, c) => sum + (c.wRVU || 0), 0);
-            const deltaWRVU = totalWRVU - baselineWRVU;
 
             // Update the summary display
             const deltaDisplay = document.getElementById('enh-delta-display');
             const totalDisplay = document.getElementById('enh-total-display');
-            if (deltaDisplay) deltaDisplay.textContent = '+' + deltaWRVU.toFixed(2);
-            if (totalDisplay) totalDisplay.textContent = totalWRVU.toFixed(2);
+            if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
+            if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
 
-            // Update the billing table
+            // Update the billing table - ONLY show enhanced codes
             const tbody = document.getElementById('enh-billing-tbody');
             if (tbody) {
-                tbody.innerHTML = consolidatedCodes.map(c => `
-                    <tr class="${c.source === 'Enhanced' ? 'opportunity-row' : ''}">
-                        <td><strong>${c.code}</strong></td>
-                        <td>${c.description}</td>
-                        <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
-                        <td><span style="color: ${c.source === 'Enhanced' ? '#28a745' : '#6c757d'}; font-size: 12px;">${c.source}</span></td>
-                    </tr>
-                `).join('') + `
-                    <tr class="total-row">
-                        <td colspan="2"><strong>TOTAL</strong></td>
-                        <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
-                        <td><span class="delta-highlight">+${deltaWRVU.toFixed(2)} vs baseline</span></td>
-                    </tr>
-                `;
+                if (enhancedCodes.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #6c757d;">No enhancements selected</td></tr>`;
+                } else {
+                    tbody.innerHTML = enhancedCodes.map(c => `
+                        <tr class="opportunity-row">
+                            <td><strong>${c.code}</strong></td>
+                            <td>${c.description}</td>
+                            <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
+                        </tr>
+                    `).join('') + `
+                        <tr class="total-row">
+                            <td colspan="2"><strong>ADDITIONAL wRVU</strong></td>
+                            <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
+                        </tr>
+                    `;
+                }
             }
         }
 
@@ -1089,6 +1209,11 @@ Plan:
             document.querySelectorAll('.tier-radio').forEach(radio => {
                 radio.addEventListener('change', updateOpportunityTotals);
             });
+            // Listen for count input changes (for count-based families)
+            document.querySelectorAll('.count-input').forEach(input => {
+                input.addEventListener('input', updateOpportunityTotals);
+                input.addEventListener('change', updateOpportunityTotals);
+            });
         }
 
         function updateOpportunityTotals() {
@@ -1098,28 +1223,35 @@ Plan:
             const opportunities = currentAnalysisData.future_opportunities.opportunities;
             const baselineWRVU = currentBilling.total_wRVU;
 
-            // Start with current billing codes, marking E/M codes
-            let finalCodes = currentBilling.codes.map(c => ({
-                code: c.code,
-                description: c.description,
-                wRVU: c.wRVU || 0,
-                source: 'Current',
-                isEM: /^99\d{3}$/.test(c.code)
-            }));
-
-            // Track the best E/M code and add-on codes
-            let bestEMCode = finalCodes.find(c => c.isEM);
-            let addOnCodes = [];
-            let procedureCodes = [];
+            // Track aggregated counts by code family
+            let familyCounts = {};
+            // Track non-family codes separately
+            let opportunityCodes = [];
+            let totalDelta = 0;
 
             // Go through each opportunity
             opportunities.forEach((o, idx) => {
                 const checkbox = document.querySelector(`.opportunity-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
+                // Check if this opportunity belongs to a count-based family
+                const familyId = checkbox.dataset.family;
+                if (familyId && CODE_FAMILIES[familyId]) {
+                    // Get count from input field
+                    const countInput = document.querySelector(`.count-input[data-opp-index="${idx}"]`);
+                    if (countInput) {
+                        const count = parseInt(countInput.value) || 0;
+                        if (!familyCounts[familyId]) {
+                            familyCounts[familyId] = 0;
+                        }
+                        familyCounts[familyId] += count;
+                    }
+                    return; // Don't process as regular code
+                }
+
                 let code, wRVU, desc;
 
-                // Check if this opportunity has tiered options
+                // Check if this opportunity has tiered options (non-count-based)
                 if (o.code_options && o.code_options.length > 0) {
                     const selectedRadio = document.querySelector(`input[name="tier-${idx}"]:checked`);
                     if (selectedRadio) {
@@ -1137,98 +1269,65 @@ Plan:
                     return;
                 }
 
-                // Classify the code
-                const isEM = /^99\d{3}$/.test(code);
-                const isAddOn = /^G\d{4}$/.test(code);
-
-                if (isEM) {
-                    // E/M codes are mutually exclusive - keep the highest
-                    if (!bestEMCode || wRVU > bestEMCode.wRVU) {
-                        bestEMCode = {
-                            code: code,
-                            description: desc,
-                            wRVU: wRVU,
-                            source: 'Opportunity',
-                            isEM: true
-                        };
-                    }
-                } else if (isAddOn) {
-                    // Add-on codes - deduplicate
-                    if (!addOnCodes.find(c => c.code === code)) {
-                        addOnCodes.push({
-                            code: code,
-                            description: desc,
-                            wRVU: wRVU,
-                            source: 'Opportunity',
-                            isEM: false
-                        });
-                    }
-                } else {
-                    // Procedure codes - deduplicate
-                    if (!procedureCodes.find(c => c.code === code)) {
-                        procedureCodes.push({
-                            code: code,
-                            description: desc,
-                            wRVU: wRVU,
-                            source: 'Opportunity',
-                            isEM: false
-                        });
-                    }
+                // Deduplicate by code
+                if (!opportunityCodes.find(c => c.code === code)) {
+                    opportunityCodes.push({
+                        code: code,
+                        description: desc,
+                        wRVU: wRVU
+                    });
+                    totalDelta += wRVU;
                 }
             });
 
-            // Build final consolidated list
-            let consolidatedCodes = [];
-
-            // Add best E/M code first
-            if (bestEMCode) {
-                consolidatedCodes.push(bestEMCode);
+            // Now process aggregated family counts and add to opportunityCodes
+            for (const [familyId, totalCount] of Object.entries(familyCounts)) {
+                if (totalCount > 0) {
+                    const result = calculateFamilyWRVU(familyId, totalCount);
+                    if (result.code) {
+                        const family = CODE_FAMILIES[familyId];
+                        opportunityCodes.push({
+                            code: result.code,
+                            description: `${family.name} (${totalCount} total)`,
+                            wRVU: result.wRVU,
+                            isAggregated: true,
+                            familyId: familyId,
+                            count: totalCount
+                        });
+                        totalDelta += result.wRVU;
+                    }
+                }
             }
-
-            // Add add-on codes (go with E/M)
-            addOnCodes.forEach(c => consolidatedCodes.push(c));
-
-            // Add non-E/M codes from current billing
-            finalCodes.filter(c => !c.isEM).forEach(c => {
-                if (!consolidatedCodes.find(x => x.code === c.code)) {
-                    consolidatedCodes.push(c);
-                }
-            });
-
-            // Add procedure codes from opportunities
-            procedureCodes.forEach(c => {
-                if (!consolidatedCodes.find(x => x.code === c.code)) {
-                    consolidatedCodes.push(c);
-                }
-            });
-
-            // Calculate totals
-            const totalWRVU = consolidatedCodes.reduce((sum, c) => sum + (c.wRVU || 0), 0);
-            const deltaWRVU = totalWRVU - baselineWRVU;
 
             // Update the summary display
             const deltaDisplay = document.getElementById('opp-delta-display');
             const totalDisplay = document.getElementById('opp-total-display');
-            if (deltaDisplay) deltaDisplay.textContent = '+' + deltaWRVU.toFixed(2);
-            if (totalDisplay) totalDisplay.textContent = totalWRVU.toFixed(2);
+            if (deltaDisplay) deltaDisplay.textContent = '+' + totalDelta.toFixed(2);
+            if (totalDisplay) totalDisplay.textContent = (baselineWRVU + totalDelta).toFixed(2);
 
-            // Update the billing table
+            // Update the billing table - ONLY show opportunity codes
             const tbody = document.getElementById('opp-billing-tbody');
             if (tbody) {
-                tbody.innerHTML = consolidatedCodes.map(c => `
-                    <tr class="${c.source === 'Opportunity' ? 'opportunity-row' : ''}">
-                        <td><strong>${c.code}</strong></td>
-                        <td>${c.description}</td>
-                        <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
-                        <td><span style="color: ${c.source === 'Opportunity' ? '#28a745' : '#6c757d'}; font-size: 12px;">${c.source}</span></td>
-                    </tr>
-                `).join('') + `
-                    <tr class="total-row">
-                        <td colspan="2"><strong>TOTAL</strong></td>
-                        <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
-                        <td><span class="delta-highlight">+${deltaWRVU.toFixed(2)} vs baseline</span></td>
-                    </tr>
-                `;
+                if (opportunityCodes.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: #6c757d;">No opportunities selected</td></tr>`;
+                } else {
+                    tbody.innerHTML = opportunityCodes.map(c => {
+                        const aggregatedClass = c.isAggregated ? 'style="background: #e8f5e9 !important;"' : '';
+                        const aggregatedIcon = c.isAggregated ? '<span title="Aggregated from multiple opportunities">⊕</span> ' : '';
+                        return `
+                            <tr class="opportunity-row" ${aggregatedClass}>
+                                <td><strong>${aggregatedIcon}${c.code}</strong></td>
+                                <td>${c.description}</td>
+                                <td><span class="wrvu-badge">+${(c.wRVU || 0).toFixed(2)}</span></td>
+                            </tr>
+                        `;
+                    }).join('') + `
+                        <tr class="total-row">
+                            <td colspan="2"><strong>ADDITIONAL wRVU</strong></td>
+                            <td><span class="wrvu-badge">+${totalDelta.toFixed(2)}</span></td>
+                        </tr>
+                    `;
+                }
             }
         }
 
