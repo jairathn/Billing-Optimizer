@@ -982,10 +982,28 @@ Plan:
 
                 if (!enhCode) return;
 
+                // Check if enhanced_code is a composite like "99213 + G2211"
+                // If so, extract just the add-on code (G2211)
+                const compositeMatch = enhCode.match(/^99\d{3}\s*\+\s*(G\d{4})$/);
+                if (compositeMatch) {
+                    // This is "99xxx + Gxxxx" format - extract just the add-on
+                    const addOnCode = compositeMatch[1];
+                    // G2211 is 0.33 wRVU, calculate delta from the composite
+                    const addOnWRVU = e.delta_wRVU || 0.33; // Use delta as the add-on value
+                    addOnCodes.push({
+                        code: addOnCode,
+                        description: 'Chronic care management add-on',
+                        wRVU: addOnWRVU,
+                        source: 'Enhanced',
+                        isEM: false
+                    });
+                    return;
+                }
+
                 // Check if this is an E/M upgrade (99xxx -> 99xxx)
                 const isEMUpgrade = /^99\d{3}$/.test(enhCode) && /^99\d{3}$/.test(currCode);
-                // Check if this is an add-on code (G2211, etc)
-                const isAddOn = /^G\d{4}$/.test(enhCode) || enhCode.includes('+');
+                // Check if this is a standalone add-on code (G2211, etc)
+                const isAddOn = /^G\d{4}$/.test(enhCode);
 
                 if (isEMUpgrade) {
                     // Replace E/M code with upgraded version if higher
@@ -1003,7 +1021,7 @@ Plan:
                     addOnCodes.push({
                         code: enhCode,
                         description: e.issue,
-                        wRVU: e.enhanced_wRVU || 0,
+                        wRVU: e.delta_wRVU || e.enhanced_wRVU || 0,
                         source: 'Enhanced',
                         isEM: false
                     });
