@@ -314,17 +314,24 @@ REFERENCE INFORMATION:
 
 You must:
 1. First identify ALL billable codes from the note AS WRITTEN
-2. Then suggest documentation enhancements that INCREASE BILLING
+2. Then suggest DOCUMENTATION enhancements for work that WAS ACTUALLY PERFORMED
 
-CRITICAL RULE: Every enhancement MUST result in either:
-- A code upgrade (higher wRVU code)
-- An additional billable code
-- Meeting a billing threshold (e.g., going from 7 to 8+ lesions for IL injection codes)
+CRITICAL: Step 3 is ONLY for documentation enhancements of work ACTUALLY DONE in this visit.
+This is NOT for suggesting new procedures that weren't performed.
 
-DO NOT recommend:
-- Increased work without billing benefit (e.g., treating 6 lesions when threshold is 8)
-- Documentation changes that don't change the billable code
-- Partial increases that don't cross billing thresholds
+VALID ENHANCEMENT TYPES (documentation for work already done):
+1. CODE UPGRADES: Document details to support a higher code (e.g., simple repair → intermediate repair)
+2. UNBUNDLING: Separate procedures under different diagnoses to avoid bundling reductions
+   - Example: If E/M and ILTAC both under "acne", separate ILTAC under "inflamed cyst"
+   - Example: Document separate anatomic sites or diagnoses for each procedure
+3. MODIFIER ADDITIONS: Add documentation to support billable modifiers (-25, -59, etc.)
+4. MISSING DOCUMENTATION: Add details for work done but not fully documented
+5. MEASUREMENT DOCUMENTATION: Add sizes, counts, or measurements that support higher codes
+
+INVALID (DO NOT SUGGEST - these belong in Step 4 Future Opportunities):
+- Procedures that were NOT performed during this visit
+- New services that COULD have been done but weren't
+- Additional treatments the provider didn't actually do
 
 For procedures with tiered thresholds, know the exact cutoffs:
 - AK destruction: 1-14 lesions vs 15+ lesions
@@ -343,7 +350,17 @@ Respond with JSON:
     }},
     "enhancements": [
         {{
-            "issue": "Closure type not documented",
+            "issue": "Procedures bundled under same diagnosis causing billing reduction",
+            "current_code": "E/M + ILTAC bundled",
+            "current_wRVU": 1.92,
+            "suggested_addition": "Document ILTAC under 'inflamed epidermal cyst' separately from E/M diagnosis of 'acne vulgaris'",
+            "enhanced_code": "E/M + ILTAC unbundled",
+            "enhanced_wRVU": 2.72,
+            "delta_wRVU": 0.80,
+            "priority": "high"
+        }},
+        {{
+            "issue": "Closure type not documented for repair performed",
             "current_code": "12001",
             "current_wRVU": 0.82,
             "suggested_addition": "Add: 'Wound edges undermined. Layered closure with deep dermal 4-0 Vicryl.'",
@@ -360,14 +377,24 @@ Respond with JSON:
 }}"""
 
         system = """You are a dermatology billing MAXIMIZATION expert.
-Your goal is to identify the MAXIMUM legitimate billing from each note.
+Your goal is to identify the MAXIMUM legitimate billing from each note through DOCUMENTATION improvements.
+
+CRITICAL DISTINCTION:
+- Step 3 (this step): ONLY documentation enhancements for work ACTUALLY PERFORMED
+- Step 4 (separate): Suggestions for procedures that COULD have been done
 
 STRICT RULES:
-1. Every enhancement must result in INCREASED wRVU - no exceptions
-2. Never recommend increased clinical work without crossing a billing threshold
-3. Know exact code thresholds (e.g., IL injections: 8+ lesions for higher code)
-4. Only suggest documentation for work that was actually performed
-5. Calculate exact delta_wRVU for each enhancement
+1. ONLY suggest documentation changes for procedures that WERE ACTUALLY DONE
+2. NEVER suggest new procedures that weren't performed - those belong in Step 4
+3. Include UNBUNDLING opportunities - separate procedures under different diagnoses
+4. Every enhancement must result in INCREASED wRVU
+5. Know exact code thresholds and only recommend when work was done
+6. Calculate exact delta_wRVU for each enhancement
+
+KEY UNBUNDLING STRATEGIES:
+- Separate E/M from procedures under different problem codes
+- Document different anatomic sites for different procedures
+- Use distinct diagnoses for each billable service
 
 If an enhancement doesn't increase billing, DO NOT include it.
 Apply proper modifier logic and NCCI edit rules.
@@ -447,17 +474,24 @@ REFERENCE INFORMATION:
 
 You must:
 1. First identify ALL billable codes from the note AS WRITTEN
-2. Then suggest documentation enhancements that INCREASE BILLING
+2. Then suggest DOCUMENTATION enhancements for work that WAS ACTUALLY PERFORMED
 
-CRITICAL RULE: Every enhancement MUST result in either:
-- A code upgrade (higher wRVU code)
-- An additional billable code
-- Meeting a billing threshold (e.g., going from 7 to 8+ lesions for IL injection codes)
+CRITICAL: Step 3 is ONLY for documentation enhancements of work ACTUALLY DONE in this visit.
+This is NOT for suggesting new procedures that weren't performed.
 
-DO NOT recommend:
-- Increased work without billing benefit (e.g., treating 6 lesions when threshold is 8)
-- Documentation changes that don't change the billable code
-- Partial increases that don't cross billing thresholds
+VALID ENHANCEMENT TYPES (documentation for work already done):
+1. CODE UPGRADES: Document details to support a higher code (e.g., simple repair → intermediate repair)
+2. UNBUNDLING: Separate procedures under different diagnoses to avoid bundling reductions
+   - Example: If E/M and ILTAC both under "acne", separate ILTAC under "inflamed cyst"
+   - Example: Document separate anatomic sites or diagnoses for each procedure
+3. MODIFIER ADDITIONS: Add documentation to support billable modifiers (-25, -59, etc.)
+4. MISSING DOCUMENTATION: Add details for work done but not fully documented
+5. MEASUREMENT DOCUMENTATION: Add sizes, counts, or measurements that support higher codes
+
+INVALID (DO NOT SUGGEST - these belong in Step 4 Future Opportunities):
+- Procedures that were NOT performed during this visit
+- New services that COULD have been done but weren't
+- Additional treatments the provider didn't actually do
 
 For procedures with tiered thresholds, know the exact cutoffs:
 - AK destruction: 1-14 lesions vs 15+ lesions
@@ -476,7 +510,17 @@ Respond with JSON:
     }},
     "enhancements": [
         {{
-            "issue": "Closure type not documented",
+            "issue": "Procedures bundled under same diagnosis causing billing reduction",
+            "current_code": "E/M + ILTAC bundled",
+            "current_wRVU": 1.92,
+            "suggested_addition": "Document ILTAC under 'inflamed epidermal cyst' separately from E/M diagnosis of 'acne vulgaris'",
+            "enhanced_code": "E/M + ILTAC unbundled",
+            "enhanced_wRVU": 2.72,
+            "delta_wRVU": 0.80,
+            "priority": "high"
+        }},
+        {{
+            "issue": "Closure type not documented for repair performed",
             "current_code": "12001",
             "current_wRVU": 0.82,
             "suggested_addition": "Add: 'Wound edges undermined. Layered closure with deep dermal 4-0 Vicryl.'",
@@ -493,14 +537,24 @@ Respond with JSON:
 }}"""
 
         system = """You are a dermatology billing MAXIMIZATION expert.
-Your goal is to identify the MAXIMUM legitimate billing from each note.
+Your goal is to identify the MAXIMUM legitimate billing from each note through DOCUMENTATION improvements.
+
+CRITICAL DISTINCTION:
+- Step 3 (this step): ONLY documentation enhancements for work ACTUALLY PERFORMED
+- Step 4 (separate): Suggestions for procedures that COULD have been done
 
 STRICT RULES:
-1. Every enhancement must result in INCREASED wRVU - no exceptions
-2. Never recommend increased clinical work without crossing a billing threshold
-3. Know exact code thresholds (e.g., IL injections: 8+ lesions for higher code)
-4. Only suggest documentation for work that was actually performed
-5. Calculate exact delta_wRVU for each enhancement
+1. ONLY suggest documentation changes for procedures that WERE ACTUALLY DONE
+2. NEVER suggest new procedures that weren't performed - those belong in Step 4
+3. Include UNBUNDLING opportunities - separate procedures under different diagnoses
+4. Every enhancement must result in INCREASED wRVU
+5. Know exact code thresholds and only recommend when work was done
+6. Calculate exact delta_wRVU for each enhancement
+
+KEY UNBUNDLING STRATEGIES:
+- Separate E/M from procedures under different problem codes
+- Document different anatomic sites for different procedures
+- Use distinct diagnoses for each billable service
 
 If an enhancement doesn't increase billing, DO NOT include it.
 Apply proper modifier logic and NCCI edit rules.
@@ -579,7 +633,7 @@ Respond with valid JSON only."""
         Returns:
             FutureOpportunities object
         """
-        prompt = f"""Analyze this clinical note and identify opportunities for INCREASED BILLING on future visits.
+        prompt = f"""Analyze this clinical note and identify procedures that COULD HAVE BEEN DONE but weren't.
 
 CLINICAL NOTE:
 {note_text}
@@ -593,17 +647,30 @@ RELEVANT SCENARIO GUIDANCE:
 REFERENCE INFORMATION:
 {corpus_context}
 
-CRITICAL RULE: Every opportunity MUST have a specific CPT code and wRVU that would be ADDED to billing.
-DO NOT include opportunities without concrete billing codes.
-DO NOT suggest increased work that doesn't cross billing thresholds.
+CRITICAL: Step 4 is for identifying MISSED PROCEDURES - things that COULD have been done during this visit.
+This is different from Step 3 which is for documentation of work that WAS done.
+
+VALID OPPORTUNITY TYPES (procedures NOT performed but could have been):
+1. MISSED PROCEDURES: Based on diagnoses/findings, procedures that would have added billing
+   - Example: Nail pitting documented but debridement not performed
+   - Example: Multiple AKs noted but not all treated
+2. ADDITIONAL TREATMENTS: Logical extensions of performed procedures
+   - Example: Did biopsy but could have done same-day treatment
+   - Example: Missed injectable opportunity for inflamed lesions
+3. VISIT LEVEL OPTIMIZATION: Could have billed higher E/M level with more documentation
+4. COMORBIDITY CAPTURE: Related conditions that warranted separate billing
 
 For each opportunity:
-1. Category: comorbidity, procedure, visit_level, or documentation
-2. What was found in the note (the trigger)
-3. What specific billable opportunity was missed
-4. What to do next time (specific action)
+1. Category: comorbidity, procedure, visit_level, or missed_treatment
+2. What was found in the note (the clinical trigger)
+3. What specific billable procedure was NOT performed
+4. What to do next time (specific action to capture this billing)
 5. The EXACT CPT code and wRVU that would be added
 6. Teaching point with billing rationale
+
+CRITICAL RULE: Every opportunity MUST have a specific CPT code and wRVU.
+DO NOT include opportunities without concrete billing codes.
+DO NOT suggest increased work that doesn't cross billing thresholds.
 
 For procedures with tiered thresholds, know the exact cutoffs:
 - AK destruction: 1-14 lesions vs 15+ lesions
@@ -615,29 +682,43 @@ Respond with JSON:
 {{
     "opportunities": [
         {{
-            "category": "comorbidity",
+            "category": "procedure",
             "finding": "Psoriasis documented with nail pitting on 8 nails",
-            "opportunity": "Nail debridement not performed despite pathology",
-            "action": "Perform nail debridement on affected nails (6+ threshold met)",
+            "opportunity": "Nail debridement not performed despite pathology present",
+            "action": "Next time: Perform nail debridement on affected nails (6+ threshold met)",
             "potential_code": {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53}},
             "teaching_point": "With 8 nails affected, debridement meets the 6+ threshold for 11721 (+0.53 wRVU)"
+        }},
+        {{
+            "category": "missed_treatment",
+            "finding": "4 inflamed cysts documented during acne visit",
+            "opportunity": "Intralesional injection not performed for inflamed cysts",
+            "action": "Next time: Inject 8+ lesions with ILTAC to reach higher billing tier",
+            "potential_code": {{"code": "11901", "description": "IL injection 8+ lesions", "wRVU": 1.10}},
+            "teaching_point": "Injecting 8+ lesions reaches the threshold for 11901 vs 11900 (+0.30 wRVU)"
         }}
     ],
-    "optimized_note": "Complete optimized note with all opportunities captured...",
-    "total_potential_additional_wRVU": 1.50
+    "optimized_note": "Complete optimized note showing what would have been documented if opportunities were captured...",
+    "total_potential_additional_wRVU": 1.63
 }}"""
 
         system = """You are a dermatology billing MAXIMIZATION educator.
-Your goal is to teach providers how to capture MAXIMUM legitimate billing.
+Your goal is to teach providers about procedures they COULD HAVE DONE but didn't.
+
+CRITICAL DISTINCTION:
+- Step 3: Documentation improvements for work that WAS DONE
+- Step 4 (this step): Procedures that COULD HAVE BEEN DONE but weren't
 
 STRICT RULES:
-1. Every opportunity MUST include a specific CPT code and wRVU
-2. Never suggest increased work without crossing a billing threshold
-3. Know exact code thresholds and only recommend when thresholds can be met
-4. Calculate exact wRVU gain for each opportunity
-5. Focus on high-value opportunities first
+1. Only suggest procedures that were NOT performed during this visit
+2. Every opportunity MUST include a specific CPT code and wRVU
+3. Never suggest work without crossing a billing threshold
+4. Know exact code thresholds and only recommend when thresholds can be met
+5. Calculate exact wRVU gain for each opportunity
+6. Focus on high-value opportunities first
 
 DO NOT include:
+- Documentation changes for work already done (that's Step 3)
 - Vague suggestions without specific codes
 - Incremental work that doesn't hit billing thresholds
 - Opportunities without quantified wRVU benefit
@@ -688,7 +769,7 @@ Respond with valid JSON only."""
         corpus_context: str,
     ) -> FutureOpportunities:
         """Async version of identify_opportunities."""
-        prompt = f"""Analyze this clinical note and identify opportunities for INCREASED BILLING on future visits.
+        prompt = f"""Analyze this clinical note and identify procedures that COULD HAVE BEEN DONE but weren't.
 
 CLINICAL NOTE:
 {note_text}
@@ -702,17 +783,30 @@ RELEVANT SCENARIO GUIDANCE:
 REFERENCE INFORMATION:
 {corpus_context}
 
-CRITICAL RULE: Every opportunity MUST have a specific CPT code and wRVU that would be ADDED to billing.
-DO NOT include opportunities without concrete billing codes.
-DO NOT suggest increased work that doesn't cross billing thresholds.
+CRITICAL: Step 4 is for identifying MISSED PROCEDURES - things that COULD have been done during this visit.
+This is different from Step 3 which is for documentation of work that WAS done.
+
+VALID OPPORTUNITY TYPES (procedures NOT performed but could have been):
+1. MISSED PROCEDURES: Based on diagnoses/findings, procedures that would have added billing
+   - Example: Nail pitting documented but debridement not performed
+   - Example: Multiple AKs noted but not all treated
+2. ADDITIONAL TREATMENTS: Logical extensions of performed procedures
+   - Example: Did biopsy but could have done same-day treatment
+   - Example: Missed injectable opportunity for inflamed lesions
+3. VISIT LEVEL OPTIMIZATION: Could have billed higher E/M level with more documentation
+4. COMORBIDITY CAPTURE: Related conditions that warranted separate billing
 
 For each opportunity:
-1. Category: comorbidity, procedure, visit_level, or documentation
-2. What was found in the note (the trigger)
-3. What specific billable opportunity was missed
-4. What to do next time (specific action)
+1. Category: comorbidity, procedure, visit_level, or missed_treatment
+2. What was found in the note (the clinical trigger)
+3. What specific billable procedure was NOT performed
+4. What to do next time (specific action to capture this billing)
 5. The EXACT CPT code and wRVU that would be added
 6. Teaching point with billing rationale
+
+CRITICAL RULE: Every opportunity MUST have a specific CPT code and wRVU.
+DO NOT include opportunities without concrete billing codes.
+DO NOT suggest increased work that doesn't cross billing thresholds.
 
 For procedures with tiered thresholds, know the exact cutoffs:
 - AK destruction: 1-14 lesions vs 15+ lesions
@@ -724,29 +818,43 @@ Respond with JSON:
 {{
     "opportunities": [
         {{
-            "category": "comorbidity",
+            "category": "procedure",
             "finding": "Psoriasis documented with nail pitting on 8 nails",
-            "opportunity": "Nail debridement not performed despite pathology",
-            "action": "Perform nail debridement on affected nails (6+ threshold met)",
+            "opportunity": "Nail debridement not performed despite pathology present",
+            "action": "Next time: Perform nail debridement on affected nails (6+ threshold met)",
             "potential_code": {{"code": "11721", "description": "Nail debridement 6+", "wRVU": 0.53}},
             "teaching_point": "With 8 nails affected, debridement meets the 6+ threshold for 11721 (+0.53 wRVU)"
+        }},
+        {{
+            "category": "missed_treatment",
+            "finding": "4 inflamed cysts documented during acne visit",
+            "opportunity": "Intralesional injection not performed for inflamed cysts",
+            "action": "Next time: Inject 8+ lesions with ILTAC to reach higher billing tier",
+            "potential_code": {{"code": "11901", "description": "IL injection 8+ lesions", "wRVU": 1.10}},
+            "teaching_point": "Injecting 8+ lesions reaches the threshold for 11901 vs 11900 (+0.30 wRVU)"
         }}
     ],
-    "optimized_note": "Complete optimized note with all opportunities captured...",
-    "total_potential_additional_wRVU": 1.50
+    "optimized_note": "Complete optimized note showing what would have been documented if opportunities were captured...",
+    "total_potential_additional_wRVU": 1.63
 }}"""
 
         system = """You are a dermatology billing MAXIMIZATION educator.
-Your goal is to teach providers how to capture MAXIMUM legitimate billing.
+Your goal is to teach providers about procedures they COULD HAVE DONE but didn't.
+
+CRITICAL DISTINCTION:
+- Step 3: Documentation improvements for work that WAS DONE
+- Step 4 (this step): Procedures that COULD HAVE BEEN DONE but weren't
 
 STRICT RULES:
-1. Every opportunity MUST include a specific CPT code and wRVU
-2. Never suggest increased work without crossing a billing threshold
-3. Know exact code thresholds and only recommend when thresholds can be met
-4. Calculate exact wRVU gain for each opportunity
-5. Focus on high-value opportunities first
+1. Only suggest procedures that were NOT performed during this visit
+2. Every opportunity MUST include a specific CPT code and wRVU
+3. Never suggest work without crossing a billing threshold
+4. Know exact code thresholds and only recommend when thresholds can be met
+5. Calculate exact wRVU gain for each opportunity
+6. Focus on high-value opportunities first
 
 DO NOT include:
+- Documentation changes for work already done (that's Step 3)
 - Vague suggestions without specific codes
 - Incremental work that doesn't hit billing thresholds
 - Opportunities without quantified wRVU benefit
