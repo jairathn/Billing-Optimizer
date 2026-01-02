@@ -315,6 +315,7 @@ REFERENCE:
 TASK:
 1. Identify ALL billable codes from note AS WRITTEN
 2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
+3. Suggest MEDICOLEGAL enhancements for missing safety documentation
 
 CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
@@ -324,6 +325,14 @@ VALID Step 3 Enhancements (things that WERE done):
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 
+MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
+These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
+- Missing patient counseling: If counseling likely given but not documented → add it
+- Missing follow-up instructions: If return visit timing not specified → add it
+- Missing warning signs education: If skin self-exam not documented → add it
+- Suspicious lesion reasoning: If lesion noted but clinical reasoning absent → add it
+- Risk factor acknowledgment: If high-risk patient but risks not documented → add it
+
 INVALID for Step 3 (move to Step 4):
 - "Injection not documented" when NO injection was given
 - "Exam not performed" → that's a missed opportunity, not an enhancement
@@ -331,23 +340,32 @@ INVALID for Step 3 (move to Step 4):
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
-"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
+"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
 
-OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+For MEDICOLEGAL enhancements, use: enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
+Example: {{"issue": "Missing safety documentation", "current_code": null, "current_wRVU": 0, "suggested_addition": "Add: Patient counseled on sun protection and self-skin exams. Return if new or changing lesions.", "enhanced_code": "LEGAL", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
 
-        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
+OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- Be CONCISE and FACTUAL: State what was done briefly
+- Include safety-critical items when clinically relevant"""
+
+        system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
 CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If procedure wasn't done → Step 4, not here
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
+- Medicolegal documentation gaps → YES (as priority: "medicolegal" cards)
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
+- Document the minimum necessary to justify billing codes
+- Over-documentation creates malpractice liability - every detail can be cross-examined
+- BUT: Always document safety-critical items as SEPARATE MEDICOLEGAL ENHANCEMENT CARDS
+- These cards have enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
+- Never include Time, Coding, or billing code sections in optimized notes
+
 Respond with valid JSON only."""
 
         try:
@@ -425,6 +443,7 @@ REFERENCE:
 TASK:
 1. Identify ALL billable codes from note AS WRITTEN
 2. Suggest DOCUMENTATION enhancements ONLY for work that WAS ACTUALLY PERFORMED
+3. Suggest MEDICOLEGAL enhancements for missing safety documentation
 
 CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
@@ -434,6 +453,14 @@ VALID Step 3 Enhancements (things that WERE done):
 - Code upgrades: Repair WAS done → document technique for intermediate vs simple
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 
+MEDICOLEGAL ENHANCEMENTS (safety documentation - no wRVU but critical for liability protection):
+These appear as separate cards with enhanced_code: "LEGAL" and delta_wRVU: 0
+- Missing patient counseling: If counseling likely given but not documented → add it
+- Missing follow-up instructions: If return visit timing not specified → add it
+- Missing warning signs education: If skin self-exam not documented → add it
+- Suspicious lesion reasoning: If lesion noted but clinical reasoning absent → add it
+- Risk factor acknowledgment: If high-risk patient but risks not documented → add it
+
 INVALID for Step 3 (move to Step 4):
 - "Injection not documented" when NO injection was given
 - "Exam not performed" → that's a missed opportunity, not an enhancement
@@ -441,23 +468,32 @@ INVALID for Step 3 (move to Step 4):
 
 JSON format:
 {{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported"}}], "total_wRVU": 0, "documentation_gaps": []}},
-"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high"}}],
+"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
 
-OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+For MEDICOLEGAL enhancements, use: enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
+Example: {{"issue": "Missing safety documentation", "current_code": null, "current_wRVU": 0, "suggested_addition": "Add: Patient counseled on sun protection and self-skin exams. Return if new or changing lesions.", "enhanced_code": "LEGAL", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
 
-        system = """Dermatology billing expert. Maximize billing through DOCUMENTATION of work ALREADY DONE.
+OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- Be CONCISE and FACTUAL: State what was done briefly
+- Include safety-critical items when clinically relevant"""
+
+        system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
 CRITICAL: Only include enhancements for services that WERE PERFORMED.
 - If procedure wasn't done → Step 4, not here
 - If exam wasn't performed → Step 4, not here
 - G2211, E/M upgrades, unbundling for work done → YES
+- Medicolegal documentation gaps → YES (as priority: "medicolegal" cards)
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
+- Document the minimum necessary to justify billing codes
+- Over-documentation creates malpractice liability - every detail can be cross-examined
+- BUT: Always document safety-critical items as SEPARATE MEDICOLEGAL ENHANCEMENT CARDS
+- These cards have enhanced_code: "LEGAL", delta_wRVU: 0, priority: "medicolegal"
+- Never include Time, Coding, or billing code sections in optimized notes
+
 Respond with valid JSON only."""
 
         try:
@@ -702,6 +738,19 @@ Look for unaddressed conditions that could warrant separate work:
 • Eye involvement in rosacea
 
 ═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 9: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
+═══════════════════════════════════════════════════════════════════════════════
+Safety documentation that SHOULD be added even though it doesn't increase billing:
+• Patient counseling on warning signs (ABCDE, non-healing lesions, when to return)
+• Skin cancer risk factor acknowledgment for high-risk patients
+• Follow-up timing and instructions
+• Clinical reasoning for any observed but not biopsied lesions
+
+For medicolegal opportunities, use:
+- category: "medicolegal"
+- potential_code: {{"code": "LEGAL", "description": "[What to document]", "wRVU": 0}}
+
+═══════════════════════════════════════════════════════════════════════════════
 OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -709,6 +758,7 @@ OUTPUT RULES
    - IL injections (11900/11901) = one card with count input
    - AK destruction (17000-17004) = one card with count input
    - Nail debridement (11720/11721) = one card with count input
+   - Medicolegal = one card for all safety documentation
    - DO NOT mix different code families in one card
 
 2. FOR COUNT-BASED CODES: Use potential_code with estimated count in description
@@ -718,26 +768,25 @@ OUTPUT RULES
    Example: [{{"code": "54050", "description": "Simple", "wRVU": 0.61, "threshold": "1-2 lesions"}},
              {{"code": "54055", "description": "Extensive", "wRVU": 1.50, "threshold": "Multiple/large"}}]
 
-4. TEACHING POINT: Include billing tip or clinical pearl
+4. TEACHING POINT: Include billing tip or medicolegal rationale
 
 5. Be SPECIFIC about clinical findings that triggered each opportunity
 
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure|visit_level|comorbidity",
+  {{"category": "procedure|visit_level|comorbidity|medicolegal",
     "finding": "[Specific clinical finding from note]",
-    "opportunity": "[What could be billed]",
+    "opportunity": "[What could be billed or documented]",
     "action": "[What provider should do]",
     "potential_code": {{"code": "X", "description": "X", "wRVU": 0.00}},
-    "teaching_point": "[Billing tip]"}}
+    "teaching_point": "[Billing tip or medicolegal rationale]"}}
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
 "total_potential_additional_wRVU": 0.00}}
 
 OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- Be CONCISE and FACTUAL
+- Include safety documentation when clinically relevant"""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -747,16 +796,21 @@ CRITICAL RULES:
 3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
+6. Include ONE medicolegal card for missing safety documentation (code: "LEGAL", wRVU: 0)
 
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
+- Document the minimum necessary to justify billing codes
+- Surface missing safety documentation as category: "medicolegal" opportunities
+- Never include Time, Coding, or billing code sections
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
 - Count-based procedures (injections, AKs, nails, biopsies)
+- Medicolegal items (code: "LEGAL", wRVU: 0)
 - Single clear recommendations
 
 USE code_options (2-3 choices) ONLY for:
@@ -992,6 +1046,19 @@ Look for unaddressed conditions that could warrant separate work:
 • Eye involvement in rosacea
 
 ═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 9: MEDICOLEGAL DOCUMENTATION (no wRVU but critical for liability)
+═══════════════════════════════════════════════════════════════════════════════
+Safety documentation that SHOULD be added even though it doesn't increase billing:
+• Patient counseling on warning signs (ABCDE, non-healing lesions, when to return)
+• Skin cancer risk factor acknowledgment for high-risk patients
+• Follow-up timing and instructions
+• Clinical reasoning for any observed but not biopsied lesions
+
+For medicolegal opportunities, use:
+- category: "medicolegal"
+- potential_code: {{"code": "LEGAL", "description": "[What to document]", "wRVU": 0}}
+
+═══════════════════════════════════════════════════════════════════════════════
 OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -999,6 +1066,7 @@ OUTPUT RULES
    - IL injections (11900/11901) = one card with count input
    - AK destruction (17000-17004) = one card with count input
    - Nail debridement (11720/11721) = one card with count input
+   - Medicolegal = one card for all safety documentation
    - DO NOT mix different code families in one card
 
 2. FOR COUNT-BASED CODES: Use potential_code with estimated count in description
@@ -1008,26 +1076,25 @@ OUTPUT RULES
    Example: [{{"code": "54050", "description": "Simple", "wRVU": 0.61, "threshold": "1-2 lesions"}},
              {{"code": "54055", "description": "Extensive", "wRVU": 1.50, "threshold": "Multiple/large"}}]
 
-4. TEACHING POINT: Include billing tip or clinical pearl
+4. TEACHING POINT: Include billing tip or medicolegal rationale
 
 5. Be SPECIFIC about clinical findings that triggered each opportunity
 
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure|visit_level|comorbidity",
+  {{"category": "procedure|visit_level|comorbidity|medicolegal",
     "finding": "[Specific clinical finding from note]",
-    "opportunity": "[What could be billed]",
+    "opportunity": "[What could be billed or documented]",
     "action": "[What provider should do]",
     "potential_code": {{"code": "X", "description": "X", "wRVU": 0.00}},
-    "teaching_point": "[Billing tip]"}}
+    "teaching_point": "[Billing tip or medicolegal rationale]"}}
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
 "total_potential_additional_wRVU": 0.00}}
 
 OPTIMIZED NOTE RULES:
-- Output ONLY the clinical note text
-- Do NOT include "Time:" or face-to-face time
-- Do NOT include "Coding:" or billing codes
-- The note should be pure clinical documentation ready for the medical record"""
+- Output ONLY the clinical note text - no Time, Coding, or billing sections
+- Be CONCISE and FACTUAL
+- Include safety documentation when clinically relevant"""
 
         system = """You are an expert dermatology billing educator and optimizer.
 
@@ -1037,16 +1104,21 @@ CRITICAL RULES:
 3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
 4. Include accurate wRVU values from the reference
 5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
+6. Include ONE medicolegal card for missing safety documentation (code: "LEGAL", wRVU: 0)
 
 E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
 NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
 Mention the -25 modifier in the description if procedures are being billed same-day.
 
-OPTIMIZED NOTE: Output only clinical documentation. Never include Time, Coding, or billing code sections.
+DOCUMENTATION PHILOSOPHY: Minimal yet complete.
+- Document the minimum necessary to justify billing codes
+- Surface missing safety documentation as category: "medicolegal" opportunities
+- Never include Time, Coding, or billing code sections
 
 USE potential_code (single code) for:
 - E/M levels (determine best achievable)
 - Count-based procedures (injections, AKs, nails, biopsies)
+- Medicolegal items (code: "LEGAL", wRVU: 0)
 - Single clear recommendations
 
 USE code_options (2-3 choices) ONLY for:
@@ -1186,17 +1258,31 @@ INSTRUCTIONS:
 3. For opportunities (things that weren't done): document them as if they WERE done
 4. For enhancements: add the documentation details that support higher billing
 5. The final note should fully support billing all selected codes
-6. Keep the note professional and clinically appropriate
-7. Output ONLY the complete rewritten note - no explanations
-8. Do NOT include "Time:" or face-to-face time sections
-9. Do NOT include "Coding:" or billing code sections - just clinical documentation
+6. Output ONLY the complete rewritten note - no explanations
+7. Do NOT include "Time:" or face-to-face time sections
+8. Do NOT include "Coding:" or billing code sections - just clinical documentation
 
-CRITICAL: Match the original note's structure and formatting style exactly.
+MEDICOLEGAL DOCUMENTATION PRINCIPLES - CRITICAL:
+- MINIMAL NECESSARY: Document the MINIMUM required to support billing codes
+- LESS IS MORE: Excessive detail creates litigation risk - every word can be cross-examined
+- Be CONCISE: Brief, factual statements only - no elaborate descriptions
+- AVOID: Speculative language, unnecessary adjectives, redundant details, flowery prose
+
+HOWEVER - ALWAYS DOCUMENT SAFETY-CRITICAL ITEMS (failure to document = failure to do):
+- Suspicious lesions noted and clinical reasoning (biopsy performed OR why deferred)
+- Patient counseling on warning signs (ABCDE changes, non-healing lesions)
+- Patient refusal of recommended biopsy/treatment (informed refusal)
+- Instructions for follow-up and when to return sooner
+- Skin cancer risk factors acknowledged in high-risk patients
+
+BALANCE: Minimal on routine details, thorough on safety documentation.
+
+Match the original note's structure and formatting style exactly.
 OUTPUT ONLY CLINICAL DOCUMENTATION - no time, no coding, no billing codes.
 
 OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
 
-        system = """Medical documentation expert. Create notes that support maximum billing.
+        system = """Medical documentation expert. Create minimal, defensible notes that support billing.
 
 CRITICAL: Preserve the original note's format and structure:
 - If input has sections (HPI, Physical Exam, Assessment, Plan), keep those sections
@@ -1207,6 +1293,14 @@ Write the note AS IF all selected items were actually performed during the visit
 - If an injection opportunity is selected, document that the injection WAS done
 - If an E/M upgrade is selected, document the MDM complexity that supports it
 - The note should be copy-paste ready to support billing all selected codes
+
+MEDICOLEGAL DOCUMENTATION PHILOSOPHY:
+- Document the MINIMUM NECESSARY to justify each billing code
+- Over-documentation creates malpractice liability - every detail can be cross-examined by attorneys
+- Concise, factual notes are legally safer than verbose, detailed ones
+- BUT: Always document safety-critical items (suspicious lesions, patient counseling, refusals, follow-up)
+- "If it wasn't documented, it wasn't done" - this applies to safety items especially
+- Use standard terminology, brief statements, objective findings
 
 NEVER include Time, Coding, or billing code sections. Output only pure clinical documentation.
 Output only the complete note text, no commentary."""
