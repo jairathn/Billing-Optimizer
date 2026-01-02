@@ -517,66 +517,222 @@ Respond with valid JSON only."""
         Returns:
             FutureOpportunities object
         """
-        prompt = f"""Identify INTRA-ENCOUNTER opportunities that could have increased billing.
+        prompt = f"""You are a dermatology billing optimization expert. Analyze this clinical note to identify MISSED billing opportunities - procedures/services that COULD have been performed but WERE NOT.
 
-NOTE:
+CLINICAL NOTE:
 {note_text}
 
-ENTITIES:
+EXTRACTED ENTITIES:
 {json.dumps(entities.model_dump(), indent=2)}
 
-SCENARIO:
+CLINICAL SCENARIO GUIDANCE:
 {scenario_content}
 
-REFERENCE:
+BILLING REFERENCE:
 {corpus_context}
 
-OPPORTUNITY TYPES:
-1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
-2. ADD-ON CODES: G2211 for chronic conditions, complex closure discussions
-3. PROCEDURE OPPORTUNITIES - ONE CARD PER CODE FAMILY, each as SEPARATE opportunity:
+YOUR TASK: Identify what the provider COULD HAVE DONE during this encounter to increase billing. These are NOT documentation fixes - these are actual clinical interventions that were missed.
 
-   DESTRUCTION (each is separate opportunity):
-   - AK destruction: potential_code 17000+17003 (1.70 avg for ~10 AKs), note "Document exact count"
-   - Benign destruction: code_options 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
-   - Genital male: code_options 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
-   - Genital female: code_options 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 1: THERAPEUTIC INJECTIONS
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Thick psoriasis plaques (especially if topicals failing)
+• Recalcitrant eczema patches
+• Keloids or hypertrophic scars
+• Alopecia areata patches
+• Lichen simplex chronicus
+• Granuloma annulare
+• Cystic acne
 
-   INJECTIONS (separate opportunity):
-   - IL injections: code_options 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
+BILLING CODES (use potential_code with count):
+• 11900: IL injection 1-7 lesions (0.52 wRVU)
+• 11901: IL injection 8+ lesions (0.82 wRVU)
 
-   DEBRIDEMENT (separate opportunity):
-   - Nail debridement: code_options 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
+CRITICAL: Multiple injection sites for DIFFERENT conditions (e.g., psoriasis plaques + keloid)
+are SEPARATE opportunities. Each becomes a count input that aggregates in the UI.
 
-   BIOPSY (separate opportunity per suspicious lesion):
-   - Use potential_code: 11102 (tangential, 0.56) or 11104 (punch, 0.69) or 11106 (incisional, 1.01)
+Example finding: "Thick psoriasis plaques on elbows not responding to topicals"
+Example action: "IL triamcinolone 10mg/mL injection to thick plaques"
 
-4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 2: DESTRUCTION - PREMALIGNANT (AKs)
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Sun-damaged skin in sun-exposed areas
+• History of skin cancer
+• Actinic keratoses noted on exam
+• Rough/scaly patches on face, scalp, arms, hands
 
-IMPORTANT RULES:
-- Each DIFFERENT code family = SEPARATE opportunity card (don't mix 17xxx with 11xxx)
-- Use code_options ONLY for mutually exclusive choices within SAME family
-- Use potential_code for single recommended code
-- Keep code_options to 2-3 meaningful tiers max (not every permutation)
+BILLING CODES (use potential_code - count-based):
+• 17000: First AK destruction (0.61 wRVU)
+• 17003: Each additional AK 2-14 (+0.09 wRVU each)
+• 17004: 15+ AKs flat rate (2.19 wRVU)
 
-JSON format:
+Example: 10 AKs = 17000 + 17003x9 = 0.61 + 0.81 = 1.42 wRVU
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 3: DESTRUCTION - BENIGN LESIONS
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Seborrheic keratoses (symptomatic - itching, irritation, catching on clothes)
+• Skin tags in friction areas
+• Verrucae (warts)
+• Molluscum contagiosum
+• Cherry angiomas (if symptomatic)
+
+BILLING CODES (use potential_code with count):
+• 17110: Benign destruction 1-14 lesions (0.70 wRVU)
+• 17111: Benign destruction 15+ lesions (1.23 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 4: DESTRUCTION - GENITAL LESIONS
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Condylomata acuminata (genital warts)
+• Genital molluscum
+• Any benign genital lesion requiring destruction
+
+BILLING CODES (use code_options - mutually exclusive):
+MALE:
+• 54050: Simple destruction (0.61 wRVU) - 1-2 small lesions
+• 54055: Extensive destruction (1.50 wRVU) - multiple or large lesions
+
+FEMALE:
+• 56501: Simple destruction (0.70 wRVU)
+• 56515: Extensive destruction (1.87 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 5: NAIL PROCEDURES
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Dystrophic nails (thickened, discolored)
+• Onychomycosis
+• Subungual debris
+• Nail psoriasis with dystrophy
+
+BILLING CODES (use potential_code with count):
+• 11720: Nail debridement 1-5 nails (0.34 wRVU)
+• 11721: Nail debridement 6+ nails (0.53 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 6: BIOPSY OPPORTUNITIES
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Any lesion with ABCDE criteria (asymmetry, border, color, diameter, evolution)
+• New or changing pigmented lesions
+• Non-healing lesions
+• Uncertain diagnosis requiring histopathology
+• Inflammatory conditions unresponsive to treatment
+
+BILLING CODES (use potential_code):
+• 11102: Tangential biopsy - first lesion (0.56 wRVU) - superficial lesions
+• 11103: Tangential biopsy - each additional (+0.17 wRVU)
+• 11104: Punch biopsy - first lesion (0.69 wRVU) - deeper sampling needed
+• 11105: Punch biopsy - each additional (+0.24 wRVU)
+• 11106: Incisional biopsy - first lesion (1.01 wRVU) - large/deep lesions
+• 11107: Incisional biopsy - each additional (+0.48 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 7: E/M LEVEL OPTIMIZATION
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: DO NOT use code_options for E/M. Determine the SINGLE MAXIMUM REASONABLE
+achievable code and use potential_code. Then specify EXACTLY what to document.
+
+E/M LEVELS (Established):
+• 99213 (1.30 wRVU): Straightforward MDM - single self-limited condition
+• 99214 (1.92 wRVU): Moderate MDM - multiple conditions, Rx management, or chronic illness
+• 99215 (2.80 wRVU): High MDM - severe/life-threatening, multiple Rx, or extensive counseling
+
+WHAT SUPPORTS EACH LEVEL:
+99214 requires ONE of:
+- 2+ chronic conditions requiring management decisions
+- Prescription drug requiring monitoring (labs, side effects)
+- Condition with mild exacerbation or uncertain diagnosis
+
+99215 requires ONE of:
+- Condition with severe exacerbation or significant risk
+- Drug requiring intensive monitoring (biologics, immunosuppressants)
+- Decision about hospitalization or referral for emergency
+
+USE CLINICAL JUDGMENT:
+- Simple acne follow-up → 99213 max (99214 only if multiple conditions or Rx issues)
+- Psoriasis on biologic → 99214-99215 (complex management, drug monitoring)
+- Eczema with infection → 99214 (acute on chronic)
+- Melanoma follow-up with new suspicious lesions → 99215 (high risk)
+
+ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+
+OUTPUT FORMAT for E/M:
+{{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
+  "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
+  "potential_code": {{"code": "99214-25", "description": "Moderate MDM with procedure", "wRVU": 1.92}},
+  "teaching_point": "[Why this level is appropriate and defensible]"}}
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 8: COMORBIDITY CAPTURE
+═══════════════════════════════════════════════════════════════════════════════
+Look for unaddressed conditions that could warrant separate work:
+• Psoriatic arthritis screening in psoriasis patients
+• Depression/anxiety screening in chronic skin conditions
+• Nail involvement in psoriasis (separate from skin)
+• Eye involvement in rosacea
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT RULES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. ONE OPPORTUNITY CARD PER CODE FAMILY
+   - IL injections (11900/11901) = one card with count input
+   - AK destruction (17000-17004) = one card with count input
+   - Nail debridement (11720/11721) = one card with count input
+   - DO NOT mix different code families in one card
+
+2. FOR COUNT-BASED CODES: Use potential_code with estimated count in description
+   Example: {{"code": "11900", "description": "IL injection ~4 lesions", "wRVU": 0.52}}
+
+3. FOR TIER-BASED CODES: Use code_options with 2-3 tiers max
+   Example: [{{"code": "54050", "description": "Simple", "wRVU": 0.61, "threshold": "1-2 lesions"}},
+             {{"code": "54055", "description": "Extensive", "wRVU": 1.50, "threshold": "Multiple/large"}}]
+
+4. TEACHING POINT: Include billing tip or clinical pearl
+
+5. Be SPECIFIC about clinical findings that triggered each opportunity
+
+RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure", "finding": "Sun damage with AKs", "opportunity": "AK destruction billing", "action": "Document exact AK count per site",
-    "potential_code": {{"code": "17000+17003", "description": "AK destruction (document count)", "wRVU": 1.50}},
-    "teaching_point": "Each AK adds 0.09 wRVU via 17003. 15+ uses 17004 (2.19)"}},
-  {{"category": "procedure", "finding": "Nail changes", "opportunity": "Nail debridement", "action": "Document nail count",
-    "code_options": [{{"code": "11720", "description": "1-5 nails", "wRVU": 0.34, "threshold": "1-5"}},
-                     {{"code": "11721", "description": "6+ nails", "wRVU": 0.53, "threshold": "6+"}}],
-    "teaching_point": "Count all affected nails"}},
-  {{"category": "visit_level", "finding": "Chronic condition", "opportunity": "Add G2211", "action": "Document ongoing management",
-    "potential_code": {{"code": "G2211", "description": "Visit complexity add-on", "wRVU": 0.33}},
-    "teaching_point": "Chronic care qualifies"}}
-], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
+  {{"category": "procedure|visit_level|comorbidity",
+    "finding": "[Specific clinical finding from note]",
+    "opportunity": "[What could be billed]",
+    "action": "[What provider should do]",
+    "potential_code": {{"code": "X", "description": "X", "wRVU": 0.00}},
+    "teaching_point": "[Billing tip]"}}
+], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
+"total_potential_additional_wRVU": 0.00}}"""
 
-        system = """Dermatology billing educator. Return opportunities as SEPARATE cards per code family.
-CRITICAL: Different code families (17xxx vs 11xxx) must be SEPARATE opportunities.
-Use code_options only for 2-3 mutually exclusive tiers within same family.
-Respond with valid JSON only."""
+        system = """You are an expert dermatology billing educator and optimizer.
+
+CRITICAL RULES:
+1. Only suggest opportunities that are CLINICALLY APPROPRIATE given the patient's presentation
+2. ONE card per code family - aggregate related findings (e.g., all injection-worthy lesions in one card)
+3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
+4. Include accurate wRVU values from the reference
+5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
+
+E/M CRITICAL: For E/M levels, use clinical judgment to determine the MAXIMUM REASONABLE
+achievable code - the one that would actually be paid by insurance. DO NOT offer a range
+of E/M options. Pick ONE specific level and tell the provider exactly what to document.
+
+USE potential_code (single code) for:
+- E/M levels (determine best achievable)
+- Count-based procedures (injections, AKs, nails, biopsies)
+- Single clear recommendations
+
+USE code_options (2-3 choices) ONLY for:
+- Truly mutually exclusive tiers (genital destruction: simple vs extensive)
+- Non-count-based procedure choices
+
+OUTPUT: Valid JSON only. No markdown, no explanation outside JSON."""
 
         try:
             response = self._call_llm(prompt, system=system, max_tokens=8192)
@@ -636,66 +792,222 @@ Respond with valid JSON only."""
         corpus_context: str,
     ) -> FutureOpportunities:
         """Async version of identify_opportunities."""
-        prompt = f"""Identify INTRA-ENCOUNTER opportunities that could have increased billing.
+        prompt = f"""You are a dermatology billing optimization expert. Analyze this clinical note to identify MISSED billing opportunities - procedures/services that COULD have been performed but WERE NOT.
 
-NOTE:
+CLINICAL NOTE:
 {note_text}
 
-ENTITIES:
+EXTRACTED ENTITIES:
 {json.dumps(entities.model_dump(), indent=2)}
 
-SCENARIO:
+CLINICAL SCENARIO GUIDANCE:
 {scenario_content}
 
-REFERENCE:
+BILLING REFERENCE:
 {corpus_context}
 
-OPPORTUNITY TYPES:
-1. E/M LEVEL UPGRADES: 99213→99214→99215, or 99203→99205 via MDM/counseling
-2. ADD-ON CODES: G2211 for chronic conditions, complex closure discussions
-3. PROCEDURE OPPORTUNITIES - ONE CARD PER CODE FAMILY, each as SEPARATE opportunity:
+YOUR TASK: Identify what the provider COULD HAVE DONE during this encounter to increase billing. These are NOT documentation fixes - these are actual clinical interventions that were missed.
 
-   DESTRUCTION (each is separate opportunity):
-   - AK destruction: potential_code 17000+17003 (1.70 avg for ~10 AKs), note "Document exact count"
-   - Benign destruction: code_options 17110 (1-14, 0.70) OR 17111 (15+, 1.23)
-   - Genital male: code_options 54050 (simple, 0.61) OR 54055 (extensive, 1.50)
-   - Genital female: code_options 56501 (simple, 0.70) OR 56515 (extensive, 1.87)
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 1: THERAPEUTIC INJECTIONS
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Thick psoriasis plaques (especially if topicals failing)
+• Recalcitrant eczema patches
+• Keloids or hypertrophic scars
+• Alopecia areata patches
+• Lichen simplex chronicus
+• Granuloma annulare
+• Cystic acne
 
-   INJECTIONS (separate opportunity):
-   - IL injections: code_options 11900 (1-7, 0.52) OR 11901 (8+, 0.82)
+BILLING CODES (use potential_code with count):
+• 11900: IL injection 1-7 lesions (0.52 wRVU)
+• 11901: IL injection 8+ lesions (0.82 wRVU)
 
-   DEBRIDEMENT (separate opportunity):
-   - Nail debridement: code_options 11720 (1-5, 0.34) OR 11721 (6+, 0.53)
+CRITICAL: Multiple injection sites for DIFFERENT conditions (e.g., psoriasis plaques + keloid)
+are SEPARATE opportunities. Each becomes a count input that aggregates in the UI.
 
-   BIOPSY (separate opportunity per suspicious lesion):
-   - Use potential_code: 11102 (tangential, 0.56) or 11104 (punch, 0.69) or 11106 (incisional, 1.01)
+Example finding: "Thick psoriasis plaques on elbows not responding to topicals"
+Example action: "IL triamcinolone 10mg/mL injection to thick plaques"
 
-4. COMORBIDITY CAPTURE: Related conditions warranting separate billing
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 2: DESTRUCTION - PREMALIGNANT (AKs)
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Sun-damaged skin in sun-exposed areas
+• History of skin cancer
+• Actinic keratoses noted on exam
+• Rough/scaly patches on face, scalp, arms, hands
 
-IMPORTANT RULES:
-- Each DIFFERENT code family = SEPARATE opportunity card (don't mix 17xxx with 11xxx)
-- Use code_options ONLY for mutually exclusive choices within SAME family
-- Use potential_code for single recommended code
-- Keep code_options to 2-3 meaningful tiers max (not every permutation)
+BILLING CODES (use potential_code - count-based):
+• 17000: First AK destruction (0.61 wRVU)
+• 17003: Each additional AK 2-14 (+0.09 wRVU each)
+• 17004: 15+ AKs flat rate (2.19 wRVU)
 
-JSON format:
+Example: 10 AKs = 17000 + 17003x9 = 0.61 + 0.81 = 1.42 wRVU
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 3: DESTRUCTION - BENIGN LESIONS
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Seborrheic keratoses (symptomatic - itching, irritation, catching on clothes)
+• Skin tags in friction areas
+• Verrucae (warts)
+• Molluscum contagiosum
+• Cherry angiomas (if symptomatic)
+
+BILLING CODES (use potential_code with count):
+• 17110: Benign destruction 1-14 lesions (0.70 wRVU)
+• 17111: Benign destruction 15+ lesions (1.23 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 4: DESTRUCTION - GENITAL LESIONS
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Condylomata acuminata (genital warts)
+• Genital molluscum
+• Any benign genital lesion requiring destruction
+
+BILLING CODES (use code_options - mutually exclusive):
+MALE:
+• 54050: Simple destruction (0.61 wRVU) - 1-2 small lesions
+• 54055: Extensive destruction (1.50 wRVU) - multiple or large lesions
+
+FEMALE:
+• 56501: Simple destruction (0.70 wRVU)
+• 56515: Extensive destruction (1.87 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 5: NAIL PROCEDURES
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Dystrophic nails (thickened, discolored)
+• Onychomycosis
+• Subungual debris
+• Nail psoriasis with dystrophy
+
+BILLING CODES (use potential_code with count):
+• 11720: Nail debridement 1-5 nails (0.34 wRVU)
+• 11721: Nail debridement 6+ nails (0.53 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 6: BIOPSY OPPORTUNITIES
+═══════════════════════════════════════════════════════════════════════════════
+CLINICAL TRIGGERS:
+• Any lesion with ABCDE criteria (asymmetry, border, color, diameter, evolution)
+• New or changing pigmented lesions
+• Non-healing lesions
+• Uncertain diagnosis requiring histopathology
+• Inflammatory conditions unresponsive to treatment
+
+BILLING CODES (use potential_code):
+• 11102: Tangential biopsy - first lesion (0.56 wRVU) - superficial lesions
+• 11103: Tangential biopsy - each additional (+0.17 wRVU)
+• 11104: Punch biopsy - first lesion (0.69 wRVU) - deeper sampling needed
+• 11105: Punch biopsy - each additional (+0.24 wRVU)
+• 11106: Incisional biopsy - first lesion (1.01 wRVU) - large/deep lesions
+• 11107: Incisional biopsy - each additional (+0.48 wRVU)
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 7: E/M LEVEL OPTIMIZATION
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: DO NOT use code_options for E/M. Determine the SINGLE MAXIMUM REASONABLE
+achievable code and use potential_code. Then specify EXACTLY what to document.
+
+E/M LEVELS (Established):
+• 99213 (1.30 wRVU): Straightforward MDM - single self-limited condition
+• 99214 (1.92 wRVU): Moderate MDM - multiple conditions, Rx management, or chronic illness
+• 99215 (2.80 wRVU): High MDM - severe/life-threatening, multiple Rx, or extensive counseling
+
+WHAT SUPPORTS EACH LEVEL:
+99214 requires ONE of:
+- 2+ chronic conditions requiring management decisions
+- Prescription drug requiring monitoring (labs, side effects)
+- Condition with mild exacerbation or uncertain diagnosis
+
+99215 requires ONE of:
+- Condition with severe exacerbation or significant risk
+- Drug requiring intensive monitoring (biologics, immunosuppressants)
+- Decision about hospitalization or referral for emergency
+
+USE CLINICAL JUDGMENT:
+- Simple acne follow-up → 99213 max (99214 only if multiple conditions or Rx issues)
+- Psoriasis on biologic → 99214-99215 (complex management, drug monitoring)
+- Eczema with infection → 99214 (acute on chronic)
+- Melanoma follow-up with new suspicious lesions → 99215 (high risk)
+
+ADD-ON: G2211 (+0.33 wRVU) for established ongoing care relationship
+
+OUTPUT FORMAT for E/M:
+{{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
+  "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
+  "potential_code": {{"code": "99214-25", "description": "Moderate MDM with procedure", "wRVU": 1.92}},
+  "teaching_point": "[Why this level is appropriate and defensible]"}}
+
+═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 8: COMORBIDITY CAPTURE
+═══════════════════════════════════════════════════════════════════════════════
+Look for unaddressed conditions that could warrant separate work:
+• Psoriatic arthritis screening in psoriasis patients
+• Depression/anxiety screening in chronic skin conditions
+• Nail involvement in psoriasis (separate from skin)
+• Eye involvement in rosacea
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT RULES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. ONE OPPORTUNITY CARD PER CODE FAMILY
+   - IL injections (11900/11901) = one card with count input
+   - AK destruction (17000-17004) = one card with count input
+   - Nail debridement (11720/11721) = one card with count input
+   - DO NOT mix different code families in one card
+
+2. FOR COUNT-BASED CODES: Use potential_code with estimated count in description
+   Example: {{"code": "11900", "description": "IL injection ~4 lesions", "wRVU": 0.52}}
+
+3. FOR TIER-BASED CODES: Use code_options with 2-3 tiers max
+   Example: [{{"code": "54050", "description": "Simple", "wRVU": 0.61, "threshold": "1-2 lesions"}},
+             {{"code": "54055", "description": "Extensive", "wRVU": 1.50, "threshold": "Multiple/large"}}]
+
+4. TEACHING POINT: Include billing tip or clinical pearl
+
+5. Be SPECIFIC about clinical findings that triggered each opportunity
+
+RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure", "finding": "Sun damage with AKs", "opportunity": "AK destruction billing", "action": "Document exact AK count per site",
-    "potential_code": {{"code": "17000+17003", "description": "AK destruction (document count)", "wRVU": 1.50}},
-    "teaching_point": "Each AK adds 0.09 wRVU via 17003. 15+ uses 17004 (2.19)"}},
-  {{"category": "procedure", "finding": "Nail changes", "opportunity": "Nail debridement", "action": "Document nail count",
-    "code_options": [{{"code": "11720", "description": "1-5 nails", "wRVU": 0.34, "threshold": "1-5"}},
-                     {{"code": "11721", "description": "6+ nails", "wRVU": 0.53, "threshold": "6+"}}],
-    "teaching_point": "Count all affected nails"}},
-  {{"category": "visit_level", "finding": "Chronic condition", "opportunity": "Add G2211", "action": "Document ongoing management",
-    "potential_code": {{"code": "G2211", "description": "Visit complexity add-on", "wRVU": 0.33}},
-    "teaching_point": "Chronic care qualifies"}}
-], "optimized_note": "X", "total_potential_additional_wRVU": 0}}"""
+  {{"category": "procedure|visit_level|comorbidity",
+    "finding": "[Specific clinical finding from note]",
+    "opportunity": "[What could be billed]",
+    "action": "[What provider should do]",
+    "potential_code": {{"code": "X", "description": "X", "wRVU": 0.00}},
+    "teaching_point": "[Billing tip]"}}
+], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
+"total_potential_additional_wRVU": 0.00}}"""
 
-        system = """Dermatology billing educator. Return opportunities as SEPARATE cards per code family.
-CRITICAL: Different code families (17xxx vs 11xxx) must be SEPARATE opportunities.
-Use code_options only for 2-3 mutually exclusive tiers within same family.
-Respond with valid JSON only."""
+        system = """You are an expert dermatology billing educator and optimizer.
+
+CRITICAL RULES:
+1. Only suggest opportunities that are CLINICALLY APPROPRIATE given the patient's presentation
+2. ONE card per code family - aggregate related findings (e.g., all injection-worthy lesions in one card)
+3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
+4. Include accurate wRVU values from the reference
+5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
+
+E/M CRITICAL: For E/M levels, use clinical judgment to determine the MAXIMUM REASONABLE
+achievable code - the one that would actually be paid by insurance. DO NOT offer a range
+of E/M options. Pick ONE specific level and tell the provider exactly what to document.
+
+USE potential_code (single code) for:
+- E/M levels (determine best achievable)
+- Count-based procedures (injections, AKs, nails, biopsies)
+- Single clear recommendations
+
+USE code_options (2-3 choices) ONLY for:
+- Truly mutually exclusive tiers (genital destruction: simple vs extensive)
+- Non-count-based procedure choices
+
+OUTPUT: Valid JSON only. No markdown, no explanation outside JSON."""
 
         try:
             response = await self._call_llm_async(prompt, system=system, max_tokens=8192)
