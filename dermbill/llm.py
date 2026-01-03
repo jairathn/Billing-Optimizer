@@ -970,13 +970,15 @@ MALE GENITAL:
 • 54056: Cryosurgery penile lesions (1.26 wRVU) - cryo specifically
 • 54057: Laser destruction penile lesions (1.50 wRVU) - laser specifically
 
-FEMALE GENITAL:
-• 56501: Simple vulvar destruction (0.70 wRVU) - 1-2 small lesions
-• 56515: Extensive vulvar destruction (1.87 wRVU) - multiple/large lesions
+FEMALE GENITAL (simple vs extensive is JUDGMENT CALL - NOT count-based):
+• 56501: Simple vulvar destruction (0.70 wRVU) - DEFAULT when note lacks extensive documentation
+• 56515: Extensive vulvar destruction (1.87 wRVU) - requires documentation of extensive effort/time/technique
+NOTE: Always bill 56501 in current billing. Create EXTENSIVE_UPGRADE enhancement to let user toggle to 56515.
 
-ANAL/PERIANAL:
-• 46900: Simple anal destruction (0.91 wRVU) - 1-2 small lesions
-• 46910: Extensive anal destruction (1.51 wRVU) - multiple/large lesions
+ANAL/PERIANAL (simple vs extensive is JUDGMENT CALL - NOT count-based):
+• 46900: Simple anal destruction (0.91 wRVU) - DEFAULT when note lacks extensive documentation
+• 46910: Extensive anal destruction (1.51 wRVU) - requires documentation of extensive effort/time/technique
+NOTE: Always bill simple code in current billing. Create EXTENSIVE_UPGRADE enhancement to let user toggle.
 • 46916: Cryosurgery anal lesions (1.86 wRVU) - cryo specifically
 • 46917: Laser destruction anal lesions (1.95 wRVU) - laser specifically
 
@@ -1412,13 +1414,15 @@ MALE GENITAL:
 • 54056: Cryosurgery penile lesions (1.26 wRVU) - cryo specifically
 • 54057: Laser destruction penile lesions (1.50 wRVU) - laser specifically
 
-FEMALE GENITAL:
-• 56501: Simple vulvar destruction (0.70 wRVU) - 1-2 small lesions
-• 56515: Extensive vulvar destruction (1.87 wRVU) - multiple/large lesions
+FEMALE GENITAL (simple vs extensive is JUDGMENT CALL - NOT count-based):
+• 56501: Simple vulvar destruction (0.70 wRVU) - DEFAULT when note lacks extensive documentation
+• 56515: Extensive vulvar destruction (1.87 wRVU) - requires documentation of extensive effort/time/technique
+NOTE: Always bill 56501 in current billing. Create EXTENSIVE_UPGRADE enhancement to let user toggle to 56515.
 
-ANAL/PERIANAL:
-• 46900: Simple anal destruction (0.91 wRVU) - 1-2 small lesions
-• 46910: Extensive anal destruction (1.51 wRVU) - multiple/large lesions
+ANAL/PERIANAL (simple vs extensive is JUDGMENT CALL - NOT count-based):
+• 46900: Simple anal destruction (0.91 wRVU) - DEFAULT when note lacks extensive documentation
+• 46910: Extensive anal destruction (1.51 wRVU) - requires documentation of extensive effort/time/technique
+NOTE: Always bill simple code in current billing. Create EXTENSIVE_UPGRADE enhancement to let user toggle.
 • 46916: Cryosurgery anal lesions (1.86 wRVU) - cryo specifically
 • 46917: Laser destruction anal lesions (1.95 wRVU) - laser specifically
 
