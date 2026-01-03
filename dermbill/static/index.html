@@ -2271,9 +2271,51 @@ Plan:
                 const checkboxes = document.querySelectorAll('.enhancement-checkbox:checked');
                 checkboxes.forEach(cb => {
                     const idx = parseInt(cb.dataset.index);
-                    selectedEnhancements.push(currentAnalysisData.documentation_enhancements.enhancements[idx]);
+                    const enh = currentAnalysisData.documentation_enhancements.enhancements[idx];
+
+                    // For extensive upgrade enhancements, capture the toggle value
+                    if (enh.priority === 'extensive_upgrade' && enh.upgrade_family) {
+                        const extensiveSelect = document.querySelector(`.extensive-select[data-enh-index="${idx}"]`);
+                        const isExtensive = extensiveSelect ? extensiveSelect.value === 'yes' : true;
+                        const family = CODE_FAMILIES[enh.upgrade_family];
+                        if (family) {
+                            // Modify the enhancement to reflect the selected code
+                            const modifiedEnh = {
+                                ...enh,
+                                enhanced_code: isExtensive ? family.extensiveCode : family.simpleCode,
+                                enhanced_wRVU: isExtensive ? family.extensiveWRVU : family.simpleWRVU,
+                                is_extensive: isExtensive
+                            };
+                            selectedEnhancements.push(modifiedEnh);
+                        } else {
+                            selectedEnhancements.push(enh);
+                        }
+                    } else {
+                        selectedEnhancements.push(enh);
+                    }
                 });
             } else {
+                // For opportunities, also collect enhancement checkboxes (extensive upgrades appear in both tabs)
+                const enhCheckboxes = document.querySelectorAll('.enhancement-checkbox:checked');
+                enhCheckboxes.forEach(cb => {
+                    const idx = parseInt(cb.dataset.index);
+                    const enh = currentAnalysisData.documentation_enhancements?.enhancements?.[idx];
+                    if (enh && enh.priority === 'extensive_upgrade' && enh.upgrade_family) {
+                        const extensiveSelect = document.querySelector(`.extensive-select[data-enh-index="${idx}"]`);
+                        const isExtensive = extensiveSelect ? extensiveSelect.value === 'yes' : true;
+                        const family = CODE_FAMILIES[enh.upgrade_family];
+                        if (family) {
+                            const modifiedEnh = {
+                                ...enh,
+                                enhanced_code: isExtensive ? family.extensiveCode : family.simpleCode,
+                                enhanced_wRVU: isExtensive ? family.extensiveWRVU : family.simpleWRVU,
+                                is_extensive: isExtensive
+                            };
+                            selectedEnhancements.push(modifiedEnh);
+                        }
+                    }
+                });
+
                 const checkboxes = document.querySelectorAll('.opportunity-checkbox:checked');
                 checkboxes.forEach(cb => {
                     const idx = parseInt(cb.dataset.index);
@@ -2338,33 +2380,11 @@ Plan:
                     throw new Error(data.detail || 'Regeneration failed');
                 }
 
-                // Build billing codes display
-                let billingHtml = '<div style="background: #e8f5e9; border-radius: 8px; padding: 15px; margin-bottom: 15px;">';
-                billingHtml += '<h4 style="margin: 0 0 10px 0; color: #2e7d32;">Billing Codes for Optimized Note</h4>';
-                billingHtml += '<table style="width: 100%; border-collapse: collapse;">';
-                billingHtml += '<tr style="background: #c8e6c9;"><th style="padding: 8px; text-align: left;">Code</th><th style="padding: 8px; text-align: left;">Modifier</th><th style="padding: 8px; text-align: left;">Description</th><th style="padding: 8px; text-align: right;">wRVU</th></tr>';
-
-                if (data.billing_codes && data.billing_codes.length > 0) {
-                    data.billing_codes.forEach(code => {
-                        billingHtml += `<tr style="border-bottom: 1px solid #ddd;">
-                            <td style="padding: 8px; font-weight: bold;">${code.code}</td>
-                            <td style="padding: 8px;">${code.modifier || '-'}</td>
-                            <td style="padding: 8px;">${code.description}</td>
-                            <td style="padding: 8px; text-align: right;">${code.wRVU.toFixed(2)}</td>
-                        </tr>`;
-                    });
-                    billingHtml += `<tr style="background: #c8e6c9; font-weight: bold;">
-                        <td colspan="3" style="padding: 8px;">TOTAL</td>
-                        <td style="padding: 8px; text-align: right;">${data.total_wRVU.toFixed(2)}</td>
-                    </tr>`;
-                }
-                billingHtml += '</table></div>';
-
-                // Update the optimized note section with billing codes + note
+                // Update the optimized note section with just the note (billing codes shown in table above)
                 const noteContainer = document.getElementById(noteId);
-                noteContainer.innerHTML = billingHtml + '<div style="white-space: pre-wrap;">' + data.optimized_note + '</div>';
+                noteContainer.innerHTML = '<div style="white-space: pre-wrap;">' + data.optimized_note + '</div>';
 
-                status.textContent = `✓ Note regenerated with ${data.included_enhancements + data.included_opportunities} recommendations (${data.total_wRVU.toFixed(2)} wRVU)`;
+                status.textContent = `✓ Note regenerated with ${data.included_enhancements + data.included_opportunities} recommendations`;
                 status.style.color = '#28a745';
 
             } catch (err) {
