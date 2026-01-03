@@ -1796,7 +1796,12 @@ OUTPUT: Valid JSON only."""
 
         # Process selected enhancements - update or add billing codes
         for e in selected_enhancements:
-            changes_to_apply.append(f"ENHANCEMENT: {e.get('issue', '')} - {e.get('suggested_addition', '')}")
+            # Check for user-specified count (from count clarification cards)
+            user_count = e.get("user_specified_count")
+            if user_count:
+                changes_to_apply.append(f"ENHANCEMENT: {e.get('issue', '')} - USER SPECIFIED COUNT: {user_count}")
+            else:
+                changes_to_apply.append(f"ENHANCEMENT: {e.get('issue', '')} - {e.get('suggested_addition', '')}")
             # If enhancement has an enhanced_code, update billing
             enhanced_code = e.get("enhanced_code", "")
             if enhanced_code and enhanced_code != e.get("current_code", ""):
@@ -1810,7 +1815,12 @@ OUTPUT: Valid JSON only."""
 
         # Process selected opportunities - add their billing codes
         for o in selected_opportunities:
-            changes_to_apply.append(f"OPPORTUNITY: {o.get('opportunity', '')} - {o.get('action', '')}")
+            # Check for user-specified count
+            user_count = o.get("user_specified_count")
+            if user_count:
+                changes_to_apply.append(f"OPPORTUNITY: {o.get('opportunity', '')} - USER SPECIFIED COUNT: {user_count}")
+            else:
+                changes_to_apply.append(f"OPPORTUNITY: {o.get('opportunity', '')} - {o.get('action', '')}")
             potential_code = o.get("potential_code", {})
             if potential_code and potential_code.get("code"):
                 billing_codes.append({
@@ -1846,15 +1856,12 @@ INSTRUCTIONS:
 7. Do NOT include "Time:" or face-to-face time sections
 8. Do NOT include "Coding:" or billing code sections - just clinical documentation
 
-CRITICAL - NEVER HALLUCINATE NUMBERS:
-- NEVER invent specific counts (lesion counts, measurements, quantities) not in the original note
-- If original says "vulvar warts" with no count, do NOT add "8 vulvar warts" - keep it vague
-- If original says "multiple lesions", do NOT change to specific numbers
-- For extensive destruction: use QUALITATIVE language, not fabricated counts
-  GOOD: "Extensive cryotherapy performed to vulvar condylomata requiring extended treatment time"
-  BAD: "Cryotherapy to 8 vulvar condylomata" (if 8 wasn't in original)
-- Only include specific numbers that appear in the ORIGINAL NOTE or were EXPLICITLY provided
-- Fabricating numbers is a MAJOR LIABILITY - physicians can be sued for falsified documentation
+CRITICAL - NUMBERS POLICY:
+- NEVER invent specific counts that weren't provided
+- EXCEPTION: If you see "USER SPECIFIED COUNT: X" in the items below, USE that number - the user explicitly entered it
+- If original says "vulvar warts" with no count AND no user-specified count, keep it vague ("multiple", "several")
+- For extensive destruction without user count: use QUALITATIVE language ("extensive", "multiple lesions")
+- Fabricating numbers is MEDICAL FRAUD - but using USER SPECIFIED COUNTs is correct and expected
 
 MEDICOLEGAL DOCUMENTATION PRINCIPLES - CRITICAL:
 - MINIMAL NECESSARY: Document the MINIMUM required to support billing codes

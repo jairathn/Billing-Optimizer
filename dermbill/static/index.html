@@ -2301,6 +2301,17 @@ Plan:
                         } else {
                             selectedEnhancements.push(enh);
                         }
+                    }
+                    // For count clarification enhancements, capture the user-entered count
+                    else if (enh.priority === 'count_clarification' && enh.count_family) {
+                        const countInput = document.querySelector(`.count-clarify-input[data-enh-index="${idx}"]`);
+                        const userCount = countInput ? parseInt(countInput.value) || 1 : 1;
+                        const modifiedEnh = {
+                            ...enh,
+                            user_specified_count: userCount,
+                            suggested_addition: `${userCount} ${enh.count_family.replace('_', ' ')} performed`
+                        };
+                        selectedEnhancements.push(modifiedEnh);
                     } else {
                         selectedEnhancements.push(enh);
                     }
@@ -2349,7 +2360,19 @@ Plan:
                             selectedOpportunities.push(modifiedOpp);
                         }
                     } else {
-                        selectedOpportunities.push(opp);
+                        // Check for count input (user-specified count for count-based families)
+                        const countInput = document.querySelector(`.count-input[data-opp-index="${idx}"]`);
+                        if (countInput) {
+                            const userCount = parseInt(countInput.value) || 1;
+                            const modifiedOpp = {
+                                ...opp,
+                                user_specified_count: userCount,
+                                action: `${opp.action} (${userCount} specified by user)`
+                            };
+                            selectedOpportunities.push(modifiedOpp);
+                        } else {
+                            selectedOpportunities.push(opp);
+                        }
                     }
                 });
             }
