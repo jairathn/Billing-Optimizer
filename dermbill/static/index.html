@@ -590,6 +590,23 @@
         .modifier-badge:hover {
             background: #e0a800;
         }
+
+        .diagnosis-badge {
+            display: inline-block;
+            background: #e9ecef;
+            color: #495057;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 500;
+            border: 1px solid #ced4da;
+        }
+
+        .diagnosis-badge:not(:empty):not(:-moz-only-whitespace) {
+            background: #d4edda;
+            color: #155724;
+            border-color: #c3e6cb;
+        }
     </style>
 </head>
 <body>
@@ -1377,6 +1394,7 @@ Plan:
                                 <th>Description</th>
                                 <th>wRVU</th>
                                 <th>Status</th>
+                                <th>Diagnosis</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1384,6 +1402,7 @@ Plan:
                                 const modifierDisplay = c.modifier ?
                                     `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                                     '-';
+                                const diagnosisDisplay = c.diagnosis || '-';
                                 return `
                                 <tr>
                                     <td><strong>${c.code}</strong></td>
@@ -1391,12 +1410,13 @@ Plan:
                                     <td>${c.description}</td>
                                     <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
                                     <td class="${c.status === 'supported' ? 'status-supported' : 'status-missing'}">${c.status}</td>
+                                    <td><span class="diagnosis-badge">${diagnosisDisplay}</span></td>
                                 </tr>
                             `}).join('')}
                             <tr class="total-row">
                                 <td colspan="3"><strong>TOTAL</strong></td>
                                 <td><span class="wrvu-badge">${correctedCurrentTotalWRVU.toFixed(2)}</span></td>
-                                <td></td>
+                                <td colspan="2"></td>
                             </tr>
                         </tbody>
                     </table>
@@ -1444,7 +1464,7 @@ Plan:
                 <h4 style="margin-top: 20px;">Complete Billing Codes (for EMR Entry)</h4>
                 <table class="billing-table" id="enh-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>wRVU</th><th>Diagnosis</th></tr>
                     </thead>
                     <tbody id="enh-billing-tbody">
                     </tbody>
@@ -1614,7 +1634,7 @@ Plan:
                 <h4 style="margin-top: 20px;">Complete Billing Codes (for EMR Entry)</h4>
                 <table class="billing-table" id="opp-billing-table">
                     <thead>
-                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>wRVU</th></tr>
+                        <tr><th>Code</th><th>Mod</th><th>Description</th><th>wRVU</th><th>Diagnosis</th></tr>
                     </thead>
                     <tbody id="opp-billing-tbody">
                     </tbody>
@@ -1984,7 +2004,7 @@ Plan:
 
             if (tbody) {
                 if (mueCheckedCodes.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
                     tbody.innerHTML = mueCheckedCodes.map(c => {
                         const modifierDisplay = c.modifier ?
@@ -1995,18 +2015,21 @@ Plan:
                             : (c.fromBaseline ? '' : 'style="background: #e8f5e9;"');
                         const upgradeIcon = c.upgraded ? '↑ ' : '';
                         const mueIcon = c.mueExceeded ? '⚠️ ' : '';
+                        const diagnosisDisplay = c.diagnosis || '-';
                         return `
                             <tr ${rowStyle}>
                                 <td><strong>${mueIcon}${upgradeIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
                                 <td>${c.description}${c.mueExceeded ? ` <small>(MUE: ${c.mueLimit})</small>` : ''}</td>
                                 <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
+                                <td><span class="diagnosis-badge">${diagnosisDisplay}</span></td>
                             </tr>
                         `;
                     }).join('') + `
                         <tr class="total-row">
                             <td colspan="3"><strong>TOTAL wRVU</strong></td>
                             <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
+                            <td></td>
                         </tr>
                     `;
                 }
@@ -2225,7 +2248,7 @@ Plan:
 
             if (tbody) {
                 if (mueCheckedCodes.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #6c757d;">No codes to bill</td></tr>`;
                 } else {
                     tbody.innerHTML = mueCheckedCodes.map(c => {
                         const rowStyle = c.mueExceeded
@@ -2237,18 +2260,21 @@ Plan:
                         const modifierDisplay = c.modifier ?
                             `<span class="modifier-badge" title="${c.modifierReason || ''}">${c.modifier}</span>` :
                             '-';
+                        const diagnosisDisplay = c.diagnosis || '-';
                         return `
                             <tr ${rowStyle}>
                                 <td><strong>${mueIcon}${upgradeIcon}${aggregatedIcon}${c.code}</strong></td>
                                 <td>${modifierDisplay}</td>
                                 <td>${c.description}${c.mueExceeded ? ` <small>(MUE: ${c.mueLimit})</small>` : ''}</td>
                                 <td><span class="wrvu-badge">${(c.wRVU || 0).toFixed(2)}</span></td>
+                                <td><span class="diagnosis-badge">${diagnosisDisplay}</span></td>
                             </tr>
                         `;
                     }).join('') + `
                         <tr class="total-row">
                             <td colspan="3"><strong>TOTAL wRVU</strong></td>
                             <td><span class="wrvu-badge">${totalWRVU.toFixed(2)}</span></td>
+                            <td></td>
                         </tr>
                     `;
                 }
