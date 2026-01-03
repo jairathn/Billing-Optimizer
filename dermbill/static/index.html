@@ -784,6 +784,51 @@ Plan:
             '17313': { mue: 8, wRVU: 5.42 },   // Stage 1, trunk/arms/legs
             '17314': { mue: 40, wRVU: 2.98, addOn: true },  // Additional stage, T/A/L
             '17315': { mue: 20, wRVU: 0.85, addOn: true },  // Additional block
+            // Excisions - benign (size matters for documentation upgrades!)
+            '11400': { mue: 3, wRVU: 0.88 },  // Benign trunk ≤0.5cm
+            '11401': { mue: 3, wRVU: 1.25 },  // Benign trunk 0.6-1cm
+            '11402': { mue: 3, wRVU: 1.41 },  // Benign trunk 1.1-2cm
+            '11403': { mue: 3, wRVU: 1.79 },  // Benign trunk 2.1-3cm
+            '11404': { mue: 3, wRVU: 2.06 },  // Benign trunk 3.1-4cm
+            '11406': { mue: 3, wRVU: 3.43 },  // Benign trunk >4cm
+            '11420': { mue: 3, wRVU: 1.00 },  // Benign scalp/hands/feet ≤0.5cm
+            '11421': { mue: 3, wRVU: 1.43 },  // Benign scalp/hands/feet 0.6-1cm
+            '11422': { mue: 3, wRVU: 1.64 },  // Benign scalp/hands/feet 1.1-2cm
+            '11423': { mue: 3, wRVU: 2.01 },  // Benign scalp/hands/feet 2.1-3cm
+            '11424': { mue: 3, wRVU: 2.42 },  // Benign scalp/hands/feet 3.1-4cm
+            '11426': { mue: 3, wRVU: 3.99 },  // Benign scalp/hands/feet >4cm
+            '11440': { mue: 3, wRVU: 1.02 },  // Benign face ≤0.5cm
+            '11441': { mue: 3, wRVU: 1.49 },  // Benign face 0.6-1cm
+            '11442': { mue: 3, wRVU: 1.73 },  // Benign face 1.1-2cm
+            '11443': { mue: 3, wRVU: 2.28 },  // Benign face 2.1-3cm
+            '11444': { mue: 3, wRVU: 3.11 },  // Benign face 3.1-4cm
+            '11446': { mue: 3, wRVU: 4.68 },  // Benign face >4cm
+            // Excisions - malignant (higher wRVU, size matters!)
+            '11600': { mue: 3, wRVU: 1.59 },  // Malignant trunk ≤0.5cm
+            '11601': { mue: 3, wRVU: 2.02 },  // Malignant trunk 0.6-1cm
+            '11602': { mue: 3, wRVU: 2.21 },  // Malignant trunk 1.1-2cm
+            '11603': { mue: 3, wRVU: 2.75 },  // Malignant trunk 2.1-3cm
+            '11604': { mue: 3, wRVU: 3.09 },  // Malignant trunk 3.1-4cm
+            '11606': { mue: 3, wRVU: 4.89 },  // Malignant trunk >4cm
+            '11620': { mue: 3, wRVU: 1.60 },  // Malignant scalp/hands/feet ≤0.5cm
+            '11621': { mue: 3, wRVU: 2.03 },  // Malignant scalp/hands/feet 0.6-1cm
+            '11622': { mue: 3, wRVU: 2.35 },  // Malignant scalp/hands/feet 1.1-2cm
+            '11623': { mue: 3, wRVU: 3.03 },  // Malignant scalp/hands/feet 2.1-3cm
+            '11624': { mue: 3, wRVU: 3.53 },  // Malignant scalp/hands/feet 3.1-4cm
+            '11626': { mue: 3, wRVU: 4.49 },  // Malignant scalp/hands/feet >4cm
+            '11640': { mue: 3, wRVU: 1.63 },  // Malignant face ≤0.5cm
+            '11641': { mue: 3, wRVU: 2.12 },  // Malignant face 0.6-1cm
+            '11642': { mue: 3, wRVU: 2.55 },  // Malignant face 1.1-2cm
+            '11643': { mue: 3, wRVU: 3.33 },  // Malignant face 2.1-3cm
+            '11644': { mue: 3, wRVU: 4.23 },  // Malignant face 3.1-4cm
+            '11646': { mue: 3, wRVU: 6.10 },  // Malignant face >4cm
+            // Repairs - simple
+            '12001': { mue: 3, wRVU: 1.11 },  // Simple, scalp/trunk ≤2.5cm
+            '12002': { mue: 3, wRVU: 1.34 },  // Simple, scalp/trunk 2.6-7.5cm
+            '12004': { mue: 3, wRVU: 1.64 },  // Simple, scalp/trunk 7.6-12.5cm
+            '12011': { mue: 3, wRVU: 1.25 },  // Simple, face ≤2.5cm
+            '12013': { mue: 3, wRVU: 1.45 },  // Simple, face 2.6-5.0cm
+            '12014': { mue: 3, wRVU: 1.85 },  // Simple, face 5.1-7.5cm
             // Repairs - intermediate (wRVU from CPT_Master_Reference.xlsx)
             '12031': { mue: 3, wRVU: 1.95 },  // Scalp/trunk 2.5cm or less
             '12032': { mue: 3, wRVU: 2.46 },  // Scalp/trunk 2.6-7.5cm

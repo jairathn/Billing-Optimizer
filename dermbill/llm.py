@@ -1037,6 +1037,59 @@ For medicolegal opportunities, use:
 - potential_code: {{"code": "LEGAL", "description": "[What to document]", "wRVU": 0}}
 
 ═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 11: DOCUMENTATION-DRIVEN UPGRADES (same work, higher billing)
+═══════════════════════════════════════════════════════════════════════════════
+These are HIGH-VALUE opportunities where the clinical work was already done,
+but documentation upgrades justify higher-paying codes. Look for these actively!
+
+1. REPAIR TYPE UPGRADES (Simple → Intermediate → Complex):
+   • Simple (12001-12021): Single layer closure
+   • Intermediate (12031-12057): Document "layered closure" or "extensive undermining"
+   • Complex (13100-13160): Document debridement, scar revision, stents, retention sutures
+
+   DOCUMENTATION TIP: If you closed in layers, document it! "Layered closure performed"
+   upgrades simple to intermediate. "Extensive undermining required" also qualifies.
+   wRVU difference: Simple 2.5cm trunk (12001) = 1.11 vs Intermediate (12031) = 1.95
+
+2. EXCISION SIZE DOCUMENTATION:
+   • Excision codes are tiered by size: lesion diameter + 2x narrowest margin
+   • Document the TOTAL size including margins, not just lesion size
+   • Example: 0.8cm lesion with 0.3cm margins = 1.4cm total → higher tier code
+
+   DOCUMENTATION TIP: "Excision performed, specimen measured 1.4 cm including margins"
+
+3. BIOPSY TYPE SELECTION (all clinically equivalent for many lesions):
+   • 11102 Tangential (0.56 wRVU): superficial sampling
+   • 11104 Punch (0.69 wRVU): full-thickness sampling
+   • 11106 Incisional (1.01 wRVU): large/deep lesions, partial removal
+
+   DOCUMENTATION TIP: If punch was used, document "punch biopsy". If you excised
+   a portion of a larger lesion, that's incisional (1.01 vs 0.56 wRVU).
+
+4. DESTRUCTION MODALITY DOCUMENTATION:
+   • Cryo-specific codes (46916, 54056) often pay more than generic codes
+   • Document the specific modality: "cryotherapy", "electrodesiccation", "laser"
+
+5. WOUND COMPLEXITY FACTORS (justify intermediate/complex):
+   • Contaminated wound requiring debridement
+   • Wound edges requiring trimming/revision
+   • Undermining performed for tension-free closure
+   • Bleeding requiring more than simple pressure
+   • Location requiring meticulous technique (eyelid, lip vermillion)
+
+6. E/M COMPLEXITY DOCUMENTATION:
+   • Reviewing outside records → document "reviewed external records from [source]"
+   • Discussing with other providers → document the consultation
+   • Extended counseling → document time and topics discussed
+   • Multiple diagnoses → list each one addressed
+
+For documentation upgrades, use category: "documentation_upgrade"
+{{"category": "documentation_upgrade", "finding": "[What was done]",
+  "opportunity": "[Higher code available]", "action": "Document: [specific language]",
+  "potential_code": {{"code": "12031", "description": "Intermediate repair - document layered closure", "wRVU": 1.95}},
+  "teaching_point": "[Why this documentation justifies the upgrade]"}}
+
+═══════════════════════════════════════════════════════════════════════════════
 OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 1. ONE CARD PER CODE FAMILY: Don't mix IL injections with AK destruction, etc.
@@ -1052,7 +1105,7 @@ OUTPUT RULES
 
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure|visit_level|comorbidity|medicolegal",
+  {{"category": "procedure|visit_level|comorbidity|medicolegal|documentation_upgrade",
     "finding": "[Specific clinical finding from note]",
     "opportunity": "[What could be billed or documented]",
     "action": "[What provider should do]",
@@ -1426,6 +1479,59 @@ For medicolegal opportunities, use:
 - potential_code: {{"code": "LEGAL", "description": "[What to document]", "wRVU": 0}}
 
 ═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 11: DOCUMENTATION-DRIVEN UPGRADES (same work, higher billing)
+═══════════════════════════════════════════════════════════════════════════════
+These are HIGH-VALUE opportunities where the clinical work was already done,
+but documentation upgrades justify higher-paying codes. Look for these actively!
+
+1. REPAIR TYPE UPGRADES (Simple → Intermediate → Complex):
+   • Simple (12001-12021): Single layer closure
+   • Intermediate (12031-12057): Document "layered closure" or "extensive undermining"
+   • Complex (13100-13160): Document debridement, scar revision, stents, retention sutures
+
+   DOCUMENTATION TIP: If you closed in layers, document it! "Layered closure performed"
+   upgrades simple to intermediate. "Extensive undermining required" also qualifies.
+   wRVU difference: Simple 2.5cm trunk (12001) = 1.11 vs Intermediate (12031) = 1.95
+
+2. EXCISION SIZE DOCUMENTATION:
+   • Excision codes are tiered by size: lesion diameter + 2x narrowest margin
+   • Document the TOTAL size including margins, not just lesion size
+   • Example: 0.8cm lesion with 0.3cm margins = 1.4cm total → higher tier code
+
+   DOCUMENTATION TIP: "Excision performed, specimen measured 1.4 cm including margins"
+
+3. BIOPSY TYPE SELECTION (all clinically equivalent for many lesions):
+   • 11102 Tangential (0.56 wRVU): superficial sampling
+   • 11104 Punch (0.69 wRVU): full-thickness sampling
+   • 11106 Incisional (1.01 wRVU): large/deep lesions, partial removal
+
+   DOCUMENTATION TIP: If punch was used, document "punch biopsy". If you excised
+   a portion of a larger lesion, that's incisional (1.01 vs 0.56 wRVU).
+
+4. DESTRUCTION MODALITY DOCUMENTATION:
+   • Cryo-specific codes (46916, 54056) often pay more than generic codes
+   • Document the specific modality: "cryotherapy", "electrodesiccation", "laser"
+
+5. WOUND COMPLEXITY FACTORS (justify intermediate/complex):
+   • Contaminated wound requiring debridement
+   • Wound edges requiring trimming/revision
+   • Undermining performed for tension-free closure
+   • Bleeding requiring more than simple pressure
+   • Location requiring meticulous technique (eyelid, lip vermillion)
+
+6. E/M COMPLEXITY DOCUMENTATION:
+   • Reviewing outside records → document "reviewed external records from [source]"
+   • Discussing with other providers → document the consultation
+   • Extended counseling → document time and topics discussed
+   • Multiple diagnoses → list each one addressed
+
+For documentation upgrades, use category: "documentation_upgrade"
+{{"category": "documentation_upgrade", "finding": "[What was done]",
+  "opportunity": "[Higher code available]", "action": "Document: [specific language]",
+  "potential_code": {{"code": "12031", "description": "Intermediate repair - document layered closure", "wRVU": 1.95}},
+  "teaching_point": "[Why this documentation justifies the upgrade]"}}
+
+═══════════════════════════════════════════════════════════════════════════════
 OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 1. ONE CARD PER CODE FAMILY: Don't mix IL injections with AK destruction, etc.
@@ -1441,7 +1547,7 @@ OUTPUT RULES
 
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure|visit_level|comorbidity|medicolegal",
+  {{"category": "procedure|visit_level|comorbidity|medicolegal|documentation_upgrade",
     "finding": "[Specific clinical finding from note]",
     "opportunity": "[What could be billed or documented]",
     "action": "[What provider should do]",
