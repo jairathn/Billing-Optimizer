@@ -367,6 +367,13 @@ For genital/anal lesions, NEVER use generic 17110/17111. Use site-specific codes
 • Male genital (penile warts, etc): 54050 (simple) or 54055 (extensive)
 • Anal/perianal: 46900 (simple) or 46910 (extensive)
 
+CURRENT_BILLING FOR GENITAL/ANAL - ABSOLUTE RULE:
+In current_billing.codes, ALWAYS use the SIMPLE code (56501, 54050, 46900) unless the
+original note EXPLICITLY contains the word "extensive".
+- "Cryotherapy to vulvar warts" → current_billing uses 56501 (NOT 56515!)
+- "Extensive cryotherapy to vulvar warts" → current_billing uses 56515
+The EXTENSIVE_UPGRADE enhancement is a SEPARATE suggestion - it does NOT affect current_billing.
+
 When genital/anal destruction is documented WITHOUT "extensive" language, create EXTENSIVE_UPGRADE:
 {{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
   "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed'",
@@ -475,11 +482,22 @@ OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
 - Be CONCISE and FACTUAL: State what was done briefly
 - Include safety-critical items when clinically relevant
-- For genital/anal destruction: ALWAYS use extensive language in optimized_note (default selection)"""
+- For genital/anal destruction: use extensive language in optimized_note (default selection)
+
+ABSOLUTE PROHIBITION - NEVER INVENT NUMBERS:
+- NEVER add specific counts that are not in the original note
+- If original says "vulvar warts" → do NOT write "4 vulvar warts" or any number
+- Use qualitative language: "multiple", "several", "extensive" - NOT fabricated counts
+- Inventing numbers is MEDICAL FRAUD and ILLEGAL"""
 
         system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
-CRITICAL RULES:
+ABSOLUTE RULES - VIOLATIONS ARE UNACCEPTABLE:
+1. NEVER INVENT NUMBERS - if original note has no count, do NOT add one. Use "multiple", "several", not "4"
+2. current_billing MUST use SIMPLE codes (56501, 54050, 46900) unless "extensive" is in original note
+3. EXTENSIVE_UPGRADE enhancement is a suggestion - does NOT change current_billing codes
+
+OTHER RULES:
 1. Only include enhancements for services that WERE PERFORMED
 2. COUNT EXTRACTION - PRINCIPLE-BASED:
    - SCAN the procedure text for ANY numeric/countable info (digits, "bilateral", listed sites)
@@ -489,8 +507,9 @@ CRITICAL RULES:
 3. SITE-SPECIFIC CODES - CRITICAL:
    - Genital warts/lesions → NEVER use 17110. Use 56501/56515 (female) or 54050/54055 (male)
    - Anal/perianal lesions → NEVER use 17110. Use 46900/46910
-   - When site-specific destruction done without "extensive" → priority: "extensive_upgrade"
-   - optimized_note MUST use extensive language for genital/anal (default is "Yes - Extensive")
+   - current_billing: ALWAYS 56501/54050/46900 unless "extensive" appears in original note
+   - When no "extensive" in note → priority: "extensive_upgrade" (but current_billing stays simple!)
+   - optimized_note uses extensive language (default toggle is "Yes")
 4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 5. G2211, E/M upgrades, unbundling → priority: "high"
 
@@ -632,6 +651,13 @@ For genital/anal lesions, NEVER use generic 17110/17111. Use site-specific codes
 • Male genital (penile warts, etc): 54050 (simple) or 54055 (extensive)
 • Anal/perianal: 46900 (simple) or 46910 (extensive)
 
+CURRENT_BILLING FOR GENITAL/ANAL - ABSOLUTE RULE:
+In current_billing.codes, ALWAYS use the SIMPLE code (56501, 54050, 46900) unless the
+original note EXPLICITLY contains the word "extensive".
+- "Cryotherapy to vulvar warts" → current_billing uses 56501 (NOT 56515!)
+- "Extensive cryotherapy to vulvar warts" → current_billing uses 56515
+The EXTENSIVE_UPGRADE enhancement is a SEPARATE suggestion - it does NOT affect current_billing.
+
 When genital/anal destruction is documented WITHOUT "extensive" language, create EXTENSIVE_UPGRADE:
 {{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
   "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed'",
@@ -740,11 +766,22 @@ OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
 - Be CONCISE and FACTUAL: State what was done briefly
 - Include safety-critical items when clinically relevant
-- For genital/anal destruction: ALWAYS use extensive language in optimized_note (default selection)"""
+- For genital/anal destruction: use extensive language in optimized_note (default selection)
+
+ABSOLUTE PROHIBITION - NEVER INVENT NUMBERS:
+- NEVER add specific counts that are not in the original note
+- If original says "vulvar warts" → do NOT write "4 vulvar warts" or any number
+- Use qualitative language: "multiple", "several", "extensive" - NOT fabricated counts
+- Inventing numbers is MEDICAL FRAUD and ILLEGAL"""
 
         system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
-CRITICAL RULES:
+ABSOLUTE RULES - VIOLATIONS ARE UNACCEPTABLE:
+1. NEVER INVENT NUMBERS - if original note has no count, do NOT add one. Use "multiple", "several", not "4"
+2. current_billing MUST use SIMPLE codes (56501, 54050, 46900) unless "extensive" is in original note
+3. EXTENSIVE_UPGRADE enhancement is a suggestion - does NOT change current_billing codes
+
+OTHER RULES:
 1. Only include enhancements for services that WERE PERFORMED
 2. COUNT EXTRACTION - PRINCIPLE-BASED:
    - SCAN the procedure text for ANY numeric/countable info (digits, "bilateral", listed sites)
@@ -754,8 +791,9 @@ CRITICAL RULES:
 3. SITE-SPECIFIC CODES - CRITICAL:
    - Genital warts/lesions → NEVER use 17110. Use 56501/56515 (female) or 54050/54055 (male)
    - Anal/perianal lesions → NEVER use 17110. Use 46900/46910
-   - When site-specific destruction done without "extensive" → priority: "extensive_upgrade"
-   - optimized_note MUST use extensive language for genital/anal (default is "Yes - Extensive")
+   - current_billing: ALWAYS 56501/54050/46900 unless "extensive" appears in original note
+   - When no "extensive" in note → priority: "extensive_upgrade" (but current_billing stays simple!)
+   - optimized_note uses extensive language (default toggle is "Yes")
 4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 5. G2211, E/M upgrades, unbundling → priority: "high"
 
