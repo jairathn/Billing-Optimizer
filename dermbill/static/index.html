@@ -1622,7 +1622,7 @@ Plan:
             `;
 
             // Show enhancement cards in opportunities tab (enhancements should also appear as opportunities)
-            const enhancements = data.documentation_enhancements;
+            // Note: 'enhancements' variable already defined earlier in this function
             if (enhancements && enhancements.enhancements && enhancements.enhancements.length) {
                 // Filter for interactive enhancement cards (extensive upgrades, etc.)
                 const interactiveEnhancements = enhancements.enhancements.filter(e =>
