@@ -533,6 +533,8 @@ Respond with valid JSON only."""
                     priority=e.get("priority", "medium"),
                     count_family=e.get("count_family"),
                     default_count=int(e["default_count"]) if e.get("default_count") else None,
+                    upgrade_family=e.get("upgrade_family"),
+                    default_extensive=e.get("default_extensive"),
                 )
                 for e in data.get("enhancements", [])
             ]
@@ -791,6 +793,8 @@ Respond with valid JSON only."""
                     priority=e.get("priority", "medium"),
                     count_family=e.get("count_family"),
                     default_count=int(e["default_count"]) if e.get("default_count") else None,
+                    upgrade_family=e.get("upgrade_family"),
+                    default_extensive=e.get("default_extensive"),
                 )
                 for e in data.get("enhancements", [])
             ]
