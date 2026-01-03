@@ -465,13 +465,17 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
    "Extensive destruction performed - multiple lesions across broad treatment area requiring
    extended provider time and careful technique to complete"
 
+   IMPORTANT: The optimized_note MUST include extensive template language for genital/anal
+   destruction BY DEFAULT (since "Yes - Extensive" is the default toggle selection).
+
 CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
 with count_family and default_count. Do NOT suggest a specific count - let the user input it.
 
 OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
 - Be CONCISE and FACTUAL: State what was done briefly
-- Include safety-critical items when clinically relevant"""
+- Include safety-critical items when clinically relevant
+- For genital/anal destruction: ALWAYS use extensive language in optimized_note (default selection)"""
 
         system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
@@ -486,6 +490,7 @@ CRITICAL RULES:
    - Genital warts/lesions → NEVER use 17110. Use 56501/56515 (female) or 54050/54055 (male)
    - Anal/perianal lesions → NEVER use 17110. Use 46900/46910
    - When site-specific destruction done without "extensive" → priority: "extensive_upgrade"
+   - optimized_note MUST use extensive language for genital/anal (default is "Yes - Extensive")
 4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 5. G2211, E/M upgrades, unbundling → priority: "high"
 
@@ -725,13 +730,17 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
    "Extensive destruction performed - multiple lesions across broad treatment area requiring
    extended provider time and careful technique to complete"
 
+   IMPORTANT: The optimized_note MUST include extensive template language for genital/anal
+   destruction BY DEFAULT (since "Yes - Extensive" is the default toggle selection).
+
 CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
 with count_family and default_count. Do NOT suggest a specific count - let the user input it.
 
 OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
 - Be CONCISE and FACTUAL: State what was done briefly
-- Include safety-critical items when clinically relevant"""
+- Include safety-critical items when clinically relevant
+- For genital/anal destruction: ALWAYS use extensive language in optimized_note (default selection)"""
 
         system = """Dermatology billing expert. Maximize billing AND medicolegal protection through DOCUMENTATION.
 
@@ -746,6 +755,7 @@ CRITICAL RULES:
    - Genital warts/lesions → NEVER use 17110. Use 56501/56515 (female) or 54050/54055 (male)
    - Anal/perianal lesions → NEVER use 17110. Use 46900/46910
    - When site-specific destruction done without "extensive" → priority: "extensive_upgrade"
+   - optimized_note MUST use extensive language for genital/anal (default is "Yes - Extensive")
 4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 5. G2211, E/M upgrades, unbundling → priority: "high"
 
