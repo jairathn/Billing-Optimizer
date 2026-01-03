@@ -398,6 +398,28 @@ VALID Step 3 Enhancements (things that WERE done):
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 - COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
 
+═══════════════════════════════════════════════════════════════════════════════
+G2211 CRITICAL RULE - DIAGNOSIS SEPARATION REQUIRED
+═══════════════════════════════════════════════════════════════════════════════
+G2211 (ongoing care add-on) CANNOT be used if a PROCEDURE is billed for the SAME DIAGNOSIS.
+
+EVERY CODE MUST HAVE AN ASSOCIATED DIAGNOSIS. This is critical for G2211 eligibility.
+
+Example scenario: Patient with Acne + PIH + Inflamed Cyst
+  - WRONG: Bill injection under "Acne" → G2211 BLOCKED for Acne management
+  - RIGHT: Bill injection under "Inflamed Cyst", chemical peel under "PIH"
+           → G2211 CAN be used for ongoing Acne management (no procedure on Acne dx)
+
+G2211 ELIGIBILITY CHECK:
+1. Identify all diagnoses in the note
+2. Identify which procedures are billed and their associated diagnoses
+3. G2211 can ONLY be used for a chronic condition that has NO same-day procedure
+4. In suggested_addition for G2211, specify which diagnosis it applies to
+
+OUTPUT REQUIREMENT: For EVERY code in current_billing.codes and enhancements,
+include a "diagnosis" field specifying which condition it's billed under.
+This enables proper G2211 eligibility determination and correct unbundling.
+
 ADD-ON CODES (bill WITH primary codes when applicable):
 • Biopsies: 11103/11105/11107 for each additional lesion biopsied
 • Skin tags: 11201 (+0.28 wRVU) for each additional 10 tags removed beyond first 15
@@ -430,9 +452,11 @@ INVALID for Step 3 (move to Step 4):
 - Treating MORE lesions/nails than were actually treated (that's Step 4)
 
 JSON format:
-{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported|count_unspecified"}}], "total_wRVU": 0, "documentation_gaps": []}},
-"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal|count_clarification", "count_family": "optional", "default_count": 1}}],
+{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported|count_unspecified", "diagnosis": "condition name"}}], "total_wRVU": 0, "documentation_gaps": []}},
+"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal|count_clarification", "count_family": "optional", "default_count": 1, "diagnosis": "condition name"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
+
+CRITICAL: The "diagnosis" field is REQUIRED for every code. This enables G2211 eligibility check.
 
 ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
 
@@ -450,9 +474,14 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
      "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
 
 3. BILLING ENHANCEMENT (code upgrade, unbundling, G2211):
-   {{"issue": "G2211 chronic care add-on", "current_code": "99214", "current_wRVU": 1.92,
-     "suggested_addition": "Add: Ongoing management of chronic condition...",
-     "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
+   {{"issue": "G2211 chronic care add-on for Acne", "current_code": "99214", "current_wRVU": 1.92,
+     "suggested_addition": "Add: Ongoing management of chronic Acne (G2211 eligible - no same-day procedure billed under Acne dx)",
+     "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high",
+     "diagnosis": "Acne"}}
+
+   CRITICAL FOR G2211: Only suggest G2211 for a diagnosis that has NO procedure billed against it.
+   If injection is billed under "Acne", G2211 is BLOCKED for Acne. Bill injection under
+   "Inflamed Cyst" instead, then G2211 can be used for "Acne" chronic management.
 
 4. EXTENSIVE_UPGRADE (genital/anal destruction - simple vs extensive):
    When genital or anal destruction is documented WITHOUT explicit "extensive" language,
@@ -512,6 +541,10 @@ OTHER RULES:
    - optimized_note uses extensive language (default toggle is "Yes")
 4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 5. G2211, E/M upgrades, unbundling → priority: "high"
+6. DIAGNOSIS ASSOCIATION REQUIRED: Every code MUST have an associated diagnosis field.
+   This is CRITICAL for G2211 eligibility - G2211 cannot be used if a procedure is
+   billed for the same diagnosis. Example: injection under "Inflamed Cyst" allows
+   G2211 for "Acne" management, but injection under "Acne" blocks G2211 for Acne.
 
 DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
@@ -535,6 +568,7 @@ Respond with valid JSON only."""
                     units=int(c.get("units", 1)),
                     status=c.get("status", "supported"),
                     documentation_note=c.get("documentation_note"),
+                    diagnosis=c.get("diagnosis"),
                 )
                 for c in cb_data.get("codes", [])
             ]
@@ -559,6 +593,7 @@ Respond with valid JSON only."""
                     default_count=int(e["default_count"]) if e.get("default_count") else None,
                     upgrade_family=e.get("upgrade_family"),
                     default_extensive=e.get("default_extensive"),
+                    diagnosis=e.get("diagnosis"),
                 )
                 for e in data.get("enhancements", [])
             ]
@@ -682,6 +717,28 @@ VALID Step 3 Enhancements (things that WERE done):
 - Unbundling: Multiple procedures WERE done → separate under different diagnoses
 - COUNT_CLARIFICATION: Procedure WAS done but count is ambiguous → ask user to specify
 
+═══════════════════════════════════════════════════════════════════════════════
+G2211 CRITICAL RULE - DIAGNOSIS SEPARATION REQUIRED
+═══════════════════════════════════════════════════════════════════════════════
+G2211 (ongoing care add-on) CANNOT be used if a PROCEDURE is billed for the SAME DIAGNOSIS.
+
+EVERY CODE MUST HAVE AN ASSOCIATED DIAGNOSIS. This is critical for G2211 eligibility.
+
+Example scenario: Patient with Acne + PIH + Inflamed Cyst
+  - WRONG: Bill injection under "Acne" → G2211 BLOCKED for Acne management
+  - RIGHT: Bill injection under "Inflamed Cyst", chemical peel under "PIH"
+           → G2211 CAN be used for ongoing Acne management (no procedure on Acne dx)
+
+G2211 ELIGIBILITY CHECK:
+1. Identify all diagnoses in the note
+2. Identify which procedures are billed and their associated diagnoses
+3. G2211 can ONLY be used for a chronic condition that has NO same-day procedure
+4. In suggested_addition for G2211, specify which diagnosis it applies to
+
+OUTPUT REQUIREMENT: For EVERY code in current_billing.codes and enhancements,
+include a "diagnosis" field specifying which condition it's billed under.
+This enables proper G2211 eligibility determination and correct unbundling.
+
 ADD-ON CODES (bill WITH primary codes when applicable):
 • Biopsies: 11103/11105/11107 for each additional lesion biopsied
 • Skin tags: 11201 (+0.28 wRVU) for each additional 10 tags removed beyond first 15
@@ -714,9 +771,11 @@ INVALID for Step 3 (move to Step 4):
 - Treating MORE lesions/nails than were actually treated (that's Step 4)
 
 JSON format:
-{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported|count_unspecified"}}], "total_wRVU": 0, "documentation_gaps": []}},
-"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal|count_clarification", "count_family": "optional", "default_count": 1}}],
+{{"current_billing": {{"codes": [{{"code": "X", "modifier": "X", "description": "X", "wRVU": 0, "units": 1, "status": "supported|count_unspecified", "diagnosis": "condition name"}}], "total_wRVU": 0, "documentation_gaps": []}},
+"enhancements": [{{"issue": "X", "current_code": "X", "current_wRVU": 0, "suggested_addition": "X", "enhanced_code": "X", "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "high|medicolegal|count_clarification", "count_family": "optional", "default_count": 1, "diagnosis": "condition name"}}],
 "suggested_addendum": "X", "optimized_note": "X", "enhanced_total_wRVU": 0, "improvement": 0}}
+
+CRITICAL: The "diagnosis" field is REQUIRED for every code. This enables G2211 eligibility check.
 
 ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
 
@@ -734,9 +793,14 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
      "enhanced_wRVU": 0, "delta_wRVU": 0, "priority": "medicolegal"}}
 
 3. BILLING ENHANCEMENT (code upgrade, unbundling, G2211):
-   {{"issue": "G2211 chronic care add-on", "current_code": "99214", "current_wRVU": 1.92,
-     "suggested_addition": "Add: Ongoing management of chronic condition...",
-     "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
+   {{"issue": "G2211 chronic care add-on for Acne", "current_code": "99214", "current_wRVU": 1.92,
+     "suggested_addition": "Add: Ongoing management of chronic Acne (G2211 eligible - no same-day procedure billed under Acne dx)",
+     "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high",
+     "diagnosis": "Acne"}}
+
+   CRITICAL FOR G2211: Only suggest G2211 for a diagnosis that has NO procedure billed against it.
+   If injection is billed under "Acne", G2211 is BLOCKED for Acne. Bill injection under
+   "Inflamed Cyst" instead, then G2211 can be used for "Acne" chronic management.
 
 4. EXTENSIVE_UPGRADE (genital/anal destruction - simple vs extensive):
    When genital or anal destruction is documented WITHOUT explicit "extensive" language,
@@ -796,6 +860,10 @@ OTHER RULES:
    - optimized_note uses extensive language (default toggle is "Yes")
 4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 5. G2211, E/M upgrades, unbundling → priority: "high"
+6. DIAGNOSIS ASSOCIATION REQUIRED: Every code MUST have an associated diagnosis field.
+   This is CRITICAL for G2211 eligibility - G2211 cannot be used if a procedure is
+   billed for the same diagnosis. Example: injection under "Inflamed Cyst" allows
+   G2211 for "Acne" management, but injection under "Acne" blocks G2211 for Acne.
 
 DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
@@ -819,6 +887,7 @@ Respond with valid JSON only."""
                     units=int(c.get("units", 1)),
                     status=c.get("status", "supported"),
                     documentation_note=c.get("documentation_note"),
+                    diagnosis=c.get("diagnosis"),
                 )
                 for c in cb_data.get("codes", [])
             ]
@@ -843,6 +912,7 @@ Respond with valid JSON only."""
                     default_count=int(e["default_count"]) if e.get("default_count") else None,
                     upgrade_family=e.get("upgrade_family"),
                     default_extensive=e.get("default_extensive"),
+                    diagnosis=e.get("diagnosis"),
                 )
                 for e in data.get("enhancements", [])
             ]
@@ -1100,10 +1170,31 @@ ADD-ONS:
 • G2211 (+0.33 wRVU): Established ongoing care relationship (chronic condition management)
 • G2212 (+0.61 wRVU): Prolonged visit - document total face-to-face time >40min est/60min new
 
+═══════════════════════════════════════════════════════════════════════════════
+G2211 CRITICAL RULE - DIAGNOSIS SEPARATION REQUIRED
+═══════════════════════════════════════════════════════════════════════════════
+G2211 (ongoing care add-on) CANNOT be used if a PROCEDURE is billed for the SAME DIAGNOSIS.
+
+EVERY CODE MUST HAVE AN ASSOCIATED DIAGNOSIS. This is critical for G2211 eligibility.
+
+Example scenario: Patient with Acne + PIH + Inflamed Cyst
+  - WRONG: Bill injection under "Acne" → G2211 BLOCKED for Acne management
+  - RIGHT: Bill injection under "Inflamed Cyst", chemical peel under "PIH"
+           → G2211 CAN be used for ongoing Acne management (no procedure on Acne dx)
+
+G2211 ELIGIBILITY CHECK:
+1. Identify all diagnoses in the note
+2. Identify which procedures could be billed and their associated diagnoses
+3. G2211 can ONLY be used for a chronic condition that has NO same-day procedure
+4. In action field, specify which diagnosis G2211 applies to
+
+OUTPUT REQUIREMENT: For EVERY potential_code, specify the associated diagnosis.
+This enables proper G2211 eligibility determination and correct unbundling.
+
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
   "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
-  "potential_code": {{"code": "99214", "description": "Moderate MDM (add -25 mod if billing with procedure)", "wRVU": 1.92}},
+  "potential_code": {{"code": "99214", "description": "Moderate MDM (add -25 mod if billing with procedure)", "wRVU": 1.92, "diagnosis": "Acne"}},
   "teaching_point": "[Why this level is appropriate and defensible]"}}
 
 NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
@@ -1312,6 +1403,7 @@ OUTPUT: Valid JSON only."""
                         code=pc["code"],
                         description=pc.get("description", ""),
                         wRVU=float(pc.get("wRVU", 0)),
+                        diagnosis=pc.get("diagnosis"),
                     )
 
                 code_options = None
@@ -1576,10 +1668,31 @@ ADD-ONS:
 • G2211 (+0.33 wRVU): Established ongoing care relationship (chronic condition management)
 • G2212 (+0.61 wRVU): Prolonged visit - document total face-to-face time >40min est/60min new
 
+═══════════════════════════════════════════════════════════════════════════════
+G2211 CRITICAL RULE - DIAGNOSIS SEPARATION REQUIRED
+═══════════════════════════════════════════════════════════════════════════════
+G2211 (ongoing care add-on) CANNOT be used if a PROCEDURE is billed for the SAME DIAGNOSIS.
+
+EVERY CODE MUST HAVE AN ASSOCIATED DIAGNOSIS. This is critical for G2211 eligibility.
+
+Example scenario: Patient with Acne + PIH + Inflamed Cyst
+  - WRONG: Bill injection under "Acne" → G2211 BLOCKED for Acne management
+  - RIGHT: Bill injection under "Inflamed Cyst", chemical peel under "PIH"
+           → G2211 CAN be used for ongoing Acne management (no procedure on Acne dx)
+
+G2211 ELIGIBILITY CHECK:
+1. Identify all diagnoses in the note
+2. Identify which procedures could be billed and their associated diagnoses
+3. G2211 can ONLY be used for a chronic condition that has NO same-day procedure
+4. In action field, specify which diagnosis G2211 applies to
+
+OUTPUT REQUIREMENT: For EVERY potential_code, specify the associated diagnosis.
+This enables proper G2211 eligibility determination and correct unbundling.
+
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
   "opportunity": "E/M upgrade to 99214", "action": "Document: [EXACTLY what to add]",
-  "potential_code": {{"code": "99214", "description": "Moderate MDM (add -25 mod if billing with procedure)", "wRVU": 1.92}},
+  "potential_code": {{"code": "99214", "description": "Moderate MDM (add -25 mod if billing with procedure)", "wRVU": 1.92, "diagnosis": "Acne"}},
   "teaching_point": "[Why this level is appropriate and defensible]"}}
 
 NOTE: Output just the E/M code (99213, 99214, 99215) without the modifier.
@@ -1788,6 +1901,7 @@ OUTPUT: Valid JSON only."""
                         code=pc["code"],
                         description=pc.get("description", ""),
                         wRVU=float(pc.get("wRVU", 0)),
+                        diagnosis=pc.get("diagnosis"),
                     )
 
                 code_options = None

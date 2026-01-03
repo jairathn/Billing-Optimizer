@@ -42,6 +42,7 @@ class BillingCode(BaseModel):
     units: int = Field(default=1, ge=1, description="Number of units")
     status: str = Field(default="supported", description="supported, missing_documentation, or flagged")
     documentation_note: Optional[str] = Field(default=None, description="Note about documentation status")
+    diagnosis: Optional[str] = Field(default=None, description="Associated diagnosis (critical for G2211 eligibility)")
 
 
 class CurrentBilling(BaseModel):
@@ -71,6 +72,8 @@ class DocumentationEnhancement(BaseModel):
     # Extensive upgrade fields - used for genital/anal destruction simple vs extensive toggle
     upgrade_family: Optional[str] = Field(default=None, description="Code family for extensive upgrade (e.g., female_genital_destruction)")
     default_extensive: Optional[bool] = Field(default=None, description="Default to extensive (True) or simple (False)")
+    # Diagnosis association - critical for G2211 eligibility
+    diagnosis: Optional[str] = Field(default=None, description="Associated diagnosis (critical for G2211 eligibility)")
 
 
 class DocumentationEnhancements(BaseModel):
@@ -91,6 +94,7 @@ class PotentialCode(BaseModel):
     code: str = Field(..., description="CPT/HCPCS code")
     description: str = Field(..., description="Code description")
     wRVU: float = Field(..., ge=0.0, description="Work RVUs")
+    diagnosis: Optional[str] = Field(default=None, description="Associated diagnosis (critical for G2211 eligibility)")
 
 
 class CodeOption(BaseModel):
