@@ -321,39 +321,49 @@ TASK:
 CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CRITICAL: COUNT CLARIFICATION FOR AMBIGUOUS PROCEDURES
+COUNT EXTRACTION: PRINCIPLE-BASED APPROACH
 ═══════════════════════════════════════════════════════════════════════════════
-When a count-based procedure is documented as PERFORMED but the COUNT is NOT SPECIFIED:
-- NEVER assume the count from observed exam findings
-- OBSERVED findings ≠ TREATED findings (e.g., "8 nails with pitting" ≠ "8 nails debrided")
-- Create a COUNT_CLARIFICATION enhancement card to ask the user how many were actually done
 
-Count-based procedure families requiring explicit counts:
-• Nail debridement (11720/11721): Note must specify HOW MANY nails were debrided
-• IL injections (11900/11901): Note must specify HOW MANY lesions were injected
-• AK destruction (17000/17003/17004): Note must specify HOW MANY AKs were treated
-• Benign destruction (17110/17111): Note must specify HOW MANY lesions were destroyed
+CORE PRINCIPLE: A count IS SPECIFIED if the PROCEDURE DESCRIPTION (Plan section)
+contains ANY numeric or countable information about what was treated.
 
-VALID COUNT SPECIFICATIONS (count IS specified - use status: "supported"):
-- "Nail debridement of 3 nails" → count = 3
-- "IL triamcinolone injected into 4 thick plaques" → count = 4
-- "Injections to bilateral elbows and knees" → count = 4 (2 + 2)
-- "Treated 6 AKs on scalp" → count = 6
-- "Destroyed 12 verrucae" → count = 12
+EXTRACTION RULES - Apply in order:
+1. EXPLICIT NUMBER: Any digit in the procedure text → use that number
+   • "injected into 4 thick plaques" → count = 4 ✓
+   • "debridement of 3 nails" → count = 3 ✓
+   • "treated 6 AKs" → count = 6 ✓
 
-AMBIGUOUS (count NOT specified - use COUNT_CLARIFICATION):
-- "Nail debridement performed" → HOW MANY nails?
-- "IL injection given to plaques" → HOW MANY plaques?
-- "AKs treated with cryotherapy" → HOW MANY AKs?
+2. ANATOMIC COUNTING: Bilateral/paired anatomy → calculate count
+   • "bilateral elbows" → count = 2 ✓
+   • "bilateral elbows and knees" → count = 4 (2+2) ✓
+   • "both hands" → count = 2 ✓
 
-EXAMPLE - WRONG (assumes count from exam):
-Note says: "Nail debridement performed. Exam shows pitting on 8 nails."
-WRONG: current_billing includes 11721 (6+ nails) assuming all 8 were treated
-RIGHT: current_billing includes 11720 with status: "count_unspecified", create COUNT_CLARIFICATION card
+3. LISTED SITES: Enumerated locations → count the list
+   • "injected scalp, left arm, right arm" → count = 3 ✓
+   • "treated forehead, nose, and cheeks" → count = 3 ✓
 
-EXAMPLE - CORRECT (count specified in procedure):
-Note says: "Nail debridement of 3 nails performed."
-CORRECT: current_billing includes 11720 (1-5 nails) with status: "supported"
+4. ANATOMIC IMPLICATION: Specific anatomy implies count
+   • "all 10 toenails debrided" → count = 10 ✓
+   • "both great toenails" → count = 2 ✓
+
+CRITICAL: Only use COUNT_CLARIFICATION when the procedure text has NO countable info:
+- "Nail debridement performed" → no count anywhere → COUNT_CLARIFICATION
+- "IL injection given" → no count anywhere → COUNT_CLARIFICATION
+- "AKs treated" → no count anywhere → COUNT_CLARIFICATION
+
+WRONG - Do NOT flag as unspecified if count exists ANYWHERE in procedure text:
+- "IL triamcinolone 10mg/mL injected into 4 thick plaques" → count = 4 (NOT unspecified!)
+- "Nail debridement bilateral great toenails" → count = 2 (NOT unspecified!)
+
+Count-based procedure families:
+• Nail debridement (11720: 1-5, 11721: 6+)
+• IL injections (11900: 1-7, 11901: 8+)
+• AK destruction (17000: first, 17003: 2-14, 17004: 15+)
+• Benign destruction (17110: 1-14, 17111: 15+)
+
+EXAM vs PLAN: NEVER use exam counts for billing. If exam says "8 nails dystrophic"
+but Plan says "nail debridement performed" with no count → COUNT_CLARIFICATION
+(The exam count is what exists; the Plan count is what was treated)
 
 For COUNT_CLARIFICATION cards, use this format in enhancements:
 {{"issue": "Nail debridement count unspecified", "current_code": "11720", "current_wRVU": 0.31,
@@ -425,6 +435,24 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
      "suggested_addition": "Add: Ongoing management of chronic condition...",
      "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
 
+4. EXTENSIVE_UPGRADE (genital/anal destruction - simple vs extensive):
+   When genital or anal destruction is documented WITHOUT explicit "extensive" language,
+   suggest upgrading to extensive with template documentation.
+
+   {{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
+     "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed - multiple lesions requiring extended treatment time and effort'",
+     "enhanced_code": "56515", "enhanced_wRVU": 1.87, "delta_wRVU": 1.17, "priority": "extensive_upgrade",
+     "upgrade_family": "female_genital_destruction", "default_extensive": true}}
+
+   UPGRADE FAMILIES and codes:
+   • female_genital_destruction: 56501 (0.70) → 56515 (1.87) = +167%
+   • male_genital_destruction: 54050 (0.61) → 54055 (1.50) = +146%
+   • anal_destruction: 46900 (0.91) → 46910 (1.51) = +66%
+
+   TEMPLATE LANGUAGE for extensive (use in optimized note):
+   "Extensive destruction performed - multiple lesions across broad treatment area requiring
+   extended provider time and careful technique to complete"
+
 CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
 with count_family and default_count. Do NOT suggest a specific count - let the user input it.
 
@@ -437,10 +465,13 @@ OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 
 CRITICAL RULES:
 1. Only include enhancements for services that WERE PERFORMED
-2. COUNT-BASED PROCEDURES (nail debridement, injections, AK/benign destruction):
-   - If count is NOT specified in note → create COUNT_CLARIFICATION card (priority: "count_clarification")
-   - NEVER assume count from exam findings (observed ≠ treated)
-   - NEVER suggest a specific count - use count_family and default_count: 1
+2. COUNT EXTRACTION - PRINCIPLE-BASED:
+   - SCAN the procedure text for ANY numeric/countable info (digits, "bilateral", listed sites)
+   - If count info EXISTS → status: "supported" with extracted count
+   - ONLY use COUNT_CLARIFICATION when procedure text has NO count info whatsoever
+   - Example: "injected into 4 thick plaques" → count = 4, status: "supported" (NOT count_clarification!)
+   - Example: "IL injection given" → no count → COUNT_CLARIFICATION
+   - NEVER assume count from EXAM findings (exam = what exists, plan = what was treated)
 3. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 4. G2211, E/M upgrades, unbundling → priority: "high"
 
@@ -534,39 +565,49 @@ TASK:
 CRITICAL: If a procedure/exam/service WAS NOT DONE, it belongs in Step 4 (Opportunities), NOT here.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CRITICAL: COUNT CLARIFICATION FOR AMBIGUOUS PROCEDURES
+COUNT EXTRACTION: PRINCIPLE-BASED APPROACH
 ═══════════════════════════════════════════════════════════════════════════════
-When a count-based procedure is documented as PERFORMED but the COUNT is NOT SPECIFIED:
-- NEVER assume the count from observed exam findings
-- OBSERVED findings ≠ TREATED findings (e.g., "8 nails with pitting" ≠ "8 nails debrided")
-- Create a COUNT_CLARIFICATION enhancement card to ask the user how many were actually done
 
-Count-based procedure families requiring explicit counts:
-• Nail debridement (11720/11721): Note must specify HOW MANY nails were debrided
-• IL injections (11900/11901): Note must specify HOW MANY lesions were injected
-• AK destruction (17000/17003/17004): Note must specify HOW MANY AKs were treated
-• Benign destruction (17110/17111): Note must specify HOW MANY lesions were destroyed
+CORE PRINCIPLE: A count IS SPECIFIED if the PROCEDURE DESCRIPTION (Plan section)
+contains ANY numeric or countable information about what was treated.
 
-VALID COUNT SPECIFICATIONS (count IS specified - use status: "supported"):
-- "Nail debridement of 3 nails" → count = 3
-- "IL triamcinolone injected into 4 thick plaques" → count = 4
-- "Injections to bilateral elbows and knees" → count = 4 (2 + 2)
-- "Treated 6 AKs on scalp" → count = 6
-- "Destroyed 12 verrucae" → count = 12
+EXTRACTION RULES - Apply in order:
+1. EXPLICIT NUMBER: Any digit in the procedure text → use that number
+   • "injected into 4 thick plaques" → count = 4 ✓
+   • "debridement of 3 nails" → count = 3 ✓
+   • "treated 6 AKs" → count = 6 ✓
 
-AMBIGUOUS (count NOT specified - use COUNT_CLARIFICATION):
-- "Nail debridement performed" → HOW MANY nails?
-- "IL injection given to plaques" → HOW MANY plaques?
-- "AKs treated with cryotherapy" → HOW MANY AKs?
+2. ANATOMIC COUNTING: Bilateral/paired anatomy → calculate count
+   • "bilateral elbows" → count = 2 ✓
+   • "bilateral elbows and knees" → count = 4 (2+2) ✓
+   • "both hands" → count = 2 ✓
 
-EXAMPLE - WRONG (assumes count from exam):
-Note says: "Nail debridement performed. Exam shows pitting on 8 nails."
-WRONG: current_billing includes 11721 (6+ nails) assuming all 8 were treated
-RIGHT: current_billing includes 11720 with status: "count_unspecified", create COUNT_CLARIFICATION card
+3. LISTED SITES: Enumerated locations → count the list
+   • "injected scalp, left arm, right arm" → count = 3 ✓
+   • "treated forehead, nose, and cheeks" → count = 3 ✓
 
-EXAMPLE - CORRECT (count specified in procedure):
-Note says: "Nail debridement of 3 nails performed."
-CORRECT: current_billing includes 11720 (1-5 nails) with status: "supported"
+4. ANATOMIC IMPLICATION: Specific anatomy implies count
+   • "all 10 toenails debrided" → count = 10 ✓
+   • "both great toenails" → count = 2 ✓
+
+CRITICAL: Only use COUNT_CLARIFICATION when the procedure text has NO countable info:
+- "Nail debridement performed" → no count anywhere → COUNT_CLARIFICATION
+- "IL injection given" → no count anywhere → COUNT_CLARIFICATION
+- "AKs treated" → no count anywhere → COUNT_CLARIFICATION
+
+WRONG - Do NOT flag as unspecified if count exists ANYWHERE in procedure text:
+- "IL triamcinolone 10mg/mL injected into 4 thick plaques" → count = 4 (NOT unspecified!)
+- "Nail debridement bilateral great toenails" → count = 2 (NOT unspecified!)
+
+Count-based procedure families:
+• Nail debridement (11720: 1-5, 11721: 6+)
+• IL injections (11900: 1-7, 11901: 8+)
+• AK destruction (17000: first, 17003: 2-14, 17004: 15+)
+• Benign destruction (17110: 1-14, 17111: 15+)
+
+EXAM vs PLAN: NEVER use exam counts for billing. If exam says "8 nails dystrophic"
+but Plan says "nail debridement performed" with no count → COUNT_CLARIFICATION
+(The exam count is what exists; the Plan count is what was treated)
 
 For COUNT_CLARIFICATION cards, use this format in enhancements:
 {{"issue": "Nail debridement count unspecified", "current_code": "11720", "current_wRVU": 0.31,
@@ -638,6 +679,24 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
      "suggested_addition": "Add: Ongoing management of chronic condition...",
      "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
 
+4. EXTENSIVE_UPGRADE (genital/anal destruction - simple vs extensive):
+   When genital or anal destruction is documented WITHOUT explicit "extensive" language,
+   suggest upgrading to extensive with template documentation.
+
+   {{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
+     "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed - multiple lesions requiring extended treatment time and effort'",
+     "enhanced_code": "56515", "enhanced_wRVU": 1.87, "delta_wRVU": 1.17, "priority": "extensive_upgrade",
+     "upgrade_family": "female_genital_destruction", "default_extensive": true}}
+
+   UPGRADE FAMILIES and codes:
+   • female_genital_destruction: 56501 (0.70) → 56515 (1.87) = +167%
+   • male_genital_destruction: 54050 (0.61) → 54055 (1.50) = +146%
+   • anal_destruction: 46900 (0.91) → 46910 (1.51) = +66%
+
+   TEMPLATE LANGUAGE for extensive (use in optimized note):
+   "Extensive destruction performed - multiple lesions across broad treatment area requiring
+   extended provider time and careful technique to complete"
+
 CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
 with count_family and default_count. Do NOT suggest a specific count - let the user input it.
 
@@ -650,10 +709,13 @@ OPTIMIZED NOTE RULES - DOCUMENTATION PRINCIPLES:
 
 CRITICAL RULES:
 1. Only include enhancements for services that WERE PERFORMED
-2. COUNT-BASED PROCEDURES (nail debridement, injections, AK/benign destruction):
-   - If count is NOT specified in note → create COUNT_CLARIFICATION card (priority: "count_clarification")
-   - NEVER assume count from exam findings (observed ≠ treated)
-   - NEVER suggest a specific count - use count_family and default_count: 1
+2. COUNT EXTRACTION - PRINCIPLE-BASED:
+   - SCAN the procedure text for ANY numeric/countable info (digits, "bilateral", listed sites)
+   - If count info EXISTS → status: "supported" with extracted count
+   - ONLY use COUNT_CLARIFICATION when procedure text has NO count info whatsoever
+   - Example: "injected into 4 thick plaques" → count = 4, status: "supported" (NOT count_clarification!)
+   - Example: "IL injection given" → no count → COUNT_CLARIFICATION
+   - NEVER assume count from EXAM findings (exam = what exists, plan = what was treated)
 3. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
 4. G2211, E/M upgrades, unbundling → priority: "high"
 
@@ -753,27 +815,43 @@ CLINICAL SCENARIO GUIDANCE:
 BILLING REFERENCE:
 {corpus_context}
 
-YOUR TASK: Identify opportunities to increase billing through:
-1. UPGRADES: Procedures that WERE done but billing is limited by:
-   - Explicit undertreatment: Fewer sites treated than exist (e.g., "4 plaques injected" but 8 on exam)
-   - Ambiguous count: Count not documented, so only baseline tier justifiable (e.g., "nail debridement
-     performed" with no count → can only bill 11720, but exam shows 8 nails → upgrade opportunity)
-2. ADDITIONS: Procedures that were NOT done but clinical findings support
+YOUR TASK: MAXIMIZE RVU by identifying ALL opportunities to increase billing through:
+
+1. UPGRADES (check EVERY count-based procedure in Plan):
+   A. UNDERTREATMENT: Fewer sites treated than exam shows exist
+      → "4 plaques injected" but exam shows 8 → opportunity to treat all 8
+   B. AMBIGUOUS COUNT: No count documented → only baseline tier billable
+      → "nail debridement performed" (no count) but exam shows 8 dystrophic nails
+      → opportunity: document/treat all 8 to bill 11721 instead of 11720
+   C. SUBOPTIMAL TIER: Count specified but below tier threshold
+      → "5 AKs treated" → just 1 more gets 17003x5 instead of 17003x4
+
+2. ADDITIONS: Procedures NOT done that clinical findings clearly support
+   → Thick plaques noted but no injection given → opportunity for IL injection
 
 ═══════════════════════════════════════════════════════════════════════════════
-CORE PRINCIPLES
+CORE PRINCIPLES - RVU MAXIMIZATION
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check:
-   - Was a specific count documented? If not, only baseline tier is billable
-   - Does exam show more treatable sites than were documented/treated?
-   - If exam findings support higher tier → suggest treating/documenting to that level
+1. UPGRADE PRINCIPLE: For EVERY count-based procedure in Plan:
+   - Extract count from procedure text (use principle-based extraction)
+   - Compare to exam findings - are there more treatable sites?
+   - Check tier thresholds - could treating more bump to next tier?
+   - If upgrade possible → create opportunity card with SPECIFIC target count
 
-2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
-   "4 plaques" = 4). Use specific counts in recommendations.
+2. COUNT EXTRACTION: Use same principles as enhancements:
+   - Explicit numbers, bilateral (=2), listed sites, anatomic implications
+   - If count IS specified: check for upgrade potential against exam
+   - If count NOT specified: this IS an upgrade opportunity (ambiguous → baseline only)
 
-3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable.
+3. TIER THRESHOLD AWARENESS:
+   - Nail: 1-5 (11720) → 6+ (11721) [threshold: 6]
+   - IL injection: 1-7 (11900) → 8+ (11901) [threshold: 8]
+   - Benign: 1-14 (17110) → 15+ (17111) [threshold: 15]
+   - AK: first (17000) + 2-14 (17003) → 15+ (17004) [threshold: 15]
 
-4. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
+4. CLINICAL APPROPRIATENESS: Only suggest what's medically reasonable.
+
+5. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
@@ -828,21 +906,50 @@ BILLING CODES (use potential_code with count):
 • 17111: Benign destruction 15+ lesions (1.23 wRVU)
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 4: DESTRUCTION - GENITAL LESIONS
+CATEGORY 4: DESTRUCTION - SPECIAL SITES (Genital, Anal, Perianal)
 ═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: Special anatomic sites have SITE-SPECIFIC codes that pay MORE than generic
+benign destruction codes (17110/17111). ALWAYS use site-specific codes when applicable.
+
 CLINICAL TRIGGERS:
-• Condylomata acuminata (genital warts)
-• Genital molluscum
-• Any benign genital lesion requiring destruction
+• Condylomata acuminata (genital/anal warts)
+• Genital/anal molluscum
+• Perianal skin tags
+• Any benign lesion in genital, anal, or perianal region
 
-BILLING CODES (use code_options - mutually exclusive):
-MALE:
+SIMPLE vs EXTENSIVE DISTINCTION (judgment call - document to justify):
+• SIMPLE: Straightforward destruction, minimal complexity
+• EXTENSIVE: Choose when ANY of the following apply and DOCUMENT why:
+  - Multiple lesions requiring additional time/effort
+  - Large or confluent lesions
+  - Difficult anatomic location requiring careful technique
+  - Multiple treatment modalities needed
+  - Significant patient discomfort management
+  - Extensive surface area involvement
+
+DOCUMENTATION TIP: To justify extensive, note factors like "multiple confluent lesions",
+"required extended treatment time due to [reason]", "difficult anatomic access", etc.
+
+BILLING CODES BY SITE (use code_options - simple vs extensive):
+
+MALE GENITAL:
 • 54050: Simple destruction (0.61 wRVU) - 1-2 small lesions
-• 54055: Extensive destruction (1.50 wRVU) - multiple or large lesions
+• 54055: Extensive destruction (1.50 wRVU) - multiple/large lesions
+• 54056: Cryosurgery penile lesions (1.26 wRVU) - cryo specifically
+• 54057: Laser destruction penile lesions (1.50 wRVU) - laser specifically
 
-FEMALE:
-• 56501: Simple destruction (0.70 wRVU)
-• 56515: Extensive destruction (1.87 wRVU)
+FEMALE GENITAL:
+• 56501: Simple vulvar destruction (0.70 wRVU) - 1-2 small lesions
+• 56515: Extensive vulvar destruction (1.87 wRVU) - multiple/large lesions
+
+ANAL/PERIANAL:
+• 46900: Simple anal destruction (0.91 wRVU) - 1-2 small lesions
+• 46910: Extensive anal destruction (1.51 wRVU) - multiple/large lesions
+• 46916: Cryosurgery anal lesions (1.86 wRVU) - cryo specifically
+• 46917: Laser destruction anal lesions (1.95 wRVU) - laser specifically
+
+TIP: If using cryotherapy on anal or penile lesions, use the cryo-specific codes
+(46916, 54056) which often pay more than generic simple/extensive codes.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 5: NAIL PROCEDURES
@@ -966,6 +1073,59 @@ For medicolegal opportunities, use:
 - potential_code: {{"code": "LEGAL", "description": "[What to document]", "wRVU": 0}}
 
 ═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 11: DOCUMENTATION-DRIVEN UPGRADES (same work, higher billing)
+═══════════════════════════════════════════════════════════════════════════════
+These are HIGH-VALUE opportunities where the clinical work was already done,
+but documentation upgrades justify higher-paying codes. Look for these actively!
+
+1. REPAIR TYPE UPGRADES (Simple → Intermediate → Complex):
+   • Simple (12001-12021): Single layer closure
+   • Intermediate (12031-12057): Document "layered closure" or "extensive undermining"
+   • Complex (13100-13160): Document debridement, scar revision, stents, retention sutures
+
+   DOCUMENTATION TIP: If you closed in layers, document it! "Layered closure performed"
+   upgrades simple to intermediate. "Extensive undermining required" also qualifies.
+   wRVU difference: Simple 2.5cm trunk (12001) = 1.11 vs Intermediate (12031) = 1.95
+
+2. EXCISION SIZE DOCUMENTATION:
+   • Excision codes are tiered by size: lesion diameter + 2x narrowest margin
+   • Document the TOTAL size including margins, not just lesion size
+   • Example: 0.8cm lesion with 0.3cm margins = 1.4cm total → higher tier code
+
+   DOCUMENTATION TIP: "Excision performed, specimen measured 1.4 cm including margins"
+
+3. BIOPSY TYPE SELECTION (all clinically equivalent for many lesions):
+   • 11102 Tangential (0.56 wRVU): superficial sampling
+   • 11104 Punch (0.69 wRVU): full-thickness sampling
+   • 11106 Incisional (1.01 wRVU): large/deep lesions, partial removal
+
+   DOCUMENTATION TIP: If punch was used, document "punch biopsy". If you excised
+   a portion of a larger lesion, that's incisional (1.01 vs 0.56 wRVU).
+
+4. DESTRUCTION MODALITY DOCUMENTATION:
+   • Cryo-specific codes (46916, 54056) often pay more than generic codes
+   • Document the specific modality: "cryotherapy", "electrodesiccation", "laser"
+
+5. WOUND COMPLEXITY FACTORS (justify intermediate/complex):
+   • Contaminated wound requiring debridement
+   • Wound edges requiring trimming/revision
+   • Undermining performed for tension-free closure
+   • Bleeding requiring more than simple pressure
+   • Location requiring meticulous technique (eyelid, lip vermillion)
+
+6. E/M COMPLEXITY DOCUMENTATION:
+   • Reviewing outside records → document "reviewed external records from [source]"
+   • Discussing with other providers → document the consultation
+   • Extended counseling → document time and topics discussed
+   • Multiple diagnoses → list each one addressed
+
+For documentation upgrades, use category: "documentation_upgrade"
+{{"category": "documentation_upgrade", "finding": "[What was done]",
+  "opportunity": "[Higher code available]", "action": "Document: [specific language]",
+  "potential_code": {{"code": "12031", "description": "Intermediate repair - document layered closure", "wRVU": 1.95}},
+  "teaching_point": "[Why this documentation justifies the upgrade]"}}
+
+═══════════════════════════════════════════════════════════════════════════════
 OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 1. ONE CARD PER CODE FAMILY: Don't mix IL injections with AK destruction, etc.
@@ -981,7 +1141,7 @@ OUTPUT RULES
 
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure|visit_level|comorbidity|medicolegal",
+  {{"category": "procedure|visit_level|comorbidity|medicolegal|documentation_upgrade",
     "finding": "[Specific clinical finding from note]",
     "opportunity": "[What could be billed or documented]",
     "action": "[What provider should do]",
@@ -995,37 +1155,35 @@ OPTIMIZED NOTE RULES:
 - Be CONCISE and FACTUAL
 - Include safety documentation when clinically relevant"""
 
-        system = """You are an expert dermatology billing educator and optimizer.
+        system = """You are an expert dermatology billing educator and optimizer. MAXIMIZE RVU.
 
-CRITICAL RULES:
-1. Only suggest opportunities that are CLINICALLY APPROPRIATE given the patient's presentation
-2. ONE card per code family - aggregate related findings (e.g., all injection-worthy lesions in one card)
-3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
-4. Include accurate wRVU values from the reference
-5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
-6. Include ONE medicolegal card for missing safety documentation (code: "LEGAL", wRVU: 0)
-7. PROCEDURE UPGRADES: If a count-based procedure was done, check if treating more sites could bump the tier
+CRITICAL RULES - RVU MAXIMIZATION:
+1. CHECK EVERY count-based procedure in Plan for upgrade potential:
+   - Extract count using principle-based approach (digits, bilateral, listed sites)
+   - Compare to exam findings - more treatable sites = upgrade opportunity
+   - Ambiguous count (no count in procedure) = upgrade opportunity (baseline tier only billable)
+2. ONE card per code family - aggregate related findings
+3. Be SPECIFIC - reference actual findings, target counts, tier thresholds
+4. Include accurate wRVU values from reference
+5. HIGH-VALUE first (procedures > E/M)
+6. ONE medicolegal card if safety documentation missing
 
-E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
-NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
-Mention the -25 modifier in the description if procedures are being billed same-day.
+UPGRADE DETECTION CHECKLIST:
+□ Nail debridement done? → Check: exam nail count vs treated count → suggest 6+ for 11721
+□ IL injection done? → Check: exam lesion count vs injected count → suggest 8+ for 11901
+□ AK destruction done? → Check: exam AK count vs treated count → suggest 15+ for 17004
+□ Benign destruction done? → Check: exam lesion count vs treated count → suggest 15+ for 17111
+□ Count ambiguous in any above? → This IS an upgrade opportunity (baseline only billable)
 
-DOCUMENTATION PHILOSOPHY: Minimal yet complete.
-- Document the minimum necessary to justify billing codes
-- Surface missing safety documentation as category: "medicolegal" opportunities
-- Never include Time, Coding, or billing code sections
+E/M CRITICAL: Pick ONE specific code, not a range. No -25 in code field.
 
 USE potential_code (single code) for:
-- E/M levels (determine best achievable)
-- Count-based procedures (injections, AKs, nails, biopsies)
-- Medicolegal items (code: "LEGAL", wRVU: 0)
-- Single clear recommendations
+- E/M levels, count-based procedures, medicolegal items
 
-USE code_options (2-3 choices) ONLY for:
-- Truly mutually exclusive tiers (genital destruction: simple vs extensive)
-- Non-count-based procedure choices
+USE code_options ONLY for:
+- Truly mutually exclusive tiers (genital: simple vs extensive)
 
-OUTPUT: Valid JSON only. No markdown, no explanation outside JSON."""
+OUTPUT: Valid JSON only."""
 
         try:
             response = self._call_llm(prompt, system=system, max_tokens=8192)
@@ -1099,27 +1257,43 @@ CLINICAL SCENARIO GUIDANCE:
 BILLING REFERENCE:
 {corpus_context}
 
-YOUR TASK: Identify opportunities to increase billing through:
-1. UPGRADES: Procedures that WERE done but billing is limited by:
-   - Explicit undertreatment: Fewer sites treated than exist (e.g., "4 plaques injected" but 8 on exam)
-   - Ambiguous count: Count not documented, so only baseline tier justifiable (e.g., "nail debridement
-     performed" with no count → can only bill 11720, but exam shows 8 nails → upgrade opportunity)
-2. ADDITIONS: Procedures that were NOT done but clinical findings support
+YOUR TASK: MAXIMIZE RVU by identifying ALL opportunities to increase billing through:
+
+1. UPGRADES (check EVERY count-based procedure in Plan):
+   A. UNDERTREATMENT: Fewer sites treated than exam shows exist
+      → "4 plaques injected" but exam shows 8 → opportunity to treat all 8
+   B. AMBIGUOUS COUNT: No count documented → only baseline tier billable
+      → "nail debridement performed" (no count) but exam shows 8 dystrophic nails
+      → opportunity: document/treat all 8 to bill 11721 instead of 11720
+   C. SUBOPTIMAL TIER: Count specified but below tier threshold
+      → "5 AKs treated" → just 1 more gets 17003x5 instead of 17003x4
+
+2. ADDITIONS: Procedures NOT done that clinical findings clearly support
+   → Thick plaques noted but no injection given → opportunity for IL injection
 
 ═══════════════════════════════════════════════════════════════════════════════
-CORE PRINCIPLES
+CORE PRINCIPLES - RVU MAXIMIZATION
 ═══════════════════════════════════════════════════════════════════════════════
-1. UPGRADE PRINCIPLE: For any count-based procedure in the Plan section, check:
-   - Was a specific count documented? If not, only baseline tier is billable
-   - Does exam show more treatable sites than were documented/treated?
-   - If exam findings support higher tier → suggest treating/documenting to that level
+1. UPGRADE PRINCIPLE: For EVERY count-based procedure in Plan:
+   - Extract count from procedure text (use principle-based extraction)
+   - Compare to exam findings - are there more treatable sites?
+   - Check tier thresholds - could treating more bump to next tier?
+   - If upgrade possible → create opportunity card with SPECIFIC target count
 
-2. COUNT PRINCIPLE: Extract counts from anatomic descriptions (bilateral = 2,
-   "4 plaques" = 4). Use specific counts in recommendations.
+2. COUNT EXTRACTION: Use same principles as enhancements:
+   - Explicit numbers, bilateral (=2), listed sites, anatomic implications
+   - If count IS specified: check for upgrade potential against exam
+   - If count NOT specified: this IS an upgrade opportunity (ambiguous → baseline only)
 
-3. CLINICAL APPROPRIATENESS: Only suggest interventions that are medically reasonable.
+3. TIER THRESHOLD AWARENESS:
+   - Nail: 1-5 (11720) → 6+ (11721) [threshold: 6]
+   - IL injection: 1-7 (11900) → 8+ (11901) [threshold: 8]
+   - Benign: 1-14 (17110) → 15+ (17111) [threshold: 15]
+   - AK: first (17000) + 2-14 (17003) → 15+ (17004) [threshold: 15]
 
-4. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
+4. CLINICAL APPROPRIATENESS: Only suggest what's medically reasonable.
+
+5. ONE CARD PER CODE FAMILY: Aggregate related opportunities.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 1: THERAPEUTIC INJECTIONS
@@ -1174,21 +1348,50 @@ BILLING CODES (use potential_code with count):
 • 17111: Benign destruction 15+ lesions (1.23 wRVU)
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 4: DESTRUCTION - GENITAL LESIONS
+CATEGORY 4: DESTRUCTION - SPECIAL SITES (Genital, Anal, Perianal)
 ═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: Special anatomic sites have SITE-SPECIFIC codes that pay MORE than generic
+benign destruction codes (17110/17111). ALWAYS use site-specific codes when applicable.
+
 CLINICAL TRIGGERS:
-• Condylomata acuminata (genital warts)
-• Genital molluscum
-• Any benign genital lesion requiring destruction
+• Condylomata acuminata (genital/anal warts)
+• Genital/anal molluscum
+• Perianal skin tags
+• Any benign lesion in genital, anal, or perianal region
 
-BILLING CODES (use code_options - mutually exclusive):
-MALE:
+SIMPLE vs EXTENSIVE DISTINCTION (judgment call - document to justify):
+• SIMPLE: Straightforward destruction, minimal complexity
+• EXTENSIVE: Choose when ANY of the following apply and DOCUMENT why:
+  - Multiple lesions requiring additional time/effort
+  - Large or confluent lesions
+  - Difficult anatomic location requiring careful technique
+  - Multiple treatment modalities needed
+  - Significant patient discomfort management
+  - Extensive surface area involvement
+
+DOCUMENTATION TIP: To justify extensive, note factors like "multiple confluent lesions",
+"required extended treatment time due to [reason]", "difficult anatomic access", etc.
+
+BILLING CODES BY SITE (use code_options - simple vs extensive):
+
+MALE GENITAL:
 • 54050: Simple destruction (0.61 wRVU) - 1-2 small lesions
-• 54055: Extensive destruction (1.50 wRVU) - multiple or large lesions
+• 54055: Extensive destruction (1.50 wRVU) - multiple/large lesions
+• 54056: Cryosurgery penile lesions (1.26 wRVU) - cryo specifically
+• 54057: Laser destruction penile lesions (1.50 wRVU) - laser specifically
 
-FEMALE:
-• 56501: Simple destruction (0.70 wRVU)
-• 56515: Extensive destruction (1.87 wRVU)
+FEMALE GENITAL:
+• 56501: Simple vulvar destruction (0.70 wRVU) - 1-2 small lesions
+• 56515: Extensive vulvar destruction (1.87 wRVU) - multiple/large lesions
+
+ANAL/PERIANAL:
+• 46900: Simple anal destruction (0.91 wRVU) - 1-2 small lesions
+• 46910: Extensive anal destruction (1.51 wRVU) - multiple/large lesions
+• 46916: Cryosurgery anal lesions (1.86 wRVU) - cryo specifically
+• 46917: Laser destruction anal lesions (1.95 wRVU) - laser specifically
+
+TIP: If using cryotherapy on anal or penile lesions, use the cryo-specific codes
+(46916, 54056) which often pay more than generic simple/extensive codes.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 5: NAIL PROCEDURES
@@ -1312,6 +1515,59 @@ For medicolegal opportunities, use:
 - potential_code: {{"code": "LEGAL", "description": "[What to document]", "wRVU": 0}}
 
 ═══════════════════════════════════════════════════════════════════════════════
+CATEGORY 11: DOCUMENTATION-DRIVEN UPGRADES (same work, higher billing)
+═══════════════════════════════════════════════════════════════════════════════
+These are HIGH-VALUE opportunities where the clinical work was already done,
+but documentation upgrades justify higher-paying codes. Look for these actively!
+
+1. REPAIR TYPE UPGRADES (Simple → Intermediate → Complex):
+   • Simple (12001-12021): Single layer closure
+   • Intermediate (12031-12057): Document "layered closure" or "extensive undermining"
+   • Complex (13100-13160): Document debridement, scar revision, stents, retention sutures
+
+   DOCUMENTATION TIP: If you closed in layers, document it! "Layered closure performed"
+   upgrades simple to intermediate. "Extensive undermining required" also qualifies.
+   wRVU difference: Simple 2.5cm trunk (12001) = 1.11 vs Intermediate (12031) = 1.95
+
+2. EXCISION SIZE DOCUMENTATION:
+   • Excision codes are tiered by size: lesion diameter + 2x narrowest margin
+   • Document the TOTAL size including margins, not just lesion size
+   • Example: 0.8cm lesion with 0.3cm margins = 1.4cm total → higher tier code
+
+   DOCUMENTATION TIP: "Excision performed, specimen measured 1.4 cm including margins"
+
+3. BIOPSY TYPE SELECTION (all clinically equivalent for many lesions):
+   • 11102 Tangential (0.56 wRVU): superficial sampling
+   • 11104 Punch (0.69 wRVU): full-thickness sampling
+   • 11106 Incisional (1.01 wRVU): large/deep lesions, partial removal
+
+   DOCUMENTATION TIP: If punch was used, document "punch biopsy". If you excised
+   a portion of a larger lesion, that's incisional (1.01 vs 0.56 wRVU).
+
+4. DESTRUCTION MODALITY DOCUMENTATION:
+   • Cryo-specific codes (46916, 54056) often pay more than generic codes
+   • Document the specific modality: "cryotherapy", "electrodesiccation", "laser"
+
+5. WOUND COMPLEXITY FACTORS (justify intermediate/complex):
+   • Contaminated wound requiring debridement
+   • Wound edges requiring trimming/revision
+   • Undermining performed for tension-free closure
+   • Bleeding requiring more than simple pressure
+   • Location requiring meticulous technique (eyelid, lip vermillion)
+
+6. E/M COMPLEXITY DOCUMENTATION:
+   • Reviewing outside records → document "reviewed external records from [source]"
+   • Discussing with other providers → document the consultation
+   • Extended counseling → document time and topics discussed
+   • Multiple diagnoses → list each one addressed
+
+For documentation upgrades, use category: "documentation_upgrade"
+{{"category": "documentation_upgrade", "finding": "[What was done]",
+  "opportunity": "[Higher code available]", "action": "Document: [specific language]",
+  "potential_code": {{"code": "12031", "description": "Intermediate repair - document layered closure", "wRVU": 1.95}},
+  "teaching_point": "[Why this documentation justifies the upgrade]"}}
+
+═══════════════════════════════════════════════════════════════════════════════
 OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════════════
 1. ONE CARD PER CODE FAMILY: Don't mix IL injections with AK destruction, etc.
@@ -1327,7 +1583,7 @@ OUTPUT RULES
 
 RESPOND WITH JSON ONLY:
 {{"opportunities": [
-  {{"category": "procedure|visit_level|comorbidity|medicolegal",
+  {{"category": "procedure|visit_level|comorbidity|medicolegal|documentation_upgrade",
     "finding": "[Specific clinical finding from note]",
     "opportunity": "[What could be billed or documented]",
     "action": "[What provider should do]",
@@ -1341,37 +1597,35 @@ OPTIMIZED NOTE RULES:
 - Be CONCISE and FACTUAL
 - Include safety documentation when clinically relevant"""
 
-        system = """You are an expert dermatology billing educator and optimizer.
+        system = """You are an expert dermatology billing educator and optimizer. MAXIMIZE RVU.
 
-CRITICAL RULES:
-1. Only suggest opportunities that are CLINICALLY APPROPRIATE given the patient's presentation
-2. ONE card per code family - aggregate related findings (e.g., all injection-worthy lesions in one card)
-3. Be SPECIFIC - reference actual findings from the note, not generic suggestions
-4. Include accurate wRVU values from the reference
-5. Focus on HIGH-VALUE opportunities first (procedures > E/M adjustments)
-6. Include ONE medicolegal card for missing safety documentation (code: "LEGAL", wRVU: 0)
-7. PROCEDURE UPGRADES: If a count-based procedure was done, check if treating more sites could bump the tier
+CRITICAL RULES - RVU MAXIMIZATION:
+1. CHECK EVERY count-based procedure in Plan for upgrade potential:
+   - Extract count using principle-based approach (digits, bilateral, listed sites)
+   - Compare to exam findings - more treatable sites = upgrade opportunity
+   - Ambiguous count (no count in procedure) = upgrade opportunity (baseline tier only billable)
+2. ONE card per code family - aggregate related findings
+3. Be SPECIFIC - reference actual findings, target counts, tier thresholds
+4. Include accurate wRVU values from reference
+5. HIGH-VALUE first (procedures > E/M)
+6. ONE medicolegal card if safety documentation missing
 
-E/M CRITICAL: Pick ONE specific E/M code - the maximum that insurance would actually pay.
-NEVER output a range like "99214-99215". Output just "99214" or "99215" (without -25 modifier in code).
-Mention the -25 modifier in the description if procedures are being billed same-day.
+UPGRADE DETECTION CHECKLIST:
+□ Nail debridement done? → Check: exam nail count vs treated count → suggest 6+ for 11721
+□ IL injection done? → Check: exam lesion count vs injected count → suggest 8+ for 11901
+□ AK destruction done? → Check: exam AK count vs treated count → suggest 15+ for 17004
+□ Benign destruction done? → Check: exam lesion count vs treated count → suggest 15+ for 17111
+□ Count ambiguous in any above? → This IS an upgrade opportunity (baseline only billable)
 
-DOCUMENTATION PHILOSOPHY: Minimal yet complete.
-- Document the minimum necessary to justify billing codes
-- Surface missing safety documentation as category: "medicolegal" opportunities
-- Never include Time, Coding, or billing code sections
+E/M CRITICAL: Pick ONE specific code, not a range. No -25 in code field.
 
 USE potential_code (single code) for:
-- E/M levels (determine best achievable)
-- Count-based procedures (injections, AKs, nails, biopsies)
-- Medicolegal items (code: "LEGAL", wRVU: 0)
-- Single clear recommendations
+- E/M levels, count-based procedures, medicolegal items
 
-USE code_options (2-3 choices) ONLY for:
-- Truly mutually exclusive tiers (genital destruction: simple vs extensive)
-- Non-count-based procedure choices
+USE code_options ONLY for:
+- Truly mutually exclusive tiers (genital: simple vs extensive)
 
-OUTPUT: Valid JSON only. No markdown, no explanation outside JSON."""
+OUTPUT: Valid JSON only."""
 
         try:
             response = await self._call_llm_async(prompt, system=system, max_tokens=8192)
