@@ -1713,6 +1713,12 @@ Plan:
                     }
 
                     // If it's a count-based family AND not a no-count category, render count input
+                    // BUT skip extensive upgrade families (handled by enhancement toggle, not count-based)
+                    const isExtensiveUpgradeFamily = detectedFamily && CODE_FAMILIES[detectedFamily]?.isExtensiveUpgrade;
+                    if (isExtensiveUpgradeFamily) {
+                        // Skip this opportunity - extensive upgrades are handled in enhancements section
+                        return '';
+                    }
                     if (detectedFamily && CODE_FAMILIES[detectedFamily] && !isNoCountCategory && !isEmFamily) {
                         const family = CODE_FAMILIES[detectedFamily];
                         // Extract default count from potential_code description or code_options
@@ -2108,8 +2114,13 @@ Plan:
                 const checkbox = document.querySelector(`.opportunity-checkbox[data-index="${idx}"]`);
                 if (!checkbox || !checkbox.checked) return;
 
-                // Handle count-based families (only if count input exists)
+                // Skip extensive upgrade families - they're handled by enhancement toggle, not here
                 const familyId = checkbox.dataset.family;
+                if (familyId && CODE_FAMILIES[familyId]?.isExtensiveUpgrade) {
+                    return; // Extensive upgrades handled in enhancements section
+                }
+
+                // Handle count-based families (only if count input exists)
                 if (familyId && CODE_FAMILIES[familyId]) {
                     const countInput = document.querySelector(`.count-input[data-opp-index="${idx}"]`);
                     if (countInput) {
