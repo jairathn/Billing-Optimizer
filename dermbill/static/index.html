@@ -1080,6 +1080,9 @@ Plan:
             const family = CODE_FAMILIES[familyId];
             if (!family) return { code: null, wRVU: 0, desc: '' };
 
+            // Skip families without tiers (extensive upgrade families use different structure)
+            if (!family.tiers) return { code: null, wRVU: 0, desc: '' };
+
             for (const tier of family.tiers) {
                 if (count >= tier.min && count <= tier.max) {
                     if (tier.perUnit) {
