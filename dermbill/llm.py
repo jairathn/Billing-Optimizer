@@ -881,10 +881,18 @@ CLINICAL TRIGGERS:
 • Perianal skin tags
 • Any benign lesion in genital, anal, or perianal region
 
-SIMPLE vs EXTENSIVE DISTINCTION:
-• SIMPLE: 1-2 small lesions, minimal time/effort, single modality
-• EXTENSIVE: Multiple lesions (3+), large lesions, confluent disease, multiple modalities,
-  or treatment requiring significantly more time/effort
+SIMPLE vs EXTENSIVE DISTINCTION (judgment call - document to justify):
+• SIMPLE: Straightforward destruction, minimal complexity
+• EXTENSIVE: Choose when ANY of the following apply and DOCUMENT why:
+  - Multiple lesions requiring additional time/effort
+  - Large or confluent lesions
+  - Difficult anatomic location requiring careful technique
+  - Multiple treatment modalities needed
+  - Significant patient discomfort management
+  - Extensive surface area involvement
+
+DOCUMENTATION TIP: To justify extensive, note factors like "multiple confluent lesions",
+"required extended treatment time due to [reason]", "difficult anatomic access", etc.
 
 BILLING CODES BY SITE (use code_options - simple vs extensive):
 
@@ -1262,10 +1270,18 @@ CLINICAL TRIGGERS:
 • Perianal skin tags
 • Any benign lesion in genital, anal, or perianal region
 
-SIMPLE vs EXTENSIVE DISTINCTION:
-• SIMPLE: 1-2 small lesions, minimal time/effort, single modality
-• EXTENSIVE: Multiple lesions (3+), large lesions, confluent disease, multiple modalities,
-  or treatment requiring significantly more time/effort
+SIMPLE vs EXTENSIVE DISTINCTION (judgment call - document to justify):
+• SIMPLE: Straightforward destruction, minimal complexity
+• EXTENSIVE: Choose when ANY of the following apply and DOCUMENT why:
+  - Multiple lesions requiring additional time/effort
+  - Large or confluent lesions
+  - Difficult anatomic location requiring careful technique
+  - Multiple treatment modalities needed
+  - Significant patient discomfort management
+  - Extensive surface area involvement
+
+DOCUMENTATION TIP: To justify extensive, note factors like "multiple confluent lesions",
+"required extended treatment time due to [reason]", "difficult anatomic access", etc.
 
 BILLING CODES BY SITE (use code_options - simple vs extensive):
 
