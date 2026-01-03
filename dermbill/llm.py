@@ -870,21 +870,42 @@ BILLING CODES (use potential_code with count):
 • 17111: Benign destruction 15+ lesions (1.23 wRVU)
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 4: DESTRUCTION - GENITAL LESIONS
+CATEGORY 4: DESTRUCTION - SPECIAL SITES (Genital, Anal, Perianal)
 ═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: Special anatomic sites have SITE-SPECIFIC codes that pay MORE than generic
+benign destruction codes (17110/17111). ALWAYS use site-specific codes when applicable.
+
 CLINICAL TRIGGERS:
-• Condylomata acuminata (genital warts)
-• Genital molluscum
-• Any benign genital lesion requiring destruction
+• Condylomata acuminata (genital/anal warts)
+• Genital/anal molluscum
+• Perianal skin tags
+• Any benign lesion in genital, anal, or perianal region
 
-BILLING CODES (use code_options - mutually exclusive):
-MALE:
+SIMPLE vs EXTENSIVE DISTINCTION:
+• SIMPLE: 1-2 small lesions, minimal time/effort, single modality
+• EXTENSIVE: Multiple lesions (3+), large lesions, confluent disease, multiple modalities,
+  or treatment requiring significantly more time/effort
+
+BILLING CODES BY SITE (use code_options - simple vs extensive):
+
+MALE GENITAL:
 • 54050: Simple destruction (0.61 wRVU) - 1-2 small lesions
-• 54055: Extensive destruction (1.50 wRVU) - multiple or large lesions
+• 54055: Extensive destruction (1.50 wRVU) - multiple/large lesions
+• 54056: Cryosurgery penile lesions (1.26 wRVU) - cryo specifically
+• 54057: Laser destruction penile lesions (1.50 wRVU) - laser specifically
 
-FEMALE:
-• 56501: Simple destruction (0.70 wRVU)
-• 56515: Extensive destruction (1.87 wRVU)
+FEMALE GENITAL:
+• 56501: Simple vulvar destruction (0.70 wRVU) - 1-2 small lesions
+• 56515: Extensive vulvar destruction (1.87 wRVU) - multiple/large lesions
+
+ANAL/PERIANAL:
+• 46900: Simple anal destruction (0.91 wRVU) - 1-2 small lesions
+• 46910: Extensive anal destruction (1.51 wRVU) - multiple/large lesions
+• 46916: Cryosurgery anal lesions (1.86 wRVU) - cryo specifically
+• 46917: Laser destruction anal lesions (1.95 wRVU) - laser specifically
+
+TIP: If using cryotherapy on anal or penile lesions, use the cryo-specific codes
+(46916, 54056) which often pay more than generic simple/extensive codes.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 5: NAIL PROCEDURES
@@ -1230,21 +1251,42 @@ BILLING CODES (use potential_code with count):
 • 17111: Benign destruction 15+ lesions (1.23 wRVU)
 
 ═══════════════════════════════════════════════════════════════════════════════
-CATEGORY 4: DESTRUCTION - GENITAL LESIONS
+CATEGORY 4: DESTRUCTION - SPECIAL SITES (Genital, Anal, Perianal)
 ═══════════════════════════════════════════════════════════════════════════════
+CRITICAL: Special anatomic sites have SITE-SPECIFIC codes that pay MORE than generic
+benign destruction codes (17110/17111). ALWAYS use site-specific codes when applicable.
+
 CLINICAL TRIGGERS:
-• Condylomata acuminata (genital warts)
-• Genital molluscum
-• Any benign genital lesion requiring destruction
+• Condylomata acuminata (genital/anal warts)
+• Genital/anal molluscum
+• Perianal skin tags
+• Any benign lesion in genital, anal, or perianal region
 
-BILLING CODES (use code_options - mutually exclusive):
-MALE:
+SIMPLE vs EXTENSIVE DISTINCTION:
+• SIMPLE: 1-2 small lesions, minimal time/effort, single modality
+• EXTENSIVE: Multiple lesions (3+), large lesions, confluent disease, multiple modalities,
+  or treatment requiring significantly more time/effort
+
+BILLING CODES BY SITE (use code_options - simple vs extensive):
+
+MALE GENITAL:
 • 54050: Simple destruction (0.61 wRVU) - 1-2 small lesions
-• 54055: Extensive destruction (1.50 wRVU) - multiple or large lesions
+• 54055: Extensive destruction (1.50 wRVU) - multiple/large lesions
+• 54056: Cryosurgery penile lesions (1.26 wRVU) - cryo specifically
+• 54057: Laser destruction penile lesions (1.50 wRVU) - laser specifically
 
-FEMALE:
-• 56501: Simple destruction (0.70 wRVU)
-• 56515: Extensive destruction (1.87 wRVU)
+FEMALE GENITAL:
+• 56501: Simple vulvar destruction (0.70 wRVU) - 1-2 small lesions
+• 56515: Extensive vulvar destruction (1.87 wRVU) - multiple/large lesions
+
+ANAL/PERIANAL:
+• 46900: Simple anal destruction (0.91 wRVU) - 1-2 small lesions
+• 46910: Extensive anal destruction (1.51 wRVU) - multiple/large lesions
+• 46916: Cryosurgery anal lesions (1.86 wRVU) - cryo specifically
+• 46917: Laser destruction anal lesions (1.95 wRVU) - laser specifically
+
+TIP: If using cryotherapy on anal or penile lesions, use the cryo-specific codes
+(46916, 54056) which often pay more than generic simple/extensive codes.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CATEGORY 5: NAIL PROCEDURES

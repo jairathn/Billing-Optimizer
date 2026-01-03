@@ -829,6 +829,19 @@ Plan:
             // Add-on codes - flaps/grafts
             '14301': { mue: 3, wRVU: 12.33 },  // Tissue transfer 30.1-60 sq cm
             '14302': { mue: 6, wRVU: 3.64, addOn: true },  // Tissue transfer ea addl 30 sq cm (add-on to 14301)
+            // Special sites - genital destruction (male)
+            '54050': { mue: 1, wRVU: 0.61, family: 'male_genital_destruction' },  // Simple destruction penis
+            '54055': { mue: 1, wRVU: 1.50, family: 'male_genital_destruction' },  // Extensive destruction penis
+            '54056': { mue: 1, wRVU: 1.26, family: 'male_genital_destruction' },  // Cryosurgery penile lesions
+            '54057': { mue: 1, wRVU: 1.50, family: 'male_genital_destruction' },  // Laser destruction penile
+            // Special sites - genital destruction (female)
+            '56501': { mue: 1, wRVU: 0.70, family: 'female_genital_destruction' },  // Simple vulvar destruction
+            '56515': { mue: 1, wRVU: 1.87, family: 'female_genital_destruction' },  // Extensive vulvar destruction
+            // Special sites - anal/perianal destruction
+            '46900': { mue: 1, wRVU: 0.91, family: 'anal_destruction' },  // Simple anal destruction
+            '46910': { mue: 1, wRVU: 1.51, family: 'anal_destruction' },  // Extensive anal destruction
+            '46916': { mue: 1, wRVU: 1.86, family: 'anal_destruction' },  // Cryosurgery anal lesions
+            '46917': { mue: 1, wRVU: 1.95, family: 'anal_destruction' },  // Laser destruction anal
         };
 
         // Helper to sanitize codes: filter non-billable and correct wRVU from MUE_DATA
