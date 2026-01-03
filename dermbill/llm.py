@@ -1798,6 +1798,16 @@ INSTRUCTIONS:
 7. Do NOT include "Time:" or face-to-face time sections
 8. Do NOT include "Coding:" or billing code sections - just clinical documentation
 
+CRITICAL - NEVER HALLUCINATE NUMBERS:
+- NEVER invent specific counts (lesion counts, measurements, quantities) not in the original note
+- If original says "vulvar warts" with no count, do NOT add "8 vulvar warts" - keep it vague
+- If original says "multiple lesions", do NOT change to specific numbers
+- For extensive destruction: use QUALITATIVE language, not fabricated counts
+  GOOD: "Extensive cryotherapy performed to vulvar condylomata requiring extended treatment time"
+  BAD: "Cryotherapy to 8 vulvar condylomata" (if 8 wasn't in original)
+- Only include specific numbers that appear in the ORIGINAL NOTE or were EXPLICITLY provided
+- Fabricating numbers is a MAJOR LIABILITY - physicians can be sued for falsified documentation
+
 MEDICOLEGAL DOCUMENTATION PRINCIPLES - CRITICAL:
 - MINIMAL NECESSARY: Document the MINIMUM required to support billing codes
 - LESS IS MORE: Excessive detail creates litigation risk - every word can be cross-examined
@@ -1819,6 +1829,12 @@ OUTPUT ONLY CLINICAL DOCUMENTATION - no time, no coding, no billing codes.
 OUTPUT THE COMPLETE OPTIMIZED NOTE:"""
 
         system = """Medical documentation expert. Create minimal, defensible notes that support billing.
+
+ABSOLUTE RULE - NEVER HALLUCINATE NUMBERS:
+- NEVER invent counts, measurements, or quantities not in the original note
+- If original has no count, keep description vague (e.g., "vulvar condylomata" not "8 vulvar condylomata")
+- For extensive procedures, use QUALITATIVE language: "extensive treatment", "multiple lesions", "broad area"
+- Fabricating specific numbers is MEDICAL FRAUD and creates massive liability
 
 CRITICAL: Preserve the original note's format and structure:
 - If input has sections (HPI, Physical Exam, Assessment, Plan), keep those sections
