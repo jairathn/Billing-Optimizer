@@ -435,6 +435,24 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
      "suggested_addition": "Add: Ongoing management of chronic condition...",
      "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
 
+4. EXTENSIVE_UPGRADE (genital/anal destruction - simple vs extensive):
+   When genital or anal destruction is documented WITHOUT explicit "extensive" language,
+   suggest upgrading to extensive with template documentation.
+
+   {{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
+     "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed - multiple lesions requiring extended treatment time and effort'",
+     "enhanced_code": "56515", "enhanced_wRVU": 1.87, "delta_wRVU": 1.17, "priority": "extensive_upgrade",
+     "upgrade_family": "female_genital_destruction", "default_extensive": true}}
+
+   UPGRADE FAMILIES and codes:
+   • female_genital_destruction: 56501 (0.70) → 56515 (1.87) = +167%
+   • male_genital_destruction: 54050 (0.61) → 54055 (1.50) = +146%
+   • anal_destruction: 46900 (0.91) → 46910 (1.51) = +66%
+
+   TEMPLATE LANGUAGE for extensive (use in optimized note):
+   "Extensive destruction performed - multiple lesions across broad treatment area requiring
+   extended provider time and careful technique to complete"
+
 CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
 with count_family and default_count. Do NOT suggest a specific count - let the user input it.
 
@@ -660,6 +678,24 @@ ENHANCEMENT TYPES - USE THE CORRECT FORMAT:
    {{"issue": "G2211 chronic care add-on", "current_code": "99214", "current_wRVU": 1.92,
      "suggested_addition": "Add: Ongoing management of chronic condition...",
      "enhanced_code": "99214 + G2211", "enhanced_wRVU": 2.25, "delta_wRVU": 0.33, "priority": "high"}}
+
+4. EXTENSIVE_UPGRADE (genital/anal destruction - simple vs extensive):
+   When genital or anal destruction is documented WITHOUT explicit "extensive" language,
+   suggest upgrading to extensive with template documentation.
+
+   {{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
+     "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed - multiple lesions requiring extended treatment time and effort'",
+     "enhanced_code": "56515", "enhanced_wRVU": 1.87, "delta_wRVU": 1.17, "priority": "extensive_upgrade",
+     "upgrade_family": "female_genital_destruction", "default_extensive": true}}
+
+   UPGRADE FAMILIES and codes:
+   • female_genital_destruction: 56501 (0.70) → 56515 (1.87) = +167%
+   • male_genital_destruction: 54050 (0.61) → 54055 (1.50) = +146%
+   • anal_destruction: 46900 (0.91) → 46910 (1.51) = +66%
+
+   TEMPLATE LANGUAGE for extensive (use in optimized note):
+   "Extensive destruction performed - multiple lesions across broad treatment area requiring
+   extended provider time and careful technique to complete"
 
 CRITICAL: If a procedure was done but count is unspecified, you MUST use priority: "count_clarification"
 with count_family and default_count. Do NOT suggest a specific count - let the user input it.

@@ -258,6 +258,11 @@
             border-left-color: #ffc107;
         }
 
+        .enhancement-card.extensive_upgrade {
+            border-left-color: #28a745;
+            background: linear-gradient(to right, #f8fff8, white);
+        }
+
         .enhancement-card h4 {
             margin-bottom: 10px;
             color: #333;
@@ -707,6 +712,44 @@ Plan:
                     { min: 15, max: 999, code: '17004', wRVU: 2.59, desc: 'AK destruction 15+' }
                 ],
                 patterns: ['17000', '17003', '17004'],
+                mutuallyExclusive: true,
+                mue: 1
+            },
+            // EXTENSIVE UPGRADE FAMILIES - judgment call, no strict count threshold
+            // These use yes/no toggle instead of count input
+            'female_genital_destruction': {
+                name: 'Female Genital Destruction',
+                isExtensiveUpgrade: true,  // Flag for toggle-based upgrade
+                simpleCode: '56501',
+                extensiveCode: '56515',
+                simpleWRVU: 0.70,
+                extensiveWRVU: 1.87,
+                templateText: 'Extensive destruction performed - multiple lesions across broad treatment area requiring extended provider time and careful technique',
+                patterns: ['56501', '56515'],
+                mutuallyExclusive: true,
+                mue: 1
+            },
+            'male_genital_destruction': {
+                name: 'Male Genital Destruction',
+                isExtensiveUpgrade: true,
+                simpleCode: '54050',
+                extensiveCode: '54055',
+                simpleWRVU: 0.61,
+                extensiveWRVU: 1.50,
+                templateText: 'Extensive destruction performed - multiple lesions across broad treatment area requiring extended provider time and careful technique',
+                patterns: ['54050', '54055', '54056', '54057'],
+                mutuallyExclusive: true,
+                mue: 1
+            },
+            'anal_destruction': {
+                name: 'Anal Destruction',
+                isExtensiveUpgrade: true,
+                simpleCode: '46900',
+                extensiveCode: '46910',
+                simpleWRVU: 0.91,
+                extensiveWRVU: 1.51,
+                templateText: 'Extensive destruction performed - multiple lesions across broad treatment area requiring extended provider time and careful technique',
+                patterns: ['46900', '46910', '46916', '46917'],
                 mutuallyExclusive: true,
                 mue: 1
             },
@@ -1406,6 +1449,49 @@ Plan:
                 enhHtml += '<h4 style="margin-top: 20px;">Enhancement Recommendations</h4>';
                 enhHtml += '<div id="enhancement-list">';
                 enhHtml += enhancements.enhancements.map((e, idx) => {
+                    // Check if this is an extensive upgrade card (genital/anal - judgment call)
+                    const isExtensiveUpgrade = e.priority === 'extensive_upgrade';
+                    const upgradeFamily = e.upgrade_family || null;
+
+                    if (isExtensiveUpgrade && upgradeFamily) {
+                        const family = CODE_FAMILIES[upgradeFamily];
+                        if (family && family.isExtensiveUpgrade) {
+                            const deltaWRVU = family.extensiveWRVU - family.simpleWRVU;
+                            return `
+                                <div class="enhancement-card extensive_upgrade" style="border-left-color: #28a745;">
+                                    <div style="display: flex; align-items: flex-start; gap: 10px;">
+                                        <input type="checkbox" class="enhancement-checkbox extensive-upgrade-checkbox"
+                                               data-index="${idx}" data-family="${upgradeFamily}"
+                                               checked style="margin-top: 5px; transform: scale(1.3);">
+                                        <div style="flex: 1;">
+                                            <span class="category-badge" style="background: #28a745; color: white;">DOCUMENTATION UPGRADE</span>
+                                            <h4 style="margin: 5px 0;">${e.issue}</h4>
+                                            <p style="color: #155724; background: #d4edda; padding: 10px; border-radius: 4px; margin: 10px 0;">
+                                                <strong>💰 Easy Win:</strong> Same work, better documentation = +${deltaWRVU.toFixed(2)} wRVU (+${Math.round((deltaWRVU/family.simpleWRVU)*100)}%)
+                                            </p>
+                                            <div class="extensive-toggle-group" style="display: flex; align-items: center; gap: 15px; margin: 10px 0;">
+                                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                                    <span>Was this destruction extensive?</span>
+                                                    <select class="extensive-select" data-enh-index="${idx}" data-family="${upgradeFamily}"
+                                                            style="padding: 8px 12px; border-radius: 4px; border: 1px solid #28a745; font-size: 14px;">
+                                                        <option value="yes" selected>Yes - Extensive (${family.extensiveCode}: ${family.extensiveWRVU.toFixed(2)} wRVU)</option>
+                                                        <option value="no">No - Simple (${family.simpleCode}: ${family.simpleWRVU.toFixed(2)} wRVU)</option>
+                                                    </select>
+                                                </label>
+                                            </div>
+                                            <div class="template-text" style="background: #f8f9fa; padding: 10px; border-radius: 4px; font-style: italic; font-size: 13px;">
+                                                <strong>Add to note:</strong> "${family.templateText}"
+                                            </div>
+                                            <p style="font-size: 12px; color: #6c757d; margin-top: 8px;">
+                                                Judgment call based on: multiple lesions, large area, extended time, difficult technique, or patient discomfort management.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }
+                    }
+
                     // Check if this is a count clarification card
                     const isCountClarify = e.priority === 'count_clarification' || e.enhanced_code === 'COUNT_CLARIFY';
                     const countFamily = e.count_family || null;
@@ -1665,6 +1751,10 @@ Plan:
                 input.addEventListener('input', updateEnhancementTotals);
                 input.addEventListener('change', updateEnhancementTotals);
             });
+            // Listen for extensive upgrade toggle changes
+            document.querySelectorAll('.extensive-select').forEach(select => {
+                select.addEventListener('change', updateEnhancementTotals);
+            });
         }
 
         function updateEnhancementTotals() {
@@ -1706,6 +1796,24 @@ Plan:
                         if (resultSpan && result.code) {
                             resultSpan.textContent = `→ ${result.code} (${result.wRVU.toFixed(2)} wRVU)`;
                         }
+                    }
+                    return;
+                }
+
+                // Handle EXTENSIVE_UPGRADE cards - yes/no toggle for genital/anal destruction
+                if (e.priority === 'extensive_upgrade') {
+                    const extensiveSelect = document.querySelector(`.extensive-select[data-enh-index="${idx}"]`);
+                    const upgradeFamily = e.upgrade_family;
+                    if (extensiveSelect && upgradeFamily && CODE_FAMILIES[upgradeFamily]) {
+                        const family = CODE_FAMILIES[upgradeFamily];
+                        const isExtensive = extensiveSelect.value === 'yes';
+                        const code = isExtensive ? family.extensiveCode : family.simpleCode;
+                        const wRVU = isExtensive ? family.extensiveWRVU : family.simpleWRVU;
+                        enhancementCodes.push({
+                            code: code,
+                            wRVU: wRVU,
+                            description: family.name + (isExtensive ? ' (Extensive)' : ' (Simple)')
+                        });
                     }
                     return;
                 }
