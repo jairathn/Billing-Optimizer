@@ -667,25 +667,25 @@ Plan: Continue current therapy. Return in 3 months."></textarea>
         });
 
         function loadExample() {
-            document.getElementById('clinical-note').value = `Chief Complaint: Acne follow-up, genital lesions
+            document.getElementById('clinical-note').value = `Chief Complaint: Acne follow-up, vulvar lesions
 
-HPI: 22-year-old female with moderate inflammatory acne. Currently on doxycycline 100mg BID and tretinoin cream. Reports some improvement but has "a few painful bumps" on chin and jawline. Also notes dark spots where previous pimples healed. Additionally reports new bumps in genital area x 2 weeks.
+HPI: 22-year-old female with moderate inflammatory acne. Currently on doxycycline 100mg BID and tretinoin cream. Reports some improvement but has "a few painful bumps" on chin and jawline. Also notes dark spots where previous pimples healed. Additionally reports new bumps in vulvar area x 2 weeks.
 
 Exam:
 - Face: scattered inflammatory papules and pustules on cheeks
 - Chin/jawline: 4 tender, deep nodules
 - Post-inflammatory hyperpigmentation on bilateral cheeks
 - Comedones on forehead
-- External genitalia: condylomata acuminata present
+- Vulva: condylomata acuminata present
 
 Assessment:
 1. Acne vulgaris, moderate, partially improved
-2. Condylomata acuminata
+2. Condylomata acuminata, vulvar
 
 Plan:
 1. Continue current acne regimen
 2. May consider isotretinoin if not improved in 2 months
-3. Cryotherapy to genital warts performed today
+3. Cryotherapy to vulvar warts performed today
 4. Return 8 weeks`;
         }
 
@@ -1413,6 +1413,9 @@ Plan:
             }
             document.getElementById('tab-current').innerHTML = currentHtml;
 
+            // Use the corrected baseline for all tabs (consistent with Current Billing display)
+            const correctedBaselineWRVU = correctedCurrentTotalWRVU;
+
             // Enhancements tab
             const enhancements = data.documentation_enhancements;
             let enhHtml = `
@@ -1420,15 +1423,15 @@ Plan:
                     <h3>Documentation Enhancements</h3>
                     <div class="summary-stats">
                         <div class="stat">
-                            <div class="stat-value" id="enh-delta-display">+${enhancements.improvement.toFixed(2)}</div>
+                            <div class="stat-value" id="enh-delta-display">+0.00</div>
                             <div class="stat-label">Additional wRVU (Selected)</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value" id="enh-total-display">${enhancements.enhanced_total_wRVU.toFixed(2)}</div>
+                            <div class="stat-value" id="enh-total-display">${correctedBaselineWRVU.toFixed(2)}</div>
                             <div class="stat-label">Total wRVU (with Selected)</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${currentBilling.total_wRVU.toFixed(2)}</div>
+                            <div class="stat-value">${correctedBaselineWRVU.toFixed(2)}</div>
                             <div class="stat-label">Baseline wRVU</div>
                         </div>
                     </div>
@@ -1582,18 +1585,19 @@ Plan:
 
             // Opportunities tab
             const opportunities = data.future_opportunities;
-            const baselineWRVU = currentBilling.total_wRVU;
+            // Use corrected baseline (same as Current Billing display)
+            const baselineWRVU = correctedBaselineWRVU;
 
             let oppHtml = `
                 <div class="summary-box">
                     <h3>Intra-Encounter Opportunities</h3>
                     <div class="summary-stats">
                         <div class="stat">
-                            <div class="stat-value" id="opp-delta-display">+${opportunities.total_potential_additional_wRVU.toFixed(2)}</div>
+                            <div class="stat-value" id="opp-delta-display">+0.00</div>
                             <div class="stat-label">Additional wRVU (Selected)</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value" id="opp-total-display">${(baselineWRVU + opportunities.total_potential_additional_wRVU).toFixed(2)}</div>
+                            <div class="stat-value" id="opp-total-display">${baselineWRVU.toFixed(2)}</div>
                             <div class="stat-label">Total wRVU (with Selected)</div>
                         </div>
                         <div class="stat">
