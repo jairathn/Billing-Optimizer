@@ -1232,12 +1232,44 @@ RESPOND WITH JSON ONLY:
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
 "total_potential_additional_wRVU": 0.00}}
 
+═══════════════════════════════════════════════════════════════════════════════
+ABSOLUTE PROHIBITION - NEVER INVENT NUMBERS
+═══════════════════════════════════════════════════════════════════════════════
+- NEVER add specific lesion counts that are NOT in the original note
+- If original says "vulvar warts" do NOT write "3 vulvar warts" or any number
+- Use ONLY qualitative descriptors: "multiple", "several", "extensive"
+- Fabricating numbers is MEDICAL FRAUD - completely unacceptable
+- The ONLY numbers allowed in optimized_note are:
+  1. Numbers that appear VERBATIM in the original note
+  2. Counts that are implied by bilateral anatomy (e.g., "bilateral" = 2)
+
+═══════════════════════════════════════════════════════════════════════════════
+GENITAL/ANAL DESTRUCTION - EXTENSIVE DOCUMENTATION IN OPTIMIZED_NOTE
+═══════════════════════════════════════════════════════════════════════════════
+When the original note contains genital/anal destruction (vulvar, penile, anal warts),
+the optimized_note MUST include extensive destruction justification language:
+- "Extensive cryotherapy performed to vulvar condylomata requiring extended treatment time"
+- "Multiple confluent lesions requiring meticulous technique"
+- Document: extended time, multiple lesions, difficulty, surface area, etc.
+This allows billing the extensive code (56515, 54055, 46910) instead of simple.
+
 OPTIMIZED NOTE RULES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
 - Be CONCISE and FACTUAL
-- Include safety documentation when clinically relevant"""
+- Include safety documentation when clinically relevant
+- NEVER INVENT NUMBERS - use qualitative descriptors only unless number is in original
+- For genital destruction: INCLUDE extensive justification language by default"""
 
         system = """You are an expert dermatology billing educator and optimizer. MAXIMIZE RVU.
+
+═══════════════════════════════════════════════════════════════════════════════
+ABSOLUTE RULES - VIOLATIONS ARE UNACCEPTABLE
+═══════════════════════════════════════════════════════════════════════════════
+1. NEVER INVENT NUMBERS - if original note has no count, do NOT add one
+   - Use "multiple", "several", "extensive" - NEVER fabricate counts like "3" or "4"
+   - Inventing lesion counts is MEDICAL FRAUD
+2. GENITAL DESTRUCTION: Include extensive justification in optimized_note by default
+   - Always add: "extensive requiring extended treatment time", "multiple confluent lesions", etc.
 
 CRITICAL RULES - RVU MAXIMIZATION:
 1. CHECK EVERY count-based procedure in Plan for upgrade potential:
@@ -1676,12 +1708,44 @@ RESPOND WITH JSON ONLY:
 ], "optimized_note": "[Full rewritten note with all opportunities documented as performed]",
 "total_potential_additional_wRVU": 0.00}}
 
+═══════════════════════════════════════════════════════════════════════════════
+ABSOLUTE PROHIBITION - NEVER INVENT NUMBERS
+═══════════════════════════════════════════════════════════════════════════════
+- NEVER add specific lesion counts that are NOT in the original note
+- If original says "vulvar warts" do NOT write "3 vulvar warts" or any number
+- Use ONLY qualitative descriptors: "multiple", "several", "extensive"
+- Fabricating numbers is MEDICAL FRAUD - completely unacceptable
+- The ONLY numbers allowed in optimized_note are:
+  1. Numbers that appear VERBATIM in the original note
+  2. Counts that are implied by bilateral anatomy (e.g., "bilateral" = 2)
+
+═══════════════════════════════════════════════════════════════════════════════
+GENITAL/ANAL DESTRUCTION - EXTENSIVE DOCUMENTATION IN OPTIMIZED_NOTE
+═══════════════════════════════════════════════════════════════════════════════
+When the original note contains genital/anal destruction (vulvar, penile, anal warts),
+the optimized_note MUST include extensive destruction justification language:
+- "Extensive cryotherapy performed to vulvar condylomata requiring extended treatment time"
+- "Multiple confluent lesions requiring meticulous technique"
+- Document: extended time, multiple lesions, difficulty, surface area, etc.
+This allows billing the extensive code (56515, 54055, 46910) instead of simple.
+
 OPTIMIZED NOTE RULES:
 - Output ONLY the clinical note text - no Time, Coding, or billing sections
 - Be CONCISE and FACTUAL
-- Include safety documentation when clinically relevant"""
+- Include safety documentation when clinically relevant
+- NEVER INVENT NUMBERS - use qualitative descriptors only unless number is in original
+- For genital destruction: INCLUDE extensive justification language by default"""
 
         system = """You are an expert dermatology billing educator and optimizer. MAXIMIZE RVU.
+
+═══════════════════════════════════════════════════════════════════════════════
+ABSOLUTE RULES - VIOLATIONS ARE UNACCEPTABLE
+═══════════════════════════════════════════════════════════════════════════════
+1. NEVER INVENT NUMBERS - if original note has no count, do NOT add one
+   - Use "multiple", "several", "extensive" - NEVER fabricate counts like "3" or "4"
+   - Inventing lesion counts is MEDICAL FRAUD
+2. GENITAL DESTRUCTION: Include extensive justification in optimized_note by default
+   - Always add: "extensive requiring extended treatment time", "multiple confluent lesions", etc.
 
 CRITICAL RULES - RVU MAXIMIZATION:
 1. CHECK EVERY count-based procedure in Plan for upgrade potential:
