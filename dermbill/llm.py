@@ -420,16 +420,21 @@ OUTPUT REQUIREMENT: For EVERY code in current_billing.codes and enhancements,
 include a "diagnosis" field specifying which condition it's billed under.
 This enables proper G2211 eligibility determination and correct unbundling.
 
-DIAGNOSIS EXTRACTION FROM CLINICAL NOTE:
-1. ALWAYS extract the actual diagnosis from the clinical note - never invent diagnoses
-2. Read the HPI, Assessment, and Plan sections to identify all documented conditions
-3. Assign each procedure to the most clinically appropriate diagnosis that MAXIMIZES billing:
+DIAGNOSIS OPTIMIZATION FOR MAXIMUM BILLING:
+1. Read the HPI, Assessment, and Plan to identify all documented conditions
+2. Assign each procedure to the diagnosis that MAXIMIZES billing:
    - If multiple conditions could justify a procedure, pick one that's NOT the primary E/M condition
    - Example: Chemical peel in acne patient → bill under "PIH" not "Acne" (preserves G2211 for Acne)
-   - Example: Injection for inflamed cyst → bill under "Inflamed cyst" not "Acne" (if also managing acne)
-4. If the note doesn't specify a diagnosis for a procedure, use the most clinically vague diagnosis
-   that would still support medical necessity (e.g., "Vulvar lesion" not "Condylomata acuminata")
-5. WRONG diagnoses = FRAUD. Only use diagnoses actually documented in or clearly implied by the note.
+   - Example: Injection for inflamed cyst → bill under "Inflamed cyst" not "Acne"
+3. SIDECAR DIAGNOSES: When a procedure was clearly done but would block G2211 if billed under the
+   main diagnosis, suggest a clinically plausible "sidecar" diagnosis that commonly co-occurs:
+   - Acne patient getting injection → suggest "Inflamed cyst" or "Inflammatory nodule"
+   - Acne patient getting chemical peel → suggest "Post-inflammatory hyperpigmentation (PIH)"
+   - Psoriasis patient getting IL injection → suggest "Psoriatic plaque" (specific lesion, not the condition)
+   These are conditions the patient almost certainly has that the provider treated but didn't document.
+   The provider will confirm accuracy before accepting.
+4. If no specific diagnosis fits, use the most clinically appropriate vague diagnosis
+   (e.g., "Vulvar lesion" rather than assuming a specific pathology)
 
 ADD-ON CODES (bill WITH primary codes when applicable):
 • Biopsies: 11103/11105/11107 for each additional lesion biopsied
@@ -750,16 +755,21 @@ OUTPUT REQUIREMENT: For EVERY code in current_billing.codes and enhancements,
 include a "diagnosis" field specifying which condition it's billed under.
 This enables proper G2211 eligibility determination and correct unbundling.
 
-DIAGNOSIS EXTRACTION FROM CLINICAL NOTE:
-1. ALWAYS extract the actual diagnosis from the clinical note - never invent diagnoses
-2. Read the HPI, Assessment, and Plan sections to identify all documented conditions
-3. Assign each procedure to the most clinically appropriate diagnosis that MAXIMIZES billing:
+DIAGNOSIS OPTIMIZATION FOR MAXIMUM BILLING:
+1. Read the HPI, Assessment, and Plan to identify all documented conditions
+2. Assign each procedure to the diagnosis that MAXIMIZES billing:
    - If multiple conditions could justify a procedure, pick one that's NOT the primary E/M condition
    - Example: Chemical peel in acne patient → bill under "PIH" not "Acne" (preserves G2211 for Acne)
-   - Example: Injection for inflamed cyst → bill under "Inflamed cyst" not "Acne" (if also managing acne)
-4. If the note doesn't specify a diagnosis for a procedure, use the most clinically vague diagnosis
-   that would still support medical necessity (e.g., "Vulvar lesion" not "Condylomata acuminata")
-5. WRONG diagnoses = FRAUD. Only use diagnoses actually documented in or clearly implied by the note.
+   - Example: Injection for inflamed cyst → bill under "Inflamed cyst" not "Acne"
+3. SIDECAR DIAGNOSES: When a procedure was clearly done but would block G2211 if billed under the
+   main diagnosis, suggest a clinically plausible "sidecar" diagnosis that commonly co-occurs:
+   - Acne patient getting injection → suggest "Inflamed cyst" or "Inflammatory nodule"
+   - Acne patient getting chemical peel → suggest "Post-inflammatory hyperpigmentation (PIH)"
+   - Psoriasis patient getting IL injection → suggest "Psoriatic plaque" (specific lesion, not the condition)
+   These are conditions the patient almost certainly has that the provider treated but didn't document.
+   The provider will confirm accuracy before accepting.
+4. If no specific diagnosis fits, use the most clinically appropriate vague diagnosis
+   (e.g., "Vulvar lesion" rather than assuming a specific pathology)
 
 ADD-ON CODES (bill WITH primary codes when applicable):
 • Biopsies: 11103/11105/11107 for each additional lesion biopsied
@@ -1213,16 +1223,20 @@ G2211 ELIGIBILITY CHECK:
 OUTPUT REQUIREMENT: For EVERY potential_code, specify the associated diagnosis.
 This enables proper G2211 eligibility determination and correct unbundling.
 
-DIAGNOSIS EXTRACTION FROM CLINICAL NOTE:
-1. ALWAYS extract the actual diagnosis from the clinical note - never invent diagnoses
-2. Read the HPI, Assessment, and Plan sections to identify all documented conditions
-3. Assign each procedure to the most clinically appropriate diagnosis that MAXIMIZES billing:
-   - If multiple conditions could justify a procedure, pick one that's NOT the primary E/M condition
-   - Example: Chemical peel in acne patient → bill under "PIH" not "Acne" (preserves G2211 for Acne)
-   - Example: Injection for inflamed cyst → bill under "Inflamed cyst" not "Acne" (if also managing acne)
-4. If the note doesn't specify a diagnosis for a procedure, use the most clinically vague diagnosis
-   that would still support medical necessity (e.g., "Vulvar lesion" not "Condylomata acuminata")
-5. WRONG diagnoses = FRAUD. Only use diagnoses actually documented in or clearly implied by the note.
+DIAGNOSIS STRATEGY FOR OPPORTUNITIES:
+1. For procedures suggested, assign diagnoses that MAXIMIZE billing and preserve G2211:
+   - Example: Suggest chemical peel for "PIH" not "Acne" (preserves G2211 for Acne management)
+   - Example: Suggest injection for "Inflamed cyst" not "Acne"
+2. SIDECAR DIAGNOSES: Suggest clinically plausible conditions that commonly co-occur with the
+   documented condition. These are high-yield findings the provider likely saw but didn't document:
+   - Acne patient → suggest looking for PIH, inflamed cysts, comedones (for extraction)
+   - TBSE → suggest checking for seborrheic dermatitis (scalp), tinea pedis, actinic keratoses
+   - Nail dystrophy → suggest evaluating for onychomycosis (nail clipping/culture)
+   - Psoriasis → suggest checking nails for pitting/dystrophy (separate billable finding)
+3. For E/M upgrades, suggest common findings that would increase complexity:
+   - TBSE with just "no suspicious lesions" → could upgrade if seb derm or tinea treated
+   - Low-level E/M → check for chronic conditions that need OTC counseling (sunscreen, moisturizer)
+4. The provider reviews and confirms if findings are actually present before accepting.
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
@@ -1722,16 +1736,20 @@ G2211 ELIGIBILITY CHECK:
 OUTPUT REQUIREMENT: For EVERY potential_code, specify the associated diagnosis.
 This enables proper G2211 eligibility determination and correct unbundling.
 
-DIAGNOSIS EXTRACTION FROM CLINICAL NOTE:
-1. ALWAYS extract the actual diagnosis from the clinical note - never invent diagnoses
-2. Read the HPI, Assessment, and Plan sections to identify all documented conditions
-3. Assign each procedure to the most clinically appropriate diagnosis that MAXIMIZES billing:
-   - If multiple conditions could justify a procedure, pick one that's NOT the primary E/M condition
-   - Example: Chemical peel in acne patient → bill under "PIH" not "Acne" (preserves G2211 for Acne)
-   - Example: Injection for inflamed cyst → bill under "Inflamed cyst" not "Acne" (if also managing acne)
-4. If the note doesn't specify a diagnosis for a procedure, use the most clinically vague diagnosis
-   that would still support medical necessity (e.g., "Vulvar lesion" not "Condylomata acuminata")
-5. WRONG diagnoses = FRAUD. Only use diagnoses actually documented in or clearly implied by the note.
+DIAGNOSIS STRATEGY FOR OPPORTUNITIES:
+1. For procedures suggested, assign diagnoses that MAXIMIZE billing and preserve G2211:
+   - Example: Suggest chemical peel for "PIH" not "Acne" (preserves G2211 for Acne management)
+   - Example: Suggest injection for "Inflamed cyst" not "Acne"
+2. SIDECAR DIAGNOSES: Suggest clinically plausible conditions that commonly co-occur with the
+   documented condition. These are high-yield findings the provider likely saw but didn't document:
+   - Acne patient → suggest looking for PIH, inflamed cysts, comedones (for extraction)
+   - TBSE → suggest checking for seborrheic dermatitis (scalp), tinea pedis, actinic keratoses
+   - Nail dystrophy → suggest evaluating for onychomycosis (nail clipping/culture)
+   - Psoriasis → suggest checking nails for pitting/dystrophy (separate billable finding)
+3. For E/M upgrades, suggest common findings that would increase complexity:
+   - TBSE with just "no suspicious lesions" → could upgrade if seb derm or tinea treated
+   - Low-level E/M → check for chronic conditions that need OTC counseling (sunscreen, moisturizer)
+4. The provider reviews and confirms if findings are actually present before accepting.
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
