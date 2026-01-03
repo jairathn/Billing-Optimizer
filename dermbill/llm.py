@@ -420,6 +420,27 @@ OUTPUT REQUIREMENT: For EVERY code in current_billing.codes and enhancements,
 include a "diagnosis" field specifying which condition it's billed under.
 This enables proper G2211 eligibility determination and correct unbundling.
 
+DIAGNOSIS OPTIMIZATION FOR MAXIMUM BILLING:
+Your job is to OUTPUT THE OPTIMAL BILLING CONFIGURATION. Assume all clinically plausible
+diagnoses ARE present - the provider will deselect anything that doesn't apply.
+
+1. Assign each procedure to the diagnosis that MAXIMIZES billing:
+   - Pick a diagnosis that's NOT the primary E/M condition (preserves G2211)
+   - Example: Chemical peel in acne patient → bill under "PIH" (preserves G2211 for Acne)
+   - Example: Injection in acne patient → bill under "Inflamed cyst" (preserves G2211 for Acne)
+
+2. USE SIDECAR DIAGNOSES LIBERALLY: When a procedure would block G2211 if billed under the
+   main diagnosis, USE a clinically plausible sidecar diagnosis that commonly co-occurs:
+   - Acne + injection → use "Inflamed cyst" or "Inflammatory nodule"
+   - Acne + chemical peel → use "Post-inflammatory hyperpigmentation (PIH)"
+   - Acne + extraction → use "Comedones" or "Milia"
+   - Psoriasis + IL injection → use "Psoriatic plaque" (specific lesion)
+   - Eczema + injection → use "Eczematous nodule" or "Prurigo nodule"
+   These conditions almost always exist in these patients. Output them as the diagnosis.
+
+3. For procedures without a clear sidecar, use an appropriately vague diagnosis
+   (e.g., "Vulvar lesion", "Skin lesion", "Inflammatory lesion")
+
 ADD-ON CODES (bill WITH primary codes when applicable):
 • Biopsies: 11103/11105/11107 for each additional lesion biopsied
 • Skin tags: 11201 (+0.28 wRVU) for each additional 10 tags removed beyond first 15
@@ -738,6 +759,27 @@ G2211 ELIGIBILITY CHECK:
 OUTPUT REQUIREMENT: For EVERY code in current_billing.codes and enhancements,
 include a "diagnosis" field specifying which condition it's billed under.
 This enables proper G2211 eligibility determination and correct unbundling.
+
+DIAGNOSIS OPTIMIZATION FOR MAXIMUM BILLING:
+Your job is to OUTPUT THE OPTIMAL BILLING CONFIGURATION. Assume all clinically plausible
+diagnoses ARE present - the provider will deselect anything that doesn't apply.
+
+1. Assign each procedure to the diagnosis that MAXIMIZES billing:
+   - Pick a diagnosis that's NOT the primary E/M condition (preserves G2211)
+   - Example: Chemical peel in acne patient → bill under "PIH" (preserves G2211 for Acne)
+   - Example: Injection in acne patient → bill under "Inflamed cyst" (preserves G2211 for Acne)
+
+2. USE SIDECAR DIAGNOSES LIBERALLY: When a procedure would block G2211 if billed under the
+   main diagnosis, USE a clinically plausible sidecar diagnosis that commonly co-occurs:
+   - Acne + injection → use "Inflamed cyst" or "Inflammatory nodule"
+   - Acne + chemical peel → use "Post-inflammatory hyperpigmentation (PIH)"
+   - Acne + extraction → use "Comedones" or "Milia"
+   - Psoriasis + IL injection → use "Psoriatic plaque" (specific lesion)
+   - Eczema + injection → use "Eczematous nodule" or "Prurigo nodule"
+   These conditions almost always exist in these patients. Output them as the diagnosis.
+
+3. For procedures without a clear sidecar, use an appropriately vague diagnosis
+   (e.g., "Vulvar lesion", "Skin lesion", "Inflammatory lesion")
 
 ADD-ON CODES (bill WITH primary codes when applicable):
 • Biopsies: 11103/11105/11107 for each additional lesion biopsied
@@ -1190,6 +1232,29 @@ G2211 ELIGIBILITY CHECK:
 
 OUTPUT REQUIREMENT: For EVERY potential_code, specify the associated diagnosis.
 This enables proper G2211 eligibility determination and correct unbundling.
+
+DIAGNOSIS STRATEGY FOR OPPORTUNITIES:
+Your job is to OUTPUT THE OPTIMAL BILLING OPPORTUNITIES. Assume all clinically plausible
+findings ARE present - the provider will deselect anything that doesn't apply.
+
+1. Assign diagnoses that MAXIMIZE billing and preserve G2211:
+   - Chemical peel → bill under "PIH" (preserves G2211 for Acne management)
+   - Injection → bill under "Inflamed cyst" (preserves G2211 for Acne)
+
+2. ASSUME COMMON CO-OCCURRING CONDITIONS ARE PRESENT and output opportunities for them:
+   - Acne patient → ASSUME PIH present, inflamed cysts present, comedones present
+   - TBSE → ASSUME seborrheic dermatitis on scalp, tinea pedis, actinic damage present
+   - Nail dystrophy → ASSUME onychomycosis present (nail clipping/KOH billable)
+   - Psoriasis → ASSUME nail pitting/dystrophy present (separate billable)
+   - Elderly patient → ASSUME xerosis, seborrheic keratoses, actinic keratoses present
+   - Any visit → ASSUME patient needs sun protection counseling (OTC management)
+
+3. For E/M upgrades, OUTPUT opportunities based on common findings:
+   - TBSE → output upgrade opportunity for treating seb derm or tinea (moderate complexity)
+   - Low-level E/M → output upgrade for OTC counseling (sunscreen = prescription-strength management)
+   - Chronic condition → output G2211 add-on opportunity
+
+4. Be AGGRESSIVE. Output the maximum plausible billing. Provider deselects what doesn't apply.
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
@@ -1688,6 +1753,29 @@ G2211 ELIGIBILITY CHECK:
 
 OUTPUT REQUIREMENT: For EVERY potential_code, specify the associated diagnosis.
 This enables proper G2211 eligibility determination and correct unbundling.
+
+DIAGNOSIS STRATEGY FOR OPPORTUNITIES:
+Your job is to OUTPUT THE OPTIMAL BILLING OPPORTUNITIES. Assume all clinically plausible
+findings ARE present - the provider will deselect anything that doesn't apply.
+
+1. Assign diagnoses that MAXIMIZE billing and preserve G2211:
+   - Chemical peel → bill under "PIH" (preserves G2211 for Acne management)
+   - Injection → bill under "Inflamed cyst" (preserves G2211 for Acne)
+
+2. ASSUME COMMON CO-OCCURRING CONDITIONS ARE PRESENT and output opportunities for them:
+   - Acne patient → ASSUME PIH present, inflamed cysts present, comedones present
+   - TBSE → ASSUME seborrheic dermatitis on scalp, tinea pedis, actinic damage present
+   - Nail dystrophy → ASSUME onychomycosis present (nail clipping/KOH billable)
+   - Psoriasis → ASSUME nail pitting/dystrophy present (separate billable)
+   - Elderly patient → ASSUME xerosis, seborrheic keratoses, actinic keratoses present
+   - Any visit → ASSUME patient needs sun protection counseling (OTC management)
+
+3. For E/M upgrades, OUTPUT opportunities based on common findings:
+   - TBSE → output upgrade opportunity for treating seb derm or tinea (moderate complexity)
+   - Low-level E/M → output upgrade for OTC counseling (sunscreen = prescription-strength management)
+   - Chronic condition → output G2211 add-on opportunity
+
+4. Be AGGRESSIVE. Output the maximum plausible billing. Provider deselects what doesn't apply.
 
 OUTPUT FORMAT for E/M:
 {{"category": "visit_level", "finding": "[What in this note supports higher E/M]",
