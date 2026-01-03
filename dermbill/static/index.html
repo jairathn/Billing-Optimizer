@@ -710,7 +710,10 @@ Plan:
         let currentAnalysisData = null;
 
         // Code family definitions for count-based aggregation
-        const CODE_FAMILIES = {
+        // NOTE: fallbackDiagnosis should be the MOST VAGUE diagnosis that covers the code
+            // These are ONLY used when LLM doesn't extract diagnosis from note
+            // The actual diagnosis should come from the clinical note via LLM
+            const CODE_FAMILIES = {
             'il_injection': {
                 name: 'IL Injections',
                 tiers: [
@@ -720,7 +723,7 @@ Plan:
                 patterns: ['11900', '11901'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Lesion (specify type)'
+                fallbackDiagnosis: 'Skin lesion'  // Most vague - could be cyst, keloid, plaque, etc.
             },
             'ak_destruction': {
                 name: 'AK Destruction',
@@ -732,7 +735,7 @@ Plan:
                 patterns: ['17000', '17003', '17004'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Actinic keratosis'
+                fallbackDiagnosis: 'Premalignant lesion'  // AK codes are specifically for premalignant
             },
             // EXTENSIVE UPGRADE FAMILIES - judgment call, no strict count threshold
             // These use yes/no toggle instead of count input
@@ -747,7 +750,7 @@ Plan:
                 patterns: ['56501', '56515'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Condylomata acuminata, vulva'
+                fallbackDiagnosis: 'Vulvar lesion'  // Vague - could be warts, molluscum, tags, etc.
             },
             'male_genital_destruction': {
                 name: 'Male Genital Destruction',
@@ -760,7 +763,7 @@ Plan:
                 patterns: ['54050', '54055', '54056', '54057'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Condylomata acuminata, penis'
+                fallbackDiagnosis: 'Penile lesion'  // Vague - could be warts, molluscum, etc.
             },
             'anal_destruction': {
                 name: 'Anal Destruction',
@@ -773,7 +776,7 @@ Plan:
                 patterns: ['46900', '46910', '46916', '46917'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Condylomata acuminata, anal'
+                fallbackDiagnosis: 'Anal/perianal lesion'  // Vague - could be warts, tags, etc.
             },
             'benign_destruction': {
                 name: 'Benign Lesion Destruction',
@@ -784,7 +787,7 @@ Plan:
                 patterns: ['17110', '17111'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Benign lesion'
+                fallbackDiagnosis: 'Benign skin lesion'  // Already vague
             },
             'nail_debridement': {
                 name: 'Nail Debridement',
@@ -795,7 +798,7 @@ Plan:
                 patterns: ['11720', '11721'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Onychomycosis'
+                fallbackDiagnosis: 'Nail disorder'  // Vague - could be fungal, dystrophic, psoriatic
             },
             'id_abscess': {
                 name: 'I&D Abscess',
@@ -806,7 +809,7 @@ Plan:
                 patterns: ['10060', '10061'],
                 mutuallyExclusive: true,
                 mue: 1,
-                defaultDiagnosis: 'Abscess, cutaneous'
+                fallbackDiagnosis: 'Skin abscess'  // Reasonably specific since it's an abscess code
             },
             'em_established': {
                 name: 'E/M Established',
@@ -1918,7 +1921,7 @@ Plan:
                             code: code,
                             wRVU: wRVU,
                             description: family.name + (isExtensive ? ' (Extensive)' : ' (Simple)'),
-                            diagnosis: e.diagnosis || family.defaultDiagnosis || 'Condylomata acuminata'
+                            diagnosis: e.diagnosis || family.fallbackDiagnosis
                         });
                     }
                     return;
@@ -1968,7 +1971,7 @@ Plan:
                             description: `${family.name} (${totalCount} total)`,
                             wRVU: result.wRVU,
                             isFromCountClarify: true,
-                            diagnosis: family.defaultDiagnosis || familyCountDiagnoses[familyId]
+                            diagnosis: familyCountDiagnoses[familyId] || family.fallbackDiagnosis
                         });
                     }
                 }
@@ -2114,7 +2117,7 @@ Plan:
                             code: code,
                             wRVU: wRVU,
                             description: family.name + (isExtensive ? ' (Extensive)' : ' (Simple)'),
-                            diagnosis: e.diagnosis || family.defaultDiagnosis || 'Condylomata acuminata'
+                            diagnosis: e.diagnosis
                         });
                     }
                     return;
@@ -2152,6 +2155,8 @@ Plan:
 
             // Track family counts for count-based codes
             let familyCounts = {};
+            // Track diagnoses for family counts from opportunities
+            let familyCountDiagnoses = {};
 
             // Process opportunities
             opportunities.forEach((o, idx) => {
@@ -2171,6 +2176,10 @@ Plan:
                         const count = parseInt(countInput.value) || 0;
                         if (!familyCounts[familyId]) familyCounts[familyId] = 0;
                         familyCounts[familyId] += count;
+                        // Capture diagnosis for this family from the opportunity
+                        if (o.potential_code?.diagnosis && !familyCountDiagnoses[familyId]) {
+                            familyCountDiagnoses[familyId] = o.potential_code.diagnosis;
+                        }
                         return; // Only return early if we actually processed a count input
                     }
                     // If no count input (e.g., E/M upgrade), fall through to potential_code handling
@@ -2216,7 +2225,7 @@ Plan:
                             code: result.code,
                             description: `${family.name} (${totalCount} total)`,
                             wRVU: result.wRVU,
-                            diagnosis: family.defaultDiagnosis,
+                            diagnosis: familyCountDiagnoses[familyId] || family.fallbackDiagnosis,
                             isAggregated: true
                         });
                     }
