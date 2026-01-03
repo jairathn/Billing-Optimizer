@@ -1413,6 +1413,9 @@ Plan:
             }
             document.getElementById('tab-current').innerHTML = currentHtml;
 
+            // Use the corrected baseline for all tabs (consistent with Current Billing display)
+            const correctedBaselineWRVU = correctedCurrentTotalWRVU;
+
             // Enhancements tab
             const enhancements = data.documentation_enhancements;
             let enhHtml = `
@@ -1420,15 +1423,15 @@ Plan:
                     <h3>Documentation Enhancements</h3>
                     <div class="summary-stats">
                         <div class="stat">
-                            <div class="stat-value" id="enh-delta-display">+${enhancements.improvement.toFixed(2)}</div>
+                            <div class="stat-value" id="enh-delta-display">+0.00</div>
                             <div class="stat-label">Additional wRVU (Selected)</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value" id="enh-total-display">${enhancements.enhanced_total_wRVU.toFixed(2)}</div>
+                            <div class="stat-value" id="enh-total-display">${correctedBaselineWRVU.toFixed(2)}</div>
                             <div class="stat-label">Total wRVU (with Selected)</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${currentBilling.total_wRVU.toFixed(2)}</div>
+                            <div class="stat-value">${correctedBaselineWRVU.toFixed(2)}</div>
                             <div class="stat-label">Baseline wRVU</div>
                         </div>
                     </div>
@@ -1582,18 +1585,19 @@ Plan:
 
             // Opportunities tab
             const opportunities = data.future_opportunities;
-            const baselineWRVU = currentBilling.total_wRVU;
+            // Use corrected baseline (same as Current Billing display)
+            const baselineWRVU = correctedBaselineWRVU;
 
             let oppHtml = `
                 <div class="summary-box">
                     <h3>Intra-Encounter Opportunities</h3>
                     <div class="summary-stats">
                         <div class="stat">
-                            <div class="stat-value" id="opp-delta-display">+${opportunities.total_potential_additional_wRVU.toFixed(2)}</div>
+                            <div class="stat-value" id="opp-delta-display">+0.00</div>
                             <div class="stat-label">Additional wRVU (Selected)</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value" id="opp-total-display">${(baselineWRVU + opportunities.total_potential_additional_wRVU).toFixed(2)}</div>
+                            <div class="stat-value" id="opp-total-display">${baselineWRVU.toFixed(2)}</div>
                             <div class="stat-label">Total wRVU (with Selected)</div>
                         </div>
                         <div class="stat">

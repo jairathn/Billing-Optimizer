@@ -361,6 +361,18 @@ Count-based procedure families:
 • AK destruction (17000: first, 17003: 2-14, 17004: 15+)
 • Benign destruction (17110: 1-14, 17111: 15+)
 
+CRITICAL - SITE-SPECIFIC DESTRUCTION CODES:
+For genital/anal lesions, NEVER use generic 17110/17111. Use site-specific codes:
+• Female genital (vulvar warts, etc): 56501 (simple) or 56515 (extensive)
+• Male genital (penile warts, etc): 54050 (simple) or 54055 (extensive)
+• Anal/perianal: 46900 (simple) or 46910 (extensive)
+
+When genital/anal destruction is documented WITHOUT "extensive" language, create EXTENSIVE_UPGRADE:
+{{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
+  "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed'",
+  "enhanced_code": "56515", "enhanced_wRVU": 1.87, "delta_wRVU": 1.17, "priority": "extensive_upgrade",
+  "upgrade_family": "female_genital_destruction", "default_extensive": true}}
+
 EXAM vs PLAN: NEVER use exam counts for billing. If exam says "8 nails dystrophic"
 but Plan says "nail debridement performed" with no count → COUNT_CLARIFICATION
 (The exam count is what exists; the Plan count is what was treated)
@@ -469,11 +481,13 @@ CRITICAL RULES:
    - SCAN the procedure text for ANY numeric/countable info (digits, "bilateral", listed sites)
    - If count info EXISTS → status: "supported" with extracted count
    - ONLY use COUNT_CLARIFICATION when procedure text has NO count info whatsoever
-   - Example: "injected into 4 thick plaques" → count = 4, status: "supported" (NOT count_clarification!)
-   - Example: "IL injection given" → no count → COUNT_CLARIFICATION
    - NEVER assume count from EXAM findings (exam = what exists, plan = what was treated)
-3. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
-4. G2211, E/M upgrades, unbundling → priority: "high"
+3. SITE-SPECIFIC CODES - CRITICAL:
+   - Genital warts/lesions → NEVER use 17110. Use 56501/56515 (female) or 54050/54055 (male)
+   - Anal/perianal lesions → NEVER use 17110. Use 46900/46910
+   - When site-specific destruction done without "extensive" → priority: "extensive_upgrade"
+4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
+5. G2211, E/M upgrades, unbundling → priority: "high"
 
 DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
@@ -605,6 +619,18 @@ Count-based procedure families:
 • AK destruction (17000: first, 17003: 2-14, 17004: 15+)
 • Benign destruction (17110: 1-14, 17111: 15+)
 
+CRITICAL - SITE-SPECIFIC DESTRUCTION CODES:
+For genital/anal lesions, NEVER use generic 17110/17111. Use site-specific codes:
+• Female genital (vulvar warts, etc): 56501 (simple) or 56515 (extensive)
+• Male genital (penile warts, etc): 54050 (simple) or 54055 (extensive)
+• Anal/perianal: 46900 (simple) or 46910 (extensive)
+
+When genital/anal destruction is documented WITHOUT "extensive" language, create EXTENSIVE_UPGRADE:
+{{"issue": "Vulvar destruction - upgrade to extensive?", "current_code": "56501", "current_wRVU": 0.70,
+  "suggested_addition": "Was destruction extensive? If yes, add: 'Extensive destruction performed'",
+  "enhanced_code": "56515", "enhanced_wRVU": 1.87, "delta_wRVU": 1.17, "priority": "extensive_upgrade",
+  "upgrade_family": "female_genital_destruction", "default_extensive": true}}
+
 EXAM vs PLAN: NEVER use exam counts for billing. If exam says "8 nails dystrophic"
 but Plan says "nail debridement performed" with no count → COUNT_CLARIFICATION
 (The exam count is what exists; the Plan count is what was treated)
@@ -713,11 +739,13 @@ CRITICAL RULES:
    - SCAN the procedure text for ANY numeric/countable info (digits, "bilateral", listed sites)
    - If count info EXISTS → status: "supported" with extracted count
    - ONLY use COUNT_CLARIFICATION when procedure text has NO count info whatsoever
-   - Example: "injected into 4 thick plaques" → count = 4, status: "supported" (NOT count_clarification!)
-   - Example: "IL injection given" → no count → COUNT_CLARIFICATION
    - NEVER assume count from EXAM findings (exam = what exists, plan = what was treated)
-3. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
-4. G2211, E/M upgrades, unbundling → priority: "high"
+3. SITE-SPECIFIC CODES - CRITICAL:
+   - Genital warts/lesions → NEVER use 17110. Use 56501/56515 (female) or 54050/54055 (male)
+   - Anal/perianal lesions → NEVER use 17110. Use 46900/46910
+   - When site-specific destruction done without "extensive" → priority: "extensive_upgrade"
+4. Medicolegal documentation gaps → priority: "medicolegal", enhanced_code: "LEGAL"
+5. G2211, E/M upgrades, unbundling → priority: "high"
 
 DOCUMENTATION PHILOSOPHY: Minimal yet complete.
 - Document the minimum necessary to justify billing codes
