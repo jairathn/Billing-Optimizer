@@ -10,6 +10,7 @@ Endpoints:
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -20,21 +21,41 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
-from .models import (
-    AnalyzeRequest,
-    AnalysisResult,
-    CodeLookupResponse,
-    ScenarioListResponse,
-    ScenarioResponse,
-    HealthResponse,
-    RegenerateNoteRequest,
-    RegenerateNoteResponse,
-)
-from .analyzer import DermBillAnalyzer
-from .codes import get_code_database
-from .scenarios import get_scenario_matcher
-from .llm import get_llm_client
-from . import __version__
+# Handle both relative imports (when run as module) and absolute imports (Vercel)
+try:
+    from .models import (
+        AnalyzeRequest,
+        AnalysisResult,
+        CodeLookupResponse,
+        ScenarioListResponse,
+        ScenarioResponse,
+        HealthResponse,
+        RegenerateNoteRequest,
+        RegenerateNoteResponse,
+    )
+    from .analyzer import DermBillAnalyzer
+    from .codes import get_code_database
+    from .scenarios import get_scenario_matcher
+    from .llm import get_llm_client
+    from . import __version__
+except ImportError:
+    # When run directly by Vercel, add parent directory to path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from models import (
+        AnalyzeRequest,
+        AnalysisResult,
+        CodeLookupResponse,
+        ScenarioListResponse,
+        ScenarioResponse,
+        HealthResponse,
+        RegenerateNoteRequest,
+        RegenerateNoteResponse,
+    )
+    from analyzer import DermBillAnalyzer
+    from codes import get_code_database
+    from scenarios import get_scenario_matcher
+    from llm import get_llm_client
+    __version__ = "1.0.0"
 
 
 # Load environment variables
