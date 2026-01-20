@@ -297,8 +297,3 @@ async def get_scenario(name: str):
         raise HTTPException(status_code=404, detail=f"Scenario not found: {name}")
 
     return ScenarioResponse(name=name, content=content)
-
-
-# Vercel serverless handler
-# This is the entry point for Vercel's Python runtime
-handler = app
