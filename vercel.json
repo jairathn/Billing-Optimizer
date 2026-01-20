@@ -11,8 +11,5 @@
       "src": "/(.*)",
       "dest": "dermbill/api.py"
     }
-  ],
-  "env": {
-    "ANTHROPIC_API_KEY": "@anthropic-api-key"
-  }
+  ]
 }
