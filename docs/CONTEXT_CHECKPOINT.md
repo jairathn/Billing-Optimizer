@@ -1,6 +1,6 @@
 # Context checkpoint (resume here after compaction)
 
-Last updated: 2026-11-06 (after first full build)
+Last updated: 2026-11-06 (two commits pushed; waiting on research workflows and recent-file download)
 
 ## Mission
 Rebuild the Billing-Optimizer repo (currently "DermBill AI", an LLM note-analysis tool) into a
@@ -85,3 +85,15 @@ Associates (ODA), drjairath@owensboroderm.com.
 - Rebuild: python -m remitwatch.cli --db $DB ingest-835 <dir>; ingest-ema <dir>; detect; serve
 - Regenerate findings doc: python scripts/leak_report.py --db $DB > docs/DATA_FINDINGS.md
 - Pending: recent RMT/837 files from the download agent (1,399 + 87), research docs from the two workflows.
+
+## Headline numbers (archive through 2026-09-10, detection v1.1)
+- Total detectable leakage ~$3.26M (2024-2026). Downcoding $61K (Anthem 99204->99203 x108, 99214->99213), bundling $435K,
+  denials never paid $1.18M, contract gaps $877K at Medicare parity (Anthem commercial E/M 59-72% of Medicare = $616K;
+  MA below Medicare $261K), underpayment vs own rate $183K, fees $67K (~$30K/yr), takebacks $460K.
+- Skin substitutes (Q-codes): Medicare paid ~$2.5M in 2025; reversals of ~$1.4M charges / ~$700K paid; takebacks likely tied.
+- MIPS bonus: +$308K (2024) -> +$82K (2025) -> +$14K (2026).
+- Still appealable now (deadline not passed): ~1,339 findings, ~$146K; expired ~$1.2M.
+## Pending when this checkpoint was written
+- Download agent (ac41a9a060e3b3cc7): recent RMT (1,399) + 837 (87) files into scratchpad/data/dropbox; then: ingest-835 + ingest 837s, detect, regenerate docs/DATA_FINDINGS.md, commit.
+- Workflows wf_00156c6f-279 (domain) and wf_ee7fd1ce-70c (tech): write docs/RESEARCH_DOMAIN.md and docs/RESEARCH_TECH.md; then integrate
+  deadlines/statutes into appeals.py and detect.py APPEAL_DAYS, update OPERATIONS.md hosting recommendation, commit.
