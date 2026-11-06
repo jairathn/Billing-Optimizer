@@ -77,9 +77,17 @@ def build_links(store: Store, log=print) -> dict:
                 continue
             seen[key] = sig
         staged.append(d)
+    # overlapping exports (daily and weekly, with and without bill item ids) repeat the same charge:
+    # within a claim, identical signatures coming from different source files are one charge
+    sig_seen: dict[tuple, str] = {}
     for d in staged:
         if (d["bill_item_id"], d["claim_id"]) in conflicts:
             continue
+        sig = (d["claim_id"], d["service_date"], d["cpt"], _mods(d["modifiers"]), d["units"], d["charges_cents"])
+        src = sig_seen.get(sig)
+        if src is not None and src != d["source_name"]:
+            continue
+        sig_seen[sig] = d["source_name"]
         pool[d["claim_id"]].append(d)
 
     # ERA handling rows
