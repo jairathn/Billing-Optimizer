@@ -213,7 +213,7 @@ async function findingsTable(v, container, base, opts={}){
     </div>
     <table><thead><tr>${opts.bulk?'<th></th>':''}<th>DOS</th><th>Payer</th><th>Provider</th><th>Code</th><th>Finding</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Expected</th><th class="num">Shortfall</th><th>CARC/RARC</th><th>Deadline</th><th>Status</th></tr></thead>
     <tbody>${res.items.map(r=>`<tr class="row" data-id="${r.finding_id}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${r.finding_id}" onclick="event.stopPropagation()"></td>`:''}
-      <td>${r.service_date||''}</td><td>${esc(r.payer_group)}</td><td class="small">${esc((r.rendering_provider_name||'').split(' ').slice(0,2).join(' '))}</td>
+      <td>${r.service_date||''}</td><td>${esc(r.payer_group)}</td><td class="small">${esc((r.rendering_provider_name||'').replace(/\s+/g,' ').trim())}</td>
       <td>${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}</td>
       <td><span class="sev-${r.severity}">●</span> ${esc(r.title)}<div class="small muted">${r.patient_control_number||''}</div></td>
       <td class="num">${money2(r.charge_cents)}</td><td class="num">${money2(r.allowed_cents)}</td><td class="num">${money2(r.expected_cents)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b></td>
@@ -225,20 +225,32 @@ async function findingsTable(v, container, base, opts={}){
   container.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>openDetail(tr.dataset.id));
   const b = container.querySelector('#bulkAppealed'); if(b) b.onclick=async()=>{ const ids=[...container.querySelectorAll('.sel:checked')].map(x=>x.value); if(!ids.length) return; await api('/api/findings/bulk-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,status:'appealed'})}); render(); };
 }
+async function trendChart(id, params, label){
+  const rows = await api('/api/trends?'+qs(params));
+  const months=[...new Set(rows.map(r=>r.month))].sort();
+  const totals={}; rows.forEach(r=>{totals[r.grp]=(totals[r.grp]||0)+r.n;});
+  const groups=Object.keys(totals).sort((a,b)=>totals[b]-totals[a]).slice(0,6);
+  chart(id,{type:'line',data:{labels:months,datasets:groups.map((g,i)=>({label:g,borderColor:palette[i],backgroundColor:palette[i],tension:.2,pointRadius:2,data:months.map(m=>{const r=rows.find(x=>x.month===m&&x.grp===g);return r?r.n:0;})}))},
+    options:{plugins:{legend:{position:'bottom'},title:{display:true,text:label}},scales:{y:{beginAtZero:true,title:{display:true,text:'lines per month of service'}}}}});
+}
 function legend(sigs){ return `<div class="legend">${sigs.map(s=>`<div><b>${s}</b>: ${esc(SIGNAL_HELP[s]||'')}</div>`).join('')}</div>`; }
 
 async function downcoding(v){
   const sigs=['DOWNCODE_SVC06','DOWNCODE_CHARGE','DOWNCODE_RATE','DOWNCODE_LEVEL_DENIED','CODE_CHANGED'];
   v.innerHTML = `<div class="panel"><h2>Downcoding: ${money(total(sigRows(sigs)))} across ${count(sigRows(sigs)).toLocaleString()} lines</h2>
-    <div class="note">Three independent detectors: the payer's own SVC06 field, the charge amount fingerprint, and the allowed-amount fingerprint. On this practice's history the charge fingerprint agreed with SVC06 in every case where both existed.</div>${legend(sigs)}</div>
+    <div class="note">Three independent detectors: the payer's own SVC06 field, the charge amount fingerprint, and the allowed-amount fingerprint. On this practice's history the charge fingerprint agreed with SVC06 in every case where both existed. The chart shows when each payer starts and stops: downcoding programs come and go.</div>${legend(sigs)}</div>
+    <div class="panel"><canvas id="cTrend"></canvas></div>
     <div class="panel" id="tbl"></div>`;
+  await trendChart('cTrend', {category:'downcoding'}, 'Downcoded lines per month by payer (all statuses)');
   await findingsTable(v, v.querySelector('#tbl'), {category:'downcoding'});
 }
 async function bundling(v){
   const sigs=['EM_BUNDLED_MOD25','EM_BUNDLED_MOD57_MAJOR','EM_BUNDLED_MOD57_MINOR','EM_BUNDLED_NO_MODIFIER','EM_BUNDLED_MOD24','ADDON_BUNDLED','PROCEDURE_BUNDLED'];
   v.innerHTML = `<div class="panel"><h2>Bundled away: ${money(total(sigRows(sigs)))} across ${count(sigRows(sigs)).toLocaleString()} lines</h2>
     <div class="note">Lines paid $0 inside otherwise paid claims with CARC 97, B10, 236, 234 or remark M80/N19/M15. These never show up as a denied claim.</div>${legend(sigs)}</div>
+    <div class="panel"><canvas id="cTrend"></canvas></div>
     <div class="panel" id="tbl"></div>`;
+  await trendChart('cTrend', {category:'bundling'}, 'Bundled lines per month by payer (all statuses)');
   await findingsTable(v, v.querySelector('#tbl'), {category:'bundling'});
 }
 async function denials(v){

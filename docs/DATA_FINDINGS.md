@@ -4,16 +4,16 @@ Generated 2026-11-06 from 31,547 unique 835 remittances (188,089 claims, 408,876
 
 ## The one-paragraph answer
 
-Across the whole archive the detectable leakage is about $3,254,619. Classic E/M downcoding, the thing the practice asked about, is $79,851 of it. The money is in bundling ($430,200), denials that were never worked ($1,157,321), contract rates below Medicare ($877,022 at Medicare parity), underpayment against the payer's own rate ($182,702), and fees plus takebacks ($527,522).
+Across the whole archive the detectable leakage is about $3,262,910. Classic E/M downcoding, the thing the practice asked about, is $61,327 of it. The money is in bundling ($434,593), denials that were never worked ($1,179,745), contract rates below Medicare ($877,022 at Medicare parity), underpayment against the payer's own rate ($182,702), and fees plus takebacks ($527,522).
 
 ## By year and category
 
 | year | downcoding | bundling | denial | underpayment | fees | contract | total |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 2023 | $982 | $9,386 | $117,403 | $1,994 | $0 | $5,528 | $135,293 |
-| 2024 | $9,804 | $142,213 | $397,965 | $55,021 | $72,267 | $394,390 | $1,071,659 |
-| 2025 | $11,081 | $122,780 | $413,846 | $81,243 | $197,789 | $281,640 | $1,108,380 |
-| 2026 | $57,984 | $155,822 | $225,745 | $44,424 | $257,466 | $195,465 | $936,906 |
+| 2023 | $816 | $10,193 | $120,289 | $1,994 | $0 | $5,528 | $138,820 |
+| 2024 | $2,926 | $143,681 | $407,788 | $55,021 | $72,267 | $394,390 | $1,076,072 |
+| 2025 | $4,095 | $123,908 | $422,778 | $81,243 | $197,789 | $281,640 | $1,111,453 |
+| 2026 | $53,490 | $156,811 | $226,528 | $44,424 | $257,466 | $195,465 | $934,184 |
 
 ## By signal
 
@@ -21,33 +21,33 @@ Across the whole archive the detectable leakage is about $3,254,619. Classic E/M
 |---|---|---|---:|---:|
 | CONTRACT_RATE_GAP | contract | renegotiate | 51 | $615,666 |
 | TAKEBACK | fees | review | 139 | $460,343 |
-| DENIED_MEDICAL_NECESSITY | denial | appeal | 1,420 | $261,586 |
+| DENIED_MEDICAL_NECESSITY | denial | appeal | 1,420 | $265,214 |
 | MA_BELOW_MEDICARE | contract | review | 132 | $261,356 |
-| PROCEDURE_BUNDLED | bundling | appeal | 772 | $197,995 |
-| DENIED_NONCOVERED | denial | review | 1,716 | $194,922 |
+| PROCEDURE_BUNDLED | bundling | appeal | 772 | $202,388 |
+| DENIED_NONCOVERED | denial | review | 1,716 | $200,562 |
 | UNDERPAID_VS_OWN_RATE | underpayment | appeal | 2,989 | $180,541 |
-| DENIED_MISSING_INFO | denial | correct_and_resubmit | 1,253 | $159,291 |
-| DENIED_AUTH | denial | appeal | 923 | $115,231 |
+| DENIED_MISSING_INFO | denial | correct_and_resubmit | 1,253 | $166,576 |
+| DENIED_AUTH | denial | appeal | 923 | $115,491 |
 | EM_BUNDLED_MOD57_MAJOR | bundling | appeal | 1,185 | $112,610 |
-| DENIED_FREQUENCY | denial | appeal | 1,023 | $85,976 |
+| DENIED_FREQUENCY | denial | appeal | 1,023 | $87,642 |
+| DENIED_DUPLICATE_UNPAID | denial | review | 410 | $76,448 |
 | EM_BUNDLED_MOD25 | bundling | appeal | 1,112 | $76,364 |
-| DENIED_DUPLICATE_UNPAID | denial | review | 410 | $75,924 |
-| CODE_CHANGED | downcoding | review | 276 | $70,369 |
 | FEE_SKIM | fees | opt_out | 1,122 | $67,179 |
-| CLAIM_DENIED_UNPAID | denial | review | 347 | $43,077 |
+| CODE_CHANGED | downcoding | review | 162 | $52,166 |
+| CLAIM_DENIED_UNPAID | denial | review | 347 | $44,071 |
+| CLAIM_DENIED_UNPAID | denial | appeal | 829 | $34,514 |
 | DENIED_MISSING_MODIFIER | denial | correct_and_resubmit | 375 | $34,510 |
-| CLAIM_DENIED_UNPAID | denial | appeal | 829 | $34,152 |
-| DENIED_MISSING_PRIMARY | denial | review | 170 | $29,951 |
-| DENIED_OTHER | denial | review | 98 | $29,018 |
-| DENIED_PROVIDER | denial | review | 173 | $26,882 |
-| CLAIM_DENIED_UNPAID | denial | correct_and_resubmit | 154 | $25,318 |
+| DENIED_MISSING_PRIMARY | denial | review | 170 | $30,379 |
+| DENIED_OTHER | denial | review | 98 | $29,488 |
+| DENIED_PROVIDER | denial | review | 173 | $27,199 |
+| CLAIM_DENIED_UNPAID | denial | correct_and_resubmit | 154 | $25,393 |
 | ADDON_BUNDLED | bundling | appeal | 130 | $23,309 |
-| DENIED_CODING | denial | correct_and_resubmit | 208 | $21,353 |
-| DENIED_TIMELY_FILING | denial | review | 158 | $20,129 |
+| DENIED_CODING | denial | correct_and_resubmit | 208 | $21,766 |
+| DENIED_TIMELY_FILING | denial | review | 158 | $20,490 |
 | EM_BUNDLED_NO_MODIFIER | bundling | correct_and_resubmit | 135 | $10,825 |
 | EM_BUNDLED_MOD24 | bundling | appeal | 72 | $4,886 |
-| DOWNCODE_SVC06 | downcoding | appeal | 152 | $4,401 |
 | EM_BUNDLED_MOD57_MINOR | bundling | correct_and_resubmit | 43 | $4,212 |
+| DOWNCODE_SVC06 | downcoding | appeal | 149 | $4,080 |
 | DOWNCODE_LEVEL_DENIED | downcoding | appeal | 71 | $3,548 |
 | MPPR_EXCESS | underpayment | appeal | 130 | $2,161 |
 | DOWNCODE_RATE | downcoding | appeal | 46 | $1,509 |
@@ -57,26 +57,26 @@ Across the whole archive the detectable leakage is about $3,254,619. Classic E/M
 
 | payer | kind | findings | dollars | of which appealable now |
 |---|---|---:|---:|---:|
-| Anthem / BCBS | commercial | 2,831 | $838,247 | $20,457 |
-| Medicare KY (CGS J15) | medicare | 3,178 | $714,045 | $21,131 |
-| Humana Medicare Advantage | medicare_advantage | 2,811 | $542,653 | $0 |
-| Medicare IN (WPS J8) | medicare | 1,508 | $286,686 | $6,638 |
-| UnitedHealthcare Medicare Advantage | medicare_advantage | 1,529 | $244,677 | $25,880 |
-| UMWA Health & Retirement Funds | commercial | 1,206 | $186,125 | $22,247 |
-| Anthem / BCBS Medicare Advantage | medicare_advantage | 948 | $133,548 | $0 |
-| UnitedHealthcare | commercial | 551 | $74,705 | $33,165 |
-| Medicare Supplement carriers | supplement | 553 | $35,082 | $38 |
-| UHC Integrated Services (Wausau) | commercial | 457 | $34,724 | $4,447 |
-| Aetna | commercial | 347 | $29,864 | $3,709 |
-| UMR | commercial | 426 | $28,812 | $4,537 |
-| Self-funded plan TPAs | commercial | 478 | $21,595 | $562 |
-| Humana Medicaid | medicaid | 119 | $13,025 | $0 |
-| Humana | commercial | 79 | $11,010 | $0 |
-| Southeastern Indiana Health Organization (Siho) | other | 90 | $10,392 | $0 |
-| Medicaid KY | medicaid | 41 | $8,734 | $0 |
+| Anthem / BCBS | commercial | 2,821 | $837,449 | $20,457 |
+| Medicare KY (CGS J15) | medicare | 3,178 | $719,068 | $21,481 |
+| Humana Medicare Advantage | medicare_advantage | 2,713 | $533,161 | $0 |
+| Medicare IN (WPS J8) | medicare | 1,507 | $286,525 | $6,638 |
+| UnitedHealthcare Medicare Advantage | medicare_advantage | 1,529 | $248,092 | $25,880 |
+| UMWA Health & Retirement Funds | commercial | 1,206 | $187,076 | $22,247 |
+| Anthem / BCBS Medicare Advantage | medicare_advantage | 948 | $134,940 | $0 |
+| UnitedHealthcare | commercial | 551 | $76,336 | $33,165 |
+| Medicare Supplement carriers | supplement | 553 | $35,323 | $38 |
+| UHC Integrated Services (Wausau) | commercial | 457 | $35,120 | $4,447 |
+| Aetna | commercial | 346 | $30,803 | $4,081 |
+| UMR | commercial | 426 | $29,094 | $4,689 |
+| Self-funded plan TPAs | commercial | 478 | $23,618 | $562 |
+| Humana Medicaid | medicaid | 119 | $13,842 | $0 |
+| Humana | commercial | 72 | $10,708 | $0 |
+| Southeastern Indiana Health Organization (Siho) | other | 90 | $10,456 | $0 |
+| Medicaid KY | medicaid | 41 | $8,947 | $0 |
+| Anthem / BCBS Medicaid | medicaid | 64 | $7,029 | $0 |
 | Aetna Senior Supplemental (American Continental) | supplement | 34 | $6,366 | $0 |
 | Railroad Medicare | medicare | 61 | $5,565 | $236 |
-| Anthem / BCBS Medicaid | medicaid | 64 | $5,526 | $0 |
 
 ## Contract rates versus Medicare
 
@@ -153,19 +153,19 @@ Usual allowed amount per code (most common allowed amount on cleanly paid primar
 
 ## Correctable billing errors (no appeal needed, just a corrected claim)
 
-- DENIED_MISSING_INFO: 1,253 lines, $159,291
+- DENIED_MISSING_INFO: 1,253 lines, $166,576
 - DENIED_MISSING_MODIFIER: 375 lines, $34,510
-- CLAIM_DENIED_UNPAID: 154 lines, $25,318
-- DENIED_CODING: 208 lines, $21,353
+- CLAIM_DENIED_UNPAID: 154 lines, $25,393
+- DENIED_CODING: 208 lines, $21,766
 - EM_BUNDLED_NO_MODIFIER: 135 lines, $10,825
 - EM_BUNDLED_MOD57_MINOR: 43 lines, $4,212
 
 ## Appeal deadlines (estimated from the remittance date and payer type)
 
-- due within 30 days: 411 findings, $49,299
-- due within 90 days: 427 findings, $39,933
-- expired: 11,684 findings, $1,213,665
-- later: 501 findings, $56,905
+- due within 30 days: 411 findings, $49,649
+- due within 90 days: 427 findings, $40,119
+- expired: 11,681 findings, $1,230,552
+- later: 501 findings, $57,243
 
 ## Caveats
 

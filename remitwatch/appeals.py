@@ -152,6 +152,20 @@ def build_packet(d: dict, show_phi: bool = False) -> dict[str, Any]:
         ])
         ask = f"Requested action: reprocess CPT {orig or '[billed code]'} as billed and pay the difference of {money(f.get('shortfall_cents'))} (expected allowed {money(f.get('expected_cents'))} versus {money(f.get('allowed_cents'))} allowed)."
         attachments += ["Complete progress note for the date of service, signed", "Any orders, results, outside records and prescriptions referenced in the note", "AMA CPT E/M MDM table (2021 guidelines) with the applicable rows highlighted"]
+    elif sig == "CODE_CHANGED":
+        subject = f"Request for reconsideration: procedure code changed by the payer from {orig} to {code}"
+        body = "\n".join([
+            f"The service on the date of service above was billed as CPT {orig} and adjudicated as CPT {code} (the remittance reports the submitted code in SVC06). "
+            "No request for records preceded the change and no rationale was provided.",
+            "",
+            f"CPT {orig} correctly describes the service performed and documented: [describe the procedure, site, size or stage, and why {orig} rather than {code} applies]. "
+            "A payer may not unilaterally recode a service without reviewing the documentation; if the plan maintains that a different code applies, "
+            "we ask for the written clinical and coding rationale.",
+            "",
+            f"We ask that the line be reprocessed as CPT {orig} as billed.",
+        ])
+        ask = f"Requested action: reprocess CPT {orig} as billed and pay the difference of {money(f.get('shortfall_cents'))}."
+        attachments += ["Procedure or operative note for the date of service", "Pathology report if applicable"]
     elif sig in ("EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24"):
         mod = "25" if sig == "EM_BUNDLED_MOD25" else ("57" if "57" in sig else "24")
         same_day = ", ".join((f.get("evidence") or {}).get("same_day_codes") or [])

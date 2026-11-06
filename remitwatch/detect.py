@@ -251,14 +251,23 @@ class Detector:
             counts[(l["payer_group"], l["year"], l["procedure_code"], l["provider_tier"])][l["allowed_cents"]] += 1
             self.kinds[l["payer_group"]] = l["payer_kind"]
         self.rates: dict[tuple, dict] = {}
+        market_counts: dict[tuple, Counter] = defaultdict(Counter)
         for key, cnt in counts.items():
             n = sum(cnt.values())
+            market_counts[(key[1], key[2], key[3])].update(cnt)
             if n < 5:
                 continue
             mode, mode_n = cnt.most_common(1)[0]
             vals = sorted(cnt.elements())
             self.rates[key] = {"mode": mode, "median": vals[len(vals) // 2], "p10": vals[int(0.1 * (len(vals) - 1))],
                                "p90": vals[int(0.9 * (len(vals) - 1))], "n": n, "share": mode_n / n}
+        # cross-payer typical allowed (median) per year, code and tier: the last-resort expectation
+        self.market: dict[tuple, dict] = {}
+        for key, cnt in market_counts.items():
+            n = sum(cnt.values())
+            if n >= 10:
+                vals = sorted(cnt.elements())
+                self.market[key] = {"median": vals[len(vals) // 2], "n": n}
         self.medicare: dict[tuple, int] = {}
         for (grp, year, code, tier), r in self.rates.items():
             if self.kinds.get(grp) == "medicare" and r["n"] >= 10:
@@ -289,6 +298,10 @@ class Detector:
         med = self.medicare.get((year, code, tier if tier != "unknown" else "physician"))
         if med:
             return med, f"Medicare {year} rate for {code} ({tier})", None
+        for t in (tier, "physician", "nonphysician", "unknown"):
+            m = self.market.get((year, code, t))
+            if m:
+                return m["median"], f"cross-payer typical {year} allowed for {code} ({t}, n={m['n']})", None
         return None, "no baseline", None
 
     def expected_allowed(self, l: dict, code: str) -> tuple[int | None, str]:
@@ -359,6 +372,12 @@ class Detector:
 
             # ---- downcoding and code changes (any claim status)
             if orig and orig != code:
+                # re-adjudication remits split lines into pieces (B13 "previously paid", token charges): not appealable events
+                claim_lines = self.lines_by_claim.get(l["claim_key"], [])
+                readjudicated = any(rc == "B13" for ln in claim_lines for _g, rc, _a in self.adj.get(ln["line_key"], [])) \
+                    or any(rc == "B13" for _g, rc, _a in self.claim_adj.get(l["claim_key"], []))
+                if readjudicated or (l.get("charge_cents") or 0) < 2000:
+                    continue
                 if is_downcode(orig, code):
                     exp, basis = self.expected_allowed(l, orig)
                     short = (exp - allowed) if exp else None

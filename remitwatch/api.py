@@ -310,6 +310,20 @@ def rates_matrix(year: str, tier: str = "physician", codes: str = "99203,99204,9
     return {"year": year, "tier": tier, "codes": code_list, "payers": out}
 
 
+@app.get("/api/trends")
+def trends(category: Optional[str] = None, signal: Optional[str] = None, by: str = "payer_group", _: str = Depends(require_auth)):
+    """Monthly counts and dollars by payer group (or signal) for a category or signal, all statuses, by month of service."""
+    where, params = ["COALESCE(service_date, payment_date) >= '2023-01'"], []
+    if category:
+        cats = [c for c in category.split(",") if c]
+        where.append("category IN (%s)" % ",".join("?" * len(cats))); params += cats
+    if signal:
+        sigs = [x for x in signal.split(",") if x]
+        where.append("signal IN (%s)" % ",".join("?" * len(sigs))); params += sigs
+    col = "signal" if by == "signal" else "payer_group"
+    return rows(f"SELECT substr(COALESCE(service_date, payment_date),1,7) month, {col} grp, COUNT(*) n, SUM(shortfall_cents) cents FROM findings WHERE {' AND '.join(where)} GROUP BY 1,2 ORDER BY 1", tuple(params))
+
+
 @app.get("/api/payers")
 def payers(_: str = Depends(require_auth)):
     return rows("""SELECT payer_group, payer_kind, COUNT(*) findings, SUM(shortfall_cents) shortfall_cents,
