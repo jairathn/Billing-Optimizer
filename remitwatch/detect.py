@@ -352,12 +352,14 @@ class Detector:
                 best, top = a, rc
         return adj, top, pr, {rc for _g, rc, _a in payer_adj}
 
-    def later_payment(self, l: dict, code: str | None = None) -> tuple | None:
-        """Earliest later remit that paid this bill, code and date of service (a reworked or appealed line)."""
+    def later_payment(self, l: dict, code: str | None = None, expected: int | None = None) -> tuple | None:
+        """Earliest later remit that paid this bill, code and date of service (a reworked or appealed line).
+        A primary payment counts; a secondary payment counts only when it covers at least half the expected amount."""
         bill = bill_of(l.get("patient_control_number"))
         dos = l.get("service_date") or l.get("statement_from")
         mine = l.get("payment_date") or l.get("txn_payment_date") or ""
         events = [e for e in self.paid_events.get((bill, code or l.get("procedure_code"), dos), []) if e[0] and e[0] > mine]
+        events = [e for e in events if e[3] in ("1", "19") or (expected and (e[2] or 0) >= 0.5 * expected)]
         return min(events) if events else None
 
     def _emit(self, signal, category, severity, actionable, title, l, expected, shortfall, carc, rarc, evidence,
@@ -432,7 +434,7 @@ class Detector:
                     self._emit("DOWNCODE_SVC06", "downcoding", "high" if primary else "medium", "appeal",
                                f"Billed {orig}, paid as {code} ({l['payer_group']})", l, exp, short, top, rarc,
                                {"basis": basis, "original_modifiers": l.get("original_modifiers"), "claim_status": status},
-                               resolved_by=self.later_payment(l, orig))
+                               resolved_by=self.later_payment(l, orig, expected=exp))
                 else:
                     exp, basis = self.expected_allowed(l, orig)
                     short = (exp - allowed) if exp else None
@@ -481,7 +483,7 @@ class Detector:
                 cat = code_category(code)
                 if code == "99024" or code == "G2211" or (l.get("charge_cents") or 0) <= 100:
                     continue
-                later = self.later_payment(l)
+                later = self.later_payment(l, expected=exp)
                 emit = self._emit
                 self._emit = lambda *a, **k: emit(*a, **dict(k, resolved_by=later))  # noqa: E731
                 if top in BUNDLING_CARCS or "M80" in rarcs or "N19" in rarcs or "M15" in rarcs or "N20" in rarcs:
