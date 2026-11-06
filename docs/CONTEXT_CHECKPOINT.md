@@ -105,3 +105,13 @@ Associates (ODA), drjairath@owensboroderm.com.
 - New: findings auto-resolve when a later remit paid the same bill/code/DOS (status 'resolved', note 'Paid on a later remittance');
   ~5,540 findings / ~$816K were rework the billers did do. Open leakage in downcoding+bundling+denial+underpayment ~ $1.03M.
 - EMA link coverage for DOS >= 2026-07-27: ~87% exact composite (matches the prior app's 90%).
+
+## State at 2026-11-06 ~15:45 UTC (commit 5c92313)
+- Store now holds 32,043 remits (payments through 2026-10-09) after ingesting 496 new recent RMT files; 101 recent files were
+  byte-identical to archive members. 837 .txt files are routed to x12_837.ingest_837_file by store.ingest_835_paths; the
+  835 parser skips non-835 ST sets. Recent cohort (DOS 2026-09-14..10-02) links 1,430 exact / 1,646 (6 ambiguous) after
+  collapsing identical charges repeated across overlapping daily/weekly EMA exports.
+- Open leakage (open findings only) ~$2.47M; recovered on later remits ~$816K (auto-resolved; rule reversible).
+- Still pending: remaining recent RMT (Sept Reports/Trizetto files ~600+, rest of 10-5 folder incl. 87 x 837 .txt) from the
+  download agent; research docs from both workflows (then: appeal deadlines/statutes into appeals.py + detect.py
+  APPEAL_DAYS, OPERATIONS.md hosting recommendation, final summary to the user).
