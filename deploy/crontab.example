@@ -1,0 +1,4 @@
+# Weekly, Monday 05:10 America/Chicago (practice time). Logs to data/reports/cron.log.
+# Install with: crontab deploy/crontab.example   (after editing paths)
+CRON_TZ=America/Chicago
+10 5 * * 1  cd /opt/remitwatch && . .venv/bin/activate && set -a && . ./.env && set +a && python -m remitwatch.cli weekly >> data/reports/cron.log 2>&1

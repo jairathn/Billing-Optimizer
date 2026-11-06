@@ -1,0 +1,13 @@
+# One small host runs both the dashboard and the weekly job.
+#   docker compose up -d            -> dashboard on http://host:8000 plus the weekly schedule
+#   docker compose run --rm app weekly   -> run the weekly job now
+services:
+  app:
+    build: .
+    command: cron
+    env_file: .env
+    ports: ["8000:8000"]
+    volumes: ["remitwatch-data:/data"]
+    restart: unless-stopped
+volumes:
+  remitwatch-data:

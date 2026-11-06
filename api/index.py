@@ -1,16 +1,14 @@
 """
-Vercel serverless entry point for DermBill AI.
-This file imports the FastAPI app from dermbill.
-"""
+Vercel serverless entry point: exposes the RemitWatch FastAPI app.
 
+Vercel has no persistent disk, so this only works when REMITWATCH_DB points at a
+store that exists in the deployment (for example a read-only copy uploaded with the
+build). For the hands-off weekly job and a store that grows, run the container in
+deploy/ instead (see docs/OPERATIONS.md).
+"""
 import sys
 from pathlib import Path
 
-# Add the project root to the path so we can import dermbill
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Import the FastAPI app
-from dermbill.api import app
-
-# Vercel looks for 'app' by default for ASGI applications
+from remitwatch.api import app  # noqa: E402,F401
