@@ -323,9 +323,14 @@ def _parse_envelope(env: str, d: Delims, env_index: int, r: Parsed835) -> None:
         txn = None
 
     raw_segments: list[str] = []
+    skipping_until_se = False
 
     for seg in iter_segments(env, d):
         sid = seg.id
+        if skipping_until_se:
+            if sid == "SE":
+                skipping_until_se = False
+            continue
         if txn is not None:
             raw_segments.append(seg.raw)
         try:
@@ -345,6 +350,10 @@ def _parse_envelope(env: str, d: Delims, env_index: int, r: Parsed835) -> None:
                 }
             elif sid == "ST":
                 finish_txn()
+                if seg.get(1) != "835":
+                    skipping_until_se = True
+                    r.problems.append({"source": src, "level": "transaction", "message": f"skipped ST type {seg.get(1)} (not an 835)"})
+                    continue
                 txn_seq += 1
                 st_control = seg.get(2)
                 raw_segments = []

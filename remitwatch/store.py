@@ -295,6 +295,13 @@ class Store:
                 if self.file_seen(sha):
                     stats["skipped_seen"] += 1
                     continue
+                head = data[:600]
+                if b"GS*HC*" in head or b"*837*" in head:
+                    from .x12_837 import ingest_837_file
+                    r837 = ingest_837_file(self, p)
+                    stats["claim_files_837"] = stats.get("claim_files_837", 0) + 1
+                    stats["claims_837"] = stats.get("claims_837", 0) + (r837.get("claims") or 0)
+                    continue
                 from .x12_835 import parse_835_bytes
                 parsed = parse_835_bytes(data, source=p)
                 r = self.ingest_parsed(parsed, source_path=p)
