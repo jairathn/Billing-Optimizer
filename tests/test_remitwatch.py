@@ -249,3 +249,19 @@ def test_fingerprint_ignores_control_numbers():
     fa = parse_835_bytes(a).transactions[0]["content_fingerprint"]
     fb = parse_835_bytes(b).transactions[0]["content_fingerprint"]
     assert fa == fb
+
+
+def test_auto_resolution_is_reversible(tmp_path):
+    db = tmp_path / "rv.sqlite"
+    store = Store(str(db))
+    (tmp_path / "a.RMT").write_bytes(remit(CLAIM_BUNDLED, "91.31", seg_count=25, isa_ctrl="000000001", pay_date="20260501"))
+    (tmp_path / "b.RMT").write_bytes(remit(CLAIM_BUNDLED_REWORKED, "208.91", seg_count=29, isa_ctrl="000000002", pay_date="20260601"))
+    store.ingest_835_paths([str(tmp_path / "a.RMT"), str(tmp_path / "b.RMT")])
+    Detector(store, run_id="t1").run()
+    assert store.query("SELECT status FROM findings WHERE signal='EM_BUNDLED_MOD25'")[0]["status"] == "resolved"
+    # the later payment disappears (for example its remit was superseded): the finding must come back
+    store.conn.execute("UPDATE transactions SET superseded=1 WHERE payment_date='2026-06-01'")
+    store.conn.commit()
+    Detector(store, run_id="t2").run()
+    f = store.query("SELECT status, notes FROM findings WHERE signal='EM_BUNDLED_MOD25'")[0]
+    assert f["status"] == "open" and f["notes"] is None
