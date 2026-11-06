@@ -736,8 +736,11 @@ class Detector:
         rows = []
         for fid, f in self.findings.items():
             st, notes, first = existing.get(fid, ("open", None, self.now))
+            auto_before = bool(notes) and notes.startswith("Paid on a later remittance")
             if f.get("auto_status") and st != "dismissed":
                 st, notes = f["auto_status"], f.get("auto_notes")
+            elif auto_before and st == "resolved":
+                st, notes = "open", None   # an earlier automatic resolution no longer holds under the current rule
             f["status"], f["notes"], f["first_seen"], f["last_seen"] = st, notes, first, self.now
             rows.append(tuple(f.get(k) for k in cols))
         c.execute("DELETE FROM findings")
