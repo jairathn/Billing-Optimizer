@@ -20,11 +20,11 @@ from remitwatch.x12_835 import cents, parse_835_bytes, split_envelopes  # noqa: 
 from remitwatch.x12_837 import parse_837_bytes  # noqa: E402
 
 
-def remit(claims: str, bpr: str, payer="ANTHEM", payer_id="ANTHM", seg_count=20, isa_ctrl="000000001", plb: str = "") -> bytes:
+def remit(claims: str, bpr: str, payer="ANTHEM", payer_id="ANTHM", seg_count=20, isa_ctrl="000000001", plb: str = "", pay_date="20251124") -> bytes:
     body = (
         f"ISA*00*          *00*          *ZZ*{payer_id:<15}*ZZ*3LDA           *260904*0909*^*00501*{isa_ctrl:>9}*0*P*:~"
         f"GS*HP*{payer_id}*3LDA*20260904*0909*1*X*005010X221A1~ST*835*000000001~"
-        f"BPR*I*{bpr}*C*ACH*CCP*01*061000052*DA*123*999**01*042100175*DA*555*20251124~TRN*1*TRACE{isa_ctrl}*1350781558~"
+        f"BPR*I*{bpr}*C*ACH*CCP*01*061000052*DA*123*999**01*042100175*DA*555*{pay_date}~TRN*1*TRACE{isa_ctrl}*1350781558~"
         f"REF*EV*FEP~DTM*405*20251120~N1*PR*{payer}~N3*1 MAIN ST~N4*CINCINNATI*OH*45209~REF*2U*{payer_id}~PER*BL*PORTAL*TE*8005551212~"
         f"N1*PE*TEST DERMATOLOGY*XX*1821130295~N3*2 MAIN ST~N4*OWENSBORO*KY*42303~REF*TJ*311488176~LX*1~"
         f"{claims}{plb}SE*{seg_count}*000000001~GE*1*1~IEA*1*{isa_ctrl}~"
@@ -195,3 +195,57 @@ def test_api_smoke(tmp_path, monkeypatch):
     assert "99214" in pk["letter"] and "DOE" not in pk["letter"] and pk["attachments"]
     assert client.get("/api/findings.csv?category=downcoding", auth=auth).status_code == 200
     assert client.get("/", auth=auth).status_code == 200
+
+
+CLAIM_BUNDLED_REWORKED = (
+    "CLP*CB00TEST02C024*1*401.21*208.91**12*PAYERCLAIM2B*11~NM1*QC*1*ROE*RICHARD****MI*R000002~NM1*82*2*TEST PROVIDER MD*****XX*1215042429~DTM*232*20260407~"
+    "SVC*HC:99214:25*223.65*117.60**1~DTM*472*20260407~CAS*CO*45*106.05~REF*6R*2001~AMT*B6*117.60~"
+    "SVC*HC:17110*177.56*91.31**1~DTM*472*20260407~CAS*PR*2*18.26~CAS*CO*45*67.99~REF*6R*2002~AMT*B6*109.57~"
+)
+
+
+def test_later_remit_resolves_finding_and_ema_handling_is_attached(tmp_path):
+    db = tmp_path / "r.sqlite"
+    store = Store(str(db))
+    (tmp_path / "a.RMT").write_bytes(remit(CLAIM_DOWNCODE + CLAIM_BUNDLED, "168.91", seg_count=41, isa_ctrl="000000001", pay_date="20260501"))
+    # the corrected claim (new suffix C024) paid the E/M a month later
+    (tmp_path / "b.RMT").write_bytes(remit(CLAIM_BUNDLED_REWORKED, "208.91", seg_count=29, isa_ctrl="000000002", pay_date="20260601"))
+    store.ingest_835_paths([str(tmp_path / "a.RMT"), str(tmp_path / "b.RMT")])
+    # EMA rows: the billed charge line and how the biller handled the B10 adjustment
+    store.ingest_ema_rows([
+        {"row_fingerprint": "ema-charge-1", "family": "charge_lines", "source_name": "Encounter & Charges 4-7-26.xlsx", "row_index": 1,
+         "claim_id": "CB00TEST02C017", "bill_item_id": "7000001", "service_date": "2026-04-07", "cpt": "99214", "modifiers": '["25"]',
+         "modifier_1": "25", "units": 1.0, "charges_cents": 22365, "activity_type": "Charge", "patient_id": "P1", "provider": "Doe, Jane",
+         "payer": "Blue Cross and Blue Shield", "claim_status": "Resolved/Paid"},
+        {"row_fingerprint": "ema-era-1", "family": "era_lines", "source_name": "ERA & Payment Lines 4-26.xlsx", "row_index": 1,
+         "claim_id": "CB00TEST02C017", "service_date": "2026-04-07", "cpt": "99214", "carc": "PI-B10", "carc_group": "PI", "carc_code": "B10",
+         "adjustment_status": "WRITE_OFF", "adjustment_subtype": "Contractual", "adjustments_cents": 22365, "payments_cents": 0,
+         "transaction_date": "2026-05-03"},
+    ])
+    from remitwatch.link import build_links
+
+    stats = build_links(store, log=lambda *_a: None)
+    assert stats["states"].get("exact_composite") == 1
+    link = store.query("SELECT * FROM line_links WHERE state='exact_composite'")[0]
+    assert link["bill_item_id"] == "7000001" and link["ema_cpt"] == "99214"
+    Detector(store, run_id="t").run()
+    f = store.query("SELECT * FROM findings WHERE signal='EM_BUNDLED_MOD25'")[0]
+    assert f["ema_handling"] == "WRITE_OFF"
+    ev = __import__("json").loads(f["evidence"])
+    assert ev["ema_link"] == "exact_composite" and "WRITE_OFF" in ev["ema_handling"][0]
+    assert f["status"] == "resolved" and "later remittance" in f["notes"] and ev["paid_later"]["payment_date"] == "2026-06-01"
+    # the downcode on the other claim has no later payment and stays open
+    assert store.query("SELECT status FROM findings WHERE signal='DOWNCODE_SVC06'")[0]["status"] == "open"
+    # a dismissed finding is never re-opened or auto-resolved
+    store.conn.execute("UPDATE findings SET status='dismissed' WHERE signal='EM_BUNDLED_MOD25'")
+    store.conn.commit()
+    Detector(store, run_id="t2").run()
+    assert store.query("SELECT status FROM findings WHERE signal='EM_BUNDLED_MOD25'")[0]["status"] == "dismissed"
+
+
+def test_fingerprint_ignores_control_numbers():
+    a = remit(CLAIM_DOWNCODE, "77.60", seg_count=29, isa_ctrl="000000001")
+    b = a.replace(b"ST*835*000000001~", b"ST*835*000000777~").replace(b"SE*29*000000001~", b"SE*29*000000777~")
+    fa = parse_835_bytes(a).transactions[0]["content_fingerprint"]
+    fb = parse_835_bytes(b).transactions[0]["content_fingerprint"]
+    assert fa == fb

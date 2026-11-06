@@ -295,6 +295,8 @@ def _parse_envelope(env: str, d: Delims, env_index: int, r: Parsed835) -> None:
         claim["line_count"] = len(lines)
         claim["line_charge_total_cents"] = sum(l["charge_cents"] or 0 for l in lines)
         claim["line_paid_total_cents"] = sum(l["paid_cents"] or 0 for l in lines)
+        # CLP04 minus the sum of SVC03: claim-level money not attributed to a line (interest, claim-level adjustments)
+        claim["claim_paid_minus_lines_cents"] = (claim["paid_cents"] or 0) - claim["line_paid_total_cents"]
         claim["claim_adjustment_total_cents"] = claim_adj
         claim["line_adjustment_total_cents"] = line_adj
         charge = claim["charge_cents"] or 0
@@ -345,7 +347,7 @@ def _parse_envelope(env: str, d: Delims, env_index: int, r: Parsed835) -> None:
                 finish_txn()
                 txn_seq += 1
                 st_control = seg.get(2)
-                raw_segments = [seg.raw]
+                raw_segments = []
                 txn = {
                     "transaction_key": f"{r.sha256[:16]}:{env_index}:{st_control or txn_seq}",
                     "source": src, "source_name": os.path.basename(src) if src else None,
@@ -684,8 +686,9 @@ def _parse_envelope(env: str, d: Delims, env_index: int, r: Parsed835) -> None:
                     })
             elif sid == "SE":
                 txn["segment_count"] = int(seg.get(1)) if seg.get(1).isdigit() else None
-                # content fingerprint of ST..SE lets the store skip re-delivered duplicates
-                txn["content_fingerprint"] = hashlib.sha256("\n".join(raw_segments).encode("utf-8")).hexdigest()
+                # content fingerprint of the segments between ST and SE (control numbers excluded) lets the
+                # store skip the same remittance re-delivered inside a new envelope
+                txn["content_fingerprint"] = hashlib.sha256("\n".join(raw_segments[:-1]).encode("utf-8")).hexdigest()
                 finish_txn()
             elif sid in ("GE", "IEA", "TS3", "TS2", "RDM"):
                 pass

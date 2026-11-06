@@ -77,6 +77,14 @@ def cmd_ingest_ema(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_link(args: argparse.Namespace) -> int:
+    from .link import build_links
+    from .store import Store
+
+    build_links(Store(args.db))
+    return 0
+
+
 def cmd_detect(args: argparse.Namespace) -> int:
     from .detect import run_detection
 
@@ -174,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("ingest-835"); a.add_argument("paths", nargs="+"); a.set_defaults(fn=cmd_ingest_835)
     b = sub.add_parser("ingest-ema"); b.add_argument("paths", nargs="+"); b.set_defaults(fn=cmd_ingest_ema)
     d = sub.add_parser("detect"); d.set_defaults(fn=cmd_detect)
+    lk = sub.add_parser("link"); lk.set_defaults(fn=cmd_link)
     o = sub.add_parser("oauth"); o.set_defaults(fn=cmd_oauth)
     s_ = sub.add_parser("sync"); s_.add_argument("--full", action="store_true"); s_.add_argument("--no-ingest", action="store_true"); s_.set_defaults(fn=cmd_sync)
     w = sub.add_parser("weekly"); w.add_argument("--full", action="store_true"); w.add_argument("--skip-sync", action="store_true")

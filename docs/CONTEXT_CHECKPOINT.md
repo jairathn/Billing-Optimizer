@@ -97,3 +97,11 @@ Associates (ODA), drjairath@owensboroderm.com.
 - Download agent (ac41a9a060e3b3cc7): recent RMT (1,399) + 837 (87) files into scratchpad/data/dropbox; then: ingest-835 + ingest 837s, detect, regenerate docs/DATA_FINDINGS.md, commit.
 - Workflows wf_00156c6f-279 (domain) and wf_ee7fd1ce-70c (tech): write docs/RESEARCH_DOMAIN.md and docs/RESEARCH_TECH.md; then integrate
   deadlines/statutes into appeals.py and detect.py APPEAL_DAYS, update OPERATIONS.md hosting recommendation, commit.
+
+## Update after reading the prior app's source (ODA-Financial-Dashboard-Source)
+- Adopted: payload fingerprint excludes ST/SE control numbers; supersede key includes payment date; composite 835->EMA charge
+  linkage (remitwatch/link.py: exact_composite / fallback_candidate / ambiguous / unmatched) and ERA handling join (line_handling);
+  claim ids = 9-char bill id + suffix (C017/C024/C031 = submission sequence), so later-payment checks key on the bill prefix.
+- New: findings auto-resolve when a later remit paid the same bill/code/DOS (status 'resolved', note 'Paid on a later remittance');
+  ~5,540 findings / ~$816K were rework the billers did do. Open leakage in downcoding+bundling+denial+underpayment ~ $1.03M.
+- EMA link coverage for DOS >= 2026-07-27: ~87% exact composite (matches the prior app's 90%).

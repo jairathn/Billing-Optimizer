@@ -113,6 +113,7 @@ const SIGNAL_HELP = {
   SEQUESTRATION:'2 percent federal sequestration withheld on Medicare and MA lines (not recoverable).'
 };
 const state = {tab:'overview', year:'', status:'open', page:{}, filt:{}, summary:null, meta:null, charts:{}};
+const HANDLING = {WRITE_OFF:'written off in EMA', TRANSFER_RESPONSIBILITY:'moved to patient in EMA', IGNORE:'ignored in EMA', MIXED:'mixed handling in EMA'};
 const $ = s => document.querySelector(s);
 const money = c => (c==null?'–':(c<0?'-':'')+'$'+Math.round(Math.abs(c)/100).toLocaleString());
 const money2 = c => (c==null?'–':'$'+(c/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}));
@@ -169,6 +170,7 @@ async function overview(v){
     ${kpi('Downcoded', money(cat.downcoding), 'code or level reduced', 'downcoding')}
     ${kpi('Fees and takebacks', money(cat.fees), 'PLB withholds', 'fees')}
     ${kpi('Due in 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' appeals · expired '+money((dl.expired||{}).shortfall_cents), 'appeals')}
+    ${kpi('Recovered on later remits', money((s.resolved_by_later_remit||{}).shortfall_cents), ((s.resolved_by_later_remit||{}).n||0)+' lines paid after rework (auto-resolved)', 'denials')}
   </div>
   <div class="grid two">
     <div class="panel"><h2>Leakage by month of service</h2><canvas id="cMonth"></canvas></div>
@@ -193,7 +195,7 @@ function kpi(l,v,s,go){ return `<div class="kpi" data-go="${go}"><div class="l">
 
 // ---------------------------------------------------------------- findings table (shared)
 async function findingsTable(v, container, base, opts={}){
-  const key = state.tab; const f = Object.assign({signal:'',payer:'',severity:'',actionable:'',q:'',deadline:''}, state.filt[key]||{});
+  const key = state.tab; const f = Object.assign({signal:'',payer:'',severity:'',actionable:'',q:'',deadline:'',handling:''}, state.filt[key]||{});
   const page = state.page[key]||0, limit = 100;
   const params = Object.assign({}, base, f, {year:state.year, status:state.status, limit, offset:page*limit, sort: opts.sort||'shortfall'});
   const res = await api('/api/findings?'+qs(params));
@@ -206,6 +208,7 @@ async function findingsTable(v, container, base, opts={}){
       <select data-f="severity"><option value="">Any severity</option>${['high','medium','low'].map(x=>`<option ${f.severity===x?'selected':''}>${x}</option>`).join('')}</select>
       <select data-f="actionable"><option value="">Any action</option>${['appeal','correct_and_resubmit','review','opt_out','renegotiate'].map(x=>`<option ${f.actionable===x?'selected':''}>${x}</option>`).join('')}</select>
       <select data-f="deadline"><option value="">Any deadline</option><option value="valid" ${f.deadline==='valid'?'selected':''}>Still appealable</option><option value="due" ${f.deadline==='due'?'selected':''}>Due in 45 days</option><option value="expired" ${f.deadline==='expired'?'selected':''}>Expired</option></select>
+      <select data-f="handling"><option value="">Any EMA handling</option>${Object.keys(HANDLING).map(x=>`<option value="${x}" ${f.handling===x?'selected':''}>${HANDLING[x]}</option>`).join('')}</select>
       <input data-f="q" placeholder="claim id, code, CARC…" value="${esc(f.q)}">
       <span class="muted small">${res.total.toLocaleString()} findings · ${money(res.shortfall_cents)}</span>
       <a class="small" href="/api/findings.csv?${qs(Object.assign({},base,f,{year:state.year,status:state.status}))}">Export CSV</a>
@@ -215,7 +218,7 @@ async function findingsTable(v, container, base, opts={}){
     <tbody>${res.items.map(r=>`<tr class="row" data-id="${r.finding_id}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${r.finding_id}" onclick="event.stopPropagation()"></td>`:''}
       <td>${r.service_date||''}</td><td>${esc(r.payer_group)}</td><td class="small">${esc((r.rendering_provider_name||'').replace(/\s+/g,' ').trim())}</td>
       <td>${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}</td>
-      <td><span class="sev-${r.severity}">●</span> ${esc(r.title)}<div class="small muted">${r.patient_control_number||''}</div></td>
+      <td><span class="sev-${r.severity}">●</span> ${esc(r.title)}<div class="small muted">${r.patient_control_number||''} ${r.ema_handling?'<span class="chip">'+esc(HANDLING[r.ema_handling]||r.ema_handling)+'</span>':''}</div></td>
       <td class="num">${money2(r.charge_cents)}</td><td class="num">${money2(r.allowed_cents)}</td><td class="num">${money2(r.expected_cents)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b></td>
       <td class="small">${esc(r.carc||'')}${r.rarc?'<br>'+esc(r.rarc):''}</td><td class="small ${r.appeal_deadline&&r.appeal_deadline<new Date().toISOString().slice(0,10)?'sev-high':''}">${r.appeal_deadline||''}</td><td><span class="chip">${r.status}</span></td></tr>`).join('')}</tbody></table>
     <div class="pager"><button id="prev" ${page===0?'disabled':''}>‹ prev</button><span>page ${page+1} of ${Math.max(1,Math.ceil(res.total/limit))}</span><button id="next" ${(page+1)*limit>=res.total?'disabled':''}>next ›</button></div>`;
@@ -358,6 +361,8 @@ async function openDetail(id){
     ${(adjBy.claim||[]).length?`<div class="small">Claim-level: ${adjBy.claim.map(a=>a.group_code+'-'+a.reason_code+' '+money2(a.amount_cents)).join(', ')}</div>`:''}
     <h3 class="small">All remits for this claim</h3>
     <table class="small"><thead><tr><th>Paid</th><th>Status</th><th>Payer</th><th class="num">Charge</th><th class="num">Paid</th><th>Trace</th></tr></thead><tbody>${(r.history||[]).map(h=>`<tr><td>${h.payment_date||''}</td><td>${h.claim_status_code}</td><td>${esc(h.payer_name)}</td><td class="num">${money2(h.charge_cents)}</td><td class="num">${money2(h.paid_cents)}</td><td class="small">${h.trace_number||''}</td></tr>`).join('')}</tbody></table>
+    ${r.link?`<div class="small"><b>EMA charge link:</b> ${r.link.state}${r.link.ema_cpt?' · billed '+esc(r.link.ema_cpt)+(r.link.ema_modifiers?'-'+JSON.parse(r.link.ema_modifiers).join(','):'')+' x'+r.link.ema_units+' '+money2(r.link.ema_charges_cents)+' (bill item '+(r.link.bill_item_id||'')+', status '+esc(r.link.ema_claim_status||'')+')':''} ${r.link.cause?'· '+esc(r.link.cause):''}</div>`:''}
+    ${(r.handling||[]).length?`<div class="small"><b>How EMA handled it:</b> ${r.handling.map(x=>esc((x.carc||'')+' '+(x.adjustment_status||'')+' '+money2(x.adjustments_cents)+' on '+(x.transaction_date||''))).join(' · ')}</div>`:''}
     ${(r.ema||[]).length?`<h3 class="small">ModMed EMA rows for this claim</h3><table class="small"><thead><tr><th>Family</th><th>DOS</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adj</th><th>Status / handling</th></tr></thead><tbody>${r.ema.slice(0,40).map(e=>`<tr><td>${e.family}${e.activity_type?' · '+e.activity_type:''}</td><td>${e.service_date||''}</td><td>${e.cpt||''}${e.modifiers?'-'+JSON.parse(e.modifiers).join(','):''}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc(e.claim_status||'')} ${e.carc?'· '+esc(e.carc):''} ${e.adjustment_status?'· '+esc(e.adjustment_status):''} ${e.denial_category?'· '+esc(e.denial_category):''}</td></tr>`).join('')}</tbody></table>`:'<div class="small muted">No EMA export rows for this claim (annual exports not loaded).</div>'}
     <h3 class="small">Evidence</h3><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre>`;
   d.querySelector('#closeD').onclick=()=>d.classList.remove('open');

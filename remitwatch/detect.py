@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS findings (
     procedure_code TEXT, modifiers TEXT, original_procedure_code TEXT, code_category TEXT,
     charge_cents INTEGER, allowed_cents INTEGER, paid_cents INTEGER, expected_cents INTEGER, shortfall_cents INTEGER,
     carc TEXT, carc_text TEXT, rarc TEXT, rarc_text TEXT,
-    evidence TEXT, appeal_deadline TEXT,
+    evidence TEXT, appeal_deadline TEXT, ema_handling TEXT,
     status TEXT DEFAULT 'open', notes TEXT, run_id TEXT, first_seen TEXT, last_seen TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_f_signal ON findings(signal);
@@ -130,11 +130,18 @@ def is_surgical(code: str | None) -> bool:
     return bool(code) and code in GLOBAL_DAYS and code not in ADD_ON_CODES
 
 
+def bill_of(pcn: str | None) -> str:
+    """EMA claim ids are a 9-character bill id plus a submission suffix (C017, C024, ...)."""
+    return (pcn or "")[:9]
+
+
 class Detector:
     def __init__(self, store: Store, run_id: str | None = None):
         self.store = store
         self.conn = store.conn
         self.conn.executescript(FINDINGS_DDL)
+        if "ema_handling" not in {r[1] for r in self.conn.execute("PRAGMA table_info(findings)")}:
+            self.conn.execute("ALTER TABLE findings ADD COLUMN ema_handling TEXT")
         self.run_id = run_id or datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ")
         self.now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.findings: dict[str, dict] = {}
@@ -179,12 +186,29 @@ class Detector:
             self.claim_rem[r["claim_key"]].append(r["code"])
         self.paid_line_keys: set[tuple] = set()
         self.paid_pcns: set[str] = set()
+        self.paid_events: dict[tuple, list[tuple]] = defaultdict(list)   # (bill, code, dos) -> [(payment_date, trace, paid, status)]
+        self.bill_paid_dates: dict[str, list[str]] = defaultdict(list)
         self.lines_by_claim: dict[str, list[dict]] = defaultdict(list)
         for l in self.lines:
             self.lines_by_claim[l["claim_key"]].append(l)
             if (l.get("paid_cents") or 0) > 0 and l.get("claim_status_code") in ("1", "19", "2", "3"):
-                self.paid_line_keys.add((l["patient_control_number"], l["procedure_code"], l.get("service_date")))
+                bill = bill_of(l["patient_control_number"])
+                dos = l.get("service_date")
+                self.paid_line_keys.add((bill, l["procedure_code"], dos))
                 self.paid_pcns.add(l["patient_control_number"])
+                pd_ = l.get("payment_date") or l.get("txn_payment_date") or ""
+                self.paid_events[(bill, l["procedure_code"], dos)].append((pd_, l.get("trace_number"), l["paid_cents"], l.get("claim_status_code")))
+                self.bill_paid_dates[bill].append(pd_)
+        # EMA links and biller handling (built by link.build_links when EMA exports are loaded)
+        self.links: dict[str, dict] = {}
+        self.handling: dict[str, list[dict]] = defaultdict(list)
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "line_links" in tables:
+            for r in c.execute("SELECT line_key, state, bill_item_id, ema_cpt, ema_modifiers, ema_units, ema_charges_cents, ema_claim_status FROM line_links WHERE state IN ('exact_composite','fallback_candidate')"):
+                self.links[r["line_key"]] = dict(r)
+        if "line_handling" in tables:
+            for r in c.execute("SELECT line_key, carc, rarc, adjustment_status, adjustment_subtype, adjustments_cents, payments_cents, transaction_date FROM line_handling"):
+                self.handling[r["line_key"]].append(dict(r))
         # surgical rank within each claim: 1 = highest allowed surgical procedure (paid 100 percent), 2+ reduced
         for claim_lines in self.lines_by_claim.values():
             surg = [x for x in claim_lines if is_surgical(x.get("procedure_code")) and (x.get("allowed_cents") or 0) > 0]
@@ -328,9 +352,30 @@ class Detector:
                 best, top = a, rc
         return adj, top, pr, {rc for _g, rc, _a in payer_adj}
 
+    def later_payment(self, l: dict, code: str | None = None) -> tuple | None:
+        """Earliest later remit that paid this bill, code and date of service (a reworked or appealed line)."""
+        bill = bill_of(l.get("patient_control_number"))
+        dos = l.get("service_date") or l.get("statement_from")
+        mine = l.get("payment_date") or l.get("txn_payment_date") or ""
+        events = [e for e in self.paid_events.get((bill, code or l.get("procedure_code"), dos), []) if e[0] and e[0] > mine]
+        return min(events) if events else None
+
     def _emit(self, signal, category, severity, actionable, title, l, expected, shortfall, carc, rarc, evidence,
-              key_parts=None, claim=None) -> None:
+              key_parts=None, claim=None, resolved_by: tuple | None = None) -> None:
         base = l or claim or {}
+        lk = base.get("line_key")
+        ema_handling = None
+        if lk:
+            link = self.links.get(lk)
+            if link:
+                evidence = dict(evidence, ema_link=link["state"], ema_billed=f"{link['ema_cpt']}{'-' + ','.join(json.loads(link['ema_modifiers'])) if link.get('ema_modifiers') else ''} x{link['ema_units']} ${(link['ema_charges_cents'] or 0)/100:.2f}", ema_claim_status=link.get("ema_claim_status"))
+            hs = self.handling.get(lk)
+            if hs:
+                statuses = sorted({h["adjustment_status"] for h in hs if h.get("adjustment_status")})
+                ema_handling = statuses[0] if len(statuses) == 1 else ("MIXED" if statuses else None)
+                evidence = dict(evidence, ema_handling=[f"{h['carc'] or ''} {h['adjustment_status'] or ''} ${(h['adjustments_cents'] or 0)/100:.2f} on {h['transaction_date'] or ''}".strip() for h in hs[:8]])
+        if resolved_by:
+            evidence = dict(evidence, paid_later={"payment_date": resolved_by[0], "trace": resolved_by[1], "paid_cents": resolved_by[2], "claim_status": resolved_by[3]})
         fid = _fid(signal, *(key_parts or (base.get("line_key") or base.get("claim_key") or json.dumps(evidence, sort_keys=True),)))
         kind = base.get("payer_kind", "other")
         grp = base.get("payer_group")
@@ -351,6 +396,9 @@ class Detector:
             "carc": carc, "carc_text": carc_text(carc), "rarc": rarc, "rarc_text": rarc_text((rarc or "").split(",")[0]),
             "evidence": json.dumps(evidence, default=str),
             "appeal_deadline": _add_days(pay_date, days) if actionable in ("appeal", "correct_and_resubmit") else None,
+            "ema_handling": ema_handling,
+            "auto_status": "resolved" if resolved_by else None,
+            "auto_notes": f"Paid on a later remittance ({resolved_by[0]}, trace {resolved_by[1]}, ${(resolved_by[2] or 0)/100:.2f})" if resolved_by else None,
             "run_id": self.run_id,
         }
 
@@ -383,7 +431,8 @@ class Detector:
                     short = (exp - allowed) if exp else None
                     self._emit("DOWNCODE_SVC06", "downcoding", "high" if primary else "medium", "appeal",
                                f"Billed {orig}, paid as {code} ({l['payer_group']})", l, exp, short, top, rarc,
-                               {"basis": basis, "original_modifiers": l.get("original_modifiers"), "claim_status": status})
+                               {"basis": basis, "original_modifiers": l.get("original_modifiers"), "claim_status": status},
+                               resolved_by=self.later_payment(l, orig))
                 else:
                     exp, basis = self.expected_allowed(l, orig)
                     short = (exp - allowed) if exp else None
@@ -432,6 +481,9 @@ class Detector:
                 cat = code_category(code)
                 if code == "99024" or code == "G2211" or (l.get("charge_cents") or 0) <= 100:
                     continue
+                later = self.later_payment(l)
+                emit = self._emit
+                self._emit = lambda *a, **k: emit(*a, **dict(k, resolved_by=later))  # noqa: E731
                 if top in BUNDLING_CARCS or "M80" in rarcs or "N19" in rarcs or "M15" in rarcs or "N20" in rarcs:
                     if code in EM_CODES:
                         companions = [o for o in self.lines_by_claim[l["claim_key"]] if o["line_key"] != l["line_key"]]
@@ -457,6 +509,7 @@ class Detector:
                         comp = sorted({o["procedure_code"] for o in self.lines_by_claim[l["claim_key"]] if o["line_key"] != l["line_key"] and o.get("procedure_code")})
                         self._emit("PROCEDURE_BUNDLED", "bundling", "high" if (exp or 0) >= 10000 else "medium", "appeal",
                                    f"{code} bundled into another same-day service ({top})", l, exp, exp, top, rarc, {"basis": basis, "same_day_codes": comp})
+                    self._emit = emit
                     continue
                 if top in INFO_CARCS:
                     if any(r in MODIFIER_RARCS for r in rarcs):
@@ -465,37 +518,48 @@ class Detector:
                         self._emit("DENIED_CODING", "denial", "high", "correct_and_resubmit", f"{code} denied: coding error ({rarc})", l, exp, exp, top, rarc, {"basis": basis})
                     else:
                         self._emit("DENIED_MISSING_INFO", "denial", "medium", "correct_and_resubmit", f"{code} denied for missing information ({top} {rarc or ''})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in CODING_CARCS:
                     self._emit("DENIED_CODING", "denial", "high", "correct_and_resubmit", f"{code} denied: code/modifier inconsistent ({top})", l, exp, exp, top, rarc, {"basis": basis, "modifiers": mods})
+                    self._emit = emit
                     continue
                 if top in PRIMARY_CARCS:
                     self._emit("DENIED_MISSING_PRIMARY", "denial", "medium", "review", f"{code} denied: qualifying/primary service missing or denied ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in AUTH_CARCS:
                     self._emit("DENIED_AUTH", "denial", "high", "appeal", f"{code} denied: authorization ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in MEDNEC_CARCS:
                     self._emit("DENIED_MEDICAL_NECESSITY", "denial", "high", "appeal", f"{code} denied: medical necessity / documentation ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in FREQ_CARCS:
                     self._emit("DENIED_FREQUENCY", "denial", "medium", "appeal", f"{code} denied: frequency/units ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in TIMELY_CARCS:
                     self._emit("DENIED_TIMELY_FILING", "denial", "high", "review", f"{code} denied: timely filing", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in PROVIDER_CARCS:
                     self._emit("DENIED_PROVIDER", "denial", "high", "review", f"{code} denied: provider enrollment/credentialing ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in DUP_CARCS:
-                    if (l["patient_control_number"], code, l.get("service_date")) not in self.paid_line_keys:
+                    if (bill_of(l["patient_control_number"]), code, l.get("service_date")) not in self.paid_line_keys:
                         self._emit("DENIED_DUPLICATE_UNPAID", "denial", "medium", "review", f"{code} denied as duplicate but never paid", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if top in NONCOV_CARCS:
                     self._emit("DENIED_NONCOVERED", "denial", "low", "review", f"{code} not covered ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
                     continue
                 if cat not in ("postop",):
                     self._emit("DENIED_OTHER", "denial", "low", "review", f"{code} paid $0 ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                self._emit = emit
                 continue
 
             # ---- underpayment on paid lines
@@ -534,6 +598,8 @@ class Detector:
         for r in rows:
             cl = dict(r)
             if cl["patient_control_number"] in self.paid_pcns:
+                continue
+            if any(d > (cl.get("payment_date") or "") for d in self.bill_paid_dates.get(bill_of(cl["patient_control_number"]), [])):
                 continue
             grp, kind = normalize_payer(cl.get("payer_name"))
             kind = payer_kind_from_cfi(cl.get("claim_filing_indicator"), kind)
@@ -664,9 +730,12 @@ class Detector:
                 "original_procedure_code", "code_category", "charge_cents", "allowed_cents", "paid_cents", "expected_cents",
                 "shortfall_cents", "carc", "carc_text", "rarc", "rarc_text", "evidence", "appeal_deadline", "status", "notes",
                 "run_id", "first_seen", "last_seen"]
+        cols.append("ema_handling")
         rows = []
         for fid, f in self.findings.items():
             st, notes, first = existing.get(fid, ("open", None, self.now))
+            if f.get("auto_status") and st != "dismissed":
+                st, notes = f["auto_status"], f.get("auto_notes")
             f["status"], f["notes"], f["first_seen"], f["last_seen"] = st, notes, first, self.now
             rows.append(tuple(f.get(k) for k in cols))
         c.execute("DELETE FROM findings")
@@ -678,6 +747,12 @@ class Detector:
         return dict(summary)
 
     def run(self) -> dict:
+        try:
+            if self.conn.execute("SELECT 1 FROM ema_rows LIMIT 1").fetchone():
+                from .link import build_links
+                build_links(self.store, log=lambda *_a: None)
+        except Exception:
+            pass
         self.load()
         self.build_baselines()
         self.run_line_rules()

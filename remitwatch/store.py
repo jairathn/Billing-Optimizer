@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS claims (
     moa_nonpayable_professional_cents INTEGER, payer_claim_contact_phone TEXT,
     payer_name TEXT, payer_id TEXT, payee_npi TEXT, payment_date TEXT, trace_number TEXT,
     line_count INTEGER, line_charge_total_cents INTEGER, line_paid_total_cents INTEGER,
-    claim_adjustment_total_cents INTEGER, line_adjustment_total_cents INTEGER, balanced INTEGER
+    claim_adjustment_total_cents INTEGER, line_adjustment_total_cents INTEGER, balanced INTEGER, claim_paid_minus_lines_cents INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_claims_txn ON claims(transaction_key);
 CREATE INDEX IF NOT EXISTS ix_claims_pcn ON claims(patient_control_number);
@@ -189,6 +189,9 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn.executescript(DDL)
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     conn.execute("UPDATE transactions SET superseded=0 WHERE superseded IS NULL")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
+    if "claim_paid_minus_lines_cents" not in cols:
+        conn.execute("ALTER TABLE claims ADD COLUMN claim_paid_minus_lines_cents INTEGER")
     conn.commit()
     return conn
 
@@ -325,14 +328,14 @@ class Store:
         c = self.conn
         c.execute("UPDATE transactions SET superseded=0")
         rows = c.execute("""
-            SELECT t.transaction_key, COALESCE(t.trace_payer_id, t.payer_id, t.payer_name) AS pid, t.trace_number,
+            SELECT t.transaction_key, COALESCE(t.trace_payer_id, t.payer_id, t.payer_name) AS pid, t.trace_number, t.payment_date,
                    t.isa_date, t.isa_time, f.mtime
             FROM transactions t LEFT JOIN files f ON f.sha256 = t.file_sha256
             WHERE t.trace_number IS NOT NULL AND t.trace_number <> ''
         """).fetchall()
         groups: dict[tuple, list] = {}
         for r in rows:
-            groups.setdefault((r["pid"], r["trace_number"]), []).append(r)
+            groups.setdefault((r["pid"], r["trace_number"], r["payment_date"]), []).append(r)
         flagged = 0
         for key, members in groups.items():
             if len(members) < 2:

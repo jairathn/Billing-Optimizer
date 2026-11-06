@@ -128,6 +128,8 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
     out["by_month"] = rows(f"SELECT substr(COALESCE(service_date, payment_date),1,7) month, category, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} AND COALESCE(service_date, payment_date) >= '2023-01' GROUP BY 1,2 ORDER BY 1", tuple(params))
     out["by_provider"] = rows(f"SELECT rendering_provider_npi npi, MAX(rendering_provider_name) name, MAX(provider_tier) tier, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} AND rendering_provider_npi IS NOT NULL GROUP BY rendering_provider_npi ORDER BY shortfall_cents DESC LIMIT 20", tuple(params))
     out["by_actionable"] = rows(f"SELECT actionable, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY actionable ORDER BY shortfall_cents DESC", tuple(params))
+    out["by_handling"] = rows(f"SELECT COALESCE(ema_handling,'unknown') ema_handling, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY 1 ORDER BY shortfall_cents DESC", tuple(params))
+    out["resolved_by_later_remit"] = one("SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='resolved' AND notes LIKE 'Paid on a later remittance%'")
     out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < date('now') THEN 'expired' WHEN appeal_deadline < date('now','+30 days') THEN 'due_30d' WHEN appeal_deadline < date('now','+90 days') THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') GROUP BY 1")
     out["info"] = rows("SELECT signal, year, title, shortfall_cents, evidence FROM findings WHERE category='info' ORDER BY signal, year")
     out["years"] = [r["year"] for r in rows("SELECT DISTINCT year FROM findings WHERE year >= '2023' ORDER BY year")]
@@ -137,10 +139,10 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
 # --------------------------------------------------------------------------- findings
 FINDING_COLS = ("finding_id, signal, category, severity, actionable, title, patient_control_number, claim_key, line_key, payer_name, payer_group, payer_kind, "
                 "rendering_provider_name, rendering_provider_npi, provider_tier, service_date, payment_date, year, procedure_code, modifiers, original_procedure_code, "
-                "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, status, notes, first_seen, last_seen")
+                "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, ema_handling, status, notes, first_seen, last_seen")
 
 
-def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline):
+def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None):
     where, params = [], []
     if signal:
         sigs = [s for s in signal.split(",") if s]
@@ -180,15 +182,18 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
     if q:
         where.append("(patient_control_number LIKE ? OR title LIKE ? OR payer_name LIKE ? OR procedure_code LIKE ? OR carc LIKE ? OR rarc LIKE ?)")
         params += [f"%{q}%"] * 6
+    if handling:
+        where.append("ema_handling=?")
+        params.append(handling)
     return (" WHERE " + " AND ".join(where)) if where else "", params
 
 
 @app.get("/api/findings")
 def findings(signal: Optional[str] = None, category: Optional[str] = None, payer: Optional[str] = None, year: Optional[str] = None,
              status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
-             provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None,
+             provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
              sort: str = "shortfall", limit: int = Query(100, le=2000), offset: int = 0, _: str = Depends(require_auth)):
-    w, params = _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline)
+    w, params = _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling)
     order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": "appeal_deadline ASC", "payer": "payer_group, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset))
@@ -245,6 +250,9 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
         out["remarks"] = rems
         tx = one("SELECT transaction_key, source_name, payer_name, payer_id, payer_contact_phone, payer_contact_url, payment_method, payment_amount_cents, payment_date, trace_number, production_date, payee_npi FROM transactions WHERE transaction_key=?", (f["transaction_key"],))
         out["remit"] = tx
+        if f.get("line_key") and has_table("line_links"):
+            out["link"] = one("SELECT * FROM line_links WHERE line_key=?", (f["line_key"],))
+            out["handling"] = rows("SELECT * FROM line_handling WHERE line_key=? ORDER BY transaction_date", (f["line_key"],))
         pcn = f.get("patient_control_number")
         if pcn:
             out["history"] = rows("SELECT c.claim_key, c.claim_status_code, c.charge_cents, c.paid_cents, c.payment_date, c.payer_name, c.trace_number FROM claims c JOIN transactions t ON t.transaction_key=c.transaction_key WHERE c.patient_control_number=? AND t.superseded=0 ORDER BY c.payment_date", (pcn,))

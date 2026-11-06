@@ -37,27 +37,31 @@ def main() -> None:
       "All findings are open until a biller marks them otherwise.\n")
 
     p("## The one-paragraph answer\n")
-    cat = {r["category"]: r for r in q(conn, "SELECT category, COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE category IN ('downcoding','bundling','denial','underpayment','fees','contract') GROUP BY 1")}
+    cat = {r["category"]: r for r in q(conn, "SELECT category, COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE status IN ('open','in_progress','appealed') AND category IN ('downcoding','bundling','denial','underpayment','fees','contract') GROUP BY 1")}
+    rec = q(conn, "SELECT COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE status='resolved' AND notes LIKE 'Paid on a later remittance%'")[0]
     tot = sum(r["c"] or 0 for r in cat.values())
-    p(f"Across the whole archive the detectable leakage is about {money(tot)}. Classic E/M downcoding, the thing the practice asked about, is "
+    p(f"Across the whole archive the detectable, still-unrecovered leakage is about {money(tot)}. Classic E/M downcoding, the thing the practice asked about, is "
       f"{money((cat.get('downcoding') or {}).get('c'))} of it. The money is in bundling ({money((cat.get('bundling') or {}).get('c'))}), "
       f"denials that were never worked ({money((cat.get('denial') or {}).get('c'))}), contract rates below Medicare ({money((cat.get('contract') or {}).get('c'))} at Medicare parity), "
-      f"underpayment against the payer's own rate ({money((cat.get('underpayment') or {}).get('c'))}), and fees plus takebacks ({money((cat.get('fees') or {}).get('c'))}).\n")
+      f"underpayment against the payer's own rate ({money((cat.get('underpayment') or {}).get('c'))}), and fees plus takebacks ({money((cat.get('fees') or {}).get('c'))}). "
+      f"A further {money(rec['c'])} across {rec['n']:,} lines was initially denied or bundled and then paid on a later remittance, which is the rework the billers did do; those are marked resolved and excluded from the open figures.\n")
 
     p("## By year and category\n")
     p("| year | downcoding | bundling | denial | underpayment | fees | contract | total |")
     p("|---|---:|---:|---:|---:|---:|---:|---:|")
+    p("Open findings only (resolved and dismissed excluded).\n")
     for y in q(conn, "SELECT year FROM findings WHERE year>='2023' GROUP BY 1 ORDER BY 1"):
-        row = {r["category"]: r["c"] for r in q(conn, "SELECT category, SUM(shortfall_cents) c FROM findings WHERE year=? GROUP BY 1", (y["year"],))}
+        row = {r["category"]: r["c"] for r in q(conn, "SELECT category, SUM(shortfall_cents) c FROM findings WHERE year=? AND status IN ('open','in_progress','appealed') GROUP BY 1", (y["year"],))}
         cats = ["downcoding", "bundling", "denial", "underpayment", "fees", "contract"]
         p(f"| {y['year']} | " + " | ".join(money(row.get(c)) for c in cats) + f" | {money(sum(row.get(c) or 0 for c in cats))} |")
     p("")
 
     p("## By signal\n")
-    p("| signal | category | what to do | findings | dollars |")
-    p("|---|---|---|---:|---:|")
-    for r in q(conn, "SELECT signal, category, actionable, COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE category<>'info' GROUP BY 1,2,3 ORDER BY c DESC"):
-        p(f"| {r['signal']} | {r['category']} | {r['actionable']} | {r['n']:,} | {money(r['c'])} |")
+    p("| signal | category | what to do | open findings | open dollars | paid later (rework) |")
+    p("|---|---|---|---:|---:|---:|")
+    for r in q(conn, """SELECT signal, category, actionable, SUM(status IN ('open','in_progress','appealed')) n, SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END) c,
+                        SUM(CASE WHEN status='resolved' THEN shortfall_cents END) r FROM findings WHERE category<>'info' GROUP BY 1,2,3 ORDER BY c DESC"""):
+        p(f"| {r['signal']} | {r['category']} | {r['actionable']} | {int(r['n'] or 0):,} | {money(r['c'])} | {money(r['r'])} |")
     p("")
 
     p("## By payer\n")
@@ -65,7 +69,7 @@ def main() -> None:
     p("|---|---|---:|---:|---:|")
     for r in q(conn, """SELECT payer_group, payer_kind, COUNT(*) n, SUM(shortfall_cents) c,
                         SUM(CASE WHEN actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline >= date('now') THEN shortfall_cents ELSE 0 END) a
-                        FROM findings WHERE category IN ('downcoding','bundling','denial','underpayment','fees','contract') GROUP BY 1,2 ORDER BY c DESC LIMIT 20"""):
+                        FROM findings WHERE status IN ('open','in_progress','appealed') AND category IN ('downcoding','bundling','denial','underpayment','fees','contract') GROUP BY 1,2 ORDER BY c DESC LIMIT 20"""):
         p(f"| {r['payer_group']} | {r['payer_kind']} | {r['n']:,} | {money(r['c'])} | {money(r['a'])} |")
     p("")
 
@@ -92,7 +96,7 @@ def main() -> None:
     p("")
 
     p("## Correctable billing errors (no appeal needed, just a corrected claim)\n")
-    for r in q(conn, "SELECT signal, COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE actionable='correct_and_resubmit' GROUP BY 1 ORDER BY c DESC"):
+    for r in q(conn, "SELECT signal, COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE actionable='correct_and_resubmit' AND status IN ('open','in_progress','appealed') GROUP BY 1 ORDER BY c DESC"):
         p(f"- {r['signal']}: {r['n']:,} lines, {money(r['c'])}")
     p("")
 
