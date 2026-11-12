@@ -353,6 +353,21 @@ LEGAL = {
 MEDICARE_SAME_DAY_EM = {"effective": "2027-01-01", "pct": 0.80, "confirmed": False}
 
 
+def payer_group_kind(name: str | None, cfi: str | None) -> tuple[str, str]:
+    """Payer group and kind for a claim: the payer name rules refined by the claim filing indicator (CLP06).
+    Medicare Advantage and Medicaid products that share a commercial payer's name get their own group."""
+    grp, kind = normalize_payer(name)
+    refined = payer_kind_from_cfi(cfi, kind)
+    if refined == "medicare" and kind in ("supplement", "commercial", "medicare_advantage", "medicaid"):
+        refined = kind          # supplement and commercial carriers sometimes label their claims MB; they are not Medicare itself
+    kind = refined
+    if kind == "medicare_advantage" and "Medicare Advantage" not in grp:
+        grp = f"{grp} Medicare Advantage"
+    elif kind == "medicaid" and "Medicaid" not in grp:
+        grp = f"{grp} Medicaid"
+    return grp, kind
+
+
 def carc_text(code: str | None) -> str:
     return CARC.get(code or "", "")
 

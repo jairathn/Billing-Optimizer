@@ -17,7 +17,9 @@ def money(c) -> str:
     return f"${(c or 0) / 100:,.0f}"
 
 
-def build_report(store: Store, run_id: str | None = None, sync_stats: dict | None = None, ingest_stats: dict | None = None) -> str:
+def build_report(store: Store, run_id: str | None = None, sync_stats: dict | None = None, ingest_stats: dict | None = None,
+                 detail: bool = False) -> str:
+    """Summary report. The emailed version (detail=False) carries payer names, counts and dollars only; the saved file adds claim-level rows."""
     q = store.query
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     last_run = q("SELECT * FROM detection_runs ORDER BY started_at DESC LIMIT 1")
@@ -25,10 +27,29 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     lines = [f"# RemitWatch weekly report ({now})", ""]
     meta = q("SELECT COUNT(*) n, MAX(payment_date) last_payment FROM transactions WHERE superseded=0")[0]
     lines.append(f"Remits in store: {meta['n']:,} (latest payment date {meta['last_payment']}).")
-    if sync_stats:
+    if sync_stats and sync_stats.get("skipped"):
+        lines.append(f"Dropbox sync: {sync_stats['skipped']}.")
+    elif sync_stats:
         lines.append(f"Dropbox sync: {sync_stats.get('downloaded', 0)} new files downloaded, {sync_stats.get('unchanged', 0)} unchanged, {sync_stats.get('errors', 0)} errors ({sync_stats.get('mode')} listing).")
     if ingest_stats:
         lines.append(f"Ingested: {ingest_stats.get('remits', 0)} remits, {ingest_stats.get('ema', 0)} EMA exports, {ingest_stats.get('claims_837', 0)} claim files.")
+    lines.append("")
+    try:
+        alerts = q("SELECT severity, title FROM alerts WHERE status IN ('new','acknowledged') ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, cents_recent DESC LIMIT 25")
+    except Exception:
+        alerts = []
+    lines.append("## Alerts")
+    lines += [f"- [{a['severity']}] {a['title']}" for a in alerts] or ["No active alerts."]
+    lines.append("")
+    prog = q("""SELECT status, COUNT(*) n, SUM(shortfall_cents) cents, SUM(recovered_cents) rec FROM findings
+                WHERE category IN ('downcoding','bundling','denial','underpayment') GROUP BY 1""")
+    by = {r["status"]: r for r in prog}
+    lines.append("## Scoreboard")
+    lines.append("| status | findings | dollars |")
+    lines.append("|---|---:|---:|")
+    for st in ("open", "in_progress", "appealed", "resolved", "lost", "dismissed"):
+        if st in by:
+            lines.append(f"| {st} | {by[st]['n']:,} | {money(by[st]['rec'] if st == 'resolved' else by[st]['cents'])} |")
     lines.append("")
     new = q("""SELECT category, signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
                WHERE first_seen = (SELECT MAX(first_seen) FROM findings) AND category IN ('downcoding','bundling','denial','underpayment','fees')
@@ -46,7 +67,9 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
                FROM findings WHERE status='open' AND actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')
                ORDER BY appeal_deadline, shortfall_cents DESC LIMIT 40""")
     lines.append("## Appeals due in the next 45 days")
-    if due:
+    if due and not detail:
+        lines.append(f"{len(due)}{'+' if len(due) == 40 else ''} findings are due; open the Appeals queue in the dashboard for the list.")
+    elif due:
         lines.append("| deadline | payer | claim | DOS | code | signal | dollars |")
         lines.append("|---|---|---|---|---|---|---:|")
         for r in due:

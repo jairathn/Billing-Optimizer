@@ -233,7 +233,7 @@ def test_later_remit_resolves_finding_and_ema_handling_is_attached(tmp_path):
     assert f["ema_handling"] == "WRITE_OFF"
     ev = __import__("json").loads(f["evidence"])
     assert ev["ema_link"] == "exact_composite" and "WRITE_OFF" in ev["ema_handling"][0]
-    assert f["status"] == "resolved" and "later remittance" in f["notes"] and ev["paid_later"]["payment_date"] == "2026-06-01"
+    assert f["status"] == "resolved" and "later remittance" in f["auto_note"] and f["notes"] is None and ev["paid_later"]["payment_date"] == "2026-06-01"
     # the downcode on the other claim has no later payment and stays open
     assert store.query("SELECT status FROM findings WHERE signal='DOWNCODE_SVC06'")[0]["status"] == "open"
     # a dismissed finding is never re-opened or auto-resolved

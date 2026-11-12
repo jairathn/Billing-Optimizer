@@ -57,11 +57,12 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import (ADD_ON_CODES, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, appeal_rule, carc_text, code_category,
-                    normalize_payer, payer_kind_from_cfi, pos_class, rarc_text)
+                    normalize_payer, payer_group_kind, pos_class, rarc_text)
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_VERSION = "2.0"
+DETECT_VERSION = "2.1"
+DERIVED_SCHEMA = "3"        # bump when the layout of a derived table changes; the tables are dropped and rebuilt
 
 BUNDLING_CARCS = {"97", "B10", "236", "234", "231", "M15"}
 LEVEL_CARCS = {"150", "186"}
@@ -89,8 +90,10 @@ EXTRA_FINDING_COLS = {
     "ema_handling": "TEXT", "billed_code": "TEXT", "code_pair": "TEXT", "level_drop": "INTEGER", "pos": "TEXT", "pos_class": "TEXT",
     "plan": "TEXT", "month": "TEXT", "service_month": "TEXT", "modifier_class": "TEXT", "location": "TEXT", "diagnosis": "TEXT",
     "deadline_basis": "TEXT", "recovered_cents": "INTEGER", "recovered_date": "TEXT", "appealed_at": "TEXT", "status_changed_at": "TEXT",
-    "stale": "INTEGER DEFAULT 0",
+    "stale": "INTEGER DEFAULT 0", "auto_note": "TEXT", "prev_status": "TEXT",
 }
+EM_SQL = ",".join(f"'{c}'" for c in sorted(EM_CODES))
+AUTO_NOTE_PREFIX = "Paid on a later remittance"
 
 FINDINGS_DDL = """
 CREATE TABLE IF NOT EXISTS findings (
@@ -123,9 +126,17 @@ CREATE TABLE IF NOT EXISTS payer_rates (
 CREATE TABLE IF NOT EXISTS exposure (
     month TEXT, payer_group TEXT, payer_kind TEXT, npi TEXT, tier TEXT, code TEXT, pos_class TEXT, plan TEXT,
     lines INTEGER, zero_paid INTEGER, charge_cents INTEGER, allowed_cents INTEGER, paid_cents INTEGER,
-    PRIMARY KEY (month, payer_group, npi, code, pos_class, plan)
+    PRIMARY KEY (month, payer_group, payer_kind, npi, tier, code, pos_class, plan)
 );
 CREATE INDEX IF NOT EXISTS ix_exp_payer ON exposure(payer_group, month);
+CREATE TABLE IF NOT EXISTS exposure_daily (
+    day TEXT, payer_group TEXT, payer_kind TEXT, npi TEXT, scope TEXT, lines INTEGER,
+    PRIMARY KEY (day, payer_group, payer_kind, npi, scope)
+);
+CREATE TABLE IF NOT EXISTS rate_points (
+    day TEXT, payer_group TEXT, payer_kind TEXT, code TEXT, tier TEXT, pos_class TEXT, allowed_cents INTEGER, n INTEGER,
+    PRIMARY KEY (day, payer_group, payer_kind, code, tier, pos_class, allowed_cents)
+);
 CREATE TABLE IF NOT EXISTS finding_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, finding_id TEXT, at TEXT, kind TEXT, from_status TEXT, to_status TEXT,
     amount_cents INTEGER, actor TEXT, note TEXT, run_id TEXT
@@ -137,6 +148,7 @@ CREATE TABLE IF NOT EXISTS progress_snapshots (
 );
 CREATE TABLE IF NOT EXISTS fee_table (year TEXT, code TEXT, charge_cents INTEGER, share REAL, PRIMARY KEY (year, code, charge_cents));
 CREATE TABLE IF NOT EXISTS provider_tiers (npi TEXT PRIMARY KEY, name TEXT, tier TEXT, ratio REAL, n INTEGER);
+CREATE TABLE IF NOT EXISTS providers (npi TEXT PRIMARY KEY, name TEXT, tier TEXT, lines INTEGER, location TEXT);
 CREATE TABLE IF NOT EXISTS detection_runs (run_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, version TEXT, lines INTEGER, findings INTEGER, summary TEXT);
 """
 
@@ -156,17 +168,37 @@ def _add_days(iso: str | None, days: int) -> str | None:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the derived tables and add columns introduced after the first release. Safe to call on every start."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(payer_rates)")}
-    if cols and "pos_class" not in cols:
-        conn.execute("DROP TABLE payer_rates")      # derived data, rebuilt by every detection run
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    cur = conn.execute("SELECT value FROM meta WHERE key='derived_schema'").fetchone()
+    if not cur or cur[0] != DERIVED_SCHEMA:
+        for t in ("payer_rates", "exposure", "exposure_daily", "rate_points"):      # derived data, rebuilt by every detection run
+            conn.execute(f"DROP TABLE IF EXISTS {t}")
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('derived_schema', ?)", (DERIVED_SCHEMA,))
     conn.executescript(FINDINGS_DDL)
     have = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
     for col, decl in EXTRA_FINDING_COLS.items():
         if col not in have:
             conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {decl}")
+    if "auto_note" not in have:     # older stores kept the automatic note in the notes column
+        conn.execute(f"UPDATE findings SET auto_note = notes, notes = NULL WHERE notes LIKE '{AUTO_NOTE_PREFIX}%'")
     conn.executescript("""CREATE INDEX IF NOT EXISTS ix_f_month ON findings(month);
                           CREATE INDEX IF NOT EXISTS ix_f_npi ON findings(rendering_provider_npi);""")
     conn.commit()
+
+
+ORG_NAME_WORDS = ("DERMATOLOG", "ASSOC", " PSC", "CENTER", "CLINIC", "SURGERY", "DERMA")
+
+
+def best_provider_name(names: Counter) -> str:
+    """Payers spell the rendering provider many ways and some send the group name; pick the commonest personal name."""
+    clean = Counter()
+    for n, k in names.items():
+        n = " ".join((n or "").replace(",", ", ").split())
+        if n:
+            clean[n] += k
+    personal = Counter({n: k for n, k in clean.items() if not any(w in n.upper() for w in ORG_NAME_WORDS)})
+    pick = (personal or clean).most_common(1)
+    return pick[0][0] if pick else ""
 
 
 def modifier_class(mods: list[str]) -> str:
@@ -210,12 +242,7 @@ class Detector:
         for l in self.lines:
             l["modifiers_list"] = json.loads(l["modifiers"]) if l.get("modifiers") else []
             l["year"] = (l.get("service_date") or l.get("payment_date") or "")[:4]
-            grp, kind = normalize_payer(l.get("payer_name"))
-            kind = payer_kind_from_cfi(l.get("claim_filing_indicator"), kind)
-            if kind == "medicare_advantage" and "Medicare Advantage" not in grp:
-                grp = f"{grp} Medicare Advantage"
-            elif kind == "medicaid" and "Medicaid" not in grp:
-                grp = f"{grp} Medicaid"
+            grp, kind = payer_group_kind(l.get("payer_name"), l.get("claim_filing_indicator"))
             l["payer_group"], l["payer_kind"] = grp, kind
             l["pricing_mod"] = next((m for m in l["modifiers_list"] if m in PRICING_MODIFIERS), None)
             l["pos"] = l.get("facility_type_code")
@@ -329,8 +356,21 @@ class Detector:
             tier = "nonphysician" if r < 0.92 else "physician"
             self.provider_tier[npi] = tier
             tier_rows.append((npi, names.get(npi, ""), tier, round(r, 3), len(ratios)))
+        name_votes: dict[str, Counter] = defaultdict(Counter)
+        line_counts: Counter = Counter()
         for l in self.lines:
             l["provider_tier"] = self.provider_tier.get(l.get("rendering_provider_npi") or "", "unknown")
+            if l.get("rendering_provider_npi"):
+                name_votes[l["rendering_provider_npi"]][l.get("rp_name") or ""] += 1
+                line_counts[l["rendering_provider_npi"]] += 1
+        self.provider_name = {npi: best_provider_name(v) for npi, v in name_votes.items()}
+        for l in self.lines:
+            if l.get("rendering_provider_npi"):
+                l["rp_name"] = self.provider_name.get(l["rendering_provider_npi"]) or l.get("rp_name")
+        self.conn.execute("DELETE FROM providers")
+        self.conn.executemany("INSERT OR REPLACE INTO providers (npi, name, tier, lines, location) VALUES (?,?,?,?,?)",
+                              [(npi, self.provider_name.get(npi, ""), self.provider_tier.get(npi, "unknown"), n, self.npi_location.get(npi))
+                               for npi, n in line_counts.items()])
         self.conn.execute("DELETE FROM provider_tiers")
         self.conn.executemany("INSERT INTO provider_tiers (npi, name, tier, ratio, n) VALUES (?,?,?,?,?)", tier_rows)
 
@@ -357,6 +397,7 @@ class Detector:
                 continue
             if self._same_day_policy_claim(l):
                 continue
+            l["clean"] = True
             counts[(l["payer_group"], l["year"], l["procedure_code"], l["provider_tier"], l["pos_class"])][l["allowed_cents"]] += 1
             self.kinds[l["payer_group"]] = l["payer_kind"]
         self.rates: dict[tuple, dict] = {}
@@ -537,14 +578,18 @@ class Detector:
                 best, top = a, rc
         return adj, top, pr, {rc for _g, rc, _a in payer_adj}
 
-    def later_payment(self, l: dict, code: str | None = None, expected: int | None = None) -> tuple | None:
+    def later_payment(self, l: dict, code: str | None = None, expected: int | None = None, min_paid: int | None = None) -> tuple | None:
         """Earliest later remit that paid this bill, code and date of service (a reworked or appealed line).
-        A primary payment counts; a secondary payment counts only when it covers at least half the expected amount."""
+        A primary payment counts; a secondary payment counts only when it covers at least half the expected amount.
+        `min_paid` is for lines that were paid short under the same code: the later payment must be clearly larger than
+        the short one, so a repeat of the same reduced payment does not close the finding."""
         bill = bill_of(l.get("patient_control_number"))
         dos = l.get("service_date") or l.get("statement_from")
         mine = l.get("payment_date") or l.get("txn_payment_date") or ""
         events = [e for e in self.paid_events.get((bill, code or l.get("procedure_code"), dos), []) if e[0] and e[0] > mine]
         events = [e for e in events if e[3] in ("1", "19") or (expected and (e[2] or 0) >= 0.5 * expected)]
+        if min_paid is not None:
+            events = [e for e in events if (e[2] or 0) >= min_paid]
         return min(events) if events else None
 
     def _emit(self, signal, category, severity, actionable, title, l, expected, shortfall, carc, rarc, evidence,
@@ -579,12 +624,18 @@ class Detector:
         level_drop = (fam_b[1] - fam_p[1]) if (fam_b and fam_p and fam_b[0] == fam_p[0] and billed != code) else None
         if evidence.get("paid_like") and family_of(evidence["paid_like"]) and fam_p:
             level_drop = fam_p[1] - family_of(evidence["paid_like"])[1]
-        pair = f"{billed}→{code}" if (billed and code and billed != code) else (f"{code}→{evidence['paid_like']} rate" if evidence.get("paid_like") else None)
+        pair = f"{billed}→{code}" if (billed and code and billed != code) else (f"{code} at {evidence['paid_like']} rate" if evidence.get("paid_like") else None)
+        if pair is None and signal in DOWNCODE_SIGNALS and code:
+            pair = f"{code} denied for level" if not (base.get("allowed_cents") or 0) else f"{code} reduced"
         link = self.links.get(lk) if lk else None
         dos = base.get("service_date") or base.get("statement_from")
         recovered = None
         if resolved_by:
-            recovered = min(resolved_by[2] or 0, shortfall) if shortfall and shortfall > 0 else (resolved_by[2] or 0)
+            if not shortfall or shortfall <= 0:
+                # no baseline for this line: the amount the payer later paid is the best measure of what was at stake
+                expected = shortfall = resolved_by[2] or 0
+                evidence = dict(evidence, basis="amount paid on the later remittance (no baseline for this code)")
+            recovered = min(resolved_by[2] or 0, shortfall)
         self.findings[fid] = {
             "billed_code": billed, "code_pair": pair, "level_drop": level_drop,
             "pos": base.get("pos") or base.get("facility_type_code"), "pos_class": base.get("pos_class") or pos_class(base.get("facility_type_code")),
@@ -617,10 +668,28 @@ class Detector:
 
     # ------------------------------------------------------------------ line rules
     def run_line_rules(self) -> None:
+        # a denied visit with a lower level paid in its place is one event: the paid line must not also count as a downcode
+        swap_paid: set[str] = set()
+        primary_changes: set[tuple] = set()
+        for claim_lines in self.lines_by_claim.values():
+            for x in claim_lines:
+                cx, st = x.get("procedure_code"), x.get("claim_status_code")
+                if st not in ("1", "19") or not cx:
+                    continue
+                ox = x.get("original_procedure_code")
+                if ox and ox != cx:
+                    primary_changes.add((bill_of(x.get("patient_control_number")), x.get("service_date"), ox, cx))
+                if cx in EM_CODES and not (x.get("paid_cents") or 0) and not (x.get("allowed_cents") or 0):
+                    carcs_x = {rc for g, rc, _a in self.adj.get(x["line_key"], []) if g in ("CO", "PI", "OA")}
+                    if carcs_x & LEVEL_CARCS or any(r in LEVEL_RARCS for r in self.rem.get(x["line_key"], [])):
+                        for o in claim_lines:
+                            if o["line_key"] != x["line_key"] and (o.get("paid_cents") or 0) > 0 and o.get("service_date") == x.get("service_date") \
+                                    and is_downcode(cx, o.get("procedure_code")):
+                                swap_paid.add(o["line_key"])
         for l in self.lines:
             status = l.get("claim_status_code")
             code = l.get("procedure_code")
-            if not code:
+            if not code or l["line_key"] in swap_paid:
                 continue
             mods = l["modifiers_list"]
             adj, top, pr, carcs = self._line_carcs(l)
@@ -642,6 +711,9 @@ class Detector:
                 readjudicated = any(rc == "B13" for ln in claim_lines for _g, rc, _a in self.adj.get(ln["line_key"], [])) \
                     or any(rc == "B13" for _g, rc, _a in self.claim_adj.get(l["claim_key"], []))
                 if readjudicated or (l.get("charge_cents") or 0) < 2000:
+                    continue
+                # a secondary payer that echoes the primary's code change is the same event, not a second downcode
+                if not primary and (bill_of(l.get("patient_control_number")), l.get("service_date"), orig, code) in primary_changes:
                     continue
                 if is_downcode(orig, code):
                     exp, basis = self.downcode_expected(l, orig, code, allowed)
@@ -676,7 +748,7 @@ class Detector:
                     short = (exp - allowed) if exp else None
                     self._emit("DOWNCODE_CHARGE", "downcoding", "high", "appeal",
                                f"Charge matches the {implied} fee but paid as {code} ({l['payer_group']})", l, exp, short, top, rarc,
-                               {"basis": basis, "charge_implies": implied})
+                               {"basis": basis, "charge_implies": implied}, resolved_by=self.later_payment(l, implied, expected=exp))
                     continue
                 # payment cut for the level with the billed code left in place (Anthem's CARC 186 pattern)
                 if level_flag and code in EM_CODES and allowed > 0:
@@ -693,7 +765,8 @@ class Detector:
                         self._emit("DOWNCODE_LEVEL_REDUCED", "downcoding", "high", "appeal",
                                    f"{code} paid at a reduced level with the code unchanged ({codes186}{', paid like ' + like if like else ''}, {l['payer_group']})",
                                    l, exp, short, next(iter(sorted(carcs & LEVEL_CARCS)), top), rarc,
-                                   {"basis": basis, "paid_like": like, "level_adjustment_cents": level_amt, "usual_rate_cents": usual})
+                                   {"basis": basis, "paid_like": like, "level_adjustment_cents": level_amt, "usual_rate_cents": usual},
+                                   resolved_by=self.later_payment(l, expected=exp, min_paid=paid + short // 2))
                         continue
                 if code in EM_CODES and allowed > 0 and paid > 0 and l.get("paid_units") in (None, 1, 1.0) and not l["pricing_mod"]:
                     own, _b, own_r = self.usual_rate(l, code)
@@ -701,14 +774,16 @@ class Detector:
                         lower = self.paid_like(l, code, allowed)
                         if lower:
                             self._emit("DOWNCODE_RATE", "downcoding", "medium", "appeal",
-                                       f"{code} allowed at the {lower} rate ({l['payer_group']})", l, own, own - allowed, top, rarc, {"paid_like": lower})
+                                       f"{code} allowed at the {lower} rate ({l['payer_group']})", l, own, own - allowed, top, rarc, {"paid_like": lower},
+                                       resolved_by=self.later_payment(l, expected=own, min_paid=paid + (own - allowed) // 2))
                             continue
                 # remark N22 says the payer added or changed the code but no original code was reported
                 if "N22" in rarcs and code not in EM_CODES and allowed > 0:
-                    rate, basis, r = self.usual_rate(l, code)
+                    _rate, _b, r = self.usual_rate(l, code)
+                    exp, basis = self.expected_allowed(l, code)         # rank-aware: a correctly reduced second procedure is not short
                     self._emit("CODE_CHANGED", "downcoding", "medium", "review",
                                f"Payer says it added or changed {code} (remark N22) without reporting the billed code ({l['payer_group']})",
-                               l, rate, (rate - allowed) if (rate and r and rate > allowed) else 0, top, rarc, {"basis": basis, "claim_status": status})
+                               l, exp, (exp - allowed) if (exp and r and exp > allowed) else 0, top, rarc, {"basis": basis, "claim_status": status})
                     continue
 
             if not primary:
@@ -867,10 +942,7 @@ class Detector:
                 continue
             if any(d > (cl.get("payment_date") or "") for d in self.bill_paid_dates.get(bill_of(cl["patient_control_number"]), [])):
                 continue
-            grp, kind = normalize_payer(cl.get("payer_name"))
-            kind = payer_kind_from_cfi(cl.get("claim_filing_indicator"), kind)
-            if kind == "medicare_advantage" and "Medicare Advantage" not in grp:
-                grp = f"{grp} Medicare Advantage"
+            grp, kind = payer_group_kind(cl.get("payer_name"), cl.get("claim_filing_indicator"))
             cl["payer_group"], cl["payer_kind"] = grp, kind
             cl["year"] = (cl.get("statement_from") or cl.get("payment_date") or "")[:4]
             cl["rp_name"] = cl.get("rendering_provider_name")
@@ -1016,31 +1088,60 @@ class Detector:
                 "original_procedure_code", "code_category", "charge_cents", "allowed_cents", "paid_cents", "expected_cents",
                 "shortfall_cents", "carc", "carc_text", "rarc", "rarc_text", "evidence", "appeal_deadline", "status", "notes",
                 "run_id", "first_seen", "last_seen"] + list(EXTRA_FINDING_COLS)
+
+        def worked(r: dict) -> bool:        # a person recorded something on this finding
+            return bool(r.get("notes") or r.get("appealed_at")) or r["status"] in MANUAL_STATUSES or r["status"] == "dismissed" \
+                or (r["status"] == "resolved" and not r.get("auto_note"))
+
+        # when new information changes a line's signal (and so its id), the work recorded on the old finding follows the line
+        orphans: dict[tuple, dict] = {}
+        for fid, prev in existing.items():
+            if fid not in self.findings and prev.get("line_key") and worked(prev) and not prev.get("stale"):
+                orphans.setdefault((prev["line_key"], prev["category"]), prev)
+        inherited: set[str] = set()
         rows, events = [], []
         for fid, f in self.findings.items():
             prev = existing.get(fid)
+            if prev is None and f.get("line_key"):
+                heir = orphans.get((f["line_key"], f["category"]))
+                if heir and heir["finding_id"] not in inherited:
+                    prev = heir
+                    inherited.add(heir["finding_id"])
+                    events.append((fid, self.now, "signal_changed", heir["status"], heir["status"], f.get("shortfall_cents"), "system",
+                                   f"was {heir['signal']}, now {f['signal']}", self.run_id))
             st, notes, first = (prev["status"], prev["notes"], prev["first_seen"]) if prev else ("open", None, self.now)
+            auto_note, prev_status = (prev.get("auto_note"), prev.get("prev_status")) if prev else (None, None)
             before = st
-            auto_before = bool(notes) and notes.startswith("Paid on a later remittance")
             if prev:    # what people recorded about this finding survives every re-run
                 f["appealed_at"], f["status_changed_at"] = prev.get("appealed_at"), prev.get("status_changed_at")
-                if not f.get("auto_status") and st == "resolved" and not auto_before:
+            if f.get("auto_status"):
+                if st == "dismissed":
+                    auto_note = None
+                elif st == "resolved" and not auto_note:
+                    # already marked recovered by a person: keep the amount and date they recorded
                     f["recovered_cents"], f["recovered_date"] = prev.get("recovered_cents"), prev.get("recovered_date")
-            if f.get("auto_status") and st != "dismissed":
-                st, notes = f["auto_status"], f.get("auto_notes")
-            elif auto_before and st == "resolved":
-                st, notes = "open", None   # an earlier automatic resolution no longer holds under the current rule
+                else:
+                    if st != "resolved":
+                        prev_status = st            # remembered so the resolution can be undone exactly
+                    st, auto_note = "resolved", f.get("auto_notes")
+            elif st == "resolved" and auto_note:
+                # the later payment no longer holds (for example its remittance was superseded): back to where it was
+                st, auto_note, prev_status = (prev_status or "open"), None, None
+            elif st == "resolved" and prev:
+                f["recovered_cents"], f["recovered_date"] = prev.get("recovered_cents"), prev.get("recovered_date")
             if st != "resolved":
                 f["recovered_cents"], f["recovered_date"] = None, None
             if prev and before != st:
                 f["status_changed_at"] = self.now
                 events.append((fid, self.now, "paid_on_later_remit" if st == "resolved" else "reopened", before, st,
-                               f.get("recovered_cents") if st == "resolved" else f.get("shortfall_cents"), "system", notes, self.run_id))
+                               f.get("recovered_cents") if st == "resolved" else f.get("shortfall_cents"), "system", auto_note, self.run_id))
             f["status"], f["notes"], f["first_seen"], f["last_seen"], f["stale"] = st, notes, first, self.now, 0
+            f["auto_note"], f["prev_status"] = auto_note, prev_status
             rows.append(tuple(f.get(k) for k in cols))
-        # findings someone is working (or lost) that the current rules no longer produce are kept, marked stale, so no work is lost
+        # findings a person worked, dismissed or lost that the current rules no longer produce are kept, marked stale, so that
+        # no work is lost and a dismissed finding cannot come back as new. Stale rows are left out of every total.
         for fid, prev in existing.items():
-            if fid not in self.findings and (prev["status"] in MANUAL_STATUSES or (prev["status"] == "resolved" and prev.get("appealed_at"))):
+            if fid not in self.findings and fid not in inherited and prev["status"] != "open" and worked(prev):
                 prev["stale"] = 1
                 rows.append(tuple(prev.get(k) for k in cols))
         c.execute("DELETE FROM findings")
@@ -1076,6 +1177,25 @@ class Detector:
             a[4] += l.get("paid_cents") or 0
         self.conn.execute("DELETE FROM exposure")
         self.conn.executemany("INSERT OR REPLACE INTO exposure VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [k + tuple(v) for k, v in agg.items()])
+        # the last 400 days at day resolution for the alert engine: line counts, and the allowed amounts on cleanly paid lines
+        days = [l.get("payment_date") or l.get("txn_payment_date") or "" for l in self.lines]
+        last = max(days) if days else ""
+        cutoff = _add_days(last, -400) or ""
+        daily: Counter = Counter()
+        points: Counter = Counter()
+        for l in self.lines:
+            day = l.get("payment_date") or l.get("txn_payment_date") or ""
+            if day < cutoff or l.get("claim_status_code") not in ("1", "19") or not l.get("procedure_code") or (l.get("charge_cents") or 0) <= 0:
+                continue
+            billed = l.get("original_procedure_code") or l["procedure_code"]
+            scope = "other" if billed not in EM_CODES else ("em4" if EM_LEVEL[billed] >= 4 else "em")
+            daily[(day, l["payer_group"], l["payer_kind"], l.get("rendering_provider_npi") or "", scope)] += 1
+            if l.get("clean"):
+                points[(day, l["payer_group"], l["payer_kind"], l["procedure_code"], l.get("provider_tier") or "unknown", l["pos_class"], l["allowed_cents"])] += 1
+        self.conn.execute("DELETE FROM exposure_daily")
+        self.conn.executemany("INSERT OR REPLACE INTO exposure_daily VALUES (?,?,?,?,?,?)", [k + (v,) for k, v in daily.items()])
+        self.conn.execute("DELETE FROM rate_points")
+        self.conn.executemany("INSERT OR REPLACE INTO rate_points VALUES (?,?,?,?,?,?,?,?)", [k + (v,) for k, v in points.items()])
 
     def run(self) -> dict:
         try:

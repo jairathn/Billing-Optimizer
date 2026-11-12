@@ -53,17 +53,26 @@ pre{background:var(--soft);padding:10px;border-radius:8px;overflow:auto;font-siz
 .actions button{margin-right:6px;margin-bottom:6px}
 .legend{font-size:12px;color:var(--muted);columns:2;column-gap:24px}
 .legend b{color:var(--ink)}
-canvas{max-height:320px}
+.chartbox{position:relative;height:320px}
 .small{font-size:12px}
 .ok{color:var(--good)}
+.alert{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:10px 12px;margin:8px 0;background:var(--panel)}
+.alert.acknowledged{opacity:.75}.alert.cleared{opacity:.55;border-left-color:var(--muted)}
+.alert .ttl{font-weight:600;margin:4px 0}
+.alert .row1{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+#bellBtn b{margin-left:4px}
+#feedChip{font-size:12px;color:var(--muted)}
+td.row{cursor:pointer}
 </style>
 </head>
 <body>
 <header>
   <h1>RemitWatch</h1>
-  <div class="fresh" id="fresh">loading…</div>
+  <div class="fresh"><div id="fresh">loading…</div><div id="feedChip"></div></div>
+  <button id="bellBtn" title="alerts">Alerts</button>
   <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
-  <label class="small">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="appealed">Appealed</option><option value="resolved">Resolved</option><option value="dismissed">Dismissed</option></select></label>
+  <label class="small">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
   <button id="themeBtn" title="theme">◐</button>
 </header>
 <nav id="nav"></nav>
@@ -71,16 +80,23 @@ canvas{max-height:320px}
 <div id="drawer"></div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="/static/features.js"></script>
 <script>
 const TABS = [
-  ['overview','Overview'],['payers','Payers & rates'],['downcoding','Downcoding'],['bundling','Bundling & modifiers'],
-  ['denials','Denials'],['contracts','Contracts & underpayment'],['fees','Fees & takebacks'],['appeals','Appeals queue'],['data','Data']
+  ['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['downcoding','Downcoding'],['bundling','Bundling & modifiers'],
+  ['denials','Denials'],['contracts','Contracts & underpayment'],['fees','Fees & takebacks'],['appeals','Appeals queue'],['progress','Progress'],
+  ['payers','Payers & rates'],['data','Data']
 ];
 const SIGNAL_HELP = {
   DOWNCODE_SVC06:'Payer reported the code you billed (835 SVC06) and paid a lower level.',
+  DOWNCODE_VS_BILLED:'The claim file or EMA shows a higher level was billed than the code on the remit, and the payer reported no change.',
+  DOWNCODE_LEVEL_REDUCED:'Payment cut for the level of care with the billed code left in place (reason code 186 or 150). This is the pattern that hides inside a normal-looking payment.',
+  DOWNCODE_LINE_SWAP:'The billed visit was denied and a lower-level visit line was paid in its place.',
+  DENIED_LEVEL_OF_SERVICE:'Reason code 150 or 186 on a procedure: the payer says the records do not support the service as billed. Appeal with the operative note.',
+  MPPR_POLICY:'This payer routinely allows third and later same-day procedures below the standard 50 percent. A contract question, not a one-off error.',
   DOWNCODE_CHARGE:'Charge amount equals your fee for a higher level than the code the payer paid; the payer did not report the original code.',
   DOWNCODE_RATE:'Allowed amount equals the payer\'s usual rate for a lower level with no code change reported.',
-  DOWNCODE_LEVEL_DENIED:'CARC 150/186 or RARC M25: payer says documentation does not support the level.',
+  DOWNCODE_LEVEL_DENIED:'Visit paid $0 with reason code 150/186 or a level-of-service remark: payer says documentation does not support the level.',
   CODE_CHANGED:'Payer changed the procedure code (SVC06) outside the E/M, biopsy, repair and excision level families.',
   EM_BUNDLED_NO_MODIFIER:'E/M paid $0 as included in a same-day procedure and no modifier was billed. Correctable: add 25 if separately identifiable, resubmit.',
   EM_BUNDLED_MOD57_MINOR:'E/M-57 bundled; the same-day procedure has a 0/10-day global, so 57 is the wrong modifier. Correctable: use 25.',
@@ -117,10 +133,14 @@ const HANDLING = {WRITE_OFF:'written off in EMA', TRANSFER_RESPONSIBILITY:'moved
 const $ = s => document.querySelector(s);
 const money = c => (c==null?'–':(c<0?'-':'')+'$'+Math.round(Math.abs(c)/100).toLocaleString());
 const money2 = c => (c==null?'–':'$'+(c/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}));
-const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-async function api(path, opts){ const r = await fetch(path, opts); if(!r.ok){ throw new Error(path+' '+r.status); } return r.json(); }
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const mods = js => { try { const a = JSON.parse(js||'[]'); return Array.isArray(a)&&a.length ? '-'+esc(a.join(',')) : ''; } catch(e){ return ''; } };
+async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); } const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} throw new Error(m || (path+' '+r.status)); } return r.json(); }
 function qs(o){ return Object.entries(o).filter(([k,v])=>v!==''&&v!=null).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&'); }
-function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el) return; state.charts[id]=new Chart(el, cfg); }
+function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el) return;
+  if(!el.parentElement.classList.contains('chartbox')){ const box=document.createElement('div'); box.className='chartbox'; el.parentElement.insertBefore(box, el); box.appendChild(el); }
+  cfg.options = Object.assign({maintainAspectRatio:false}, cfg.options||{});
+  state.charts[id]=new Chart(el, cfg); }
 const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8c6d1f','#6c757d'];
 
 function initNav(){
@@ -130,6 +150,8 @@ function initNav(){
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
   $('#themeBtn').onclick = ()=>{const r=document.documentElement; r.dataset.theme = r.dataset.theme==='dark'?'light':'dark';};
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
+  $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
+  $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
 }
 async function loadMeta(){
   state.meta = await api('/api/meta');
@@ -146,7 +168,7 @@ async function render(){
   $('#nav').querySelectorAll('a').forEach(a=>a.classList.toggle('active',a.dataset.tab===state.tab));
   await loadSummary();
   const v = $('#view'); v.innerHTML = '<div class="muted">loading…</div>';
-  const fn = {overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data}[state.tab] || overview;
+  const fn = {overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data, alerts: alertsTab, explorer: explorerTab, progress: progressTab}[state.tab] || overview;
   try { await fn(v); } catch(e){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; console.error(e); }
 }
 function sumBy(rows, key){ const m={}; rows.forEach(r=>{m[r[key]]=(m[r[key]]||0)+(r.shortfall_cents||0);}); return m; }
@@ -159,7 +181,8 @@ async function overview(v){
   const s = state.summary, cat = sumBy(s.by_category,'category');
   const appealable = s.by_actionable.find(r=>r.actionable==='appeal')||{}, fix = s.by_actionable.find(r=>r.actionable==='correct_and_resubmit')||{};
   const dl = Object.fromEntries(s.deadlines.map(d=>[d.bucket,d]));
-  v.innerHTML = `
+  const hot = (state.alertsNew||[]).filter(a=>a.severity!=='info').slice(0,4);
+  v.innerHTML = `${hot.length?`<div class="panel" style="margin-top:0"><h2>New alerts</h2>${hot.map(a=>`<div class="small"><span class="sev-${a.severity}">●</span> ${esc(a.title)}</div>`).join('')}<div class="small"><a id="goAlerts" style="cursor:pointer;color:var(--accent)">Open alerts</a></div></div>`:''}
   <div class="grid kpis">
     ${kpi('Identified leakage', money(total(s.by_category)), 'all categories, '+(state.status==='all'?'all':'open')+' findings', 'overview')}
     ${kpi('Appealable', money(appealable.shortfall_cents), (appealable.n||0).toLocaleString()+' findings', 'appeals')}
@@ -182,6 +205,7 @@ async function overview(v){
   </div>
   <div class="panel"><h2>Context</h2>${s.info.map(r=>`<div class="small">• ${esc(r.title)}</div>`).join('')||'<div class="muted small">No context rows yet.</div>'}</div>`;
   v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{state.tab=k.dataset.go; render();});
+  if(v.querySelector('#goAlerts')) v.querySelector('#goAlerts').onclick=()=>{state.tab='alerts'; render();};
   v.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>{ const cat=tr.dataset.cat; state.tab = {downcoding:'downcoding',bundling:'bundling',denial:'denials',underpayment:'contracts',contract:'contracts',fees:'fees'}[cat]||'denials'; state.filt[state.tab]={signal:tr.dataset.sig}; render(); });
   // charts
   const months = [...new Set(s.by_month.map(r=>r.month))].sort(), cats=['downcoding','bundling','denial','underpayment','fees','contract'];
@@ -197,7 +221,8 @@ function kpi(l,v,s,go){ return `<div class="kpi" data-go="${go}"><div class="l">
 async function findingsTable(v, container, base, opts={}){
   const key = state.tab; const f = Object.assign({signal:'',payer:'',severity:'',actionable:'',q:'',deadline:'',handling:''}, state.filt[key]||{});
   const page = state.page[key]||0, limit = 100;
-  const params = Object.assign({}, base, f, {year:state.year, status:state.status, limit, offset:page*limit, sort: opts.sort||'shortfall'});
+  const chosen = Object.fromEntries(Object.entries(f).filter(([k,val])=>val!==''&&val!=null));    // an empty filter must not erase the tab's own scope
+  const params = Object.assign({}, base, chosen, {year:state.year, status:state.status, limit, offset:page*limit, sort: opts.sort||'shortfall'});
   const res = await api('/api/findings?'+qs(params));
   const sigs = state.summary.by_signal.filter(r=>!base.category||base.category.split(',').includes(r.category)).map(r=>r.signal);
   const payers = state.summary.by_payer.map(r=>r.payer_group);
@@ -211,16 +236,16 @@ async function findingsTable(v, container, base, opts={}){
       <select data-f="handling"><option value="">Any EMA handling</option>${Object.keys(HANDLING).map(x=>`<option value="${x}" ${f.handling===x?'selected':''}>${HANDLING[x]}</option>`).join('')}</select>
       <input data-f="q" placeholder="claim id, code, CARC…" value="${esc(f.q)}">
       <span class="muted small">${res.total.toLocaleString()} findings · ${money(res.shortfall_cents)}</span>
-      <a class="small" href="/api/findings.csv?${qs(Object.assign({},base,f,{year:state.year,status:state.status}))}">Export CSV</a>
+      <a class="small" href="/api/findings.csv?${qs(Object.assign({},base,chosen,{year:state.year,status:state.status}))}">Export CSV</a>
       ${opts.bulk?'<button id="bulkAppealed" class="small">Mark selected appealed</button>':''}
     </div>
     <table><thead><tr>${opts.bulk?'<th></th>':''}<th>DOS</th><th>Payer</th><th>Provider</th><th>Code</th><th>Finding</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Expected</th><th class="num">Shortfall</th><th>CARC/RARC</th><th>Deadline</th><th>Status</th></tr></thead>
-    <tbody>${res.items.map(r=>`<tr class="row" data-id="${r.finding_id}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${r.finding_id}" onclick="event.stopPropagation()"></td>`:''}
-      <td>${r.service_date||''}</td><td>${esc(r.payer_group)}</td><td class="small">${esc((r.rendering_provider_name||'').replace(/\s+/g,' ').trim())}</td>
+    <tbody>${res.items.map(r=>`<tr class="row" data-id="${esc(r.finding_id)}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" onclick="event.stopPropagation()"></td>`:''}
+      <td>${esc(r.service_date)}</td><td>${esc(r.payer_group)}</td><td class="small">${esc((r.rendering_provider_name||'').replace(/\s+/g,' ').trim())}</td>
       <td>${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}</td>
-      <td><span class="sev-${r.severity}">●</span> ${esc(r.title)}<div class="small muted">${r.patient_control_number||''} ${r.ema_handling?'<span class="chip">'+esc(HANDLING[r.ema_handling]||r.ema_handling)+'</span>':''}</div></td>
+      <td><span class="sev-${esc(r.severity)}">●</span> ${esc(r.title)}<div class="small muted">${esc(r.patient_control_number)} ${r.stale?'<span class="chip">stale</span>':''} ${r.ema_handling?'<span class="chip">'+esc(HANDLING[r.ema_handling]||r.ema_handling)+'</span>':''}</div></td>
       <td class="num">${money2(r.charge_cents)}</td><td class="num">${money2(r.allowed_cents)}</td><td class="num">${money2(r.expected_cents)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b></td>
-      <td class="small">${esc(r.carc||'')}${r.rarc?'<br>'+esc(r.rarc):''}</td><td class="small ${r.appeal_deadline&&r.appeal_deadline<new Date().toISOString().slice(0,10)?'sev-high':''}">${r.appeal_deadline||''}</td><td><span class="chip">${r.status}</span></td></tr>`).join('')}</tbody></table>
+      <td class="small">${esc(r.carc||'')}${r.rarc?'<br>'+esc(r.rarc):''}</td><td class="small ${r.appeal_deadline&&r.appeal_deadline<new Date().toISOString().slice(0,10)?'sev-high':''}">${esc(r.appeal_deadline)}</td><td><span class="chip">${esc(r.status)}</span></td></tr>`).join('')}</tbody></table>
     <div class="pager"><button id="prev" ${page===0?'disabled':''}>‹ prev</button><span>page ${page+1} of ${Math.max(1,Math.ceil(res.total/limit))}</span><button id="next" ${(page+1)*limit>=res.total?'disabled':''}>next ›</button></div>`;
   container.querySelectorAll('[data-f]').forEach(el=>el.onchange=()=>{ state.filt[key]=Object.assign({}, f, {[el.dataset.f]:el.value}); state.page[key]=0; render(); });
   container.querySelector('#prev').onclick=()=>{state.page[key]=page-1; render();};
@@ -239,12 +264,14 @@ async function trendChart(id, params, label){
 function legend(sigs){ return `<div class="legend">${sigs.map(s=>`<div><b>${s}</b>: ${esc(SIGNAL_HELP[s]||'')}</div>`).join('')}</div>`; }
 
 async function downcoding(v){
-  const sigs=['DOWNCODE_SVC06','DOWNCODE_CHARGE','DOWNCODE_RATE','DOWNCODE_LEVEL_DENIED','CODE_CHANGED'];
+  const sigs=['DOWNCODE_SVC06','DOWNCODE_VS_BILLED','DOWNCODE_CHARGE','DOWNCODE_LEVEL_REDUCED','DOWNCODE_RATE','DOWNCODE_LINE_SWAP','DOWNCODE_LEVEL_DENIED','CODE_CHANGED'];
   v.innerHTML = `<div class="panel"><h2>Downcoding: ${money(total(sigRows(sigs)))} across ${count(sigRows(sigs)).toLocaleString()} lines</h2>
-    <div class="note">Three independent detectors: the payer's own SVC06 field, the charge amount fingerprint, and the allowed-amount fingerprint. On this practice's history the charge fingerprint agreed with SVC06 in every case where both existed. The chart shows when each payer starts and stops: downcoding programs come and go.</div>${legend(sigs)}</div>
+    <div class="note">Six detectors work together: the payer's own SVC06 field, the claim file and EMA, the charge amount, the level-of-care reason code 186 (payment cut with the billed code left in place), the allowed amount matching a lower level's rate, and line swaps. Visit downcoding and procedure code changes are counted here; the panels below cover visits.</div>${legend(sigs)}</div>
+    <div id="dcWho"></div>
     <div class="panel"><canvas id="cTrend"></canvas></div>
     <div class="panel" id="tbl"></div>`;
-  await trendChart('cTrend', {category:'downcoding'}, 'Downcoded lines per month by payer (all statuses)');
+  await downcodeWho(v.querySelector('#dcWho'));
+  await trendChart('cTrend', {category:'downcoding'}, 'Downcoded and recoded lines per month by payer (all statuses)');
   await findingsTable(v, v.querySelector('#tbl'), {category:'downcoding'});
 }
 async function bundling(v){
@@ -269,10 +296,10 @@ async function contracts(v){
   const year = state.year || state.summary.years[state.summary.years.length-1];
   const mx = await api('/api/rates/matrix?'+qs({year, tier: state.filt.tier||'physician'}));
   v.innerHTML = `<div class="panel"><h2>Contract rate gaps: ${money(total(c))} at Medicare parity · underpaid lines: ${money(total(u))}</h2>
-    <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
+    <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','MPPR_POLICY','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
     <div class="panel"><h2>Allowed amount as % of Medicare, ${year} <select id="tierSel"><option value="physician" ${(state.filt.tier||'physician')==='physician'?'selected':''}>physicians</option><option value="nonphysician" ${state.filt.tier==='nonphysician'?'selected':''}>PAs / NPs</option></select></h2>
       <table class="heat"><thead><tr><th>Payer</th><th>Kind</th>${mx.codes.map(c=>`<th class="num">${c}</th>`).join('')}</tr></thead>
-      <tbody>${mx.payers.slice(0,25).map(p=>`<tr><td style="text-align:left">${esc(p.payer_group)}</td><td style="text-align:left" class="small muted">${p.payer_kind}</td>${mx.codes.map(c=>{const x=p.codes[c]; if(!x) return '<td class="muted">·</td>'; const pct=x.pct; const col = pct==null?'':(pct<0.8?'var(--bad)':(pct<0.95?'var(--warn)':'var(--good)')); return `<td title="${money2(x.cents)} on ${x.n} lines; Medicare ${money2(x.medicare_cents)}" style="color:${col}">${money2(x.cents)}<div class="small">${pct==null?'':Math.round(pct*100)+'%'}</div></td>`;}).join('')}</tr>`).join('')}</tbody></table></div>
+      <tbody>${mx.payers.slice(0,25).map(p=>`<tr><td style="text-align:left">${esc(p.payer_group)}</td><td style="text-align:left" class="small muted">${esc(p.payer_kind)}</td>${mx.codes.map(c=>{const x=p.codes[c]; if(!x) return '<td class="muted">·</td>'; const pct=x.pct; const col = pct==null?'':(pct<0.8?'var(--bad)':(pct<0.95?'var(--warn)':'var(--good)')); return `<td title="${money2(x.cents)} on ${x.n} lines; Medicare ${money2(x.medicare_cents)}" style="color:${col}">${money2(x.cents)}<div class="small">${pct==null?'':Math.round(pct*100)+'%'}</div></td>`;}).join('')}</tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>Contract-level findings</h2><div id="tblC"></div></div>
     <div class="panel"><h2>Underpaid lines</h2><div id="tblU"></div></div>`;
   v.querySelector('#tierSel').onchange=e=>{state.filt.tier=e.target.value; render();};
@@ -297,31 +324,30 @@ async function payers(v){
   const ps = await api('/api/payers');
   const prov = await api('/api/providers');
   v.innerHTML = `<div class="grid two"><div class="panel"><h2>By payer</h2><table><thead><tr><th>Payer</th><th>Kind</th><th class="num">Findings</th><th class="num">Open $</th><th class="num">All $</th></tr></thead>
-    <tbody>${ps.map(r=>`<tr class="row" data-p="${esc(r.payer_group)}"><td>${esc(r.payer_group)}</td><td class="small muted">${r.payer_kind}</td><td class="num">${r.findings.toLocaleString()}</td><td class="num">${money(r.open_cents)}</td><td class="num">${money(r.shortfall_cents)}</td></tr>`).join('')}</tbody></table></div>
+    <tbody>${ps.map(r=>`<tr class="row" data-p="${esc(r.payer_group)}"><td>${esc(r.payer_group)}</td><td class="small muted">${esc(r.payer_kind)}</td><td class="num">${r.findings.toLocaleString()}</td><td class="num">${money(r.open_cents)}</td><td class="num">${money(r.shortfall_cents)}</td></tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>By rendering provider</h2><table><thead><tr><th>Provider</th><th>NPI</th><th>Type</th><th class="num">Findings</th><th class="num">Dollars</th></tr></thead>
-    <tbody>${prov.map(r=>`<tr><td>${esc(r.name||'')}</td><td class="small muted">${r.npi}</td><td class="small">${r.tier||''}</td><td class="num">${r.findings.toLocaleString()}</td><td class="num">${money(r.shortfall_cents)}</td></tr>`).join('')}</tbody></table></div></div>`;
+    <tbody>${prov.map(r=>`<tr><td>${esc(r.name||'')}</td><td class="small muted">${esc(r.npi)}</td><td class="small">${esc(r.tier)}</td><td class="num">${r.findings.toLocaleString()}</td><td class="num">${money(r.shortfall_cents)}</td></tr>`).join('')}</tbody></table></div></div>`;
   v.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>{ state.tab='denials'; state.filt.denials={payer:tr.dataset.p}; render(); });
 }
 async function appeals(v){
   const dl = Object.fromEntries(state.summary.deadlines.map(d=>[d.bucket,d]));
   v.innerHTML = `<div class="grid kpis">${kpi('Due within 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' findings','appeals')}${kpi('Due within 90 days', money((dl.due_90d||{}).shortfall_cents), ((dl.due_90d||{}).n||0)+' findings','appeals')}${kpi('Later', money((dl.later||{}).shortfall_cents), ((dl.later||{}).n||0)+' findings','appeals')}${kpi('Expired', money((dl.expired||{}).shortfall_cents), ((dl.expired||{}).n||0)+' findings (deadlines are estimates)','appeals')}</div>
-    <div class="panel"><h2>Work queue</h2><div class="note">Everything open that is either appealable or a correctable billing error, soonest deadline first. Open a row for the evidence and a ready-to-send letter. Deadlines are estimated from the remittance date and the payer type; confirm against the contract.</div><div id="tbl"></div></div>`;
+    <div class="panel"><h2>Work queue</h2><div class="note">Everything open that is either appealable or a correctable billing error, soonest deadline first. Open a row for the evidence and a ready-to-send letter. Deadlines come from each payer's published provider manual where we have it (Anthem commercial allows two years from the remittance) and from the payer type otherwise; each finding shows its basis. A contract can set a different period.</div><div id="tbl"></div></div>`;
   if(!state.filt.appeals) state.filt.appeals={deadline:'valid'};
   await findingsTable(v, v.querySelector('#tbl'), {category:'downcoding,bundling,denial,underpayment'}, {sort:'deadline', bulk:true});
 }
 async function data(v){
   const m = state.meta;
-  v.innerHTML = `<div class="grid two">
+  v.innerHTML = `<div id="feedPanel"></div><div class="grid two">
     <div class="panel"><h2>What is loaded</h2><table>
       <tr><td>Files ingested</td><td class="num">${(m.files.n||0).toLocaleString()} (${m.files.n835||0} remits, ${m.files.nema||0} EMA exports)</td></tr>
-      <tr><td>Last ingest</td><td class="num">${m.files.last_ingest||'–'}</td></tr>
+      <tr><td>Last ingest</td><td class="num">${esc(m.files.last_ingest||'–')}</td></tr>
       <tr><td>Remittances</td><td class="num">${(m.remits.n||0).toLocaleString()} · ${money(m.remits.total_cents)}</td></tr>
-      <tr><td>Payment dates</td><td class="num">${m.remits.first_payment} → ${m.remits.last_payment}</td></tr>
-      <tr><td>Service lines</td><td class="num">${(m.lines.n||0).toLocaleString()} · DOS ${m.lines.first_dos} → ${m.lines.last_dos}</td></tr>
-      ${m.ema.map(e=>`<tr><td>EMA ${e.family}</td><td class="num">${e.n.toLocaleString()} rows · DOS ${e.first_dos} → ${e.last_dos}</td></tr>`).join('')}
-      ${m.sync.map(s=>`<tr><td>${s.key}</td><td class="num small">${esc(s.value).slice(0,80)}</td></tr>`).join('')}
+      <tr><td>Payment dates</td><td class="num">${esc(m.remits.first_payment)} → ${esc(m.remits.last_payment)}</td></tr>
+      <tr><td>Service lines</td><td class="num">${(m.lines.n||0).toLocaleString()} · DOS ${esc(m.lines.first_dos)} → ${esc(m.lines.last_dos)}</td></tr>
+      ${m.ema.map(e=>`<tr><td>EMA ${esc(e.family)}</td><td class="num">${e.n.toLocaleString()} rows · DOS ${esc(e.first_dos)} → ${esc(e.last_dos)}</td></tr>`).join('')}
     </table></div>
-    <div class="panel"><h2>Analysis runs</h2><table><thead><tr><th>Run</th><th>Finished</th><th class="num">Lines</th><th class="num">Findings</th></tr></thead><tbody>${m.runs.map(r=>`<tr><td class="small">${r.run_id}</td><td class="small">${r.finished_at}</td><td class="num">${r.lines.toLocaleString()}</td><td class="num">${r.findings.toLocaleString()}</td></tr>`).join('')}</tbody></table></div>
+    <div class="panel"><h2>Analysis runs</h2><table><thead><tr><th>Run</th><th>Finished</th><th class="num">Lines</th><th class="num">Findings</th></tr></thead><tbody>${m.runs.map(r=>`<tr><td class="small">${esc(r.run_id)}</td><td class="small">${esc(r.finished_at)}</td><td class="num">${r.lines.toLocaleString()}</td><td class="num">${r.findings.toLocaleString()}</td></tr>`).join('')}</tbody></table></div>
   </div>
   <div class="panel"><h2>Data the practice still needs to supply</h2>
     <ol class="small">
@@ -332,6 +358,7 @@ async function data(v){
       <li><b>Provider roster</b> (NPI, credential, start date) to replace the inferred physician / non-physician tiers.</li>
       <li><b>MIPS feedback reports</b> (QPP) for 2022 to 2024 performance years to explain the drop in the Medicare bonus.</li>
     </ol></div>`;
+  await feedPanel(v.querySelector('#feedPanel'));
 }
 
 // ---------------------------------------------------------------- detail drawer and appeal packet
@@ -341,37 +368,40 @@ async function openDetail(id){
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
   d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:start"><h2>${esc(f.title)}</h2><button id="closeD">✕</button></div>
-    <div class="small muted">${f.signal} · <span class="sev-${f.severity}">${f.severity}</span> · ${f.actionable} · status <b>${f.status}</b></div>
+    <div class="small muted">${esc(f.signal)} · <span class="sev-${esc(f.severity)}">${esc(f.severity)}</span> · ${esc(f.actionable)} · status <b>${esc(f.status)}</b>${f.stale?' · stale':''}</div>
     <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div>
     <div class="actions"><button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal packet'}</button>
-      ${['open','in_progress','appealed','resolved','dismissed'].map(s=>`<button data-st="${s}" ${f.status===s?'disabled':''}>${s}</button>`).join('')}</div>
+      ${[['open','open'],['in_progress','in progress'],['appealed','appealed'],['resolved','recovered'],['lost','lost'],['dismissed','dismiss']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled':''}>${l}</button>`).join('')}</div>
     <table class="small">
-      <tr><td>Claim (CLP01)</td><td><b>${f.patient_control_number||''}</b> · payer claim # ${cl.payer_claim_control_number||''} · patient ${cl.patient||''}</td></tr>
-      <tr><td>Payer</td><td>${esc(f.payer_name)} (${esc(f.payer_group)}, ${f.payer_kind}) · ${rem.payer_contact_phone||''} ${rem.payer_contact_url||''}</td></tr>
-      <tr><td>Remit</td><td>trace ${rem.trace_number||''} · paid ${rem.payment_date||''} · ${rem.payment_method||''} ${money2(rem.payment_amount_cents)} · file ${esc(rem.source_name||'')}</td></tr>
-      <tr><td>Service</td><td>DOS ${f.service_date||''} · provider ${esc(f.rendering_provider_name||'')} (${f.rendering_provider_npi||''}, ${f.provider_tier||''})</td></tr>
+      <tr><td>Claim (CLP01)</td><td><b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)} · patient ${esc(cl.patient)}</td></tr>
+      <tr><td>Payer</td><td>${esc(f.payer_name)} (${esc(f.payer_group)}, ${esc(f.payer_kind)}) · ${esc(rem.payer_contact_phone)} ${esc(rem.payer_contact_url)}</td></tr>
+      <tr><td>Remit</td><td>trace ${esc(rem.trace_number)} · paid ${esc(rem.payment_date)} · ${esc(rem.payment_method)} ${money2(rem.payment_amount_cents)} · file ${esc(rem.source_name||'')}</td></tr>
+      <tr><td>Service</td><td>DOS ${esc(f.service_date)} · provider ${esc(f.rendering_provider_name||'')} (${esc(f.rendering_provider_npi)}, ${esc(f.provider_tier)})</td></tr>
+      ${(f.notes||f.auto_note)?`<tr><td>Notes</td><td>${esc(f.notes||'')} ${f.auto_note?'<span class="muted">'+esc(f.auto_note)+'</span>':''}</td></tr>`:''}
       <tr><td>Money</td><td>charge ${money2(f.charge_cents)} · allowed ${money2(f.allowed_cents)} · paid ${money2(f.paid_cents)} · expected ${money2(f.expected_cents)} · <b>shortfall ${money2(f.shortfall_cents)}</b></td></tr>
       <tr><td>Codes</td><td>${f.carc?esc(f.carc)+': '+esc(f.carc_text):''} ${f.rarc?'<br>'+esc(f.rarc)+': '+esc(f.rarc_text):''}</td></tr>
-      <tr><td>Deadline</td><td>${f.appeal_deadline||'–'} (estimated)</td></tr>
     </table>
+    ${drawerExtras(f, r)}
     <h3 class="small">Claim lines on this remit</h3>
     <table class="small"><thead><tr><th>#</th><th>Code</th><th>Submitted</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Paid</th><th>Adjustments</th></tr></thead>
-    <tbody>${(r.lines||[]).map(l=>`<tr ${l.line_key===f.line_key?'style="background:var(--chip)"':''}><td>${l.line_seq}</td><td>${l.procedure_code}${l.modifiers?'-'+JSON.parse(l.modifiers).join(','):''}</td><td>${l.original_procedure_code||''}</td><td class="num">${money2(l.charge_cents)}</td><td class="num">${money2(l.allowed_cents)}</td><td class="num">${money2(l.paid_cents)}</td>
-      <td>${(adjBy[l.line_key]||[]).map(a=>`<div>${a.group_code}-${a.reason_code} ${money2(a.amount_cents)} <span class="muted">${esc(a.text)}</span></div>`).join('')}${(remBy[l.line_key]||[]).map(a=>`<div class="muted">${a.code} ${esc(a.text)}</div>`).join('')}</td></tr>`).join('')}</tbody></table>
-    ${(adjBy.claim||[]).length?`<div class="small">Claim-level: ${adjBy.claim.map(a=>a.group_code+'-'+a.reason_code+' '+money2(a.amount_cents)).join(', ')}</div>`:''}
+    <tbody>${(r.lines||[]).map(l=>`<tr ${l.line_key===f.line_key?'style="background:var(--chip)"':''}><td>${esc(l.line_seq)}</td><td>${esc(l.procedure_code)}${mods(l.modifiers)}</td><td>${esc(l.original_procedure_code)}</td><td class="num">${money2(l.charge_cents)}</td><td class="num">${money2(l.allowed_cents)}</td><td class="num">${money2(l.paid_cents)}</td>
+      <td>${(adjBy[l.line_key]||[]).map(a=>`<div>${esc(a.group_code)}-${esc(a.reason_code)} ${money2(a.amount_cents)} <span class="muted">${esc(a.text)}</span></div>`).join('')}${(remBy[l.line_key]||[]).map(a=>`<div class="muted">${esc(a.code)} ${esc(a.text)}</div>`).join('')}</td></tr>`).join('')}</tbody></table>
+    ${(adjBy.claim||[]).length?`<div class="small">Claim-level: ${adjBy.claim.map(a=>esc(a.group_code)+'-'+esc(a.reason_code)+' '+money2(a.amount_cents)).join(', ')}</div>`:''}
     <h3 class="small">All remits for this claim</h3>
-    <table class="small"><thead><tr><th>Paid</th><th>Status</th><th>Payer</th><th class="num">Charge</th><th class="num">Paid</th><th>Trace</th></tr></thead><tbody>${(r.history||[]).map(h=>`<tr><td>${h.payment_date||''}</td><td>${h.claim_status_code}</td><td>${esc(h.payer_name)}</td><td class="num">${money2(h.charge_cents)}</td><td class="num">${money2(h.paid_cents)}</td><td class="small">${h.trace_number||''}</td></tr>`).join('')}</tbody></table>
-    ${r.link?`<div class="small"><b>EMA charge link:</b> ${r.link.state}${r.link.ema_cpt?' · billed '+esc(r.link.ema_cpt)+(r.link.ema_modifiers?'-'+JSON.parse(r.link.ema_modifiers).join(','):'')+' x'+r.link.ema_units+' '+money2(r.link.ema_charges_cents)+' (bill item '+(r.link.bill_item_id||'')+', status '+esc(r.link.ema_claim_status||'')+')':''} ${r.link.cause?'· '+esc(r.link.cause):''}</div>`:''}
+    <table class="small"><thead><tr><th>Paid</th><th>Status</th><th>Payer</th><th class="num">Charge</th><th class="num">Paid</th><th>Trace</th></tr></thead><tbody>${(r.history||[]).map(h=>`<tr><td>${esc(h.payment_date)}</td><td>${esc(h.claim_status_code)}</td><td>${esc(h.payer_name)}</td><td class="num">${money2(h.charge_cents)}</td><td class="num">${money2(h.paid_cents)}</td><td class="small">${esc(h.trace_number)}</td></tr>`).join('')}</tbody></table>
+    ${r.link?`<div class="small"><b>EMA charge link:</b> ${esc(r.link.state)}${r.link.ema_cpt?' · billed '+esc(r.link.ema_cpt)+mods(r.link.ema_modifiers)+' x'+esc(r.link.ema_units)+' '+money2(r.link.ema_charges_cents)+' (bill item '+esc(r.link.bill_item_id)+', status '+esc(r.link.ema_claim_status||'')+')':''} ${r.link.cause?'· '+esc(r.link.cause):''}</div>`:''}
     ${(r.handling||[]).length?`<div class="small"><b>How EMA handled it:</b> ${r.handling.map(x=>esc((x.carc||'')+' '+(x.adjustment_status||'')+' '+money2(x.adjustments_cents)+' on '+(x.transaction_date||''))).join(' · ')}</div>`:''}
-    ${(r.ema||[]).length?`<h3 class="small">ModMed EMA rows for this claim</h3><table class="small"><thead><tr><th>Family</th><th>DOS</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adj</th><th>Status / handling</th></tr></thead><tbody>${r.ema.slice(0,40).map(e=>`<tr><td>${e.family}${e.activity_type?' · '+e.activity_type:''}</td><td>${e.service_date||''}</td><td>${e.cpt||''}${e.modifiers?'-'+JSON.parse(e.modifiers).join(','):''}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc(e.claim_status||'')} ${e.carc?'· '+esc(e.carc):''} ${e.adjustment_status?'· '+esc(e.adjustment_status):''} ${e.denial_category?'· '+esc(e.denial_category):''}</td></tr>`).join('')}</tbody></table>`:'<div class="small muted">No EMA export rows for this claim (annual exports not loaded).</div>'}
+    ${(r.ema||[]).length?`<h3 class="small">ModMed EMA rows for this claim</h3><table class="small"><thead><tr><th>Family</th><th>DOS</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adj</th><th>Status / handling</th></tr></thead><tbody>${r.ema.slice(0,40).map(e=>`<tr><td>${esc(e.family)}${e.activity_type?' · '+esc(e.activity_type):''}</td><td>${esc(e.service_date)}</td><td>${esc(e.cpt)}${mods(e.modifiers)}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc(e.claim_status||'')} ${e.carc?'· '+esc(e.carc):''} ${e.adjustment_status?'· '+esc(e.adjustment_status):''} ${e.denial_category?'· '+esc(e.denial_category):''}</td></tr>`).join('')}</tbody></table>`:'<div class="small muted">No EMA export rows for this claim (annual exports not loaded).</div>'}
     <h3 class="small">Evidence</h3><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre>`;
   d.querySelector('#closeD').onclick=()=>d.classList.remove('open');
-  d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{ await api('/api/findings/'+id+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:b.dataset.st})}); openDetail(id); });
+  d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{ if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)) openDetail(id); });
+  bindDrawerExtras(id, d);
   d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);
     $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">${esc(p.subject)}</h2><button id="closeM">✕</button></div>
       ${p.corrected_claim_instructions?`<div class="panel"><b>Correction instructions</b><div>${esc(p.corrected_claim_instructions)}</div></div>`:''}
-      <div class="actions" style="margin-top:8px"><button class="primary" id="copyL">Copy letter</button><button id="copyE">Copy evidence</button><span class="small muted">deadline ${p.deadline||'–'} · payer ${p.payer_contact.phone||''} ${p.payer_contact.url||''}</span></div>
+      <div class="actions" style="margin-top:8px"><button class="primary" id="copyL">Copy letter</button><button id="copyE">Copy evidence</button><span class="small muted">file by ${esc(p.deadline||'–')} · payer ${esc(p.payer_contact.phone)} ${esc(p.payer_contact.url)}</span></div>
+      <div class="note">${esc(p.deadline_basis||'')} To have the clinical paragraphs written from the chart, close this and use "Build the appeal from the visit note" in the finding panel.</div>
       <pre id="letter">${esc(p.letter)}</pre>
       <b class="small">Attach</b><ul class="small">${p.attachments.map(a=>`<li>${esc(a)}</li>`).join('')}</ul>
       <pre id="evid">${esc(p.evidence)}</pre>`;
@@ -387,7 +417,9 @@ window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(T
   if(location.hash && TABS.some(t=>t[0]===location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
   try { await loadMeta(); } catch(e){ $('#fresh').textContent='no data loaded yet'; }
+  await refreshHeader();
   render();
+  setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);
 })();
 </script>
 </body>

@@ -38,7 +38,7 @@ def main() -> None:
 
     p("## The one-paragraph answer\n")
     cat = {r["category"]: r for r in q(conn, "SELECT category, COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE status IN ('open','in_progress','appealed') AND category IN ('downcoding','bundling','denial','underpayment','fees','contract') GROUP BY 1")}
-    rec = q(conn, "SELECT COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE status='resolved' AND notes LIKE 'Paid on a later remittance%'")[0]
+    rec = q(conn, "SELECT COUNT(*) n, SUM(shortfall_cents) c FROM findings WHERE status='resolved' AND auto_note IS NOT NULL")[0]
     tot = sum(r["c"] or 0 for r in cat.values())
     p(f"Across the whole archive the detectable, still-unrecovered leakage is about {money(tot)}. Classic E/M downcoding, the thing the practice asked about, is "
       f"{money((cat.get('downcoding') or {}).get('c'))} of it. The money is in bundling ({money((cat.get('bundling') or {}).get('c'))}), "

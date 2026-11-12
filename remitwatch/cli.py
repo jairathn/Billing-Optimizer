@@ -120,40 +120,41 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cycle(args: argparse.Namespace) -> int:
+    """One hands-off cycle: sync Dropbox -> ingest -> detect -> alerts -> notify (-> report when due)."""
+    from .pipeline import run_cycle
+
+    out = run_cycle(args.db, sync=not args.skip_sync, full=args.full, local=args.local, force_detect=args.force_detect,
+                    report=True if args.report else None, email=not args.no_email, report_dir=args.report_dir,
+                    log=lambda *a: print(*a, file=sys.stderr))
+    print(json.dumps(out, indent=1, default=str))
+    return 0 if "error" not in out else 1
+
+
 def cmd_weekly(args: argparse.Namespace) -> int:
-    """Hands-off job: sync Dropbox -> ingest -> detect -> report (-> email)."""
-    from .detect import run_detection
-    from .dropbox_sync import ingest_new_files, sync
-    from .report import build_report, email_report, save_report
+    """The cycle with the summary report forced (kept for existing cron entries)."""
+    args.report, args.force_detect = True, True
+    return cmd_cycle(args)
+
+
+def cmd_alerts(args: argparse.Namespace) -> int:
+    from .alerts import notify, run_alerts
     from .store import Store
 
-    t0 = time.time()
     store = Store(args.db)
-    sync_stats = None
-    ingest_stats = None
-    if not args.skip_sync:
-        sync_stats = sync(store, full=args.full)
-        print(f"sync: {sync_stats['downloaded']} new, {sync_stats['unchanged']} unchanged, {sync_stats['errors']} errors", file=sys.stderr)
-        if sync_stats["new_files"]:
-            ingest_stats = ingest_new_files(store, sync_stats["new_files"])
-            print(f"ingest: {ingest_stats}", file=sys.stderr)
-    if args.local:
-        ingest_stats = ingest_new_files(store, [os.path.join(dp, f) for dp, _d, fs in os.walk(args.local) for f in fs])
-    store.close()
-    summary = run_detection(args.db)
-    store = Store(args.db)
-    text = build_report(store, sync_stats=sync_stats, ingest_stats=ingest_stats)
-    path = save_report(text, args.report_dir)
-    sent = email_report(text) if not args.no_email else False
-    print(json.dumps({"findings_by_signal": summary, "report": path, "emailed": sent, "seconds": round(time.time() - t0, 1)}, indent=1))
+    out = run_alerts(store.conn)
+    if args.notify:
+        out["notified"] = notify(store.conn)
+    rows = store.query("SELECT kind, severity, title FROM alerts WHERE status != 'cleared' ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END")
+    print(json.dumps({"summary": out, "active": [dict(r) for r in rows]}, indent=1, default=str))
     return 0
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
-    os.environ.setdefault("REMITWATCH_DB", args.db)
-    uvicorn.run("remitwatch.api:app", host=args.host, port=args.port, reload=False)
+    os.environ["REMITWATCH_DB"] = args.db
+    uvicorn.run("remitwatch.api:app", host=args.host, port=args.port, reload=False, workers=1)     # one worker: the scheduler lives in it
     return 0
 
 
@@ -185,9 +186,13 @@ def main(argv: list[str] | None = None) -> int:
     lk = sub.add_parser("link"); lk.set_defaults(fn=cmd_link)
     o = sub.add_parser("oauth"); o.set_defaults(fn=cmd_oauth)
     s_ = sub.add_parser("sync"); s_.add_argument("--full", action="store_true"); s_.add_argument("--no-ingest", action="store_true"); s_.set_defaults(fn=cmd_sync)
-    w = sub.add_parser("weekly"); w.add_argument("--full", action="store_true"); w.add_argument("--skip-sync", action="store_true")
-    w.add_argument("--local", default=None, help="also ingest every file under this local folder"); w.add_argument("--no-email", action="store_true")
-    w.add_argument("--report-dir", default="data/reports"); w.set_defaults(fn=cmd_weekly)
+    for name, fn in (("cycle", cmd_cycle), ("weekly", cmd_weekly)):
+        w = sub.add_parser(name); w.add_argument("--full", action="store_true"); w.add_argument("--skip-sync", action="store_true")
+        w.add_argument("--local", default=None, help="also ingest every file under this local folder"); w.add_argument("--no-email", action="store_true")
+        w.add_argument("--force-detect", action="store_true", help="re-run detection even when no new file arrived")
+        w.add_argument("--report", action="store_true", help="send the summary report now instead of waiting until it is due")
+        w.add_argument("--report-dir", default="data/reports"); w.set_defaults(fn=fn)
+    al = sub.add_parser("alerts"); al.add_argument("--notify", action="store_true"); al.set_defaults(fn=cmd_alerts)
     v = sub.add_parser("serve"); v.add_argument("--host", default="127.0.0.1"); v.add_argument("--port", type=int, default=8000); v.set_defaults(fn=cmd_serve)
     c = sub.add_parser("stats"); c.set_defaults(fn=cmd_stats)
     args = ap.parse_args(argv)
