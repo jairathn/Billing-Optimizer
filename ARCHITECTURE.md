@@ -9,7 +9,7 @@ Dropbox "/Trizetto Data"                    local mirror                 SQLite 
   837 claim files (.txt)                                      read       ema_rows, claims_837, lines_837            fee_table       appeal packets
 ```
 
-One process, one SQLite file. The weekly job (`remitwatch.cli weekly`) runs the four steps in order and is safe to re-run: files are skipped by content hash, 835 transactions by content fingerprint, EMA rows by row fingerprint, and findings keep their status across runs.
+One process, one SQLite file. A cycle (`remitwatch.cli cycle`, or the scheduler inside the dashboard) runs sync, ingest, detect, alerts and notify in order and is safe to re-run: files are skipped by content hash, 835 transactions by content fingerprint, EMA rows by row fingerprint, and findings keep their status, notes and appeal dates across runs.
 
 ## Parsing
 
@@ -21,29 +21,56 @@ One process, one SQLite file. The weekly job (`remitwatch.cli weekly`) runs the 
 
 ## Baselines (no contracts needed)
 
-- Provider tier: each rendering NPI is classified physician or non-physician from its Medicare allowed amounts (non-physician practitioners are paid 85 percent).
+- Provider tier: each rendering NPI is classified physician or non-physician from its Medicare allowed amounts (non-physician practitioners are paid 85 percent). Provider names are the commonest personal spelling across payers.
 - Fee table: the practice's charge amounts per code and year, learned from unaltered lines. A charge that equals the fee of a higher-level code reveals a downcode even when the payer hides the original code.
-- Payer rates: per payer group, year, code and tier, the most common allowed amount on cleanly paid primary lines, using only the highest-ranked surgical procedure on each claim so multiple-procedure reductions (which many payers apply without CARC 59) do not pollute the mode. Pricing modifiers (26, TC, 50, 52, 80...) are excluded.
-- Medicare baseline: the same rates from Medicare KY (CGS J15), falling back to Medicare IN, per year, code and tier.
-- Expected amount for a line: the payer's usual rate, halved for the second surgical procedure (quartered for later ones on commercial plans), as a rank-aware expectation.
+- Payer rates: per payer group, year, code, tier and place-of-service class (office or facility), the most common allowed amount on cleanly paid primary lines, using only the highest-ranked surgical procedure on each claim. Lines with pricing modifiers, bundling codes or level-of-care codes are left out. Facility-setting visits are paid less by design, so they have their own baseline and never read as underpaid against the office rate.
+- Medicare baseline: the same rates from Medicare KY (CGS J15), falling back to Medicare IN.
+- Multiple procedures: each payer's own routine allowance for the second and for later same-day procedures is learned from its remittances (snapped to 100, 75, 50 or 25 percent). A payer whose routine is below the standard 50 percent gets one contract-level finding instead of hundreds of line findings.
+- Expected amount for a downcoded line: the payer's usual rate for the billed code; where the payer has no baseline for that setting, the amount actually allowed scaled by the payer's office-setting ratio between the two codes.
 
 ## Detection
 
-`detect.py` loads all non-superseded lines with their claim and transaction context, builds the baselines, then runs line rules (downcoding, zero-paid lines inside paid claims, underpayment), claim rules (denied claims never paid later) and aggregate rules (fees, takebacks, G2211, MIPS, sequestration, contract rate gaps). Each finding gets a stable id from the signal and the line or claim key, a severity, an action, the expected amount and shortfall, the CARC/RARC with text, an evidence JSON, and an estimated appeal deadline (payment date plus 120 days Medicare, 60 MA, 180 commercial, 365 UHC family; refine from contracts).
+`detect.py` loads all non-superseded lines with their claim and transaction context, builds the baselines, then runs line rules, claim rules and aggregate rules. Visit downcoding has six detectors that cover the ways a payer can do it:
 
-Payer names from the 835 are normalized to payer groups and kinds (medicare, medicare_advantage, medicaid, commercial, supplement, tricare, va); the claim filing indicator (CLP06 = 16) marks Medicare Advantage products that share a commercial payer name.
+| detector | what the remittance looks like |
+|---|---|
+| DOWNCODE_SVC06 | the payer reports the billed code and pays a lower level |
+| DOWNCODE_VS_BILLED | no change reported, but the 837 claim file or EMA shows a higher level went out |
+| DOWNCODE_CHARGE | no change reported, but the charge is the practice's fee for a higher level |
+| DOWNCODE_LEVEL_REDUCED | billed code left in place, payment cut with reason code 186 or 150 |
+| DOWNCODE_RATE | billed code left in place, allowed amount equals the payer's rate for a lower level |
+| DOWNCODE_LINE_SWAP / DOWNCODE_LEVEL_DENIED | billed visit denied for level, with or without a lower-level line paid in its place |
+
+One event produces one finding: the paid half of a line swap, and a secondary payer that echoes the primary's code change, are not counted again.
+
+Each finding carries the billed code, the billed-to-paid pair, the number of levels dropped, the plan named on the remittance, place of service, location and diagnosis where EMA has them, the payment month, the filing date and the basis for that date. `exposure` holds the number of lines billed by month, payer, plan, provider, billed code and place of service, which is the denominator behind every rate in the dashboard.
+
+Findings are rebuilt on every run and matched to the previous run by id. What people recorded is carried forward. A later remittance that pays the same bill, code and date resolves the finding and records the amount; the biller's own note is kept beside the automatic one, and if that payment is later withdrawn the finding returns to exactly the status it had. When new data changes a line's signal, the recorded work follows the line. Findings someone worked that the rules no longer produce are kept and marked stale, and stale rows are left out of every total.
+
+## Alerts
+
+`alerts.py` runs after detection. It compares the last 28 days of payment dates, counted back from the newest payment in the store, with the 182 days before them, per payer and per family (visit downcoding, procedure code changes, bundling, denials, underpayment), using day-level line counts as denominators. A ramp needs at least four events, a rate at least twice the baseline rate, and a Poisson tail probability below one percent. A slower rule compares the last 91 days with the 365 before them, for a climb too gradual to double in four weeks. A payer with no events in the baseline but a history before it is reported as started again. Other rules: one provider singled out (level 4 and 5 visits, 90 days), rate cuts (the payer's most common allowed amount over the last 60 days against the 180 before), new reason codes, deadlines and a stopped feed. An alert has one row for as long as its condition holds, clears itself, and is raised again if the condition returns.
+
+## Appeal packets
+
+`appeals.py` writes the letter for each signal from templates, with statute wording that was checked against the Kentucky and Indiana sources (`codes.LEGAL`) and filing windows from `codes.appeal_rule`. `notes.py` adds the clinical part: it extracts text from the uploaded note, removes the identifiers known from the remittance and common identifier patterns, and asks Claude (`claude-opus-5-5`, structured output) to audit the note against the CPT rules for the dispute and return levels, word-for-word quotes, gaps and a recommendation. The paragraphs go into the letter unless the recommendation is not to appeal. The packet is rendered as one PDF with reportlab and stored in `appeal_packets`. Without an API key the same packet is built from the template.
 
 ## Serving
 
-`api.py` exposes JSON endpoints (summary, findings with filters and CSV export, finding detail with claim lines, adjustments, remarks, remit header, claim history and EMA rows, payer rates and a rates matrix, appeal packet, status updates). `static/index.html` is a single-page dashboard (vanilla JS, Chart.js from a CDN). Authentication is a single shared HTTP Basic login; patient names are reduced to initials unless `REMITWATCH_SHOW_PHI=1`.
+`api.py` exposes JSON endpoints: summary, findings with filters and CSV export, finding detail, payer rates, `breakdown` (any one or two of 23 dimensions with denominators), `progress`, `alerts`, `sync/status`, `sync/run`, the Dropbox webhook, and the appeal packet endpoints. `static/index.html` and `static/features.js` are a single-page dashboard (vanilla JS, Chart.js from a CDN, no build step).
+
+Authentication is one shared HTTP Basic login. State-changing calls must carry an `X-Requested-With` header, which a cross-site form cannot send. With `REMITWATCH_SHOW_PHI=0` the API returns an allowlist of claim columns and the patient's initials; names and member numbers appear only in the packet PDF. Every value that originates in a payer or EMA file is escaped before it is put in the page.
 
 ## Scheduling
 
-`dropbox_sync.py` lists the folder with `files/list_folder` (recursive) and stores the cursor; later runs call `list_folder/continue` so only new or changed files are downloaded (`files/download` by id). A refresh token obtained once with `remitwatch.cli oauth` keeps the job unattended. `report.py` writes a Markdown summary (new findings, appeals due in 45 days, correctable errors) to `data/reports/` and emails it when SMTP is configured.
+`pipeline.py` owns the cycle and its lock. The lock lives in the store, carries a token and a heartbeat, can only be released by the cycle that took it, and is taken over after three hours without a heartbeat. The dashboard process runs a scheduler thread that starts a cycle on the configured interval, when Dropbox calls the webhook (after a short wait so a batch of uploads finishes), and when someone presses "Sync and analyse now". Each cycle runs in a child process so that the memory detection needs is returned afterwards and a failure cannot take the dashboard down.
+
+`dropbox_sync.py` lists the folder with `files/list_folder` (recursive) and stores the cursor; later runs call `list_folder/continue` so only new or changed files are downloaded. A refresh token obtained once with `remitwatch.cli oauth` keeps it unattended.
 
 ## Limits and next steps
 
-- Expected amounts are revealed-rate baselines, not contracts. Loading contracts (fee schedules with effective dates) would turn "below usual" into "below contract".
-- Appeal deadlines are defaults by payer type.
-- Line matching to EMA uses composite keys; the annual EMA exports are not yet in Dropbox, so EMA context exists only from late July 2026.
-- The store is one SQLite file (about 0.7 GB for 32K remits); it is fine for one practice and one small host.
+- Expected amounts are revealed-rate baselines, not contracts. Loading contracts would turn "below usual" into "below contract".
+- Filing windows come from provider manuals where they were read and from payer type otherwise; a contract can differ.
+- Location and diagnosis are known only where EMA exports exist (late July 2026 onward); location is otherwise estimated from the provider's usual site.
+- The store is one SQLite file (about 0.9 GB for 32K remittances) and detection holds every line in memory (about 2 GB). That is fine for one practice on a 4 GB host.
+- The visit-note review has not been exercised against the live API in this build.

@@ -224,7 +224,7 @@ async function findingsTable(v, container, base, opts={}){
   const chosen = Object.fromEntries(Object.entries(f).filter(([k,val])=>val!==''&&val!=null));    // an empty filter must not erase the tab's own scope
   const params = Object.assign({}, base, chosen, {year:state.year, status:state.status, limit, offset:page*limit, sort: opts.sort||'shortfall'});
   const res = await api('/api/findings?'+qs(params));
-  const sigs = state.summary.by_signal.filter(r=>!base.category||base.category.split(',').includes(r.category)).map(r=>r.signal);
+  const sigs = base.signal ? base.signal.split(',') : state.summary.by_signal.filter(r=>!base.category||base.category.split(',').includes(r.category)).map(r=>r.signal);
   const payers = state.summary.by_payer.map(r=>r.payer_group);
   container.innerHTML = `
     <div class="filters">

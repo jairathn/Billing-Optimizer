@@ -1,0 +1,14 @@
+# HTTPS in front of the dashboard. Caddy obtains and renews the certificate for SITE_ADDRESS on its own.
+{$SITE_ADDRESS} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+	}
+	request_body {
+		max_size 20MB
+	}
+	reverse_proxy app:8000
+}

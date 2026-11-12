@@ -566,3 +566,18 @@ def test_identifiers_stay_on_the_server_when_names_are_hidden(tmp_path, monkeypa
                  headers={"X-Requested-With": "remitwatch"})
     assert bad.status_code == 400 and "Word document" in bad.json()["detail"]
     assert c.post(f"/api/packets/{pid}/email", json={"to": "x@example.org"}, headers={"X-Requested-With": "remitwatch"}).json()["sent"] is False
+
+
+def test_slow_climb_is_caught_by_the_quarter_against_the_year(tmp_path):
+    conn = alert_store(tmp_path)
+    # a year at 3 per 100, then a quarter at about 11 per 100: each month adds a little, so the four-week rule stays quiet
+    for day in ("2025-08-15", "2025-10-15", "2025-12-15", "2026-02-15", "2026-04-15", "2026-06-15"):
+        add_exposure(conn, day, 100, payer="Anthem / BCBS Medicare Advantage"); add_findings(conn, 3, day, payer="Anthem / BCBS Medicare Advantage")
+    for day, n in (("2026-07-20", 5), ("2026-08-20", 5), ("2026-09-20", 6)):
+        add_exposure(conn, day, 50, payer="Anthem / BCBS Medicare Advantage"); add_findings(conn, n, day, payer="Anthem / BCBS Medicare Advantage")
+    conn.commit()
+    active = AlertEngine(conn, today="2026-10-10").evaluate()
+    kinds = {a["kind"] for a in active.values() if a["payer_group"] == "Anthem / BCBS Medicare Advantage"}
+    assert kinds == {"RISING"}
+    rising = next(a for a in active.values() if a["kind"] == "RISING")
+    assert rising["n_recent"] == 16 and "over the last three months" in rising["title"] and abs(rising["baseline"] - 0.03) < 1e-9

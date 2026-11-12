@@ -1,4 +1,5 @@
-# Weekly, Monday 05:10 America/Chicago (practice time). Logs to data/reports/cron.log.
-# Install with: crontab deploy/crontab.example   (after editing paths)
+# Only for hosts that do not keep the dashboard running. Normally the dashboard's own scheduler does this
+# (REMITWATCH_SYNC_INTERVAL_MINUTES) and no cron entry is needed.
+# Hourly cycle, practice time. Logs to data/reports/cron.log. Install with: crontab deploy/crontab.example
 CRON_TZ=America/Chicago
-10 5 * * 1  cd /opt/remitwatch && . .venv/bin/activate && set -a && . ./.env && set +a && python -m remitwatch.cli weekly >> data/reports/cron.log 2>&1
+7 * * * *  cd /opt/remitwatch && . .venv/bin/activate && set -a && . ./.env && set +a && python -m remitwatch.cli cycle >> data/reports/cron.log 2>&1

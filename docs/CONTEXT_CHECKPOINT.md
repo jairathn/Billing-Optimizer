@@ -1,6 +1,6 @@
 # Context checkpoint (resume here after compaction)
 
-Last updated: 2026-11-06 (two commits pushed; waiting on research workflows and recent-file download)
+Last updated: 2026-11-12 (detection 2.1, living site, alerts and note-based appeal packets built, reviewed and pushed). Read the last section first.
 
 ## Mission
 Rebuild the Billing-Optimizer repo (currently "DermBill AI", an LLM note-analysis tool) into a
@@ -115,3 +115,54 @@ Associates (ODA), drjairath@owensboroderm.com.
 - Still pending: remaining recent RMT (Sept Reports/Trizetto files ~600+, rest of 10-5 folder incl. 87 x 837 .txt) from the
   download agent; research docs from both workflows (then: appeal deadlines/statutes into appeals.py + detect.py
   APPEAL_DAYS, OPERATIONS.md hosting recommendation, final summary to the user).
+
+
+## State at 2026-11-12 (third request delivered)
+
+The third request asked for: breakdowns by provider, NPI, procedure, code and anything else useful; a living site that pulls from
+Dropbox continuously and shows progress in the fight; alerts when downcoding ramps again; and a small feature to upload a clinical
+note and produce an appeal report to email. All four are built, tested (34 tests), independently reviewed (two review agents, 19
+verified defects, all fixed) and pushed to claude/ecstatic-fermi-orfcgo.
+
+New modules
+- remitwatch/alerts.py    AlertEngine: RAMP, RISING, RESUMED, NEW_BEHAVIOR, PROVIDER_TARGETED, RATE_CUT, NEW_REASON_CODE, DEADLINE, STALE_FEED
+- remitwatch/pipeline.py  run_cycle (sync, ingest, detect, alerts, notify, report), owned lock with heartbeat, Scheduler thread, status()
+- remitwatch/notes.py     extract_text, scrub, review_note (Claude API, structured output), build_from_note, render_pdf, email_packet
+- remitwatch/static/features.js   Alerts, Who & what (explorer), Progress, feed panel, note-based appeal builder
+- tests/test_features.py  19 tests for all of the above (synthetic data)
+Changed: detect.py (version 2.1), codes.py (appeal_rule, LEGAL, payer_group_kind, pos_class), appeals.py, api.py, cli.py (cycle, alerts),
+report.py, x12_837.py, index.html, deploy files, docs.
+
+Things a future session must know
+- Reason code 186 is Anthem's downcoding mark. Commercial: with SVC06. Medicare Advantage and Medicaid: billed code kept, allowed
+  amount cut to the next level down (signal DOWNCODE_LEVEL_REDUCED).
+- Anthem Kentucky commercial reconsideration window is two years from the EOP (read in the manual). This took Anthem's still-appealable
+  open findings from 224 ($18.7K) to 1,498 ($83.9K).
+- Rate baselines are keyed by place-of-service class. Facility-setting visits are paid less and must not be compared with office rates.
+- Findings keep recorded work across runs: notes and auto_note are separate columns, prev_status allows exact undo, work follows the
+  line when its signal changes, stale rows are excluded from totals.
+- The live Claude API call in notes.review_note was never run (no API key in the build environment). It is tested with a stand-in client.
+- The newest remittance in Dropbox is dated 2026-10-09. The feed has stopped or is uploaded monthly. The STALE_FEED alert says so.
+- docs/RESEARCH_SUMMARY.md lists exactly what was checked against a primary source. The two RESEARCH_*.md files are raw, mostly
+  unverified notes salvaged from research runs that ran out of usage credits. Be frugal with agents: the user ran out of credits twice.
+
+Numbers on the full archive (32,550 remittances, payments 2024-01-01 to 2026-10-09, $30.0M paid)
+- Open leakage $2.40M: contracts below Medicare $897K, denials $633K, fees and takebacks $531K, bundling $162K, underpayment $128K,
+  downcoding and code changes $52K.
+- Recovered on later remittances: $1.16M across 5,574 lines. Open and inside the filing window: 3,236 findings, $254K.
+- Visit downcoding: 229 of 93,878 office visits (0.24 percent), $7.7K. Anthem commercial 122 (0.40 per 100), Anthem Medicare Advantage
+  85 (2.63 per 100). 99204 paid as 99203 is half of it. One provider carries 44 percent. A quarter is out-of-state Blue plans.
+- Anthem recoding of radiation codes since April 2026: 126 lines, $43K. This is the 2026 "ramp".
+- Active alerts at build time: feed stopped; one provider singled out by Anthem Medicare Advantage (8 of 13 level 4 and 5 visits in
+  90 days); Humana Medicare Advantage bundling climbing (3.3 percent of lines against 1.7); Anthem procedure code changes climbing;
+  340 findings worth $24K reaching their deadline within 30 days.
+
+What the user still has to do (see docs/OPERATIONS.md)
+1. Put it on a BAA-covered host (small AWS, Google Cloud or Azure VM, 4 GB) with docker compose.
+2. Create the Dropbox app, run `remitwatch.cli oauth`, set the three DROPBOX_ variables and REMITWATCH_SYNC_INTERVAL_MINUTES, add the webhook.
+3. Set SMTP_HOST and REPORT_TO for alerts and the summary.
+4. Get a BAA from Anthropic before setting ANTHROPIC_API_KEY for the note review.
+5. Restart the remittance uploads, and route 837 claim files and annual EMA exports to the same Dropbox folder (docs/MISSING_DATA.md).
+
+Scratch (session only, not in the repository): store at <scratchpad>/data/remitwatch.sqlite, Dropbox mirror at <scratchpad>/data/dropbox,
+payer manuals at <scratchpad>/manuals, statutes at <scratchpad>/statutes, screenshots at <scratchpad>/shots.

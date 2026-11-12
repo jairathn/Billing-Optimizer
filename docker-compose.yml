@@ -1,13 +1,25 @@
-# One small host runs both the dashboard and the weekly job.
-#   docker compose up -d            -> dashboard on http://host:8000 plus the weekly schedule
-#   docker compose run --rm app weekly   -> run the weekly job now
+# One small host runs everything: the dashboard, the scheduler that pulls from Dropbox, and HTTPS.
+#   docker compose up -d                  -> site on https://YOUR-HOST (set SITE_ADDRESS in .env)
+#   docker compose run --rm app cycle     -> run one cycle now
+#   docker compose logs -f app            -> watch it
 services:
   app:
     build: .
-    command: cron
+    command: serve
     env_file: .env
-    ports: ["8000:8000"]
+    expose: ["8000"]
     volumes: ["remitwatch-data:/data"]
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on: [app]
     restart: unless-stopped
 volumes:
   remitwatch-data:
+  caddy-data:

@@ -33,7 +33,7 @@ async function refreshHeader(){
 }
 
 // ---------------------------------------------------------------- alerts
-const ALERT_KIND = {RAMP:'Ramping up', RESUMED:'Started again', NEW_BEHAVIOR:'New behavior', PROVIDER_TARGETED:'One provider singled out', RATE_CUT:'Rate cut',
+const ALERT_KIND = {RAMP:'Ramping up', RISING:'Climbing', RESUMED:'Started again', NEW_BEHAVIOR:'New behavior', PROVIDER_TARGETED:'One provider singled out', RATE_CUT:'Rate cut',
   NEW_REASON_CODE:'New reason code', DEADLINE:'Deadlines', STALE_FEED:'Feed stopped'};
 async function alertsTab(v){
   const show = state.filt.alertShow || 'active';
@@ -50,8 +50,9 @@ async function alertsTab(v){
 function alertCard(a){
   const d = a.detail || {};
   const facts = [];
-  if(d.recent_count!=null) facts.push(`${d.recent_count} of ${(d.recent_lines||0).toLocaleString()} lines in the last four weeks`);
-  if(d.baseline_count!=null) facts.push(`${d.baseline_count} of ${(d.baseline_lines||0).toLocaleString()} in the six months before`);
+  const win = d.recent_window && d.baseline_window ? [`${d.recent_window[0]} to ${d.recent_window[1]}`, `${d.baseline_window[0]} to ${d.baseline_window[1]}`] : ['the recent window', 'the baseline'];
+  if(d.recent_count!=null) facts.push(`${d.recent_count} of ${(d.recent_lines||0).toLocaleString()} lines from ${win[0]}`);
+  if(d.baseline_count!=null) facts.push(`${d.baseline_count} of ${(d.baseline_lines||0).toLocaleString()} from ${win[1]}`);
   if(d.quiet_days!=null) facts.push(`quiet for ${d.quiet_days} days before that`);
   if(d.signals) facts.push(Object.entries(d.signals).map(([k,n])=>`${k} ${n}`).join(', '));
   if(d.codes) facts.push(d.codes.map(c=>`${c.code} ${money2(c.old_cents)} → ${money2(c.new_cents)} (${pct(c.pct)}) since ${c.since}`).join('; '));

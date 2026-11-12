@@ -1177,10 +1177,10 @@ class Detector:
             a[4] += l.get("paid_cents") or 0
         self.conn.execute("DELETE FROM exposure")
         self.conn.executemany("INSERT OR REPLACE INTO exposure VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [k + tuple(v) for k, v in agg.items()])
-        # the last 400 days at day resolution for the alert engine: line counts, and the allowed amounts on cleanly paid lines
+        # the last 500 days at day resolution for the alert engine: line counts, and the allowed amounts on cleanly paid lines
         days = [l.get("payment_date") or l.get("txn_payment_date") or "" for l in self.lines]
         last = max(days) if days else ""
-        cutoff = _add_days(last, -400) or ""
+        cutoff = _add_days(last, -500) or ""
         daily: Counter = Counter()
         points: Counter = Counter()
         for l in self.lines:

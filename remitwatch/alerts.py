@@ -9,6 +9,7 @@ not read as a quiet payer.
 Kinds
 -----
 RAMP               a payer is doing more of something (downcoding, bundling, denials, underpayment) than its own recent rate
+RISING             the slow version: the last quarter against the year before it, for a climb too gradual to trip RAMP
 RESUMED            a payer went quiet for the whole baseline period and has started again
 NEW_BEHAVIOR       a payer and signal combination never seen before
 PROVIDER_TARGETED  one provider is downcoded by a payer far more often than the rest of the practice
@@ -177,6 +178,39 @@ class AlertEngine:
                     self._raise("RAMP", sev, f"{p} is ramping up {spec['label']}: {k} of {n_recent:,} lines ({rate_recent:.1%}) in the last {RECENT_DAYS} days "
                                 f"against {rate_base:.1%} over the prior six months, worth {money(cents[p])}", detail, p, fam, None, rate_recent, rate_base, k, cents[p])
 
+    def rising_rule(self) -> None:
+        """A slow climb: the last 91 days against the 365 days before them. A payer that adds a little every month never
+        doubles its own recent rate, so the four-week rule alone would miss it."""
+        recent_start = _shift(self.asof, -91)
+        base_start = _shift(recent_start, -365)
+        covered = {(a["payer_group"], a["family"]) for a in self.active.values() if a["kind"] in ("RAMP", "RESUMED", "NEW_BEHAVIOR")}
+        for fam, spec in FAMILIES.items():
+            exp_recent = self._exposure(spec["scope"], recent_start, self.asof)
+            exp_base = self._exposure(spec["scope"], base_start, recent_start)
+            recent, base, cents = Counter(), Counter(), Counter()
+            for r in self.conn.execute(f"""SELECT payer_group, payment_date d, shortfall_cents c FROM findings
+                                           WHERE {spec['where']} AND {LIVE} AND payment_date > ? AND payment_date <= ? AND payer_group IS NOT NULL""",
+                                       (base_start, self.asof)):
+                if r["d"] > recent_start:
+                    recent[r["payer_group"]] += 1
+                    cents[r["payer_group"]] += max(r["c"] or 0, 0)
+                else:
+                    base[r["payer_group"]] += 1
+            for p, k in recent.items():
+                n_recent, n_base = exp_recent.get(p, 0), exp_base.get(p, 0)
+                if (p, fam) in covered or k < 6 or n_recent < 30 or n_base < 100 or base[p] == 0:
+                    continue
+                rate_recent, rate_base = k / n_recent, base[p] / n_base
+                p_value = poisson_sf(k, rate_base * n_recent)
+                if rate_recent >= 1.75 * rate_base and p_value < 0.01:
+                    self._raise("RISING", "high" if (cents[p] >= 250000 or k >= 15) else "medium",
+                                f"{p} has been climbing on {spec['label']}: {k} of {n_recent:,} lines ({rate_recent:.1%}) over the last three months "
+                                f"against {rate_base:.1%} over the year before, worth {money(cents[p])}",
+                                {"recent_count": k, "recent_lines": n_recent, "baseline_count": base[p], "baseline_lines": n_base, "recent_dollars": cents[p],
+                                 "recent_rate": round(rate_recent, 4), "baseline_rate": round(rate_base, 4), "p_value": round(p_value, 5),
+                                 "recent_window": [recent_start, self.asof], "baseline_window": [base_start, recent_start]},
+                                p, fam, None, rate_recent, rate_base, k, cents[p], key=(p, fam, "rising"))
+
     def provider_rule(self) -> None:
         """One provider carrying a payer's downcoding: the lists payers keep are per provider."""
         start = _shift(self.asof, -90)
@@ -311,6 +345,7 @@ class AlertEngine:
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "findings" in tables and "exposure_daily" in tables:
             self.ramp_rules()
+            self.rising_rule()
             self.provider_rule()
             self.rate_cut_rule()
             self.new_code_rule()
