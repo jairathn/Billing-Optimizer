@@ -1328,6 +1328,8 @@ def recent(conn: sqlite3.Connection) -> dict:
         done = lambda r: bool(r["pulled"]) and (_days(r["service_date"], r["pulled"]) or 0) >= hold      # noqa: E731
         full = [r for r in worked if done(r) and r["patients"] >= CLINIC_DAY_MIN]
         waiting = [r for r in worked if not done(r)]
+        if not full and _tier(p["role"]) == "staff":         # a billing bucket or a few nurse visits, with no day to show
+            continue
         n = len(full)
         tot = lambda k: sum((r[k] or 0) for r in full)       # noqa: E731
         est = tot("est_visits")

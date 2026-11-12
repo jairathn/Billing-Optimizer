@@ -236,8 +236,8 @@ function pvRecent(el, rc, keep){
       {h: 'Charges a day', num: 1, f: p => money(p.charges_per_day_cents), tip: 'pathology and radiation left out'},
       {h: 'New patients a day', num: 1, f: p => n1(p.new_per_day)},
       {h: 'Same days on remittances', num: 1, f: p => n1(p.remit_patients_per_day), tip: 'insured patients a day paid so far for the days counted'},
-      {h: 'Visit to bill, median', num: 1, f: p => p.lag.median == null ? '–' : `${n0(p.lag.median)} days`},
-      {h: 'Nine in ten within', num: 1, f: p => p.lag.p90 == null ? '–' : `${n0(p.lag.p90)} days`},
+      {h: 'Visit to bill, median', num: 1, f: p => p.lag.median == null ? '–' : `${n0(p.lag.median)} ${p.lag.median === 1 ? 'day' : 'days'}`},
+      {h: 'Nine in ten within', num: 1, f: p => p.lag.p90 == null ? '–' : `${n0(p.lag.p90)} ${p.lag.p90 === 1 ? 'day' : 'days'}`},
       {h: 'Days still waiting on bills', num: 1, f: p => p.days_waiting ? `<span class="sev-medium">${n0(p.days_waiting)}</span>` : '0'},
       {h: 'At face value', num: 1, f: p => `<span class="muted">${n1(p.raw_patients_per_day)} a day over ${n0(p.raw_days)} days</span>`},
     ])}
