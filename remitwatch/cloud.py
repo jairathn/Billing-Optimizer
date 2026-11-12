@@ -860,7 +860,6 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 store.close()
         except Exception:
             pass
-        release(state, token)
         try:        # every run writes its status, so the dashboard can say when Dropbox was last checked
             if out.get("changed"):
                 out["last_change"] = out.get("finished")
@@ -870,7 +869,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 out.setdefault("totals", prev.get("totals"))
         except Exception:
             pass
-        write_status(state, out)
+        write_status(state, out)        # before the lock goes, so nobody reads "not running" beside the previous run's status
+        release(state, token)
 
 
 def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0, **params: Any) -> bool:
