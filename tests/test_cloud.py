@@ -769,7 +769,7 @@ def test_self_test_passes_when_many_requests_ask_at_once(monkeypatch):
 def test_every_address_needs_the_login_except_three(site):
     import re
     tc, auth, api, _state = site
-    public = {("GET", "/api/health"), ("GET", "/api/health/hangup"), ("GET", "/robots.txt"), ("GET", "/api/dropbox/webhook")}
+    public = {("GET", "/api/health"), ("GET", "/robots.txt"), ("GET", "/api/dropbox/webhook")}
     seen = 0
     for r in api.app.routes:
         path, methods = getattr(r, "path", None), getattr(r, "methods", None) or []
@@ -779,8 +779,6 @@ def test_every_address_needs_the_login_except_three(site):
             if m in ("HEAD", "OPTIONS"):
                 continue
             seen += 1
-            if path == "/api/health/hangup":
-                continue                    # a diagnostic that sleeps six seconds by design
             got = tc.request(m, re.sub(r"\{[^}]+\}", "x", path), headers={"X-Requested-With": "remitwatch"}, follow_redirects=False).status_code
             want = 200 if (m, path) in public else (403 if (m, path) == ("POST", "/api/dropbox/webhook") else 401)
             assert got == want, (m, path, got)

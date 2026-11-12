@@ -203,3 +203,8 @@ challenge echoed, no repository file served.
 Known and accepted: a run killed by the platform (memory or the 300 s limit) leaves its lock for seven minutes and is not
 restarted by anything but the daily run or the button; SQLite 3.40 on Vercel (no newer SQL is used; building 3.40 locally to
 test against it was not permitted in the session, the live self-test passes).
+Proven on the live Vercel deployment (no credentials needed): the build and routing (framework null, catch-all rewrite keeps the
+original path, nothing from the repository is served), Python 3.12.16 with SQLite 3.40.0, about 2.2 GB of memory, the self-test
+(store in memory, grown, saved, reopened, dashboard copy built; about 120 ms, faster than the test machine), and that a request's
+work finishes after the caller hangs up (a temporary probe, since removed). Still unproven until the settings are added: real
+Dropbox reads and writes, the first load on Vercel, the webhook from Dropbox, mail, and the live Claude note review.

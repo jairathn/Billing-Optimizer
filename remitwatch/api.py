@@ -182,27 +182,8 @@ if STATIC_DIR.exists():
 def health():
     if runtime.serverless():
         return {"ok": True, "mode": "serverless", "version": __version__, "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:7],
-                "runtime": runtime.describe(), "selftest": runtime.selftest(), "hangup": dict(_HANGUP, pid=os.getpid()),
-                "time": datetime.now(timezone.utc).isoformat()}
+                "runtime": runtime.describe(), "selftest": runtime.selftest(), "time": datetime.now(timezone.utc).isoformat()}
     return {"ok": os.path.exists(DB_PATH), "mode": "server", "version": __version__, "time": datetime.now(timezone.utc).isoformat()}
-
-
-_HANGUP: dict = {"started": None, "finished": None}
-
-
-@app.get("/api/health/hangup", include_in_schema=False)
-def hangup_probe():
-    """Diagnostic for the host: does a request's work finish after the caller stops waiting? The follow-up runs of the
-    serverless cycle rely on it. Call this and hang up after a second, then read /api/health a little later: `finished`
-    is set if the six seconds of work below ran to the end. At most one probe a minute per instance."""
-    import time
-    now = time.time()
-    if _HANGUP["started"] and now - _HANGUP["started"] < 60:
-        return dict(_HANGUP)
-    _HANGUP.update(started=now, finished=None)
-    time.sleep(6)
-    _HANGUP["finished"] = time.time()
-    return dict(_HANGUP)
 
 
 @app.get("/api/meta")

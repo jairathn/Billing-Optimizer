@@ -65,6 +65,8 @@ and what the runtime offers.
   dashboard's copy is behind (`serving.json`) and rebuilds it. Mail goes out after both saves, and what was sent is kept
   in its own small file (`notified.json`), so a failed save or an idle run cannot send the same alert or report twice.
 - A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns.
+  That relies on Vercel finishing a request's work after the caller hangs up. It does: checked on the live site on
+  2026-11-12 (six seconds of work completed after a caller that left at 1.2 seconds).
   Detection is left to a fresh run after a large batch, because a new process starts with clean memory.
 - Runs follow one another only while they are getting somewhere, and at most 30 times in a row. A file that cannot be
   read (a damaged spreadsheet, a file over 60 MB, one Dropbox will not release) is noted on the Data tab, remembered and
