@@ -625,6 +625,12 @@ def test_runs_follow_one_another_only_so_many_times_and_only_while_getting_somew
     assert "halted" in halted and "continued" not in halted and len(calls) == 1
     monkeypatch.setattr(cloud, "run_cloud_cycle", lambda *a, **k: {"more": True, "progress": False})
     assert "continued" not in tc.get("/api/cron/cycle", headers=bearer).json() and len(calls) == 1
+    # a file that could not be fetched is tried twice more, a minute and a half apart, and then left to the daily run
+    monkeypatch.setattr(cloud, "run_cloud_cycle", lambda *a, **k: {"more": False, "ingest": {"download_errors": 1}})
+    tc.get("/api/cron/cycle", headers=bearer)
+    tc.get("/api/cron/cycle?hop=1", headers=bearer)
+    assert calls[1:] == [("retry", 90, {"hop": 1}), ("retry", 90, {"hop": 2})]
+    assert "continued" not in tc.get("/api/cron/cycle?hop=2", headers=bearer).json() and len(calls) == 3
 
 
 def test_dropbox_client_asks_again_when_told_to_and_fails_fast_when_asked_to(monkeypatch):
@@ -721,3 +727,39 @@ def test_follow_up_review_points(box, monkeypatch):
         monkeypatch.setenv(k, v)
     sc = cloud.ServingCopy()
     assert sc.state().client.attempts == 6 and sc.state(fast=True).client.attempts == 1
+
+
+def test_a_cold_start_that_cannot_reach_storage_says_so_instead_of_showing_nothing(site, monkeypatch):
+    tc, auth, _api, _state = site
+    real_meta = LocalState.meta
+    broken = {"on": True}
+    monkeypatch.setattr(LocalState, "meta", lambda self, name: (_ for _ in ()).throw(RuntimeError("Dropbox files/get_metadata: too many retries"))
+                        if broken["on"] else real_meta(self, name))
+    monkeypatch.setattr(cloud, "RETRY_SECONDS", 0)
+    first = tc.get("/api/findings?signal=DOWNCODE_LEVEL_REDUCED", headers=auth)
+    assert first.status_code == 503 and "storage" in first.json()["detail"]         # not "0 findings"
+    assert tc.get("/api/sync/status", headers=auth).status_code == 503
+    broken["on"] = False                                                             # Dropbox answers again
+    assert tc.get("/api/findings?signal=DOWNCODE_LEVEL_REDUCED", headers=auth).json()["total"] == 3
+    # once this process holds a real copy, a later failure keeps serving it and reports the error on the Data tab
+    broken["on"] = True
+    cloud.SERVING_COPY.checked = 0
+    cloud.SERVING_COPY._status = (0.0, None)
+    assert tc.get("/api/findings?signal=DOWNCODE_LEVEL_REDUCED", headers=auth).json()["total"] == 3
+    assert "too many retries" in (tc.get("/api/sync/status", headers=auth).json()["storage_error"] or "")
+
+
+def test_self_test_passes_when_many_requests_ask_at_once(monkeypatch):
+    import threading
+
+    from remitwatch import runtime
+    monkeypatch.setattr(runtime, "_SELFTEST", None)
+    results: list[dict] = []
+    threads = [threading.Thread(target=lambda: results.append(runtime.selftest())) for _ in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(results) == 6 and all(r["ok"] for r in results)
+    # a failure is not remembered for ever
+    monkeypatch.setattr(runtime, "_SELFTEST", {"ok": False, "error": "x"})
+    monkeypatch.setattr(runtime, "_SELFTEST_AT", time.time() - 120)
+    assert runtime.selftest()["ok"] is True

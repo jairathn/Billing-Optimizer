@@ -118,8 +118,11 @@ def require_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)
 
 def db() -> sqlite3.Connection:
     if runtime.serverless():
-        from .cloud import SERVING_COPY
-        return SERVING_COPY.connection()        # the dashboard's copy, fetched from the state folder and kept fresh
+        from .cloud import SERVING_COPY, StorageUnavailable
+        try:
+            return SERVING_COPY.connection()    # the dashboard's copy, fetched from the state folder and kept fresh
+        except StorageUnavailable:
+            raise HTTPException(status_code=503, detail="The site could not reach its storage in Dropbox just now. Reload the page in a minute.")
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
@@ -794,7 +797,12 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
             cloud.write_status(st, out)
     elif out.get("more") and out.get("progress"):
         out["continued"] = cloud.trigger_cycle(base_url(request), "continue", hop=hop + 1)
-    elif client is not None and not out.get("skipped") and not out.get("more") and not (out.get("ingest") or {}).get("download_errors"):
+    elif (out.get("ingest") or {}).get("download_errors"):
+        # a file could not be fetched (a timeout, a busy server): try twice more, a minute and a half apart, then leave
+        # it to the daily run. Notifications start nothing in the meantime, so without this the file would wait a day.
+        if hop < 2:
+            out["continued"] = cloud.trigger_cycle(base_url(request), "retry", delay=90, hop=hop + 1)
+    elif client is not None and not out.get("skipped") and not out.get("more"):
         try:        # files that landed while this cycle ran
             if cloud.has_new_files(st, client):
                 out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)

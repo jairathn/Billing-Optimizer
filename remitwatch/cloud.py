@@ -64,6 +64,7 @@ NEEDED_MEMORY_MB = 1600          # measured peak of a detection run on five year
 MIN_MEMORY_MB = 2000             # Vercel's standard function size is 2 GB
 DEFER_DETECT_AFTER_FILES = int(os.environ.get("REMITWATCH_DEFER_DETECT_FILES", "3000"))
 REFRESH_SECONDS = 45            # how often a dashboard instance looks for a newer serving copy
+RETRY_SECONDS = 5               # how soon it looks again when storage did not answer and it has no copy at all
 JOURNAL_SECONDS = 15            # how often it looks for actions recorded by other instances
 
 CLOUD_DDL = """
@@ -593,6 +594,10 @@ def save_serving(state, conn: sqlite3.Connection) -> dict:
     return {"bytes": size, "gz_bytes": len(blob), "rev": (meta or {}).get("rev")}
 
 
+class StorageUnavailable(RuntimeError):
+    """The state folder could not be reached and this process has no copy of the dashboard's data to fall back on."""
+
+
 class ServingCopy:
     """One per process: the dashboard's local copy of the serving database, kept fresh, with the journal laid over it."""
 
@@ -606,6 +611,7 @@ class ServingCopy:
         self.journal_checked = 0.0
         self.applied: set[str] = set()
         self.error: str | None = None
+        self.known = False          # has storage answered at least once (with a copy, or with "there is none yet")?
         self._status: tuple[float, dict | None] = (0.0, None)
         self._path: str | None = None
         self._seq = 0
@@ -651,6 +657,7 @@ class ServingCopy:
             # so a slow Dropbox cannot hold the site. What a person writes (a status, a packet) is tried patiently.
             self._state, self._quick, self._state_key = state_from_env(), state_from_env(fast=True), key
             self.rev, self.checked, self.journal_checked, self.applied = None, 0.0, 0.0, set()
+            self.known = False
             self._status = (0.0, None)
         return self._quick if fast else self._state
 
@@ -667,6 +674,7 @@ class ServingCopy:
                 if force or not have or now - self.checked > REFRESH_SECONDS:
                     self.checked = now
                     m = st.meta(SERVING)
+                    self.known = True
                     if m is None:
                         if not have or self.rev is not None:
                             self._empty()
@@ -693,8 +701,12 @@ class ServingCopy:
                         self.applied.update(n for n, _ in entries)
             except Exception as exc:
                 self.error = f"{type(exc).__name__}: {str(exc)[:200]}"
-                if not (self._path and os.path.exists(self._path)):     # storage unreachable: an empty dashboard, not an error page
-                    self._empty()
+                if not self.known or not (self._path and os.path.exists(self._path)):
+                    # Storage has never answered this process, so there is nothing true to show. Say so, and look
+                    # again in a few seconds: an empty dashboard here would read as "no findings".
+                    self.checked = now - REFRESH_SECONDS + RETRY_SECONDS
+                    raise StorageUnavailable(self.error) from exc
+                # otherwise keep serving the copy already here; the Data tab shows the error
             return self._path
 
     def connection(self) -> sqlite3.Connection:
@@ -1025,7 +1037,7 @@ def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0
 
 def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     """Every setting the deployment needs, checked live, in the order the setup sheet sets them."""
-    from .dropbox_sync import DropboxClient
+    from .dropbox_sync import DropboxAuthError, DropboxClient
     env = os.environ.get
     checks: list[dict] = []
 
@@ -1055,8 +1067,12 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
             checks[-1].update(ok=True, detail=f"connected as {(acct.get('name') or {}).get('display_name') or 'the account that approved the app'}", fix="")
             info = acct.get("root_info") or {}
             team_root = info.get("root_namespace_id") if info.get("root_namespace_id") != info.get("home_namespace_id") else None
-        except Exception as exc:
+        except DropboxAuthError as exc:
+            out["reconnect"] = True
             checks[-1].update(ok=False, detail=str(exc)[:200], fix="The token was refused. Repeat the Connect Dropbox step and replace DROPBOX_REFRESH_TOKEN.")
+            team_root = None
+        except Exception as exc:
+            checks[-1].update(ok=False, detail=str(exc)[:200], fix="Dropbox did not answer just now. Wait a minute and press Check again.")
             team_root = None
         if checks[-1]["ok"]:
             try:
@@ -1067,15 +1083,18 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
                 hint = (f" This account is in a team space: add DROPBOX_PATH_ROOT_NS={team_root} in Vercel and redeploy." if team_root and not env("DROPBOX_PATH_ROOT_NS") else "")
                 add("data_folder", f"Data folder {root}", False, str(exc)[:160],
                     "The folder was not found. Check DROPBOX_ROOT_PATH matches the folder name exactly, starting with a slash." + hint)
-            from .dropbox_sync import DropboxAuthError
             from .state import DropboxState
-            # a write is tried a few times: Dropbox answers "busy" when something else is writing to the account
-            st = DropboxState(DropboxClient(attempts=3, timeout=10), env("REMITWATCH_STATE_PATH", "/RemitWatch-state"))
+            if env("REMITWATCH_STATE_DIR"):
+                st = state_from_env()       # a laptop trying the mode with a local state folder: check that folder
+            else:
+                # a write is tried a few times: Dropbox answers "busy" when something else is writing to the account
+                st = DropboxState(DropboxClient(attempts=3, timeout=10), env("REMITWATCH_STATE_PATH", "/RemitWatch-state"))
             try:
                 st.put("setup-check.txt", b"ok")
                 st.delete("setup-check.txt")
                 add("state_folder", f"Private storage ({st.describe()})", True, "the app can write and delete here")
             except DropboxAuthError as exc:
+                out["reconnect"] = True
                 add("state_folder", "Private storage", False, str(exc)[:200],
                     "The app cannot write to Dropbox. In the Dropbox Developer Console open the app, Permissions tab, tick files.content.write, "
                     "click Save changes, then repeat the Connect Dropbox step: a token only carries the permissions ticked when it was made.")
@@ -1110,8 +1129,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
             out["storage_error"] = str(exc)[:160]
     required = [c for c in checks if c["key"] in ("password", "cron_secret", "dropbox_app", "dropbox_token", "data_folder", "state_folder")]
     out["ready"] = all(c["ok"] for c in required)
-    by_key = {c["key"]: c for c in checks}
-    # the Connect Dropbox step is needed when there is no token yet, or the one in place was refused or cannot write
-    out["connect_needed"] = bool(key and secret) and (not token or by_key["dropbox_token"]["ok"] is False
-                                                      or by_key.get("state_folder", {}).get("ok") is False)
+    # the Connect Dropbox step is needed when there is no token yet, or Dropbox refused the one in place or its
+    # permissions; not when Dropbox was merely slow to answer
+    out["connect_needed"] = bool(key and secret) and (not token or bool(out.pop("reconnect", False)))
     return out

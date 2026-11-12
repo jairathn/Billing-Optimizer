@@ -70,18 +70,31 @@ def describe() -> dict:
 
 
 _SELFTEST: dict | None = None
+_SELFTEST_AT = 0.0
+_SELFTEST_LOCK = __import__("threading").Lock()
 
 
 def selftest() -> dict:
-    """Once per process, prove on this very host what the serverless mode depends on: the store can be held in memory,
-    grown, saved, compressed and reopened, and the dashboard's copy can be built in scratch space and queried. It uses
-    an empty store and takes a fraction of a second."""
-    global _SELFTEST
-    if _SELFTEST is not None:
+    """Prove on this very host what the serverless mode depends on: the store can be held in memory, grown, saved,
+    compressed and reopened, and the dashboard's copy can be built in scratch space and queried. It uses an empty store
+    and takes a fraction of a second. A pass is remembered for the life of the process; a failure is tried again after a
+    minute, so one bad moment is not held against the host for ever. One caller at a time: two requests reaching a cold
+    instance together must not run it side by side."""
+    global _SELFTEST, _SELFTEST_AT
+    import time
+    with _SELFTEST_LOCK:
+        if _SELFTEST is not None and (_SELFTEST.get("ok") or time.time() - _SELFTEST_AT < 60):
+            return _SELFTEST
+        _SELFTEST, _SELFTEST_AT = _run_selftest(), time.time()
         return _SELFTEST
+
+
+def _run_selftest() -> dict:
+    import secrets
     import sqlite3
     import time
     t = time.time()
+    path = os.path.join(tmp_dir(), f"selftest-{os.getpid()}-{secrets.token_hex(4)}.sqlite")
     try:
         from . import cloud
         from .alerts import ALERTS_DDL
@@ -99,7 +112,6 @@ def selftest() -> dict:
         data = store.to_bytes()                                   # grown well past the image it started from
         again = Store.from_bytes(cloud.gunzip_chunks([b"".join(cloud.gzip_chunks(data))]))
         kept = again.conn.execute("SELECT COUNT(*) FROM dropbox_seen").fetchone()[0]
-        path = os.path.join(tmp_dir(), f"selftest-{os.getpid()}.sqlite")
         size = cloud.build_serving(again.conn, path)
         c = sqlite3.connect(path)
         c.execute("""SELECT substr(COALESCE(service_date, payment_date),1,7) m, category, COUNT(*) n, SUM(status='open') o,
@@ -107,11 +119,15 @@ def selftest() -> dict:
                                               THEN shortfall_cents END),0) due
                      FROM findings WHERE COALESCE(stale,0)=0 GROUP BY 1,2 ORDER BY 5 DESC NULLS LAST LIMIT 5""").fetchall()
         c.close()
-        os.remove(path)
         store.close()
         again.close()
         ok = kept == 4000 and len(data) > len(image) and size > 0
-        _SELFTEST = {"ok": ok, "ms": int((time.time() - t) * 1000)}
+        return {"ok": ok, "ms": int((time.time() - t) * 1000)}
     except Exception as exc:
-        _SELFTEST = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
-    return _SELFTEST
+        return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    finally:
+        for suffix in ("", "-journal"):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
