@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 
 from . import actions as actions_mod
-from . import runtime
+from . import activity, runtime
 from .state import Conflict, state_from_env
 
 RAW = "store.sqlite.gz"
@@ -51,7 +51,8 @@ SERVING = "serving.sqlite.gz"
 STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
-SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from
+SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
+SERVING_BUILD = "2"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -60,7 +61,7 @@ FAILED_BACKOFF_SECONDS = 6 * 3600   # after a failed run, notifications start no
 UNFINISHED_BACKOFF_SECONDS = 3600   # the same after a run that could not fetch a file or left work for a follow-up run
 MAX_HOPS = 30                       # runs that may follow one another without a person or the scheduler in between
 MAX_FILE_BYTES = 60 * 1024 * 1024    # larger files in the data folder are not read
-NEEDED_MEMORY_MB = 1600          # a detection run on five years of remittances peaks at about 1.42 GB; Vercel's standard function has 2 GB
+NEEDED_MEMORY_MB = 1600          # a detection run on almost three years of remittances peaks at about 1.5 GB; Vercel's standard function has 2 GB
 DEFER_DETECT_AFTER_FILES = int(os.environ.get("REMITWATCH_DEFER_DETECT_FILES", "3000"))
 REFRESH_SECONDS = 45            # how often a dashboard instance looks for a newer serving copy
 RETRY_SECONDS = 5               # how soon it looks again when storage did not answer and it has no copy at all
@@ -524,6 +525,9 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     ("ema_rows", None, "claim_id IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
     ("line_links", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
     ("line_handling", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
+    # what each clinician did (remitwatch.activity): counts and sums per clinician, no patient rows
+    ("provider_roster", None, None), ("provider_days", None, None), ("provider_services", None, None), ("provider_payers", None, None),
+    ("provider_panels", None, None), ("provider_cohorts", None, None), ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
 ]
 
 
@@ -539,6 +543,7 @@ def empty_serving(path: str) -> None:
     c.execute("PRAGMA journal_mode=DELETE")
     ensure_schema(c)
     c.executescript(ALERTS_DDL + LINK_DDL)
+    activity.ensure_schema(c)
     c.commit()
     c.close()
 
@@ -863,7 +868,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
 
         # Is the dashboard's copy the one built from this store? A run that died between the two saves leaves it behind.
         data_rev = (conn.execute("SELECT value FROM meta WHERE key='cloud:data_rev'").fetchone() or [None])[0]
-        serving_stale = bool(data_rev) and (_read_json(state, SERVING_MARK).get("data_rev") != data_rev)
+        mark = _read_json(state, SERVING_MARK)
+        serving_stale = bool(data_rev) and (mark.get("data_rev") != data_rev or mark.get("build") != SERVING_BUILD)
 
         journal = read_actions(state)
         done, left, wrote = apply_actions(conn, journal) if journal else ([], [], False)
@@ -907,6 +913,15 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
         conn.commit()
 
+        # What each clinician did: rebuilt whenever detection ran, and once after an upgrade changed how it is built.
+        ran_activity = False
+        if has_lines and not remaining and "deferred" not in out and (ran_detect or activity.stale(conn)) \
+                and budget - (time.time() - t0) > 45:
+            out["activity"] = activity.refresh(store, log=log)
+            ran_activity = "error" not in out["activity"]
+            gc.collect()
+            mem["activity"] = peak_mb()
+
         if left and ran_detect:
             # entries that named a finding this store did not hold: detection may just have brought it back
             again, left, wrote_more = apply_actions(conn, [(n, a) for n, a in journal if n in set(left)])
@@ -932,7 +947,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         # run (nothing new in Dropbox, nothing recorded by people) uploads neither.
         alerts_changed = bool((out.get("alerts") or {}).get("new") or (out.get("alerts") or {}).get("cleared"))
         progressed = ingested or (ingest.get("from_archive") or 0) > 0
-        shown_changed = bool(ran_detect or folded or alerts_changed or (progressed and not existed))
+        shown_changed = bool(ran_detect or ran_activity or folded or alerts_changed or (progressed and not existed))
         if shown_changed:
             data_rev = str(int(data_rev or 0) + 1)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
@@ -943,7 +958,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
         if shown_changed or serving_stale:
             out["serving"] = save_serving(state, conn)
-            state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "at": _now()}).encode())
+            state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "build": SERVING_BUILD, "at": _now()}).encode())
         if ingest.get("cursor"):        # after the store, so the position never runs ahead of what was saved
             state.put(CURSOR, json.dumps({"cursor": ingest["cursor"], "root": os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data"), "at": _now()}).encode())
         # the journal: entries now in the saved store go; one whose finding never turned up is kept for a week
@@ -973,7 +988,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 marks["last_report"] = _now()
                 _write_json(state, MARKS, marks)
         out["more"] = bool(remaining or "deferred" in out)
-        out["progress"] = bool(progressed or ran_detect)
+        out["progress"] = bool(progressed or ran_detect or ran_activity)
         out["changed"] = bool(shown_changed or progressed)
         try:
             one = lambda sql: conn.execute(sql).fetchone()[0]       # noqa: E731

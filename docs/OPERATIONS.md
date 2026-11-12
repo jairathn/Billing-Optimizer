@@ -8,7 +8,7 @@ Recommended: one small virtual machine in AWS, Google Cloud or Azure. All three 
 
 Alternatives that cost more and need less administration: Fly.io with its compliance package, or Render on its HIPAA plan. Check current pricing; in November 2026 they were about $99 and $499 a month.
 
-Vercel also works, and a push to `main` deploys there: the app keeps its store in a private Dropbox folder because Vercel has no disk. Setup and limits are in `VERCEL_SETUP.md`. Two things to weigh: a run needs about 1.4 GB of the 2 GB a standard Vercel function has, and Vercel signs a BAA only on its Pro plan (a paid add-on) or Enterprise.
+Vercel also works, and a push to `main` deploys there: the app keeps its store in a private Dropbox folder because Vercel has no disk. Setup and limits are in `VERCEL_SETUP.md`. Two things to weigh: a run needs about 1.5 GB of the 2 GB a standard Vercel function has, and Vercel signs a BAA only on its Pro plan (a paid add-on) or Enterprise.
 
 Not suitable: GitHub Actions for the scheduled job (no BAA), or a workstation that sleeps.
 
@@ -41,6 +41,16 @@ Nothing to do. While the dashboard runs it does one cycle every `REMITWATCH_SYNC
 For updates within a minute of an upload, add a webhook in the Dropbox app console (Settings, Webhooks): `https://YOUR-HOST/api/dropbox/webhook`. Dropbox verifies the address once and then calls it whenever a file changes. Calls are checked against the app secret.
 
 The header of every page shows the newest payment date in the store and whether sync is on. The Data tab shows the last cycle and has a "Sync and analyse now" button. If no new remittance arrives for `REMITWATCH_STALE_DAYS` days, an alert says so; that usually means the TriZetto download or the Dropbox upload stopped, not that the payers stopped paying.
+
+### The Providers tab
+
+The same cycle rebuilds the provider tables after detection (`remitwatch/activity.py`; `python -m remitwatch.cli activity` rebuilds them alone). Three things decide how far the tab can be trusted:
+
+- **Remittances lag the visit.** Half of all visits are paid within about three weeks and nine in ten within about five. The tab works out that curve from the store and treats a month of service as complete only when 97 percent of its visits should have been paid; the default window ends there.
+- **An EMA charge export only holds the visits that had become a bill when it was pulled.** Bills are written days after the visit, and how many days differs by clinician, so a week exported on its last day undercounts everyone and undercounts the slowest billers most. The tab counts a day only when an export covering it was pulled late enough for that clinician's bills to exist, and lists the other days as waiting. To keep the recent-weeks panel current, export the full Encounter and Charge Lines layout (the one with Bill Creation Date, Bill ID and Patient ID) for the last six weeks each week. Overlapping exports are merged.
+- **Insured visits only, on the remittance side.** A self-pay or cosmetic visit never reaches a payer. The EMA panel includes them.
+
+What the files cannot show: whether a light day was an empty schedule or patients who did not come (that needs the EMA appointment export), what each clinician costs, and pay terms.
 
 ## 5. Alerts
 

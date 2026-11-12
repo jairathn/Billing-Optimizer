@@ -1301,8 +1301,16 @@ class Detector:
 
 
 def run_detection(db_path: str, run_id: str | None = None) -> dict:
+    import gc
+
+    from .activity import refresh
     store = Store(db_path)
     try:
-        return Detector(store, run_id).run()
+        det = Detector(store, run_id)
+        summary = det.run()
+        del det                 # the provider tables are built after the detector has given its memory back
+        gc.collect()
+        refresh(store, log=lambda *_a: None)
+        return summary
     finally:
         store.close()

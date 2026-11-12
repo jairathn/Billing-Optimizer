@@ -94,6 +94,19 @@ def cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_activity(args: argparse.Namespace) -> int:
+    """Rebuild the provider tables (what each clinician did) without re-running detection."""
+    from .activity import refresh
+    from .store import Store
+    store = Store(args.db)
+    try:
+        out = refresh(store, log=lambda *_a: None)
+    finally:
+        store.close()
+    print(json.dumps(out, indent=1))
+    return 1 if "error" in out else 0
+
+
 def cmd_oauth(args: argparse.Namespace) -> int:
     from .dropbox_sync import DropboxClient
 
@@ -184,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("ingest-ema"); b.add_argument("paths", nargs="+"); b.set_defaults(fn=cmd_ingest_ema)
     d = sub.add_parser("detect"); d.set_defaults(fn=cmd_detect)
     lk = sub.add_parser("link"); lk.set_defaults(fn=cmd_link)
+    ac = sub.add_parser("activity"); ac.set_defaults(fn=cmd_activity)
     o = sub.add_parser("oauth"); o.set_defaults(fn=cmd_oauth)
     s_ = sub.add_parser("sync"); s_.add_argument("--full", action="store_true"); s_.add_argument("--no-ingest", action="store_true"); s_.set_defaults(fn=cmd_sync)
     for name, fn in (("cycle", cmd_cycle), ("weekly", cmd_weekly)):

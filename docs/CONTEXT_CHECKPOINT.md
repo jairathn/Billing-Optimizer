@@ -208,3 +208,39 @@ original path, nothing from the repository is served), Python 3.12.16 with SQLit
 (store in memory, grown, saved, reopened, dashboard copy built; about 120 ms, faster than the test machine), and that a request's
 work finishes after the caller hangs up (a temporary probe, since removed). Still unproven until the settings are added: real
 Dropbox reads and writes, the first load on Vercel, the webhook from Dropbox, mail, and the live Claude note review.
+
+## Provider view (November 12, 2026)
+
+The user asked whether the same data can show what each provider is doing, and pasted a productivity memo from another assistant
+built on one EMA charge export. Answer: yes, for almost three years of insured visits. Provider-level figures are NOT written in
+this repository (it is public); they are in the password-protected dashboard and in the conversation.
+
+- New: `remitwatch/activity.py` (tables `provider_roster`, `provider_days`, `provider_services`, `provider_payers`,
+  `provider_panels`, `provider_cohorts`, `provider_ema_days`, `provider_ema_lag`; `activity:info` in `meta`),
+  `remitwatch/static/providers.js` (the Providers tab), `tests/test_activity.py`, endpoints `/api/activity/overview|trend|recent`
+  and `/api/activity/provider/{id}`, CLI `activity`. Built after detection in both pipelines (`activity.refresh`, never fatal), copied
+  into the dashboard's copy (`cloud.SERVING_TABLES`; `serving.json` now carries a `build` number so a copy made by another build is
+  remade). `ACTIVITY_VERSION` bumps drop and rebuild the tables.
+- Method, in order of how much it matters:
+  1. A bill is the first nine characters of CLP01. The same billed line returns on several remittances; lines fold into one service
+     by REF*6R, and payers that omit it are matched on date, billed code and charge. Allowed is the newest primary decision (a
+     reversal voids the earlier one; a later duplicate denial does not). Paid is every insurer payment added up.
+  2. The clinician is the rendering NPI when it is a person. Supplement and secondary payers send the group NPI with each
+     clinician's name beside it, so an NPI seen under many names is the group; then the name, the line-level provider reference,
+     another remittance for the same bill and last the EMA export decide. About 3 percent of encounters stay unassigned.
+  3. Encounters are typed. Pathology is billed on its own bill under the physician who read the slide and radiation as a
+     treatment series; neither is a patient seen. Counting bills instead of typed encounters overstates physicians' volume.
+  4. Patients seen per clinic day uses days with at least five patients, median and middle half. Two bills for one person on one
+     day are one patient (the name is used in memory only; nothing about a patient is stored).
+  5. Skin substitute products and drugs are kept out of "allowed per patient seen": they are paid mostly to cover their cost.
+  6. Panels (distinct patients in twelve months), the share of the previous year's panel seen again, new-patient return within 90
+     and 365 days, and patients biopsied who had a skin cancer treated here within 120 days (a floor: treatment elsewhere is
+     invisible) come from following each patient through the store.
+  7. Biopsy rates are shown within Medicare and within everyone else, because age drives biopsies and payer is the only proxy.
+- What was learned about the inputs: the EMA charge exports are truncated by billing lag (a visit is absent until its bill
+  exists, and the lag differs widely between clinicians), which is why a one-month export made some clinicians look half as busy
+  as they are. The later weekly exports come in a thin layout with no bill date, bill id or patient id, pulled as the week ends, so
+  none of their days can be shown as captured. Remittance lag: median 19 days, 90 percent within 37, 98 percent within 62.
+- Measured on the real archive: the build takes about 7 seconds and adds no memory. A routine re-analysis peaks at about 1.5 GB;
+  the 1.42 GB written earlier was a first load, which peaks lower. Docs corrected.
+- Not in any file: schedule fill and no-shows (needs the EMA appointment export), staff cost, pay terms. Listed in MISSING_DATA.md.

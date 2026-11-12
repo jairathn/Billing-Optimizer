@@ -21,3 +21,9 @@ Ranked by how much it changes what the system can prove.
 9. **Prior authorization logs** for radiation therapy and biologic injections: authorization denials are frequent and preventable.
 
 10. **Medicare fee schedule files** (CMS RVU files and the Kentucky and Indiana GPCIs for 2024 to 2027). Today the Medicare baseline is inferred from Medicare remittances, which works for codes Medicare pays often. The official files extend it to every code. They matter more in 2027, when Medicare is reported to start paying the lower of a same-day visit and minor procedure at 80 percent (see docs/RESEARCH_SUMMARY.md).
+
+10. **The EMA appointment export** (scheduled, arrived, no-show, cancelled, with clinician, office, appointment type and the time the slot was booked). The Providers tab can count the patients each clinician saw; it cannot tell an empty schedule from patients who did not come, or how far out each clinician is booked. Those decide whether a light schedule is a demand problem, a scheduling problem or a no-show problem. Who: practice administrator (EMA report export, the same Dropbox folder).
+
+11. **Encounter and Charge Lines in the full layout, for a rolling six weeks each week.** The weekly exports now in Dropbox are pulled as the week ends, in a layout with no Bill Creation Date, Bill ID or Patient ID. A visit only appears once its bill exists, so those exports miss the visits billed later and the tab has no way to see how late they were pulled. The full layout, re-pulled over six weeks each time, fixes both; overlapping exports are merged. Who: whoever runs the weekly EMA exports.
+
+12. **Support staff cost by clinician and pay terms**, if the provider view is to be read against cost. Neither is in any file the practice exports today.

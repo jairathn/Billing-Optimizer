@@ -64,6 +64,15 @@ textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid 
 #bellBtn b{margin-left:4px}
 #feedChip{font-size:12px;color:var(--muted)}
 td.row{cursor:pointer}
+tr.picked{background:var(--chip)}
+table.pvt th{white-space:normal;vertical-align:bottom;max-width:150px}
+table.pvt td:first-child{white-space:nowrap}
+.rng{position:relative;height:10px;min-width:140px;background:var(--soft);border-radius:5px}
+.rng i{position:absolute;top:0;height:100%;border-radius:5px;background:var(--pv1,var(--accent));opacity:.55}
+.rng b{position:absolute;top:-3px;width:2px;height:16px;margin-left:-1px;background:var(--ink)}
+.sm{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+.key{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle}
+details summary{cursor:pointer;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -81,11 +90,12 @@ td.row{cursor:pointer}
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="/static/features.js"></script>
+<script src="/static/providers.js"></script>
 <script>
 const TABS = [
   ['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['downcoding','Downcoding'],['bundling','Bundling & modifiers'],
   ['denials','Denials'],['contracts','Contracts & underpayment'],['fees','Fees & takebacks'],['appeals','Appeals queue'],['progress','Progress'],
-  ['payers','Payers & rates'],['data','Data']
+  ['payers','Payers & rates'],['providers','Providers'],['data','Data']
 ];
 const SIGNAL_HELP = {
   DOWNCODE_SVC06:'Payer reported the code you billed (835 SVC06) and paid a lower level.',
@@ -148,7 +158,8 @@ function initNav(){
   $('#nav').querySelectorAll('a').forEach(a=>a.onclick=()=>{state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
-  $('#themeBtn').onclick = ()=>{const r=document.documentElement; r.dataset.theme = r.dataset.theme==='dark'?'light':'dark';};
+  $('#themeBtn').onclick = ()=>{const r=document.documentElement; const dark = r.dataset.theme==='dark' || (r.dataset.theme!=='light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    r.dataset.theme = dark?'light':'dark'; if(state.tab==='providers') render(); };
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
   $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
@@ -168,7 +179,7 @@ async function render(){
   $('#nav').querySelectorAll('a').forEach(a=>a.classList.toggle('active',a.dataset.tab===state.tab));
   await loadSummary();
   const v = $('#view'); v.innerHTML = '<div class="muted">loading…</div>';
-  const fn = {overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data, alerts: alertsTab, explorer: explorerTab, progress: progressTab}[state.tab] || overview;
+  const fn = {overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data, alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab}[state.tab] || overview;
   try { await fn(v); } catch(e){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; console.error(e); }
 }
 function sumBy(rows, key){ const m={}; rows.forEach(r=>{m[r[key]]=(m[r[key]]||0)+(r.shortfall_cents||0);}); return m; }
@@ -357,6 +368,8 @@ async function data(v){
       <li><b>Zelis / Optum Pay / Payspan enrollment status</b> for each payer, to stop fee-bearing payments.</li>
       <li><b>Provider roster</b> (NPI, credential, start date) to replace the inferred physician / non-physician tiers.</li>
       <li><b>MIPS feedback reports</b> (QPP) for 2022 to 2024 performance years to explain the drop in the Medicare bonus.</li>
+      <li><b>The EMA appointment export</b> (scheduled, arrived, no-show, cancelled, with clinician and office), so the Providers tab can tell an empty schedule from patients who did not come.</li>
+      <li><b>Encounter &amp; Charge Lines in the full layout for a rolling six weeks each week</b> (with Bill Creation Date, Bill ID and Patient ID). An export pulled as the week ends misses every visit not billed yet.</li>
     </ol></div>`;
   await feedPanel(v.querySelector('#feedPanel'));
 }

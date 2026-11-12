@@ -368,6 +368,31 @@ def test_dashboard_reads_the_copy_and_changes_go_through_the_journal(site):
     assert st["memory_mb"]["peak"]
 
 
+def test_provider_tables_are_built_by_the_run_served_from_the_copy_and_rebuilt_after_an_upgrade(site, box, monkeypatch):
+    from remitwatch import activity
+    tc, auth, _api, state = site
+    _root, client, _state = box
+    first = json.loads(state.get(cloud.STATUS))
+    assert first["activity"]["people"] == 1 and first["memory_mb"]["activity"]
+    ov = tc.get("/api/activity/overview", headers=auth).json()
+    assert ov["ready"] is True and len(ov["providers"]) == 1 and ov["providers"][0]["visits"] >= 1
+    assert tc.get("/api/activity/trend", headers=auth).json()["ready"] is True
+    assert tc.get("/api/activity/recent", headers=auth).json()["providers"] == []
+    assert tc.get("/api/activity/overview").status_code == 401
+    # nothing new in Dropbox: the tables are not rebuilt and nothing is uploaded again
+    idle = cycle(state, client)
+    assert "activity" not in idle and idle["changed"] is False
+    # a release that changes how the tables are built: the next run rebuilds them and saves, with no new file and no detection
+    monkeypatch.setattr(activity, "ACTIVITY_VERSION", "next")
+    assert tc.get("/api/activity/overview", headers=auth).json()["ready"] is False          # the old layout is not read as if it were the new
+    rev = state.meta(cloud.SERVING)["rev"]
+    time.sleep(0.01)
+    up = cycle(state, client)
+    assert up["activity"]["people"] == 1 and "detect" not in up and up["changed"] is True and state.meta(cloud.SERVING)["rev"] != rev
+    again = cycle(state, client)
+    assert "activity" not in again and again["changed"] is False
+
+
 def test_scheduler_address_runs_one_cycle_and_needs_the_secret(site, monkeypatch):
     tc, auth, api, state = site
     assert tc.get("/api/cron/cycle").status_code == 401

@@ -158,6 +158,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             out["detect"] = {"findings": sum(summary.values())}
         store = Store(db_path)
         heartbeat(store.conn, token)
+        if "detect" not in out:         # detection rebuilds the provider tables itself; this covers an upgrade with no new files
+            from . import activity
+            if activity.stale(store.conn):
+                out["activity"] = activity.refresh(store, log=log)
+                heartbeat(store.conn, token)
         out["alerts"] = run_alerts(store.conn)
         out["notified"] = notify(store.conn, log=log) if email else {"sent": 0, "skipped": True}
         every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))

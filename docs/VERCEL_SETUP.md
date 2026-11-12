@@ -62,8 +62,11 @@ and what the runtime offers.
 - One run (`remitwatch/cloud.py`): take a lock file, download the store (`store.sqlite.gz`), apply what people recorded
   since the last run, list what is new in the data folder, ingest it, detect, raise alerts, save the store, save a small
   copy for the dashboard built from it (`serving.sqlite.gz`), send mail, write the status, release the lock.
+- After detection the same run rebuilds the provider tables (`remitwatch/activity.py`): about seven seconds on the full archive and
+  no more memory, because it runs once detection has given its memory back. They are also rebuilt once, with no new file, after a
+  release that changes how they are built.
 - The store is saved first because it is the record. If a run dies between the two saves, the next run sees that the
-  dashboard's copy is behind (`serving.json`) and rebuilds it. Mail goes out after both saves, and what was sent is kept
+  dashboard's copy is behind, or was made by a different build of the app (`serving.json`), and rebuilds it. Mail goes out after both saves, and what was sent is kept
   in its own small file (`notified.json`), so a failed save or an idle run cannot send the same alert or report twice.
 - A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns.
   That relies on Vercel finishing a request's work after the caller hangs up. It does: checked on the live site on
@@ -99,7 +102,7 @@ and what the runtime offers.
 
 | Limit | Value | What it means here |
 | --- | --- | --- |
-| Memory | 2 GB on Vercel's standard function (the only size on the Hobby plan). 4 GB with Function CPU set to Performance (Pro plan). | A detection run on five years of remittances peaks at about 1.4 GB. It grows with the archive. `/setup` and the Data tab show the last run's peak. |
+| Memory | 2 GB on Vercel's standard function (the only size on the Hobby plan). 4 GB with Function CPU set to Performance (Pro plan). | A detection run on almost three years of remittances peaks at about 1.5 GB (measured on a run that re-analyses a store already holding findings; a first load peaks lower). It grows with the archive. `/setup` and the Data tab show the last run's peak. |
 | Time | 300 seconds per run | The run budget is 240 seconds and the work is split across runs, so this is not reached in normal use. |
 | Upload size | 4.5 MB per request | A visit note uploaded for an appeal packet can be 3 MB at most on Vercel (15 MB on a VM). |
 | Scheduler | Once a day on the Hobby plan | The webhook covers the rest of the day. |

@@ -10,6 +10,7 @@ Built for Owensboro Dermatology Associates. Everything is practice-agnostic exce
 
 | | |
 |---|---|
+| Providers | What each clinician is doing, read from the same remittances: clinic days, patients seen per clinic day, new patients, how many different patients they see in a year and how many of last year's came back, visit levels, biopsy rates within Medicare and within everyone else, how often a biopsy led to a treated skin cancer, and what a visit is allowed. A second panel covers the newest weeks from the EMA charge exports and will not count a day until that clinician's bills for it can exist |
 | Who and what | Any finding family broken down by provider, payer, plan, billed code, billed-to-paid pair, modifier, place of service, location, diagnosis, month and more, one or two at a time, with the number of lines billed beside each count so a rate is always shown |
 | Alerts | Ramp, slow climb, restart after a quiet period, new behavior, one provider singled out, rate cuts, new reason codes, deadlines, stopped feed. By email and optional webhook, with no patient data |
 | Progress | Statuses (open, in progress, appealed, recovered, lost), recovered dollars by month, share recovered by payer, downcoded visits per 100 by payer over time |
@@ -96,6 +97,7 @@ remitwatch/
   fees.py         fee-schedule inference from charges; code level families
   codes.py        reason and remark texts, global periods, payer rules, filing windows, statute wording
   detect.py       detection engine: baselines, findings, denominators, status carry-over
+  activity.py     what each clinician did: who rendered each visit, patients per clinic day, panels, levels, allowed per patient
   alerts.py       what changed since the last look
   appeals.py      letters and correction instructions
   notes.py        visit-note review and appeal packet (PDF, email)
@@ -107,8 +109,8 @@ remitwatch/
   dropbox_sync.py Dropbox client (refresh token, cursor deltas, downloads, uploads)
   report.py       summary report and email
   api.py          FastAPI endpoints
-  static/         dashboard (index.html, features.js) and the setup checklist (setup.html); no build step
-  cli.py          cycle | alerts | detect | serve | oauth | sync | ingest-835 | ingest-ema | link | stats | weekly
+  static/         dashboard (index.html, features.js, providers.js) and the setup checklist (setup.html); no build step
+  cli.py          cycle | alerts | detect | activity | serve | oauth | sync | ingest-835 | ingest-ema | link | stats | weekly
 api/index.py      Vercel entry point
 vercel.json       one function behind every address, the daily schedule
 docs/             findings, operations, Vercel setup, missing data, research summary and raw research notes

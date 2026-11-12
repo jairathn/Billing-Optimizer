@@ -14,6 +14,7 @@ import csv
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
@@ -715,6 +716,57 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
     return {"dim": dim, "dim2": dim2, "family": family, "rows": data, "total": totals, "total_lines": (total_lines or {}).get("lines"),
             "rate_scope": {"downcoding": "office visit lines billed", "code_change": "procedure lines billed"}.get(family, "service lines billed"),
             "denominator_for": exposure_level, "dims": sorted(DIMS)}
+
+
+# --------------------------------------------------------------------------- providers: what each clinician is doing
+def _activity(fn, *args):
+    """Run one of the readers in remitwatch.activity on the dashboard's database; say so plainly when the tables are not built yet."""
+    from . import activity
+    conn = db()
+    try:
+        state = activity.status(conn) if has_table("meta") else {"ready": False, "built_at": None, "error": None}
+        if not state["ready"] or not has_table("provider_days"):
+            return {"ready": False, "error": state.get("error"),
+                    "message": "The provider figures are built by the next analysis run. Press Sync and analyse now on the Data tab."}
+        out = fn(conn, *args)
+        if out is None:
+            raise HTTPException(404, "No such clinician")
+        out["ready"] = True
+        out["built_at"] = state["built_at"]
+        return out
+    finally:
+        conn.close()
+
+
+@app.get("/api/activity/overview")
+def activity_overview(month_from: Optional[str] = Query(None, alias="from", pattern=r"^\d{4}-\d{2}$"),
+                      month_to: Optional[str] = Query(None, alias="to", pattern=r"^\d{4}-\d{2}$"), _: str = Depends(require_auth)):
+    """One row per clinician for a window of months of service: clinic days, patients per day, new patients, visit
+    levels, biopsies, what the services were allowed, how many patients stay."""
+    from . import activity
+    return _activity(activity.overview, month_from, month_to)
+
+
+@app.get("/api/activity/trend")
+def activity_trend(by: str = Query("quarter", pattern="^(quarter|month)$"), _: str = Depends(require_auth)):
+    from . import activity
+    return _activity(activity.trend, by)
+
+
+@app.get("/api/activity/recent")
+def activity_recent(_: str = Depends(require_auth)):
+    """The newest weeks from the EMA charge exports, with the days an export could not have captured yet set apart."""
+    from . import activity
+    return _activity(activity.recent)
+
+
+@app.get("/api/activity/provider/{provider_id}")
+def activity_provider(provider_id: str, month_from: Optional[str] = Query(None, alias="from", pattern=r"^\d{4}-\d{2}$"),
+                      month_to: Optional[str] = Query(None, alias="to", pattern=r"^\d{4}-\d{2}$"), _: str = Depends(require_auth)):
+    from . import activity
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{1,60}", provider_id):
+        raise HTTPException(404, "No such clinician")
+    return _activity(activity.detail, provider_id, month_from, month_to)
 
 
 # --------------------------------------------------------------------------- progress: are we winning
