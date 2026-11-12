@@ -1,0 +1,96 @@
+# Running RemitWatch on Vercel
+
+Pushing to `main` deploys the site on Vercel. Vercel keeps no files between requests and has no long-running process, so
+on Vercel the app runs in its serverless mode: the store lives in a private folder of the practice's own Dropbox and each
+update is one time-boxed run. Nothing else has to be hosted.
+
+The other way to run it (a small VM with a disk, `docker compose up`) is in [OPERATIONS.md](OPERATIONS.md). The dashboard,
+the detection rules and the numbers are the same in both.
+
+## What you need to set
+
+All of these go in Vercel, project, Environment Variables, for Production. Vercel reads them only when it deploys, so
+redeploy after every change.
+
+| Name | Where the value comes from | Needed |
+| --- | --- | --- |
+| `REMITWATCH_PASSWORD` | Made up. The dashboard password. The site refuses to show data until it is set. | Yes |
+| `CRON_SECRET` | Made up, 16 characters or more, no spaces. Vercel's scheduler and the site's own follow-up runs present it. | Yes |
+| `DROPBOX_APP_KEY` | Dropbox Developer Console, the app's Settings tab | Yes |
+| `DROPBOX_APP_SECRET` | Same tab | Yes |
+| `DROPBOX_REFRESH_TOKEN` | The Connect Dropbox step on the site's `/setup` page | Yes |
+| `DROPBOX_ROOT_PATH` | The data folder. Default `/Trizetto Data`. | No |
+| `DROPBOX_PATH_ROOT_NS` | Only for a Dropbox team space. `/setup` shows the number when it is needed. | Sometimes |
+| `REMITWATCH_STATE_PATH` | Where the site keeps its own files in Dropbox. Default `/RemitWatch-state`. | No |
+| `REMITWATCH_MAX_SECONDS` | Time allowed for one run. Default 240, one minute under the function limit in `vercel.json`. | No |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |
+| `ANTHROPIC_API_KEY` | Turns on the visit-note review for appeal packets. Set it only when a business associate agreement covers that account. | No |
+
+The rest of `.env.example` (alert windows, letterhead, appeal email limits) works the same on Vercel.
+
+## Setup, in order
+
+1. **Dropbox app.** Signed in to dropbox.com as the account that holds the data folder, open
+   https://www.dropbox.com/developers/console/apps and click Create app: Scoped access, Full Dropbox, any name. On the
+   Permissions tab tick `files.metadata.read`, `files.content.read` and `files.content.write`, then Save changes. On the
+   Settings tab copy the App key and the App secret.
+2. **First four settings.** In Vercel add `REMITWATCH_PASSWORD`, `CRON_SECRET`, `DROPBOX_APP_KEY` and
+   `DROPBOX_APP_SECRET`. Redeploy. Before a password is set, the site's `/setup` page shows one line saying so, and offers
+   random values for the first two.
+3. **Connect Dropbox.** Open `/setup`, log in (user `oda`), and use the Connect Dropbox box: it links to Dropbox's
+   approval page, takes the code Dropbox shows, and returns the long-lived token once. Add it in Vercel as
+   `DROPBOX_REFRESH_TOKEN`. Redeploy. The token only carries the permissions ticked when it was made: if you tick one
+   later, connect again.
+4. **First load.** When every required line on `/setup` has a tick, press Run the first load now. It reads the whole
+   folder in several short runs that follow one another. On the five-year archive this was two runs and about two minutes
+   of computing.
+5. **Instant updates.** `/setup` shows the webhook address. Add it in the Dropbox Developer Console: the app, Settings
+   tab, Webhooks, Add webhook. Without it the site still checks Dropbox once a day.
+
+`/setup` checks every setting live and says what to fix. `/api/health` needs no login and shows the version, the commit
+and what the runtime offers.
+
+## How it works
+
+- `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules
+  `/api/cron/cycle` once a day (10:17 UTC). `public/` exists so that Vercel serves nothing else from the repository.
+- One run (`remitwatch/cloud.py`): take a lock file, download the store (`store.sqlite.gz`), apply what people recorded
+  since the last run, list what is new in the data folder, ingest it, detect, raise alerts, send mail, save a small copy
+  for the dashboard (`serving.sqlite.gz`), save the store, release the lock.
+- A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns.
+  Detection is left to a fresh run after a large batch, because a new process starts with clean memory.
+- The dashboard never waits for a run. Each instance downloads the dashboard's copy, looks for a newer one every 45
+  seconds, and lays the journal of recent status changes over it. A status change is one small file in `actions/`.
+- Appeal packets are stored as two files each under `packets/`.
+- A Dropbox webhook is verified by its signature, then answered. It starts a run only when the data folder has new
+  files of a kind the app reads. The site's own writes to its state folder never start one.
+
+## Limits to know about
+
+| Limit | Value | What it means here |
+| --- | --- | --- |
+| Memory | 2 GB on Vercel's standard function (the only size on the Hobby plan). 4 GB with Function CPU set to Performance (Pro plan). | A detection run on five years of remittances peaks at about 1.4 GB. It grows with the archive. `/setup` and the Data tab show the last run's peak. |
+| Time | 300 seconds per run | The run budget is 240 seconds and the work is split across runs, so this is not reached in normal use. |
+| Upload size | 4.5 MB per request | A visit note uploaded for an appeal packet can be 3 MB at most on Vercel (15 MB on a VM). |
+| Scheduler | Once a day on the Hobby plan | The webhook covers the rest of the day. |
+| Store size | 1 GB uncompressed (SQLite's limit for a database held this way) | The store is about 0.5 GB today. |
+
+A run that is killed (out of memory or time) leaves its lock behind. The next run takes it over after seven minutes, and
+the setup page and the Data tab say that a run stopped without finishing.
+
+## Agreements
+
+Remittance files, the store and appeal packets contain patient information. On Vercel the store passes through Vercel's
+function memory and is kept in Dropbox. Vercel signs a business associate agreement only on its Pro plan (as a paid
+add-on) and Enterprise, and its Hobby plan is not offered for commercial use. Dropbox signs one on its team plans. Check
+both before real data goes through this deployment, and see [OPERATIONS.md](OPERATIONS.md) for the VM alternative.
+
+## Trying it without Vercel
+
+```bash
+REMITWATCH_MODE=serverless REMITWATCH_STATE_DIR=/tmp/rw-state REMITWATCH_PASSWORD=pw CRON_SECRET=0123456789abcdef \
+  uvicorn remitwatch.api:app
+```
+
+`REMITWATCH_STATE_DIR` keeps the state in a local folder instead of Dropbox. `scripts/cloud_bench.py` runs the cycle one
+process per run against a folder standing in for Dropbox and reports the time and peak memory of each.

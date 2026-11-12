@@ -1,0 +1,11 @@
+# Not needed to run the site on Vercel
+tests
+docs
+scripts
+deploy
+.github
+Dockerfile
+docker-compose.yml
+requirements-dev.txt
+*.md
+*.log

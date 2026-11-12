@@ -25,7 +25,7 @@ import hashlib
 import json
 import os
 import time
-from typing import Any, Iterator
+from typing import Iterable, Any, Iterator
 
 import requests
 
@@ -50,6 +50,37 @@ def dropbox_content_hash(path: str) -> str:
     return hashlib.sha256(b"".join(digests)).hexdigest()
 
 
+def content_hash_bytes(data: bytes) -> str:
+    """The same hash for data already in memory."""
+    block = 4 * 1024 * 1024
+    digests = [hashlib.sha256(data[i:i + block]).digest() for i in range(0, len(data), block)]
+    return hashlib.sha256(b"".join(digests)).hexdigest()
+
+
+class DropboxConflict(Exception):
+    """A write was refused because the file exists or has changed since it was read."""
+
+
+class DropboxNotFound(Exception):
+    pass
+
+
+class DropboxAuthError(RuntimeError):
+    """Dropbox refused the credentials, or the token lacks a permission. Retrying does not help: someone has to fix the
+    app's permissions or replace the token."""
+
+
+def _auth_error(endpoint: str, status: int, text: str) -> DropboxAuthError:
+    if "missing_scope" in text:
+        try:
+            scope = json.loads(text)["error"].get("required_scope") or ""
+        except Exception:
+            scope = ""
+        return DropboxAuthError(f"The Dropbox token is missing the permission {scope or 'this call needs'}. Tick it on the app's Permissions tab, "
+                                "save, then connect Dropbox again: a token only carries the permissions ticked when it was made.")
+    return DropboxAuthError(f"Dropbox refused the token ({endpoint}, {status}): {text[:200]}")
+
+
 class DropboxClient:
     def __init__(self, app_key: str | None = None, app_secret: str | None = None, refresh_token: str | None = None,
                  path_root_ns: str | None = None, session: requests.Session | None = None):
@@ -58,6 +89,9 @@ class DropboxClient:
         self.refresh_token = refresh_token or os.environ.get("DROPBOX_REFRESH_TOKEN", "")
         self.path_root_ns = path_root_ns or os.environ.get("DROPBOX_PATH_ROOT_NS") or None
         self.s = session or requests.Session()
+        if session is None:
+            adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=16)
+            self.s.mount("https://", adapter)
         self._token: str | None = None
         self._token_exp = 0.0
 
@@ -78,6 +112,8 @@ class DropboxClient:
         if not (self.app_key and self.app_secret and self.refresh_token):
             raise RuntimeError("DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN must be set")
         r = self.s.post(TOKEN_URL, data={"grant_type": "refresh_token", "refresh_token": self.refresh_token}, auth=(self.app_key, self.app_secret), timeout=30)
+        if r.status_code in (400, 401):
+            raise DropboxAuthError(f"Dropbox refused the app key, app secret or refresh token: {r.text[:200]}")
         r.raise_for_status()
         j = r.json()
         self._token = j["access_token"]
@@ -93,6 +129,7 @@ class DropboxClient:
         return h
 
     def _rpc(self, endpoint: str, body: dict) -> dict:
+        refreshed = False
         for attempt in range(6):
             r = self.s.post(f"{API}/{endpoint}", headers=self._headers({"Content-Type": "application/json"}), json=body, timeout=60)
             if r.status_code == 429 or r.status_code >= 500:
@@ -100,8 +137,10 @@ class DropboxClient:
                 time.sleep(min(wait, 60))
                 continue
             if r.status_code == 401:
-                self._token = None
-                continue
+                if "expired_access_token" in r.text and not refreshed:
+                    self._token, refreshed = None, True
+                    continue
+                raise _auth_error(endpoint, r.status_code, r.text)
             if r.status_code != 200:
                 raise RuntimeError(f"Dropbox {endpoint} failed {r.status_code}: {r.text[:300]}")
             return r.json()
@@ -149,6 +188,127 @@ class DropboxClient:
             os.replace(tmp, dest)
             return json.loads(r.headers.get("Dropbox-API-Result", "{}"))
         raise RuntimeError(f"download {path_or_id}: too many retries")
+
+
+    def download_bytes(self, path_or_id: str) -> tuple[bytes, dict]:
+        refreshed = False
+        for attempt in range(6):
+            r = self.s.post(f"{CONTENT}/files/download", headers=self._headers({"Dropbox-API-Arg": json.dumps({"path": path_or_id})}), timeout=300)
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(min(float(r.headers.get("Retry-After", 2 ** attempt)), 60))
+                continue
+            if r.status_code == 401:
+                if "expired_access_token" in r.text and not refreshed:
+                    self._token, refreshed = None, True
+                    continue
+                raise _auth_error("files", r.status_code, r.text)
+            if r.status_code == 409 and "not_found" in r.text:
+                raise DropboxNotFound(path_or_id)
+            if r.status_code != 200:
+                raise RuntimeError(f"download {path_or_id} failed {r.status_code}: {r.text[:200]}")
+            return r.content, json.loads(r.headers.get("Dropbox-API-Result", "{}"))
+        raise RuntimeError(f"download {path_or_id}: too many retries")
+
+    def download_chunks(self, path_or_id: str, chunk: int = 4 << 20) -> Iterator[bytes]:
+        """Stream a large file without holding it in one piece."""
+        refreshed = False
+        for attempt in range(6):
+            r = self.s.post(f"{CONTENT}/files/download", headers=self._headers({"Dropbox-API-Arg": json.dumps({"path": path_or_id})}), stream=True, timeout=300)
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(min(float(r.headers.get("Retry-After", 2 ** attempt)), 60))
+                continue
+            if r.status_code == 401:
+                if "expired_access_token" in r.text and not refreshed:
+                    self._token, refreshed = None, True
+                    continue
+                raise _auth_error("files", r.status_code, r.text)
+            if r.status_code == 409 and "not_found" in r.text:
+                raise DropboxNotFound(path_or_id)
+            if r.status_code != 200:
+                raise RuntimeError(f"download {path_or_id} failed {r.status_code}: {r.text[:200]}")
+            yield from r.iter_content(chunk)
+            return
+        raise RuntimeError(f"download {path_or_id}: too many retries")
+
+    # ---------------------------------------------------------------- writing (needs the files.content.write permission)
+    @staticmethod
+    def _mode(mode: str, rev: str | None) -> dict | str:
+        if mode == "update":
+            return {".tag": "update", "update": rev}
+        return mode     # "add" or "overwrite"
+
+    def _content_call(self, endpoint: str, arg: dict, data: bytes) -> dict:
+        refreshed = False
+        for attempt in range(6):
+            r = self.s.post(f"{CONTENT}/{endpoint}", headers=self._headers({"Dropbox-API-Arg": json.dumps(arg), "Content-Type": "application/octet-stream"}),
+                            data=data, timeout=600)
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(min(float(r.headers.get("Retry-After", 2 ** attempt)), 60))
+                continue
+            if r.status_code == 401:
+                if "expired_access_token" in r.text and not refreshed:
+                    self._token, refreshed = None, True
+                    continue
+                raise _auth_error("files", r.status_code, r.text)
+            if r.status_code == 409 and "conflict" in r.text:
+                raise DropboxConflict(r.text[:200])
+            if r.status_code != 200:
+                raise RuntimeError(f"Dropbox {endpoint} failed {r.status_code}: {r.text[:300]}")
+            return r.json() if r.text and r.text != "null" else {}
+        raise RuntimeError(f"Dropbox {endpoint}: too many retries")
+
+    def upload(self, path: str, data: bytes, mode: str = "overwrite", rev: str | None = None) -> dict:
+        """Write a file of up to 150 MB in one call. mode "add" refuses to replace an existing file (DropboxConflict);
+        mode "update" replaces it only if its revision is still `rev`."""
+        if len(data) > 140 * 1024 * 1024:
+            return self.upload_chunks(path, [data[i:i + (32 << 20)] for i in range(0, len(data), 32 << 20)])
+        arg = {"path": path, "mode": self._mode(mode, rev), "autorename": False, "mute": True, "strict_conflict": mode != "overwrite"}
+        return self._content_call("files/upload", arg, data)
+
+    def upload_chunks(self, path: str, chunks: Iterable[bytes], part: int = 32 << 20) -> dict:
+        """Write a large file through an upload session, overwriting. Chunks of any size are regrouped into parts that are
+        multiples of 4 MiB, which the session requires for every part but the last."""
+        sid = self._content_call("files/upload_session/start", {"close": False}, b"")["session_id"]
+        offset, buf = 0, bytearray()
+        for c in chunks:
+            buf += c
+            while len(buf) >= part:
+                piece, buf = bytes(buf[:part]), buf[part:]
+                self._content_call("files/upload_session/append_v2", {"cursor": {"session_id": sid, "offset": offset}, "close": False}, piece)
+                offset += len(piece)
+        return self._content_call("files/upload_session/finish",
+                                  {"cursor": {"session_id": sid, "offset": offset},
+                                   "commit": {"path": path, "mode": "overwrite", "autorename": False, "mute": True}}, bytes(buf))
+
+    def get_metadata(self, path: str) -> dict | None:
+        try:
+            return self._rpc("files/get_metadata", {"path": path})
+        except RuntimeError as exc:
+            if "not_found" in str(exc):
+                return None
+            raise
+
+    def delete(self, path: str) -> bool:
+        try:
+            self._rpc("files/delete_v2", {"path": path})
+            return True
+        except RuntimeError as exc:
+            if "not_found" in str(exc):
+                return False
+            raise
+
+    def create_folder(self, path: str) -> None:
+        try:
+            self._rpc("files/create_folder_v2", {"path": path, "autorename": False})
+        except RuntimeError as exc:
+            if "conflict" not in str(exc):
+                raise
+
+    def current_account(self) -> dict:
+        r = self.s.post(f"{API}/users/get_current_account", headers=self._headers(), timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(f"Dropbox users/get_current_account failed {r.status_code}: {r.text[:200]}")
+        return r.json()
 
 
 def wanted(entry: dict) -> bool:

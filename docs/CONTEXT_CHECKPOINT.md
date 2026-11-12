@@ -166,3 +166,27 @@ What the user still has to do (see docs/OPERATIONS.md)
 
 Scratch (session only, not in the repository): store at <scratchpad>/data/remitwatch.sqlite, Dropbox mirror at <scratchpad>/data/dropbox,
 payer manuals at <scratchpad>/manuals, statutes at <scratchpad>/statutes, screenshots at <scratchpad>/shots.
+
+## State at 2026-11-12, later (Vercel mode; pushed to main)
+
+The user said a push to main deploys automatically (a Vercel project whose production address is its vercel.app domain, named
+after this repository; most likely the Hobby plan: 2 GB, 300 s, one scheduled run a day) and asked for an instruction sheet
+for an intern. The app now runs there with its store in a private Dropbox folder. Read docs/VERCEL_SETUP.md first.
+
+- New: remitwatch/cloud.py (the serverless cycle), state.py, actions.py, runtime.py, static/setup.html, tests/test_cloud.py,
+  tests/fakes.py (FakeDropbox), scripts/cloud_bench.py, public/robots.txt, .vercelignore. vercel.json rewritten (framework null,
+  fluid, functions maxDuration 300, catch-all rewrite, one cron). pandas removed (ema_exports reads with openpyxl).
+- The intern sheet is a Claude Doc titled "RemitWatch on Vercel: setup sheet" (private to the user). The repository is PUBLIC:
+  no secrets, no provider-level figures, no site-specific addresses in committed files.
+- Proven on the real archive through a local stand-in for Dropbox: first load in two runs, 1.42 GB peak, results equal to the
+  disk-based store to the cent (17,407 findings, open $2,403,995, recovered $1,330,153). NOT proven: the real Vercel runtime, real
+  Dropbox writes, the webhook from Dropbox, the live Claude note review.
+- Found and fixed while proving it: unmatched-line shortcut dropped biller handling (link.py); scratch-file prefixes leaked into
+  source names; an idle run rewrote the whole store; a due weekly report could repeat; order-dependent ties (usual_amount, top_of,
+  mark_superseded now breaks ties by file date then key).
+- The setup flow the user's intern follows: create a Dropbox app (Scoped, Full Dropbox, three file permissions), add
+  REMITWATCH_PASSWORD, CRON_SECRET, DROPBOX_APP_KEY, DROPBOX_APP_SECRET in Vercel, redeploy, /setup, Connect Dropbox, add
+  DROPBOX_REFRESH_TOKEN, redeploy, Run the first load, add the webhook.
+- GitHub Pages is also enabled on this repository and rebuilds from main on every push.
+- To check a deployment from a session: GET /api/health on the production address (no login) shows version, commit and runtime.
+  Commit statuses are not readable without a pull request.

@@ -80,6 +80,10 @@ docker compose up -d
 
 The first command prints the Dropbox refresh token for `.env` (once). The second starts the dashboard, its scheduler and HTTPS. Hosting, the webhook, alerts, the note review and the agreements that have to be in place are in `docs/OPERATIONS.md`.
 
+### On Vercel
+
+A push to `main` deploys the site on Vercel. Vercel keeps no files and no running process, so there the store lives in a private folder of the practice's Dropbox and each update is one time-boxed run (`remitwatch/cloud.py`). Add the settings in Vercel, open `/setup` on the site, and follow its checklist: it checks every setting live, gets the Dropbox token, and starts the first load. The settings, the limits (memory above all) and how it works are in `docs/VERCEL_SETUP.md`.
+
 ## Layout
 
 ```
@@ -95,15 +99,21 @@ remitwatch/
   alerts.py       what changed since the last look
   appeals.py      letters and correction instructions
   notes.py        visit-note review and appeal packet (PDF, email)
-  pipeline.py     the cycle, its lock and the scheduler
-  dropbox_sync.py Dropbox client (refresh token, cursor deltas, downloads)
+  pipeline.py     the cycle, its lock and the scheduler (a host with a disk)
+  cloud.py        the same cycle for a serverless host: store in memory, saved to a state folder, time-boxed runs
+  state.py        the state folder (Dropbox, or a local directory for tests)
+  actions.py      status changes and acknowledgements, applied to the store or written to the journal
+  runtime.py      which of the two modes is in effect, and what the host offers
+  dropbox_sync.py Dropbox client (refresh token, cursor deltas, downloads, uploads)
   report.py       summary report and email
   api.py          FastAPI endpoints
-  static/         dashboard (index.html, features.js; no build step)
+  static/         dashboard (index.html, features.js) and the setup checklist (setup.html); no build step
   cli.py          cycle | alerts | detect | serve | oauth | sync | ingest-835 | ingest-ema | link | stats | weekly
-docs/             findings, operations, missing data, research summary and raw research notes
+api/index.py      Vercel entry point
+vercel.json       one function behind every address, the daily schedule
+docs/             findings, operations, Vercel setup, missing data, research summary and raw research notes
 deploy/           container entrypoint, Caddyfile, cron example
-tests/            synthetic-fixture tests (no patient data)
+tests/            synthetic-fixture tests (no patient data); fakes.py stands in for Dropbox
 ```
 
 ## PHI

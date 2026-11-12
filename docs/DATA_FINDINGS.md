@@ -1,10 +1,10 @@
 # What the remittances say: where Owensboro Dermatology is losing money
 
-Generated 2026-11-12 from 32,550 unique 835 remittances (192,851 claims, 419,023 service lines), payment dates 2024-01-01 to 2026-10-09, $29,966,776 paid. Detection version 2.1. Dollar figures are the allowed-amount shortfall against the payer's own usual rate (or Medicare where noted), not charges. A finding stays open until a later remittance pays it or a biller marks it.
+Generated 2026-11-12 from 32,550 unique 835 remittances (192,851 claims, 419,023 service lines), payment dates 2024-01-01 to 2026-10-09, $29,967,034 paid. Detection version 2.1. Dollar figures are the allowed-amount shortfall against the payer's own usual rate (or Medicare where noted), not charges. A finding stays open until a later remittance pays it or a biller marks it.
 
 ## The one-paragraph answer
 
-Across the whole archive the detectable, still-unrecovered leakage is about $2,404,188. Classic E/M downcoding, the thing the practice asked about, is $51,806 of it. The money is in bundling ($162,148), denials that were never worked ($633,356), contract rates below Medicare ($897,393 at Medicare parity), underpayment against the payer's own rate ($128,464), and fees plus takebacks ($531,020). A further $1,158,616 across 5,574 lines was initially denied or bundled and then paid on a later remittance, which is the rework the billers did do; those are marked resolved and excluded from the open figures.
+Across the whole archive the detectable, still-unrecovered leakage is about $2,403,995. Classic E/M downcoding, the thing the practice asked about, is $51,806 of it. The money is in bundling ($162,165), denials that were never worked ($633,379), contract rates below Medicare ($897,393 at Medicare parity), underpayment against the payer's own rate ($128,231), and fees plus takebacks ($531,020). A further $1,158,715 across 5,574 lines was initially denied or bundled and then paid on a later remittance, which is the rework the billers did do; those are marked resolved and excluded from the open figures.
 
 ## By year and category
 
@@ -12,10 +12,10 @@ Open findings only (resolved and dismissed excluded).
 
 | year | downcoding | bundling | denial | underpayment | fees | contract | total |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 2023 | $816 | $3,868 | $88,733 | $2,274 | $0 | $5,515 | $101,205 |
-| 2024 | $2,010 | $53,519 | $233,874 | $39,827 | $72,267 | $393,948 | $795,444 |
-| 2025 | $3,507 | $34,635 | $204,000 | $56,593 | $197,789 | $278,325 | $774,849 |
-| 2026 | $45,474 | $70,126 | $104,387 | $29,751 | $260,964 | $219,189 | $729,892 |
+| 2023 | $816 | $3,868 | $88,729 | $2,256 | $0 | $5,515 | $101,184 |
+| 2024 | $2,010 | $53,515 | $233,964 | $39,612 | $72,267 | $393,948 | $795,315 |
+| 2025 | $3,507 | $34,635 | $203,929 | $56,593 | $197,789 | $278,325 | $774,778 |
+| 2026 | $45,474 | $70,147 | $104,395 | $29,751 | $260,964 | $219,189 | $729,921 |
 
 ## By signal
 
@@ -24,34 +24,34 @@ Open findings only (resolved and dismissed excluded).
 | CONTRACT_RATE_GAP | contract | renegotiate | 53 | $633,418 | $0 |
 | TAKEBACK | fees | review | 141 | $462,040 | $0 |
 | MA_BELOW_MEDICARE | contract | review | 133 | $263,559 | $0 |
-| UNDERPAID_VS_OWN_RATE | underpayment | appeal | 2,487 | $124,160 | $0 |
-| DENIED_NONCOVERED | denial | review | 1,035 | $107,314 | $99,923 |
-| DENIED_AUTH | denial | appeal | 756 | $94,096 | $21,442 |
+| UNDERPAID_VS_OWN_RATE | underpayment | appeal | 2,485 | $123,928 | $0 |
+| DENIED_NONCOVERED | denial | review | 1,035 | $107,191 | $100,009 |
+| DENIED_AUTH | denial | appeal | 756 | $94,096 | $21,453 |
 | DENIED_MEDICAL_NECESSITY | denial | appeal | 692 | $88,674 | $193,020 |
-| DENIED_DUPLICATE_UNPAID | denial | review | 373 | $70,566 | $0 |
+| DENIED_DUPLICATE_UNPAID | denial | review | 373 | $70,589 | $0 |
 | FEE_SKIM | fees | opt_out | 1,143 | $68,980 | $0 |
-| DENIED_MISSING_INFO | denial | correct_and_resubmit | 483 | $60,053 | $156,166 |
+| DENIED_MISSING_INFO | denial | correct_and_resubmit | 483 | $60,053 | $156,149 |
 | EM_BUNDLED_MOD57_MAJOR | bundling | appeal | 749 | $60,011 | $36,658 |
-| PROCEDURE_BUNDLED | bundling | appeal | 244 | $50,943 | $157,806 |
+| PROCEDURE_BUNDLED | bundling | appeal | 244 | $50,964 | $157,775 |
 | CODE_CHANGED | downcoding | review | 164 | $44,365 | $0 |
-| DENIED_FREQUENCY | denial | appeal | 325 | $42,427 | $51,093 |
-| CLAIM_DENIED_UNPAID | denial | review | 332 | $41,384 | $0 |
+| DENIED_FREQUENCY | denial | appeal | 325 | $42,407 | $51,093 |
+| CLAIM_DENIED_UNPAID | denial | review | 332 | $41,516 | $0 |
 | EM_BUNDLED_MOD25 | bundling | appeal | 597 | $38,527 | $39,443 |
-| CLAIM_DENIED_UNPAID | denial | appeal | 841 | $35,497 | $0 |
+| CLAIM_DENIED_UNPAID | denial | appeal | 841 | $35,521 | $0 |
 | CLAIM_DENIED_UNPAID | denial | correct_and_resubmit | 147 | $23,355 | $0 |
 | DENIED_TIMELY_FILING | denial | review | 143 | $19,872 | $1,053 |
 | DENIED_MISSING_MODIFIER | denial | correct_and_resubmit | 212 | $18,887 | $153,995 |
 | DENIED_PROVIDER | denial | review | 78 | $10,356 | $17,428 |
-| DENIED_CODING | denial | correct_and_resubmit | 66 | $6,787 | $321,950 |
+| DENIED_CODING | denial | correct_and_resubmit | 66 | $6,772 | $321,950 |
 | DENIED_LEVEL_OF_SERVICE | denial | appeal | 18 | $5,406 | $19,433 |
-| DENIED_MISSING_PRIMARY | denial | review | 41 | $4,620 | $27,524 |
+| DENIED_MISSING_PRIMARY | denial | review | 41 | $4,620 | $27,541 |
 | MPPR_EXCESS | underpayment | appeal | 140 | $4,304 | $0 |
 | DENIED_OTHER | denial | review | 37 | $4,063 | $882 |
 | DOWNCODE_SVC06 | downcoding | appeal | 151 | $3,898 | $0 |
 | EM_BUNDLED_MOD57_MINOR | bundling | correct_and_resubmit | 38 | $3,788 | $778 |
 | EM_BUNDLED_MOD24 | bundling | appeal | 48 | $3,230 | $1,778 |
 | EM_BUNDLED_NO_MODIFIER | bundling | correct_and_resubmit | 40 | $2,923 | $8,090 |
-| ADDON_BUNDLED | bundling | appeal | 24 | $2,727 | $21,402 |
+| ADDON_BUNDLED | bundling | appeal | 24 | $2,723 | $21,402 |
 | DOWNCODE_LEVEL_REDUCED | downcoding | appeal | 55 | $1,826 | $29 |
 | DOWNCODE_LEVEL_DENIED | downcoding | appeal | 17 | $1,672 | $194 |
 | MPPR_POLICY | contract | renegotiate | 1 | $416 | $0 |
@@ -62,30 +62,30 @@ Open findings only (resolved and dismissed excluded).
 
 | payer | kind | findings | dollars | of which appealable now |
 |---|---|---:|---:|---:|
-| Anthem / BCBS | commercial | 2,546 | $823,884 | $83,874 |
+| Anthem / BCBS | commercial | 2,546 | $823,885 | $83,874 |
 | Medicare KY (CGS J15) | medicare | 1,299 | $487,500 | $12,165 |
-| Humana Medicare Advantage | medicare_advantage | 1,705 | $357,931 | $95,295 |
-| UnitedHealthcare Medicare Advantage | medicare_advantage | 1,126 | $208,082 | $17,718 |
+| Humana Medicare Advantage | medicare_advantage | 1,681 | $357,456 | $95,295 |
+| UnitedHealthcare Medicare Advantage | medicare_advantage | 1,126 | $208,083 | $17,718 |
 | Medicare IN (WPS J8) | medicare | 635 | $170,434 | $6,807 |
 | Anthem / BCBS Medicare Advantage | medicare_advantage | 576 | $88,873 | $2,980 |
 | UnitedHealthcare | commercial | 437 | $46,370 | $11,643 |
-| Medicare Supplement carriers | supplement | 560 | $35,833 | $67 |
+| Medicare Supplement carriers | supplement | 560 | $35,834 | $67 |
 | UMWA Health & Retirement Funds | commercial | 654 | $31,310 | $3,525 |
-| UHC Integrated Services (Wausau) | commercial | 377 | $25,929 | $2,663 |
-| UMR | commercial | 330 | $22,794 | $4,489 |
-| Aetna | commercial | 300 | $20,445 | $3,023 |
-| Self-funded plan TPAs | commercial | 420 | $18,000 | $529 |
+| UHC Integrated Services (Wausau) | commercial | 377 | $26,116 | $2,663 |
+| UMR | commercial | 352 | $23,039 | $4,510 |
+| Aetna | commercial | 300 | $20,440 | $3,023 |
+| Self-funded plan TPAs | commercial | 420 | $17,975 | $537 |
 | Humana Medicaid | medicaid | 109 | $11,878 | $3,996 |
 | Medicaid KY | medicaid | 38 | $8,727 | $0 |
 | Humana | commercial | 38 | $8,082 | $401 |
 | Aetna Senior Supplemental (American Continental) | supplement | 35 | $6,519 | $0 |
-| Illumifin | other | 39 | $4,544 | $0 |
-| Southeastern Indiana Health Organization (Siho) | other | 49 | $4,187 | $0 |
+| Illumifin | other | 39 | $4,475 | $0 |
+| Southeastern Indiana Health Organization (Siho) | other | 49 | $4,135 | $0 |
 | Medicaid IN | medicaid | 58 | $2,841 | $2,122 |
 
 ## Visit downcoding: who and what
 
-229 office visits were downcoded out of 93,878 billed (0.24%), worth $7,664. Provider-level figures are in the dashboard (Downcoding and Who & what tabs) and are kept out of this file.
+229 office visits were downcoded out of 93,880 billed (0.24%), worth $7,664. Provider-level figures are in the dashboard (Downcoding and Who & what tabs) and are kept out of this file.
 
 | payer | downcoded visits | visits billed | per 100 | dollars |
 |---|---:|---:|---:|---:|
@@ -132,10 +132,10 @@ Procedure code changes by the payer (outside office visits):
 
 | status | findings | dollars |
 |---|---:|---:|
-| open | 10,336 | $975,774 |
-| recovered (paid on a later remittance) | 5,574 | $1,158,616 |
+| open | 10,334 | $975,582 |
+| recovered (paid on a later remittance) | 5,574 | $1,158,715 |
 
-Open and still inside the filing window today: 3,236 findings, $253,824.
+Open and still inside the filing window today: 3,236 findings, $253,853.
 
 Active alerts (provider-level alerts are shown in the dashboard only):
 
@@ -190,7 +190,7 @@ Usual allowed amount per code (most common allowed amount on cleanly paid primar
 - 2024: net MIPS adjustment +$307,984 across 35964 lines
 - 2024: sequestration withheld $157,514
 - 2025: net MIPS adjustment +$82,364 across 37106 lines
-- 2025: sequestration withheld $207,387
+- 2025: sequestration withheld $207,408
 - 2026: net MIPS adjustment +$15,014 across 21240 lines
 - 2026: sequestration withheld $85,566
 
@@ -224,7 +224,7 @@ Usual allowed amount per code (most common allowed amount on cleanly paid primar
 - DENIED_MISSING_INFO: 483 lines, $60,053
 - CLAIM_DENIED_UNPAID: 147 lines, $23,355
 - DENIED_MISSING_MODIFIER: 212 lines, $18,887
-- DENIED_CODING: 66 lines, $6,787
+- DENIED_CODING: 66 lines, $6,772
 - EM_BUNDLED_MOD57_MINOR: 38 lines, $3,788
 - EM_BUNDLED_NO_MODIFIER: 40 lines, $2,923
 
@@ -232,8 +232,8 @@ Usual allowed amount per code (most common allowed amount on cleanly paid primar
 
 - due within 30 days: 329 findings, $23,603
 - due within 90 days: 537 findings, $48,488
-- expired: 4,897 findings, $419,411
-- later: 2,370 findings, $181,733
+- expired: 4,895 findings, $419,157
+- later: 2,370 findings, $181,762
 
 ## Caveats
 

@@ -1,10 +1,9 @@
 """
-Vercel serverless entry point: exposes the RemitWatch FastAPI app.
+Vercel entry point: exposes the RemitWatch FastAPI app as the one function behind every address (see vercel.json).
 
-Vercel has no persistent disk, so this only works when REMITWATCH_DB points at a
-store that exists in the deployment (for example a read-only copy uploaded with the
-build). For the hands-off weekly job and a store that grows, run the container in
-deploy/ instead (see docs/OPERATIONS.md).
+On Vercel nothing written to disk survives and no process outlives a request, so the app runs in its serverless mode:
+the store is kept in a private folder of the practice's Dropbox and each update is one time-boxed run of
+/api/cron/cycle (remitwatch/cloud.py). Setup: docs/VERCEL_SETUP.md, and the live checklist at /setup.
 """
 import sys
 from pathlib import Path

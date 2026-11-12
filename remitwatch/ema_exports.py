@@ -26,8 +26,6 @@ import os
 import re
 from typing import Any, Iterator
 
-import pandas as pd
-
 CANON = {
     "service date": "service_date", "transaction date": "transaction_date", "posted date": "posted_date",
     "bill creation date": "bill_created", "primary provider": "provider", "primary provider role": "provider_role",
@@ -69,6 +67,12 @@ def detect_family(columns: list[str]) -> str:
     return "unknown"
 
 
+# Text that stands for "no value". The first five are the app's own; the rest are what the spreadsheet reader used until
+# now treated as empty (including Excel's error cells), kept so that the same file always produces the same rows.
+NA_TEXT = frozenset(("", "-", "nan", "NaN", "None", "NA", "N/A", "n/a", "NULL", "null", "#N/A", "#NA", "#N/A N/A", "<NA>", "-nan", "-NaN",
+                     "1.#IND", "-1.#IND", "1.#QNAN", "-1.#QNAN", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#NULL!"))
+
+
 def _clean(v: Any) -> Any:
     if v is None:
         return None
@@ -76,7 +80,7 @@ def _clean(v: Any) -> Any:
         return None
     if isinstance(v, str):
         s = v.strip()
-        if s in ("", "-", "nan", "NaN", "None"):
+        if s in NA_TEXT:
             return None
         return s
     return v
@@ -141,34 +145,62 @@ def split_carc(v: Any) -> tuple[str | None, str | None]:
     return None, s
 
 
-def read_export(path: str) -> tuple[pd.DataFrame, str, str]:
-    """Return (dataframe with canonical columns, family, sha256 of file)."""
+def read_export(path: str) -> tuple[list[dict], str, str]:
+    """Return (rows as dicts keyed by canonical column name, family, sha256 of the file). First sheet only."""
+    import openpyxl
+
     with open(path, "rb") as fh:
         data = fh.read()
     sha = hashlib.sha256(data).hexdigest()
-    xl = pd.ExcelFile(path, engine="openpyxl")
-    sheet = xl.sheet_names[0]
-    head = xl.parse(sheet, header=None, nrows=10)
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        raw = [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    # A sheet often declares more columns and rows than it uses. Keep only up to the last cell that holds something:
+    # a row's identity (its fingerprint) is built from its columns, and empty ones must not change it from file to file.
+    def used(r: list) -> int:
+        n = len(r)
+        while n and (r[n - 1] is None or r[n - 1] == ""):
+            n -= 1
+        return n
+    widths = [used(r) for r in raw]
+    while widths and widths[-1] == 0:
+        widths.pop()
+    raw = raw[:len(widths)]
+    width = max(widths, default=0)
+    raw = [r[:width] + [None] * (width - len(r)) for r in raw]
     hdr = 0
-    for i in range(min(10, len(head))):
-        if sum(isinstance(v, str) for v in head.iloc[i]) >= 5:
+    for i in range(min(10, len(raw))):
+        if sum(isinstance(v, str) for v in raw[i]) >= 5:
             hdr = i
             break
-    df = xl.parse(sheet, header=hdr)
-    family = detect_family([str(c) for c in df.columns])
-    rename = {}
-    for c in df.columns:
-        key = str(c).lower().strip()
-        rename[c] = CANON.get(key, re.sub(r"[^a-z0-9]+", "_", key).strip("_"))
-    df = df.rename(columns=rename)
-    return df, family, sha
+    header = raw[hdr] if raw else []
+    names: list[str] = []
+    seen: dict[str, int] = {}
+    for i, c in enumerate(header):
+        label = str(c) if c is not None else f"Unnamed: {i}"
+        n = seen.get(label, 0)
+        seen[label] = n + 1
+        names.append(label if n == 0 else f"{label}.{n}")       # a repeated header gets a numeric suffix
+    family = detect_family(names)
+    canon = []
+    for c in names:
+        key = c.lower().strip()
+        canon.append(CANON.get(key, re.sub(r"[^a-z0-9]+", "_", key).strip("_")))
+    rows = []
+    for r in raw[hdr + 1:]:
+        r = list(r) + [None] * (len(canon) - len(r))
+        rows.append({canon[i]: r[i] for i in range(len(canon))})
+    return rows, family, sha
 
 
 def iter_rows(path: str) -> Iterator[dict]:
     """Yield canonical row dicts (cents, ISO dates, modifier lists) ready for the store."""
-    df, family, sha = read_export(path)
+    records, family, sha = read_export(path)
     name = os.path.basename(path)
-    for idx, rec in enumerate(df.to_dict(orient="records")):
+    for idx, rec in enumerate(records):
         if all(_clean(v) is None for v in rec.values()):
             continue
         row: dict[str, Any] = {"family": family, "source_sha256": sha, "source_name": name, "row_index": idx}
@@ -211,6 +243,7 @@ def iter_export_paths(root: str) -> Iterator[str]:
 if __name__ == "__main__":  # smoke test
     import sys
     for p in sys.argv[1:]:
-        df, fam, sha = read_export(p)
-        print(f"{fam:12s} rows={len(df):6d} cols={len(df.columns):3d} {os.path.basename(p)}")
-        print("   ", sorted(df.columns)[:50])
+        recs, fam, sha = read_export(p)
+        cols = sorted(recs[0]) if recs else []
+        print(f"{fam:12s} rows={len(recs):6d} cols={len(cols):3d} {os.path.basename(p)}")
+        print("   ", cols[:50])

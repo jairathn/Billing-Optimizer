@@ -67,10 +67,25 @@ Authentication is one shared HTTP Basic login. State-changing calls must carry a
 
 `dropbox_sync.py` lists the folder with `files/list_folder` (recursive) and stores the cursor; later runs call `list_folder/continue` so only new or changed files are downloaded. A refresh token obtained once with `remitwatch.cli oauth` keeps it unattended.
 
+## Serverless mode (Vercel)
+
+`runtime.serverless()` is true when the `VERCEL` variable is present. Nothing on disk survives there and no process outlives a request, so `cloud.py` replaces `pipeline.py`:
+
+- The store is a compact SQLite image (no secondary indexes) held in memory for one run with `deserialize` and written back with `serialize`, gzip'd, to a state folder in the practice's Dropbox (`state.py`). It is started from a serialized image even when empty, so SQLite keeps it in one block and saving needs one copy, not two.
+- A run takes a lock file (created with Dropbox's add-only write, so two runs cannot both get it), folds the journal, ingests until half its time is gone, detects, alerts, saves the dashboard's copy and the store, then writes the Dropbox position. The position is written last and lives in its own small file, so it never runs ahead of the saved store and an idle run uploads nothing large.
+- When there is more to do the run calls its own `/api/cron/cycle` with the `CRON_SECRET` and returns. Detection is handed to a fresh run after a large batch. A run that made no progress does not call itself again.
+- The dashboard reads a smaller database built by each run: findings, rates, exposure, alerts and the claim detail behind each finding. Every instance keeps a local copy under a new file name per version and overlays the journal (`actions/*.json`), so a status change shows at once and reaches the store on the next run. Replaying a journal entry is harmless.
+- The first load reads `Trizetto.zip` in one download when the data folder has it, and recognises the same files met later as loose copies by their Dropbox content hash.
+
+Measured on the five-year archive: first load in two runs (77 and 38 seconds on a 2.1 GHz core), 1.42 GB peak. Results equal the disk-based store's: same findings count, same dollars, same rates and alerts.
+
+Rules that keep the two modes equal: a file keeps its own name and date when it is ingested, the most common rate of a group does not depend on the order files were read in (`usual_amount`), and when a payer sends the same payment twice the copy from the newer file wins.
+
 ## Limits and next steps
 
 - Expected amounts are revealed-rate baselines, not contracts. Loading contracts would turn "below usual" into "below contract".
 - Filing windows come from provider manuals where they were read and from payer type otherwise; a contract can differ.
 - Location and diagnosis are known only where EMA exports exist (late July 2026 onward); location is otherwise estimated from the provider's usual site.
-- The store is one SQLite file (about 0.9 GB for 32K remittances) and detection holds every line in memory (about 2 GB). That is fine for one practice on a 4 GB host.
+- The store is one SQLite file (about 0.9 GB for 32K remittances, 0.5 GB in the compact form). Detection holds every line in memory: a run peaks at about 1.4 GB, which fits a 2 GB serverless function today and grows with the archive.
+- A store held in memory from a serialized image cannot pass 1 GB (SQLite's default limit for it).
 - The visit-note review has not been exercised against the live API in this build.

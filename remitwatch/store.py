@@ -182,11 +182,20 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def connect(db_path: str) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=60)
+def ddl(compact: bool = False) -> str:
+    """The schema. A compact store leaves out the secondary indexes: it is scanned whole by detection and never queried
+    row by row, and the indexes are a third of its size. The dashboard's copy (remitwatch.cloud) builds its own."""
+    if not compact:
+        return DDL
+    return "\n".join(ln for ln in DDL.splitlines() if not ln.lstrip().upper().startswith(("CREATE INDEX", "PRAGMA JOURNAL_MODE")))
+
+
+def connect(db_path: str, compact: bool = False) -> sqlite3.Connection:
+    if db_path != ":memory:":
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=60, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.executescript(DDL)
+    conn.executescript(ddl(compact))
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     conn.execute("UPDATE transactions SET superseded=0 WHERE superseded IS NULL")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
@@ -216,12 +225,31 @@ def table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 class Store:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, compact: bool = False):
         self.db_path = db_path
-        self.conn = connect(db_path)
+        self.compact = compact
+        self.conn = connect(db_path, compact)
         self._cols = {t: table_columns(self.conn, t) for t in
                       ("transactions", "claims", "lines", "adjustments", "remarks", "plb", "problems", "files", "ema_rows")}
         self._known_fingerprints: set[str] | None = None
+
+    # ------------------------------------------------------------------ in-memory stores (serverless hosts have no disk)
+    @classmethod
+    def from_bytes(cls, data) -> "Store":
+        """Open a compact in-memory store from a serialized database image."""
+        store = cls(":memory:", compact=True)
+        if data:
+            store.conn.deserialize(data)
+            store.conn.row_factory = sqlite3.Row
+            store.conn.executescript(ddl(True))         # tables added since the image was written
+            store.conn.execute("UPDATE transactions SET superseded=0 WHERE superseded IS NULL")
+            store.conn.commit()
+            store._cols = {t: table_columns(store.conn, t) for t in store._cols}
+        return store
+
+    def to_bytes(self) -> bytes:
+        self.conn.commit()
+        return self.conn.serialize()
 
     # ------------------------------------------------------------------ files
     def file_seen(self, sha256: str) -> bool:
@@ -256,6 +284,11 @@ class Store:
                 known.add(fp)
         c = self.conn
         cols = self._cols
+        if self.compact:        # the file hash is kept on the transaction and the file row; repeating it on every line is 40 MB
+            for x in parsed.claims:
+                x["file_sha256"] = None
+            for x in parsed.lines:
+                x["file_sha256"] = None
         ins = lambda table, rows: c.executemany(  # noqa: E731
             f"INSERT OR IGNORE INTO {table} ({','.join(cols[table])}) VALUES ({','.join('?' * len(cols[table]))})",
             [_row(r, table, cols[table]) for r in rows])
@@ -284,6 +317,7 @@ class Store:
         stats = {"files": 0, "skipped_seen": 0, "ingested": 0, "duplicate_files": 0, "transactions": 0,
                  "duplicate_transactions": 0, "problems": 0, "errors": 0, "seconds": 0.0}
         t0 = time.time()
+        self.conn.commit()          # the setting below cannot be changed inside an open transaction
         self.conn.execute("PRAGMA synchronous=OFF")
         n = 0
         for p in paths:
@@ -347,7 +381,8 @@ class Store:
         for key, members in groups.items():
             if len(members) < 2:
                 continue
-            members.sort(key=lambda r: ((r["isa_date"] or ""), (r["isa_time"] or ""), (r["mtime"] or "")))
+            # the last key makes the choice the same whatever order the files were read in
+            members.sort(key=lambda r: ((r["isa_date"] or ""), (r["isa_time"] or ""), (r["mtime"] or ""), r["transaction_key"]))
             for r in members[:-1]:
                 c.execute("UPDATE transactions SET superseded=1 WHERE transaction_key=?", (r["transaction_key"],))
                 flagged += 1

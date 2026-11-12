@@ -1,5 +1,10 @@
 {
-  "version": 2,
-  "builds": [{ "src": "api/index.py", "use": "@vercel/python", "config": { "maxLambdaSize": "50mb" } }],
-  "routes": [{ "src": "/(.*)", "dest": "api/index.py" }]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "fluid": true,
+  "functions": {
+    "api/index.py": { "maxDuration": 300 }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
+  "crons": [{ "path": "/api/cron/cycle", "schedule": "17 10 * * *" }]
 }

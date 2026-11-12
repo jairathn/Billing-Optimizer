@@ -221,11 +221,19 @@ def test_later_remit_resolves_finding_and_ema_handling_is_attached(tmp_path):
          "claim_id": "CB00TEST02C017", "service_date": "2026-04-07", "cpt": "99214", "carc": "PI-B10", "carc_group": "PI", "carc_code": "B10",
          "adjustment_status": "WRITE_OFF", "adjustment_subtype": "Contractual", "adjustments_cents": 22365, "payments_cents": 0,
          "transaction_date": "2026-05-03"},
+        # the downcoded claim has no charge row in the exports, but the biller's handling of it is there
+        {"row_fingerprint": "ema-era-2", "family": "era_lines", "source_name": "ERA & Payment Lines 4-26.xlsx", "row_index": 2,
+         "claim_id": "CB00TEST01C017", "service_date": "2025-11-11", "cpt": "99214", "carc": "CO-45", "carc_group": "CO", "carc_code": "45",
+         "adjustment_status": "IGNORE", "adjustment_subtype": "Contractual", "adjustments_cents": 8820, "payments_cents": 7760,
+         "transaction_date": "2025-11-26"},
     ])
     from remitwatch.link import build_links
 
     stats = build_links(store, log=lambda *_a: None)
-    assert stats["states"].get("exact_composite") == 1
+    assert stats["states"].get("exact_composite") == 1 and stats["states"].get("unmatched", 0) >= 1 and stats["handling_rows"] == 2
+    # lines with no charge row are counted but not stored; what the biller did with them is still kept
+    assert store.query("SELECT COUNT(*) n FROM line_links WHERE state='unmatched'")[0]["n"] == 0
+    assert store.query("SELECT COUNT(*) n FROM line_handling WHERE claim_id='CB00TEST01C017'")[0]["n"] == 1
     link = store.query("SELECT * FROM line_links WHERE state='exact_composite'")[0]
     assert link["bill_item_id"] == "7000001" and link["ema_cpt"] == "99214"
     Detector(store, run_id="t").run()
@@ -235,7 +243,8 @@ def test_later_remit_resolves_finding_and_ema_handling_is_attached(tmp_path):
     assert ev["ema_link"] == "exact_composite" and "WRITE_OFF" in ev["ema_handling"][0]
     assert f["status"] == "resolved" and "later remittance" in f["auto_note"] and f["notes"] is None and ev["paid_later"]["payment_date"] == "2026-06-01"
     # the downcode on the other claim has no later payment and stays open
-    assert store.query("SELECT status FROM findings WHERE signal='DOWNCODE_SVC06'")[0]["status"] == "open"
+    down = store.query("SELECT status, ema_handling FROM findings WHERE signal='DOWNCODE_SVC06'")[0]
+    assert down["status"] == "open" and down["ema_handling"] == "IGNORE"
     # a dismissed finding is never re-opened or auto-resolved
     store.conn.execute("UPDATE findings SET status='dismissed' WHERE signal='EM_BUNDLED_MOD25'")
     store.conn.commit()

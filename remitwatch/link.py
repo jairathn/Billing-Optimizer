@@ -146,12 +146,13 @@ def build_links(store: Store, log=print) -> dict:
                 else:
                     state, cause = "unmatched", "same claim but date, code or charge differs"
             stats[state] += 1
-            link_rows.append((l["line_key"], claim_key, state, cause,
-                              match["row_fingerprint"] if match else None, match["bill_item_id"] if match else None,
-                              match["source_name"] if match else None, match["cpt"] if match else None,
-                              match["modifiers"] if match else None, match["units"] if match else None,
-                              match["charges_cents"] if match else None, match["provider"] if match else None,
-                              match["payer"] if match else None, match["claim_status"] if match else None))
+            if state != "unmatched":        # nine lines in ten have no EMA row; storing "unmatched" for each only costs space
+                link_rows.append((l["line_key"], claim_key, state, cause,
+                                  match["row_fingerprint"] if match else None, match["bill_item_id"] if match else None,
+                                  match["source_name"] if match else None, match["cpt"] if match else None,
+                                  match["modifiers"] if match else None, match["units"] if match else None,
+                                  match["charges_cents"] if match else None, match["provider"] if match else None,
+                                  match["payer"] if match else None, match["claim_status"] if match else None))
             key = (pcn, l["procedure_code"], l["service_date"] or l["statement_from"])
             alt = (pcn, l["original_procedure_code"], l["service_date"] or l["statement_from"]) if l["original_procedure_code"] else None
             for h in handling.get(key, []) + (handling.get(alt, []) if alt else []):

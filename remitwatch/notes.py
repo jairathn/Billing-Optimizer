@@ -520,9 +520,9 @@ def list_packets(conn: sqlite3.Connection, finding_id: str | None = None) -> lis
                                               FROM appeal_packets {where} ORDER BY created_at DESC LIMIT 200""", params)]
 
 
-def email_packet(conn: sqlite3.Connection, packet_id: str, to: str, note: str = "") -> dict:
-    """Send the packet PDF to one address through the configured SMTP server. The PDF holds patient information:
-    send it only to an address inside the practice's secure mail or to a payer channel that accepts it."""
+def send_pdf(pdf: bytes, packet_id: str, to: str, note: str = "") -> dict:
+    """Email one packet PDF through the configured SMTP server. The PDF holds patient information: send it only to an
+    address inside the practice's secure mail or to a payer channel that accepts it."""
     host = os.environ.get("SMTP_HOST")
     if not host:
         return {"sent": False, "reason": "SMTP_HOST is not set"}
@@ -531,8 +531,7 @@ def email_packet(conn: sqlite3.Connection, packet_id: str, to: str, note: str = 
     allowed = [d.strip().lower() for d in os.environ.get("APPEAL_EMAIL_DOMAINS", "").split(",") if d.strip()]
     if allowed and to.split("@")[-1].lower() not in allowed:
         return {"sent": False, "reason": f"address is outside the allowed domains ({', '.join(allowed)})"}
-    p = get_packet(conn, packet_id, with_pdf=True)
-    if not p:
+    if not pdf:
         return {"sent": False, "reason": "packet not found"}
     msg = EmailMessage()
     msg["Subject"] = f"Appeal packet {packet_id}"
@@ -540,14 +539,21 @@ def email_packet(conn: sqlite3.Connection, packet_id: str, to: str, note: str = 
     msg["To"] = to
     msg.set_content((note.strip() + "\n\n" if note.strip() else "") + "The appeal packet is attached as a PDF. It contains patient information. "
                     "Handle it under the practice's privacy policy.\n")
-    msg.add_attachment(p["pdf"], maintype="application", subtype="pdf", filename=f"appeal-packet-{packet_id}.pdf")
-    with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=30) as s:
+    msg.add_attachment(pdf, maintype="application", subtype="pdf", filename=f"appeal-packet-{packet_id}.pdf")
+    with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=30) as smtp:
         if os.environ.get("SMTP_STARTTLS", "1") == "1":
-            s.starttls()
+            smtp.starttls()
         if os.environ.get("SMTP_USER"):
-            s.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASS", ""))
-        s.send_message(msg)
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    conn.execute("UPDATE appeal_packets SET emailed_to=?, emailed_at=? WHERE packet_id=?", (to, now, packet_id))
-    conn.commit()
-    return {"sent": True, "to": to, "at": now}
+            smtp.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASS", ""))
+        smtp.send_message(msg)
+    return {"sent": True, "to": to, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+
+def email_packet(conn: sqlite3.Connection, packet_id: str, to: str, note: str = "") -> dict:
+    """Email a packet stored in the database and record where it went."""
+    p = get_packet(conn, packet_id, with_pdf=True)
+    out = send_pdf((p or {}).get("pdf") or b"", packet_id, to, note)
+    if out.get("sent"):
+        conn.execute("UPDATE appeal_packets SET emailed_to=?, emailed_at=? WHERE packet_id=?", (to, out["at"], packet_id))
+        conn.commit()
+    return out

@@ -197,8 +197,8 @@ def best_provider_name(names: Counter) -> str:
         if n:
             clean[n] += k
     personal = Counter({n: k for n, k in clean.items() if not any(w in n.upper() for w in ORG_NAME_WORDS)})
-    pick = (personal or clean).most_common(1)
-    return pick[0][0] if pick else ""
+    pick = personal or clean
+    return top_of(pick)[0] if pick else ""
 
 
 def modifier_class(mods: list[str]) -> str:
@@ -206,6 +206,69 @@ def modifier_class(mods: list[str]) -> str:
         if m in mods:
             return m
     return "other" if mods else "none"
+
+
+LINE_COLUMNS = ("line_key", "claim_key", "transaction_key", "procedure_code", "modifiers", "charge_cents", "paid_cents", "paid_units",
+                "original_procedure_code", "original_modifiers", "original_units", "service_date", "allowed_cents",
+                "patient_control_number", "claim_status_code", "payer_name", "payer_id", "payment_date", "rendering_provider_npi",
+                "claim_filing_indicator", "contract_class", "facility_type_code", "rp_name", "txn_payment_date", "trace_number")
+# Not here on purpose: the claim's statement date. The rules read it with l.get("statement_from") as a fallback for a line
+# with no service date, and for lines that has always come back empty. Adding it would change which later payments match.
+LINE_DERIVED = ("modifiers_list", "year", "payer_group", "payer_kind", "pricing_mod", "pos", "pos_class", "plan", "month",
+                "provider_tier", "surg_rank", "surg_count", "clean")
+
+
+class Line:
+    """One service line with its claim and payment context. It behaves like the dict the rules were written against
+    (l["x"], l.get("x"), l["x"] = v) but is a slotted object: with 400,000 lines in memory a dict each costs close to a
+    gigabyte more, which is the difference between fitting a small serverless function and not."""
+    __slots__ = LINE_COLUMNS + LINE_DERIVED
+
+    def __getitem__(self, k):
+        try:
+            return getattr(self, k)
+        except AttributeError:
+            raise KeyError(k) from None
+
+    def __setitem__(self, k, v) -> None:
+        setattr(self, k, v)
+
+    def get(self, k, default=None):
+        return getattr(self, k, default)
+
+    def setdefault(self, k, v):
+        try:
+            return getattr(self, k)
+        except AttributeError:
+            setattr(self, k, v)
+            return v
+
+    def keys(self):
+        return [k for k in self.__slots__ if hasattr(self, k)]
+
+    def __contains__(self, k) -> bool:
+        return hasattr(self, k)
+
+
+exec("def _line_init(self, r):\n" + "".join(f"    self.{n} = r[{i}]\n" for i, n in enumerate(LINE_COLUMNS)))
+Line.__init__ = _line_init      # noqa: F821  (generated above: one bytecode store per column is several times faster than a loop)
+
+
+def top_of(cnt: Counter) -> tuple:
+    """(value, count) of the most common value; on a tie the first in sorted order, never the first that happened to be read."""
+    return min(cnt.items(), key=lambda kv: (-kv[1], str(kv[0])))
+
+
+def usual_amount(cnt: Counter) -> tuple[int, int]:
+    """The most common amount in a group and how many lines carry it. When two amounts are equally common the answer
+    must not depend on the order the files were read in, so the one nearest the middle of the group wins, then the lower."""
+    top = max(cnt.values())
+    tied = [v for v, k in cnt.items() if k == top]
+    if len(tied) == 1:
+        return tied[0], top
+    vals = sorted(cnt.elements())
+    mid = vals[len(vals) // 2]
+    return min(tied, key=lambda v: (abs(v - mid), v)), top
 
 
 def is_surgical(code: str | None) -> bool:
@@ -230,15 +293,37 @@ class Detector:
     def load(self) -> None:
         c = self.conn
         c.row_factory = sqlite3.Row
-        rows = c.execute("""
-            SELECT l.*, cl.claim_filing_indicator, cl.contract_class, cl.facility_type_code, cl.rendering_provider_name AS rp_name,
-                   cl.charge_cents AS claim_charge_cents, cl.paid_cents AS claim_paid_cents, cl.received_date,
+        # only the columns the rules read, and repeated strings shared: this list is the bulk of the memory a run needs
+        cur = c.execute("""
+            SELECT l.line_key, l.claim_key, l.transaction_key, l.procedure_code, l.modifiers, l.charge_cents, l.paid_cents, l.paid_units,
+                   l.original_procedure_code, l.original_modifiers, l.original_units, l.service_date, l.allowed_cents,
+                   l.patient_control_number, l.claim_status_code, l.payer_name, l.payer_id, l.payment_date, l.rendering_provider_npi,
+                   cl.claim_filing_indicator, cl.contract_class, cl.facility_type_code, cl.rendering_provider_name AS rp_name,
                    t.payment_date AS txn_payment_date, t.trace_number
             FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
             JOIN transactions t ON t.transaction_key = l.transaction_key
             WHERE t.superseded = 0
-        """).fetchall()
-        self.lines = [dict(r) for r in rows]
+        """)
+        names = [d[0] for d in cur.description]
+        assert tuple(names) == LINE_COLUMNS
+        shared = {"procedure_code", "modifiers", "original_procedure_code", "original_modifiers", "service_date", "claim_status_code",
+                  "payer_name", "payer_id", "payment_date", "rendering_provider_npi", "claim_filing_indicator", "contract_class",
+                  "facility_type_code", "rp_name", "txn_payment_date", "trace_number", "claim_key", "transaction_key",
+                  "patient_control_number"}
+        share_at = [i for i, n in enumerate(names) if n in shared]
+        pool: dict[str, str] = {}
+        self.lines = []
+        while True:
+            chunk = cur.fetchmany(20000)
+            if not chunk:
+                break
+            for r in chunk:
+                r = list(r)
+                for i in share_at:
+                    v = r[i]
+                    if v is not None:
+                        r[i] = pool.setdefault(v, v)
+                self.lines.append(Line(r))
         for l in self.lines:
             l["modifiers_list"] = json.loads(l["modifiers"]) if l.get("modifiers") else []
             l["year"] = (l.get("service_date") or l.get("payment_date") or "")[:4]
@@ -251,12 +336,13 @@ class Detector:
             l["month"] = (l.get("payment_date") or l.get("txn_payment_date") or "")[:7]
         adj = defaultdict(list)
         for r in c.execute("SELECT line_key, group_code, reason_code, amount_cents FROM adjustments WHERE line_key IS NOT NULL"):
-            adj[r["line_key"]].append((r["group_code"], r["reason_code"], r["amount_cents"] or 0))
+            adj[r[0]].append((pool.setdefault(r[1], r[1]), pool.setdefault(r[2], r[2]), r[3] or 0))
         self.adj = adj
         rem = defaultdict(list)
         for r in c.execute("SELECT line_key, code FROM remarks WHERE line_key IS NOT NULL"):
-            rem[r["line_key"]].append(r["code"])
+            rem[r[0]].append(pool.setdefault(r[1], r[1]))
         self.rem = rem
+        del pool
         self.claim_adj = defaultdict(list)
         for r in c.execute("SELECT claim_key, group_code, reason_code, amount_cents FROM adjustments WHERE level='claim'"):
             self.claim_adj[r["claim_key"]].append((r["group_code"], r["reason_code"], r["amount_cents"] or 0))
@@ -295,7 +381,7 @@ class Detector:
             loc_votes: dict[str, Counter] = defaultdict(Counter)
             for r in c.execute("SELECT claim_id, location, COUNT(*) n FROM ema_rows WHERE claim_id IS NOT NULL AND location IS NOT NULL GROUP BY 1,2"):
                 loc_votes[r[0]][r[1]] += r[2]
-            self.claim_location = {k: v.most_common(1)[0][0] for k, v in loc_votes.items()}
+            self.claim_location = {k: top_of(v)[0] for k, v in loc_votes.items()}
             npi_votes: dict[str, Counter] = defaultdict(Counter)
             seen_claims: set[str] = set()
             for l in self.lines:
@@ -304,7 +390,7 @@ class Detector:
                     seen_claims.add(l["claim_key"])
                     npi_votes[l["rendering_provider_npi"]][loc] += 1
             for npi, v in npi_votes.items():
-                top, n = v.most_common(1)[0]
+                top, n = top_of(v)
                 if sum(v.values()) >= 20 and n / sum(v.values()) >= 0.85:
                     self.npi_location[npi] = top
         # what was billed, from the 837 claim files and the EMA charge lines: (claim id, date of service) -> {code: source}
@@ -341,11 +427,11 @@ class Detector:
                 names[l["rendering_provider_npi"]] = l.get("rp_name") or ""
         top_by_year_code: dict[tuple, int] = {}
         for (npi, year, code), cnt in by_npi.items():
-            mode = cnt.most_common(1)[0][0]
+            mode = usual_amount(cnt)[0]
             top_by_year_code[(year, code)] = max(top_by_year_code.get((year, code), 0), mode)
         tier_votes: dict[str, list[float]] = defaultdict(list)
         for (npi, year, code), cnt in by_npi.items():
-            mode = cnt.most_common(1)[0][0]
+            mode = usual_amount(cnt)[0]
             top = top_by_year_code[(year, code)]
             if top:
                 tier_votes[npi].append(mode / top)
@@ -407,7 +493,7 @@ class Detector:
             market_counts[(key[1], key[2], key[3], key[4])].update(cnt)
             if n < 5:
                 continue
-            mode, mode_n = cnt.most_common(1)[0]
+            mode, mode_n = usual_amount(cnt)
             vals = sorted(cnt.elements())
             self.rates[key] = {"mode": mode, "median": vals[len(vals) // 2], "p10": vals[int(0.1 * (len(vals) - 1))],
                                "p90": vals[int(0.9 * (len(vals) - 1))], "n": n, "share": mode_n / n}
@@ -949,7 +1035,7 @@ class Detector:
             lines = self.lines_by_claim.get(cl["claim_key"], [])
             adj = self.claim_adj.get(cl["claim_key"], []) + [(g, rc, a) for ln in lines for g, rc, a in self.adj.get(ln["line_key"], [])]
             carcs = Counter(rc for _g, rc, _a in adj if rc not in IGNORE_CARCS)
-            top = carcs.most_common(1)[0][0] if carcs else None
+            top = top_of(carcs)[0] if carcs else None
             rarcs = self.claim_rem.get(cl["claim_key"], []) + [x for ln in lines for x in self.rem.get(ln["line_key"], [])]
             rarc = ",".join(sorted(set(rarcs))) if rarcs else None
             codes = [ln["procedure_code"] for ln in lines]
@@ -989,6 +1075,8 @@ class Detector:
                 f["n"] += 1
                 f["cents"] += amt
                 f["refs"][ref[:40] or r["reason_code"]] += 1
+                if r["payment_date"] and (not f["payment_date"] or r["payment_date"] < f["payment_date"]):
+                    f["payment_date"] = r["payment_date"]       # the month's first, whatever order the rows come in
             if r["reason_code"] == "WO" and amt >= 50000:
                 grp, kind = normalize_payer(r["payer_name"])
                 base = {"payer_name": r["payer_name"], "payer_group": grp, "payer_kind": kind, "transaction_key": r["transaction_key"], "payment_date": r["payment_date"], "year": (r["payment_date"] or "")[:4]}
@@ -1018,7 +1106,7 @@ class Detector:
             if tot >= 25 and d["zero"] / tot >= 0.5:
                 base = {"payer_group": grp, "payer_kind": d.get("kind"), "year": year, "payer_name": grp}
                 self._emit("G2211_DENIED", "info", "low", "review", f"{grp} {year}: G2211 denied on {d['zero']} of {tot} visits", None, None, None,
-                           d["carcs"].most_common(1)[0][0] if d["carcs"] else None, None,
+                           top_of(d["carcs"])[0] if d["carcs"] else None, None,
                            {"paid": d["paid"], "zero": d["zero"], "carcs": dict(d["carcs"].most_common(4)), "charge_cents": d["charge"]}, key_parts=(grp, year), claim=base)
 
         for row in c.execute("""SELECT substr(COALESCE(l.service_date,l.payment_date),1,4) yr, a.reason_code, SUM(a.amount_cents) amt, COUNT(*) n

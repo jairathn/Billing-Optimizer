@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RemitWatch setup</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#17202a;--muted:#5d6b7a;--line:#e3e7ec;--accent:#1f5fbf;--bad:#b42318;--warn:#b54708;--good:#067647;--soft:#eef2f7}
+@media (prefers-color-scheme: dark){:root{--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{max-width:860px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:22px;margin:8px 0 4px}
+h2{font-size:16px;margin:0 0 8px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:14px}
+.muted{color:var(--muted)}.small{font-size:13px}
+table{width:100%;border-collapse:collapse}
+td{padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+td.mark{width:28px;font-weight:700}
+.ok{color:var(--good)}.no{color:var(--bad)}.opt{color:var(--muted)}
+.fix{color:var(--warn);font-size:13px;margin-top:2px}
+button,input,textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:7px 10px}
+button{cursor:pointer}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+code,.val{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;background:var(--soft);padding:2px 6px;border-radius:4px;word-break:break-all}
+textarea{width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+ol{padding-left:20px;margin:6px 0}li{margin:6px 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>RemitWatch setup</h1>
+  <div class="muted">Every setting this site needs, checked live. Work from the top. After you change anything in Vercel, redeploy, then press Check again.</div>
+
+  <div class="panel"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Checklist</h2><button id="recheck">Check again</button></div>
+    <table id="checks"><tr><td class="muted">checking…</td></tr></table>
+    <div id="ready" class="small" style="margin-top:8px"></div>
+  </div>
+
+  <div class="panel" id="gen" style="display:none"><h2>Values you make up yourself</h2>
+    <div class="small muted">These two are passwords you invent. The values below were made in your browser just now and are not stored anywhere. Copy each into Vercel.</div>
+    <div class="row"><b>REMITWATCH_PASSWORD</b> <span class="val" id="genPw"></span> <button data-copy="genPw">Copy</button></div>
+    <div class="row"><b>CRON_SECRET</b> <span class="val" id="genCron"></span> <button data-copy="genCron">Copy</button></div>
+    <div class="small muted">Write the dashboard password down for Dr. Jairath. The user name is <code>oda</code> unless REMITWATCH_USER is set.</div>
+  </div>
+
+  <div class="panel" id="connect" style="display:none"><h2>Connect Dropbox</h2>
+    <ol>
+      <li>The Dropbox account that holds the <code>Trizetto Data</code> folder must be the one signed in to dropbox.com in this browser. Then open <a id="authLink" target="_blank" rel="noopener">this Dropbox approval page</a>.</li>
+      <li>If Dropbox shows a warning that the app is in development, click <b>Continue</b>. Then click <b>Allow</b>. Dropbox shows a code.</li>
+      <li>Paste the code here and press Get token.
+        <div class="row"><input id="code" placeholder="code from Dropbox" style="flex:1;min-width:240px"><button class="primary" id="exchange">Get token</button></div>
+        <div id="exMsg" class="small"></div></li>
+      <li id="tokStep" style="display:none">Copy this value. In Vercel add an environment variable named <code>DROPBOX_REFRESH_TOKEN</code> with it, for Production. Then redeploy and press Check again.
+        <textarea id="token" rows="3" readonly></textarea>
+        <div class="row"><button data-copy="token">Copy</button><span class="small muted">It is shown once. If you lose it, repeat these steps.</span></div></li>
+    </ol>
+  </div>
+
+  <div class="panel" id="hook" style="display:none"><h2>Instant updates</h2>
+    <div class="small">Add this address in the Dropbox Developer Console: open the app, <b>Settings</b> tab, <b>Webhooks</b> section, paste it into the box, click <b>Add webhook</b>. The new row must show Enabled.</div>
+    <div class="row"><span class="val" id="hookUrl"></span> <button data-copy="hookUrl">Copy</button></div>
+  </div>
+
+  <div class="panel" id="load" style="display:none"><h2>First load</h2>
+    <div class="small muted">Reads every remittance file in the Dropbox folder. It runs by itself and continues on its own until it is done. You can close this page.</div>
+    <div class="row"><button class="primary" id="run">Run the first load now</button><a href="/">Open the dashboard</a></div>
+    <div id="loadMsg" class="small"></div>
+  </div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path, opts){ opts = opts||{}; if(opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch','Content-Type':'application/json'}, opts.headers||{}); }
+  const r = await fetch(path, opts); let j = null; try { j = await r.json(); } catch(e){} if(!r.ok) throw new Error((j&&j.detail) || ('request failed ('+r.status+')')); return j; }
+function rand(n){ const a = new Uint8Array(n); crypto.getRandomValues(a); const abc='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'; return [...a].map(x=>abc[x%abc.length]).join(''); }
+document.addEventListener('click', e => { const id = e.target.dataset && e.target.dataset.copy; if(!id) return; const el = document.getElementById(id); navigator.clipboard.writeText(el.value!==undefined && el.tagName==='TEXTAREA' ? el.value : el.textContent); e.target.textContent='Copied'; setTimeout(()=>e.target.textContent='Copy',1500); });
+
+async function check(){
+  let s; try { s = await api('/api/setup/status'); } catch(e){ $('#checks').innerHTML = `<tr><td class="no">Could not check: ${esc(e.message)}</td></tr>`; return; }
+  $('#checks').innerHTML = s.checks.map(c => { const cls = c.ok===true?'ok':(c.ok===false?'no':'opt'); const mark = c.ok===true?'✓':(c.ok===false?'✗':'–');
+    return `<tr><td class="mark ${cls}">${mark}</td><td><b>${esc(c.label)}</b><div class="small muted">${esc(c.detail||'')}</div>${c.fix?`<div class="fix">${esc(c.fix)}</div>`:''}</td></tr>`; }).join('');
+  const missing = k => s.checks.some(c => c.key===k && c.ok===false);
+  $('#gen').style.display = (missing('password') || missing('cron_secret')) ? '' : 'none';
+  if(!$('#genPw').textContent){ $('#genPw').textContent = rand(20); $('#genCron').textContent = rand(40); }
+  $('#connect').style.display = (s.authorize_url && (s.connect_needed || $('#token').value)) ? '' : 'none';
+  if(s.authorize_url) $('#authLink').href = s.authorize_url;
+  $('#hook').style.display = (s.ready && s.webhook_url) ? '' : 'none';
+  if(s.webhook_url) $('#hookUrl').textContent = s.webhook_url;
+  $('#load').style.display = s.ready ? '' : 'none';
+  $('#ready').innerHTML = s.locked ? '<span class="no">This site is locked until a dashboard password is set.</span>' : (s.ready ? '<span class="ok">Required settings are complete.</span>' : '<span class="muted">Fix the items marked ✗ from the top down.</span>');
+  if(s.ready) loadStatus(s);
+}
+function describe(lc){
+  if(!lc) return 'No run yet.';
+  const i = lc.ingest||{}, m = lc.memory_mb||{}; const parts = [`last run ${esc((lc.finished||lc.started||'').replace('T',' ').slice(0,16))} UTC`];
+  if(i.remits!=null) parts.push(`${i.remits} remittance files, ${i.ema||0} EMA exports, ${i.claims_837||0} claim files read in that run`);
+  if(lc.detect) parts.push(`${lc.detect.findings} findings`);
+  if(m.peak) parts.push(`peak memory ${m.peak} MB${m.limit?' of '+m.limit:''}`);
+  if(lc.error) parts.push(`<span class="no">stopped with an error: ${esc(lc.error)}</span>`);
+  if(lc.more) parts.push('more to do, continuing by itself');
+  const t = lc.totals;
+  const held = t ? `<div><b>In the store now:</b> ${Number(t.remit_files||0).toLocaleString('en-US')} remittance files, ${Number(t.findings||0).toLocaleString('en-US')} findings, newest payment ${esc(t.newest_payment||'none yet')}.</div>` : '';
+  return held + parts.join(' · ');
+}
+let poll = null;
+async function loadStatus(s){
+  const lc = s.last_cycle, running = s.running;
+  const stalled = s.stalled ? `<div class="no">A run that started ${esc(String(s.stalled.since||'').replace('T',' ').slice(0,16))} UTC stopped without finishing: it ran out of memory or time. Press the button to continue from where it stopped. If this message comes back twice, stop and tell Dr. Jairath: the site needs the larger function size (Vercel, Settings, Functions, Function CPU, Performance).</div>` : '';
+  $('#loadMsg').innerHTML = stalled + (running ? `<b>Running</b> since ${esc(String(running.since||'').replace('T',' ').slice(0,16))} UTC. ` : '') + describe(lc)
+    + (s.has_data && !running && lc && !lc.more && !lc.error ? ' <b class="ok">Loaded.</b>' : '');
+  $('#run').disabled = !!running;
+  if((running || (lc && lc.more)) && !poll) poll = setInterval(async()=>{ try { const t = await api('/api/setup/status'); loadStatus(t); if(!t.running && !(t.last_cycle&&t.last_cycle.more)){ clearInterval(poll); poll=null; } } catch(e){} }, 10000);
+}
+$('#recheck').onclick = check;
+$('#exchange').onclick = async () => { $('#exMsg').textContent = 'Asking Dropbox…';
+  try { const r = await api('/api/setup/dropbox-token', {method:'POST', body: JSON.stringify({code: $('#code').value})});
+    $('#token').value = r.refresh_token; $('#tokStep').style.display = '';
+    $('#exMsg').innerHTML = r.missing_permissions && r.missing_permissions.length ? `<span class="no">This token is missing permissions: ${esc(r.missing_permissions.join(', '))}. In the Dropbox Developer Console open the app, Permissions tab, tick them, click Save changes, then repeat this step from its first line. Do not use this token.</span>` : '<span class="ok">Dropbox accepted the code.</span>';
+  } catch(e){ $('#exMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; } };
+$('#run').onclick = async () => { $('#run').disabled = true; $('#loadMsg').textContent = 'Starting…';
+  try { await api('/api/sync/run', {method:'POST', body:'{}'}); setTimeout(check, 6000); } catch(e){ $('#loadMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; $('#run').disabled = false; } };
+check();
+</script>
+</body>
+</html>

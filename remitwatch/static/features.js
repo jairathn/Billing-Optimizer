@@ -27,7 +27,7 @@ async function refreshHeader(){
     $('#bellBtn').innerHTML = `Alerts <b class="${hi?'sev-high':''}">${n}</b>`;
     const behind = st.days_behind;
     const cls = behind==null ? 'muted' : (behind>14 ? 'sev-high' : (behind>7 ? 'sev-medium' : 'ok'));
-    const how = st.running ? 'syncing now' : (st.dropbox_configured ? (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand') : 'Dropbox not connected');
+    const how = st.running ? 'syncing now' : (st.dropbox_configured ? (st.mode==='serverless' ? 'checks Dropbox daily and when files arrive' : (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand')) : 'Dropbox not connected');
     $('#feedChip').innerHTML = `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${behind!=null?` (${behind} days ago)`:''} · ${how}`;
   } catch(e){ /* older store without these tables */ }
 }
@@ -208,10 +208,16 @@ async function progressTab(v){
 // ---------------------------------------------------------------- feed status (Data tab)
 async function feedPanel(el){
   const s = await api('/api/sync/status'); const lc = s.last_cycle || {};
+  const cloud = s.mode === 'serverless', mem = s.memory_mb || {};
+  const fmtInt = n => Number(n).toLocaleString('en-US');
   const yes = (b, t, f) => b ? `<span class="ok">${t}</span>` : `<span class="sev-medium">${f}</span>`;
   el.innerHTML = `<div class="panel"><h2>Feed</h2><table>
     <tr><td>Dropbox connection</td><td>${yes(s.dropbox_configured,'connected','not configured: set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN')}</td></tr>
-    <tr><td>Automatic sync</td><td>${s.interval_minutes?`every ${s.interval_minutes} minutes${s.next_run?', next about '+s.next_run.replace('T',' ').slice(0,16)+' UTC':''}`:'off (set REMITWATCH_SYNC_INTERVAL_MINUTES, for example 60)'} ${s.scheduler_running?'<span class="ok">· scheduler running</span>':''}</td></tr>
+    ${cloud ? `<tr><td>Automatic sync</td><td>${yes(s.cron_ready,'once a day (10:17 UTC, early morning Central), and when Dropbox reports a new file','off: CRON_SECRET is not set')} · <a href="/setup">setup checklist</a></td></tr>
+    ${s.storage_error?`<tr><td>Storage</td><td><span class="sev-high">${esc(s.storage_error)}</span></td></tr>`:''}
+    ${s.stalled_since?`<tr><td>Last run</td><td><span class="sev-high">A run that started ${esc(String(s.stalled_since).replace('T',' ').slice(0,16))} UTC stopped without finishing (out of memory or time). The next run picks up where it left off.</span></td></tr>`:''}
+    ${mem.peak?`<tr><td>Memory used by the last run</td><td>${fmtInt(mem.peak)} MB at its peak${mem.limit?` of ${fmtInt(mem.limit)} MB available`:''}</td></tr>`:''}`
+    : `<tr><td>Automatic sync</td><td>${s.interval_minutes?`every ${s.interval_minutes} minutes${s.next_run?', next about '+s.next_run.replace('T',' ').slice(0,16)+' UTC':''}`:'off (set REMITWATCH_SYNC_INTERVAL_MINUTES, for example 60)'} ${s.scheduler_running?'<span class="ok">· scheduler running</span>':''}</td></tr>`}
     <tr><td>Instant sync on upload</td><td>${yes(s.webhook_ready,'ready: point the Dropbox app webhook at /api/dropbox/webhook','needs DROPBOX_APP_SECRET')}</td></tr>
     <tr><td>Newest payment in the store</td><td>${esc(s.newest_payment_date||'–')} ${s.days_behind!=null?`(${s.days_behind} days ago)`:''}</td></tr>
     <tr><td>Last new remittance file</td><td>${(s.last_remit_ingested||'–').replace('T',' ').slice(0,16)}</td></tr>

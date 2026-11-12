@@ -25,12 +25,16 @@ import hmac
 from contextlib import asynccontextmanager
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
-from .codes import CARC, EM_CODES, RARC
+import asyncio
+
+from . import __version__, runtime
+from .actions import STATUSES, apply_alert_ack, apply_status
+from .codes import CARC, RARC
 from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema
 
 DB_PATH = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
@@ -46,6 +50,9 @@ security = HTTPBasic(auto_error=False)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Bring an older store up to the current schema and start the background scheduler when it is configured."""
+    if runtime.serverless():
+        yield           # nothing on disk to migrate and no process to keep: remitwatch.cloud does both jobs
+        return
     if os.path.exists(DB_PATH):
         conn = sqlite3.connect(DB_PATH, timeout=60)
         try:
@@ -66,6 +73,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="RemitWatch", version=__version__, docs_url=None, redoc_url=None, lifespan=lifespan)
+# Vercel refuses answers over 4.5 MB; compressed, the largest list the dashboard asks for is a few hundred KB
+app.add_middleware(GZipMiddleware, minimum_size=2000)
 
 
 def require_xhr(request: Request) -> None:
@@ -74,11 +83,33 @@ def require_xhr(request: Request) -> None:
         raise HTTPException(status_code=400, detail="missing X-Requested-With header")
 
 
+def open_allowed() -> bool:
+    """With no password the dashboard is open. That is acceptable on a developer's own machine and nowhere else, so a
+    deployed site refuses to serve data until REMITWATCH_PASSWORD is set."""
+    return not runtime.serverless() or os.environ.get("REMITWATCH_ALLOW_OPEN") == "1"
+
+
+def base_url(request: Request) -> str:
+    """The public address of this site, for the calls it makes to itself and for the webhook address shown during setup.
+    On Vercel that is the production domain: the per-deployment addresses sit behind Vercel's own login."""
+    prod = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")
+    if prod and os.environ.get("VERCEL_ENV") == "production":
+        return f"https://{prod}"
+    # the forwarded headers are only trustworthy behind Vercel's own proxy; anywhere else a caller could set them
+    forwarded = request.headers.get("x-forwarded-host") if os.environ.get("VERCEL") else None
+    host = (forwarded or request.headers.get("host") or prod or "").split(",")[0].strip()
+    local = host.startswith(("localhost", "127.", "testserver"))
+    proto = ((request.headers.get("x-forwarded-proto") if os.environ.get("VERCEL") else None) or ("http" if local else "https")).split(",")[0].strip()
+    return f"{proto}://{host}" if host else ""
+
+
 def require_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
     """Basic auth with a single shared password. When no password is configured the
     dashboard is open (local use only)."""
     if not PASSWORD:
-        return "anonymous"
+        if open_allowed():
+            return "anonymous"
+        raise HTTPException(status_code=503, detail="This site is not set up yet: REMITWATCH_PASSWORD is missing. Open /setup.")
     if credentials is None or not (secrets.compare_digest(credentials.username, USERNAME)
                                    and secrets.compare_digest(credentials.password, PASSWORD)):
         raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic realm=RemitWatch"})
@@ -86,6 +117,9 @@ def require_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)
 
 
 def db() -> sqlite3.Connection:
+    if runtime.serverless():
+        from .cloud import SERVING_COPY
+        return SERVING_COPY.connection()        # the dashboard's copy, fetched from the state folder and kept fresh
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
@@ -112,12 +146,28 @@ MONEY_CATEGORIES = ("downcoding", "bundling", "denial", "underpayment", "fees", 
 
 
 # --------------------------------------------------------------------------- pages
+@app.get("/setup", include_in_schema=False)
+def setup_page(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    """The setup checklist. Before a password exists it is open and says only what is missing; after that it needs the login."""
+    if PASSWORD:
+        require_auth(credentials)
+    return FileResponse(STATIC_DIR / "setup.html", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/", include_in_schema=False)
-def index(_: str = Depends(require_auth)):
+def index(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    if not PASSWORD and not open_allowed():
+        return RedirectResponse("/setup")
+    require_auth(credentials)
     f = STATIC_DIR / "index.html"
     if f.exists():
         return FileResponse(f)
     return HTMLResponse("<h1>RemitWatch</h1><p>static/index.html missing</p>")
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots():
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
 
 if STATIC_DIR.exists():
@@ -127,13 +177,21 @@ if STATIC_DIR.exists():
 # --------------------------------------------------------------------------- health and meta
 @app.get("/api/health")
 def health():
-    ok = os.path.exists(DB_PATH)
-    return {"ok": ok, "db": DB_PATH, "version": __version__, "time": datetime.now(timezone.utc).isoformat()}
+    if runtime.serverless():
+        return {"ok": True, "mode": "serverless", "version": __version__, "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:7],
+                "runtime": runtime.describe(), "time": datetime.now(timezone.utc).isoformat()}
+    return {"ok": os.path.exists(DB_PATH), "mode": "server", "version": __version__, "time": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/meta")
 def meta(_: str = Depends(require_auth)):
-    out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI}
+    out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server"}
+    cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
+    if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
+        out.update(json.loads(cached["value"]))
+        out["runs"] = rows("SELECT * FROM detection_runs ORDER BY started_at DESC LIMIT 5") if has_table("detection_runs") else []
+        out["sync"] = rows("SELECT key, value FROM meta WHERE key LIKE 'sync:last%'")
+        return out
     out["files"] = one("SELECT COUNT(*) n, SUM(kind='835') n835, SUM(kind LIKE 'ema:%') nema, MAX(ingested_at) last_ingest FROM files")
     out["remits"] = one("SELECT COUNT(*) n, MIN(payment_date) first_payment, MAX(payment_date) last_payment, SUM(payment_amount_cents) total_cents FROM transactions WHERE superseded=0")
     out["lines"] = one("SELECT COUNT(*) n, MIN(service_date) first_dos, MAX(service_date) last_dos FROM lines")
@@ -260,17 +318,35 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                  request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling, _extra(request))
     data = rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
-    buf = io.StringIO()
-    if data:
-        writer = csv.DictWriter(buf, fieldnames=list(data[0].keys()))
-        writer.writeheader()
-        for r in data:
-            for k in list(r.keys()):
-                if k.endswith("_cents") and r[k] is not None:
-                    r[k] = f"{r[k] / 100:.2f}"
-            writer.writerow(r)
-    buf.seek(0)
-    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=remitwatch-findings.csv"})
+
+    def chunks():       # sent in pieces: a streamed answer has no size limit on a serverless host
+        buf = io.StringIO()
+        if data:
+            writer = csv.DictWriter(buf, fieldnames=list(data[0].keys()))
+            writer.writeheader()
+            for i, r in enumerate(data):
+                for k in list(r.keys()):
+                    if k.endswith("_cents") and r[k] is not None:
+                        r[k] = f"{r[k] / 100:.2f}"
+                writer.writerow(r)
+                if i % 400 == 399:
+                    yield buf.getvalue()
+                    buf.seek(0)
+                    buf.truncate()
+        yield buf.getvalue()
+    return StreamingResponse(chunks(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=remitwatch-findings.csv"})
+
+
+def _packets_for(finding_id: str) -> list[dict]:
+    if runtime.serverless():
+        from . import cloud
+        st = cloud.SERVING_COPY.state()
+        try:
+            return cloud.list_packets(st, finding_id) if st is not None else []
+        except Exception:
+            return []
+    return rows("SELECT packet_id, created_at, mode, subject, note_name, emailed_to, emailed_at FROM appeal_packets WHERE finding_id=? ORDER BY created_at DESC",
+                (finding_id,)) if has_table("appeal_packets") else []
 
 
 CLAIM_PUBLIC_COLS = ("claim_key", "transaction_key", "patient_control_number", "claim_status_code", "charge_cents", "paid_cents",
@@ -318,27 +394,37 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
         pcn = f.get("patient_control_number")
         if pcn:
             out["history"] = rows("SELECT c.claim_key, c.claim_status_code, c.charge_cents, c.paid_cents, c.payment_date, c.payer_name, c.trace_number FROM claims c JOIN transactions t ON t.transaction_key=c.transaction_key WHERE c.patient_control_number=? AND t.superseded=0 ORDER BY c.payment_date", (pcn,))
-            out["events"] = rows("SELECT at, kind, from_status, to_status, amount_cents, actor, note FROM finding_events WHERE finding_id=? ORDER BY id DESC LIMIT 30", (finding_id,)) if has_table("finding_events") else []
-            out["packets"] = rows("SELECT packet_id, created_at, mode, subject, note_name, emailed_to, emailed_at FROM appeal_packets WHERE finding_id=? ORDER BY created_at DESC", (finding_id,)) if has_table("appeal_packets") else []
+            out["events"] = rows("SELECT at, kind, from_status, to_status, amount_cents, actor, note FROM finding_events WHERE finding_id=? ORDER BY at DESC, id DESC LIMIT 30", (finding_id,)) if has_table("finding_events") else []
+            out["packets"] = _packets_for(finding_id)
             out["ema"] = rows("SELECT family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents, claim_status, activity_type, carc, rarc, adjustment_status, adjustment_subtype, provider, payer, denial_category, previously_denied FROM ema_rows WHERE claim_id=? ORDER BY family, service_date, row_index", (pcn,))
     return out
 
 
-STATUSES = ("open", "in_progress", "appealed", "resolved", "lost", "dismissed")
-
-
-def _apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: str | None, recovered_cents: int | None, actor: str) -> bool:
-    r = conn.execute("SELECT status, shortfall_cents, appealed_at FROM findings WHERE finding_id=?", (finding_id,)).fetchone()
-    if not r:
-        return False
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    recovered = (recovered_cents if recovered_cents is not None else r["shortfall_cents"]) if status == "resolved" else None
-    conn.execute("""UPDATE findings SET status=?, notes=COALESCE(?, notes), status_changed_at=?, recovered_cents=?, recovered_date=?,
-                    appealed_at=CASE WHEN ?='appealed' AND appealed_at IS NULL THEN ? ELSE appealed_at END WHERE finding_id=?""",
-                 (status, notes, now, recovered, now[:10] if status == "resolved" else None, status, now, finding_id))
-    conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) VALUES (?,?,?,?,?,?,?,?)",
-                 (finding_id, now, "manual", r["status"], status, recovered if status == "resolved" else r["shortfall_cents"], actor, notes))
-    return True
+def _record_status(ids: list[str], status: str, notes: str | None, recovered_cents: int | None, actor: str) -> int:
+    """Apply a status to one or more findings. On a serverless host the change is also written to the journal in the
+    state folder, which is what makes it last."""
+    if runtime.serverless():
+        from .cloud import SERVING_COPY
+        conn = db()
+        try:
+            known = [i for i in ids if conn.execute("SELECT 1 FROM findings WHERE finding_id=?", (i,)).fetchone()]
+        finally:
+            conn.close()
+        if not known:
+            return 0
+        if len(known) == 1:
+            SERVING_COPY.record({"kind": "status", "finding_id": known[0], "status": status, "notes": notes,
+                                 "recovered_cents": recovered_cents, "actor": actor})
+        else:
+            SERVING_COPY.record({"kind": "bulk_status", "ids": known, "status": status, "notes": notes, "actor": actor})
+        return len(known)
+    conn = db()
+    try:
+        n = sum(1 for i in ids if apply_status(conn, i, status, notes, recovered_cents if len(ids) == 1 else None, actor))
+        conn.commit()
+        return n
+    finally:
+        conn.close()
 
 
 @app.post("/api/findings/{finding_id}/status", dependencies=[Depends(require_xhr)])
@@ -348,13 +434,8 @@ async def set_status(finding_id: str, request: Request, user: str = Depends(requ
     if status not in STATUSES:
         raise HTTPException(400, "bad status")
     rec = body.get("recovered_cents")
-    conn = db()
-    try:
-        ok = _apply_status(conn, finding_id, status, body.get("notes"), int(rec) if rec not in (None, "") else None, user)
-        conn.commit()
-    finally:
-        conn.close()
-    if not ok:
+    n = await asyncio.to_thread(_record_status, [finding_id], status, body.get("notes"), int(rec) if rec not in (None, "") else None, user)
+    if not n:
         raise HTTPException(404, "finding not found")
     return {"ok": True}
 
@@ -366,12 +447,7 @@ async def bulk_status(request: Request, user: str = Depends(require_auth)):
     status = body.get("status")
     if status not in STATUSES or not ids or len(ids) > 5000:
         raise HTTPException(400, "bad request")
-    conn = db()
-    try:
-        n = sum(1 for i in ids if _apply_status(conn, i, status, body.get("notes"), None, user))
-        conn.commit()
-    finally:
-        conn.close()
+    n = await asyncio.to_thread(_record_status, list(ids), status, body.get("notes"), None, user)
     return {"ok": True, "updated": n}
 
 
@@ -600,7 +676,7 @@ def progress(_: str = Depends(require_auth)):
     out["all_lines"] = rows("SELECT month, SUM(lines) lines FROM exposure WHERE month >= '2024-01' GROUP BY 1 ORDER BY 1") if has_table("exposure") else []
     out["snapshots"] = rows("SELECT at, status, SUM(n) n, SUM(cents) cents FROM progress_snapshots WHERE category IN ('downcoding','bundling','denial','underpayment') GROUP BY run_id, status ORDER BY at") if has_table("progress_snapshots") else []
     out["events"] = rows("""SELECT e.at, e.kind, e.from_status, e.to_status, e.amount_cents, e.actor, f.payer_group, f.signal, f.procedure_code, e.finding_id
-                            FROM finding_events e LEFT JOIN findings f ON f.finding_id = e.finding_id ORDER BY e.id DESC LIMIT 60""") if has_table("finding_events") else []
+                            FROM finding_events e LEFT JOIN findings f ON f.finding_id = e.finding_id ORDER BY e.at DESC, e.id DESC LIMIT 60""") if has_table("finding_events") else []
     return out
 
 
@@ -620,10 +696,13 @@ def alerts_list(status: str = "active", _: str = Depends(require_auth)):
 
 @app.post("/api/alerts/{alert_id}/ack", dependencies=[Depends(require_xhr)])
 def alert_ack(alert_id: str, _: str = Depends(require_auth)):
+    if runtime.serverless():
+        from .cloud import SERVING_COPY
+        SERVING_COPY.record({"kind": "alert_ack", "alert_id": alert_id})
+        return {"ok": True}
     conn = db()
     try:
-        conn.execute("UPDATE alerts SET status='acknowledged', acknowledged_at=? WHERE alert_id=? AND status='new'",
-                     (datetime.now(timezone.utc).isoformat(timespec="seconds"), alert_id))
+        apply_alert_ack(conn, alert_id)
         conn.commit()
     finally:
         conn.close()
@@ -631,17 +710,90 @@ def alert_ack(alert_id: str, _: str = Depends(require_auth)):
 
 
 # --------------------------------------------------------------------------- the feed: status, sync now, Dropbox webhook
+def _cloud_sync_status() -> dict:
+    from . import cloud
+    from .pipeline import dropbox_configured
+    st = cloud.SERVING_COPY.status()
+    lc = st.get("last_cycle") or {}
+    newest = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d") if has_table("transactions") else None
+    files = (one("SELECT MAX(ingested_at) last, MAX(CASE WHEN kind='835' THEN ingested_at END) last835 FROM files") or {}) if has_table("files") else {}
+    behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(newest).date()).days if newest else None
+    return {"mode": "serverless", "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
+            "interval_minutes": 0, "scheduler_running": False, "next_run": None, "cron_ready": bool(os.environ.get("CRON_SECRET")),
+            "running": bool(st.get("running")), "running_since": (st.get("running") or {}).get("since"), "last_cycle": lc or None,
+            "stalled_since": (st.get("stalled") or {}).get("since"), "memory_mb": lc.get("memory_mb"),
+            "last_sync": lc.get("finished"), "newest_payment_date": newest, "days_behind": behind, "has_data": st.get("has_data"),
+            "last_file_ingested": files.get("last"), "last_remit_ingested": files.get("last835"), "storage_error": st.get("error"),
+            "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
+            "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+
+
 @app.get("/api/sync/status")
 def sync_status(_: str = Depends(require_auth)):
+    if runtime.serverless():
+        return _cloud_sync_status()
     from .pipeline import status
-    return status(DB_PATH)
+    return dict(status(DB_PATH), mode="server")
 
 
 @app.post("/api/sync/run", dependencies=[Depends(require_xhr)])
-def sync_run(_: str = Depends(require_auth)):
+def sync_run(request: Request, _: str = Depends(require_auth)):
+    if runtime.serverless():
+        from . import cloud
+        if not cloud.trigger_cycle(base_url(request), "button"):
+            raise HTTPException(400, "The site cannot start a run: CRON_SECRET is not set. Add it in Vercel and redeploy.")
+        cloud.SERVING_COPY._status = (0.0, None)
+        return {"started": True}
     from .pipeline import run_once_in_background
     run_once_in_background(DB_PATH, "button")
     return {"started": True}
+
+
+def _cron_auth(request: Request, credentials: Optional[HTTPBasicCredentials]) -> None:
+    """Vercel's scheduler and the site's own follow-up calls send the CRON_SECRET as a bearer token. A person may also
+    start a run with the dashboard login."""
+    secret = (os.environ.get("CRON_SECRET") or "").strip()
+    sent = (request.headers.get("authorization") or "").strip()
+    if secret and secrets.compare_digest(sent.encode(), f"Bearer {secret}".encode()):
+        return
+    if not PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    require_auth(credentials)
+    if request.method != "GET":
+        require_xhr(request)
+
+
+@app.api_route("/api/cron/cycle", methods=["GET", "POST"], include_in_schema=False)
+def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: int = 0, force: int = 0,
+               credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    """One cycle. On a serverless host this is the whole pipeline, run inside this request within its time budget; when
+    there is more to do than fits, it starts a fresh invocation of itself before it returns."""
+    _cron_auth(request, credentials)
+    if not runtime.serverless():
+        from .pipeline import run_once_in_background
+        run_once_in_background(DB_PATH, trigger)
+        return {"started": True, "mode": "server"}
+    from . import cloud
+    from .dropbox_sync import DropboxClient
+    from .pipeline import dropbox_configured
+    from .state import state_from_env
+    st = state_from_env()
+    if st is None:
+        raise HTTPException(503, "Dropbox is not connected yet. Open /setup.")
+    delay = min(max(int(delay), 0), 90)
+    client = (getattr(st, "client", None) or DropboxClient()) if dropbox_configured() else None
+    # the wait happens inside the cycle, after it has taken the lock, so later notifications see a run in progress
+    out = cloud.run_cloud_cycle(st, client, budget_s=max(60, runtime.max_seconds() - delay), trigger=trigger[:24], full=bool(full),
+                                force_detect=bool(force), delay_s=delay)
+    if out.get("more") and out.get("progress"):
+        out["continued"] = cloud.trigger_cycle(base_url(request), "continue")
+    elif client is not None and not out.get("skipped") and not out.get("more"):
+        try:        # files that landed while this cycle ran
+            if cloud.has_new_files(st, client):
+                out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30)
+        except Exception:
+            pass
+    return out
 
 
 @app.get("/api/dropbox/webhook", include_in_schema=False)
@@ -650,14 +802,39 @@ def dropbox_webhook_verify(challenge: str = ""):
     return PlainTextResponse(challenge, headers={"X-Content-Type-Options": "nosniff"})
 
 
+def _webhook_work(origin: str) -> None:
+    """After a signed notification on a serverless host: start a cycle only when the data folder really has something
+    new. The app's own writes to its state folder raise notifications too, and those must not start one."""
+    try:
+        from . import cloud
+        from .dropbox_sync import DropboxClient
+        from .state import state_from_env
+        st = state_from_env()
+        if st is None or cloud.running(st):
+            return      # a run in progress looks for late arrivals itself when it ends
+        if cloud.has_new_files(st, getattr(st, "client", None) or DropboxClient()):
+            cloud.trigger_cycle(origin, "webhook", delay=45)
+    except Exception:
+        pass        # the daily scheduled run picks up anything a failed notification missed
+
+
 @app.post("/api/dropbox/webhook", include_in_schema=False)
 async def dropbox_webhook(request: Request):
-    """Dropbox calls this when a file changes. The body is signed with the app secret; a valid call asks the scheduler for a cycle."""
+    """Dropbox calls this when a file changes. The body is signed with the app secret; Dropbox expects an answer within
+    ten seconds, so the work happens after the reply (or in a fresh invocation)."""
     secret = os.environ.get("DROPBOX_APP_SECRET", "")
     body = await request.body()
     sig = request.headers.get("x-dropbox-signature", "")
     if not secret or not hmac.compare_digest(sig, hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()):
         raise HTTPException(status_code=403, detail="bad signature")
+    if runtime.serverless():
+        # A serverless host may freeze the process once the reply is sent, so the check runs before it: three short
+        # calls, well inside Dropbox's ten seconds. If it ever runs long the reply goes out anyway.
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_webhook_work, base_url(request)), timeout=8)
+        except Exception:
+            pass
+        return PlainTextResponse("ok")
     from .pipeline import SCHEDULER, run_once_in_background
     if SCHEDULER.is_alive():
         SCHEDULER.poke("webhook")
@@ -666,8 +843,45 @@ async def dropbox_webhook(request: Request):
     return PlainTextResponse("ok")
 
 
+# --------------------------------------------------------------------------- setup: every setting checked live
+@app.get("/api/setup/status")
+def setup_status(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    if not PASSWORD and not open_allowed():
+        # before a password exists the page may only say that it is missing: nothing else about the site is public
+        return JSONResponse({"locked": True, "ready": False, "checks": [
+            {"key": "password", "label": "Dashboard password (REMITWATCH_PASSWORD)", "ok": False, "detail": "not set",
+             "fix": "Add REMITWATCH_PASSWORD in Vercel (Settings, Environment Variables), then redeploy. Everything else on this page appears after that."}]},
+            headers={"Cache-Control": "no-store"})
+    require_auth(credentials)
+    from . import cloud
+    return JSONResponse(cloud.setup_status(base_url(request)), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/setup/dropbox-token", dependencies=[Depends(require_xhr)])
+def setup_dropbox_token(body: dict = Body(default={}), _: str = Depends(require_auth)):
+    """Exchange the code Dropbox shows after approval for the long-lived token, and show it once so it can be pasted into
+    the host's settings. The site cannot store it itself: a serverless deployment cannot change its own settings."""
+    from .dropbox_sync import DropboxClient
+    key, secret = os.environ.get("DROPBOX_APP_KEY"), os.environ.get("DROPBOX_APP_SECRET")
+    code = str(body.get("code") or "").strip()
+    if not key or not secret:
+        raise HTTPException(400, "DROPBOX_APP_KEY and DROPBOX_APP_SECRET must be set first.")
+    if not code:
+        raise HTTPException(400, "Paste the code Dropbox showed you.")
+    try:
+        j = DropboxClient.exchange_code(key, secret, code)
+    except Exception:
+        raise HTTPException(400, "Dropbox refused the code. A code works once and only for a few minutes: open the Dropbox link again and paste the new code.")
+    if not j.get("refresh_token"):
+        raise HTTPException(400, "Dropbox did not return a long-lived token. Open the Dropbox link from this page again; do not use a link from elsewhere.")
+    scope = j.get("scope") or ""
+    missing = [x for x in ("files.metadata.read", "files.content.read", "files.content.write") if x not in scope.split()]
+    return JSONResponse({"refresh_token": j["refresh_token"], "missing_permissions": missing}, headers={"Cache-Control": "no-store"})
+
+
 # --------------------------------------------------------------------------- appeal packets built from the clinical note
-MAX_NOTE_BYTES = 15 * 1024 * 1024
+# Vercel refuses request bodies over 4.5 MB before they reach the app, and the packet built from the note has to come back
+MAX_NOTE_BYTES = (3 if runtime.serverless() else 15) * 1024 * 1024
 
 
 @app.post("/api/appeals/build", dependencies=[Depends(require_xhr)])
@@ -681,26 +895,54 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
     if file is not None:
         data = file.file.read(MAX_NOTE_BYTES + 1)
         if len(data) > MAX_NOTE_BYTES:
-            raise HTTPException(413, "file is larger than 15 MB")
+            raise HTTPException(413, f"file is larger than {MAX_NOTE_BYTES // (1024 * 1024)} MB")
     if not data and not text.strip():
         raise HTTPException(400, "attach the visit note or paste its text")
     if len(text) > 2_000_000:
         raise HTTPException(413, "pasted text is too long")
     detail = finding_detail(finding_id, "ok")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (detail["finding"].get("claim_key"),)) if detail["finding"].get("claim_key") else None
+    name = file.filename if (file is not None and data) else ""
+    if runtime.serverless():
+        # no database to keep the packet in: build it in memory and store it as two files in the state folder
+        from . import cloud
+        st = cloud.SERVING_COPY.state()
+        if st is None:
+            raise HTTPException(503, "Storage is not connected yet. Open /setup.")
+        mem = sqlite3.connect(":memory:")
+        try:
+            packet = build_from_note(mem, detail, raw_claim, name, data, pasted_text=text or None, reveal=SHOW_PHI, use_ai=use_ai == "1")
+            row = mem.execute("SELECT letter, letter_redacted, pdf FROM appeal_packets WHERE packet_id=?", (packet["packet_id"],)).fetchone()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        finally:
+            mem.close()
+        stored = dict(packet, letter_full=row[0], letter_redacted=row[1])
+        stored.pop("letter", None)
+        packet["packet_id"] = cloud.save_packet(st, stored, row[2])
+        return packet
     conn = db()
     try:
         # the PDF goes to the payer and carries the real identifiers; the letter text in this response does only when names are switched on
-        return build_from_note(conn, detail, raw_claim, file.filename if (file is not None and data) else "", data, pasted_text=text or None,
-                               reveal=SHOW_PHI, use_ai=use_ai == "1")
+        return build_from_note(conn, detail, raw_claim, name, data, pasted_text=text or None, reveal=SHOW_PHI, use_ai=use_ai == "1")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     finally:
         conn.close()
 
 
+def _cloud_state():
+    from . import cloud
+    st = cloud.SERVING_COPY.state()
+    if st is None:
+        raise HTTPException(503, "Storage is not connected yet. Open /setup.")
+    return cloud, st
+
+
 @app.get("/api/packets")
 def packets(finding_id: Optional[str] = None, _: str = Depends(require_auth)):
+    if runtime.serverless():
+        return _packets_for(finding_id) if finding_id else []
     from .notes import list_packets
     conn = db()
     try:
@@ -711,12 +953,16 @@ def packets(finding_id: Optional[str] = None, _: str = Depends(require_auth)):
 
 @app.get("/api/packets/{packet_id}")
 def packet_get(packet_id: str, _: str = Depends(require_auth)):
-    from .notes import get_packet
-    conn = db()
-    try:
-        p = get_packet(conn, packet_id, reveal=SHOW_PHI)
-    finally:
-        conn.close()
+    if runtime.serverless():
+        cloud, st = _cloud_state()
+        p = cloud.get_packet(st, packet_id, reveal=SHOW_PHI)
+    else:
+        from .notes import get_packet
+        conn = db()
+        try:
+            p = get_packet(conn, packet_id, reveal=SHOW_PHI)
+        finally:
+            conn.close()
     if not p:
         raise HTTPException(404, "packet not found")
     return p
@@ -724,23 +970,39 @@ def packet_get(packet_id: str, _: str = Depends(require_auth)):
 
 @app.get("/api/packets/{packet_id}/pdf")
 def packet_pdf(packet_id: str, _: str = Depends(require_auth)):
-    from .notes import get_packet
-    conn = db()
-    try:
-        p = get_packet(conn, packet_id, with_pdf=True)
-    finally:
-        conn.close()
+    if runtime.serverless():
+        cloud, st = _cloud_state()
+        p = cloud.get_packet(st, packet_id, with_pdf=True)
+    else:
+        from .notes import get_packet
+        conn = db()
+        try:
+            p = get_packet(conn, packet_id, with_pdf=True)
+        finally:
+            conn.close()
     if not p or not p.get("pdf"):
         raise HTTPException(404, "packet not found")
-    return Response(content=p["pdf"], media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="appeal-packet-{packet_id}.pdf"', "Cache-Control": "no-store"})
+    safe = "".join(ch for ch in packet_id if ch.isalnum() or ch in ".-_")[:80]
+    pdf = p["pdf"]
+    return StreamingResponse((pdf[i:i + 262144] for i in range(0, len(pdf), 262144)), media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="appeal-packet-{safe}.pdf"', "Cache-Control": "no-store"})
 
 
 @app.post("/api/packets/{packet_id}/email", dependencies=[Depends(require_xhr)])
 def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends(require_auth)):
+    to = str(body.get("to") or os.environ.get("APPEAL_EMAIL_TO") or "").strip()
+    note = str(body.get("note") or "")
+    if runtime.serverless():
+        from .notes import send_pdf
+        cloud, st = _cloud_state()
+        p = cloud.get_packet(st, packet_id, with_pdf=True)
+        out = send_pdf((p or {}).get("pdf") or b"", packet_id, to, note)
+        if out.get("sent"):
+            cloud.mark_packet_emailed(st, packet_id, to)
+        return out
     from .notes import email_packet
     conn = db()
     try:
-        return email_packet(conn, packet_id, str(body.get("to") or os.environ.get("APPEAL_EMAIL_TO") or "").strip(), str(body.get("note") or ""))
+        return email_packet(conn, packet_id, to, note)
     finally:
         conn.close()
