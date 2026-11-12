@@ -340,7 +340,7 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
 def _packets_for(finding_id: str) -> list[dict]:
     if runtime.serverless():
         from . import cloud
-        st = cloud.SERVING_COPY.state()
+        st = cloud.SERVING_COPY.state(fast=True)        # part of opening a finding: must not wait on a slow Dropbox
         try:
             return cloud.list_packets(st, finding_id) if st is not None else []
         except Exception:

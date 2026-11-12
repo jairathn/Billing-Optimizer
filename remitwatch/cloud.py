@@ -57,6 +57,7 @@ ACTIONS = "actions"
 PACKETS = "packets"
 _PROCESS_START = time.time()
 FAILED_BACKOFF_SECONDS = 6 * 3600   # after a failed run, notifications start nothing for this long (the daily run still does)
+UNFINISHED_BACKOFF_SECONDS = 3600   # the same after a run that could not fetch a file or left work for a follow-up run
 MAX_HOPS = 30                       # runs that may follow one another without a person or the scheduler in between
 MAX_FILE_BYTES = 60 * 1024 * 1024    # larger files in the data folder are not read
 NEEDED_MEMORY_MB = 1600          # measured peak of a detection run on five years of remittances
@@ -233,11 +234,14 @@ def read_actions(state, skip: set[str] | None = None) -> list[tuple[str, dict]]:
     return [(n, a) for n, a in sorted(got) if isinstance(a, dict)]
 
 
-def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> tuple[list[str], list[str]]:
-    """Apply journal entries to a copy of the store. Returns (names applied, names left over). An entry is left over
-    when a finding it names is not in this copy: that happens when the dashboard showed a finding the copy does not
-    hold yet, and such an entry must be kept and tried again, never dropped. Applying an entry twice is harmless."""
+def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> tuple[list[str], list[str], bool]:
+    """Apply journal entries to a copy of the store. Returns (names applied, names left over, whether anything was
+    written). An entry is left over when a finding it names is not in this copy: that happens when the dashboard showed
+    a finding the copy does not hold yet, and such an entry must be kept and tried again, never dropped. A bulk entry
+    with one finding missing is left over too, though its other findings were written. Applying an entry twice is
+    harmless and writes nothing the second time."""
     done, left = [], []
+    before = conn.total_changes
     for name, a in entries:
         try:
             if a.get("kind") == "bulk_status":
@@ -250,7 +254,7 @@ def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> 
         except Exception:
             done.append(name)       # malformed: nothing a later run could do with it either
     conn.commit()
-    return done, left
+    return done, left, conn.total_changes > before
 
 
 def expired(name: str, days: int = 7) -> bool:
@@ -588,6 +592,7 @@ class ServingCopy:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._state = None
+        self._quick = None
         self._state_key = None
         self.rev = None
         self.checked = 0.0
@@ -632,18 +637,19 @@ class ServingCopy:
         empty_serving(p)
         self._swap(p)
 
-    def state(self):
+    def state(self, fast: bool = False):
         key = tuple(os.environ.get(k) for k in ("REMITWATCH_STATE_DIR", "DROPBOX_REFRESH_TOKEN", "REMITWATCH_STATE_PATH"))
         if self._state is None or key != self._state_key:
-            # one attempt and a short wait: every page of the site passes through here, and a slow Dropbox must not hold them
-            self._state, self._state_key = state_from_env(fast=True), key
+            # Two clients on the same folder. Reads that every page passes through make one attempt with a short wait,
+            # so a slow Dropbox cannot hold the site. What a person writes (a status, a packet) is tried patiently.
+            self._state, self._quick, self._state_key = state_from_env(), state_from_env(fast=True), key
             self.rev, self.checked, self.journal_checked, self.applied = None, 0.0, 0.0, set()
             self._status = (0.0, None)
-        return self._state
+        return self._quick if fast else self._state
 
     def ensure(self, force: bool = False) -> str:
         with self._lock:
-            st = self.state()
+            st = self.state(fast=True)
             now = time.time()
             have = bool(self._path and os.path.exists(self._path))
             if st is None:
@@ -710,7 +716,7 @@ class ServingCopy:
         ts, cached = self._status
         if time.time() - ts < 10 and cached is not None:
             return cached
-        st = self.state()
+        st = self.state(fast=True)
         out: dict = {"configured": st is not None}
         if st is not None:
             try:
@@ -737,7 +743,13 @@ def webhook_should_start(state, client) -> bool:
     if going or stalled:
         return False        # a dead run's lock is cleared by the daily run or by a person, not by a notification
     last = _read_json(state, STATUS)
-    if last.get("error") and _age_seconds(last.get("finished")) < FAILED_BACKOFF_SECONDS:
+    age = _age_seconds(last.get("finished"))
+    if last.get("error") and age < FAILED_BACKOFF_SECONDS:
+        return False
+    # A run that could not fetch a file, or stopped with more to do, leaves the Dropbox position where it was, so the
+    # check below would say "new files" for every notification, including the ones the run's own writes raised.
+    unfinished = (last.get("ingest") or {}).get("download_errors") or last.get("more") or last.get("halted")
+    if unfinished and age < UNFINISHED_BACKOFF_SECONDS:
         return False
     return has_new_files(state, client)
 
@@ -836,7 +848,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         serving_stale = bool(data_rev) and (_read_json(state, SERVING_MARK).get("data_rev") != data_rev)
 
         journal = read_actions(state)
-        done, left = apply_actions(conn, journal) if journal else ([], [])
+        done, left, wrote = apply_actions(conn, journal) if journal else ([], [], False)
 
         ingest: dict = {"skipped": "Dropbox credentials are not configured"}
         if client is not None:
@@ -879,10 +891,11 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
 
         if left and ran_detect:
             # entries that named a finding this store did not hold: detection may just have brought it back
-            again, left = apply_actions(conn, [(n, a) for n, a in journal if n in set(left)])
+            again, left, wrote_more = apply_actions(conn, [(n, a) for n, a in journal if n in set(left)])
             done += again
-        folded = len(done)
-        out["actions_folded"] = folded
+            wrote = wrote or wrote_more
+        folded = wrote              # the store and the dashboard's copy are saved when something was really written
+        out["actions_folded"] = len(done)
         if left:
             out["actions_waiting"] = len(left)
 
@@ -891,9 +904,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         marks.setdefault("alerts", {})
         if settled:
             out["alerts"] = run_alerts(conn)
-            # what was mailed is recorded outside the store (the store is not saved on an idle run): put it back
-            conn.executemany("UPDATE alerts SET notified_at=? WHERE alert_id=? AND notified_at IS NULL",
-                             [(at, aid) for aid, at in marks["alerts"].items()])
+            # What was mailed is recorded outside the store (the store is not saved on an idle run): put it back. The
+            # record names the alert as it was raised then; one that cleared and has been raised again is a new alert.
+            conn.executemany("UPDATE alerts SET notified_at=? WHERE alert_id=? AND first_seen=? AND notified_at IS NULL",
+                             [(m[0], aid, m[1]) for aid, m in marks["alerts"].items() if isinstance(m, list) and len(m) == 2])
             conn.commit()
 
         # Save only what changed, the store first: it is the record, and the dashboard's copy is made from it. An idle
@@ -924,8 +938,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if settled:
             out["notified"] = notify(conn, log=log) if email else {"sent": 0, "skipped": True}
             if out["notified"].get("sent"):
-                live = {r[0]: r[1] for r in conn.execute("SELECT alert_id, notified_at FROM alerts WHERE notified_at IS NOT NULL")}
-                marks["alerts"] = live
+                marks["alerts"] = {r[0]: [r[1], r[2]] for r in conn.execute(
+                    "SELECT alert_id, notified_at, first_seen FROM alerts WHERE notified_at IS NOT NULL AND status != 'cleared'")}
                 _write_json(state, MARKS, marks)
             every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))
             last_report = marks.get("last_report") or (conn.execute("SELECT value FROM meta WHERE key='pipeline:last_report'").fetchone() or [None])[0]

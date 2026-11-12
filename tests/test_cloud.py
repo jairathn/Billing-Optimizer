@@ -660,3 +660,62 @@ def test_dropbox_client_asks_again_when_told_to_and_fails_fast_when_asked_to(mon
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("REMITWATCH_STATE_DIR", raising=False)
     assert state_from_env(fast=True).client.attempts == 1 and state_from_env().client.attempts == 6
+
+
+def test_follow_up_review_points(box, monkeypatch):
+    """Four things a second look at the fixes turned up."""
+    import requests
+
+    from remitwatch import report
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    sent: list[str] = []
+    monkeypatch.setattr(report, "email_report", lambda text, subject="RemitWatch summary": sent.append(subject) or True)
+    run = lambda **kw: cloud.run_cloud_cycle(state, client, budget_s=600, email=True, log=lambda *a: None, **kw)     # noqa: E731
+    run()
+    alert_mails = lambda: [s for s in sent if s.startswith("RemitWatch alert")]      # noqa: E731
+    assert len(alert_mails()) == 1
+
+    # 1. a bulk change with one finding missing: the others are written and saved now, and not saved again on every run
+    fids = [r[0] for r in raw_conn(state).execute("SELECT finding_id FROM findings WHERE signal='DOWNCODE_LEVEL_REDUCED'")]
+    cloud.record_action(state, {"kind": "bulk_status", "ids": fids + ["gone-since-the-click"], "status": "dismissed", "actor": "b"})
+    out = run()
+    assert out["actions_folded"] == 0 and out["actions_waiting"] == 1 and "store" in out and "serving" in out
+    assert raw_conn(state).execute("SELECT COUNT(*) FROM findings WHERE status='dismissed'").fetchone()[0] == len(fids)
+    idle = run()
+    assert idle["actions_waiting"] == 1 and "store" not in idle and "serving" not in idle
+
+    # 2. an alert that cleared and is raised again is a new alert and is mailed again
+    def set_feed(days_ago: int) -> None:
+        from datetime import date, timedelta
+        d = (date.today() - timedelta(days=days_ago)).isoformat()
+        store, _ = cloud.load_raw(state)
+        store.conn.execute("UPDATE transactions SET payment_date=?", (d,))
+        store.conn.execute("UPDATE files SET ingested_at=?", (d + "T00:00:00+00:00",))
+        store.conn.commit()
+        cloud.save_raw(state, store)
+        store.close()
+    set_feed(0)
+    cleared = run()
+    assert cleared["alerts"]["cleared"] >= 1 and len(alert_mails()) == 1
+    set_feed(40)
+    time.sleep(1.1)                                 # the alert's own timestamps have one-second resolution
+    back = run()
+    assert back["alerts"]["new"] >= 1 and back["notified"]["sent"] >= 1 and len(alert_mails()) == 2
+    run()
+    assert len(alert_mails()) == 2
+
+    # 3. a download that keeps timing out leaves the position where it was; the run's own writes must not restart it
+    time.sleep(0.01)
+    write_remits(root / DATA, clean_visits(800, 1, "99213", "156.66", "76.09", cfi="16"), prefix="slow", start_ctrl=140)
+    client.broken = {"slow000": requests.exceptions.ReadTimeout("timed out")}
+    out = run()
+    assert out["ingest"]["download_errors"] == 1 and "error" not in json.loads(state.get(cloud.STATUS))
+    assert cloud.has_new_files(state, client) is True and cloud.webhook_should_start(state, client) is False
+    client.broken = {}
+
+    # 4. the dashboard reads through a client that gives up at once and writes through one that tries again
+    for k, v in (("DROPBOX_APP_KEY", "k"), ("DROPBOX_APP_SECRET", "s"), ("DROPBOX_REFRESH_TOKEN", "r")):
+        monkeypatch.setenv(k, v)
+    sc = cloud.ServingCopy()
+    assert sc.state().client.attempts == 6 and sc.state(fast=True).client.attempts == 1
