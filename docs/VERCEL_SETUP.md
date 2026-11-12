@@ -53,7 +53,11 @@ and what the runtime offers.
 ## How it works
 
 - `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules
-  `/api/cron/cycle` once a day (10:17 UTC). `public/` exists so that Vercel serves nothing else from the repository.
+  `/api/cron/cycle` once a day (10:17 UTC; on the Hobby plan Vercel fires it some time in that hour). `public/` exists
+  so that Vercel serves nothing else from the repository.
+- Keep `"framework": null` in `vercel.json`. Under Vercel's FastAPI preset the function is given the rewritten path, so
+  every request would arrive as `/api/index`.
+- Vercel refuses to build when `CRON_SECRET` has a space or a line break at either end.
 - One run (`remitwatch/cloud.py`): take a lock file, download the store (`store.sqlite.gz`), apply what people recorded
   since the last run, list what is new in the data folder, ingest it, detect, raise alerts, save the store, save a small
   copy for the dashboard built from it (`serving.sqlite.gz`), send mail, write the status, release the lock.
@@ -64,17 +68,21 @@ and what the runtime offers.
   Detection is left to a fresh run after a large batch, because a new process starts with clean memory.
 - Runs follow one another only while they are getting somewhere, and at most 30 times in a row. A file that cannot be
   read (a damaged spreadsheet, a file over 60 MB, one Dropbox will not release) is noted on the Data tab, remembered and
-  passed over until it changes. A download that merely timed out is tried again on the next run.
+  passed over until it changes. A download that merely timed out is tried twice more, a minute and a half apart, and
+  then left to the next daily run.
 - The dashboard never waits for a run. Each instance downloads the dashboard's copy, looks for a newer one every 45
   seconds, and lays the journal of recent status changes over it. A status change is one small file in `actions/`.
 - Appeal packets are stored as two files each under `packets/`.
 - A Dropbox webhook is verified by its signature, then answered. It starts a run only when no run is going, the last
-  one did not fail in the past six hours or die, and the data folder has new files of a kind the app reads. The site's
+  one did not fail in the past six hours, die, or leave work unfinished in the past hour, and the data folder has new
+  files of a kind the app reads. The site's
   own writes to its state folder never start one. The daily scheduled run is not subject to these conditions.
 - A status change recorded for a finding the store does not hold yet is kept in the journal and tried again after
   each detection, for a week.
 - `/api/health` runs a self-test once per process: an empty store held in memory, grown, saved, reopened, and the
   dashboard's copy built from it. It shows whether this host can run the mode at all.
+- An instance that has just started and cannot reach the state folder answers "could not reach its storage" rather than
+  showing an empty dashboard. One that already holds a copy keeps serving it and reports the error on the Data tab.
 
 ## Limits to know about
 

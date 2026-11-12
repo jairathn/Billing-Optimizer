@@ -60,8 +60,7 @@ FAILED_BACKOFF_SECONDS = 6 * 3600   # after a failed run, notifications start no
 UNFINISHED_BACKOFF_SECONDS = 3600   # the same after a run that could not fetch a file or left work for a follow-up run
 MAX_HOPS = 30                       # runs that may follow one another without a person or the scheduler in between
 MAX_FILE_BYTES = 60 * 1024 * 1024    # larger files in the data folder are not read
-NEEDED_MEMORY_MB = 1600          # measured peak of a detection run on five years of remittances
-MIN_MEMORY_MB = 2000             # Vercel's standard function size is 2 GB
+NEEDED_MEMORY_MB = 1600          # a detection run on five years of remittances peaks at about 1.42 GB; Vercel's standard function has 2 GB
 DEFER_DETECT_AFTER_FILES = int(os.environ.get("REMITWATCH_DEFER_DETECT_FILES", "3000"))
 REFRESH_SECONDS = 45            # how often a dashboard instance looks for a newer serving copy
 RETRY_SECONDS = 5               # how soon it looks again when storage did not answer and it has no copy at all
@@ -1023,14 +1022,25 @@ def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0
     bypass = os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET")
     if bypass:      # only present when the project protects its production address as well
         headers["x-vercel-protection-bypass"] = bypass
+    url = f"{base_url.rstrip('/')}/api/cron/cycle"
     try:
-        r = requests.post(f"{base_url.rstrip('/')}/api/cron/cycle", params=dict(params, trigger=trigger, delay=delay),
-                          headers=headers, timeout=(5, 1.5), allow_redirects=False)
+        r = requests.post(url, params=dict(params, trigger=trigger, delay=delay), headers=headers, timeout=(5, 1.5), allow_redirects=False)
+        target = r.headers.get("location") or ""
+        if r.status_code in (301, 302, 307, 308) and _same_site(url, target):
+            # the secret goes only to this site's own name, with or without "www."
+            r = requests.post(target, headers=headers, timeout=(5, 1.5), allow_redirects=False)
     except requests.exceptions.ReadTimeout:
         return True         # the normal case: the run is under way and will outlast this call
     except Exception:
         return False
     return r.status_code < 300
+
+
+def _same_site(a: str, b: str) -> bool:
+    from urllib.parse import urlsplit
+    x, y = urlsplit(a), urlsplit(b)
+    strip = lambda h: (h or "").lower().removeprefix("www.")       # noqa: E731
+    return y.scheme == "https" and bool(y.hostname) and strip(x.hostname) == strip(y.hostname)
 
 
 # --------------------------------------------------------------------------- setup checks
@@ -1109,7 +1119,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         f"Python {rt['python']}, SQLite {rt['sqlite']}" + ("" if st_.get("ok") else f"; self-test failed: {st_.get('error') or 'wrong result'}"),
         "This host cannot hold the store in memory and write its scratch files, which the site needs. Tell Dr. Jairath.")
     mem, secs = runtime.memory_mb(), runtime.max_seconds()
-    add("limits", "Function memory and time", None if mem is None else mem >= MIN_MEMORY_MB,
+    add("limits", "Function memory and time", None if mem is None else mem >= NEEDED_MEMORY_MB,
         f"memory {mem or 'not reported by the host'} MB, time allowed for one run {secs} s",
         f"A run needs about {NEEDED_MEMORY_MB:,} MB at its peak. In Vercel open Settings, Functions, Function CPU, choose Performance (needs the Pro plan), then redeploy.")
     add("email", "Email for alerts and the weekly summary (optional)", bool(env("SMTP_HOST") and env("REPORT_TO")) or None,

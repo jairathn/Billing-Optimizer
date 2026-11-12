@@ -387,8 +387,9 @@ def test_scheduler_address_runs_one_cycle_and_needs_the_secret(site, monkeypatch
     assert calls[-1][0] == "https://remitwatch.example.com"
     monkeypatch.setattr(cloud, "trigger_cycle", lambda *a, **k: False)
     assert tc.post("/api/sync/run", headers=xhr).status_code == 400
-    # a logged-in person may also call it, but only with the header a cross-site page cannot send
-    assert tc.post("/api/cron/cycle", headers=auth).status_code == 400
+    # the site's own pages may also call it with the login, but only with the header a cross-site page cannot send:
+    # a browser attaches a saved login to requests another site's page causes, a GET for an image included
+    assert tc.post("/api/cron/cycle", headers=auth).status_code == 400 and tc.get("/api/cron/cycle", headers=auth).status_code == 400
     assert tc.post("/api/cron/cycle", headers=xhr).status_code == 200
 
 
@@ -763,3 +764,25 @@ def test_self_test_passes_when_many_requests_ask_at_once(monkeypatch):
     monkeypatch.setattr(runtime, "_SELFTEST", {"ok": False, "error": "x"})
     monkeypatch.setattr(runtime, "_SELFTEST_AT", time.time() - 120)
     assert runtime.selftest()["ok"] is True
+
+
+def test_every_address_needs_the_login_except_three(site):
+    import re
+    tc, auth, api, _state = site
+    public = {("GET", "/api/health"), ("GET", "/api/health/hangup"), ("GET", "/robots.txt"), ("GET", "/api/dropbox/webhook")}
+    seen = 0
+    for r in api.app.routes:
+        path, methods = getattr(r, "path", None), getattr(r, "methods", None) or []
+        if not path or path.startswith("/static"):
+            continue
+        for m in sorted(methods):
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            seen += 1
+            if path == "/api/health/hangup":
+                continue                    # a diagnostic that sleeps six seconds by design
+            got = tc.request(m, re.sub(r"\{[^}]+\}", "x", path), headers={"X-Requested-With": "remitwatch"}, follow_redirects=False).status_code
+            want = 200 if (m, path) in public else (403 if (m, path) == ("POST", "/api/dropbox/webhook") else 401)
+            assert got == want, (m, path, got)
+    assert seen >= 35
+    assert tc.get("/openapi.json").status_code == 404 and tc.get("/docs").status_code == 404

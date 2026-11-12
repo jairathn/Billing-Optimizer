@@ -190,3 +190,16 @@ for an intern. The app now runs there with its store in a private Dropbox folder
 - GitHub Pages is also enabled on this repository and rebuilds from main on every push.
 - To check a deployment from a session: GET /api/health on the production address (no login) shows version, commit and runtime.
   Commit statuses are not readable without a pull request.
+
+Review of the Vercel mode (same day). An independent reviewer reproduced, and the following commits closed: a self-call loop on
+one unreadable file (and two other loop routes through notifications); status changes dropped when the dashboard's copy was ahead
+of the store (the store is now saved first, with a version marker in serving.json); alert mail and the weekly report repeating
+(mail now goes after the saves, markers in notified.json keyed by the alert's first_seen); pages waiting behind Dropbox retries
+(reads use a one-attempt client, writes a patient one); a partly applied bulk change not saved; a self-test that could fail for
+good under simultaneous first requests; an empty dashboard after one failed storage call on a cold start. The reviewer's
+reproduction scripts are in the session scratchpad under rv_cycle. Production checks after each push: /api/health (commit,
+self-test), / redirects to /setup, data routes 503 until a password is set, /api/cron/cycle 401 without the secret, webhook
+challenge echoed, no repository file served.
+Known and accepted: a run killed by the platform (memory or the 300 s limit) leaves its lock for seven minutes and is not
+restarted by anything but the daily run or the button; SQLite 3.40 on Vercel (no newer SQL is used; building 3.40 locally to
+test against it was not permitted in the session, the live self-test passes).

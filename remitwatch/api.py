@@ -72,7 +72,7 @@ async def lifespan(_app: FastAPI):
         yield
 
 
-app = FastAPI(title="RemitWatch", version=__version__, docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="RemitWatch", version=__version__, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 # Vercel refuses answers over 4.5 MB; compressed, the largest list the dashboard asks for is a few hundred KB
 app.add_middleware(GZipMiddleware, minimum_size=2000)
 
@@ -182,8 +182,27 @@ if STATIC_DIR.exists():
 def health():
     if runtime.serverless():
         return {"ok": True, "mode": "serverless", "version": __version__, "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:7],
-                "runtime": runtime.describe(), "selftest": runtime.selftest(), "time": datetime.now(timezone.utc).isoformat()}
+                "runtime": runtime.describe(), "selftest": runtime.selftest(), "hangup": dict(_HANGUP, pid=os.getpid()),
+                "time": datetime.now(timezone.utc).isoformat()}
     return {"ok": os.path.exists(DB_PATH), "mode": "server", "version": __version__, "time": datetime.now(timezone.utc).isoformat()}
+
+
+_HANGUP: dict = {"started": None, "finished": None}
+
+
+@app.get("/api/health/hangup", include_in_schema=False)
+def hangup_probe():
+    """Diagnostic for the host: does a request's work finish after the caller stops waiting? The follow-up runs of the
+    serverless cycle rely on it. Call this and hang up after a second, then read /api/health a little later: `finished`
+    is set if the six seconds of work below ran to the end. At most one probe a minute per instance."""
+    import time
+    now = time.time()
+    if _HANGUP["started"] and now - _HANGUP["started"] < 60:
+        return dict(_HANGUP)
+    _HANGUP.update(started=now, finished=None)
+    time.sleep(6)
+    _HANGUP["finished"] = time.time()
+    return dict(_HANGUP)
 
 
 @app.get("/api/meta")
@@ -753,8 +772,8 @@ def sync_run(request: Request, _: str = Depends(require_auth)):
 
 
 def _cron_auth(request: Request, credentials: Optional[HTTPBasicCredentials]) -> None:
-    """Vercel's scheduler and the site's own follow-up calls send the CRON_SECRET as a bearer token. A person may also
-    start a run with the dashboard login."""
+    """Vercel's scheduler and the site's own follow-up calls send the CRON_SECRET as a bearer token. The dashboard's
+    own pages may also start a run with the login."""
     secret = (os.environ.get("CRON_SECRET") or "").strip()
     sent = (request.headers.get("authorization") or "").strip()
     if secret and secrets.compare_digest(sent.encode(), f"Bearer {secret}".encode()):
@@ -762,8 +781,9 @@ def _cron_auth(request: Request, credentials: Optional[HTTPBasicCredentials]) ->
     if not PASSWORD:
         raise HTTPException(status_code=401, detail="Unauthorized")
     require_auth(credentials)
-    if request.method != "GET":
-        require_xhr(request)
+    # A browser attaches the saved login to any request for this site, including one another site's page causes. The
+    # header below cannot be added that way, so a run is only started by this site's own pages (or by the secret).
+    require_xhr(request)
 
 
 @app.api_route("/api/cron/cycle", methods=["GET", "POST"], include_in_schema=False)

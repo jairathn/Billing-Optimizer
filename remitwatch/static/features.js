@@ -213,7 +213,7 @@ async function feedPanel(el){
   const yes = (b, t, f) => b ? `<span class="ok">${t}</span>` : `<span class="sev-medium">${f}</span>`;
   el.innerHTML = `<div class="panel"><h2>Feed</h2><table>
     <tr><td>Dropbox connection</td><td>${yes(s.dropbox_configured,'connected','not configured: set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN')}</td></tr>
-    ${cloud ? `<tr><td>Automatic sync</td><td>${yes(s.cron_ready,'once a day (10:17 UTC, early morning Central), and when Dropbox reports a new file','off: CRON_SECRET is not set')} · <a href="/setup">setup checklist</a></td></tr>
+    ${cloud ? `<tr><td>Automatic sync</td><td>${yes(s.cron_ready,'once a day (between 10 and 11 UTC, early morning Central), and when Dropbox reports a new file','off: CRON_SECRET is not set')} · <a href="/setup">setup checklist</a></td></tr>
     ${s.storage_error?`<tr><td>Storage</td><td><span class="sev-high">${esc(s.storage_error)}</span></td></tr>`:''}
     ${s.stalled_since?`<tr><td>Last run</td><td><span class="sev-high">A run that started ${esc(String(s.stalled_since).replace('T',' ').slice(0,16))} UTC stopped without finishing (out of memory or time). The next run picks up where it left off.</span></td></tr>`:''}
     ${(lc.ingest&&lc.ingest.failed&&lc.ingest.failed.length)?`<tr><td>Files the last run could not use</td><td><span class="sev-medium">${lc.ingest.failed.map(esc).join(', ')}</span><div class="small muted">Each is skipped until it changes in Dropbox. Replace the file there to have it read.</div></td></tr>`:''}
