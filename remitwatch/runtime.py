@@ -20,6 +20,12 @@ def serverless() -> bool:
     return bool(os.environ.get("VERCEL"))
 
 
+def preview() -> bool:
+    """A Vercel build of some other branch. If it were given the production settings it would hold the Dropbox token
+    and write the same state folder with different code, so it never runs a cycle."""
+    return os.environ.get("VERCEL_ENV", "production") not in ("", "production")
+
+
 def max_seconds() -> int:
     """How long one cycle may run before it must save and hand over to a fresh invocation. Set REMITWATCH_MAX_SECONDS a
     minute below the function's maximum duration."""

@@ -418,7 +418,7 @@ def notify(conn: sqlite3.Connection, log=print) -> dict:
             r = requests.post(url, json={"text": text}, timeout=15)
             sent_hook = r.status_code < 300
         except Exception as e:
-            log(f"alert webhook failed: {e}")
+            log(f"alert webhook failed: {type(e).__name__}")       # the error text would carry the address, which is the secret
     if sent_email or sent_hook:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn.executemany("UPDATE alerts SET notified_at=? WHERE alert_id=?", [(now, a["alert_id"]) for a in alerts])

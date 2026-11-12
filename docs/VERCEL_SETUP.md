@@ -14,7 +14,7 @@ redeploy after every change.
 
 | Name | Where the value comes from | Needed |
 | --- | --- | --- |
-| `REMITWATCH_PASSWORD` | Made up. The dashboard password. The site refuses to show data until it is set. | Yes |
+| `REMITWATCH_PASSWORD` | Made up, 12 or more plain letters and digits. The dashboard password. The site stays locked until it is set and long enough. | Yes |
 | `CRON_SECRET` | Made up, 16 characters or more, no spaces. Vercel's scheduler and the site's own follow-up runs present it. | Yes |
 | `DROPBOX_APP_KEY` | Dropbox Developer Console, the app's Settings tab | Yes |
 | `DROPBOX_APP_SECRET` | Same tab | Yes |
@@ -24,6 +24,7 @@ redeploy after every change.
 | `REMITWATCH_STATE_PATH` | Where the site keeps its own files in Dropbox. Default `/RemitWatch-state`. | No |
 | `REMITWATCH_MAX_SECONDS` | Time allowed for one run. Default 240, one minute under the function limit in `vercel.json`. | No |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |
+| `APPEAL_EMAIL_DOMAINS` | The domains appeal packets may be emailed to, comma separated. Until it is set, packets can be downloaded but not emailed. | To email packets |
 | `ANTHROPIC_API_KEY` | Turns on the visit-note review for appeal packets. Set it only when a business associate agreement covers that account. | No |
 
 The rest of `.env.example` (alert windows, letterhead, appeal email limits) works the same on Vercel.
@@ -85,6 +86,14 @@ and what the runtime offers.
   dashboard's copy built from it. It shows whether this host can run the mode at all.
 - An instance that has just started and cannot reach the state folder answers "could not reach its storage" rather than
   showing an empty dashboard. One that already holds a copy keeps serving it and reports the error on the Data tab.
+
+## Access
+
+- One shared login (user `oda`). Ten wrong passwords from one address lock that address out for ten minutes.
+- Add the settings for the Production environment only. A preview build of another branch that was given them would
+  hold the Dropbox token; the app refuses to run a cycle on a preview build either way.
+- No page can be framed by another site, answers with data are marked not to be stored, and the run address accepts the
+  login only from the site's own pages.
 
 ## Limits to know about
 

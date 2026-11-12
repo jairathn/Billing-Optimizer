@@ -1037,8 +1037,18 @@ def trigger_cycle(base_url: str | None, trigger: str = "webhook", delay: int = 0
 
 
 def _same_site(a: str, b: str) -> bool:
+    """Is `b` an https address on the same host as `a`, give or take "www."? The answer is taken from the address as the
+    HTTP client will read it, and anything with a login part or a backslash is refused: two parsers can disagree there."""
     from urllib.parse import urlsplit
-    x, y = urlsplit(a), urlsplit(b)
+
+    import requests
+    if not b or any(ch in b for ch in "\\@ \t\r\n"):
+        return False
+    try:
+        y = urlsplit(requests.Request("POST", b).prepare().url)
+    except Exception:
+        return False
+    x = urlsplit(a)
     strip = lambda h: (h or "").lower().removeprefix("www.")       # noqa: E731
     return y.scheme == "https" and bool(y.hostname) and strip(x.hostname) == strip(y.hostname)
 
@@ -1054,8 +1064,11 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     def add(key: str, label: str, ok: bool | None, detail: str = "", fix: str = "") -> None:
         checks.append({"key": key, "label": label, "ok": ok, "detail": detail, "fix": "" if ok else fix})
 
-    add("password", "Dashboard password (REMITWATCH_PASSWORD)", bool(env("REMITWATCH_PASSWORD")),
-        "set" if env("REMITWATCH_PASSWORD") else "not set", "Add REMITWATCH_PASSWORD in Vercel, then redeploy.")
+    pw = env("REMITWATCH_PASSWORD") or ""
+    pw_ok = bool(pw) and (not runtime.serverless() or (pw.isascii() and len(pw) >= 12))
+    add("password", "Dashboard password (REMITWATCH_PASSWORD)", pw_ok,
+        "set" if pw_ok else ("not set" if not pw else "set, but shorter than 12 characters or not plain letters and digits"),
+        "Set REMITWATCH_PASSWORD in Vercel to 12 or more plain letters and digits, then redeploy.")
     cron = env("CRON_SECRET") or ""
     cron_ok = bool(cron) and cron == cron.strip() and "\n" not in cron and len(cron) >= 16
     add("cron_secret", "Scheduler secret (CRON_SECRET)", cron_ok,
@@ -1122,8 +1135,10 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     add("limits", "Function memory and time", None if mem is None else mem >= NEEDED_MEMORY_MB,
         f"memory {mem or 'not reported by the host'} MB, time allowed for one run {secs} s",
         f"A run needs about {NEEDED_MEMORY_MB:,} MB at its peak. In Vercel open Settings, Functions, Function CPU, choose Performance (needs the Pro plan), then redeploy.")
+    domains = env("APPEAL_EMAIL_DOMAINS") or ""
     add("email", "Email for alerts and the weekly summary (optional)", bool(env("SMTP_HOST") and env("REPORT_TO")) or None,
-        "configured" if env("SMTP_HOST") and env("REPORT_TO") else "not configured")
+        ("configured" if env("SMTP_HOST") and env("REPORT_TO") else "not configured")
+        + (f"; appeal packets may be emailed to {domains}" if domains else "; appeal packets cannot be emailed until APPEAL_EMAIL_DOMAINS names the domains allowed"))
     add("note_review", "Visit-note review (optional)", bool(env("ANTHROPIC_API_KEY")) or None,
         "on" if env("ANTHROPIC_API_KEY") else "off: packets are built from the template")
     if base_url:

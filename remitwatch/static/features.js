@@ -209,7 +209,8 @@ async function progressTab(v){
 async function feedPanel(el){
   const s = await api('/api/sync/status'); const lc = s.last_cycle || {};
   const cloud = s.mode === 'serverless', mem = s.memory_mb || {};
-  const fmtInt = n => Number(n).toLocaleString('en-US');
+  const fmtInt = n => (Number(n)||0).toLocaleString('en-US');
+  const num = v => esc(String(Number(v)||0));
   const yes = (b, t, f) => b ? `<span class="ok">${t}</span>` : `<span class="sev-medium">${f}</span>`;
   el.innerHTML = `<div class="panel"><h2>Feed</h2><table>
     <tr><td>Dropbox connection</td><td>${yes(s.dropbox_configured,'connected','not configured: set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN')}</td></tr>
@@ -222,8 +223,8 @@ async function feedPanel(el){
     : `<tr><td>Automatic sync</td><td>${s.interval_minutes?`every ${s.interval_minutes} minutes${s.next_run?', next about '+s.next_run.replace('T',' ').slice(0,16)+' UTC':''}`:'off (set REMITWATCH_SYNC_INTERVAL_MINUTES, for example 60)'} ${s.scheduler_running?'<span class="ok">· scheduler running</span>':''}</td></tr>`}
     <tr><td>Instant sync on upload</td><td>${yes(s.webhook_ready,'ready: point the Dropbox app webhook at /api/dropbox/webhook','needs DROPBOX_APP_SECRET')}</td></tr>
     <tr><td>Newest payment in the store</td><td>${esc(s.newest_payment_date||'–')} ${s.days_behind!=null?`(${s.days_behind} days ago)`:''}</td></tr>
-    <tr><td>Last new remittance file</td><td>${(s.last_remit_ingested||'–').replace('T',' ').slice(0,16)}</td></tr>
-    <tr><td>Last cycle</td><td>${lc.finished?`${lc.finished.replace('T',' ').slice(0,16)} UTC (${esc(lc.trigger||'')})${lc.error?' <span class="sev-high">failed: '+esc(lc.error)+'</span>':''} · ${lc.ingest?`${lc.ingest.remits||0} remits, ${lc.ingest.ema||0} EMA exports, ${lc.ingest.claims_837||0} claim files`:''}${lc.alerts?` · ${lc.alerts.new} new alerts`:''}`:'never'}</td></tr>
+    <tr><td>Last new remittance file</td><td>${esc(String(s.last_remit_ingested||'–').replace('T',' ').slice(0,16))}</td></tr>
+    <tr><td>Last cycle</td><td>${lc.finished?`${esc(String(lc.finished).replace('T',' ').slice(0,16))} UTC (${esc(lc.trigger||'')})${lc.error?' <span class="sev-high">failed: '+esc(lc.error)+'</span>':''} · ${lc.ingest?`${num(lc.ingest.remits)} remits, ${num(lc.ingest.ema)} EMA exports, ${num(lc.ingest.claims_837)} claim files`:''}${lc.alerts?` · ${num(lc.alerts.new)} new alerts`:''}`:'never'}</td></tr>
     <tr><td>Email (alerts and weekly summary)</td><td>${yes(s.smtp_configured,'configured','not configured: set SMTP_HOST and REPORT_TO')}</td></tr>
     <tr><td>Alert webhook</td><td>${s.alert_webhook?'<span class="ok">configured</span>':'off (optional: ALERT_WEBHOOK_URL)'}</td></tr>
     <tr><td>Clinical note review</td><td>${yes(s.note_review,'on','off: set ANTHROPIC_API_KEY once a business associate agreement covers it; packets are still built from the template without it')}</td></tr>

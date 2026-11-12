@@ -27,6 +27,7 @@ from tests.test_features import claim, clean_visits, svc  # noqa: E402
 from tests.test_remitwatch import remit  # noqa: E402
 
 DATA = "Trizetto Data"
+PW = "correct-horse-battery-7"      # a deployed site refuses a password shorter than twelve characters
 
 
 def visits_with_downcodes(n_down: int = 3) -> list[str]:
@@ -313,11 +314,11 @@ def site(box, monkeypatch):
     monkeypatch.setenv("REMITWATCH_MODE", "serverless")
     monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
     monkeypatch.setenv("CRON_SECRET", "s3cret-value-for-the-scheduler")
-    monkeypatch.setenv("REMITWATCH_PASSWORD", "pw")
-    monkeypatch.setattr(api, "PASSWORD", "pw")
+    monkeypatch.setenv("REMITWATCH_PASSWORD", PW)
+    monkeypatch.setattr(api, "PASSWORD", PW)
     monkeypatch.setattr(api, "USERNAME", "oda")
     monkeypatch.setattr(cloud, "SERVING_COPY", cloud.ServingCopy())
-    auth = {"Authorization": "Basic " + base64.b64encode(b"oda:pw").decode()}
+    auth = {"Authorization": "Basic " + base64.b64encode(f"oda:{PW}".encode()).decode()}
     return TestClient(api.app), auth, api, state
 
 
@@ -334,7 +335,7 @@ def test_site_is_closed_until_a_password_is_set(site, monkeypatch):
     monkeypatch.setenv("REMITWATCH_ALLOW_OPEN", "1")                    # a developer's own machine may opt in to running open
     assert tc.get("/api/summary").status_code == 200
     monkeypatch.delenv("REMITWATCH_ALLOW_OPEN")
-    monkeypatch.setattr(api, "PASSWORD", "pw")
+    monkeypatch.setattr(api, "PASSWORD", PW)
     assert tc.get("/api/summary").status_code == 401 and tc.get("/setup").status_code == 401
     assert tc.get("/api/summary", headers=auth).status_code == 200 and tc.get("/setup", headers=auth).status_code == 200
     h = tc.get("/api/health").json()
@@ -784,3 +785,62 @@ def test_every_address_needs_the_login_except_three(site):
             assert got == want, (m, path, got)
     assert seen >= 35
     assert tc.get("/openapi.json").status_code == 404 and tc.get("/docs").status_code == 404
+
+
+def test_login_is_hard_to_guess_and_guessing_is_slowed(site, monkeypatch):
+    tc, auth, api, _state = site
+    basic = lambda u, p: {"Authorization": "Basic " + base64.b64encode(f"{u}:{p}".encode()).decode()}     # noqa: E731
+    # a deployed site treats a short password, or one a browser cannot send, as no password: locked, and it says why
+    for bad, why in (("hunter2", "shorter than 12"), ("pässword-long-enough", "browser cannot send")):
+        monkeypatch.setattr(api, "PASSWORD", bad)
+        assert tc.get("/api/summary", headers=basic("oda", "whatever-is-typed")).status_code == 503
+        assert tc.get("/api/summary").status_code == 503
+        locked = tc.get("/api/setup/status").json()
+        assert locked["locked"] and why in locked["checks"][0]["detail"]
+        assert tc.get("/", follow_redirects=False).headers["location"] == "/setup"
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "_FAILED", {})
+    # ten wrong logins from one address and it is refused for ten minutes, right password or not
+    for i in range(api.FAIL_LIMIT):
+        assert tc.get("/api/summary", headers=basic("oda", f"guess-{i}")).status_code == 401
+    assert tc.get("/api/summary", headers=basic("oda", "one-more")).status_code == 429
+    assert tc.get("/api/summary", headers=auth).status_code == 429
+    assert tc.get("/api/summary").status_code == 429
+    monkeypatch.setattr(api, "_FAILED", {})
+    assert tc.get("/api/summary", headers=auth).status_code == 200
+    # a request with no login at all is not a guess and does not count
+    for _ in range(api.FAIL_LIMIT + 3):
+        assert tc.get("/api/summary").status_code == 401
+    assert tc.get("/api/summary", headers=auth).status_code == 200
+    # text that is not plain ASCII is refused, not a crash
+    monkeypatch.setenv("DROPBOX_APP_SECRET", "appsecret")
+    assert tc.post("/api/dropbox/webhook", content=b"{}", headers={"X-Dropbox-Signature": "caf\xe9".encode("latin-1")}).status_code == 403
+    # no page may be framed by another site, and nothing with data may be kept by a browser
+    r = tc.get("/api/summary", headers=auth)
+    assert r.headers["x-frame-options"] == "DENY" and "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert r.headers["cache-control"] == "no-store" and r.headers["x-content-type-options"] == "nosniff"
+    assert tc.get("/setup", headers=auth).headers["x-frame-options"] == "DENY"
+
+
+def test_secret_never_follows_a_redirect_off_the_site_and_packets_stay_in_the_practice(site, monkeypatch):
+    tc, auth, _api, _state = site
+    same = cloud._same_site
+    assert same("https://site.example/api/cron/cycle", "https://www.site.example/api/cron/cycle?x=1")
+    assert same("https://www.site.example/a", "https://site.example/a")
+    for bad in ("https://evil.example\\\\@site.example/a", "https://site.example@evil.example/a", "https://evil.example/a",
+                "http://site.example/a", "/relative", "", "https://site.example .evil.example/a"):
+        assert not same("https://site.example/a", bad), bad
+    # an appeal packet holds a name, a member number and the visit note: without named domains it is not mailed at all
+    from remitwatch import notes
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.delenv("APPEAL_EMAIL_DOMAINS", raising=False)
+    out = notes.send_pdf(b"%PDF", "F1.abc", "someone@gmail.com", "")
+    assert out["sent"] is False and "APPEAL_EMAIL_DOMAINS" in out["reason"]
+    monkeypatch.setenv("APPEAL_EMAIL_DOMAINS", "practice.example")
+    assert "outside the allowed domains" in notes.send_pdf(b"%PDF", "F1.abc", "someone@gmail.com", "")["reason"]
+    # a finding id becomes part of a storage path: anything but a plain token lists nothing
+    assert tc.get("/api/packets?finding_id=../actions", headers=auth).json() == []
+    # a build of another branch never runs a cycle, even if it were given the production settings
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    assert tc.get("/api/cron/cycle", headers={"Authorization": "Bearer s3cret-value-for-the-scheduler"}).status_code == 409
+    assert tc.post("/api/sync/run", headers=dict(auth, **{"X-Requested-With": "remitwatch"})).status_code == 409

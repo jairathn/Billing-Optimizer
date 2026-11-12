@@ -77,6 +77,20 @@ app = FastAPI(title="RemitWatch", version=__version__, docs_url=None, redoc_url=
 app.add_middleware(GZipMiddleware, minimum_size=2000)
 
 
+@app.middleware("http")
+async def protective_headers(request: Request, call_next):
+    """No page of this site may be shown inside another site's frame, and no answer with data may be kept by a browser
+    or a proxy."""
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.path.startswith("/api/"):
+        resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
+
+
 def require_xhr(request: Request) -> None:
     """State-changing calls must carry a header a cross-site form cannot set."""
     if request.headers.get("x-requested-with") != "remitwatch":
@@ -103,15 +117,67 @@ def base_url(request: Request) -> str:
     return f"{proto}://{host}" if host else ""
 
 
-def require_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
+MIN_PASSWORD = 12
+
+
+def password_problem() -> str | None:
+    """Why the dashboard password cannot be used, or None when it can. On a deployed site the password is all that
+    stands between the internet and the data, so a short one counts as none: the site stays locked and says why."""
+    if not PASSWORD:
+        return "not set"
+    if open_allowed():
+        return None             # a developer's own machine
+    if not PASSWORD.isascii():
+        return "has a character a browser cannot send in a login (use plain letters and digits)"
+    if len(PASSWORD) < MIN_PASSWORD:
+        return f"shorter than {MIN_PASSWORD} characters"
+    return None
+
+
+_FAILED: dict[str, list[float]] = {}        # address -> times of recent wrong logins (this instance only)
+FAIL_LIMIT, FAIL_WINDOW = 10, 600
+
+
+def _caller(request: Optional[Request]) -> str:
+    if request is None:
+        return "?"
+    # behind Vercel the first address in this header is the caller's and cannot be set by the caller
+    fwd = request.headers.get("x-forwarded-for") if os.environ.get("VERCEL") else None
+    return (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")) or "?"
+
+
+def _blocked(who: str, record: bool = False) -> bool:
+    """A brake on guessing: ten wrong logins from one address in ten minutes and it is refused for the rest of them."""
+    import time
+    now = time.time()
+    recent = [t for t in _FAILED.get(who, []) if now - t < FAIL_WINDOW]
+    if record:
+        recent.append(now)
+    if recent:
+        _FAILED[who] = recent
+    else:
+        _FAILED.pop(who, None)
+    if len(_FAILED) > 5000:
+        _FAILED.clear()
+    return len(recent) >= FAIL_LIMIT + (1 if record else 0)
+
+
+def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
     """Basic auth with a single shared password. When no password is configured the
     dashboard is open (local use only)."""
-    if not PASSWORD:
-        if open_allowed():
+    problem = password_problem()
+    if problem:
+        if not PASSWORD and open_allowed():
             return "anonymous"
-        raise HTTPException(status_code=503, detail="This site is not set up yet: REMITWATCH_PASSWORD is missing. Open /setup.")
-    if credentials is None or not (secrets.compare_digest(credentials.username, USERNAME)
-                                   and secrets.compare_digest(credentials.password, PASSWORD)):
+        raise HTTPException(status_code=503, detail=f"This site is not set up yet: REMITWATCH_PASSWORD is {problem}. Open /setup.")
+    who = _caller(request)
+    if _blocked(who):
+        raise HTTPException(status_code=429, detail="Too many wrong logins from this address. Wait ten minutes.")
+    ok = credentials is not None and secrets.compare_digest(credentials.username.encode(), USERNAME.encode()) \
+        and secrets.compare_digest(credentials.password.encode(), PASSWORD.encode())
+    if not ok:
+        if credentials is not None:
+            _blocked(who, record=True)
         raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic realm=RemitWatch"})
     return credentials.username
 
@@ -150,18 +216,18 @@ MONEY_CATEGORIES = ("downcoding", "bundling", "denial", "underpayment", "fees", 
 
 # --------------------------------------------------------------------------- pages
 @app.get("/setup", include_in_schema=False)
-def setup_page(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
-    """The setup checklist. Before a password exists it is open and says only what is missing; after that it needs the login."""
-    if PASSWORD:
-        require_auth(credentials)
+def setup_page(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    """The setup checklist. Before a usable password exists it is open and says only what is missing; after that it needs the login."""
+    if not password_problem():
+        require_auth(request, credentials)
     return FileResponse(STATIC_DIR / "setup.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/", include_in_schema=False)
-def index(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
-    if not PASSWORD and not open_allowed():
+def index(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    if password_problem() and not open_allowed():
         return RedirectResponse("/setup")
-    require_auth(credentials)
+    require_auth(request, credentials)
     f = STATIC_DIR / "index.html"
     if f.exists():
         return FileResponse(f)
@@ -341,6 +407,9 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
 
 
 def _packets_for(finding_id: str) -> list[dict]:
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", finding_id or ""):
+        return []           # it becomes part of a storage path
     if runtime.serverless():
         from . import cloud
         st = cloud.SERVING_COPY.state(fast=True)        # part of opening a finding: must not wait on a slow Dropbox
@@ -743,6 +812,8 @@ def sync_status(_: str = Depends(require_auth)):
 def sync_run(request: Request, _: str = Depends(require_auth)):
     if runtime.serverless():
         from . import cloud
+        if runtime.preview():
+            raise HTTPException(409, "This is a preview deployment. Only the production site reads and writes the practice's data.")
         if not cloud.trigger_cycle(base_url(request), "button"):
             raise HTTPException(400, "The site cannot start a run: CRON_SECRET is not set. Add it in Vercel and redeploy.")
         cloud.SERVING_COPY._status = (0.0, None)
@@ -759,9 +830,9 @@ def _cron_auth(request: Request, credentials: Optional[HTTPBasicCredentials]) ->
     sent = (request.headers.get("authorization") or "").strip()
     if secret and secrets.compare_digest(sent.encode(), f"Bearer {secret}".encode()):
         return
-    if not PASSWORD:
+    if password_problem():
         raise HTTPException(status_code=401, detail="Unauthorized")
-    require_auth(credentials)
+    require_auth(request, credentials)
     # A browser attaches the saved login to any request for this site, including one another site's page causes. The
     # header below cannot be added that way, so a run is only started by this site's own pages (or by the secret).
     require_xhr(request)
@@ -781,6 +852,8 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
     from .dropbox_sync import DropboxClient
     from .pipeline import dropbox_configured
     from .state import state_from_env
+    if runtime.preview():
+        raise HTTPException(409, "This is a preview deployment. Only the production site reads and writes the practice's data.")
     st = state_from_env()
     if st is None:
         raise HTTPException(503, "Dropbox is not connected yet. Open /setup.")
@@ -826,7 +899,7 @@ def _webhook_work(origin: str) -> None:
         from .dropbox_sync import DropboxClient
         from .state import state_from_env
         st = state_from_env(fast=True)
-        if st is None:
+        if st is None or runtime.preview():
             return
         # a run in progress looks for late arrivals itself when it ends; a run that failed is not retried from here
         if cloud.webhook_should_start(st, getattr(st, "client", None) or DropboxClient(attempts=1, timeout=8)):
@@ -842,7 +915,8 @@ async def dropbox_webhook(request: Request):
     secret = os.environ.get("DROPBOX_APP_SECRET", "")
     body = await request.body()
     sig = request.headers.get("x-dropbox-signature", "")
-    if not secret or not hmac.compare_digest(sig, hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()):
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not secret or not hmac.compare_digest(sig.encode("utf-8", "replace"), expected.encode()):
         raise HTTPException(status_code=403, detail="bad signature")
     if runtime.serverless():
         # A serverless host may freeze the process once the reply is sent, so the check runs before it: three short
@@ -863,13 +937,16 @@ async def dropbox_webhook(request: Request):
 # --------------------------------------------------------------------------- setup: every setting checked live
 @app.get("/api/setup/status")
 def setup_status(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
-    if not PASSWORD and not open_allowed():
-        # before a password exists the page may only say that it is missing: nothing else about the site is public
+    problem = password_problem()
+    if problem and not open_allowed():
+        # before a usable password exists the page may only say what is wrong with it: nothing else about the site is public
+        fix = ("Add REMITWATCH_PASSWORD in Vercel (Settings, Environment Variables), then redeploy." if problem == "not set" else
+               f"Replace REMITWATCH_PASSWORD in Vercel with one of {MIN_PASSWORD} or more plain letters and digits (the box below offers one), then redeploy.")
         return JSONResponse({"locked": True, "ready": False, "checks": [
-            {"key": "password", "label": "Dashboard password (REMITWATCH_PASSWORD)", "ok": False, "detail": "not set",
-             "fix": "Add REMITWATCH_PASSWORD in Vercel (Settings, Environment Variables), then redeploy. Everything else on this page appears after that."}]},
+            {"key": "password", "label": "Dashboard password (REMITWATCH_PASSWORD)", "ok": False, "detail": problem,
+             "fix": fix + " Everything else on this page appears after that."}]},
             headers={"Cache-Control": "no-store"})
-    require_auth(credentials)
+    require_auth(request, credentials)
     from . import cloud
     return JSONResponse(cloud.setup_status(base_url(request)), headers={"Cache-Control": "no-store"})
 
