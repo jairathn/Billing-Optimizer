@@ -127,7 +127,16 @@ async function providersTab(v){
       <div class="sm" id="pvSmall"></div>
       <details class="small" style="margin-top:8px"><summary>The same numbers as a table</summary><div id="pvTrendTable"></div></details></div>
     <div class="panel"><h2>What a visit holds</h2><div class="note">Biopsy rates are shown within Medicare and within everyone else: age drives biopsies, and the payer is the nearest thing to age on a remittance. Cancer treated counts the patients a clinician biopsied who had a skin cancer treated in this practice within 120 days. It is a floor, because treatment somewhere else never shows here.</div>${visits}</div>
-    <div class="panel"><h2>What it brings in</h2><div class="note">Allowed is what the payer and the patient together owe under the contract. Per patient seen and "in the exam room" leave out pathology, radiation, and skin substitute products and drugs, which are paid mostly to cover their cost. The pathology column is what the slides from that clinician's biopsies were allowed, billed under the physician who read them.</div>${dollars}
+    ${ov.recall && ov.recall.cancer_patients ? `<div class="panel"><h2>Patients to call back</h2>
+      <div class="note">People who had a skin cancer treated in this practice (Mohs, a malignant excision or destruction, radiation) and have not been seen for a visit since, counted under the clinician who saw them last, as of ${esc(ov.recall.as_of || '')}. In all, <b>${n0(ov.recall.overdue_12)}</b> of ${n0(ov.recall.cancer_patients)} have not been seen for twelve months and ${n0(ov.recall.overdue_18)} for eighteen. This is a count from the remittances, where a patient is known only by name: some will have moved, died or be followed elsewhere. The list to work from is the recall report in EMA.</div>
+      ${pvTable(ov.providers.filter(r => keep(r) && (r.recall || {}).cancer_patients >= 20).sort((x, y) => (y.recall.overdue_12 || 0) - (x.recall.overdue_12 || 0)), [
+        {h: 'Seen last by', f: r => pvWho(r)},
+        {h: 'Treated for a skin cancer here', num: 1, f: r => n0(r.recall.cancer_patients)},
+        {h: 'Not seen for 12 months', num: 1, f: r => `<b>${n0(r.recall.overdue_12)}</b>`},
+        {h: 'Not seen for 18 months', num: 1, f: r => n0(r.recall.overdue_18)},
+        {h: 'Share overdue', num: 1, f: r => pctv(r.recall.cancer_patients ? r.recall.overdue_12 / r.recall.cancer_patients : null)},
+      ])}</div>` : ''}
+    <div class="panel"><h2>What it brings in</h2><div class="note">Allowed is what the payer and the patient together owe under the contract. Per patient seen and "in the exam room" leave out pathology, radiation, and skin substitute products and drugs, which are paid mostly to cover their cost. The pathology column is what the slides from that clinician's biopsies were allowed, billed under the physician who read them. It is there to show what a biopsy brings in, not as a basis for pay: ask counsel before tying anyone's pay to pathology or radiation.</div>${dollars}
       <h3 class="small" style="margin:14px 0 4px">Where the allowed dollars come from</h3><div class="chartbox" style="height:${Math.max(160, 34 * rows.length + 70)}px"><canvas id="pvMix"></canvas></div>
       <details class="small" style="margin-top:8px"><summary>The same numbers as a table</summary><div id="pvMixTable"></div></details></div>
     <div class="panel"><h2>The newest weeks, from the EMA charge exports</h2><div id="pvRecent"></div></div>

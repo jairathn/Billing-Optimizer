@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS provider_cohorts (
     biopsied INTEGER, treated_120 INTEGER,
     PRIMARY KEY (provider_id, quarter)
 );
+CREATE TABLE IF NOT EXISTS provider_recall (
+    provider_id TEXT PRIMARY KEY, cancer_patients INTEGER, overdue_12 INTEGER, overdue_18 INTEGER, as_of TEXT
+);
 CREATE TABLE IF NOT EXISTS provider_ema_days (
     provider TEXT, provider_id TEXT, role TEXT, service_date TEXT,
     patients INTEGER, insured_patients INTEGER, loose_lines INTEGER, visits INTEGER, new_visits INTEGER, est_visits INTEGER, est_high INTEGER,
@@ -84,7 +87,7 @@ CREATE TABLE IF NOT EXISTS provider_ema_lag (
 );
 """
 TABLES = ("provider_roster", "provider_days", "provider_services", "provider_payers", "provider_panels", "provider_cohorts",
-          "provider_ema_days", "provider_ema_lag")
+          "provider_recall", "provider_ema_days", "provider_ema_lag")
 INFO_KEY = "activity:info"
 
 EM_NEW = ("99202", "99203", "99204", "99205")
@@ -341,6 +344,7 @@ def build_activity(store, log=print) -> dict:
     payers: dict[tuple, list] = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
     journeys: dict[tuple, list] = {}                                 # patient -> [(date, clinician, new patient visit, biopsied)]; never stored
     treated: dict[tuple, list] = {}                                  # patient -> dates a skin cancer was treated, by anyone
+    last_visit: dict[tuple, list] = {}                               # patient -> [date last seen face to face, the clinician then]
     lag_hist: Counter = Counter()
     how: Counter = Counter()                                         # how each encounter found its clinician
     took: dict[tuple, str] = {}                                      # (patient, date) -> the clinician who took the biopsy
@@ -507,6 +511,13 @@ def build_activity(store, log=print) -> dict:
                 pk[5] += 1 if lesions else 0
                 if provider in people and patient[0] != "#":
                     journeys.setdefault(patient, []).append((d, provider, new, bool(lesions)))
+                if patient[0] != "#":
+                    seen_last = last_visit.get(patient)
+                    if seen_last is None:
+                        last_visit[patient] = [d, provider if provider in people else None]
+                    elif d > seen_last[0] or (d == seen_last[0] and provider in people and (seen_last[1] is None or provider < seen_last[1])):
+                        seen_last[0] = d
+                        seen_last[1] = provider if provider in people else seen_last[1]
             if patient[0] != "#" and any(f in CANCER_TREATMENT or it[1].startswith("116") for it, f in zip(its, fams)):
                 treated.setdefault(patient, []).append(d)
             how[source] += 1
@@ -595,8 +606,10 @@ def build_activity(store, log=print) -> dict:
     for done in (days, day_n, services, payers):       # give the memory back before following patients through time
         done.clear()
     build_panels(conn, journeys, treated, first_payment, last_payment)
+    build_recall(conn, treated, last_visit, last_payment)
     journeys.clear()
     treated.clear()
+    last_visit.clear()
 
     # ---- the EMA side: recent weeks, self-pay included, and how long a visit takes to become a bill
     ema_summary = build_ema(conn, ema_id) if has_ema else {}
@@ -724,6 +737,28 @@ def build_panels(conn: sqlite3.Connection, journeys: dict, treated: dict, first_
             rows.append((who, f"{y:04d}-{m:02d}", r[0], r[1] if i >= 23 else None, r[2] if i >= 23 else None, r[3] if i >= 23 else None))
     conn.executemany("INSERT INTO provider_panels VALUES (?,?,?,?,?,?)", rows)
     conn.executemany("INSERT INTO provider_cohorts VALUES (?,?,?,?,?,?,?,?,?)", [k + tuple(v) for k, v in sorted(cohort.items())])
+
+
+def build_recall(conn: sqlite3.Connection, treated: dict, last_visit: dict, last_payment: str | None) -> None:
+    """Patients who had a skin cancer treated here and have not been seen face to face for a year or more, counted under
+    the clinician who saw them last. Measured 60 days before the newest payment, so a recent visit still waiting to be
+    paid is not mistaken for an absence. A count, not a list: some of these patients have moved, died or are followed
+    elsewhere, and the list itself belongs in EMA."""
+    conn.execute("DELETE FROM provider_recall")
+    try:
+        as_of = date.fromisoformat((last_payment or "")[:10]) - timedelta(days=60)
+    except ValueError:
+        return
+    cut12, cut18 = (as_of - timedelta(days=365)).isoformat(), (as_of - timedelta(days=548)).isoformat()
+    n: dict[str, list] = defaultdict(lambda: [0, 0, 0])
+    for patient, dates in treated.items():
+        seen = last_visit.get(patient) or [None, None]
+        last = max([d for d in (seen[0], max(dates)) if d])
+        who = n[seen[1] or "unattributed"]
+        who[0] += 1
+        who[1] += last < cut12
+        who[2] += last < cut18
+    conn.executemany("INSERT INTO provider_recall VALUES (?,?,?,?,?)", [(k, v[0], v[1], v[2], as_of.isoformat()) for k, v in sorted(n.items())])
 
 
 def refresh(store, log=print) -> dict:
@@ -1064,6 +1099,7 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
         if _add_months(q_end, 3) <= horizon and _add_months(q_end, 3) > _add_months(horizon, -12):
             x[4] += r["new_patients"]
             x[5] += r["back_90"]
+    recall = {r["provider_id"]: dict(r) for r in conn.execute("SELECT * FROM provider_recall")}
     weeks = _weeks(a, b)
     out, other = [], []
     for pid, p in per.items():
@@ -1108,6 +1144,7 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
             "new_back_90": _share(came_back[pid][5], came_back[pid][4]) if came_back[pid][4] >= 50 else None,
             "return_visits_per_new": round(came_back[pid][3] / came_back[pid][0], 2) if came_back[pid][0] >= 50 else None,
             "cancer_per_100_biopsied": round(100 * came_back[pid][7] / came_back[pid][6], 1) if came_back[pid][6] >= 100 else None,
+            "recall": {k: (recall.get(pid) or {}).get(k) for k in ("cancer_patients", "overdue_12", "overdue_18")},
             "downcoded": down.get(pid, {"n": 0, "cents": 0}),
             "downcoded_per_100_visits": round(100 * down.get(pid, {"n": 0})["n"] / (est_n + new_n), 2) if (est_n + new_n) else None,
         }
@@ -1119,6 +1156,9 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
             "unassigned_share": _share(sum(r["patients"] for r in other), seen_total),
             "incomplete_months": [m for m in months_in if m["complete"] < COMPLETE_SHARE],
             "clinic_day_min": CLINIC_DAY_MIN, "families": [{"family": k, "label": v} for k, v in FAMILIES],
+            "recall": {"as_of": next((r["as_of"] for r in recall.values()), None), "cancer_patients": sum(r["cancer_patients"] for r in recall.values()),
+                       "overdue_12": sum(r["overdue_12"] for r in recall.values()), "overdue_18": sum(r["overdue_18"] for r in recall.values()),
+                       "unattributed": {k: (recall.get("unattributed") or {}).get(k, 0) for k in ("cancer_patients", "overdue_12", "overdue_18")}},
             "attribution": info(conn).get("attribution") or {}}
 
 

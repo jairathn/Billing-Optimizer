@@ -527,7 +527,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     ("line_handling", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
     # what each clinician did (remitwatch.activity): counts and sums per clinician, no patient rows
     ("provider_roster", None, None), ("provider_days", None, None), ("provider_services", None, None), ("provider_payers", None, None),
-    ("provider_panels", None, None), ("provider_cohorts", None, None), ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
+    ("provider_panels", None, None), ("provider_cohorts", None, None), ("provider_recall", None, None),
+    ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
 ]
 
 

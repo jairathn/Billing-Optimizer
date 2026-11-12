@@ -237,6 +237,38 @@ def test_panels_new_patient_returns_and_what_the_biopsy_found(built):
     assert panels == {}                    # a panel needs twelve months of remittances behind it; this store has five
 
 
+def test_patients_treated_for_a_skin_cancer_and_not_seen_since_are_counted_under_who_saw_them_last(tmp_path):
+    files = [
+        ("20240220", "KY MEDICARE", [
+            clp(1, svc("17311", "900.00", "480.00", "600.00", "20240201", lcn="A1"), who="bob", patient=("GONE", "GARY"), cfi="MB"),
+            clp(2, svc("11642", "400.00", "160.00", "200.00", "20240201", lcn="A2"), who="bob", patient=("BACK", "BETH"), cfi="MB"),
+            clp(3, svc("17262", "300.00", "120.00", "150.00", "20240201", lcn="A3"), who="bob", patient=("LATER", "LEO"), cfi="MB"),
+            visit(4, "20240201", who="bob", patient=("NEVER", "NED")),                     # no cancer: not part of this count
+        ]),
+        ("20240320", "KY MEDICARE", [visit(5, "20240301", patient=("GONE", "GARY"), cfi="MB")]),       # last seen by Ann, a month after surgery
+        ("20251220", "KY MEDICARE", [visit(6, "20251201", patient=("BACK", "BETH"), cfi="MB")]),       # came back within the year
+        ("20260301", "KY MEDICARE", [
+            visit(7, "20260215", patient=("LATER", "LEO"), cfi="MB"),      # seen again, after the day the count is taken
+            clp(8, svc("77401", "90.00", "40.00", "50.00", "20260210", lcn="A8"), who="bob", patient=("RAY", "RITA"), cfi="MB"),      # in treatment now
+        ]),
+    ]
+    store = Store(str(tmp_path / "s.sqlite"))
+    store.ingest_835_paths(write_files(tmp_path, files))
+    activity.build_activity(store, log=lambda *a: None)
+    store.conn.row_factory = sqlite3.Row
+    rows = {r["provider_id"]: dict(r) for r in store.conn.execute("SELECT * FROM provider_recall")}
+    # counted 60 days before the newest payment (31 December 2025). Gary: last seen March 2024 by Ann, overdue 12 and 18 months.
+    # Beth: seen December 2025. Leo: surgery February 2024 and nothing for two years, but seen in February 2026: a visit after the
+    # count date still counts, so he is not overdue. Rita: radiation in February 2026 is contact, and nobody has seen her for a visit.
+    assert rows[ANN] == {"provider_id": ANN, "cancer_patients": 3, "overdue_12": 1, "overdue_18": 1, "as_of": "2025-12-31"}
+    assert rows["unattributed"]["cancer_patients"] == 1 and rows["unattributed"]["overdue_12"] == 0
+    assert BOB not in rows
+    ov = activity.overview(store.conn)
+    assert ov["recall"]["overdue_12"] == 1 and ov["recall"]["cancer_patients"] == 4 and ov["recall"]["as_of"] == "2025-12-31"
+    assert next(r for r in ov["providers"] if r["provider_id"] == ANN)["recall"] == {"cancer_patients": 3, "overdue_12": 1, "overdue_18": 1}
+    store.close()
+
+
 def test_overview_trend_detail_and_the_months_that_are_complete(built):
     conn = built.conn
     ov = activity.overview(conn, "2026-03", "2026-04")
