@@ -952,9 +952,10 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     else:
         add("data_folder", f"Data folder {root}", None, "checked once Dropbox is connected")
         add("state_folder", "Private storage", None, "checked once Dropbox is connected")
-    rt = runtime.describe()
-    add("runtime", "Runtime", rt["in_memory_store"], f"Python {rt['python']}, SQLite {rt['sqlite']}",
-        "This Python build cannot hold the store in memory, which the site needs on a serverless host. Tell Dr. Jairath.")
+    rt, st_ = runtime.describe(), runtime.selftest()
+    add("runtime", "Runtime", bool(rt["in_memory_store"] and st_.get("ok")),
+        f"Python {rt['python']}, SQLite {rt['sqlite']}" + ("" if st_.get("ok") else f"; self-test failed: {st_.get('error') or 'wrong result'}"),
+        "This host cannot hold the store in memory and write its scratch files, which the site needs. Tell Dr. Jairath.")
     mem, secs = runtime.memory_mb(), runtime.max_seconds()
     add("limits", "Function memory and time", None if mem is None else mem >= MIN_MEMORY_MB,
         f"memory {mem or 'not reported by the host'} MB, time allowed for one run {secs} s",

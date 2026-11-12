@@ -338,7 +338,7 @@ def test_site_is_closed_until_a_password_is_set(site, monkeypatch):
     assert tc.get("/api/summary").status_code == 401 and tc.get("/setup").status_code == 401
     assert tc.get("/api/summary", headers=auth).status_code == 200 and tc.get("/setup", headers=auth).status_code == 200
     h = tc.get("/api/health").json()
-    assert h["mode"] == "serverless" and h["runtime"]["in_memory_store"] is True
+    assert h["mode"] == "serverless" and h["runtime"]["in_memory_store"] is True and h["selftest"]["ok"] is True
     assert tc.get("/robots.txt").text.startswith("User-agent: *\nDisallow: /")
 
 
