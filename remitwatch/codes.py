@@ -63,7 +63,7 @@ CARC: dict[str, str] = {
 # --------------------------------------------------------------------------- RARC
 RARC: dict[str, str] = {
     "M15": "Separately billed services/tests have been bundled; they are components of the same procedure",
-    "M20": "Missing/incomplete/invalid HCPCS", "M25": "Information does not support the level of service billed; paid at lower level",
+    "M20": "Missing/incomplete/invalid HCPCS", "M25": "Information furnished does not substantiate the need for this level of service",
     "M26": "Information does not support this many services/supplies", "M27": "Patient was previously notified of liability",
     "M51": "Missing/incomplete/invalid procedure code(s)", "M53": "Missing/incomplete/invalid days or units of service",
     "M54": "Missing/incomplete/invalid total charges", "M62": "Missing/incomplete/invalid treatment authorization code",
@@ -257,6 +257,100 @@ def payer_kind_from_cfi(cfi: str | None, default: str) -> str:
     if cfi == "VA":
         return "va"
     return default
+
+
+# --------------------------------------------------------------------------- place of service
+# CLP08 place-of-service codes that Medicare (and payers that follow it) pay at the facility rate.
+FACILITY_POS = {"02", "19", "21", "22", "23", "24", "26", "31", "34", "41", "42", "51", "52", "53", "56", "61"}
+
+
+def pos_class(pos: str | None) -> str:
+    """'facility' when the claim's place of service is paid at the facility rate, else 'office'."""
+    return "facility" if (pos or "") in FACILITY_POS else "office"
+
+
+# --------------------------------------------------------------------------- appeal windows
+# Days from the remittance (EOP) date to file the first-level dispute, per the payer's published provider
+# manual. `verified` is True only where the wording was read in the primary source during the build
+# (docs/RESEARCH_SUMMARY.md lists the sources). A participation agreement can set a different period,
+# so every deadline shown by the dashboard is an estimate.
+APPEAL_RULES: list[dict] = [
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "verified": True,
+     "label": "Anthem commercial: Claim Payment Reconsideration within two years of the EOP issue date; "
+              "Claim Payment Appeal within 90 days of the reconsideration decision",
+     "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual, effective September 1, 2026, Claim Payment Disputes"},
+    {"match": r"^Anthem", "kinds": {"medicare_advantage"}, "days": 120, "verified": False,
+     "label": "Anthem Medicare Advantage: reconsideration within 120 days of the EOP; appeal within 30 days of the reconsideration letter",
+     "source": "Anthem Medicare Advantage provider guidebook (as reported in research; not re-read)"},
+    {"match": r"^Anthem", "kinds": {"medicaid"}, "days": 90, "verified": True,
+     "label": "Anthem Kentucky Medicaid: payment appeal within 90 calendar days of the remittance date",
+     "source": "Anthem Kentucky Medicaid Provider Manual, payment appeals"},
+    {"match": r"^(UnitedHealthcare|UMR|UHC|Optum|Surest)", "kinds": None, "days": 365, "verified": False,
+     "label": "UnitedHealthcare: reconsideration and appeal both within 12 months of the original EOB or PRA",
+     "source": "UnitedHealthcare Care Provider Administrative Guide 2026, chapter 10 (as quoted in research)"},
+    {"match": r"^Humana", "kinds": None, "days": 540, "verified": False,
+     "label": "Humana: claim dispute within 18 months of the paid date",
+     "source": "Humana provider manual (as reported in research; not re-read)"},
+    {"match": r"^Aetna", "kinds": None, "days": 180, "verified": False,
+     "label": "Aetna: reconsideration within 180 days of the claim decision; appeal within 60 days of the reconsideration decision",
+     "source": "Aetna provider dispute page (as reported in research)"},
+    {"match": r"^Cigna", "kinds": None, "days": 180, "verified": False,
+     "label": "Cigna: payment review within 180 days of the initial payment or denial",
+     "source": "Cigna reference guide (as reported in research)"},
+]
+APPEAL_DEFAULTS: dict[str, tuple[int, str]] = {
+    "medicare": (120, "Medicare Part B: redetermination within 120 days of receipt of the remittance (42 CFR 405.942)"),
+    "medicare_advantage": (60, "Medicare Advantage: contracted providers follow the plan manual; 60 days is the conservative default"),
+    "medicaid": (90, "Medicaid managed care: 90 days is the conservative default; check the plan manual"),
+    "commercial": (180, "Commercial plans: 180 days is the common default (also the ERISA minimum for a member appeal)"),
+    "supplement": (180, "Supplement plans: 180 days default"),
+    "tricare": (90, "TRICARE: 90 days from the date of the EOB"),
+    "va": (90, "VA Community Care: 90 days from the denial"),
+    "other": (180, "Default 180 days"),
+}
+
+
+def appeal_rule(payer_group: str | None, payer_kind: str | None, plan: str | None = None) -> dict:
+    """Filing window for the first-level dispute: {'days', 'label', 'source', 'verified'}."""
+    grp, kind = payer_group or "", payer_kind or "other"
+    if plan and "FEDERAL EMPLOYEE" in plan.upper():
+        return {"days": 180, "verified": False, "source": "conservative default for the Federal Employee Program",
+                "label": "Federal Employee Program: 180 days used as a conservative window; confirm the provider dispute period with the local Blue plan"}
+    for r in APPEAL_RULES:
+        if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
+            return {"days": r["days"], "label": r["label"], "source": r["source"], "verified": r["verified"]}
+    days, label = APPEAL_DEFAULTS.get(kind, APPEAL_DEFAULTS["other"])
+    return {"days": days, "label": label, "source": "default by payer type", "verified": kind == "medicare"}
+
+
+# --------------------------------------------------------------------------- statutes cited in letters
+# Wording checked against the Kentucky Legislative Research Commission statute PDFs and the Indiana Code.
+LEGAL = {
+    "KRS_702": "KRS 304.17A-702 requires an insurer to pay, deny or contest a clean claim within 30 calendar days of receipt.",
+    "KRS_708": "KRS 304.17A-708(1) provides that an insurer shall not require a provider to appeal errors in payment where the insurer "
+               "has not paid the claim according to the contracted rate, and that miscalculations shall be corrected and paid within "
+               "30 calendar days of receipt of documentation verifying the error.",
+    "KRS_730": "KRS 304.17A-730 requires interest on the unpaid amount of a clean claim at 12 percent per year when paid 1 to 30 days "
+               "late, 18 percent when 31 to 60 days late and 21 percent when more than 60 days late, added without a request from the provider.",
+    "KRS_714": "KRS 304.17A-714 requires written notice of an overpayment within 24 months of payment, with the covered person, date of "
+               "service, claim reference and the basis for the determination, allows the provider 30 calendar days to dispute it, and bars "
+               "recoupment until a timely dispute is resolved.",
+    "IC_6_5": "Indiana Code 27-8-5.7-6.5 (and 27-13-36.2-4.5 for health maintenance organizations) provides that an insurer may not alter "
+              "the CPT code submitted on a clean claim, or pay for a CPT code of lesser monetary value, unless the code submitted is not in "
+              "accordance with coding guidelines, clinical care guidelines or the provider contract, or an employee or contractor of the "
+              "insurer has reviewed the medical record.",
+    "ERISA": "If this plan is an employer self-funded plan governed by ERISA, we request, as the member's authorized representative under "
+             "the assignment of benefits, a copy of the specific rule, guideline, protocol or edit relied on for this determination "
+             "(29 CFR 2560.503-1(g) and (h)).",
+    "MA": "Medicare Advantage organizations must provide the basic benefits of original Medicare and follow its coverage and coding rules "
+          "(42 CFR 422.101).",
+    "MEDICARE": "This is a request for redetermination under 42 CFR 405.940 et seq., submitted within 120 days of the initial determination.",
+}
+
+# Medicare same-day visit policy reported for the CY 2027 physician fee schedule final rule (released November 2026):
+# when an office visit with modifier 25 is billed with a 0-day global procedure, the lower-paid service is paid at 80 percent.
+# Trade-press reports only; confirm against the Federal Register text before relying on it.
+MEDICARE_SAME_DAY_EM = {"effective": "2027-01-01", "pct": 0.80, "confirmed": False}
 
 
 def carc_text(code: str | None) -> str:

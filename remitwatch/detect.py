@@ -9,10 +9,13 @@ to act on it. Findings are idempotent: re-running detection keeps the status
 Signals (category: signal)
 --------------------------
 downcoding   DOWNCODE_SVC06            payer reported the submitted code (SVC06) and paid a lower level
+             DOWNCODE_VS_BILLED        the claim file or EMA shows a higher level was billed than the code on the remit
              DOWNCODE_CHARGE           charge amount is the practice's fee for a higher level than the paid code
+             DOWNCODE_LEVEL_REDUCED    CARC 186/150 or a level remark on a paid visit: payment cut for the level, code unchanged
              DOWNCODE_RATE             allowed equals the payer's usual rate for a lower level
-             DOWNCODE_LEVEL_DENIED     CARC 150/186 or RARC M25: payer says documentation does not support the level
-             CODE_CHANGED              payer changed the code (SVC06) outside the known level families
+             DOWNCODE_LINE_SWAP        billed visit denied and a lower-level visit line paid in its place
+             DOWNCODE_LEVEL_DENIED     CARC 150/186 or a level remark on an unpaid visit
+             CODE_CHANGED              payer changed the code (SVC06 or remark N22) outside the known level families
 bundling     EM_BUNDLED_NO_MODIFIER    E/M paid $0 as bundled and no modifier 25/57/24 was billed (correct and resubmit)
              EM_BUNDLED_MOD57_MINOR    E/M-57 bundled; same-day procedures are 0/10-day global (57 is wrong, use 25)
              EM_BUNDLED_MOD57_MAJOR    E/M-57 bundled; a 90-day global procedure was done the same day (appeal)
@@ -25,6 +28,7 @@ denial       DENIED_MISSING_MODIFIER   CO-16 with RARC N822/N823/N519: correct a
              DENIED_MISSING_PRIMARY    CO-B15/107: add-on billed without a payable primary
              DENIED_MISSING_INFO       CO-16/226/227/250/251/252: resubmit with the requested information
              DENIED_AUTH               CO-197/198/15/39/210/243: authorization failure
+             DENIED_LEVEL_OF_SERVICE   CO-150/186 on a procedure: payer says the records do not support the service as billed
              DENIED_MEDICAL_NECESSITY  CO-50/B12/B22/167/A1/272: appeal with records
              DENIED_FREQUENCY          CO-151/119/222/273/B14: appeal with records
              DENIED_NONCOVERED         CO-96/204/49/55/200...: verify benefits, bill patient where allowed
@@ -39,6 +43,7 @@ fees         FEE_SKIM                  PLB fees withheld (Zelis transaction fees
              TAKEBACK                  PLB WO overpayment recovery above a threshold
 contract     CONTRACT_RATE_GAP         commercial payer's usual rate far below Medicare for a high-volume code
              MA_BELOW_MEDICARE         Medicare Advantage payer's usual rate below the Medicare fee schedule
+             MPPR_POLICY               payer routinely pays later procedures below the standard 50 percent
 info         G2211_DENIED              per payer and year: G2211 denied most of the time
              MIPS_ADJUSTMENT           per year: net MIPS adjustment (CARC 144)
              SEQUESTRATION             per year: sequestration (CARC 253)
@@ -51,11 +56,12 @@ import sqlite3
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from .codes import ADD_ON_CODES, EM_CODES, EM_LEVEL, GLOBAL_DAYS, carc_text, code_category, normalize_payer, payer_kind_from_cfi, rarc_text
+from .codes import (ADD_ON_CODES, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, appeal_rule, carc_text, code_category,
+                    normalize_payer, payer_kind_from_cfi, pos_class, rarc_text)
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_VERSION = "1.1"
+DETECT_VERSION = "2.0"
 
 BUNDLING_CARCS = {"97", "B10", "236", "234", "231", "M15"}
 LEVEL_CARCS = {"150", "186"}
@@ -72,12 +78,19 @@ DUP_CARCS = {"18", "B13"}
 IGNORE_CARCS = {"45", "253", "144", "23", "94", "187", "59", "131", "237", "A2", "P1", "W1", "3", "2", "1"}
 MODIFIER_RARCS = {"N822", "N823", "N519", "M78", "N793"}
 CODING_RARCS = {"M20", "M51", "N56", "M53"}
-LEVEL_RARCS = {"M25", "N657"}
+LEVEL_RARCS = {"M25", "N657", "N610", "M85", "N22"}     # level-of-service remarks; only meaningful on visit codes
 PRICING_MODIFIERS = {"26", "TC", "50", "52", "53", "54", "55", "56", "62", "66", "80", "81", "82", "AS", "22", "51", "73", "74", "FY", "GY"}
+DOWNCODE_SIGNALS = ("DOWNCODE_SVC06", "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE",
+                    "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED")
+MANUAL_STATUSES = ("in_progress", "appealed", "lost")
 
-APPEAL_DAYS_DEFAULT = 180
-APPEAL_DAYS_BY_KIND = {"medicare": 120, "medicare_advantage": 60, "medicaid": 90, "commercial": 180, "tricare": 90, "va": 90, "supplement": 180}
-APPEAL_DAYS_BY_GROUP = {"UnitedHealthcare": 365, "UMR": 365, "UHC Integrated Services (Wausau)": 365, "Optum (UHC)": 365}
+# columns added after the first release; created by ALTER TABLE on older stores
+EXTRA_FINDING_COLS = {
+    "ema_handling": "TEXT", "billed_code": "TEXT", "code_pair": "TEXT", "level_drop": "INTEGER", "pos": "TEXT", "pos_class": "TEXT",
+    "plan": "TEXT", "month": "TEXT", "service_month": "TEXT", "modifier_class": "TEXT", "location": "TEXT", "diagnosis": "TEXT",
+    "deadline_basis": "TEXT", "recovered_cents": "INTEGER", "recovered_date": "TEXT", "appealed_at": "TEXT", "status_changed_at": "TEXT",
+    "stale": "INTEGER DEFAULT 0",
+}
 
 FINDINGS_DDL = """
 CREATE TABLE IF NOT EXISTS findings (
@@ -104,8 +117,23 @@ CREATE INDEX IF NOT EXISTS ix_f_cat ON findings(category);
 CREATE TABLE IF NOT EXISTS payer_rates (
     payer_group TEXT, payer_kind TEXT, year TEXT, code TEXT, tier TEXT,
     mode_cents INTEGER, median_cents INTEGER, p10_cents INTEGER, p90_cents INTEGER, n INTEGER, mode_share REAL,
-    medicare_cents INTEGER, pct_of_medicare REAL,
-    PRIMARY KEY (payer_group, year, code, tier)
+    medicare_cents INTEGER, pct_of_medicare REAL, pos_class TEXT DEFAULT 'office',
+    PRIMARY KEY (payer_group, year, code, tier, pos_class)
+);
+CREATE TABLE IF NOT EXISTS exposure (
+    month TEXT, payer_group TEXT, payer_kind TEXT, npi TEXT, tier TEXT, code TEXT, pos_class TEXT, plan TEXT,
+    lines INTEGER, zero_paid INTEGER, charge_cents INTEGER, allowed_cents INTEGER, paid_cents INTEGER,
+    PRIMARY KEY (month, payer_group, npi, code, pos_class, plan)
+);
+CREATE INDEX IF NOT EXISTS ix_exp_payer ON exposure(payer_group, month);
+CREATE TABLE IF NOT EXISTS finding_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, finding_id TEXT, at TEXT, kind TEXT, from_status TEXT, to_status TEXT,
+    amount_cents INTEGER, actor TEXT, note TEXT, run_id TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_fe_finding ON finding_events(finding_id);
+CREATE INDEX IF NOT EXISTS ix_fe_at ON finding_events(at);
+CREATE TABLE IF NOT EXISTS progress_snapshots (
+    run_id TEXT, at TEXT, category TEXT, status TEXT, n INTEGER, cents INTEGER, PRIMARY KEY (run_id, category, status)
 );
 CREATE TABLE IF NOT EXISTS fee_table (year TEXT, code TEXT, charge_cents INTEGER, share REAL, PRIMARY KEY (year, code, charge_cents));
 CREATE TABLE IF NOT EXISTS provider_tiers (npi TEXT PRIMARY KEY, name TEXT, tier TEXT, ratio REAL, n INTEGER);
@@ -126,6 +154,28 @@ def _add_days(iso: str | None, days: int) -> str | None:
         return None
 
 
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    """Create the derived tables and add columns introduced after the first release. Safe to call on every start."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(payer_rates)")}
+    if cols and "pos_class" not in cols:
+        conn.execute("DROP TABLE payer_rates")      # derived data, rebuilt by every detection run
+    conn.executescript(FINDINGS_DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    for col, decl in EXTRA_FINDING_COLS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {decl}")
+    conn.executescript("""CREATE INDEX IF NOT EXISTS ix_f_month ON findings(month);
+                          CREATE INDEX IF NOT EXISTS ix_f_npi ON findings(rendering_provider_npi);""")
+    conn.commit()
+
+
+def modifier_class(mods: list[str]) -> str:
+    for m in ("25", "57", "24", "59", "XS", "XE", "XU", "XP", "76", "79"):
+        if m in mods:
+            return m
+    return "other" if mods else "none"
+
+
 def is_surgical(code: str | None) -> bool:
     return bool(code) and code in GLOBAL_DAYS and code not in ADD_ON_CODES
 
@@ -139,9 +189,7 @@ class Detector:
     def __init__(self, store: Store, run_id: str | None = None):
         self.store = store
         self.conn = store.conn
-        self.conn.executescript(FINDINGS_DDL)
-        if "ema_handling" not in {r[1] for r in self.conn.execute("PRAGMA table_info(findings)")}:
-            self.conn.execute("ALTER TABLE findings ADD COLUMN ema_handling TEXT")
+        ensure_schema(self.conn)
         self.run_id = run_id or datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ")
         self.now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.findings: dict[str, dict] = {}
@@ -151,7 +199,7 @@ class Detector:
         c = self.conn
         c.row_factory = sqlite3.Row
         rows = c.execute("""
-            SELECT l.*, cl.claim_filing_indicator, cl.contract_class, cl.rendering_provider_name AS rp_name,
+            SELECT l.*, cl.claim_filing_indicator, cl.contract_class, cl.facility_type_code, cl.rendering_provider_name AS rp_name,
                    cl.charge_cents AS claim_charge_cents, cl.paid_cents AS claim_paid_cents, cl.received_date,
                    t.payment_date AS txn_payment_date, t.trace_number
             FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
@@ -170,6 +218,10 @@ class Detector:
                 grp = f"{grp} Medicaid"
             l["payer_group"], l["payer_kind"] = grp, kind
             l["pricing_mod"] = next((m for m in l["modifiers_list"] if m in PRICING_MODIFIERS), None)
+            l["pos"] = l.get("facility_type_code")
+            l["pos_class"] = pos_class(l["pos"])
+            l["plan"] = (l.get("contract_class") or "").strip() or None
+            l["month"] = (l.get("payment_date") or l.get("txn_payment_date") or "")[:7]
         adj = defaultdict(list)
         for r in c.execute("SELECT line_key, group_code, reason_code, amount_cents FROM adjustments WHERE line_key IS NOT NULL"):
             adj[r["line_key"]].append((r["group_code"], r["reason_code"], r["amount_cents"] or 0))
@@ -204,8 +256,39 @@ class Detector:
         self.handling: dict[str, list[dict]] = defaultdict(list)
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "line_links" in tables:
-            for r in c.execute("SELECT line_key, state, bill_item_id, ema_cpt, ema_modifiers, ema_units, ema_charges_cents, ema_claim_status FROM line_links WHERE state IN ('exact_composite','fallback_candidate')"):
+            for r in c.execute("""SELECT ll.line_key, ll.state, ll.bill_item_id, ll.ema_cpt, ll.ema_modifiers, ll.ema_units, ll.ema_charges_cents,
+                                         ll.ema_claim_status, e.location, e.icd10
+                                  FROM line_links ll LEFT JOIN ema_rows e ON e.row_fingerprint = ll.ema_row_fingerprint
+                                  WHERE ll.state IN ('exact_composite','fallback_candidate')"""):
                 self.links[r["line_key"]] = dict(r)
+        # practice location: from any EMA row for the claim id, else the rendering provider's usual site when one site dominates
+        self.claim_location: dict[str, str] = {}
+        self.npi_location: dict[str, str] = {}
+        if "ema_rows" in tables:
+            loc_votes: dict[str, Counter] = defaultdict(Counter)
+            for r in c.execute("SELECT claim_id, location, COUNT(*) n FROM ema_rows WHERE claim_id IS NOT NULL AND location IS NOT NULL GROUP BY 1,2"):
+                loc_votes[r[0]][r[1]] += r[2]
+            self.claim_location = {k: v.most_common(1)[0][0] for k, v in loc_votes.items()}
+            npi_votes: dict[str, Counter] = defaultdict(Counter)
+            seen_claims: set[str] = set()
+            for l in self.lines:
+                loc = self.claim_location.get(l.get("patient_control_number") or "")
+                if loc and l.get("rendering_provider_npi") and l["claim_key"] not in seen_claims:
+                    seen_claims.add(l["claim_key"])
+                    npi_votes[l["rendering_provider_npi"]][loc] += 1
+            for npi, v in npi_votes.items():
+                top, n = v.most_common(1)[0]
+                if sum(v.values()) >= 20 and n / sum(v.values()) >= 0.85:
+                    self.npi_location[npi] = top
+        # what was billed, from the 837 claim files and the EMA charge lines: (claim id, date of service) -> {code: source}
+        self.billed: dict[tuple, dict[str, str]] = defaultdict(dict)
+        if "lines_837" in tables:
+            for r in c.execute("SELECT patient_control_number, service_date, procedure_code FROM lines_837 WHERE procedure_code IS NOT NULL"):
+                self.billed[(r[0], r[1])].setdefault(r[2], "837 claim file")
+        if "ema_rows" in tables:
+            for r in c.execute("""SELECT claim_id, service_date, cpt FROM ema_rows
+                                  WHERE family='charge_lines' AND activity_type='Charge' AND claim_id IS NOT NULL AND cpt IS NOT NULL"""):
+                self.billed[(r[0], r[1])].setdefault(r[2], "EMA charge line")
         if "line_handling" in tables:
             for r in c.execute("SELECT line_key, carc, rarc, adjustment_status, adjustment_subtype, adjustments_cents, payments_cents, transaction_date FROM line_handling"):
                 self.handling[r["line_key"]].append(dict(r))
@@ -270,15 +353,17 @@ class Detector:
                 continue
             if l["surg_rank"] > 1:
                 continue
-            if any(rc in ("59", "B10", "97", "236", "234") for _g, rc, _a in self.adj.get(l["line_key"], [])):
+            if any(rc in ("59", "B10", "97", "236", "234", "150", "186") for _g, rc, _a in self.adj.get(l["line_key"], [])):
                 continue
-            counts[(l["payer_group"], l["year"], l["procedure_code"], l["provider_tier"])][l["allowed_cents"]] += 1
+            if self._same_day_policy_claim(l):
+                continue
+            counts[(l["payer_group"], l["year"], l["procedure_code"], l["provider_tier"], l["pos_class"])][l["allowed_cents"]] += 1
             self.kinds[l["payer_group"]] = l["payer_kind"]
         self.rates: dict[tuple, dict] = {}
         market_counts: dict[tuple, Counter] = defaultdict(Counter)
         for key, cnt in counts.items():
             n = sum(cnt.values())
-            market_counts[(key[1], key[2], key[3])].update(cnt)
+            market_counts[(key[1], key[2], key[3], key[4])].update(cnt)
             if n < 5:
                 continue
             mode, mode_n = cnt.most_common(1)[0]
@@ -293,51 +378,151 @@ class Detector:
                 vals = sorted(cnt.elements())
                 self.market[key] = {"median": vals[len(vals) // 2], "n": n}
         self.medicare: dict[tuple, int] = {}
-        for (grp, year, code, tier), r in self.rates.items():
+        for (grp, year, code, tier, pos), r in self.rates.items():
             if self.kinds.get(grp) == "medicare" and r["n"] >= 10:
-                key = (year, code, tier)
+                key = (year, code, tier, pos)
                 if key not in self.medicare or grp.startswith("Medicare KY"):
                     self.medicare[key] = r["mode"]
         self.conn.execute("DELETE FROM payer_rates")
         rows = []
-        for (grp, year, code, tier), r in self.rates.items():
-            med = self.medicare.get((year, code, tier))
+        for (grp, year, code, tier, pos), r in self.rates.items():
+            med = self.medicare.get((year, code, tier, pos))
             rows.append((grp, self.kinds.get(grp, "other"), year, code, tier, r["mode"], r["median"], r["p10"], r["p90"], r["n"],
-                         round(r["share"], 3), med, round(r["mode"] / med, 4) if med else None))
-        self.conn.executemany("INSERT OR REPLACE INTO payer_rates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                         round(r["share"], 3), med, round(r["mode"] / med, 4) if med else None, pos))
+        self.conn.executemany("""INSERT OR REPLACE INTO payer_rates (payer_group, payer_kind, year, code, tier, mode_cents, median_cents, p10_cents,
+                                 p90_cents, n, mode_share, medicare_cents, pct_of_medicare, pos_class) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+
+        # each payer's own multiple-procedure practice: typical allowed as a share of its usual rate for the 2nd and for later procedures
+        ratios: dict[tuple, list[float]] = defaultdict(list)
+        for l in self.lines:
+            rank = l.get("surg_rank", 0)
+            code = l.get("procedure_code")
+            if rank < 2 or not is_surgical(code) or code in ADD_ON_CODES or l.get("claim_status_code") not in ("1", "19"):
+                continue
+            if (l.get("paid_cents") or 0) <= 0 or not l.get("allowed_cents") or l.get("original_procedure_code") or l["pricing_mod"] \
+                    or l.get("paid_units") not in (None, 1, 1.0):
+                continue
+            r = self.rates.get((l["payer_group"], l["year"], code, l["provider_tier"], l["pos_class"]))
+            if r and r["n"] >= 10 and r["mode"]:
+                ratios[(l["payer_group"], 2 if rank == 2 else 3)].append(l["allowed_cents"] / r["mode"])
+        self.mppr: dict[tuple, dict] = {}
+        for key, vals in ratios.items():
+            if len(vals) < 15:
+                continue
+            med = sorted(vals)[len(vals) // 2]
+            snap = min((1.0, 0.75, 0.5, 0.25), key=lambda p: abs(p - med))
+            if abs(snap - med) <= 0.08:
+                self.mppr[key] = {"pct": snap, "n": len(vals), "median": round(med, 3)}
         self.conn.commit()
 
-    def usual_rate(self, l: dict, code: str) -> tuple[int | None, str, dict | None]:
+    def _same_day_policy_claim(self, l: dict) -> bool:
+        """Medicare's reported 2027 same-day rule: a visit with modifier 25 billed with a 0-day global procedure has the
+        lower-paid of the two paid at 80 percent. Such lines are kept out of the 2027 Medicare baselines."""
+        if l.get("payer_kind") != "medicare" or (l.get("service_date") or "") < MEDICARE_SAME_DAY_EM["effective"]:
+            return False
+        claim_lines = self.lines_by_claim.get(l["claim_key"], [])
+        has_em25 = any(o.get("procedure_code") in EM_CODES and "25" in o["modifiers_list"] for o in claim_lines)
+        has_zero_day = any(GLOBAL_DAYS.get(o.get("procedure_code") or "") == 0 and o.get("procedure_code") not in EM_CODES for o in claim_lines)
+        code = l.get("procedure_code")
+        return has_em25 and has_zero_day and (code in EM_CODES or GLOBAL_DAYS.get(code or "") == 0)
+
+    def _rate_lookup(self, l: dict, code: str, pos: str) -> tuple[int | None, str, dict | None]:
         grp, year, tier = l["payer_group"], l["year"], l.get("provider_tier", "unknown")
+        where = "" if pos == "office" else ", facility setting"
         for t in (tier, "physician", "nonphysician", "unknown"):
-            r = self.rates.get((grp, year, code, t))
+            r = self.rates.get((grp, year, code, t, pos))
             if r:
-                return r["mode"], f"{grp} usual {year} rate for {code} ({t}, n={r['n']})", r
+                return r["mode"], f"{grp} usual {year} rate for {code} ({t}{where}, n={r['n']})", r
         if year.isdigit():
             for y in (str(int(year) - 1), str(int(year) + 1)):
                 for t in (tier, "physician", "unknown"):
-                    r = self.rates.get((grp, y, code, t))
+                    r = self.rates.get((grp, y, code, t, pos))
                     if r:
-                        return r["mode"], f"{grp} usual {y} rate for {code} ({t}, n={r['n']})", r
-        med = self.medicare.get((year, code, tier if tier != "unknown" else "physician"))
+                        return r["mode"], f"{grp} usual {y} rate for {code} ({t}{where}, n={r['n']})", r
+        med = self.medicare.get((year, code, tier if tier != "unknown" else "physician", pos))
         if med:
-            return med, f"Medicare {year} rate for {code} ({tier})", None
+            return med, f"Medicare {year} rate for {code} ({tier}{where})", None
         for t in (tier, "physician", "nonphysician", "unknown"):
-            m = self.market.get((year, code, t))
+            m = self.market.get((year, code, t, pos))
             if m:
-                return m["median"], f"cross-payer typical {year} allowed for {code} ({t}, n={m['n']})", None
+                return m["median"], f"cross-payer typical {year} allowed for {code} ({t}{where}, n={m['n']})", None
         return None, "no baseline", None
 
+    def usual_rate(self, l: dict, code: str) -> tuple[int | None, str, dict | None]:
+        """The payer's usual allowed amount for this code, provider type and place-of-service class.
+        The third value is the rate record when the figure is the payer's own (None for fallbacks)."""
+        pos = l.get("pos_class", "office")
+        rate, basis, r = self._rate_lookup(l, code, pos)
+        if rate is None and pos == "facility":
+            # no facility-setting baseline: an office-setting figure is good enough to size a denial, never to call a line underpaid
+            rate, basis, _r = self._rate_lookup(l, code, "office")
+            if rate is not None:
+                return rate, basis + " (office-setting figure; no facility-setting baseline)", None
+        return rate, basis, r
+
+    def mppr_pct(self, l: dict) -> tuple[float, bool]:
+        """Share of the usual rate this payer normally allows for a 2nd or later procedure, and whether it was learned from its remits."""
+        p = self.mppr.get((l["payer_group"], 2 if l.get("surg_rank", 0) == 2 else 3))
+        return (p["pct"], True) if p else (0.5, False)
+
     def expected_allowed(self, l: dict, code: str) -> tuple[int | None, str]:
-        """Rank-aware expectation: the payer's usual full rate, halved for a second surgical procedure."""
+        """Rank-aware expectation: the payer's usual full rate, reduced for a second or later surgical procedure."""
         rate, basis, _r = self.usual_rate(l, code)
         if rate is None:
             return None, basis
         rank = l.get("surg_rank", 0)
         if rank >= 2 and code not in ADD_ON_CODES and is_surgical(code):
-            pct = 0.5 if (rank == 2 or l["payer_kind"] in ("medicare", "medicare_advantage", "medicaid")) else 0.25
-            return int(round(rate * pct)), f"{basis}; multiple-procedure rank {rank} -> {int(pct*100)}%"
+            pct, learned = self.mppr_pct(l)
+            note = " (this payer's usual practice)" if learned else ""
+            return int(round(rate * pct)), f"{basis}; multiple-procedure rank {rank} -> {int(pct*100)}%{note}"
+        if self._same_day_policy_claim(l):
+            others = [o for o in self.lines_by_claim.get(l["claim_key"], []) if o["line_key"] != l["line_key"] and (o.get("allowed_cents") or 0) > 0]
+            if any((o.get("allowed_cents") or 0) > rate for o in others):
+                pct = MEDICARE_SAME_DAY_EM["pct"]
+                return int(round(rate * pct)), f"{basis}; Medicare same-day visit and procedure rule from {MEDICARE_SAME_DAY_EM['effective']} -> {int(pct*100)}%"
         return rate, basis
+
+    def downcode_expected(self, l: dict, billed: str, paid_code: str, allowed: int) -> tuple[int | None, str]:
+        """Expected allowed for the billed code of a downcoded line. Where the payer has no baseline for this place of
+        service, scale the amount actually allowed by the payer's office-setting ratio between the two codes."""
+        _rate, _basis, r = self.usual_rate(l, billed)
+        if r is None and allowed and l.get("surg_rank", 0) < 2:
+            hi, _b, hr = self._rate_lookup(l, billed, "office")
+            lo, _b2, lr = self._rate_lookup(l, paid_code, "office")
+            if hi and lo and hr and lr and hi > lo:
+                return int(round(allowed * hi / lo)), (f"allowed amount scaled by this payer's usual {billed} to {paid_code} ratio "
+                                                       f"(${hi/100:.2f} to ${lo/100:.2f}); no baseline for this place of service")
+        return self.expected_allowed(l, billed)
+
+    def paid_like(self, l: dict, code: str, allowed: int) -> str | None:
+        """The lower visit level whose usual rate at this payer equals the allowed amount, checked for every provider type."""
+        fam = family_of(code)
+        if not fam or not allowed:
+            return None
+        years = [l["year"]] + ([str(int(l["year"]) - 1)] if l["year"].isdigit() else [])
+        for lower in sorted(EM_CODES, reverse=True):
+            lf = family_of(lower)
+            if not lf or lf[0] != fam[0] or lf[1] >= fam[1]:
+                continue
+            for y in years:
+                for t in ("physician", "nonphysician", "unknown"):
+                    r = self.rates.get((l["payer_group"], y, lower, t, l.get("pos_class", "office")))
+                    if r and abs(r["mode"] - allowed) <= 1:
+                        return lower
+        return None
+
+    def billed_higher(self, l: dict, code: str) -> tuple[str, str, list[str]] | None:
+        """A higher level of the same code family that the claim file or EMA shows was billed for this claim and date,
+        when the code on the remit was not billed at all. Returns (billed code, source, all billed codes)."""
+        dos = l.get("service_date") or l.get("statement_from")
+        billed = self.billed.get((l.get("patient_control_number"), dos))
+        if not billed or code in billed:
+            return None
+        higher = [b for b in billed if is_downcode(b, code)]
+        if not higher:
+            return None
+        best = max(higher, key=lambda b: (family_of(b) or ("", 0))[1])
+        return best, billed[best], sorted(billed)
 
     # ------------------------------------------------------------------ helpers
     def _line_carcs(self, l: dict):
@@ -381,23 +566,49 @@ class Detector:
         fid = _fid(signal, *(key_parts or (base.get("line_key") or base.get("claim_key") or json.dumps(evidence, sort_keys=True),)))
         kind = base.get("payer_kind", "other")
         grp = base.get("payer_group")
-        days = APPEAL_DAYS_BY_GROUP.get((grp or "").replace(" Medicare Advantage", ""), APPEAL_DAYS_BY_KIND.get(kind, APPEAL_DAYS_DEFAULT))
         pay_date = base.get("payment_date") or base.get("txn_payment_date")
+        plan = base.get("plan") or (base.get("contract_class") or "").strip() or None
+        rule = appeal_rule(grp, kind, plan)
+        deadline, deadline_basis = None, None
+        if actionable in ("appeal", "correct_and_resubmit"):
+            deadline = _add_days(pay_date, rule["days"])
+            deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
+        code = base.get("procedure_code")
+        billed = evidence.get("billed_code") or base.get("original_procedure_code") or evidence.get("charge_implies") or code
+        fam_b, fam_p = family_of(billed), family_of(code)
+        level_drop = (fam_b[1] - fam_p[1]) if (fam_b and fam_p and fam_b[0] == fam_p[0] and billed != code) else None
+        if evidence.get("paid_like") and family_of(evidence["paid_like"]) and fam_p:
+            level_drop = fam_p[1] - family_of(evidence["paid_like"])[1]
+        pair = f"{billed}→{code}" if (billed and code and billed != code) else (f"{code}→{evidence['paid_like']} rate" if evidence.get("paid_like") else None)
+        link = self.links.get(lk) if lk else None
+        dos = base.get("service_date") or base.get("statement_from")
+        recovered = None
+        if resolved_by:
+            recovered = min(resolved_by[2] or 0, shortfall) if shortfall and shortfall > 0 else (resolved_by[2] or 0)
         self.findings[fid] = {
+            "billed_code": billed, "code_pair": pair, "level_drop": level_drop,
+            "pos": base.get("pos") or base.get("facility_type_code"), "pos_class": base.get("pos_class") or pos_class(base.get("facility_type_code")),
+            "plan": plan, "month": (pay_date or "")[:7] or None, "service_month": (dos or "")[:7] or None,
+            "modifier_class": modifier_class(base.get("modifiers_list") or []) if code else None,
+            "location": (link or {}).get("location") or self.claim_location.get(base.get("patient_control_number") or "")
+                        or (self.npi_location.get(base.get("rendering_provider_npi") or "", "") + " (provider's usual site)"
+                            if self.npi_location.get(base.get("rendering_provider_npi") or "") else None),
+            "diagnosis": ((link or {}).get("icd10") or "").split(",")[0].strip() or None,
+            "deadline_basis": deadline_basis, "recovered_cents": recovered, "recovered_date": resolved_by[0] if resolved_by else None,
             "finding_id": fid, "signal": signal, "category": category, "severity": severity, "actionable": actionable, "title": title,
             "line_key": base.get("line_key"), "claim_key": base.get("claim_key"), "transaction_key": base.get("transaction_key"),
             "patient_control_number": base.get("patient_control_number"),
             "payer_name": base.get("payer_name"), "payer_group": grp, "payer_kind": kind, "payer_id": base.get("payer_id"),
             "rendering_provider_npi": base.get("rendering_provider_npi"), "rendering_provider_name": base.get("rp_name") or base.get("rendering_provider_name"),
             "provider_tier": base.get("provider_tier"),
-            "service_date": base.get("service_date") or base.get("statement_from"), "payment_date": pay_date, "year": base.get("year"),
-            "procedure_code": base.get("procedure_code"), "modifiers": ",".join(base.get("modifiers_list") or []) or None,
-            "original_procedure_code": base.get("original_procedure_code"), "code_category": code_category(base.get("procedure_code")),
+            "service_date": dos, "payment_date": pay_date, "year": base.get("year"),
+            "procedure_code": code, "modifiers": ",".join(base.get("modifiers_list") or []) or None,
+            "original_procedure_code": base.get("original_procedure_code"), "code_category": code_category(code),
             "charge_cents": base.get("charge_cents"), "allowed_cents": base.get("allowed_cents"), "paid_cents": base.get("paid_cents"),
             "expected_cents": expected, "shortfall_cents": shortfall,
             "carc": carc, "carc_text": carc_text(carc), "rarc": rarc, "rarc_text": rarc_text((rarc or "").split(",")[0]),
             "evidence": json.dumps(evidence, default=str),
-            "appeal_deadline": _add_days(pay_date, days) if actionable in ("appeal", "correct_and_resubmit") else None,
+            "appeal_deadline": deadline,
             "ema_handling": ema_handling,
             "auto_status": "resolved" if resolved_by else None,
             "auto_notes": f"Paid on a later remittance ({resolved_by[0]}, trace {resolved_by[1]}, ${(resolved_by[2] or 0)/100:.2f})" if resolved_by else None,
@@ -417,8 +628,12 @@ class Detector:
             rarc = ",".join(rarcs) if rarcs else None
             primary = status in ("1", "19")
             orig = l.get("original_procedure_code")
+            if orig == code:
+                orig = None     # SVC06 repeats the paid code when only the modifiers or units changed
             allowed = l.get("allowed_cents") or 0
             paid = l.get("paid_cents") or 0
+            level_amt = sum(a for g, rc, a in adj if rc in LEVEL_CARCS and g in ("CO", "PI", "OA"))
+            level_flag = bool(carcs & LEVEL_CARCS) or (code in EM_CODES and any(r in LEVEL_RARCS for r in rarcs))
 
             # ---- downcoding and code changes (any claim status)
             if orig and orig != code:
@@ -429,11 +644,13 @@ class Detector:
                 if readjudicated or (l.get("charge_cents") or 0) < 2000:
                     continue
                 if is_downcode(orig, code):
-                    exp, basis = self.expected_allowed(l, orig)
+                    exp, basis = self.downcode_expected(l, orig, code, allowed)
                     short = (exp - allowed) if exp else None
+                    ev = {"basis": basis, "original_modifiers": l.get("original_modifiers"), "claim_status": status}
+                    if level_flag:
+                        ev["level_adjustment"] = f"{'/'.join(sorted(carcs & LEVEL_CARCS)) or rarc} ${level_amt/100:.2f}"
                     self._emit("DOWNCODE_SVC06", "downcoding", "high" if primary else "medium", "appeal",
-                               f"Billed {orig}, paid as {code} ({l['payer_group']})", l, exp, short, top, rarc,
-                               {"basis": basis, "original_modifiers": l.get("original_modifiers"), "claim_status": status},
+                               f"Billed {orig}, paid as {code} ({l['payer_group']})", l, exp, short, top, rarc, ev,
                                resolved_by=self.later_payment(l, orig, expected=exp))
                 else:
                     exp, basis = self.expected_allowed(l, orig)
@@ -443,38 +660,78 @@ class Detector:
                                    f"Payer changed {orig} to {code} ({l['payer_group']})", l, exp, short, top, rarc, {"basis": basis, "claim_status": status})
                 continue
             if primary and not orig:
+                # the claim file or EMA shows a higher level was billed and the remit does not admit to a change
+                hb = self.billed_higher(l, code)
+                if hb:
+                    exp, basis = self.downcode_expected(l, hb[0], code, allowed)
+                    short = (exp - allowed) if exp else None
+                    self._emit("DOWNCODE_VS_BILLED", "downcoding", "high", "appeal",
+                               f"Billed {hb[0]} per the {hb[1]}, remit shows {code} with no code change reported ({l['payer_group']})",
+                               l, exp, short, top, rarc, {"basis": basis, "billed_code": hb[0], "billed_source": hb[1], "billed_codes": hb[2]},
+                               resolved_by=self.later_payment(l, hb[0], expected=exp))
+                    continue
                 implied = self.fees.implied_original(l["year"], code, l.get("charge_cents"))
                 if implied:
-                    exp, basis = self.expected_allowed(l, implied)
+                    exp, basis = self.downcode_expected(l, implied, code, allowed)
                     short = (exp - allowed) if exp else None
                     self._emit("DOWNCODE_CHARGE", "downcoding", "high", "appeal",
                                f"Charge matches the {implied} fee but paid as {code} ({l['payer_group']})", l, exp, short, top, rarc,
                                {"basis": basis, "charge_implies": implied})
                     continue
+                # payment cut for the level with the billed code left in place (Anthem's CARC 186 pattern)
+                if level_flag and code in EM_CODES and allowed > 0:
+                    usual, basis, _r = self.usual_rate(l, code)
+                    codes186 = "/".join(sorted(carcs & LEVEL_CARCS)) or (rarc or "")
+                    exp = usual
+                    if level_amt > 0 and (not usual or allowed + level_amt < usual):
+                        # the payer's own adjustment amount, unless it exceeds its usual rate for this provider type (it is
+                        # computed from the physician fee even when the visit is paid at the non-physician rate)
+                        exp, basis = allowed + level_amt, f"allowed amount plus the payer's own level-of-care adjustment ({codes186} ${level_amt/100:.2f})"
+                    short = (exp - allowed) if exp else None
+                    if short and short > 0:
+                        like = self.paid_like(l, code, allowed)
+                        self._emit("DOWNCODE_LEVEL_REDUCED", "downcoding", "high", "appeal",
+                                   f"{code} paid at a reduced level with the code unchanged ({codes186}{', paid like ' + like if like else ''}, {l['payer_group']})",
+                                   l, exp, short, next(iter(sorted(carcs & LEVEL_CARCS)), top), rarc,
+                                   {"basis": basis, "paid_like": like, "level_adjustment_cents": level_amt, "usual_rate_cents": usual})
+                        continue
                 if code in EM_CODES and allowed > 0 and paid > 0 and l.get("paid_units") in (None, 1, 1.0) and not l["pricing_mod"]:
-                    own, _b, _r = self.usual_rate(l, code)
-                    if own and allowed < own:
-                        fam = family_of(code)
-                        for lower in sorted(EM_CODES):
-                            lf = family_of(lower)
-                            if fam and lf and lf[0] == fam[0] and lf[1] < fam[1]:
-                                low, _b2, _r2 = self.usual_rate(l, lower)
-                                if low and low == allowed:
-                                    self._emit("DOWNCODE_RATE", "downcoding", "medium", "appeal",
-                                               f"{code} allowed at the {lower} rate ({l['payer_group']})", l, own, own - allowed, top, rarc, {"paid_like": lower})
-                                    break
+                    own, _b, own_r = self.usual_rate(l, code)
+                    if own and own_r and allowed < own:
+                        lower = self.paid_like(l, code, allowed)
+                        if lower:
+                            self._emit("DOWNCODE_RATE", "downcoding", "medium", "appeal",
+                                       f"{code} allowed at the {lower} rate ({l['payer_group']})", l, own, own - allowed, top, rarc, {"paid_like": lower})
+                            continue
+                # remark N22 says the payer added or changed the code but no original code was reported
+                if "N22" in rarcs and code not in EM_CODES and allowed > 0:
+                    rate, basis, r = self.usual_rate(l, code)
+                    self._emit("CODE_CHANGED", "downcoding", "medium", "review",
+                               f"Payer says it added or changed {code} (remark N22) without reporting the billed code ({l['payer_group']})",
+                               l, rate, (rate - allowed) if (rate and r and rate > allowed) else 0, top, rarc, {"basis": basis, "claim_status": status})
+                    continue
 
             if not primary:
                 continue
 
-            # ---- level-of-service denials and reductions (CARC 150/186, RARC M25) on paid or unpaid lines
-            if (top in LEVEL_CARCS or (carcs & LEVEL_CARCS) or any(r in LEVEL_RARCS for r in rarcs)) and code in EM_CODES:
+            # ---- level-of-service denials on unpaid visits (CARC 150/186 or a level remark)
+            if level_flag and code in EM_CODES and paid == 0 and allowed == 0:
                 exp, basis = self.expected_allowed(l, code)
-                short = (exp - allowed) if exp else None
-                if short and short > 0:
+                # a lower-level visit line paid on the same claim and date means the payer swapped the line rather than denied the visit
+                swap = next((o for o in self.lines_by_claim[l["claim_key"]] if o["line_key"] != l["line_key"] and (o.get("paid_cents") or 0) > 0
+                             and o.get("service_date") == l.get("service_date") and is_downcode(code, o.get("procedure_code"))), None)
+                if swap and exp:
+                    self._emit("DOWNCODE_LINE_SWAP", "downcoding", "high", "appeal",
+                               f"Billed {code} denied and a {swap['procedure_code']} line paid in its place ({l['payer_group']})",
+                               l, exp, exp - (swap.get("allowed_cents") or 0), top or next(iter(carcs & LEVEL_CARCS), None), rarc,
+                               {"basis": basis, "paid_line_code": swap["procedure_code"], "paid_line_allowed_cents": swap.get("allowed_cents")},
+                               resolved_by=self.later_payment(l, expected=exp))
+                    continue
+                if exp:
                     self._emit("DOWNCODE_LEVEL_DENIED", "downcoding", "high", "appeal",
                                f"{code}: payer says documentation does not support the level ({top or ','.join(sorted(carcs & LEVEL_CARCS)) or rarc})",
-                               l, exp, short, top or next(iter(carcs & LEVEL_CARCS), None), rarc, {"basis": basis})
+                               l, exp, exp, top or next(iter(carcs & LEVEL_CARCS), None), rarc, {"basis": basis},
+                               resolved_by=self.later_payment(l, expected=exp))
                     continue
 
             # ---- zero-paid lines (silent denials inside paid claims)
@@ -534,6 +791,11 @@ class Detector:
                     self._emit("DENIED_AUTH", "denial", "high", "appeal", f"{code} denied: authorization ({top})", l, exp, exp, top, rarc, {"basis": basis})
                     self._emit = emit
                     continue
+                if top in LEVEL_CARCS:
+                    self._emit("DENIED_LEVEL_OF_SERVICE", "denial", "high", "appeal",
+                               f"{code} denied: payer says the records do not support the service as billed ({top})", l, exp, exp, top, rarc, {"basis": basis})
+                    self._emit = emit
+                    continue
                 if top in MEDNEC_CARCS:
                     self._emit("DENIED_MEDICAL_NECESSITY", "denial", "high", "appeal", f"{code} denied: medical necessity / documentation ({top})", l, exp, exp, top, rarc, {"basis": basis})
                     self._emit = emit
@@ -574,12 +836,14 @@ class Detector:
                 rank = l.get("surg_rank", 0)
                 if rank >= 2 and is_surgical(code) and code not in ADD_ON_CODES:
                     pct_paid = allowed / rate
-                    policy = 0.5 if (rank == 2 or l["payer_kind"] in ("medicare", "medicare_advantage", "medicaid")) else 0.25
+                    policy, learned = self.mppr_pct(l)
                     if pct_paid < policy - 0.07:
                         exp = int(round(rate * policy))
                         self._emit("MPPR_EXCESS", "underpayment", "medium", "appeal",
-                                   f"{code} paid at {pct_paid:.0%} of the usual rate as procedure #{rank} (policy {policy:.0%})", l, exp, exp - allowed, "59" if "59" in carcs else top, rarc,
-                                   {"basis": basis, "rank": rank, "procedures_on_claim": l.get("surg_count"), "pct_of_usual": round(pct_paid, 3), "carc_59_reported": "59" in carcs})
+                                   f"{code} paid at {pct_paid:.0%} of the usual rate as procedure #{rank} ({'this payer normally allows' if learned else 'standard policy'} {policy:.0%})",
+                                   l, exp, exp - allowed, "59" if "59" in carcs else top, rarc,
+                                   {"basis": basis, "rank": rank, "procedures_on_claim": l.get("surg_count"), "pct_of_usual": round(pct_paid, 3),
+                                    "carc_59_reported": "59" in carcs, "policy_pct": policy, "policy_learned": learned})
                     continue
                 if code in ADD_ON_CODES and "59" in carcs:
                     c59 = sum(a for _g, rc, a in adj if rc == "59")
@@ -699,12 +963,31 @@ class Detector:
                 self._emit("SEQUESTRATION", "info", "info", "none", f"{row['yr']}: sequestration withheld ${amt/100:,.0f}", None, None, amt, "253", None,
                            {"year": row["yr"], "lines": row["n"]}, key_parts=("SEQ", row["yr"]), claim=base)
 
+        # a payer whose routine allowance for third and later procedures is below the standard 50 percent
+        for (grp, bucket), p in self.mppr.items():
+            if bucket == 3 and p["pct"] < 0.5:
+                gap, n = 0, 0
+                for l in self.lines:
+                    if l["payer_group"] != grp or l.get("surg_rank", 0) < 3 or not is_surgical(l.get("procedure_code")) or l.get("procedure_code") in ADD_ON_CODES \
+                            or l.get("claim_status_code") not in ("1", "19") or (l.get("paid_cents") or 0) <= 0:
+                        continue
+                    rate, _b, r = self.usual_rate(l, l["procedure_code"])
+                    if rate and r and (l.get("allowed_cents") or 0) < 0.5 * rate:
+                        gap += int(0.5 * rate) - (l.get("allowed_cents") or 0)
+                        n += 1
+                base = {"payer_group": grp, "payer_kind": self.kinds.get(grp), "payer_name": grp, "year": None}
+                self._emit("MPPR_POLICY", "contract", "medium", "renegotiate",
+                           f"{grp} allows third and later same-day procedures at about {p['pct']:.0%} of its usual rate ({p['n']} lines); the Medicare standard is 50%",
+                           None, None, gap, "59", None, {"typical_pct": p["median"], "lines": p["n"], "lines_below_half": n,
+                                                          "note": "Check the contract's multiple-procedure terms; this is the payer's routine practice, not a one-off error."},
+                           key_parts=("MPPR_POLICY", grp), claim=base)
+
         # contract-level rate findings: commercial far below Medicare, Medicare Advantage below Medicare
-        for (grp, year, code, tier), r in self.rates.items():
+        for (grp, year, code, tier, pos), r in self.rates.items():
             kind = self.kinds.get(grp)
-            if tier == "unknown" or r["n"] < 50 or r["share"] < 0.3:
+            if pos != "office" or tier == "unknown" or r["n"] < 50 or r["share"] < 0.3:
                 continue
-            med = self.medicare.get((year, code, tier))
+            med = self.medicare.get((year, code, tier, pos))
             if not med:
                 continue
             pct = r["mode"] / med
@@ -725,31 +1008,74 @@ class Detector:
     # ------------------------------------------------------------------ persistence
     def save(self) -> dict:
         c = self.conn
-        existing = {r["finding_id"]: (r["status"], r["notes"], r["first_seen"]) for r in c.execute("SELECT finding_id, status, notes, first_seen FROM findings")}
+        c.row_factory = sqlite3.Row
+        existing = {r["finding_id"]: dict(r) for r in c.execute("SELECT * FROM findings")}
         cols = ["finding_id", "signal", "category", "severity", "actionable", "title", "line_key", "claim_key", "transaction_key",
                 "patient_control_number", "payer_name", "payer_group", "payer_kind", "payer_id", "rendering_provider_npi",
                 "rendering_provider_name", "provider_tier", "service_date", "payment_date", "year", "procedure_code", "modifiers",
                 "original_procedure_code", "code_category", "charge_cents", "allowed_cents", "paid_cents", "expected_cents",
                 "shortfall_cents", "carc", "carc_text", "rarc", "rarc_text", "evidence", "appeal_deadline", "status", "notes",
-                "run_id", "first_seen", "last_seen"]
-        cols.append("ema_handling")
-        rows = []
+                "run_id", "first_seen", "last_seen"] + list(EXTRA_FINDING_COLS)
+        rows, events = [], []
         for fid, f in self.findings.items():
-            st, notes, first = existing.get(fid, ("open", None, self.now))
+            prev = existing.get(fid)
+            st, notes, first = (prev["status"], prev["notes"], prev["first_seen"]) if prev else ("open", None, self.now)
+            before = st
             auto_before = bool(notes) and notes.startswith("Paid on a later remittance")
+            if prev:    # what people recorded about this finding survives every re-run
+                f["appealed_at"], f["status_changed_at"] = prev.get("appealed_at"), prev.get("status_changed_at")
+                if not f.get("auto_status") and st == "resolved" and not auto_before:
+                    f["recovered_cents"], f["recovered_date"] = prev.get("recovered_cents"), prev.get("recovered_date")
             if f.get("auto_status") and st != "dismissed":
                 st, notes = f["auto_status"], f.get("auto_notes")
             elif auto_before and st == "resolved":
                 st, notes = "open", None   # an earlier automatic resolution no longer holds under the current rule
-            f["status"], f["notes"], f["first_seen"], f["last_seen"] = st, notes, first, self.now
+            if st != "resolved":
+                f["recovered_cents"], f["recovered_date"] = None, None
+            if prev and before != st:
+                f["status_changed_at"] = self.now
+                events.append((fid, self.now, "paid_on_later_remit" if st == "resolved" else "reopened", before, st,
+                               f.get("recovered_cents") if st == "resolved" else f.get("shortfall_cents"), "system", notes, self.run_id))
+            f["status"], f["notes"], f["first_seen"], f["last_seen"], f["stale"] = st, notes, first, self.now, 0
             rows.append(tuple(f.get(k) for k in cols))
+        # findings someone is working (or lost) that the current rules no longer produce are kept, marked stale, so no work is lost
+        for fid, prev in existing.items():
+            if fid not in self.findings and (prev["status"] in MANUAL_STATUSES or (prev["status"] == "resolved" and prev.get("appealed_at"))):
+                prev["stale"] = 1
+                rows.append(tuple(prev.get(k) for k in cols))
         c.execute("DELETE FROM findings")
         c.executemany(f"INSERT INTO findings ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", rows)
+        if events:
+            c.executemany("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note, run_id) VALUES (?,?,?,?,?,?,?,?,?)", events)
+        c.execute("DELETE FROM progress_snapshots WHERE run_id=?", (self.run_id,))
+        c.execute("""INSERT INTO progress_snapshots (run_id, at, category, status, n, cents)
+                     SELECT ?, ?, category, status, COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings GROUP BY category, status""", (self.run_id, self.now))
+        self._save_exposure()
         summary = Counter(f["signal"] for f in self.findings.values())
         c.execute("INSERT OR REPLACE INTO detection_runs (run_id, started_at, finished_at, version, lines, findings, summary) VALUES (?,?,?,?,?,?,?)",
                   (self.run_id, self.now, datetime.now(timezone.utc).isoformat(timespec="seconds"), DETECT_VERSION, len(self.lines), len(rows), json.dumps(summary)))
         c.commit()
         return dict(summary)
+
+    def _save_exposure(self) -> None:
+        """Denominators for rates: primary-claim lines by payment month, payer, plan, provider, billed code and place of service."""
+        agg: dict[tuple, list[int]] = defaultdict(lambda: [0, 0, 0, 0, 0])
+        for l in self.lines:
+            if l.get("claim_status_code") not in ("1", "19") or not l.get("procedure_code") or not l.get("month"):
+                continue
+            if (l.get("charge_cents") or 0) <= 0:
+                continue
+            billed = l.get("original_procedure_code") or l["procedure_code"]
+            key = (l["month"], l["payer_group"], l["payer_kind"], l.get("rendering_provider_npi") or "", l.get("provider_tier") or "unknown",
+                   billed, l["pos_class"], l.get("plan") or "")
+            a = agg[key]
+            a[0] += 1
+            a[1] += 1 if (l.get("paid_cents") or 0) == 0 and (l.get("allowed_cents") or 0) == 0 else 0
+            a[2] += l.get("charge_cents") or 0
+            a[3] += l.get("allowed_cents") or 0
+            a[4] += l.get("paid_cents") or 0
+        self.conn.execute("DELETE FROM exposure")
+        self.conn.executemany("INSERT OR REPLACE INTO exposure VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [k + tuple(v) for k, v in agg.items()])
 
     def run(self) -> dict:
         try:

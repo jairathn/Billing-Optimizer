@@ -150,11 +150,16 @@ def parse_837_bytes(data: bytes, source: str = "") -> dict[str, list[dict]]:
             elif sid == "SE":
                 finish_claim()
         finish_claim()
+    by_key = {c["claim_837_key"]: c for c in claims}
     for l in lines:
+        c = by_key.get(l["claim_837_key"])
+        if not c:
+            continue
         if not l["service_date"]:
-            c = next((c for c in claims if c["claim_837_key"] == l["claim_837_key"]), None)
-            if c:
-                l["service_date"] = c.get("service_date")
+            l["service_date"] = c.get("service_date")
+        elif not c.get("service_date") or l["service_date"] < c["service_date"]:
+            # professional claims carry the date of service on each line (2400 DTP*472), not on the claim
+            c["service_date"] = l["service_date"]
     return {"claims": claims, "lines": lines, "sha256": sha}
 
 
