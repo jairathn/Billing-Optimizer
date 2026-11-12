@@ -392,7 +392,7 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
     try:
         entries = list(client.list_continue(cursor) if cursor else client.list_folder(root, recursive=True))
     except RuntimeError as exc:
-        if cursor and "reset" in str(exc).lower():      # Dropbox dropped the position: list the folder afresh
+        if cursor and _cursor_reset(exc):       # Dropbox dropped the position: list the folder afresh
             return sync_and_ingest(store, client, state, deadline, full=True, log=log)
         raise
     new_cursor = getattr(client, "last_cursor", None)
@@ -465,6 +465,13 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
     return out
 
 
+def _cursor_reset(exc: Exception) -> bool:
+    """Dropbox's own answer that a listing position is no longer valid (a 409 naming "reset"), and nothing else: a
+    dropped connection also says "reset"."""
+    text = str(exc).lower()
+    return isinstance(exc, RuntimeError) and " failed 409" in text and "reset" in text
+
+
 def saved_cursor(state, root: str) -> str | None:
     """The Dropbox position of the last complete sync, kept in its own small file so that an idle run writes nothing
     large. A position recorded for a different data folder is not used."""
@@ -492,7 +499,7 @@ def has_new_files(state, client) -> bool:
     except Exception as exc:
         # Only a position Dropbox has dropped is worth a run (the run lists the folder afresh and saves a new one). Any
         # other failure would fail the run too, and answering "yes" here would have the site call itself for ever.
-        return "reset" in str(exc).lower()
+        return _cursor_reset(exc)
     prefix = _state_prefix(state)
     for e in res.get("entries", []):
         if wanted(e) and not (prefix and (e.get("path_lower") or "").startswith(prefix)):
@@ -1060,15 +1067,21 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
                 hint = (f" This account is in a team space: add DROPBOX_PATH_ROOT_NS={team_root} in Vercel and redeploy." if team_root and not env("DROPBOX_PATH_ROOT_NS") else "")
                 add("data_folder", f"Data folder {root}", False, str(exc)[:160],
                     "The folder was not found. Check DROPBOX_ROOT_PATH matches the folder name exactly, starting with a slash." + hint)
-            st = state_from_env(fast=True)
+            from .dropbox_sync import DropboxAuthError
+            from .state import DropboxState
+            # a write is tried a few times: Dropbox answers "busy" when something else is writing to the account
+            st = DropboxState(DropboxClient(attempts=3, timeout=10), env("REMITWATCH_STATE_PATH", "/RemitWatch-state"))
             try:
                 st.put("setup-check.txt", b"ok")
                 st.delete("setup-check.txt")
                 add("state_folder", f"Private storage ({st.describe()})", True, "the app can write and delete here")
-            except Exception as exc:
-                add("state_folder", "Private storage", False, str(exc)[:160],
+            except DropboxAuthError as exc:
+                add("state_folder", "Private storage", False, str(exc)[:200],
                     "The app cannot write to Dropbox. In the Dropbox Developer Console open the app, Permissions tab, tick files.content.write, "
                     "click Save changes, then repeat the Connect Dropbox step: a token only carries the permissions ticked when it was made.")
+            except Exception as exc:
+                add("state_folder", "Private storage", False, str(exc)[:160],
+                    "Dropbox did not accept a test write just now. Wait a minute and press Check again. Nothing needs to be changed unless this stays red.")
     else:
         add("data_folder", f"Data folder {root}", None, "checked once Dropbox is connected")
         add("state_folder", "Private storage", None, "checked once Dropbox is connected")

@@ -608,6 +608,8 @@ def test_notifications_do_not_restart_a_run_that_failed_or_died(box):
     assert cloud.has_new_files(state, client) is False
     client._rpc = lambda endpoint, body: (_ for _ in ()).throw(RuntimeError("Dropbox files/list_folder/continue failed 409: reset/"))
     assert cloud.has_new_files(state, client) is True
+    client._rpc = lambda endpoint, body: (_ for _ in ()).throw(ConnectionResetError("Connection reset by peer"))
+    assert cloud.has_new_files(state, client) is False               # a dropped connection is not Dropbox's "reset"
     client._rpc = real
 
 
