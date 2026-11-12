@@ -55,15 +55,26 @@ and what the runtime offers.
 - `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules
   `/api/cron/cycle` once a day (10:17 UTC). `public/` exists so that Vercel serves nothing else from the repository.
 - One run (`remitwatch/cloud.py`): take a lock file, download the store (`store.sqlite.gz`), apply what people recorded
-  since the last run, list what is new in the data folder, ingest it, detect, raise alerts, send mail, save a small copy
-  for the dashboard (`serving.sqlite.gz`), save the store, release the lock.
+  since the last run, list what is new in the data folder, ingest it, detect, raise alerts, save the store, save a small
+  copy for the dashboard built from it (`serving.sqlite.gz`), send mail, write the status, release the lock.
+- The store is saved first because it is the record. If a run dies between the two saves, the next run sees that the
+  dashboard's copy is behind (`serving.json`) and rebuilds it. Mail goes out after both saves, and what was sent is kept
+  in its own small file (`notified.json`), so a failed save or an idle run cannot send the same alert or report twice.
 - A run stops ingesting at half its time and saves. If there is more to do it starts a fresh run of itself and returns.
   Detection is left to a fresh run after a large batch, because a new process starts with clean memory.
+- Runs follow one another only while they are getting somewhere, and at most 30 times in a row. A file that cannot be
+  read (a damaged spreadsheet, a file over 60 MB, one Dropbox will not release) is noted on the Data tab, remembered and
+  passed over until it changes. A download that merely timed out is tried again on the next run.
 - The dashboard never waits for a run. Each instance downloads the dashboard's copy, looks for a newer one every 45
   seconds, and lays the journal of recent status changes over it. A status change is one small file in `actions/`.
 - Appeal packets are stored as two files each under `packets/`.
-- A Dropbox webhook is verified by its signature, then answered. It starts a run only when the data folder has new
-  files of a kind the app reads. The site's own writes to its state folder never start one.
+- A Dropbox webhook is verified by its signature, then answered. It starts a run only when no run is going, the last
+  one did not fail in the past six hours or die, and the data folder has new files of a kind the app reads. The site's
+  own writes to its state folder never start one. The daily scheduled run is not subject to these conditions.
+- A status change recorded for a finding the store does not hold yet is kept in the journal and tried again after
+  each detection, for a week.
+- `/api/health` runs a self-test once per process: an empty store held in memory, grown, saved, reopened, and the
+  dashboard's copy built from it. It shows whether this host can run the mode at all.
 
 ## Limits to know about
 

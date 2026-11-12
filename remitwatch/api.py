@@ -764,7 +764,7 @@ def _cron_auth(request: Request, credentials: Optional[HTTPBasicCredentials]) ->
 
 
 @app.api_route("/api/cron/cycle", methods=["GET", "POST"], include_in_schema=False)
-def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: int = 0, force: int = 0,
+def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: int = 0, force: int = 0, hop: int = 0,
                credentials: Optional[HTTPBasicCredentials] = Depends(security)):
     """One cycle. On a serverless host this is the whole pipeline, run inside this request within its time budget; when
     there is more to do than fits, it starts a fresh invocation of itself before it returns."""
@@ -785,12 +785,19 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
     # the wait happens inside the cycle, after it has taken the lock, so later notifications see a run in progress
     out = cloud.run_cloud_cycle(st, client, budget_s=max(60, runtime.max_seconds() - delay), trigger=trigger[:24], full=bool(full),
                                 force_detect=bool(force), delay_s=delay)
-    if out.get("more") and out.get("progress"):
-        out["continued"] = cloud.trigger_cycle(base_url(request), "continue")
-    elif client is not None and not out.get("skipped") and not out.get("more"):
+    # A run starts the next one only while it is getting somewhere, and only so many times in a row. Whatever goes
+    # wrong, the chain ends; the daily run or a person starts a new one.
+    hop = max(int(hop), 0)
+    if hop >= cloud.MAX_HOPS:
+        if out.get("more"):
+            out["halted"] = f"{hop} runs in a row without finishing"
+            cloud.write_status(st, out)
+    elif out.get("more") and out.get("progress"):
+        out["continued"] = cloud.trigger_cycle(base_url(request), "continue", hop=hop + 1)
+    elif client is not None and not out.get("skipped") and not out.get("more") and not (out.get("ingest") or {}).get("download_errors"):
         try:        # files that landed while this cycle ran
             if cloud.has_new_files(st, client):
-                out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30)
+                out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)
         except Exception:
             pass
     return out
@@ -809,10 +816,11 @@ def _webhook_work(origin: str) -> None:
         from . import cloud
         from .dropbox_sync import DropboxClient
         from .state import state_from_env
-        st = state_from_env()
-        if st is None or cloud.running(st):
-            return      # a run in progress looks for late arrivals itself when it ends
-        if cloud.has_new_files(st, getattr(st, "client", None) or DropboxClient()):
+        st = state_from_env(fast=True)
+        if st is None:
+            return
+        # a run in progress looks for late arrivals itself when it ends; a run that failed is not retried from here
+        if cloud.webhook_should_start(st, getattr(st, "client", None) or DropboxClient(attempts=1, timeout=8)):
             cloud.trigger_cycle(origin, "webhook", delay=45)
     except Exception:
         pass        # the daily scheduled run picks up anything a failed notification missed

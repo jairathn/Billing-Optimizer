@@ -100,6 +100,8 @@ function describe(lc){
   if(lc.detect) parts.push(`${lc.detect.findings} findings`);
   if(m.peak) parts.push(`peak memory ${m.peak} MB${m.limit?' of '+m.limit:''}`);
   if(lc.error) parts.push(`<span class="no">stopped with an error: ${esc(lc.error)}</span>`);
+  if(lc.halted) parts.push(`<span class="no">stopped after ${esc(lc.halted)}: click Run the first load now to continue</span>`);
+  if(i.failed && i.failed.length) parts.push(`could not use: ${i.failed.map(esc).join(', ')}`);
   if(lc.more) parts.push('more to do, continuing by itself');
   const t = lc.totals;
   const held = t ? `<div><b>In the store now:</b> ${Number(t.remit_files||0).toLocaleString('en-US')} remittance files, ${Number(t.findings||0).toLocaleString('en-US')} findings, newest payment ${esc(t.newest_payment||'none yet')}.</div>` : '';

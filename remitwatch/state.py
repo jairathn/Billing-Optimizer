@@ -112,6 +112,9 @@ class LocalState:
         except OSError:
             return False
 
+    def delete_many(self, names: list[str]) -> int:
+        return sum(1 for n in names if self.delete(n))
+
     def describe(self) -> str:
         return f"local folder {self.root}"
 
@@ -174,16 +177,22 @@ class DropboxState:
     def delete(self, name: str) -> bool:
         return self.client.delete(self._p(name))
 
+    def delete_many(self, names: list[str]) -> int:
+        """Many small files in a few calls: a day of status changes is hundreds of journal entries."""
+        return self.client.delete_many([self._p(n) for n in names]) if names else 0
+
     def describe(self) -> str:
         return f"Dropbox folder {self.base}"
 
 
-def state_from_env():
-    """The state folder this deployment is configured for, or None when nothing is configured yet."""
+def state_from_env(fast: bool = False):
+    """The state folder this deployment is configured for, or None when nothing is configured yet. `fast` is for the
+    dashboard's own small reads: one attempt and a short wait, so a slow Dropbox cannot hold every page of the site."""
     local = os.environ.get("REMITWATCH_STATE_DIR")
     if local:
         return LocalState(local)
     if all(os.environ.get(k) for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN")):
         from .dropbox_sync import DropboxClient
-        return DropboxState(DropboxClient(), os.environ.get("REMITWATCH_STATE_PATH", "/RemitWatch-state"))
+        client = DropboxClient(attempts=1, timeout=8) if fast else DropboxClient()
+        return DropboxState(client, os.environ.get("REMITWATCH_STATE_PATH", "/RemitWatch-state"))
     return None

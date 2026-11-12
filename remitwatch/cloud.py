@@ -7,11 +7,15 @@ own Dropbox.
     serving.sqlite.gz    what the dashboard reads: findings, rates, alerts and the claim detail behind each finding.
     actions/*.json       the journal: each status change or acknowledgement made in the dashboard, one small file.
     packets/<finding>/   appeal packets (metadata and PDF).
-    status.json          the last cycle, for the dashboard.     cursor.json   the Dropbox position, for the webhook.
+    status.json          the last cycle, for the dashboard.     cursor.json   the Dropbox position.
+    serving.json         which version of the store the dashboard's copy was built from.
+    notified.json        which alerts have been mailed and when the last report went out.
     lock.json            held by the cycle that is running.
 
 One cycle (run_cloud_cycle): take the lock, load the store, fold the journal into it, pull new files from the data
-folder, ingest, detect, raise alerts, notify, build the dashboard's copy, save both, release the lock. A cycle has a
+folder, ingest, detect, raise alerts, save the store, then the dashboard's copy built from it, then send mail, write
+the status and release the lock. The store is saved first because it is the record: if a run dies between the two
+saves, the next run sees that the dashboard's copy is behind and rebuilds it. A cycle has a
 time budget. When it cannot finish, it saves what it has and the caller starts a fresh invocation to continue, so a
 first load of tens of thousands of files completes across several short runs.
 
@@ -47,8 +51,14 @@ SERVING = "serving.sqlite.gz"
 STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
+SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from
+MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
+_PROCESS_START = time.time()
+FAILED_BACKOFF_SECONDS = 6 * 3600   # after a failed run, notifications start nothing for this long (the daily run still does)
+MAX_HOPS = 30                       # runs that may follow one another without a person or the scheduler in between
+MAX_FILE_BYTES = 60 * 1024 * 1024    # larger files in the data folder are not read
 NEEDED_MEMORY_MB = 1600          # measured peak of a detection run on five years of remittances
 MIN_MEMORY_MB = 2000             # Vercel's standard function size is 2 GB
 DEFER_DETECT_AFTER_FILES = int(os.environ.get("REMITWATCH_DEFER_DETECT_FILES", "3000"))
@@ -87,6 +97,18 @@ def _age_seconds(iso: str | None) -> float:
         return (datetime.now(timezone.utc) - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds()
     except ValueError:
         return 1e9
+
+
+def _read_json(state, name: str) -> dict:
+    try:
+        j = json.loads(state.get(name) or b"{}")
+        return j if isinstance(j, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _write_json(state, name: str, value: dict) -> None:
+    state.put(name, json.dumps(value, default=str).encode())
 
 
 # --------------------------------------------------------------------------- compression
@@ -211,20 +233,33 @@ def read_actions(state, skip: set[str] | None = None) -> list[tuple[str, dict]]:
     return [(n, a) for n, a in sorted(got) if isinstance(a, dict)]
 
 
-def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> int:
-    n = 0
-    for _name, a in entries:
+def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> tuple[list[str], list[str]]:
+    """Apply journal entries to a copy of the store. Returns (names applied, names left over). An entry is left over
+    when a finding it names is not in this copy: that happens when the dashboard showed a finding the copy does not
+    hold yet, and such an entry must be kept and tried again, never dropped. Applying an entry twice is harmless."""
+    done, left = [], []
+    for name, a in entries:
         try:
             if a.get("kind") == "bulk_status":
-                for fid in a.get("ids") or []:
-                    actions_mod.apply_status(conn, fid, a["status"], a.get("notes"), None, a.get("actor") or "", a.get("at"))
+                found = [actions_mod.apply_status(conn, fid, a["status"], a.get("notes"), None, a.get("actor") or "", a.get("at"))
+                         for fid in a.get("ids") or []]
+                ok = all(found)
             else:
-                actions_mod.apply(conn, a)
-            n += 1
+                ok = actions_mod.apply(conn, a) is not False
+            (done if ok else left).append(name)
         except Exception:
-            continue        # one malformed entry must not block the rest
+            done.append(name)       # malformed: nothing a later run could do with it either
     conn.commit()
-    return n
+    return done, left
+
+
+def expired(name: str, days: int = 7) -> bool:
+    """A journal entry's name starts with the time it was recorded. One that has found no finding for a week is given up."""
+    try:
+        at = datetime.strptime(name.rsplit("/", 1)[-1][:15], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - at > timedelta(days=days)
 
 
 # --------------------------------------------------------------------------- pulling files from the data folder
@@ -306,7 +341,9 @@ def ingest_zip(store, client, root: str, deadline: float, out: dict, log) -> Non
 
     def flush():
         if batch:
-            _add(out, _ingest_batch(store, batch, log))
+            part = _ingest_batch(store, batch, log)
+            _add(out, part)
+            out["failed"] = (out.get("failed") or []) + [f"{n} (could not be read)" for n in part.get("failed") or []]
             conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)", rows)
             conn.commit()
             batch.clear()
@@ -337,10 +374,11 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
     """Pull what is new in the data folder and ingest it, stopping at the deadline. The Dropbox position (cursor) is only
     advanced when everything it listed was handled, so a run that stops early is simply repeated: files already taken
     are recognised by id and content hash and skipped without a download."""
-    from .dropbox_sync import wanted
+    from .dropbox_sync import permanent_download_error, wanted
     conn = store.conn
     root = os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data")
-    out: dict = {"listed": 0, "wanted": 0, "downloaded": 0, "remits": 0, "ema": 0, "claims_837": 0, "errors": 0, "remaining": 0}
+    out: dict = {"listed": 0, "wanted": 0, "downloaded": 0, "remits": 0, "ema": 0, "claims_837": 0, "errors": 0, "remaining": 0,
+                 "download_errors": 0, "failed": []}
     cursor = None if full else saved_cursor(state, root)
     out["mode"] = "delta" if cursor else "full"
     if not cursor:
@@ -369,6 +407,12 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
         if h and h in seen_hash:
             mark.append((eid, h, e.get("path_display"), _now()))       # same bytes already ingested under another name
             continue
+        if (e.get("size") or 0) > MAX_FILE_BYTES:
+            # a file this large would be read whole beside the store; no remittance or export is anywhere near it
+            mark.append((eid, h, e.get("path_display"), _now()))
+            out["errors"] += 1
+            out["failed"].append(f"{e.get('name')} (too large)")
+            continue
         todo.append(e)
     if mark:
         conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)", mark)
@@ -389,18 +433,30 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
         items, rows = [], []
         for e, data in got:
             if isinstance(data, Exception):
-                out["errors"] += 1
                 log(f"  download failed {e.get('name')}: {data}")
+                if permanent_download_error(data):
+                    # Dropbox refuses this file itself: remember it so it is not asked for again until it changes
+                    out["errors"] += 1
+                    out["failed"].append(f"{e.get('name')} (cannot be downloaded)")
+                    rows.append((e.get("id") or e.get("path_lower"), e.get("content_hash"), e.get("path_display"), _now()))
+                else:
+                    out["download_errors"] += 1         # a timeout or a busy server: try again on a later run
                 continue
             items.append((e.get("name") or "file", data, _epoch(e.get("client_modified") or e.get("server_modified"))))
             rows.append((e.get("id") or e.get("path_lower"), e.get("content_hash"), e.get("path_display"), _now()))
         out["downloaded"] += len(items)
         if items:
-            _add(out, _ingest_batch(store, items, log))
+            part = _ingest_batch(store, items, log)
+            _add(out, part)
+            out["failed"] += [f"{n} (could not be read)" for n in part.get("failed") or []]
         conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)", rows)
         conn.commit()
-    # the position moves on only when everything listed was handled, and only when there was something to move past
-    if not out["remaining"] and not out["errors"] and new_cursor and (out["listed"] or not cursor):
+    # A file that was fetched is remembered in the store whether or not it could be read, so the store must be saved.
+    out["seen_changed"] = bool(out["downloaded"] or out["failed"] or mark)
+    out["failed"] = out["failed"][:20]
+    # The position moves on when everything listed was handled. A file that could not be read does not hold it back (it
+    # is remembered and skipped until it changes); only a download that may work next time does.
+    if not out["remaining"] and not out["download_errors"] and new_cursor and (out["listed"] or not cursor):
         out["cursor"] = new_cursor
     return out
 
@@ -429,8 +485,10 @@ def has_new_files(state, client) -> bool:
         return False        # no complete sync yet: the first load is driven by the button and the daily run, not by notifications
     try:
         res = client._rpc("files/list_folder/continue", {"cursor": cursor})
-    except Exception:
-        return True
+    except Exception as exc:
+        # Only a position Dropbox has dropped is worth a run (the run lists the folder afresh and saves a new one). Any
+        # other failure would fail the run too, and answering "yes" here would have the site call itself for ever.
+        return "reset" in str(exc).lower()
     prefix = _state_prefix(state)
     for e in res.get("entries", []):
         if wanted(e) and not (prefix and (e.get("path_lower") or "").startswith(prefix)):
@@ -550,12 +608,13 @@ class ServingCopy:
         the two never share a rollback journal."""
         d = runtime.tmp_dir()
         if self._seq == 0:
-            for f in os.listdir(d):         # left by an earlier process on this instance
-                if f.startswith("serving-") and not f.startswith(f"serving-{os.getpid()}-"):
-                    try:
-                        os.remove(os.path.join(d, f))
-                    except OSError:
-                        pass
+            for f in os.listdir(d):         # left by an earlier process on this instance (a process id can repeat, a start time cannot)
+                p = os.path.join(d, f)
+                try:
+                    if f.startswith("serving-") and not f.startswith(self._tag) and os.path.getmtime(p) < _PROCESS_START - 1:
+                        os.remove(p)
+                except OSError:
+                    pass
         self._seq += 1
         return os.path.join(d, f"{self._tag}-{self._seq}.sqlite")
 
@@ -576,7 +635,8 @@ class ServingCopy:
     def state(self):
         key = tuple(os.environ.get(k) for k in ("REMITWATCH_STATE_DIR", "DROPBOX_REFRESH_TOKEN", "REMITWATCH_STATE_PATH"))
         if self._state is None or key != self._state_key:
-            self._state, self._state_key = state_from_env(), key
+            # one attempt and a short wait: every page of the site passes through here, and a slow Dropbox must not hold them
+            self._state, self._state_key = state_from_env(fast=True), key
             self.rev, self.checked, self.journal_checked, self.applied = None, 0.0, 0.0, set()
             self._status = (0.0, None)
         return self._state
@@ -669,6 +729,19 @@ class ServingCopy:
 SERVING_COPY = ServingCopy()
 
 
+def webhook_should_start(state, client) -> bool:
+    """A Dropbox notification starts a run only when all of this holds: no run is going, the last one did not just fail
+    or die (its own writes raise notifications, and without this a failing run would restart itself for ever), and the
+    data folder really has a new file the app reads."""
+    going, stalled = lock_state(state)
+    if going or stalled:
+        return False        # a dead run's lock is cleared by the daily run or by a person, not by a notification
+    last = _read_json(state, STATUS)
+    if last.get("error") and _age_seconds(last.get("finished")) < FAILED_BACKOFF_SECONDS:
+        return False
+    return has_new_files(state, client)
+
+
 # --------------------------------------------------------------------------- appeal packets as files
 
 def save_packet(state, packet: dict, pdf: bytes) -> str:
@@ -758,21 +831,23 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         mem = {"load": peak_mb()}
         out["memory_mb"] = mem
 
+        # Is the dashboard's copy the one built from this store? A run that died between the two saves leaves it behind.
+        data_rev = (conn.execute("SELECT value FROM meta WHERE key='cloud:data_rev'").fetchone() or [None])[0]
+        serving_stale = bool(data_rev) and (_read_json(state, SERVING_MARK).get("data_rev") != data_rev)
+
         journal = read_actions(state)
-        folded = apply_actions(conn, journal) if journal else 0
-        out["actions_folded"] = folded
+        done, left = apply_actions(conn, journal) if journal else ([], [])
 
         ingest: dict = {"skipped": "Dropbox credentials are not configured"}
         if client is not None:
             # leave room for detection and for saving: ingestion gets at most half of the budget
             ingest = sync_and_ingest(store, client, state, deadline=t0 + budget * 0.5, full=full, log=log)
-        out["ingest"] = {k: v for k, v in ingest.items() if k not in ("cursor", "remit_stats")}
+        out["ingest"] = {k: v for k, v in ingest.items() if k not in ("cursor", "remit_stats", "seen_changed")}
         n_ingested = ingest.get("remits", 0) + ingest.get("ema", 0) + ingest.get("claims_837", 0)
         ingested = n_ingested > 0
         remaining = (ingest.get("remaining") or 0) > 0
         mem["ingest"] = peak_mb()
 
-        reported = False
         pending = conn.execute("SELECT 1 FROM meta WHERE key='cloud:detect_pending'").fetchone() is not None
         has_run = conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone() is not None
         has_lines = conn.execute("SELECT 1 FROM lines LIMIT 1").fetchone() is not None
@@ -781,10 +856,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if need_detect and not remaining:
             last = conn.execute("SELECT value FROM meta WHERE key='cloud:detect_seconds'").fetchone()
             estimate = float(last[0]) if last else 60.0
-            left = budget - (time.time() - t0)
+            left_s = budget - (time.time() - t0)
             # Hand detection to a fresh invocation when this one may not have the time left for it, or has just read a
             # large batch: a fresh process starts with clean memory, and detection is the step that needs the most.
-            if ingested and (left < estimate * 1.5 + 45 or n_ingested >= DEFER_DETECT_AFTER_FILES):
+            if ingested and (left_s < estimate * 1.5 + 45 or n_ingested >= DEFER_DETECT_AFTER_FILES):
                 conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
                 out["deferred"] = "detection"
             else:
@@ -802,41 +877,72 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
         conn.commit()
 
-        if not remaining and "deferred" not in out and has_lines:
+        if left and ran_detect:
+            # entries that named a finding this store did not hold: detection may just have brought it back
+            again, left = apply_actions(conn, [(n, a) for n, a in journal if n in set(left)])
+            done += again
+        folded = len(done)
+        out["actions_folded"] = folded
+        if left:
+            out["actions_waiting"] = len(left)
+
+        settled = not remaining and "deferred" not in out and has_lines
+        marks = _read_json(state, MARKS) if settled else {}
+        marks.setdefault("alerts", {})
+        if settled:
             out["alerts"] = run_alerts(conn)
+            # what was mailed is recorded outside the store (the store is not saved on an idle run): put it back
+            conn.executemany("UPDATE alerts SET notified_at=? WHERE alert_id=? AND notified_at IS NULL",
+                             [(at, aid) for aid, at in marks["alerts"].items()])
+            conn.commit()
+
+        # Save only what changed, the store first: it is the record, and the dashboard's copy is made from it. An idle
+        # run (nothing new in Dropbox, nothing recorded by people) uploads neither.
+        alerts_changed = bool((out.get("alerts") or {}).get("new") or (out.get("alerts") or {}).get("cleared"))
+        progressed = ingested or (ingest.get("from_archive") or 0) > 0
+        shown_changed = bool(ran_detect or folded or alerts_changed or (progressed and not existed))
+        if shown_changed:
+            data_rev = str(int(data_rev or 0) + 1)
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
+            conn.commit()
+        if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed"):
+            t2 = time.time()
+            meta = save_raw(state, store)
+            out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
+        if shown_changed or serving_stale:
+            out["serving"] = save_serving(state, conn)
+            state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "at": _now()}).encode())
+        if ingest.get("cursor"):        # after the store, so the position never runs ahead of what was saved
+            state.put(CURSOR, json.dumps({"cursor": ingest["cursor"], "root": os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data"), "at": _now()}).encode())
+        # the journal: entries now in the saved store go; one whose finding never turned up is kept for a week
+        gone = done + [n for n in left if expired(n)]
+        if gone:
+            state.delete_many(gone)
+
+        # Mail goes out after everything is saved, and what was sent is written down at once in its own small file, so
+        # neither a failed save nor an idle run can send the same alert or report again.
+        if settled:
             out["notified"] = notify(conn, log=log) if email else {"sent": 0, "skipped": True}
+            if out["notified"].get("sent"):
+                live = {r[0]: r[1] for r in conn.execute("SELECT alert_id, notified_at FROM alerts WHERE notified_at IS NOT NULL")}
+                marks["alerts"] = live
+                _write_json(state, MARKS, marks)
             every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))
-            last_report = conn.execute("SELECT value FROM meta WHERE key='pipeline:last_report'").fetchone()
-            due = not last_report or (datetime.now(timezone.utc) - datetime.fromisoformat(last_report[0])) >= timedelta(days=every)
+            last_report = marks.get("last_report") or (conn.execute("SELECT value FROM meta WHERE key='pipeline:last_report'").fetchone() or [None])[0]
+            due = not last_report or _age_seconds(last_report) >= every * 86400
             if due and conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone():
-                reported = True
                 from .report import build_report, email_report
-                text = build_report(store, ingest_stats=ingest if "remits" in ingest else None)
                 try:
+                    text = build_report(store, ingest_stats=ingest if "remits" in ingest else None)
                     state.put(f"reports/remitwatch-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.md", build_report(store, detail=True).encode())
                     out["report_emailed"] = email_report(text) if email else False
                 except Exception as exc:
                     out["report_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
-                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('pipeline:last_report', ?)", (_now(),))
-                conn.commit()
-
-        # Save only what changed. The dashboard's copy: whenever what it shows could differ. The full store: whenever its
-        # contents differ. An idle run (nothing new in Dropbox, nothing recorded by people) uploads neither.
-        alerts_changed = bool((out.get("alerts") or {}).get("new") or (out.get("alerts") or {}).get("cleared"))
-        progressed = ingested or (ingest.get("from_archive") or 0) > 0
-        if ran_detect or folded or alerts_changed or (progressed and not existed):
-            out["serving"] = save_serving(state, conn)
-        if ran_detect or folded or alerts_changed or progressed or reported or "deferred" in out:
-            t2 = time.time()
-            meta = save_raw(state, store)
-            out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
-        if ingest.get("cursor"):        # after the store, so the position never runs ahead of what was saved
-            state.put(CURSOR, json.dumps({"cursor": ingest["cursor"], "root": os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data"), "at": _now()}).encode())
-        for name, _a in journal:
-            state.delete(name)
+                marks["last_report"] = _now()
+                _write_json(state, MARKS, marks)
         out["more"] = bool(remaining or "deferred" in out)
         out["progress"] = bool(progressed or ran_detect)
-        out["changed"] = bool("serving" in out or "store" in out)
+        out["changed"] = bool(shown_changed or progressed)
         try:
             one = lambda sql: conn.execute(sql).fetchone()[0]       # noqa: E731
             out["totals"] = {"remit_files": one("SELECT COUNT(*) FROM files WHERE kind='835'"),
@@ -922,7 +1028,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         "Use the Connect Dropbox step on this page, add the value it shows as DROPBOX_REFRESH_TOKEN in Vercel, then redeploy.")
     root = env("DROPBOX_ROOT_PATH", "/Trizetto Data")
     if key and secret and token and probe:
-        client = DropboxClient()
+        client = DropboxClient(attempts=1, timeout=10)      # the page must answer even when Dropbox is slow
         try:
             acct = client.current_account()
             checks[-1].update(ok=True, detail=f"connected as {(acct.get('name') or {}).get('display_name') or 'the account that approved the app'}", fix="")
@@ -940,7 +1046,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
                 hint = (f" This account is in a team space: add DROPBOX_PATH_ROOT_NS={team_root} in Vercel and redeploy." if team_root and not env("DROPBOX_PATH_ROOT_NS") else "")
                 add("data_folder", f"Data folder {root}", False, str(exc)[:160],
                     "The folder was not found. Check DROPBOX_ROOT_PATH matches the folder name exactly, starting with a slash." + hint)
-            st = state_from_env()
+            st = state_from_env(fast=True)
             try:
                 st.put("setup-check.txt", b"ok")
                 st.delete("setup-check.txt")
@@ -966,7 +1072,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         "on" if env("ANTHROPIC_API_KEY") else "off: packets are built from the template")
     if base_url:
         out["webhook_url"] = f"{base_url.rstrip('/')}/api/dropbox/webhook"
-    st = state_from_env() if (key and secret and token) or env("REMITWATCH_STATE_DIR") else None
+    st = state_from_env(fast=True) if (key and secret and token) or env("REMITWATCH_STATE_DIR") else None
     if st is not None and probe:
         try:
             raw = st.get(STATUS)

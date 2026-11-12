@@ -22,6 +22,7 @@ class FakeDropbox:
         self._snapshots: dict[str, dict[str, str]] = {}
         self.calls: dict[str, int] = {}
         self.app_secret = "fake-secret"
+        self.broken: dict[str, Exception] = {}
 
     # ------------------------------------------------------------ helpers
     def _count(self, name: str) -> None:
@@ -107,6 +108,9 @@ class FakeDropbox:
     def download_bytes(self, path_or_id: str) -> tuple[bytes, dict]:
         self._count("download")
         p = self._local(path_or_id)
+        for part, exc in self.broken.items():           # tests: make chosen files fail to download
+            if part in p:
+                raise exc
         if not os.path.isfile(p):
             raise DropboxNotFound(path_or_id)
         with open(p, "rb") as fh:
@@ -142,6 +146,14 @@ class FakeDropbox:
             os.remove(p)
             return True
         return False
+
+    def delete_many(self, paths: list[str], wait_s: int = 60) -> int:
+        self._count("delete_batch")
+        for p in paths:
+            lp = self._local(p)
+            if os.path.isfile(lp):
+                os.remove(lp)
+        return len(paths)
 
     def current_account(self) -> dict:
         return {"name": {"display_name": "Test Account"}, "root_info": {"root_namespace_id": "1", "home_namespace_id": "1"}}

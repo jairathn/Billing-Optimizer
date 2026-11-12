@@ -25,7 +25,7 @@ import hashlib
 import json
 import os
 import time
-from typing import Iterable, Any, Iterator
+from typing import Iterable, Iterator
 
 import requests
 
@@ -83,7 +83,11 @@ def _auth_error(endpoint: str, status: int, text: str) -> DropboxAuthError:
 
 class DropboxClient:
     def __init__(self, app_key: str | None = None, app_secret: str | None = None, refresh_token: str | None = None,
-                 path_root_ns: str | None = None, session: requests.Session | None = None):
+                 path_root_ns: str | None = None, session: requests.Session | None = None, attempts: int = 6, timeout: int = 60):
+        # attempts=1 with a short timeout is for the dashboard's own small checks: a slow Dropbox must fail fast there,
+        # because every page of the site waits on them. The cycle keeps the patient default.
+        self.attempts = max(1, attempts)
+        self.timeout = timeout
         self.app_key = app_key or os.environ.get("DROPBOX_APP_KEY", "")
         self.app_secret = app_secret or os.environ.get("DROPBOX_APP_SECRET", "")
         self.refresh_token = refresh_token or os.environ.get("DROPBOX_REFRESH_TOKEN", "")
@@ -130,11 +134,11 @@ class DropboxClient:
 
     def _rpc(self, endpoint: str, body: dict) -> dict:
         refreshed = False
-        for attempt in range(6):
-            r = self.s.post(f"{API}/{endpoint}", headers=self._headers({"Content-Type": "application/json"}), json=body, timeout=60)
-            if r.status_code == 429 or r.status_code >= 500:
-                wait = float(r.headers.get("Retry-After", 2 ** attempt))
-                time.sleep(min(wait, 60))
+        for attempt in range(self.attempts):
+            r = self.s.post(f"{API}/{endpoint}", headers=self._headers({"Content-Type": "application/json"}), json=body, timeout=self.timeout)
+            if r.status_code == 429 or r.status_code >= 500 or (r.status_code == 409 and "too_many_write_operations" in r.text):
+                if attempt + 1 < self.attempts:
+                    time.sleep(min(float(r.headers.get("Retry-After") or 0) or 2 ** attempt, 60))
                 continue
             if r.status_code == 401:
                 if "expired_access_token" in r.text and not refreshed:
@@ -192,10 +196,12 @@ class DropboxClient:
 
     def download_bytes(self, path_or_id: str) -> tuple[bytes, dict]:
         refreshed = False
-        for attempt in range(6):
-            r = self.s.post(f"{CONTENT}/files/download", headers=self._headers({"Dropbox-API-Arg": json.dumps({"path": path_or_id})}), timeout=300)
+        for attempt in range(self.attempts):
+            r = self.s.post(f"{CONTENT}/files/download", headers=self._headers({"Dropbox-API-Arg": json.dumps({"path": path_or_id})}),
+                            timeout=max(self.timeout, 60) * 5 if self.attempts > 1 else 60)
             if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(min(float(r.headers.get("Retry-After", 2 ** attempt)), 60))
+                if attempt + 1 < self.attempts:
+                    time.sleep(min(float(r.headers.get("Retry-After") or 0) or 2 ** attempt, 60))
                 continue
             if r.status_code == 401:
                 if "expired_access_token" in r.text and not refreshed:
@@ -212,10 +218,11 @@ class DropboxClient:
     def download_chunks(self, path_or_id: str, chunk: int = 4 << 20) -> Iterator[bytes]:
         """Stream a large file without holding it in one piece."""
         refreshed = False
-        for attempt in range(6):
+        for attempt in range(self.attempts):
             r = self.s.post(f"{CONTENT}/files/download", headers=self._headers({"Dropbox-API-Arg": json.dumps({"path": path_or_id})}), stream=True, timeout=300)
             if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(min(float(r.headers.get("Retry-After", 2 ** attempt)), 60))
+                if attempt + 1 < self.attempts:
+                    time.sleep(min(float(r.headers.get("Retry-After") or 0) or 2 ** attempt, 60))
                 continue
             if r.status_code == 401:
                 if "expired_access_token" in r.text and not refreshed:
@@ -239,11 +246,13 @@ class DropboxClient:
 
     def _content_call(self, endpoint: str, arg: dict, data: bytes) -> dict:
         refreshed = False
-        for attempt in range(6):
+        for attempt in range(self.attempts):
             r = self.s.post(f"{CONTENT}/{endpoint}", headers=self._headers({"Dropbox-API-Arg": json.dumps(arg), "Content-Type": "application/octet-stream"}),
-                            data=data, timeout=600)
-            if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(min(float(r.headers.get("Retry-After", 2 ** attempt)), 60))
+                            data=data, timeout=600 if self.attempts > 1 else 60)
+            # "too many write operations" is Dropbox asking for the same write again in a moment; it arrives as a 409
+            if r.status_code == 429 or r.status_code >= 500 or (r.status_code == 409 and "too_many_write_operations" in r.text):
+                if attempt + 1 < self.attempts:
+                    time.sleep(min(float(r.headers.get("Retry-After") or 0) or 2 ** attempt, 60))
                 continue
             if r.status_code == 401:
                 if "expired_access_token" in r.text and not refreshed:
@@ -297,6 +306,28 @@ class DropboxClient:
                 return False
             raise
 
+    def delete_many(self, paths: list[str], wait_s: int = 60) -> int:
+        """Delete up to thousands of files in a few calls (one batch job per 1,000) instead of one call each. Returns how
+        many were asked for; a path that is already gone is not an error."""
+        done = 0
+        for i in range(0, len(paths), 1000):
+            part = paths[i:i + 1000]
+            if len(part) == 1:
+                self.delete(part[0])
+                done += 1
+                continue
+            res = self._rpc("files/delete_batch", {"entries": [{"path": p} for p in part]})
+            job, t0 = res.get("async_job_id"), time.time()
+            while res.get(".tag") == "async_job_id" or res.get(".tag") == "in_progress":
+                if time.time() - t0 > wait_s:
+                    break       # still running on Dropbox's side: it will finish there; the caller's work is repeatable
+                time.sleep(1.0)
+                res = self._rpc("files/delete_batch/check", {"async_job_id": job})
+            if res.get(".tag") == "failed":
+                raise RuntimeError(f"Dropbox files/delete_batch failed: {json.dumps(res)[:200]}")
+            done += len(part)
+        return done
+
     def create_folder(self, path: str) -> None:
         try:
             self._rpc("files/create_folder_v2", {"path": path, "autorename": False})
@@ -309,6 +340,14 @@ class DropboxClient:
         if r.status_code != 200:
             raise RuntimeError(f"Dropbox users/get_current_account failed {r.status_code}: {r.text[:200]}")
         return r.json()
+
+
+def permanent_download_error(exc: Exception) -> bool:
+    """True when asking again cannot help: Dropbox answered with an error about this file itself (it was deleted, is of a
+    kind that cannot be downloaded, is restricted). A timeout, a dropped connection or a busy server is not that."""
+    if isinstance(exc, DropboxNotFound):
+        return True
+    return isinstance(exc, RuntimeError) and not isinstance(exc, DropboxAuthError) and " failed 409" in str(exc)
 
 
 def wanted(entry: dict) -> bool:
@@ -379,7 +418,7 @@ def ingest_new_files(store, paths: list[str], log=print) -> dict:
     from .ema_exports import iter_rows
     from .x12_835 import looks_like_x12
 
-    out = {"remits": 0, "ema": 0, "claims_837": 0, "skipped": 0, "errors": 0}
+    out = {"remits": 0, "ema": 0, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []}
     remits = []
     for p in paths:
         low = p.lower()
@@ -397,6 +436,7 @@ def ingest_new_files(store, paths: list[str], log=print) -> dict:
                 out["ema"] += 1
             except Exception as exc:
                 out["errors"] += 1
+                out["failed"].append(os.path.basename(p))
                 log(f"  EMA ERROR {os.path.basename(p)}: {exc}")
         elif looks_like_x12(p):
             with open(p, "rb") as fh:
@@ -408,6 +448,7 @@ def ingest_new_files(store, paths: list[str], log=print) -> dict:
                     out["claims_837"] += 1
                 except Exception as exc:
                     out["errors"] += 1
+                    out["failed"].append(os.path.basename(p))
                     log(f"  837 ERROR {os.path.basename(p)}: {exc}")
             else:
                 remits.append(p)

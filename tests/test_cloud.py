@@ -451,3 +451,212 @@ def test_missing_permission_is_reported_in_plain_words():
     with pytest.raises(DropboxAuthError) as err:
         c.upload("/x", b"1")
     assert "files.content.write" in str(err.value) and Session.calls == 1        # no retry: it cannot succeed
+
+
+# --------------------------------------------------------------------------- what an independent review found
+
+def test_an_unreadable_file_is_remembered_and_starts_nothing_again(box, monkeypatch):
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    cycle(state, client)
+    time.sleep(0.01)
+    (root / DATA / "Claim Status 11-2-26.xlsx").write_bytes(b"this is not a spreadsheet")
+    position, store_rev = state.get(cloud.CURSOR), state.meta(cloud.RAW)["rev"]
+    assert cloud.has_new_files(state, client) is True
+    out = cycle(state, client)
+    assert out["ingest"]["errors"] == 1 and out["ingest"]["failed"] == ["Claim Status 11-2-26.xlsx (could not be read)"]
+    assert out["ingest"]["download_errors"] == 0 and "detect" not in out and out["more"] is False
+    # the position moved past it and the store remembers it, so neither the next run nor a notification asks for it again
+    assert state.get(cloud.CURSOR) != position and state.meta(cloud.RAW)["rev"] != store_rev
+    assert cloud.has_new_files(state, client) is False
+    downloads = client.calls["download"]
+    again = cycle(state, client)
+    assert again["ingest"]["downloaded"] == 0 and again["ingest"]["errors"] == 0
+    assert client.calls["download"] - downloads <= 8                 # the store and a few small state files, never the bad file
+    # a file far larger than any remittance is not read at all
+    monkeypatch.setattr(cloud, "MAX_FILE_BYTES", 200)
+    time.sleep(0.01)
+    write_remits(root / DATA, clean_visits(500, 3, "99213", "156.66", "76.09", cfi="16"), prefix="huge", start_ctrl=120)
+    big = cycle(state, client)
+    assert big["ingest"]["failed"] == ["huge000.RMT (too large)"] and big["ingest"]["downloaded"] == 0 and big["ingest"]["remits"] == 0
+    assert cloud.has_new_files(state, client) is False
+
+
+def test_a_download_that_may_work_later_holds_the_position_and_one_that_cannot_does_not(box):
+    import requests
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    cycle(state, client)
+    time.sleep(0.01)
+    write_remits(root / DATA, [claim(300, svc("99214", "223.65", "76.09", "76.09", "CAS*CO*186*51.71~CAS*CO*45*95.85~"), cfi="16")], prefix="late", start_ctrl=50)
+    position = state.get(cloud.CURSOR)
+    client.broken = {"late000": requests.exceptions.ConnectionError("connection dropped")}
+    out = cycle(state, client)
+    assert out["ingest"]["download_errors"] == 1 and out["ingest"]["remits"] == 0 and state.get(cloud.CURSOR) == position
+    client.broken = {}
+    out = cycle(state, client)
+    assert out["ingest"]["remits"] == 1 and out["detect"]["findings"] >= 4 and state.get(cloud.CURSOR) != position
+    # Dropbox refusing the file itself is final: it is noted, remembered and passed over
+    time.sleep(0.01)
+    write_remits(root / DATA, clean_visits(600, 1, "99213", "156.66", "76.09", cfi="16"), prefix="locked", start_ctrl=60)
+    client.broken = {"locked000": RuntimeError("download id:x failed 409: path/restricted_content/")}
+    position = state.get(cloud.CURSOR)
+    out = cycle(state, client)
+    assert out["ingest"]["failed"] == ["locked000.RMT (cannot be downloaded)"] and out["ingest"]["download_errors"] == 0
+    assert state.get(cloud.CURSOR) != position and cloud.has_new_files(state, client) is False
+
+
+def test_the_store_is_saved_before_the_dashboard_copy_and_a_copy_left_behind_is_rebuilt(box, monkeypatch):
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    cycle(state, client)
+    rev = state.meta(cloud.SERVING)["rev"]
+    assert json.loads(state.get(cloud.SERVING_MARK))["data_rev"] == "1"
+    time.sleep(0.01)
+    write_remits(root / DATA, [claim(300, svc("99214", "223.65", "76.09", "76.09", "CAS*CO*186*51.71~CAS*CO*45*95.85~"), cfi="16")], prefix="new", start_ctrl=50)
+    real = cloud.save_serving
+    monkeypatch.setattr(cloud, "save_serving", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("upload failed")))
+    with pytest.raises(RuntimeError):
+        cycle(state, client)
+    # the run died after the store was saved: the record has the new finding, the dashboard still shows the old copy
+    assert raw_conn(state).execute("SELECT COUNT(*) FROM findings WHERE signal='DOWNCODE_LEVEL_REDUCED'").fetchone()[0] == 4
+    assert state.meta(cloud.SERVING)["rev"] == rev and json.loads(state.get(cloud.STATUS))["error"].startswith("RuntimeError")
+    assert state.meta(cloud.LOCK) is None
+    monkeypatch.setattr(cloud, "save_serving", real)
+    out = cycle(state, client)      # nothing new to read, but the copy is behind the store: it is rebuilt
+    assert out["ingest"]["remits"] == 0 and "detect" not in out and "serving" in out and "store" not in out
+    assert state.meta(cloud.SERVING)["rev"] != rev and json.loads(state.get(cloud.SERVING_MARK))["data_rev"] == "2"
+    monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
+    assert cloud.ServingCopy().connection().execute("SELECT COUNT(*) FROM findings WHERE signal='DOWNCODE_LEVEL_REDUCED'").fetchone()[0] == 4
+    assert "serving" not in cycle(state, client)        # and not rebuilt again after that
+
+
+def test_a_status_for_a_finding_the_store_does_not_hold_is_kept_not_dropped(box):
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    cycle(state, client)
+    fid = raw_conn(state).execute("SELECT finding_id FROM findings WHERE signal='DOWNCODE_LEVEL_REDUCED' LIMIT 1").fetchone()[0]
+    cloud.record_action(state, {"kind": "status", "finding_id": fid, "status": "appealed", "actor": "biller"})
+    kept = cloud.record_action(state, {"kind": "status", "finding_id": "not-in-the-store-yet", "status": "appealed", "actor": "biller"})
+    cloud.record_action(state, {"kind": "bulk_status", "ids": [fid, "also-missing"], "status": "in_progress", "actor": "biller"})
+    old = f"{cloud.ACTIONS}/20200101T000000000000-abc123.json"       # recorded long ago and never matched: given up
+    state.put(old, json.dumps({"kind": "status", "finding_id": "gone-for-good", "status": "lost", "at": "2020-01-01T00:00:00+00:00"}).encode())
+    out = cycle(state, client)
+    assert out["actions_folded"] == 1 and out["actions_waiting"] == 3
+    left = sorted(m["name"] for m in state.list(cloud.ACTIONS))
+    assert len(left) == 2 and kept in left and old not in left
+    assert client.calls.get("delete_batch", 0) >= 1                  # cleared in one call, not one call per entry
+    assert raw_conn(state).execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "in_progress"
+    assert cloud.expired(old) and not cloud.expired(kept)
+
+
+def test_alert_mail_and_the_weekly_report_go_out_once(box, monkeypatch):
+    from remitwatch import report
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    sent: list[str] = []
+    working = {"on": False}
+
+    def fake_email(text, subject="RemitWatch summary"):
+        if not working["on"]:
+            return False                                             # mail is not set up yet
+        sent.append(subject)
+        return True
+    monkeypatch.setattr(report, "email_report", fake_email)
+    run = lambda: cloud.run_cloud_cycle(state, client, budget_s=600, email=True, log=lambda *a: None)      # noqa: E731
+    first = run()
+    assert first["alerts"]["new"] >= 1 and first["notified"]["sent"] == 0 and sent == []
+    working["on"] = True                                             # mail is set up a day later
+    second = run()
+    assert second["notified"]["sent"] >= 1 and len(sent) == 1 and sent[0].startswith("RemitWatch alert")
+    assert "store" not in second                                     # an idle run: what was mailed is kept in its own small file
+    marks = json.loads(state.get(cloud.MARKS))
+    assert marks["alerts"] and marks["last_report"]
+    for _ in range(3):
+        again = run()
+        assert again["notified"] == {"sent": 0}
+    assert len(sent) == 1                                            # four idle runs later, still one mail
+    # the report is due again after a week, and then goes out once
+    marks["last_report"] = "2026-01-01T00:00:00+00:00"
+    state.put(cloud.MARKS, json.dumps(marks).encode())
+    run()
+    run()
+    assert [s for s in sent if "summary" in s.lower()] == ["RemitWatch summary"] and len(sent) == 2
+
+
+def test_notifications_do_not_restart_a_run_that_failed_or_died(box):
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    cycle(state, client)
+    time.sleep(0.01)
+    write_remits(root / DATA, clean_visits(700, 1, "99213", "156.66", "76.09", cfi="16"), prefix="more", start_ctrl=80)
+    assert cloud.webhook_should_start(state, client) is True
+    ok = json.loads(state.get(cloud.STATUS))
+    state.put(cloud.STATUS, json.dumps(dict(ok, error="OperationalError: boom", finished=cloud._now())).encode())
+    assert cloud.webhook_should_start(state, client) is False        # the run just failed: its own writes must not restart it
+    state.put(cloud.STATUS, json.dumps(dict(ok, error="OperationalError: boom", finished="2026-01-01T00:00:00+00:00")).encode())
+    assert cloud.webhook_should_start(state, client) is True         # long ago: worth another try
+    token = cloud.acquire(state)
+    assert cloud.webhook_should_start(state, client) is False        # a run is going
+    old = time.time() - cloud.lock_stale_seconds() - 5
+    os.utime(os.path.join(str(root), "RemitWatch-state", cloud.LOCK), (old, old))
+    assert cloud.webhook_should_start(state, client) is False        # a run died: left to the daily run or a person
+    cloud.release(state, token)
+    # a check that cannot be made is not a reason to start a run, unless Dropbox says the position is gone
+    real = client._rpc
+    client._rpc = lambda endpoint, body: (_ for _ in ()).throw(RuntimeError("Dropbox files/list_folder/continue failed 500"))
+    assert cloud.has_new_files(state, client) is False
+    client._rpc = lambda endpoint, body: (_ for _ in ()).throw(RuntimeError("Dropbox files/list_folder/continue failed 409: reset/"))
+    assert cloud.has_new_files(state, client) is True
+    client._rpc = real
+
+
+def test_runs_follow_one_another_only_so_many_times_and_only_while_getting_somewhere(site, monkeypatch):
+    tc, _auth, _api, _state = site
+    bearer = {"Authorization": "Bearer s3cret-value-for-the-scheduler"}
+    calls = []
+    monkeypatch.setattr(cloud, "trigger_cycle", lambda base, trigger="webhook", delay=0, **kw: calls.append((trigger, delay, kw)) or True)
+    monkeypatch.setattr(cloud, "run_cloud_cycle", lambda *a, **k: {"more": True, "progress": True})
+    assert tc.get("/api/cron/cycle?hop=3", headers=bearer).json()["continued"] is True
+    assert calls == [("continue", 0, {"hop": 4})]
+    halted = tc.get(f"/api/cron/cycle?hop={cloud.MAX_HOPS}", headers=bearer).json()
+    assert "halted" in halted and "continued" not in halted and len(calls) == 1
+    monkeypatch.setattr(cloud, "run_cloud_cycle", lambda *a, **k: {"more": True, "progress": False})
+    assert "continued" not in tc.get("/api/cron/cycle", headers=bearer).json() and len(calls) == 1
+
+
+def test_dropbox_client_asks_again_when_told_to_and_fails_fast_when_asked_to(monkeypatch):
+    from remitwatch.dropbox_sync import DropboxClient
+    from remitwatch.state import state_from_env
+
+    class Reply:
+        def __init__(self, status, text):
+            self.status_code, self.text, self.headers = status, text, {}
+
+        def json(self):
+            return json.loads(self.text)
+
+    class Session:
+        def __init__(self, replies):
+            self.replies, self.calls = list(replies), 0
+
+        def post(self, *a, **k):
+            self.calls += 1
+            return self.replies.pop(0)
+
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    busy = Reply(409, '{"error_summary": "too_many_write_operations/..", "error": {".tag": "too_many_write_operations"}}')
+    s = Session([busy, busy, Reply(200, '{"rev": "0123456789ab", "size": 1}')])
+    c = DropboxClient("k", "s", "r", session=s)
+    c._token, c._token_exp = "t", time.time() + 3600
+    assert c.upload("/x", b"1")["rev"] == "0123456789ab" and s.calls == 3
+    s = Session([Reply(503, "busy")])
+    quick = DropboxClient("k", "s", "r", session=s, attempts=1, timeout=8)
+    quick._token, quick._token_exp = "t", time.time() + 3600
+    with pytest.raises(RuntimeError):
+        quick.get_metadata("/x")
+    assert s.calls == 1
+    for k, v in (("DROPBOX_APP_KEY", "k"), ("DROPBOX_APP_SECRET", "s"), ("DROPBOX_REFRESH_TOKEN", "r")):
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("REMITWATCH_STATE_DIR", raising=False)
+    assert state_from_env(fast=True).client.attempts == 1 and state_from_env().client.attempts == 6
