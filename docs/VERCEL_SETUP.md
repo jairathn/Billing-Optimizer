@@ -21,8 +21,7 @@ redeploy after every change.
 | `DROPBOX_REFRESH_TOKEN` | The Connect Dropbox step on the site's `/setup` page | Yes |
 | `DROPBOX_ROOT_PATH` | The data folder. Default `/Trizetto Data`. | No |
 | `DROPBOX_PATH_ROOT_NS` | Only for a Dropbox team space. `/setup` shows the number when it is needed. | Sometimes |
-| `REMITWATCH_OWNER_PASSWORD` | Made up by the owner, 12 or more plain letters and digits, different from the dashboard password. When it is set, the Providers tab (what each clinician is doing) opens only for the user `owner` with this password, at `/owner`; the shared login keeps everything else. Without it, everyone who can sign in sees that tab. | No |
-| `REMITWATCH_OWNER_USER` | The owner's user name. Default `owner`. | No |
+| `REMITWATCH_OWNER_PASSWORD` | Made up by the owner, 12 or more plain letters and digits, different from the dashboard password. When it is set, what each clinician is doing (the Providers tab, and lines billed per clinician on Who and what) shows only after this password is typed into the Providers tab. Everyone keeps the same login and every other tab. Without it, everyone who can sign in sees those figures. | No |
 | `REMITWATCH_STATE_PATH` | Where the site keeps its own files in Dropbox. Default `/RemitWatch-state`. | No |
 | `REMITWATCH_MAX_SECONDS` | Time allowed for one run. Default 240, one minute under the function limit in `vercel.json`. | No |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |
@@ -45,7 +44,7 @@ The rest of `.env.example` (alert windows, letterhead, appeal email limits) work
    `DROPBOX_REFRESH_TOKEN`. Redeploy. The token only carries the permissions ticked when it was made: if you tick one
    later, connect again.
 4. **First load.** When every required line on `/setup` has a tick, press Run the first load now. It reads the whole
-   folder in several short runs that follow one another. On the five-year archive this was two runs and about two minutes
+   folder in several short runs that follow one another. On almost three years of remittances this was two runs and about two minutes
    of computing.
 5. **Instant updates.** `/setup` shows the webhook address. Add it in the Dropbox Developer Console: the app, Settings
    tab, Webhooks, Add webhook. Without it the site still checks Dropbox once a day.
@@ -95,6 +94,9 @@ and what the runtime offers.
 ## Access
 
 - One shared login (user `oda`). Ten wrong passwords from one address lock that address out for ten minutes.
+- Optionally a second password for the owner (`REMITWATCH_OWNER_PASSWORD`), typed into the Providers tab. It is not a login: the page sends it with the provider
+  calls and forgets it on reload, on Lock and after half an hour without use. Ten wrong tries from one address close that tab to the address for ten minutes
+  and leave the rest of the site alone.
 - Add the settings for the Production environment only. A preview build of another branch that was given them would
   hold the Dropbox token; the app refuses to run a cycle on a preview build either way.
 - No page can be framed by another site, answers with data are marked not to be stored, and the run address accepts the

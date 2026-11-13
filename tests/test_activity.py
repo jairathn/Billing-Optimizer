@@ -314,7 +314,7 @@ def test_ema_side_counts_a_day_only_when_the_export_could_hold_it(built):
     assert a["provider_id"] == ANN and a["pulled"] == "2026-03-30" and a["location"] == "North Office"
     b = days[("Alpha, Ann", "2026-03-03")]
     assert b["patients"] == 5                                   # the thin export repeats the same five bills: counted once
-    assert days[("Bravo, Bob", "2026-03-02")]["patients"] == 0 and days[("Bravo, Bob", "2026-03-02")]["path_only"] == 1
+    assert days[("Bravo, Bob", "2026-03-02")]["patients"] == 0 and days[("Bravo, Bob", "2026-03-02")]["other_contacts"] == 1
     late = days[("Alpha, Ann", "2026-04-10")]
     assert (late["patients"], late["insured_patients"], late["loose_lines"], late["pulled"]) == (7, 6, 1, "2026-04-10")
 
@@ -495,7 +495,7 @@ def test_reversals_denials_and_two_payers_that_both_decide(tmp_path):
         ("20260325", right, [clp(1, svc("99214", "200.00", "104.00", "130.00", D, lcn="50000001"), cfi="MB")]),
         ("20260410", wrong, [clp(1, svc("99214", "-200.00", "-100.00", None, D, lcn="50000001"), cfi="MB", status="22"),
                              clp(1, svc("99214", "200.00", "0.00", None, D, lcn="50000001", cas="CAS*CO*109*200.00~"), cfi="MB")])])
-    assert (day_["items"], day_["allowed_cents"], day_["paid_cents"], svcs["99214"]["denied"], day_["place"]) == (1, 13000, 10400, 0, None)
+    assert (day_["items"], day_["allowed_cents"], day_["paid_cents"], svcs["99214"]["denied"], day_["place"]) == (1, 13000, 10400, 0, "KY")
     # a payer that pays without saying what it allowed: at least what it paid
     day_, _s, _k, _i = fold(tmp_path, "d", [("20260320", "ANTHEM", [clp(1, svc("99213", "150.00", "72.00", None, D, lcn="50000001"))])])
     assert (day_["allowed_cents"], day_["paid_cents"]) == (7200, 7200)
@@ -542,6 +542,7 @@ def test_what_a_day_holds_office_state_visits_without_a_procedure_and_contacts_t
     assert (d["patients"], d["visits"], d["est_visits"], d["est_alone"], d["est_alone_high"], d["other_contacts"]) == (3, 3, 3, 2, 1, 2)
     assert (d["biopsy_patients"], d["path_read_patients"], d["path_generated_cents"], d["place"]) == (1, 1, 6000, "KY")
     assert day(store.conn, ANN, "2026-03-03")["place"] == "IN" and day(store.conn, ANN, "2026-03-04")["place"] is None      # no Medicare claim that day
+    assert next(r for r in activity.overview(store.conn, "2026-03", "2026-03")["providers"] if r["provider_id"] == ANN)["clinic_days_no_state"] == 0
     ov = activity.overview(store.conn, "2026-03", "2026-03")
     ann = next(r for r in ov["providers"] if r["provider_id"] == ANN)
     assert ann["other_contacts"] == 2 and ann["patients"] == 7 and ann["path_read_share"] is None and ann["est_alone_high_share"] is None    # too few to quote a share
@@ -577,30 +578,116 @@ def test_panels_keep_established_patients_apart_and_count_only_a_first_biopsy(tm
     store.close()
 
 
-def test_weeks_a_payer_went_missing_are_found_and_lower_the_months_they_touch(tmp_path):
+def gap_files(skip=(16, 17), weeks=24, start=None, also_skip_a_year_before=False):
+    """A payer that pays thirty visits every Wednesday, two weeks after they happened, a second that pays sixty, and a
+    fund that pays forty-five every other week (its empty weeks are normal)."""
     from datetime import date, timedelta
     files, n = [], 0
-    monday = date(2025, 1, 6)
-    for w in range(24):
-        paid = (monday + timedelta(days=7 * w + 2)).strftime("%Y%m%d")                # every Wednesday
+    monday = start or date(2025, 1, 6)
+    for w in range(weeks):
+        paid = (monday + timedelta(days=7 * w + 2)).strftime("%Y%m%d")
         dos = (monday + timedelta(days=7 * w - 14)).strftime("%Y%m%d")
-        if w not in (16, 17):                                                         # a payer that pays every week skips two, then resumes
+        if w not in skip and not (also_skip_a_year_before and (w + 52) in skip):
             files.append((paid, "ANTHEM", [visit(n := n + 1, dos) for _ in range(30)]))
-        if w % 2 == 0:                                                                # a fund that pays every other week: its empty weeks are normal
+        files.append((paid, "HUMANA", [visit(n := n + 1, dos) for _ in range(60)]))
+        if w % 2 == 0:
             files.append((paid, "UMWA HEALTH & RETIREMENT FUNDS", [visit(n := n + 1, dos) for _ in range(45)]))
+    return files
+
+
+def test_weeks_a_payer_went_missing_are_found_and_measured_by_month_of_service(tmp_path):
     store = Store(str(tmp_path / "s.sqlite"))
-    assert store.ingest_835_paths(write_files(tmp_path, files))["errors"] == 0
+    assert store.ingest_835_paths(write_files(tmp_path, gap_files()))["errors"] == 0
     activity.build_activity(store, log=lambda *a: None)
-    gaps = activity.info(store.conn)["gaps"]
+    meta = activity.info(store.conn)
+    gaps, holes = meta["gaps"], meta["gap_months"]
     assert len(gaps) == 1 and gaps[0]["payer"] == "ANTHEM" and (gaps[0]["from"], gaps[0]["to"], gaps[0]["weeks"]) == ("2025-04-28", "2025-05-11", 2)
-    assert gaps[0]["seen"] == 0 and gaps[0]["usual"] == 60 and 0.5 < gaps[0]["share"] < 0.6
-    cdf = [min(1.0, d / 30) for d in range(151)]
-    whole, net = activity.month_completeness("2025-04", "2025-06-18", cdf), activity.month_completeness("2025-04", "2025-06-18", cdf, gaps)
-    assert whole == 1.0 and 0.7 < net < 0.9                    # April's visits would have been paid partly in the missing weeks
-    assert activity.month_completeness("2025-01", "2025-06-18", cdf, gaps) == 1.0
+    assert gaps[0]["seen"] == 0 and gaps[0]["usual"] == 60
+    # the two missing payments were for the visits of 14 and 21 April: sixty of April's claims, and no other month's.
+    # It is measured against the payer's usual share of everyone else's claims, so it lands near sixty, not on it.
+    assert list(gaps[0]["missing_by_month"]) == ["2025-04"] and 54 <= gaps[0]["missing"] <= 68
+    assert list(holes) == ["2025-04"] and 0.1 < holes["2025-04"] < 0.2              # 60 of the 450 or so that should be there
     cov = activity.coverage(store.conn)
-    assert cov["gaps"] == gaps and any(m["missing_to_gaps"] > 0 for m in cov["months"])
+    by = {m["month"]: m for m in cov["months"]}
+    assert by["2025-04"]["complete"] < 0.9 and by["2025-04"]["missing_to_gaps"] > 0.1
+    assert by["2025-03"]["missing_to_gaps"] == 0 and by["2025-05"]["missing_to_gaps"] == 0 and cov["gaps"] == gaps
+    assert "2025-04" not in (cov["default_from"] or "") and cov["last_complete_month"] != "2025-04"
     store.close()
+
+
+def test_a_week_that_is_thin_every_year_and_a_week_made_up_later_are_not_gaps(tmp_path):
+    from datetime import date
+    # the same two weeks are empty in both years: the season, not a lost file
+    store = Store(str(tmp_path / "a.sqlite"))
+    (tmp_path / "a").mkdir()
+    files = gap_files(skip=(68, 69), weeks=80, start=date(2024, 1, 1), also_skip_a_year_before=True)
+    assert store.ingest_835_paths(write_files(tmp_path / "a", files))["errors"] == 0
+    activity.build_activity(store, log=lambda *a: None)
+    # the first time it happens there is no year to compare with, so it is reported; the second time it is the season
+    assert [g["from"] for g in activity.info(store.conn)["gaps"]] == ["2024-04-22"]
+    assert all(m.startswith("2024") for m in activity.info(store.conn)["gap_months"])
+    store.close()
+    # a week with nothing, and the week after it with double: the payer was late, nothing is missing
+    store = Store(str(tmp_path / "b.sqlite"))
+    (tmp_path / "b").mkdir()
+    files = gap_files(skip=(16,))
+    late = [visit(5000 + i, "20250414") for i in range(30)]                 # the visits the skipped week would have paid
+    files.append(("20250507", "ANTHEM", late))
+    assert store.ingest_835_paths(write_files(tmp_path / "b", files))["errors"] == 0
+    activity.build_activity(store, log=lambda *a: None)
+    assert activity.info(store.conn)["gaps"] == []
+    assert all(m["missing_to_gaps"] == 0 for m in activity.coverage(store.conn)["months"])
+    store.close()
+
+
+def test_one_payer_under_two_names_is_one_payer_and_a_reversal_cancels_the_decision_it_matches(tmp_path):
+    # the payer adjusts its first decision (pays again for less, no reversal), then takes the first one back: the second stands
+    first = clp(1, svc("99214", "200.00", "104.00", "130.00", D, lcn="50000001"), cfi="MB")
+    second = clp(1, svc("99214", "200.00", "80.00", "100.00", D, lcn="50000001"), cfi="MB")
+    back = clp(1, svc("99214", "-200.00", "-104.00", "-130.00", D, lcn="50000001"), cfi="MB", status="22")
+    day_, svcs, _k, _i = fold(tmp_path, "a", [("20260320", "KY MEDICARE", [first]), ("20260327", "KY MEDICARE", [second]), ("20260410", "KY MEDICARE", [back])])
+    assert (day_["items"], day_["allowed_cents"], day_["paid_cents"], svcs["99214"]["denied"]) == (1, 10000, 8000, 0)
+    # the reversal arrives under another name of the same payer id: it still cancels that payer's decision
+    files = write_files_with_ids(tmp_path, "b", [
+        ("20260320", "UMR", "39026", [clp(1, svc("99213", "150.00", "72.00", "90.00", D, lcn="50000001"))]),
+        ("20260410", "WAUSAU", "39026", [clp(1, svc("99213", "-150.00", "-72.00", "-90.00", D, lcn="50000001"), status="22"),
+                                         clp(1, svc("99213", "150.00", "0.00", None, D, lcn="50000001", cas="CAS*CO*29*150.00~"), status="4")])])
+    store = Store(str(tmp_path / "b.sqlite"))
+    assert store.ingest_835_paths(files)["errors"] == 0
+    activity.build_activity(store, log=lambda *a: None)
+    store.conn.row_factory = sqlite3.Row
+    r = dict(store.conn.execute("SELECT * FROM provider_services WHERE code='99213' AND month='2026-03'").fetchone())
+    assert (r["items"], r["allowed_cents"], r["paid_cents"], r["denied"]) == (1, 0, 0, 1)
+    store.close()
+
+
+def write_files_with_ids(tmp_path, name: str, files: list) -> list[str]:
+    """Remittance files whose payer id is given, not made from the name (plus the seed that makes both clinicians people)."""
+    folder = tmp_path / name
+    folder.mkdir()
+    out = write_files(folder, [SEED])
+    for i, (paid, payer, payer_id, claims) in enumerate(files):
+        p = folder / f"ID{i:03d}-{payer.replace(' ', '')}.RMT"
+        p.write_bytes(remit("".join(claims), "100.00", payer=payer, payer_id=payer_id, seg_count=99, isa_ctrl=f"{900 + i:09d}", pay_date=paid))
+        out.append(str(p))
+    return out
+
+
+def test_units_the_patients_share_and_a_single_medicare_claim(tmp_path):
+    # a payer that writes 0 for the units billed beside the units it paid: three lesions, not one
+    zero_units = (f"SVC*HC:11102*180.00*80.00**1*HC:11102*0~DTM*472*{D}~REF*6R*50000002~AMT*B6*100.00~"
+                  f"SVC*HC:11103*120.00*48.00**2*HC:11103*0~DTM*472*{D}~REF*6R*50000003~AMT*B6*60.00~")
+    day_, svcs, _k, _i = fold(tmp_path, "a", [("20260320", "ANTHEM", [clp(1, svc("99213", "150.00", "72.00", "90.00", D, lcn="50000001") + zero_units)])])
+    assert (day_["biopsy_lesions"], svcs["11103"]["units"], day_["place"]) == (3.0, 2.0, None)
+    # the payer pays nothing and says the patient owes it all (deductible), with no allowed amount: allowed, not denied
+    owed = clp(1, svc("99213", "150.00", "0.00", None, D, lcn="50000001", cas="CAS*CO*45*60.00~CAS*PR*1*90.00~"), cfi="MB")
+    day_, svcs, _k, _i = fold(tmp_path, "b", [("20260320", "KY MEDICARE", [owed])])
+    assert (day_["allowed_cents"], day_["paid_cents"], svcs["99213"]["denied"], day_["place"]) == (9000, 0, 0, "KY")     # and one Medicare claim tells the state
+    # two contractors on one day, one claim each: no state
+    day_, _s, _k, _i = fold(tmp_path, "c", [("20260320", "KY MEDICARE", [visit(1, D, cfi="MB")]), ("20260321", "IN MEDICARE", [visit(2, D, cfi="MB")])])
+    assert day_["place"] is None and day_["patients"] == 2
+    info = _i
+    assert info["checks"]["services_paid_over_allowed"] == 0 and info["checks"]["services_paid_over_allowed_share"] == 0
 
 
 def test_export_pull_times_voids_and_exports_by_transaction_date(tmp_path):
@@ -626,13 +713,12 @@ def test_export_pull_times_voids_and_exports_by_transaction_date(tmp_path):
     # the later export moved the day's pull date although every one of its rows was a repeat; a voided payment leaves the
     # charge alone, a voided charge removes it
     assert (days["2026-03-02"]["patients"], days["2026-03-02"]["pulled"]) == (4, "2026-04-08")
-    # the export by transaction date adds its charges but covers no day: those days wait
-    assert [(d, days[d]["patients"], days[d]["pulled"]) for d in ("2026-03-09", "2026-03-10", "2026-03-11")] == \
-        [("2026-03-09", 5, None), ("2026-03-10", 5, None), ("2026-03-11", 5, None)]
+    # the export by transaction date cannot vouch for any day: the days only it holds are unknown, not light and not waiting
+    assert sorted(days) == ["2026-03-02"]
     meta = activity.info(store.conn)["ema"]
     assert meta["exports"] == 3 and meta["exports_with_a_creation_time"] == 3 and meta["last_pulled"] == "2026-04-08"
-    ann = activity.recent(store.conn)["providers"][0]
-    assert ann["days_waiting"] == 3 and ann["clinic_days"] == 0 and ann["raw_days"] == 4
+    assert (meta["first_service"], meta["last_service"]) == ("2026-03-02", "2026-03-02")
+    assert activity.recent(store.conn)["providers"] == []                 # four patients on one day is not a clinician's week
     store.close()
 
 
@@ -674,67 +760,97 @@ def test_tables_left_behind_by_a_run_without_time_are_rebuilt_by_the_next(tmp_pa
     store.close()
 
 
-def test_the_providers_tab_can_be_kept_for_the_owners_login(tmp_path, monkeypatch):
+def test_the_provider_figures_can_be_kept_for_the_owner(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from remitwatch import api
+    from remitwatch import api, cloud
     db = str(tmp_path / "s.sqlite")
     store = Store(db)
-    store.ingest_835_paths(write_files(tmp_path))
+    denied = [("20260324", "ANTHEM", [clp(301 + i, svc("99214", "200.00", "0.00", None, "20260302", lcn=f"L30{i}", cas="CAS*CO*50*200.00~")) for i in range(2)])]
+    store.ingest_835_paths(write_files(tmp_path, FILES + denied))          # two denied visits, so there are findings to break down
     store.close()
     run_detection(db)
     monkeypatch.setattr(api, "DB_PATH", db)
     monkeypatch.setattr(api, "PASSWORD", PW)
     monkeypatch.setattr(api, "USERNAME", "oda")
     monkeypatch.setattr(api, "_FAILED", {})
+    monkeypatch.setattr(api, "_OWNER_FAILED", {})
     monkeypatch.delenv("REMITWATCH_MODE", raising=False)
-    tc, shared, owner = TestClient(api.app), ("oda", PW), ("owner", "a-second-long-password-9")
+    tc, login, key = TestClient(api.app), ("oda", PW), "a-second-long-password-9"
+    owner = {"X-Owner-Password": key}
     routes = ("/api/activity/overview", "/api/activity/trend", "/api/activity/recent", f"/api/activity/provider/{ANN}")
-    # with no owner password, everyone who can sign in sees the tab
-    assert tc.get("/api/meta", auth=shared).json()["providers"] == {"open": True, "owner_login": False}
-    assert all(tc.get(r, auth=shared).status_code == 200 for r in routes)
-    assert tc.get("/owner", auth=shared, follow_redirects=False).headers["location"] == "/#providers"
-    assert tc.get("/api/summary", auth=owner).status_code == 401                 # and there is no owner login to guess at
+    by_clinician = ("/api/breakdown?dim=provider&family=denial", f"/api/breakdown?dim=payer&family=denial&provider={ANN}", "/api/breakdown?dim=payer&dim2=provider&family=denial")
+    lines = lambda path, **kw: [(r["lines"], r["rate"]) for r in tc.get(path, auth=login, **kw).json()["rows"]]      # noqa: E731
 
-    monkeypatch.setattr(api, "OWNER_PASSWORD", owner[1])
-    monkeypatch.setattr(api, "_FAILED", {})
-    # the shared login keeps everything else, is told the tab is not for it, and is refused by every provider route
-    assert tc.get("/api/meta", auth=shared).json()["providers"] == {"open": False, "owner_login": True}
-    assert tc.get("/api/summary", auth=shared).status_code == 200 and tc.get("/api/coverage", auth=shared).status_code == 200
+    # with no owner password, everyone who can sign in sees it all, and a header nobody asked for changes nothing
+    assert tc.get("/api/meta", auth=login).json()["providers"] == {"locked": False}
+    assert all(tc.get(r, auth=login).status_code == 200 for r in routes)
+    assert all(tc.get(r, auth=login, headers={"X-Owner-Password": "anything"}).status_code == 200 for r in routes)
+    open_lines = lines(by_clinician[0])
+    assert open_lines and all(n for n, _rate in open_lines) and tc.get(by_clinician[0], auth=login).json()["rates_locked"] is False
+    assert tc.get(by_clinician[1], auth=login).json()["total_lines"] == open_lines[0][0]         # a filter gives one clinician's lines as the total
+
+    monkeypatch.setattr(api, "OWNER_PASSWORD", key)
+    assert tc.get("/api/meta", auth=login).json()["providers"] == {"locked": True}
+    # the login alone: every provider route refuses with 403 (never 401, which would make a browser drop its login) ...
     for r in routes:
-        got = tc.get(r, auth=shared)
-        assert got.status_code == 403 and "owner" in got.json()["detail"], r
-        assert tc.get(r).status_code == 401, r
-    # the owner's login opens them, and everything the shared login can
-    assert tc.get("/api/meta", auth=owner).json()["providers"] == {"open": True, "owner_login": True}
-    assert all(tc.get(r, auth=owner).status_code == 200 for r in routes)
-    assert tc.get("/api/summary", auth=owner).status_code == 200 and tc.get("/", auth=owner).status_code == 200
-    # /owner asks the browser for a login until the owner's is given; the shared login asking is not a wrong guess
-    for _ in range(api.FAIL_LIMIT + 2):
-        ask = tc.get("/owner", auth=shared, follow_redirects=False)
-        assert ask.status_code == 401 and ask.headers["www-authenticate"].startswith("Basic") and "owner" in ask.text
-    assert tc.get("/owner", follow_redirects=False).status_code == 401
-    assert tc.get("/owner", auth=owner, follow_redirects=False).headers["location"] == "/#providers"
-    # each half of a login belongs to its own pair
-    assert tc.get("/api/summary", auth=("oda", owner[1])).status_code == 401
-    assert tc.get("/api/summary", auth=("owner", PW)).status_code == 401
-    monkeypatch.setattr(api, "_FAILED", {})
-    # wrong guesses at the owner's password are slowed like any other
+        got = tc.get(r, auth=login)
+        assert got.status_code == 403 and "owner's password" in got.json()["detail"] and "www-authenticate" not in got.headers, r
+        assert tc.get(r).status_code == 401 and tc.get(r, headers=owner).status_code == 401, r        # and the owner's password alone is not a login
+    # ... the rest of the site is as before, but lines billed per clinician, and the rate that gives them back, are left out
+    assert tc.get("/api/summary", auth=login).status_code == 200 and tc.get("/api/coverage", auth=login).status_code == 200
+    for path in by_clinician:
+        res = tc.get(path, auth=login).json()
+        assert res["rates_locked"] is True and res["total_lines"] is None and res["rows"] and all(r["lines"] is None and r["rate"] is None for r in res["rows"]), path
+        assert all(r["n"] for r in res["rows"])                                    # the findings themselves stay
+    by_payer = tc.get("/api/breakdown?dim=payer&family=denial", auth=login).json()
+    assert by_payer["rates_locked"] is False and any(r["lines"] for r in by_payer["rows"])
+    # with the owner's password beside the login everything opens; the page tries a password with one light call
+    assert all(tc.get(r, auth=login, headers=owner).status_code == 200 for r in routes)
+    assert tc.get("/api/activity/unlock", auth=login, headers=owner).json() == {"ok": True} and tc.get("/api/activity/unlock", auth=login).status_code == 403
+    assert lines(by_clinician[0], headers=owner) == open_lines
+    # asking without it is not a guess; a wrong one is, on any route, and ten of them close the owner's door only
+    for _ in range(api.FAIL_LIMIT + 3):
+        assert tc.get(routes[0], auth=login).status_code == 403
+    assert tc.get(routes[0], auth=login, headers=owner).status_code == 200
     for i in range(api.FAIL_LIMIT):
-        assert tc.get("/owner", auth=("owner", f"guess-{i}"), follow_redirects=False).status_code == 401
-    assert tc.get("/owner", auth=owner, follow_redirects=False).status_code == 429
-    monkeypatch.setattr(api, "_FAILED", {})
+        route = (routes[0], by_clinician[0])[i % 2]
+        got = tc.get(route, auth=login, headers={"X-Owner-Password": f"guess-{i}"})
+        assert (got.status_code == 403 and got.json()["detail"] == "That is not the owner's password.") if i % 2 == 0 else got.json()["rates_locked"], i
+    assert tc.get(routes[0], auth=login, headers=owner).status_code == 429
+    assert tc.get(by_clinician[0], auth=login, headers=owner).json()["rates_locked"] is True
+    assert tc.get("/api/summary", auth=login).status_code == 200                   # the billers are not locked out by it
+    monkeypatch.setattr(api, "_OWNER_FAILED", {})
+    assert tc.get(routes[0], auth=login, headers=owner).status_code == 200
+    # ten wrong logins do not stop the owner's password from being right afterwards, and the other way round
+    assert api._FAILED == {}
 
-    # an owner password that is too short, or the same as the shared one, closes the tab to everyone and says why
-    for bad, why in (("short", "shorter than 12"), (PW, "the same as the dashboard password"), ("pässword-long-enough", "browser cannot send")):
+    # an owner's password that cannot be used closes the figures to everyone and says why, in the API and on /setup alike
+    for bad, why in (("short", "shorter than 12"), (PW, "the same as the dashboard password"), ("pässword-long-enough", "browser cannot send"),
+                     ("a-second-long-password-9 ", "space at one end")):
         monkeypatch.setattr(api, "OWNER_PASSWORD", bad)
-        for who in (shared, ("owner", bad)):
-            got = tc.get("/api/activity/overview", auth=who)
-            assert got.status_code in (503, 401) and (got.status_code == 401 or why in got.json()["detail"]), (bad, who[0], got.status_code)
-        assert tc.get("/api/activity/overview", auth=shared).status_code == 503
-        assert tc.get("/api/meta", auth=shared).json()["providers"]["open"] is False
-        assert tc.get("/api/summary", auth=shared).status_code == 200            # the rest of the site is untouched
-        monkeypatch.setattr(api, "_FAILED", {})
+        monkeypatch.setenv("REMITWATCH_OWNER_PASSWORD", bad)
+        monkeypatch.setenv("REMITWATCH_PASSWORD", PW)
+        for headers in ({}, {"X-Owner-Password": bad.encode("ascii", "ignore").decode()}):
+            got = tc.get(routes[0], auth=login, headers=headers)
+            assert got.status_code == 503 and why in got.json()["detail"], (bad, got.status_code)
+        assert tc.get(by_clinician[0], auth=login).json()["rates_locked"] is True
+        assert tc.get("/api/summary", auth=login).status_code == 200
+        check = next(c for c in cloud.setup_status(probe=False)["checks"] if c["key"] == "owner_password")
+        assert check["ok"] is False and why in check["detail"], (bad, check)
+    monkeypatch.setenv("REMITWATCH_OWNER_PASSWORD", key)
+    assert next(c for c in cloud.setup_status(probe=False)["checks"] if c["key"] == "owner_password")["ok"] is True
+    monkeypatch.delenv("REMITWATCH_OWNER_PASSWORD")
+    assert next(c for c in cloud.setup_status(probe=False)["checks"] if c["key"] == "owner_password")["ok"] is None
+
+    # a site with no dashboard password (a developer's machine) still asks for the owner's, and still slows guesses
+    monkeypatch.setattr(api, "PASSWORD", "")
+    monkeypatch.setattr(api, "OWNER_PASSWORD", key)
+    monkeypatch.setattr(api, "_OWNER_FAILED", {})
+    assert tc.get("/api/summary").status_code == 200 and tc.get(routes[0]).status_code == 403 and tc.get(routes[0], headers=owner).status_code == 200
+    for i in range(api.FAIL_LIMIT):
+        assert tc.get(routes[0], headers={"X-Owner-Password": f"guess-{i}"}).status_code == 403
+    assert tc.get(routes[0], headers=owner).status_code == 429
 
 
 def test_several_readers_at_once_take_turns(tmp_path, monkeypatch):
@@ -770,3 +886,24 @@ def test_several_readers_at_once_take_turns(tmp_path, monkeypatch):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert most[0] == 1
+
+
+
+def test_ema_patients_are_typed_like_remittance_patients_and_a_sliver_of_a_day_is_not_the_day(tmp_path):
+    store = Store(str(tmp_path / "s.sqlite"))
+    full, sliver = "Encounter & Charges week.xlsx", "Encounter & Charges one day.xlsx"
+    rows, i = [], 0
+    for n in range(1, 7):                               # six patients with a visit
+        rows.append(dict(ema_row(i := i + 1, full, "2026-03-02", "Alpha, Ann", "99213", patient=f"P{n}", bill_no=n, created="2026-03-03"), transaction_date="2026-03-03"))
+    for n, code in ((7, "99024"), (8, "96910"), (9, "88305")):          # a post-operative check, a light-box session, a slide: none is a patient seen
+        rows.append(dict(ema_row(i := i + 1, full, "2026-03-02", "Alpha, Ann", code, patient=f"P{n}", bill_no=n, created="2026-03-03"), transaction_date="2026-03-03"))
+    # a later export holding one late charge for that day (posted the same day it was pulled): it does not move the day's pull date
+    rows.append(dict(ema_row(i := i + 1, sliver, "2026-03-02", "Alpha, Ann", "17110", patient="P1", bill_no=1, created="2026-03-20"), transaction_date="2026-03-20"))
+    store.ingest_ema_rows(rows)
+    store.record_export(full, "sha-a", "charge_lines", "2026-03-04T15:00:00Z", 9)
+    store.record_export(sliver, "sha-b", "charge_lines", "2026-03-20T15:00:00Z", 1)
+    activity.build_activity(store, log=lambda *a: None)
+    store.conn.row_factory = sqlite3.Row
+    d = dict(store.conn.execute("SELECT * FROM provider_ema_days").fetchone())
+    assert (d["patients"], d["visits"], d["other_contacts"], d["pulled"]) == (6, 6, 3, "2026-03-04")
+    store.close()

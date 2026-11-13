@@ -48,7 +48,7 @@ def _dbx_hash(data: bytes) -> str:
 
 
 def test_wanted_and_local_path():
-    assert wanted({".tag": "file", "name": "P39026D311488176U835747-869414588-UMR-311488176.RMT"})
+    assert wanted({".tag": "file", "name": "P39026D999999999U835747-123456789-UMR-999999999.RMT"})
     assert wanted({".tag": "file", "name": "Encounter & Charges 9-14-26.xlsx"})
     assert wanted({".tag": "file", "name": "PROFESSIONAL_Claims_20261009180510714.txt"})
     assert not wanted({".tag": "file", "name": "Trizetto.zip"})

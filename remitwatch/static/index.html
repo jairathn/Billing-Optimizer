@@ -76,7 +76,6 @@ table.pvt td .sub{display:block;color:var(--muted);font-size:11px;font-weight:40
 .scroll{overflow:auto}
 .busy{opacity:.55;transition:opacity .15s}
 .warnbox{border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:12px}
-nav a.owner{font-style:italic}
 .rng{position:relative;height:10px;min-width:140px;background:var(--soft);border-radius:5px}
 .rng i{position:absolute;top:0;height:100%;border-radius:5px;background:var(--pv1,var(--accent));opacity:.55}
 .rng b{position:absolute;top:-3px;width:2px;height:16px;margin-left:-1px;background:var(--ink)}
@@ -155,7 +154,10 @@ const money = c => (c==null?'–':(c<0?'-':'')+'$'+Math.round(Math.abs(c)/100).t
 const money2 = c => (c==null?'–':'$'+(c/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}));
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const mods = js => { try { const a = JSON.parse(js||'[]'); return Array.isArray(a)&&a.length ? '-'+esc(a.join(',')) : ''; } catch(e){ return ''; } };
-async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); } const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); const err = new Error(m || (path+' '+r.status)); err.status = r.status; throw err; } return r.json(); }
+async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); }
+  // what each clinician is doing may be kept for the owner: the password typed into the Providers tab rides along on those calls only
+  if(state.ownerKey && /^\/api\/(activity\/|breakdown)/.test(path)){ opts = Object.assign({}, opts||{}); opts.headers = Object.assign({'X-Owner-Password': state.ownerKey}, opts.headers||{}); }
+  const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); const err = new Error(m || (path+' '+r.status)); err.status = r.status; throw err; } return r.json(); }
 function qs(o){ return Object.entries(o).filter(([k,v])=>v!==''&&v!=null).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&'); }
 function sweepCharts(){ Object.keys(state.charts).forEach(id=>{ const c=state.charts[id]; if(!c.canvas || !c.canvas.isConnected){ c.destroy(); delete state.charts[id]; } }); }
 function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el) return;
@@ -164,10 +166,9 @@ function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const 
   state.charts[id]=new Chart(el, cfg); }
 const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8c6d1f','#6c757d'];
 
-function tabOpen(k){ if(!TABS.some(t=>t[0]===k)) return false; const p = state.meta && state.meta.providers; return k!=='providers' || !p || p.open; }
+function tabOpen(k){ return TABS.some(t=>t[0]===k); }
 function initNav(){
-  $('#nav').innerHTML = TABS.map(([k,l])=> tabOpen(k) ? `<a data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`
-    : `<a class="owner" href="/owner" title="What each clinician is doing. Opens with the owner's login.">${l} (owner sign-in)</a>`).join('');
+  $('#nav').innerHTML = TABS.map(([k,l])=>`<a data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`).join('');
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=()=>{state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
@@ -370,9 +371,10 @@ async function data(v){
   try { cov = await api('/api/coverage'); } catch(e){}
   const day = d => { const x = new Date(d + 'T00:00:00Z'); return isNaN(x) ? esc(d) : x.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}); };
   const gaps = (cov.gaps||[]).length ? `<div class="panel"><h2>Remittance weeks that look missing</h2>
-    <div class="note">A payer that pays every week sent next to nothing in these weeks and then started again. Either its 835 files for those weeks never reached the Dropbox folder or it paid nothing. Ask TriZetto to send the files again. Until they arrive, the visits that payer would have paid in those weeks are missing from every count on this site, and so is any downcoding in them.</div>
-    <table><thead><tr><th>Payer</th><th>Payer ID</th><th>From</th><th>To</th><th class="num">Weeks</th><th class="num">Claims received</th><th class="num">Usual for those weeks</th></tr></thead>
-    <tbody>${cov.gaps.map(g=>`<tr><td>${esc(g.payer)}</td><td class="small muted">${esc(g.payer_id)}</td><td>${day(g.from)}</td><td>${day(g.to)}</td><td class="num">${esc(g.weeks)}</td><td class="num">${Number(g.seen||0).toLocaleString()}</td><td class="num">${Number(g.usual||0).toLocaleString()}</td></tr>`).join('')}</tbody></table></div>` : '';
+    <div class="note">A payer that pays every week sent next to nothing in these weeks and then started again, and the visits those weeks would have paid are still short. Either its 835 files for those weeks never reached the Dropbox folder or it paid nothing. Ask TriZetto to send the files again. Until they arrive, those visits are missing from every count on this site, and so is any downcoding in them. A week the payer made up afterwards is not listed.</div>
+    <table><thead><tr><th>Payer</th><th>Payer ID</th><th>From</th><th>To</th><th class="num">Weeks</th><th class="num">Claims received</th><th class="num">Usual for those weeks</th><th>Visits still short, about</th></tr></thead>
+    <tbody>${cov.gaps.map(g=>`<tr><td>${esc(g.payer)}</td><td class="small muted">${esc(g.payer_id)}</td><td>${day(g.from)}</td><td>${day(g.to)}</td><td class="num">${esc(g.weeks)}</td><td class="num">${Number(g.seen||0).toLocaleString()}</td><td class="num">${Number(g.usual||0).toLocaleString()}</td>
+      <td>${Object.entries(g.missing_by_month||{}).map(([m,n])=>`${Number(n).toLocaleString()} claims for ${esc(new Date(m+'-15T00:00:00Z').toLocaleString('en-US',{month:'short',year:'numeric',timeZone:'UTC'}))}`).join(', ')}</td></tr>`).join('')}</tbody></table></div>` : '';
   v.innerHTML = `<div id="feedPanel"></div>${gaps}<div class="grid two">
     <div class="panel"><h2>What is loaded</h2><table>
       <tr><td>Files ingested</td><td class="num">${(m.files.n||0).toLocaleString()} (${m.files.n835||0} remits, ${m.files.nema||0} EMA exports)</td></tr>

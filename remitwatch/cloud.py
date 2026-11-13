@@ -52,7 +52,7 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "3"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
+SERVING_BUILD = "4"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -1149,7 +1149,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     rt, st_ = runtime.describe(), runtime.selftest()
     add("runtime", "Runtime", bool(rt["in_memory_store"] and st_.get("ok")),
         f"Python {rt['python']}, SQLite {rt['sqlite']}" + ("" if st_.get("ok") else f"; self-test failed: {st_.get('error') or 'wrong result'}"),
-        "This host cannot hold the store in memory and write its scratch files, which the site needs. Tell Dr. Jairath.")
+        "This host cannot hold the store in memory and write its scratch files, which the site needs. Tell the practice owner.")
     mem, secs = runtime.memory_mb(), runtime.max_seconds()
     add("limits", "Function memory and time", None if mem is None else mem >= NEEDED_MEMORY_MB,
         f"memory {mem or 'not reported by the host'} MB, time allowed for one run {secs} s",
@@ -1161,11 +1161,10 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     add("note_review", "Visit-note review (optional)", bool(env("ANTHROPIC_API_KEY")) or None,
         "on" if env("ANTHROPIC_API_KEY") else "off: packets are built from the template")
     owner = env("REMITWATCH_OWNER_PASSWORD") or ""
-    owner_ok = owner.isascii() and len(owner) >= 12 and owner != pw
-    add("owner_login", "Owner's own login for the Providers tab (optional)", (owner_ok if owner else None),
-        "on: the Providers tab answers only to the owner's login" if owner_ok else
-        ("off: everyone who can sign in sees the Providers tab" if not owner else
-         "set, but it is shorter than 12 characters, not plain letters and digits, or the same as the dashboard password"),
+    owner_bad = runtime.owner_password_problem(owner, pw)
+    add("owner_password", "Owner's password for the Providers tab (optional)", (not owner_bad) if owner else None,
+        ("on: what each clinician is doing opens only after the owner's password is typed into the Providers tab" if not owner_bad else f"set, but it is {owner_bad}")
+        if owner else "off: everyone who can sign in sees the Providers tab",
         "Replace REMITWATCH_OWNER_PASSWORD in Vercel with 12 or more plain letters and digits, different from the dashboard password, "
         "then redeploy. Until then the Providers tab is closed to everyone.")
     if base_url:

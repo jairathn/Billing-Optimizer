@@ -81,7 +81,8 @@ async function explorerTab(v){
   const chips = [['payer','Payer'],['provider','Provider'],['plan','Plan'],['code','Billed code'],['from','From'],['to','To']].filter(([k])=>ex[k])
     .map(([k,l])=>`<span class="chip">${l}: ${esc(k==='provider'?(state.provNames||{})[ex[k]]||ex[k]:ex[k])} <a data-clear="${k}" style="cursor:pointer">✕</a></span>`).join('');
   v.innerHTML = `<div class="panel"><h2>Who and what: ${FAMILY_LABELS[ex.family]}</h2>
-    <div class="note">Every count sits next to the number of lines billed, so a busy provider or payer is not mistaken for a targeted one. "Per 100" is findings per 100 ${esc(res.rate_scope)}. Click a row to narrow everything to it, and the findings behind it are listed underneath.</div>
+    <div class="note">Every count sits next to the number of lines billed, so a busy provider or payer is not mistaken for a targeted one. "Per 100" is findings per 100 ${esc(res.rate_scope)}. Click a row to narrow everything to it, and the findings behind it are listed underneath.
+      ${res.rates_locked ? '<span class="sev-medium">Lines billed and rates by provider are kept for the owner. They show here once the Providers tab has been opened with the owner\'s password.</span>' : ''}</div>
     <div class="filters">
       <label class="small">Show <select id="exFam">${Object.keys(FAMILY_LABELS).map(k=>`<option value="${k}" ${ex.family===k?'selected':''}>${FAMILY_LABELS[k]}</option>`).join('')}</select></label>
       <label class="small">by <select id="exDim">${dimOpts(ex.dim)}</select></label>

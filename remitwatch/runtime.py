@@ -137,3 +137,19 @@ def _run_selftest() -> dict:
                 os.remove(path + suffix)
             except OSError:
                 pass
+
+
+
+def owner_password_problem(owner: str, shared: str, min_length: int = 12) -> str | None:
+    """Why an owner's password cannot be used, or None when it can or when there is none."""
+    if not owner:
+        return None
+    if not owner.isascii():
+        return "has a character a browser cannot send (use plain letters and digits)"
+    if owner != owner.strip():
+        return "has a space at one end"
+    if len(owner) < min_length:
+        return f"shorter than {min_length} characters"
+    if owner == shared:
+        return "the same as the dashboard password"
+    return None

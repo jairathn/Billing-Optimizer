@@ -26,25 +26,25 @@ def remit(claims: str, bpr: str, payer="ANTHEM", payer_id="ANTHM", seg_count=20,
         f"GS*HP*{payer_id}*3LDA*20260904*0909*1*X*005010X221A1~ST*835*000000001~"
         f"BPR*I*{bpr}*C*ACH*CCP*01*061000052*DA*123*999**01*042100175*DA*555*{pay_date}~TRN*1*TRACE{isa_ctrl}*1350781558~"
         f"REF*EV*FEP~DTM*405*20251120~N1*PR*{payer}~N3*1 MAIN ST~N4*CINCINNATI*OH*45209~REF*2U*{payer_id}~PER*BL*PORTAL*TE*8005551212~"
-        f"N1*PE*TEST DERMATOLOGY*XX*1821130295~N3*2 MAIN ST~N4*OWENSBORO*KY*42303~REF*TJ*311488176~LX*1~"
+        f"N1*PE*TEST DERMATOLOGY*XX*1821130295~N3*2 MAIN ST~N4*ANYTOWN*KY*40000~REF*TJ*999999999~LX*1~"
         f"{claims}{plb}SE*{seg_count}*000000001~GE*1*1~IEA*1*{isa_ctrl}~"
     )
     return body.encode()
 
 
 CLAIM_DOWNCODE = (
-    "CLP*CB00TEST01C017*1*205.80*77.60*40.00*12*PAYERCLAIM1*11~NM1*QC*1*DOE*JANE****MI*R000001~NM1*82*2*TEST PROVIDER MD*****XX*1215042429~"
+    "CLP*CB00TEST01C017*1*205.80*77.60*40.00*12*PAYERCLAIM1*11~NM1*QC*1*DOE*JANE****MI*R000001~NM1*82*2*TEST PROVIDER MD*****XX*1888888882~"
     "REF*CE*PPO~DTM*050*20251114~DTM*232*20251111~SVC*HC:99213*205.80*77.60**1*HC:99214~DTM*472*20251111~CAS*CO*45*88.20~CAS*PR*3*40.00~REF*6R*1001~AMT*B6*117.60~"
 )
 CLAIM_BUNDLED = (
-    "CLP*CB00TEST02C017*1*401.21*91.31**12*PAYERCLAIM2*11~NM1*QC*1*ROE*RICHARD****MI*R000002~NM1*82*2*TEST PROVIDER MD*****XX*1215042429~DTM*232*20260407~"
+    "CLP*CB00TEST02C017*1*401.21*91.31**12*PAYERCLAIM2*11~NM1*QC*1*ROE*RICHARD****MI*R000002~NM1*82*2*TEST PROVIDER MD*****XX*1888888882~DTM*232*20260407~"
     "SVC*HC:99214:25*223.65*0.00**1~DTM*472*20260407~CAS*PI*B10*223.65~REF*6R*2001~"
     "SVC*HC:17110*177.56*91.31**1~DTM*472*20260407~CAS*PR*2*18.26~CAS*CO*45*67.99~REF*6R*2002~AMT*B6*109.57~"
 )
 
 
 def test_parse_basic_remit_balances():
-    data = remit(CLAIM_DOWNCODE + CLAIM_BUNDLED, "168.91", seg_count=41, plb="PLB*311488176*20261231*CS:ZELIS TRANSACTION FEE*1.50~")
+    data = remit(CLAIM_DOWNCODE + CLAIM_BUNDLED, "168.91", seg_count=41, plb="PLB*999999999*20261231*CS:ZELIS TRANSACTION FEE*1.50~")
     r = parse_835_bytes(data, source="test.RMT")
     assert r.counts()["transactions"] == 1
     assert r.counts()["claims"] == 2
@@ -105,9 +105,9 @@ def test_store_ingest_dedup_and_detect(tmp_path):
     p3.write_bytes(remit(CLAIM_DOWNCODE + CLAIM_BUNDLED, "168.91", seg_count=41))  # byte-identical file, skipped by hash
     # baseline remits so the detector has rates: 25 clean 99214 lines and 25 clean 99213 lines
     for i in range(25):
-        clean = (f"CLP*CB00CLEAN{i:02d}C017*1*223.65*117.60*0.00*12*PC{i}*11~NM1*QC*1*DOE*JOHN****MI*R{i:06d}~NM1*82*2*TEST PROVIDER MD*****XX*1215042429~DTM*232*20260401~"
+        clean = (f"CLP*CB00CLEAN{i:02d}C017*1*223.65*117.60*0.00*12*PC{i}*11~NM1*QC*1*DOE*JOHN****MI*R{i:06d}~NM1*82*2*TEST PROVIDER MD*****XX*1888888882~DTM*232*20260401~"
                  f"SVC*HC:99214*223.65*117.60**1~DTM*472*20260401~CAS*CO*45*106.05~REF*6R*3{i:03d}~AMT*B6*117.60~"
-                 f"CLP*CB00CLEAN{i:02d}B017*1*156.66*76.15*0.00*12*PD{i}*11~NM1*QC*1*DOE*JOHN****MI*R{i:06d}~NM1*82*2*TEST PROVIDER MD*****XX*1215042429~DTM*232*20260401~"
+                 f"CLP*CB00CLEAN{i:02d}B017*1*156.66*76.15*0.00*12*PD{i}*11~NM1*QC*1*DOE*JOHN****MI*R{i:06d}~NM1*82*2*TEST PROVIDER MD*****XX*1888888882~DTM*232*20260401~"
                  f"SVC*HC:99213*156.66*76.15**1~DTM*472*20260401~CAS*CO*45*80.51~REF*6R*4{i:03d}~AMT*B6*76.15~")
         (tmp_path / f"c{i}.RMT").write_bytes(remit(clean, "193.75", seg_count=38, isa_ctrl=f"{100 + i:09d}"))
     store = Store(str(db))
@@ -138,13 +138,13 @@ def test_ema_export_loader(tmp_path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(["Service Date", "Primary Provider", "Claim ID", "CPT/Product", "Modifiers", "Units", "Charges", "Payments", "Activity Type", "Bill Item Identifier", "Payer", "Location"])
-    ws.append(["2026-09-14", "Doe, Jane", "CB00EJJG6C017", "99214", "25", 1, 223.65, 0, "Charge", 7032635, "Blue Cross and Blue Shield", "Owensboro"])
-    ws.append(["2026-09-14", "Doe, Jane", "CB00EJJG6C017", "99214", "-", 0, 0, 63.89, "Payment", 7032635, "Blue Cross and Blue Shield", "Owensboro"])
+    ws.append(["2026-09-15", "Doe, Jane", "CB00TEST09C017", "99214", "25", 1, 223.65, 0, "Charge", 7000009, "Blue Cross and Blue Shield", "Main Office"])
+    ws.append(["2026-09-15", "Doe, Jane", "CB00TEST09C017", "99214", "-", 0, 0, 63.89, "Payment", 7000009, "Blue Cross and Blue Shield", "Main Office"])
     p = tmp_path / "Encounter & Charges 9-14-26.xlsx"
     wb.save(p)
     rows = list(ema_exports.iter_rows(str(p)))
     assert len(rows) == 2 and rows[0]["family"] == "charge_lines"
-    assert rows[0]["cpt"] == "99214" and rows[0]["modifier_1"] == "25" and rows[0]["charges_cents"] == 22365 and rows[0]["service_date"] == "2026-09-14"
+    assert rows[0]["cpt"] == "99214" and rows[0]["modifier_1"] == "25" and rows[0]["charges_cents"] == 22365 and rows[0]["service_date"] == "2026-09-15"
     assert rows[1]["payments_cents"] == 6389 and rows[1]["modifiers"] is None
     assert rows[0]["row_fingerprint"] != rows[1]["row_fingerprint"]
     assert ema_exports.split_carc("CO-45") == ("CO", "45") and ema_exports.split_carc("PR-1") == ("PR", "1") and ema_exports.split_carc("CO-") == ("CO", None)
@@ -152,11 +152,11 @@ def test_ema_export_loader(tmp_path):
 
 def test_837_parser():
     data = (
-        "ISA*00*          *00*          *ZZ*311488176      *ZZ*TRIZETTO       *261005*1200*^*00501*000000101*0*P*:~GS*HC*311488176*TRIZETTO*20261005*1200*101*X*005010X222A1~"
-        "ST*837*0001*005010X222A1~BHT*0019*00*123*20261005*1200*CH~NM1*41*2*TEST DERM*****46*311488176~PER*IC*BILLING*TE*2705551212~NM1*40*2*TRIZETTO*****46*TZ~"
-        "HL*1**20*1~NM1*85*2*TEST DERMATOLOGY*****XX*1821130295~N3*2 MAIN~N4*OWENSBORO*KY*42303~REF*EI*311488176~"
+        "ISA*00*          *00*          *ZZ*999999999      *ZZ*TRIZETTO       *261005*1200*^*00501*000000101*0*P*:~GS*HC*999999999*TRIZETTO*20261005*1200*101*X*005010X222A1~"
+        "ST*837*0001*005010X222A1~BHT*0019*00*123*20261005*1200*CH~NM1*41*2*TEST DERM*****46*999999999~PER*IC*BILLING*TE*2705551212~NM1*40*2*TRIZETTO*****46*TZ~"
+        "HL*1**20*1~NM1*85*2*TEST DERMATOLOGY*****XX*1821130295~N3*2 MAIN~N4*ANYTOWN*KY*40000~REF*EI*999999999~"
         "HL*2*1*22*0~SBR*P*18*GRP1******CI~NM1*IL*1*DOE*JANE****MI*R000001~NM1*PR*2*ANTHEM*****PI*00660~"
-        "CLM*CB00TEST01C017*223.65***11:B:1*Y*A*Y*Y~HI*ABK:L409~NM1*82*1*PROVIDER*TEST****XX*1215042429~"
+        "CLM*CB00TEST01C017*223.65***11:B:1*Y*A*Y*Y~HI*ABK:L409~NM1*82*1*PROVIDER*TEST****XX*1888888882~"
         "LX*1~SV1*HC:99214:25*223.65*UN*1***1~DTP*472*D8*20261001~REF*6R*5001~LX*2~SV1*HC:17110*177.56*UN*1***1~DTP*472*D8*20261001~REF*6R*5002~SE*25*0001~GE*1*101~IEA*1*000000101~"
     ).encode()
     r = parse_837_bytes(data, source="PROFESSIONAL_Claims_x.txt")
@@ -198,7 +198,7 @@ def test_api_smoke(tmp_path, monkeypatch):
 
 
 CLAIM_BUNDLED_REWORKED = (
-    "CLP*CB00TEST02C024*1*401.21*208.91**12*PAYERCLAIM2B*11~NM1*QC*1*ROE*RICHARD****MI*R000002~NM1*82*2*TEST PROVIDER MD*****XX*1215042429~DTM*232*20260407~"
+    "CLP*CB00TEST02C024*1*401.21*208.91**12*PAYERCLAIM2B*11~NM1*QC*1*ROE*RICHARD****MI*R000002~NM1*82*2*TEST PROVIDER MD*****XX*1888888882~DTM*232*20260407~"
     "SVC*HC:99214:25*223.65*117.60**1~DTM*472*20260407~CAS*CO*45*106.05~REF*6R*2001~AMT*B6*117.60~"
     "SVC*HC:17110*177.56*91.31**1~DTM*472*20260407~CAS*PR*2*18.26~CAS*CO*45*67.99~REF*6R*2002~AMT*B6*109.57~"
 )

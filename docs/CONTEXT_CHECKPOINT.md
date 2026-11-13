@@ -7,19 +7,18 @@ Rebuild the Billing-Optimizer repo (currently "DermBill AI", an LLM note-analysi
 hands-off dashboard that ingests TriZetto ERA (X12 835 ".RMT") files and ModMed EMA exports from
 Dropbox, links paid lines back to billed lines, and makes payer downcoding (and other
 underpayment) obvious with evidence, dollars, trends, and ready-to-send appeal packets.
-Weekly automatic Dropbox pull. No new staff. Owner: Neil Jairath, Owensboro Dermatology
-Associates (ODA), drjairath@owensboroderm.com.
+Weekly automatic Dropbox pull. No new staff. Owner: the practice's physician-owner.
 
 ## What exists (inputs)
 - Repo branch: claude/ecstatic-fermi-orfcgo. Old app = FastAPI + static HTML on Vercel (api/index.py
   -> dermbill.api:app). Old corpus (CPT_Master_Reference.xlsx, rules/, scenarios/) is about note
   coding, not remits. To be replaced.
-- Dropbox (connector works, account = Neil Jairath). Root has one mount: "/Trizetto Data"
-  (ns:15011251635//). Subfolders: Trizetto (the 30K+ .RMT 835 files), Trizetto.zip (43.5 MB
+- Dropbox (connector works, the owner's account). Root has one mount: "/Trizetto Data".
+  Subfolders: Trizetto (the 30K+ .RMT 835 files), Trizetto.zip (43.5 MB
   archive of the same), Reports, Sept Reports, 9_21-_25, 9_28-10_2, 9-14-26 to 9-18-26,
   10-5-26 - 10-9-26 (weekly EMA xlsx exports + new RMT files), .AU.SUZzP.nosync (ignore).
-- RMT filename pattern: P<payerid>D<...>U<835 ctrl>-<check/trace>-<PayerName>-311488176.RMT
-  (311488176 is likely the practice's TriZetto/payee id).
+- RMT filename pattern: P<payerid>D<...>U<835 ctrl>-<check/trace>-<PayerName>-<practice id>.RMT
+  (the last part is the practice's own id with TriZetto).
 - EMA export families (xlsx): "Encounter and Charge Lines" (42 cols, billed CPT per line),
   "ERA and Payment Line Adjustments" (24 cols), "Claim and Claim Status" (23 cols); annual
   2024/2025/2026 files live in Reports/; weekly pilot exports in dated folders.
@@ -32,7 +31,7 @@ Associates (ODA), drjairath@owensboroderm.com.
   Payer mix: Medicare KY J15, BCBS/Anthem, Humana Medicare, UHC (several), Medicare IN J8,
   UMR, Optum, Cigna, supplements. 3 locations, ~10 providers.
 
-## Key domain facts (from Cassey Vessels texts + prior dashboard)
+## Key domain facts (from the billing lead's texts + prior dashboard)
 - Downcoding does not appear as a denial. 835 shows paid code in SVC01 and the submitted code in
   SVC06 when they differ; CAS adjustments carry CARC (e.g., 150, 186, 16, 97, 45, 59) and RARC
   (e.g., N22, M127, N657, N381) that hint at it. Must compare billed vs paid per line.
@@ -64,7 +63,7 @@ Associates (ODA), drjairath@owensboroderm.com.
   8. G2211: commercial payers (Anthem, UHC, UMR, Cigna) deny nearly all; Medicare denies when billed with mod 25.
   9. CARC 59 MPPR: no reductions on add-on codes found; KY Medicare ~$295K/yr reductions, looks rule-consistent.
 - Medicare below-usual-rate E/M lines are explained by PA/NP 85% payment, not underpayment (stratify by rendering NPI).
-- EMA exports: Claim ID (e.g. CB00EAJD9C017) == 835 CLP01. REF*6R is NOT the EMA Bill Item Identifier (different
+- EMA exports: Claim ID (e.g. CB00ABCD1C017) == 835 CLP01. REF*6R is NOT the EMA Bill Item Identifier (different
   number ranges). Line matching must be composite (claim id + DOS + CPT + modifiers + units + charge).
 - Annual EMA exports (ODA - 2024/2025/2026.xlsx etc.) are NOT in Dropbox; only Jul 27 2026 onward exists. Missing data.
 - 837 claim files exist: 87 PROFESSIONAL_Claims_*.txt in 10-5-26 - 10-9-26 (Oct 5-9 2026 only).
@@ -276,17 +275,30 @@ for leaks. The per-clinician counts held (within 5 percent everywhere). What cha
 - **Screen** (`static/providers.js`). Answers are kept in `state.pv.data` and a change of filter, metric, theme or pick redraws
   from memory without moving the reader; a late answer can no longer draw over a newer one; month boxes ignore half-typed values;
   fixed-period columns say so; the call-back table no longer depends on the window; charts whose canvas has gone are released.
-- **Owner login.** `REMITWATCH_OWNER_PASSWORD` (optional) keeps `/api/activity/*` for a second login (`owner` by default);
-  `/api/meta` tells the page whether to show the tab, and `/owner` asks the browser for the owner's login. Unset, behaviour is
-  unchanged. A weak value closes the tab to everyone and `/setup` says why.
+- **Owner's password.** `REMITWATCH_OWNER_PASSWORD` (optional) keeps what each clinician is doing for the owner. It is typed into
+  the Providers tab, kept in the page's memory, and sent in `X-Owner-Password` with `/api/activity/*` and `/api/breakdown`. Without
+  it those routes answer 403 and `breakdown` leaves out lines billed per clinician (the same information by another door). Wrong
+  tries have their own brake. A first design swapped the browser's Basic login at `/owner`; a reviewer showed it signed billers out
+  in Chromium and left the owner's login in the browser, so it was dropped before release.
 - **Speed.** The readers pull thousands of rows into Python and crawled when several ran at once (six together took about seven
   seconds each on the archive, against 0.05 alone). The API now runs one at a time (`_ACTIVITY_LOCK`).
-- `ACTIVITY_VERSION` is "2" and `SERVING_BUILD` "3". Measured on the simulated Dropbox: a site holding state from the previous
-  release rebuilds its provider tables in one run of 27 seconds (peak 1.33 GB, no detection); a first load from nothing takes two
-  runs (54 and 36 seconds, peak 1.43 GB) and gives the same findings count as before (17,407). The dashboard copy built by the
-  cloud cycle equals the store built by the CLI for every provider figure except charges and paid for two clinicians, which differ
-  by a few hundred dollars: eight pairs of duplicate remittances from October and November 2024 survive as different copies
-  depending on the order files are read in. Known, small, not fixed.
+- A second review (three reviewers: an independent recomputation, the gate and a leak check, the screen) found the engine sound
+  (every per-clinician figure within 0.15 percent of an independent derivation) and asked for refinements, now in version 3:
+  missing payer weeks are measured by payer and month of service instead of spread by the lag curve (the first method put the hole
+  in the wrong month); a payer keeps every decision and a reversal cancels the one it matches; payers are told apart by payer id;
+  a payer that writes 0 for units billed no longer hides units; a line with no allowed amount counts what was paid plus the
+  patient's share; one Medicare claim is enough to give a clinic day its state; EMA patients are typed like remittance patients;
+  an export that holds a sliver of a day does not vouch for it.
+- `ACTIVITY_VERSION` is "3" and `SERVING_BUILD` "4". Measured on the simulated Dropbox with version 2: a site holding state from
+  the previous release rebuilds its provider tables in one run of 27 seconds (peak 1.33 GB, no detection); a first load from
+  nothing takes two runs (54 and 36 seconds, peak 1.43 GB). The cloud-built store and the CLI-built store differ by two findings
+  in 17,400 and about a hundred dollars, and four clinicians' paid totals differ by a few hundred dollars: eight pairs of duplicate
+  remittances from October and November 2024 survive as different copies depending on the order files are read in. Known, small,
+  not fixed.
+- Older files held real identifiers and were cleaned in this pass (tests, research notes, this file): two claim ids, a bill item
+  id, the practice's tax id, payment trace numbers, one clinician NPI, the owner's name and work email, a staff member's name, a
+  Dropbox namespace id. They remain in the repository's history. The owner decides whether to rewrite it or make the repository
+  private.
 
 Things a later session should not redo or get wrong:
 

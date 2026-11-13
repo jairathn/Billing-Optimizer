@@ -42,10 +42,12 @@ from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema
 DB_PATH = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
 PASSWORD = os.environ.get("REMITWATCH_PASSWORD", "")
 USERNAME = os.environ.get("REMITWATCH_USER", "oda")
-# An optional second login. When it is set, the Providers tab (what each clinician is doing) answers only to it; the
-# shared login keeps everything else. Without it, everyone who can sign in sees that tab.
+# An optional second password. When it is set, what each clinician is doing (the Providers tab, and the number of lines
+# billed per clinician on the Who and what tab) is shown only after it has been typed into the Providers tab. The page
+# sends it in a header with those calls and keeps it in memory only. The browser's own login stays the shared one, so
+# nobody is signed out or switched, and closing or reloading the page locks the tab again.
 OWNER_PASSWORD = os.environ.get("REMITWATCH_OWNER_PASSWORD", "")
-OWNER_USERNAME = os.environ.get("REMITWATCH_OWNER_USER", "owner")
+OWNER_HEADER = "x-owner-password"
 SHOW_PHI = os.environ.get("REMITWATCH_SHOW_PHI", "0") == "1"
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -142,31 +144,20 @@ def password_problem() -> str | None:
 
 def owner_problem() -> str | None:
     """Why the owner's password cannot be used, or None when it can or when there is none. A weak one is never quietly
-    ignored: the Providers tab is then refused to everyone until it is fixed."""
-    if not OWNER_PASSWORD:
-        return None
-    if not OWNER_PASSWORD.isascii() or not OWNER_USERNAME.isascii():
-        return "has a character a browser cannot send in a login (use plain letters and digits)"
-    if len(OWNER_PASSWORD) < MIN_PASSWORD:
-        return f"shorter than {MIN_PASSWORD} characters"
-    if secrets.compare_digest(OWNER_PASSWORD.encode(), PASSWORD.encode()):
-        return "the same as the dashboard password"
-    return None
+    ignored: the provider figures are then refused to everyone until it is fixed."""
+    return runtime.owner_password_problem(OWNER_PASSWORD, PASSWORD, MIN_PASSWORD)
 
 
-def login_kind(credentials: Optional[HTTPBasicCredentials]) -> str | None:
-    """Which login these credentials are: 'owner', 'shared', or None when they are neither. Both pairs are compared
-    every time, so how long the answer takes says nothing about which part was wrong."""
-    if credentials is None:
-        return None
-    user, word = credentials.username.encode(), credentials.password.encode()
-    shared = secrets.compare_digest(user, USERNAME.encode()) & secrets.compare_digest(word, PASSWORD.encode()) & bool(PASSWORD)
-    owner = secrets.compare_digest(user, OWNER_USERNAME.encode()) & secrets.compare_digest(word, OWNER_PASSWORD.encode()) \
-        & bool(OWNER_PASSWORD) & (owner_problem() is None)
-    return "owner" if owner else ("shared" if shared else None)
+def shared_login(credentials: Optional[HTTPBasicCredentials]) -> bool:
+    """Whether these are the dashboard's user name and password. Both halves are compared every time, so how long the
+    answer takes says nothing about which half was wrong."""
+    if credentials is None or not PASSWORD:
+        return False
+    return secrets.compare_digest(credentials.username.encode(), USERNAME.encode()) & secrets.compare_digest(credentials.password.encode(), PASSWORD.encode())
 
 
 _FAILED: dict[str, list[float]] = {}        # address -> times of recent wrong logins (this instance only)
+_OWNER_FAILED: dict[str, list[float]] = {}  # the same for wrong tries at the owner's password
 FAIL_LIMIT, FAIL_WINDOW = 10, 600
 
 
@@ -178,24 +169,26 @@ def _caller(request: Optional[Request]) -> str:
     return (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")) or "?"
 
 
-def _blocked(who: str, record: bool = False) -> bool:
-    """A brake on guessing: ten wrong logins from one address in ten minutes and it is refused for the rest of them."""
+def _blocked(who: str, record: bool = False, owner: bool = False) -> bool:
+    """A brake on guessing: ten wrong tries from one address in ten minutes and it is refused for the rest of them.
+    Wrong logins and wrong tries at the owner's password are counted apart, so guessing at one cannot lock out the other."""
     import time
+    book = _OWNER_FAILED if owner else _FAILED
     now = time.time()
-    recent = [t for t in _FAILED.get(who, []) if now - t < FAIL_WINDOW]
+    recent = [t for t in book.get(who, []) if now - t < FAIL_WINDOW]
     if record:
         recent.append(now)
     if recent:
-        _FAILED[who] = recent
+        book[who] = recent
     else:
-        _FAILED.pop(who, None)
-    if len(_FAILED) > 5000:
-        _FAILED.clear()
+        book.pop(who, None)
+    if len(book) > 5000:
+        book.clear()
     return len(recent) >= FAIL_LIMIT + (1 if record else 0)
 
 
 def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
-    """Basic auth with the shared password, or with the owner's when one is set. When no password is configured the
+    """Basic auth with a single shared password. When no password is configured the
     dashboard is open (local use only)."""
     problem = password_problem()
     if problem:
@@ -205,31 +198,49 @@ def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredent
     who = _caller(request)
     if _blocked(who):
         raise HTTPException(status_code=429, detail="Too many wrong logins from this address. Wait ten minutes.")
-    if not login_kind(credentials):
+    if not shared_login(credentials):
         if credentials is not None:
             _blocked(who, record=True)
         raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic realm=RemitWatch"})
     return credentials.username
 
 
-def providers_open_to(credentials: Optional[HTTPBasicCredentials]) -> bool:
-    """Whether this login may see what each clinician is doing."""
-    return not OWNER_PASSWORD or login_kind(credentials) == "owner"
+def owner_state(request: Optional[Request]) -> str:
+    """How this request stands with the owner's password: 'open' (none is set, or the right one came with the request),
+    'missing' (none was sent), 'wrong', 'blocked' (too many wrong tries from this address) or 'unusable' (the one
+    configured is too weak to be accepted). A wrong try is counted wherever it is made, so no route can be used to
+    guess faster than another."""
+    if not OWNER_PASSWORD:
+        return "open"
+    if owner_problem():
+        return "unusable"
+    who = _caller(request)
+    if _blocked(who, owner=True):
+        return "blocked"
+    sent = request.headers.get(OWNER_HEADER) if request is not None else None
+    if not sent:
+        return "missing"
+    if secrets.compare_digest(sent.encode(), OWNER_PASSWORD.encode()):
+        return "open"
+    _blocked(who, record=True, owner=True)
+    return "wrong"
 
 
 def require_owner(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
-    """The Providers tab compares named clinicians. With no owner password it is open to everyone who can sign in;
-    with one, only to that login."""
+    """The Providers tab compares named clinicians. With no owner password it is open to everyone who can sign in; with
+    one, the request must also carry it. Refusals are 403, never 401: a 401 would make the browser ask for a login
+    again and drop the one it has."""
     user = require_auth(request, credentials)
-    if not OWNER_PASSWORD:
+    state = owner_state(request)
+    if state == "open":
         return user
-    problem = owner_problem()
-    if problem:
-        raise HTTPException(status_code=503, detail=f"The provider figures are switched off: REMITWATCH_OWNER_PASSWORD is {problem}. "
+    if state == "unusable":
+        raise HTTPException(status_code=503, detail=f"The provider figures are switched off: REMITWATCH_OWNER_PASSWORD is {owner_problem()}. "
                                                     "Replace it in the host's settings and redeploy.")
-    if login_kind(credentials) != "owner":
-        raise HTTPException(status_code=403, detail="The provider figures are for the owner's login.")
-    return user
+    if state == "blocked":
+        raise HTTPException(status_code=429, detail="Too many wrong tries at the owner's password from this address. Wait ten minutes.")
+    raise HTTPException(status_code=403, detail="That is not the owner's password." if state == "wrong"
+                        else "These figures open with the owner's password.")
 
 
 def db() -> sqlite3.Connection:
@@ -284,31 +295,6 @@ def index(request: Request, credentials: Optional[HTTPBasicCredentials] = Depend
     return HTMLResponse("<h1>RemitWatch</h1><p>static/index.html missing</p>")
 
 
-@app.get("/owner", include_in_schema=False)
-def owner_sign_in(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
-    """Change to the owner's login: the browser asks for a user name and password until the owner's are given, then
-    opens the Providers tab. A browser keeps one login per site, so this is also how to leave the shared one."""
-    if password_problem() and not open_allowed():
-        return RedirectResponse("/setup")
-    if not OWNER_PASSWORD:
-        require_auth(request, credentials)
-        return RedirectResponse("/#providers")
-    problem = owner_problem()
-    if problem:
-        raise HTTPException(status_code=503, detail=f"REMITWATCH_OWNER_PASSWORD is {problem}. Replace it in the host's settings and redeploy.")
-    who = _caller(request)
-    if _blocked(who):
-        raise HTTPException(status_code=429, detail="Too many wrong logins from this address. Wait ten minutes.")
-    kind = login_kind(credentials)
-    if kind != "owner":
-        if credentials is not None and kind is None:
-            _blocked(who, record=True)          # a wrong guess; the shared login asking to change is not one
-        return HTMLResponse('<!doctype html><meta charset="utf-8"><title>RemitWatch</title><body style="font:15px system-ui;margin:40px">'
-                            "<p>This part of the dashboard is for the owner's login.</p><p><a href=\"/\">Back to the dashboard</a></p>",
-                            status_code=401, headers={"WWW-Authenticate": "Basic realm=RemitWatch", "Cache-Control": "no-store"})
-    return RedirectResponse("/#providers")
-
-
 @app.get("/robots.txt", include_in_schema=False)
 def robots():
     return PlainTextResponse("User-agent: *\nDisallow: /\n")
@@ -328,10 +314,10 @@ def health():
 
 
 @app.get("/api/meta")
-def meta(credentials: Optional[HTTPBasicCredentials] = Depends(security), _: str = Depends(require_auth)):
+def meta(_: str = Depends(require_auth)):
     out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server",
-                           # whether this login may open the Providers tab, and whether a separate owner login exists
-                           "providers": {"open": providers_open_to(credentials), "owner_login": bool(OWNER_PASSWORD)}}
+                           # whether what each clinician is doing asks for the owner's password first
+                           "providers": {"locked": bool(OWNER_PASSWORD)}}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -734,9 +720,10 @@ def _provider_names() -> dict[str, str]:
 def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "downcoding", status: str = "active",
               payer: Optional[str] = None, provider: Optional[str] = None, plan: Optional[str] = None, code: Optional[str] = None,
               year: Optional[str] = None, month_from: Optional[str] = None, month_to: Optional[str] = None, signal: Optional[str] = None,
-              limit: int = Query(400, le=2000), _: str = Depends(require_auth)):
+              limit: int = Query(400, le=2000), request: Request = None, _: str = Depends(require_auth)):
     """Findings grouped by one or two dimensions, with the number of billed lines behind them where the store has it,
-    so every count comes with a rate (findings per 100 lines)."""
+    so every count comes with a rate (findings per 100 lines). Lines billed by clinician are how busy each clinician
+    is, so when an owner's password is set they are left out unless it came with the request."""
     if dim not in DIMS or (dim2 and dim2 not in DIMS) or family not in FAMILY or dim == dim2:
         raise HTTPException(400, "unknown dimension or family")
     fwhere, ewhere = [FAMILY[family][0], "month IS NOT NULL", "COALESCE(stale,0)=0"], [FAMILY[family][1]]
@@ -789,7 +776,14 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
                 r[f"label{i+1}"] = names.get(r[f"k{i+1}"]) or r[f"k{i+1}"] or "(no rendering provider on the remit)"
     totals = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {' AND '.join(fwhere)}", tuple(fparams))
     total_lines = one(f"SELECT SUM(lines) lines FROM exposure WHERE {' AND '.join(ewhere)}", tuple(eparams)) if has_table("exposure") else {"lines": None}
+    by_clinician = "provider" in dims or (provider is not None and provider != "")
+    locked = by_clinician and owner_state(request) != "open"
+    if locked:              # the rate goes too: the count divided by the rate gives the lines back
+        for r in data:
+            r["lines"] = r["rate"] = None
+        total_lines = {"lines": None}
     return {"dim": dim, "dim2": dim2, "family": family, "rows": data, "total": totals, "total_lines": (total_lines or {}).get("lines"),
+            "rates_locked": locked,
             "rate_scope": {"downcoding": "office visit lines billed", "code_change": "procedure lines billed"}.get(family, "service lines billed"),
             "denominator_for": exposure_level, "dims": sorted(DIMS)}
 
@@ -837,6 +831,13 @@ def coverage(_: str = Depends(require_auth)):
                 "last_complete_month": cov["last_complete_month"], "complete_share": cov["complete_share"]}
     finally:
         conn.close()
+
+
+@app.get("/api/activity/unlock")
+def activity_unlock(_: str = Depends(require_owner)):
+    """One light call for the page to try the owner's password with, so that a wrong try counts once and not once for
+    every figure the tab then asks for."""
+    return {"ok": True}
 
 
 @app.get("/api/activity/overview")

@@ -63,11 +63,42 @@ function pvRange(r, max){
 }
 const pvKeep = (tier, r) => tier === 'all' || r.tier === tier;
 
+/* ------------------------------------------------------------------ the owner's password
+   When the site has one, these figures are sent only to a request that carries it. It is typed here, kept in this
+   page's memory (never in the browser's storage), sent on the provider calls alone, and forgotten on Lock, on reload
+   and after half an hour without use. */
+const PV_IDLE_MS = 30 * 60 * 1000;
+const pvLocked = () => !!(state.meta && state.meta.providers && state.meta.providers.locked);
+function pvForget(){ state.ownerKey = ''; if(state.pv){ state.pv.data = null; state.pv.detail = null; clearTimeout(state.pv.idle); } }
+function pvUnlockForm(v, message){
+  v.classList.remove('busy');
+  v.innerHTML = `<div class="panel" style="max-width:560px"><h2>What each clinician is doing</h2>
+    <div class="note">This tab compares named clinicians, so it is kept for the owner. Type the owner's password to open it. It is not saved anywhere: closing or reloading the page, or pressing Lock, closes the tab again, and so does half an hour without use.</div>
+    <form id="pvUnlock" class="filters"><input id="pvKey" type="password" autocomplete="off" aria-label="owner's password" placeholder="owner's password" style="min-width:240px"> <button class="primary">Open</button></form>
+    ${message ? `<div class="small sev-medium">${esc(message)}</div>` : ''}</div>`;
+  v.querySelector('#pvUnlock').onsubmit = e => {
+    e.preventDefault();
+    const key = v.querySelector('#pvKey').value;
+    if(!key) return;
+    if(/[^\x20-\x7e]/.test(key)){ pvUnlockForm(v, "That is not the owner's password."); return; }      // a browser cannot send it, and the site would not accept it
+    state.ownerKey = key;
+    v.classList.add('busy');
+    api('/api/activity/unlock').then(() => { if(state.tab === 'providers') render(); },         // tried with one call, so a wrong try counts once
+      err => { pvForget(); if(state.tab === 'providers' && v.isConnected) pvUnlockForm(v, err.message); });
+  };
+  v.querySelector('#pvKey').focus();
+}
+
 /* ------------------------------------------------------------------ loading */
 async function providersTab(v){           // called by render(): the tab was opened, or the whole page is being redrawn
   const pv = state.pv = Object.assign({from: '', to: '', preset: 'year', tier: 'all', pick: '', metric: 'per_day'}, state.pv || {});
   pv.el = v;
-  await pvLoad();
+  if(pvLocked() && !state.ownerKey){ pvUnlockForm(v); return; }
+  try { await pvLoad(); }
+  catch(e){
+    if(pvLocked() && [403, 429, 503].includes(e.status)){ pvForget(); pvUnlockForm(v, e.message); return; }
+    throw e;
+  }
 }
 async function pvLoad(){
   const pv = state.pv, v = pv.el, seq = pv.seq = (pv.seq || 0) + 1;
@@ -91,7 +122,9 @@ async function pvLoad(){
 }
 function pvReload(){
   pvLoad().catch(e => { const v = state.pv.el; console.error(e);
-    if(v && v.isConnected && state.tab === 'providers'){ pvDraw(); v.insertAdjacentHTML('afterbegin', `<div class="warnbox">Those months could not be loaded (${esc(e.message)}). Showing the months loaded before.</div>`); } });
+    if(!v || !v.isConnected || state.tab !== 'providers') return;
+    if(pvLocked() && [403, 429, 503].includes(e.status)){ pvForget(); pvUnlockForm(v, e.message); return; }
+    pvDraw(); v.insertAdjacentHTML('afterbegin', `<div class="warnbox">Those months could not be loaded (${esc(e.message)}). Showing the months loaded before.</div>`); });
 }
 function pvRedraw(){ return state.tab === 'providers' && pvDraw(); }      // the theme button
 
@@ -132,7 +165,7 @@ function pvDraw(){
   const inWindow = (cov.months || []).filter(m => m.month >= ov.from && m.month <= ov.to);
   const filling = inWindow.filter(m => m.complete + (m.missing_to_gaps || 0) < bar).map(m => `${monthName(m.month)} about ${Math.round(100 * m.complete)}% in`);
   const short = inWindow.filter(m => (m.missing_to_gaps || 0) >= 0.005);
-  const gaps = (cov.gaps || []).filter(g => g.to >= ov.from + '-01' && g.from.slice(0, 7) <= addMonths(ov.to, 5));
+  const gaps = (cov.gaps || []).filter(g => Object.keys(g.missing_by_month || {}).some(m => m >= ov.from && m <= ov.to));
   const followed = ov.followed || {}, fNew = followed.new_back, fCa = followed.cancer;
   const span = q => q ? `${quarterName(q[0])} to ${quarterName(q[1])}` : 'no finished quarters yet';
   const preset = pv.preset || 'year';
@@ -145,7 +178,7 @@ function pvDraw(){
     {h: 'Patients seen', num: 1, f: r => n0(r.patients)},
     {h: 'Per clinic day', num: 1, f: r => `<b>${n0((r.per_day || {}).median)}</b>`, tip: 'median over clinic days'},
     {h: `<span class="muted">0 to ${n0(maxDay)} a day</span>`, f: r => pvRange(r, maxDay)},
-    {h: 'Per clinic day, by state', num: 1, f: places, tip: 'median on clinic days that had a Medicare claim, by the state of the Medicare contractor that paid it, which follows the office where the visit took place'},
+    {h: 'Per clinic day, by state', num: 1, f: places, tip: 'median on clinic days that had a Medicare claim, by the state of the Medicare contractor that paid it, which follows the office where the visit took place. Days with no Medicare claim carry no state.'},
     {h: 'New patients a day', num: 1, f: r => n1(r.new_per_day)},
     {h: 'New, share of visits', num: 1, f: r => pctv(r.new_share)},
     {h: 'Post-op and nurse contacts', num: 1, f: r => r.other_contacts ? n0(r.other_contacts) : '–', tip: 'patient-days whose only service was a post-operative check, a light-box session or an injection given by staff; not counted as patients seen'},
@@ -200,12 +233,13 @@ function pvDraw(){
       <label class="small">to <input id="pvTo" type="month" value="${esc(ov.to)}" min="${esc(cov.first_month || '')}" max="${esc(cov.last_month || '')}"></label>
       <label class="small">Show <select id="pvTier"><option value="all" ${pv.tier === 'all' ? 'selected' : ''}>everyone</option><option value="nonphysician" ${pv.tier === 'nonphysician' ? 'selected' : ''}>PAs and NPs</option><option value="physician" ${pv.tier === 'physician' ? 'selected' : ''}>physicians</option></select></label>
       <span class="muted small">${monthName(ov.from)} to ${monthName(ov.to)}</span>
+      ${pvLocked() ? '<button id="pvLock" title="forget the owner\'s password on this page and close the tab">Lock</button>' : ''}
     </div>
-    <div class="small muted">Half of all visits are paid within ${n0(lag.p50)} days and nine in ten within ${n0(lag.p90)}, so the newest months are still filling in. Visits are complete through ${monthName(last)}.
+    <div class="small muted">Half of all visits are paid within ${n0(lag.p50)} days and nine in ten within ${n0(lag.p90)}, so the newest months are still filling in. Months through ${monthName(last)} are at least ${Math.round(100 * bar)}% in.
       ${filling.length ? `<span class="sev-medium">These months are not complete yet and their counts will rise: ${esc(filling.join(', '))}.</span>` : ''}
       ${ov.unassigned_share ? `${pctv(ov.unassigned_share)} of patients seen could not be tied to a clinician because the payer named only the group. They are not spread evenly, so one clinician can be short by more than that.` : ''}</div>
     ${short.length && gaps.length ? `<div class="warnbox"><b>Remittances are missing for some weeks.</b> ${gaps.map(g => `${esc(g.payer)}, ${dayName(g.from)} to ${dayName(g.to)} (${plural(g.seen, 'claim', 'claims')} where about ${n0(g.usual)} are usual)`).join('; ')}.
-      Months they touch run short: ${short.map(m => `${monthName(m.month)} by about ${Math.max(1, Math.round(100 * m.missing_to_gaps))}%`).join(', ')}. A clinician with more of that payer's patients is short by more. The Data tab lists the weeks to ask TriZetto for.</div>` : ''}</div>
+      Visits in these months are short because of it: ${short.map(m => `${monthName(m.month)} by about ${Math.max(1, Math.round(100 * m.missing_to_gaps))}%`).join(', ')}. A clinician with more of that payer's patients is short by more. The Data tab lists the weeks to ask TriZetto for.</div>` : ''}</div>
 
     <div class="panel"><h2>How busy</h2><div class="note">Per clinic day is the median, and the bar is the middle half of that clinician's clinic days on one scale. Click a row for that clinician's months, weekdays, offices and codes.</div>${volume}
       ${Object.keys(where).length ? `<div class="small muted" style="margin-top:6px">Under each name: where their patients were seen in the EMA charge exports (visits ${dayName(ema.first_service)} to ${dayName(ema.last_service)}), whatever months are chosen above.</div>` : ''}
@@ -248,6 +282,11 @@ function pvDraw(){
       <li>What the pathology showed. A biopsy rate says how often, not how well chosen.</li></ul></div>`;
 
   sweepCharts();
+  if(pvLocked()){
+    v.querySelector('#pvLock').onclick = () => { pvForget(); render(); };
+    clearTimeout(pv.idle);
+    pv.idle = setTimeout(() => { pvForget(); if(state.tab === 'providers') render(); }, PV_IDLE_MS);
+  }
   const redraw = () => pvDraw();
   v.querySelector('#pvPreset').onchange = e => {
     const p = e.target.value;

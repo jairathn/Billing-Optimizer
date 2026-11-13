@@ -11,12 +11,13 @@ How a remittance line becomes activity
   bill        The first nine characters of the patient control number (CLP01) are the EMA bill id. A bill is one visit.
   service     One billed line. The same line comes back on several remittances (primary, secondary, a reversal and a
               reprocessed claim) and must be counted once. The payer that received the claim from the practice echoes
-              the line control number (REF*6R, the EMA bill item id); a payer that got the claim forwarded to it sends
-              its own number or none. So a line joins the service with the same number and billed code, else a service
-              of the same billed code and date that its own claim has not used yet.
-  allowed     What the payer that decided the service as primary allowed. A reversal takes that back only when it comes
-              from the same payer, and a second payer calling itself primary does not replace it. Paid is every insurer
-              payment for the service added up, reversals included.
+              the line control number the practice sent on it (REF*6R; it is not the EMA bill item id); a payer that
+              got the claim forwarded to it sends its own number or none. So a line joins the service with the same
+              number and billed code, else a service of the same billed code and date that its own claim has not used.
+  allowed     What the first payer to decide the service as primary allowed, in its newest decision still standing. A
+              reversal takes back the one decision it matches, of the payer that sent it, and a second payer calling
+              itself primary does not replace the first. Where a payer states no allowed amount, it is what it paid
+              plus what it told the patient to pay. Paid is every insurer payment for the service added up.
   clinician   The rendering provider on the claim when it is a person. Supplement and secondary payers often send the
               group instead; then the provider reference on the line, the person named on the claim, another remittance
               for the same bill, and last the EMA export are tried in that order.
@@ -28,8 +29,8 @@ How a remittance line becomes activity
               clinicians send them to payers.
 
 What the remittances cannot see: self-pay visits, payers whose remittances never reach the folder, and weeks of a
-payer's remittances that are missing from it. The last is checked (find_gaps) and lowers the completeness of the months
-it touches.
+payer's remittances that are missing from it. The last is looked for (find_gaps): the visits that payer should have
+paid are measured month by month and taken off the completeness of those months.
 
 Everything written here is a count or a sum per clinician. No patient is stored.
 """
@@ -45,7 +46,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from .codes import DRUG_RE, RADIATION_CODES, SKIN_SUBSTITUTE_RE, payer_group_kind
 
-ACTIVITY_VERSION = "2"      # bump when the tables or the way they are filled change; they are then rebuilt
+ACTIVITY_VERSION = "3"      # bump when the tables or the way they are filled change; they are then rebuilt
 CLINIC_DAY_MIN = 5          # a day counts as a clinic day when the clinician saw at least this many patients
 COMPLETE_SHARE = 0.97       # a month of service is treated as complete when this share of its visits has been paid
 LAG_DAYS = 150              # how far the service-to-payment curve is kept
@@ -89,7 +90,7 @@ CREATE TABLE IF NOT EXISTS provider_recall (
 CREATE TABLE IF NOT EXISTS provider_ema_days (
     provider TEXT, provider_id TEXT, role TEXT, service_date TEXT,
     patients INTEGER, insured_patients INTEGER, loose_lines INTEGER, visits INTEGER, new_visits INTEGER, est_visits INTEGER, est_high INTEGER,
-    path_only INTEGER, radiation INTEGER, biopsy_lesions REAL, charges_cents INTEGER, clinic_charges_cents INTEGER, location TEXT, pulled TEXT,
+    other_contacts INTEGER, radiation INTEGER, biopsy_lesions REAL, charges_cents INTEGER, clinic_charges_cents INTEGER, location TEXT, pulled TEXT,
     named INTEGER,
     PRIMARY KEY (provider, service_date)
 );
@@ -129,7 +130,7 @@ MEDICARE = ("medicare", "medicare_advantage")
 
 # columns of the remittance stream read by build_activity
 (C_CLAIM, C_STATUS, C_CODE, C_ORIG, C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED, C_DATE, C_LCN, C_PAYDATE,
- C_NPI, C_LAST, C_FIRST, C_REFS, C_PLAST, C_PFIRST, C_PAYER, C_CFI, C_BILL) = range(21)
+ C_NPI, C_LAST, C_FIRST, C_REFS, C_PLAST, C_PFIRST, C_PAYER, C_CFI, C_BILL, C_PAYERID, C_PATIENT_OWES) = range(23)
 # one service while its remittance lines are folded in
 (I_DATE, I_CODE, I_UNITS, I_CHARGE, I_ALLOWED, I_PAID, I_LIVE, I_DECIDED, I_DENIED, I_KIND, I_FIRSTPAID, I_DECISIONS, I_GROUP, I_LAST) = range(14)
 
@@ -179,6 +180,23 @@ def service_family(code: str | None) -> str:
     if c == "99024":
         return "postop"
     return "other"
+
+
+def contact_kind(fams) -> str:
+    """What one patient's services on one day amount to. A visit or a procedure is a patient seen by the clinician; a
+    slide read on its own bill, a radiation treatment, a post-operative check and a visit to the nurse (light box,
+    injection given by staff) are not, and are counted apart."""
+    if "new_visit" in fams or "est_visit" in fams:
+        return "visit"
+    if all(f == "pathology" for f in fams):
+        return "path"
+    if all(f in NOT_CLINIC for f in fams):
+        return "radiation"
+    if all(f in ("postop", "pathology", "visit_addon") for f in fams):
+        return "postop"
+    if all(f in NURSE or f in ("postop", "pathology", "visit_addon") for f in fams):
+        return "nurse"
+    return "procedure"
 
 
 # --------------------------------------------------------------------------- names
@@ -424,6 +442,7 @@ def build_activity(store, log=print) -> dict:
     payer_cache: dict[tuple, tuple] = {}
     state_cache: dict[str, str | None] = {}
     undated = 0
+    over = [0, 0]                                                    # services insurers paid over a tenth above allowed, and by how much
 
     def payer(name, cfi) -> tuple:
         k = (name, cfi)
@@ -499,7 +518,7 @@ def build_activity(store, log=print) -> dict:
                 k = (r[C_CLAIM], r[C_LCN], code)
                 m = halves.get(k)
                 if m is not None:
-                    for c in (C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED):
+                    for c in (C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED, C_PATIENT_OWES):
                         if r[c] is not None:
                             m[c] = (m[c] or 0) + r[c]
                     continue
@@ -537,6 +556,9 @@ def build_activity(store, log=print) -> dict:
             _fold(items[key], r, payer)
         for it in items.values():
             _settle(it)
+            if it[I_ALLOWED] > 0 and it[I_PAID] > 1.1 * it[I_ALLOWED]:
+                over[0] += 1
+                over[1] += it[I_PAID] - it[I_ALLOWED]
 
         # ---- the patient (never stored): two bills for one person on one day are one patient seen
         named = next((r for r in raw if (r[C_PLAST] or "").strip()), None)
@@ -559,18 +581,7 @@ def build_activity(store, log=print) -> dict:
             new = "new_visit" in fams
             est = "est_visit" in fams
             high = any(it[I_CODE] in ("99214", "99215") for it in its)
-            if new or est:
-                kind = "visit"
-            elif all(f == "pathology" for f in fams):
-                kind = "path"
-            elif all(f in NOT_CLINIC for f in fams):
-                kind = "radiation"
-            elif all(f in ("postop", "pathology", "visit_addon") for f in fams):
-                kind = "postop"
-            elif all(f in NURSE or f in ("postop", "pathology", "visit_addon") for f in fams):
-                kind = "nurse"
-            else:
-                kind = "procedure"
+            kind = contact_kind(fams)
             seen_today = kind in ("visit", "procedure")
             lesions = sum((it[I_UNITS] or 1.0) for it, f in zip(its, fams) if f == "biopsy")
             n = day_n[(provider, d)]
@@ -657,10 +668,14 @@ def build_activity(store, log=print) -> dict:
                   l.payer_name, c.claim_filing_indicator,
                   CASE WHEN length(l.patient_control_number) >= 9 THEN substr(l.patient_control_number, 1, 9)
                        WHEN length(l.patient_control_number) >= 4 THEN l.patient_control_number
-                       ELSE COALESCE(l.patient_control_number, '') || '|' || COALESCE(c.patient_last, '') || '|' || COALESCE(c.patient_first, '') END AS bill
+                       ELSE COALESCE(l.patient_control_number, '') || '|' || COALESCE(c.patient_last, '') || '|' || COALESCE(c.patient_first, '') END AS bill,
+                  NULLIF(l.payer_id, ''),
+                  CASE WHEN COALESCE(l.allowed_cents, 0) = 0 AND l.claim_status_code IN ('1', '19') THEN
+                       (SELECT SUM(a.amount_cents) FROM adjustments a
+                        WHERE a.line_key = l.line_key AND a.group_code = 'PR' AND a.reason_code IN ('1', '2', '3')) END
            FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
            WHERE t.superseded = 0
-           ORDER BY bill, l.payment_date, CASE WHEN l.claim_status_code = '22' THEN 0 ELSE 1 END, l.claim_key, l.line_seq""")
+           ORDER BY bill, l.payment_date, CASE WHEN l.claim_status_code = '22' THEN 0 ELSE 1 END, l.transaction_key, c.claim_seq, l.line_seq""")
     bill, rows, n_lines, n_bills = None, [], 0, 0
     while True:
         chunk = cur.fetchmany(20000)
@@ -707,7 +722,7 @@ def build_activity(store, log=print) -> dict:
         place = None
         if states:
             top, top_n = min(states.items(), key=lambda kv: (-kv[1], kv[0]))
-            if top_n >= 2 and top_n >= 0.7 * sum(states.values()):
+            if top_n >= 0.7 * sum(states.values()) and (top_n >= 2 or len(states) == 1):
                 place = top
         day_rows.append((provider, d, pts, visits, new, est, pts - visits, len(alone), sum(1 for v in alone if v[4]), n[7], n[0], n[1],
                          sum(1 for v in vals if v[3]), sum(v[3] for v in vals), len(read_here.get(key, ())), n[2], n[3], n[4], n[5], n[6],
@@ -723,7 +738,7 @@ def build_activity(store, log=print) -> dict:
     conn.executemany("INSERT INTO provider_services VALUES (?,?,?,?,?,?,?,?,?,?)",
                      [(k[0], k[1], k[2], service_family(k[2]), v[0], v[1], v[2], v[3], v[4], v[5]) for k, v in sorted(services.items())])
     conn.executemany("INSERT INTO provider_payers VALUES (?,?,?,?,?,?,?,?,?)", [k + tuple(v) for k, v in sorted(payers.items())])
-    checks = _checks(services, day_rows)
+    checks = _checks(services, day_rows, over)
     for done in (days, day_n, services, payers, place_n):          # give the memory back before following patients through time
         done.clear()
     build_panels(conn, journeys, treated, first_payment, last_payment)
@@ -775,11 +790,12 @@ def build_activity(store, log=print) -> dict:
             for q in (0.5, 0.75, 0.9, 0.95, 0.98):
                 if f"p{int(q * 100)}" not in marks and acc >= q * total:
                     marks[f"p{int(q * 100)}"] = dd
+    gaps, gap_months = find_gaps(conn, last_payment)
     out = {
         "version": ACTIVITY_VERSION, "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "first_payment": first_payment, "last_payment": last_payment, "lines": n_lines, "bills": n_bills, "undated_services": undated,
         "clinic_day_min": CLINIC_DAY_MIN, "lag": dict(marks, n=total, cdf=cdf), "attribution": dict(how),
-        "people": len(people), "group_ids": len(groups), "ema": ema_summary, "gaps": find_gaps(conn, last_payment), "checks": checks,
+        "people": len(people), "group_ids": len(groups), "ema": ema_summary, "gaps": gaps, "gap_months": gap_months, "checks": checks,
         "seconds": round(time.time() - t0, 1),
     }
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (INFO_KEY, json.dumps(out)))
@@ -792,21 +808,23 @@ def build_activity(store, log=print) -> dict:
 
 def _fold(it: list, r, payer) -> None:
     """Add one remittance line to its service. The lines of a bill arrive oldest payment first, a reversal before
-    anything else paid the same day. Each payer that decided the service as primary keeps its own decision: a reversal
-    takes back only the decision of the payer that sent it, and a second payer speaking as primary does not replace
-    the first."""
+    anything else paid the same day. Each payer keeps its own decisions, in order. A reversal takes back the one
+    decision it matches, of the payer that sent it, and a second payer speaking as primary does not replace the first.
+    A payer is told apart by its payer id where it sends one: the same payer writes under several names and products."""
     status = r[C_STATUS]
     it[I_PAID] += r[C_PAID] or 0                    # every insurer payment, reversals included
     group, kind = payer(r[C_PAYER], r[C_CFI])
-    decisions = it[I_DECISIONS]                     # payer -> [allowed or None, kind of payer], in the order they first decided
+    who = r[C_PAYERID] or group
+    decisions = it[I_DECISIONS]                     # payer -> [kind, group, [allowed, paid] per decision still open], in order of first decision
     if status == "22":
-        if group in decisions:
-            decisions[group][0] = None
+        slot = decisions.get(who)
+        if slot and slot[2]:
+            _take_back(slot[2], abs(r[C_ALLOWED] or 0), abs(r[C_PAID] or 0))
         return
     it[I_LIVE] = True
     if it[I_DATE] is None:
         it[I_DATE] = r[C_DATE]
-    units = r[C_OUNITS] if r[C_OUNITS] is not None else r[C_PUNITS]
+    units = r[C_OUNITS] if r[C_OUNITS] else r[C_PUNITS]       # some payers send "0" for the units billed beside the units they paid
     if units and abs(units) > it[I_UNITS]:
         it[I_UNITS] = float(abs(units))
     charge = abs(r[C_CHARGE] or 0)
@@ -815,23 +833,38 @@ def _fold(it: list, r, payer) -> None:
     if status in PRIMARY or status == "4":
         it[I_DECIDED] = True
         it[I_LAST] = (kind, group)
-        slot = decisions.get(group)
+        slot = decisions.get(who)
         if slot is None:
-            slot = decisions[group] = [None, kind]
+            slot = decisions[who] = [kind, group, []]
         if status in PRIMARY:
             allowed, paid = r[C_ALLOWED] or 0, r[C_PAID] or 0
-            if allowed > 0:
-                slot[0] = allowed
-            elif paid > 0 and slot[0] is None:
-                slot[0] = paid                      # a payer that pays without stating what it allowed: at least what it paid
+            if allowed <= 0:
+                # no allowed amount stated: at least what the payer paid plus what it told the patient to pay
+                # (deductible, coinsurance, copayment)
+                allowed = max(paid, 0) + max(r[C_PATIENT_OWES] or 0, 0)
+            slot[2].append([allowed, paid])
         if it[I_FIRSTPAID] is None or (r[C_PAYDATE] and r[C_PAYDATE] < it[I_FIRSTPAID]):
             it[I_FIRSTPAID] = r[C_PAYDATE]
 
 
+def _take_back(open_: list, allowed: int, paid: int) -> None:
+    """A reversal cancels the decision it matches: the same allowed amount, else the same payment, else the oldest."""
+    for test in ((lambda d: bool(allowed) and d[0] == allowed), (lambda d: d[1] == paid), (lambda d: True)):
+        for i, d in enumerate(open_):
+            if test(d):
+                del open_[i]
+                return
+
+
 def _settle(it: list) -> None:
-    """After the last line: the allowed amount is the first primary decision still standing, the payer is the one that
-    made it, and a service nobody allowed or paid, that some payer did decide, was denied."""
-    standing = next(((allowed, kind, group) for group, (allowed, kind) in it[I_DECISIONS].items() if allowed), None)
+    """After the last line: the allowed amount is the newest decision still standing of the first payer that has one,
+    the payer is that one, and a service nobody allowed or paid, that some payer did decide, was denied."""
+    standing = None
+    for kind, group, open_ in it[I_DECISIONS].values():
+        allowed = next((d[0] for d in reversed(open_) if d[0] > 0), 0)
+        if allowed:
+            standing = (allowed, kind, group)
+            break
     if standing:
         it[I_ALLOWED], it[I_KIND], it[I_GROUP] = standing
     elif it[I_LAST]:
@@ -839,19 +872,25 @@ def _settle(it: list) -> None:
     it[I_DENIED] = bool(it[I_DECIDED] and not standing and it[I_PAID] <= 0)
 
 
-def _checks(services: dict, day_rows: list) -> dict:
-    """Two things that must hold if the fold is right, kept with the build so a break shows: a clinician cannot have
-    many more visit-code services than patient visits, and insurers cannot have paid more than was allowed."""
+def _checks(services: dict, day_rows: list, over: list) -> dict:
+    """Things that must hold if the fold is right, kept with the build so a break shows. A clinician cannot have many
+    more visit-code services than patient visits. Insurers cannot, across a family of services in a quarter, have paid
+    more than was allowed. Single services paid above their allowed amount do exist (a Medicare incentive on top, a
+    second payer paying more than the first left): on the archive they come to about one and a half percent of allowed,
+    so several times that means lines are landing on the wrong service."""
     codes = sum(v[0] for k, v in services.items() if k[2] in EM_NEW or k[2] in EM_EST)
     visits = sum(r[3] for r in day_rows)
-    over = Counter()
+    allowed = sum(v[4] for v in services.values())
+    net = Counter()
     for (provider, month, code), v in services.items():
         fam = service_family(code)
         q = f"{month[:4]}-Q{(int(month[5:7]) + 2) // 3}"
-        over[(fam, q)] += v[5] - v[4]
-    worst = max(over.items(), key=lambda kv: kv[1], default=((None, None), 0))
+        net[(fam, q)] += v[5] - v[4]
+    worst = max(net.items(), key=lambda kv: kv[1], default=((None, None), 0))
     return {"visit_codes": codes, "patient_visits": visits, "visit_codes_per_visit": round(codes / visits, 3) if visits else None,
-            "paid_over_allowed_cents": max(worst[1], 0), "paid_over_allowed_where": list(worst[0]) if worst[1] > 0 else None}
+            "paid_over_allowed_cents": max(worst[1], 0), "paid_over_allowed_where": list(worst[0]) if worst[1] > 0 else None,
+            "services_paid_over_allowed": over[0], "services_paid_over_allowed_cents": over[1],
+            "services_paid_over_allowed_share": round(over[1] / allowed, 4) if allowed else None}
 
 
 def _tier(role: str | None) -> str | None:
@@ -970,21 +1009,34 @@ def build_recall(conn: sqlite3.Connection, treated: dict, last_visit: dict, last
     conn.executemany("INSERT INTO provider_recall VALUES (?,?,?,?,?)", [(k, v[0], v[1], v[2], as_of.isoformat()) for k, v in sorted(n.items())])
 
 
-def find_gaps(conn: sqlite3.Connection, last_payment: str | None) -> list[dict]:
-    """Weeks in which a payer that pays every week sent next to nothing, and then resumed. Either its remittance files for
-    those weeks never reached the folder or it paid nothing; in both cases the visits it would have paid then are not in
-    the store, and the months they fall in are less complete than the payment-lag curve alone says.
+GAP_REACH_DAYS = 75        # nearly every visit a payer pays in a given week took place in the 75 days before it
+
+
+def find_gaps(conn: sqlite3.Connection, last_payment: str | None) -> tuple[list[dict], dict]:
+    """Weeks in which a payer that pays every week sent next to nothing and then resumed, and what that costs each month
+    of service. Either its remittance files for those weeks never reached the folder or it paid nothing; either way the
+    visits it would have paid then are not in the store.
 
     A week is a gap for a payer when its primary claims are under a quarter of that payer's median week and under half
-    of even its tenth-lowest week in the six months before, which leaves alone payers that pay every other week."""
+    of even its tenth-lowest week in the six months before (which leaves alone payers that pay every other week), and
+    the same week a year earlier was not just as thin (which leaves alone a payer that is quiet every Christmas). A
+    payer is its payer id: the same payer writes under several names.
+
+    How much is missing is then measured, not modelled: for the months of service such a week would have paid, the
+    payer's claims are compared with what its usual share of everyone else's claims that month would be, and a month
+    more than a fifth short counts the difference as missing. (A payer's share moves by a tenth or more from month to
+    month on its own, so a smaller hole cannot be told from noise and is left alone.) A gap the payer made up in the
+    following weeks leaves no month short and is dropped. Returns the gaps, each with the months its payer is short,
+    and {month: share of that month's claims missing}."""
     if not last_payment:
-        return []
+        return [], {}
     try:
         end = date.fromisoformat(last_payment[:10])
     except ValueError:
-        return []
+        return [], {}
     monday = lambda d: d - timedelta(days=d.weekday())      # noqa: E731
-    weekly: dict[tuple, Counter] = defaultdict(Counter)
+    weekly: dict[str, Counter] = defaultdict(Counter)
+    names: dict[str, Counter] = defaultdict(Counter)
     first = None
     for name, pid, d, n in conn.execute(
             """SELECT COALESCE(c.payer_name, ''), COALESCE(c.payer_id, ''), t.payment_date, COUNT(*)
@@ -994,18 +1046,19 @@ def find_gaps(conn: sqlite3.Connection, last_payment: str | None) -> list[dict]:
             w = monday(date.fromisoformat(d[:10]))
         except ValueError:
             continue
-        weekly[(name, pid)][w] += n
+        key = pid or name
+        weekly[key][w] += n
+        names[key][name] += n
         first = w if first is None or w < first else first
     if first is None:
-        return []
+        return [], {}
     weeks = []
     w = first
     while w + timedelta(days=6) <= end:         # whole weeks only
         weeks.append(w)
         w += timedelta(days=7)
-    everyone = [sum(c.get(w, 0) for c in weekly.values()) for w in weeks]
     out = []
-    for (name, pid), counts in sorted(weekly.items()):
+    for key, counts in sorted(weekly.items()):
         series = [counts.get(w, 0) for w in weeks]
         if sum(series) < 500:
             continue
@@ -1018,22 +1071,75 @@ def find_gaps(conn: sqlite3.Connection, last_payment: str | None) -> list[dict]:
             ranked = sorted(hist)
             med, q10 = ranked[len(ranked) // 2], ranked[len(ranked) // 10]
             if med >= 20 and series[i] < 0.25 * med and series[i] < 0.5 * q10:
+                year_ago = [series[j] for j in (i - 53, i - 52, i - 51) if j >= 0]
+                around = sorted(series[j] for j in range(max(0, i - 60), i - 44) if abs(j - (i - 52)) > 1)
+                if year_ago and len(around) >= 8 and around[len(around) // 2] >= 0.5 * med and min(year_ago) < 0.5 * around[len(around) // 2]:
+                    continue                    # the payer was paying a year ago and that week was just as thin: the season, not a lost file
                 flagged.add(i)
-                base = sum(everyone[j] for j in range(max(0, i - 26), i)) or 1
-                low.append((i, med, round(sum(series[j] for j in range(max(0, i - 26), i)) / base, 4)))
+                low.append((i, med))
         run: list[tuple] = []
-        for k, item in enumerate(low + [None]):
+        for item in low + [None]:
             if item is not None and (not run or item[0] == run[-1][0] + 1):
                 run.append(item)
                 continue
             if run:
                 after = [counts.get(weeks[run[-1][0]] + timedelta(days=7 * k), 0) for k in range(1, 5)]     # the unfinished last week counts here
-                if any(x >= 0.5 * run[0][1] for x in after):       # it came back: a gap, not a payer that left or changed its name
-                    out.append({"payer": name, "payer_id": pid, "from": weeks[run[0][0]].isoformat(),
+                if any(x >= 0.5 * run[0][1] for x in after):       # it came back: a gap, not a payer that left or changed its id
+                    name = min(names[key].items(), key=lambda kv: (-kv[1], kv[0]))[0]
+                    out.append({"payer": name, "payer_id": key if key != name else "", "key": key, "from": weeks[run[0][0]].isoformat(),
                                 "to": (weeks[run[-1][0]] + timedelta(days=6)).isoformat(), "weeks": len(run),
-                                "seen": sum(series[i] for i, _m, _s in run), "usual": sum(m for _i, m, _s in run), "share": run[0][2]})
+                                "seen": sum(series[i] for i, _m in run), "usual": sum(m for _i, m in run)})
             run = [item] if item is not None else []
-    return out
+    if not out:
+        return [], {}
+
+    # ---- what is missing, by month of service
+    month_of: dict[str, Counter] = defaultdict(Counter)
+    everyone: Counter = Counter()
+    for key, m, n in conn.execute(
+            """SELECT k, m, COUNT(*) FROM (
+                   SELECT COALESCE(NULLIF(l.payer_id, ''), l.payer_name, '') k, substr(MIN(COALESCE(l.service_date, l.service_period_start)), 1, 7) m
+                   FROM lines l JOIN transactions t ON t.transaction_key = l.transaction_key
+                   WHERE t.superseded = 0 AND l.claim_status_code IN ('1', '19') GROUP BY l.claim_key)
+               WHERE m IS NOT NULL GROUP BY 1, 2"""):
+        month_of[key][m] += n
+        everyone[m] += n
+    touched: dict[str, set] = defaultdict(set)          # payer -> months of service one of its gaps would have paid
+    for g in out:
+        m, last = (date.fromisoformat(g["from"]) - timedelta(days=GAP_REACH_DAYS)).isoformat()[:7], g["to"][:7]
+        g["reach"] = set()
+        while m <= last:
+            g["reach"].add(m)
+            touched[g["key"]].add(m)
+            m = _add_months(m, 1)
+    short: Counter = Counter()
+    lost: dict[str, dict] = {}
+    for key, months in touched.items():
+        mine = month_of.get(key, Counter())
+        clean = sorted(m for m in everyone if m not in months and everyone[m] - mine.get(m, 0) > 0 and mine.get(m, 0) > 0)
+        for m in sorted(months):
+            # the payer's usual share of everyone else's claims, from the six nearest untouched months of the same
+            # calendar year (plans change in January), else the six nearest of any year
+            near = sorted(clean, key=lambda x: (x[:4] != m[:4], abs((int(x[:4]) - int(m[:4])) * 12 + int(x[5:7]) - int(m[5:7]))))[:6]
+            others = sum(everyone[x] - mine.get(x, 0) for x in near)
+            if not others:
+                continue
+            expected = (everyone.get(m, 0) - mine.get(m, 0)) * sum(mine.get(x, 0) for x in near) / others
+            actual = mine.get(m, 0)
+            if expected >= 20 and actual < 0.8 * expected:
+                short[m] += expected - actual
+                lost.setdefault(key, {})[m] = round(expected - actual)
+    gaps = []
+    for g in out:
+        months = {m: n for m, n in (lost.get(g["key"]) or {}).items() if m in g["reach"]}
+        if not months:
+            continue                # the payer made the week up afterwards: nothing is missing
+        # two spans of one payer that reach the same month both name it; the month's share below counts it once
+        g = dict(g, missing_by_month=months, missing=sum(months.values()))
+        del g["key"], g["reach"]
+        gaps.append(g)
+    share = {m: round(x / (everyone.get(m, 0) + x), 4) for m, x in sorted(short.items()) if x >= 1}
+    return gaps, share
 
 
 def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> dict:
@@ -1059,15 +1165,27 @@ def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> di
         made = {r[0]: (r[1] or "")[:10] for r in conn.execute("SELECT source_name, created_at FROM ema_sources WHERE created_at IS NOT NULL")}
     pulled_at: dict[str, str] = {}
     covers: set = set()                             # exports by date of service: they cover the days they hold
+    posted: set = set()                             # exports that say when each charge was posted
     for source, created, last_day, n_days, n_posted in conn.execute(
             f"SELECT source_name, MAX(substr(bill_created,1,10)), MAX(service_date), COUNT(DISTINCT service_date), COUNT(DISTINCT transaction_date) {base} GROUP BY 1"):
         floor = max(created or "", last_day or "")
         pulled_at[source] = max(made.get(source, ""), floor) if made.get(source, "") >= (last_day or "") else floor
+        if n_posted:
+            posted.add(source)
         if not (n_posted and n_posted < n_days):     # many days of service posted on few days: an export by transaction date
             covers.add(source)
+    held: dict[tuple, int] = {}
+    fullest: Counter = Counter()
+    for source, d, n in conn.execute(f"SELECT source_name, service_date, COUNT(*) {base} GROUP BY 1, 2"):
+        held[(source, d)] = n
+        fullest[d] = max(fullest[d], n)
     cover: dict[tuple, str] = {}
     for source, provider, d in conn.execute(f"SELECT DISTINCT source_name, provider, service_date {base}"):
-        if source in covers and pulled_at.get(source, "") > cover.get((provider, d), ""):
+        if source not in covers:
+            continue
+        if source in posted and held.get((source, d), 0) < 0.5 * fullest[d]:
+            continue                                # a sliver of a day another export holds in full: late charges, not the day
+        if pulled_at.get(source, "") > cover.get((provider, d), ""):
             cover[(provider, d)] = pulled_at[source]
     patient_of: dict[str, str] = {}
     for bill_id, claim_id, patient in conn.execute(f"SELECT bill_id, claim_id, patient_id {base} AND patient_id IS NOT NULL ORDER BY source_name, row_index"):
@@ -1078,7 +1196,6 @@ def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> di
     seen_sig: dict[tuple, str] = {}
     day: dict[tuple, dict] = {}
     bills: dict[tuple, list] = {}
-    first_service = last_service = None
     nameless = 0
     for (source, provider, role, d, patient, bill_id, claim_id, item, cpt, units, charge, created, location, mods) in conn.execute(
             f"""SELECT source_name, provider, provider_role, service_date, patient_id, bill_id, claim_id, bill_item_id, cpt, units, charges_cents,
@@ -1112,18 +1229,15 @@ def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> di
         else:
             p = e["pts"].get(who)
             if p is None:
-                p = e["pts"][who] = [False, False, False, False, False, False]    # new, established, high level, seen, radiation, insured
+                p = e["pts"][who] = [False, False, False, set(), False]    # new, established, high level, what was billed, insured
             if fam == "new_visit":
                 p[0] = True
             elif fam == "est_visit":
                 p[1] = True
                 p[2] = p[2] or code in ("99214", "99215")
-            if fam not in NOT_CLINIC:
-                p[3] = True
-            elif fam == "radiation":
-                p[4] = True
+            p[3].add(fam)
             if claim_id:
-                p[5] = True
+                p[4] = True
         if fam == "biopsy":
             e["lesions"] += abs(units or 1.0)
         e["charges"] += charge or 0
@@ -1136,17 +1250,21 @@ def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> di
             if b is None:
                 b = bills[(provider, bill)] = [d, created[:10], pulled_at.get(source, ""), False]
             b[3] = b[3] or fam in VISIT
+    rows = []
+    first_service = last_service = None
+    for (provider, d), e in sorted(day.items()):
+        if (provider, d) not in cover:
+            continue            # held only by an export that cannot vouch for the day: unknown, not a light day and not a day waiting
+        pts = [(p, contact_kind(p[3])) for p in e["pts"].values()]
+        seen = [p for p, kind in pts if kind in ("visit", "procedure")]          # the same rule as the remittance side
+        loc = min(e["loc"].items(), key=lambda kv: (-kv[1], kv[0]))[0] if e["loc"] else None
+        rows.append((provider, ema_id(provider), e["role"], d, len(seen), sum(1 for p in seen if p[4]), e["loose"],
+                     sum(1 for p in seen if p[0] or p[1]), sum(1 for p in seen if p[0]), sum(1 for p in seen if p[1] and not p[0]),
+                     sum(1 for p in seen if p[2]), sum(1 for _p, kind in pts if kind not in ("visit", "procedure", "radiation")),
+                     sum(1 for _p, kind in pts if kind == "radiation"),
+                     e["lesions"], e["charges"], e["clinic"], loc, cover[(provider, d)], 1 if e["named"] else 0))
         first_service = d if first_service is None or d < first_service else first_service
         last_service = d if last_service is None or d > last_service else last_service
-    rows = []
-    for (provider, d), e in sorted(day.items()):
-        pts = list(e["pts"].values())
-        seen = [p for p in pts if p[3]]
-        loc = min(e["loc"].items(), key=lambda kv: (-kv[1], kv[0]))[0] if e["loc"] else None
-        rows.append((provider, ema_id(provider), e["role"], d, len(seen), sum(1 for p in seen if p[5]), e["loose"],
-                     sum(1 for p in seen if p[0] or p[1]), sum(1 for p in seen if p[0]), sum(1 for p in seen if p[1] and not p[0]),
-                     sum(1 for p in seen if p[2]), sum(1 for p in pts if not p[3] and not p[4]), sum(1 for p in pts if not p[3] and p[4]),
-                     e["lesions"], e["charges"], e["clinic"], loc, cover.get((provider, d)), 1 if e["named"] else 0))
     conn.executemany("INSERT INTO provider_ema_days VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     last_created = max((b[1] for b in bills.values()), default=None)
     # days from the visit to the bill, for bills that hold an office visit and for the rest (a slide read or a surgery is
@@ -1182,29 +1300,15 @@ def _paid_by(cdf: list, lag: int) -> float:
     return cdf[min(lag, len(cdf) - 1)] if cdf else min(1.0, lag / 60.0)
 
 
-def month_completeness(month: str, last_payment: str | None, cdf: list, gaps: list | tuple = ()) -> float:
-    """Share of a month's visits that should have reached a remittance by the newest payment date in the store, less the
-    share that would have been paid in weeks when a payer's remittances are missing."""
+def month_completeness(month: str, last_payment: str | None, cdf: list) -> float:
+    """Share of a month's visits that should have reached a remittance by the newest payment date in the store."""
     try:
         y, m = int(month[:4]), int(month[5:7])
         p = date.fromisoformat(last_payment or "")
     except ValueError:
         return 1.0
-    spans = []
-    for g in gaps or ():
-        try:
-            spans.append((date.fromisoformat(g["from"]), min(date.fromisoformat(g["to"]), p), float(g.get("share") or 0)))
-        except (KeyError, TypeError, ValueError):
-            continue
     n = calendar.monthrange(y, m)[1]
-    tot = 0.0
-    for d in range(1, n + 1):
-        day = date(y, m, d)
-        got = _paid_by(cdf, (p - day).days)
-        for a, b, share in spans:
-            got -= share * (_paid_by(cdf, (b - day).days) - _paid_by(cdf, (a - day).days - 1))
-        tot += max(got, 0.0)
-    return round(tot / n, 3)
+    return round(sum(_paid_by(cdf, (p - date(y, m, d)).days) for d in range(1, n + 1)) / n, 3)
 
 
 def _add_months(month: str, k: int) -> str:
@@ -1219,6 +1323,7 @@ def coverage(conn: sqlite3.Connection) -> dict:
     lag = {k: v for k, v in (meta.get("lag") or {}).items() if k != "cdf"}
     cdf = (meta.get("lag") or {}).get("cdf") or []
     gaps = meta.get("gaps") or []
+    holes = meta.get("gap_months") or {}
     r = conn.execute("SELECT MIN(service_date), MAX(service_date) FROM provider_days WHERE patients > 0").fetchone()
     if not r or not r[0] or not last_pay:
         return {"months": [], "first_month": None, "last_month": None, "last_complete_month": None, "default_from": None, "default_to": None,
@@ -1231,7 +1336,7 @@ def coverage(conn: sqlite3.Connection) -> dict:
     m = first_month
     while m <= last_month:
         whole = month_completeness(m, last_pay, cdf)
-        net = month_completeness(m, last_pay, cdf, gaps) if gaps else whole
+        net = round(whole * (1 - float(holes.get(m) or 0)), 3)      # what the lag leaves, less what a payer's missing weeks took
         months.append({"month": m, "complete": net, "missing_to_gaps": round(whole - net, 3)})
         m = _add_months(m, 1)
     done = [x["month"] for x in months if x["complete"] >= COMPLETE_SHARE]
@@ -1319,6 +1424,8 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
             p["sum"]["clinic_day_allowed"] += r["clinic_allowed_cents"] or 0
             if r["place"]:
                 p["place"][r["place"]].append(r["patients"])
+            else:
+                p["sum"]["no_state_days"] += 1
     fam: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: [0, 0.0, 0, 0]))
     codes: dict[str, Counter] = defaultdict(Counter)
     for r in conn.execute("SELECT provider_id, code, family, SUM(items) n, SUM(units) u, SUM(allowed_cents) a, SUM(charge_cents) c FROM provider_services "
@@ -1390,6 +1497,7 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
                                                    "mean": round(sum(clinic) / len(clinic), 1) if clinic else None, "max": max(clinic) if clinic else None},
             "places": [{"place": k, "clinic_days": len(v), "per_day": _quantile(v, 0.5), "mean": round(sum(v) / len(v), 1)}
                        for k, v in sorted(p["place"].items(), key=lambda kv: (-len(kv[1]), kv[0])) if len(v) >= 5],
+            "clinic_days_no_state": s["no_state_days"],
             "visits": s["visits"], "new_visits": s["new_visits"], "est_visits": s["est_visits"], "proc_only": s["proc_only"],
             "other_contacts": s["other_contacts"],
             "new_share": _share(s["new_visits"], s["visits"]), "new_per_day": round(s["clinic_new"] / len(clinic), 2) if clinic else None,
