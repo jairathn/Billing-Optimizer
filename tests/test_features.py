@@ -963,3 +963,27 @@ def test_a_fixed_claim_runs_on_the_corrected_claim_clock_where_the_payer_publish
         else:
             assert grp == "Anthem / BCBS Medicare Advantage" and deadline == "2027-01-01" and "date of service" in basis
         st.close()
+
+
+# --------------------------------------------------------------------------- CMS's own code tables and the 2027 same-day rule
+
+def test_code_tables_come_from_cms_and_the_2027_same_day_rule_spares_10_day_procedures(tmp_path):
+    from remitwatch.codes import ADD_ON_CODES, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM
+    from remitwatch.detect import is_surgical
+    assert GLOBAL_DAYS["17000"] == 10 and GLOBAL_DAYS["17110"] == 10 and GLOBAL_DAYS["11300"] == 0 and GLOBAL_DAYS["11102"] == 0
+    assert GLOBAL_DAYS["14040"] == 90 and "88305" not in GLOBAL_DAYS
+    assert {"17312", "11103", "17003", "13102", "14302"} <= ADD_ON_CODES and not {"15271", "15275", "G0463"} & ADD_ON_CODES
+    assert is_surgical("17311") and is_surgical("11102") and not is_surgical("88305") and not is_surgical("17004") and not is_surgical("96372")
+    assert MEDICARE_SAME_DAY_EM["confirmed"] and MEDICARE_SAME_DAY_EM["pct"] == 0.80
+    em25 = lambda: svc("99213", "200.00", "85.00", "85.00", "CAS*CO*45*115.00~", dos="20270115", mods="25")     # noqa: E731
+    base = [claim(i, svc("99213", "200.00", "85.00", "85.00", "CAS*CO*45*115.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(1, 26)] \
+        + [claim(i, svc("11102", "180.00", "82.00", "82.00", "CAS*CO*45*98.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(100, 125)] \
+        + [claim(i, svc("17000", "120.00", "57.00", "57.00", "CAS*CO*45*63.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(200, 225)]
+    biopsy_day = claim(300, em25() + svc("11102", "180.00", "65.60", "65.60", "CAS*CO*45*114.40~", dos="20270115"), dos="20270115", cfi="16")
+    destruction_day = claim(301, em25() + svc("17000", "120.00", "45.60", "45.60", "CAS*CO*45*74.40~", dos="20270115"), dos="20270115", cfi="16")
+    st = build_store(tmp_path, base + [biopsy_day, destruction_day], payer="HUMANA", pay_date="20270201")
+    Detector(st, run_id="same-day").run()
+    under = {r[0]: r[1] for r in st.query("SELECT procedure_code, signal FROM findings WHERE category='underpayment'")}
+    assert "11102" not in under, under          # a 0-day biopsy beside a visit-25 is paid at 80 percent by rule
+    assert under.get("17000") == "UNDERPAID_VS_OWN_RATE", under     # a 10-day destruction is not in the rule: 80 percent is short
+    st.close()

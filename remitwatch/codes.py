@@ -105,47 +105,18 @@ RARC: dict[str, str] = {
 EM_CODES = {"99202", "99203", "99204", "99205", "99211", "99212", "99213", "99214", "99215"}
 EM_LEVEL = {c: int(c[-1]) for c in EM_CODES}
 
-# Add-on codes: never subject to multiple procedure reduction (modifier 51 exempt)
-ADD_ON_CODES = {"17003", "11103", "11105", "11107", "11201", "17312", "17314", "17315", "11001", "11008", "11046",
-                "11047", "15003", "15005", "15101", "15111", "15116", "15121", "15131", "15136", "15151", "15152",
-                "15156", "15157", "15201", "15221", "15241", "15261", "15271", "15272", "15273", "15274", "15275",
-                "15276", "15277", "15278", "96367", "96368", "96375", "96376", "96570", "96571", "G2211", "G0463"}
+# Add-on codes (CMS global indicator ZZZ: never reduced for multiple procedures, paid with their primary) and global
+# surgical periods, from CMS's fee schedule relative value file (remitwatch/pfs.py). Codes outside the dermatology ranges
+# that file covers and that this practice can bill as add-ons are listed by hand.
+from .pfs import PFS_INDICATORS  # noqa: E402
 
-# Global surgical period days for common dermatology procedures (Medicare)
-GLOBAL_DAYS: dict[str, int] = {}
-for _c in ["17311", "17312", "17313", "17314", "17315", "11102", "11103", "11104", "11105", "11106", "11107",
-           "17000", "17003", "17004", "17110", "17111", "11900", "11901", "11055", "11056", "11057", "11720", "11721",
-           "96910", "96912", "96913", "96920", "96921", "96922", "88305", "88304", "88307", "88312", "88341", "88342",
-           "99024", "96372", "96401", "96402", "11981", "11982", "11983", "10021", "40490", "11755", "11760"]:
-    GLOBAL_DAYS[_c] = 0
-for _c in ["11200", "11201", "11300", "11301", "11302", "11303", "11305", "11306", "11307", "11308", "11310", "11311",
-           "11312", "11313", "11400", "11401", "11402", "11403", "11404", "11406", "11420", "11421", "11422", "11423",
-           "11424", "11426", "11440", "11441", "11442", "11443", "11444", "11446", "11600", "11601", "11602", "11603",
-           "11604", "11606", "11620", "11621", "11622", "11623", "11624", "11626", "11640", "11641", "11642", "11643",
-           "11644", "11646", "12001", "12002", "12004", "12005", "12006", "12007", "12011", "12013", "12014", "12015",
-           "12016", "12017", "12018", "12031", "12032", "12034", "12035", "12036", "12037", "12041", "12042", "12044",
-           "12045", "12046", "12047", "12051", "12052", "12053", "12054", "12055", "12056", "12057", "13100", "13101",
-           "13102", "13120", "13121", "13122", "13131", "13132", "13133", "13150", "13151", "13152", "13153", "10060",
-           "10061", "10080", "10081", "10120", "10121", "10140", "10160", "11042", "11043", "11044", "11450", "11451",
-           "11462", "11463", "11470", "11471", "11740", "11750", "11765", "11770", "11771", "11772", "17106", "17107",
-           "17108", "17250", "17260", "17261", "17262", "17263", "17264", "17266", "17270", "17271", "17272", "17273",
-           "17274", "17276", "17280", "17281", "17282", "17283", "17284", "17286", "17340", "17360", "17380", "17999",
-           "19000", "19001", "20550", "20551", "20600", "20605", "20610", "40800", "40808", "40810", "40812", "41100",
-           "41105", "41108", "41110", "54050", "54055", "54056", "54057", "54060", "56501", "56515", "67810", "67840",
-           "67850", "68020", "69100", "69105", "69110", "69120"]:
-    GLOBAL_DAYS[_c] = 10
-for _c in ["14000", "14001", "14020", "14021", "14040", "14041", "14060", "14061", "14301", "14302", "15100", "15110",
-           "15115", "15120", "15130", "15135", "15150", "15155", "15200", "15220", "15240", "15260", "15570", "15572",
-           "15574", "15576", "15730", "15731", "15733", "15734", "15736", "15738", "15740", "15750", "15760", "15770",
-           "15780", "15781", "15782", "15783", "15786", "15787", "15788", "15789", "15792", "15793", "15819", "15820",
-           "15821", "15822", "15823", "15824", "15825", "15826", "15828", "15829", "15830", "15832", "15833", "15834",
-           "15835", "15836", "15837", "15838", "15839", "15840", "15841", "15842", "15845", "15847", "15860", "15876",
-           "15877", "15878", "15879", "15920", "15922", "15931", "15933", "15934", "15935", "15936", "15937", "15940",
-           "15941", "15944", "15945", "15946", "15950", "15951", "15952", "15953", "15956", "15958", "15999", "21011",
-           "21012", "21013", "21014", "21015", "21016", "67900", "67901", "67902", "67903", "67904", "67906", "67908",
-           "67909", "67911", "67912", "67914", "67915", "67916", "67917", "67921", "67922", "67923", "67924", "67930",
-           "67935", "67938", "67950", "67961", "67966", "67971", "67973", "67974", "67975"]:
-    GLOBAL_DAYS[_c] = 90
+ADD_ON_CODES = {c for c, (glob, _m) in PFS_INDICATORS.items() if glob == "ZZZ"} | {"96367", "96368", "96375", "96376", "G2211"}
+
+# Global surgical period days (Medicare): 0, 10 or 90 for codes with a global period; codes without one are absent.
+GLOBAL_DAYS: dict[str, int] = {c: int(glob) for c, (glob, _m) in PFS_INDICATORS.items() if glob in ("000", "010", "090")}
+
+# Codes Medicare reduces as a second or later procedure on the same day (multiple-procedure indicator 2 or 3).
+MPPR_CODES = {c for c, (_g, mult) in PFS_INDICATORS.items() if mult in ("2", "3")}
 
 RADIATION_CODES = {"77401", "77402", "77407", "77412", "77427", "77431", "77432", "77435", "77436", "77437", "77280",
                    "77285", "77290", "77295", "77300", "77301", "77306", "77307", "77316", "77317", "77318", "77321",
@@ -408,10 +379,11 @@ LEGAL = {
     "MEDICARE": "This is a request for redetermination under 42 CFR 405.940 et seq., submitted within 120 days of the initial determination.",
 }
 
-# Medicare same-day visit policy reported for the CY 2027 physician fee schedule final rule (released November 2026):
-# when an office visit with modifier 25 is billed with a 0-day global procedure, the lower-paid service is paid at 80 percent.
-# Trade-press reports only; confirm against the Federal Register text before relying on it.
-MEDICARE_SAME_DAY_EM = {"effective": "2027-01-01", "pct": 0.80, "confirmed": False}
+# Medicare same-day visit policy, CY 2027 physician fee schedule final rule (CMS-1848-F; CMS fact sheet November 4, 2026;
+# Federal Register November 9, 2026): when a separately identifiable office visit is furnished on the same day as a 0-day
+# global procedure, the most expensive service (procedure or visit) is paid at 100 percent and the other same-day
+# procedures and visits at 80 percent. The proposed 50 percent and the 10- and 90-day globals were not finalized.
+MEDICARE_SAME_DAY_EM = {"effective": "2027-01-01", "pct": 0.80, "confirmed": True}
 
 
 def payer_group_kind(name: str | None, cfi: str | None) -> tuple[str, str]:

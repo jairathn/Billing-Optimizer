@@ -37,7 +37,7 @@ The Kentucky statutes are at `https://apps.legislature.ky.gov/law/statutes/statu
 | Cigna: payment review within 180 days | research note |
 | Anthem Medicare Advantage: reconsideration within 120 days of the EOP, appeal within 30 days | research note quoting the provider guidebook |
 | Indiana Code 27-13-36.2-4.5 (the HMO counterpart of 27-8-5.7-6.5) | quoted by a research agent; the insurer section was re-read, this one was not |
-| Medicare from January 1, 2027: when a visit with modifier 25 is billed with a 0-day global procedure, the lower-paid of the two is paid at 80 percent | trade press reports of the CY 2027 fee schedule final rule (released November 2026). Not checked against the Federal Register. The detection engine already expects it for Medicare lines from that date so they are not flagged, and will flag other payers that copy it |
+| Medicare from January 1, 2027: when an office visit with modifier 25 is furnished on the same day as a 0-day global procedure, the most expensive service is paid at 100 percent and the other visits and 0-day procedures at 80 percent (10- and 90-day globals and the proposed 50 percent were not finalized). G2211 becomes modifier B1 | CMS, CY 2027 Physician Fee Schedule final rule fact sheet (November 4, 2026); Federal Register November 9, 2026 (CMS-1848-F). The engine expects the 80 percent for Medicare and Medicare Advantage lines from that date, in denial sizing and in the underpayment check, using CMS's own global periods (remitwatch/pfs.py) |
 | Anthropic signs a BAA for HIPAA-ready API organisations; the Messages API is covered | Anthropic privacy centre article, read through a search summary |
 | Hosting: AWS, Google Cloud and Azure sign a BAA at no charge; Fly.io and Render sell HIPAA plans; GitHub Actions has no BAA | research notes, pricing as of November 2026 |
 
@@ -45,5 +45,5 @@ The Kentucky statutes are at `https://apps.legislature.ky.gov/law/statutes/statu
 
 1. The filing window in each executed participation agreement. It overrides the manual.
 2. Whether Anthem's two-year window applies to federal employee plan claims processed by Anthem. The application uses 180 days for those to be safe.
-3. The Federal Register text of the 2027 same-day visit rule and the reason codes Medicare will use for it.
+3. The reason codes Medicare will use on remittances for the 2027 same-day visit rule, and whether it stacks with the multiple-procedure reduction (no CMS change request yet).
 4. Which plans are self-funded, which decides whether the Kentucky statutes or ERISA governs a dispute.

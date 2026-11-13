@@ -64,8 +64,8 @@ import sqlite3
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, appeal_rule, carc_text,
-                    code_category, corrected_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
+from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, MPPR_CODES, appeal_rule,
+                    carc_text, code_category, corrected_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
@@ -73,11 +73,12 @@ DETECT_RULES = "2.3"
 
 
 def _rules_hash() -> str:
-    """This file and the ones whose rules it applies: payer windows and reason codes (codes.py), fee families
-    (fees.py), and how remittance lines are tied to EMA rows (link.py)."""
+    """This file and the ones whose rules it applies: payer windows and reason codes (codes.py), CMS's global periods
+    and multiple-procedure indicators (pfs.py), fee families (fees.py), and how remittance lines are tied to EMA rows
+    (link.py)."""
     h = hashlib.sha256()
     here = os.path.dirname(os.path.abspath(__file__))
-    for name in ("detect.py", "codes.py", "fees.py", "link.py"):
+    for name in ("detect.py", "codes.py", "fees.py", "link.py", "pfs.py"):
         with open(os.path.join(here, name), "rb") as fh:
             h.update(fh.read())
     return h.hexdigest()[:8]
@@ -296,7 +297,9 @@ def usual_amount(cnt: Counter) -> tuple[int, int]:
 
 
 def is_surgical(code: str | None) -> bool:
-    return bool(code) and code in GLOBAL_DAYS and code not in ADD_ON_CODES
+    """A procedure Medicare ranks and reduces as a second or later procedure on the same day (CMS multiple-procedure
+    indicator 2 or 3). Add-ons, pathology, injections and other codes CMS does not reduce are not ranked."""
+    return bool(code) and code in MPPR_CODES and code not in ADD_ON_CODES
 
 
 SECOND_RATE_MIN_LINES = 5        # a lower amount the payer allowed this often for a code is a rule of the payer's, not a one-off
@@ -719,9 +722,12 @@ class Detector:
         self.conn.commit()
 
     def _same_day_policy_claim(self, l: dict) -> bool:
-        """Medicare's reported 2027 same-day rule: a visit with modifier 25 billed with a 0-day global procedure has the
-        lower-paid of the two paid at 80 percent. Such lines are kept out of the 2027 Medicare baselines."""
-        if l.get("payer_kind") != "medicare" or (l.get("service_date") or "") < MEDICARE_SAME_DAY_EM["effective"]:
+        """Medicare's same-day rule from 2027 (CY 2027 physician fee schedule final rule): when an office visit with
+        modifier 25 is billed on the same day as a 0-day global procedure, the most expensive service is paid at 100
+        percent and the other visits and 0-day procedures at 80 percent. Applied to Medicare Advantage too: a plan that
+        follows Medicare's payment rules pays the same way, and one that pays in full is not shown as underpaying. Such
+        lines are kept out of the 2027 baselines."""
+        if l.get("payer_kind") not in ("medicare", "medicare_advantage") or (l.get("service_date") or "") < MEDICARE_SAME_DAY_EM["effective"]:
             return False
         claim_lines = self.lines_by_claim.get(l["claim_key"], [])
         has_em25 = any(o.get("procedure_code") in EM_CODES and "25" in o["modifiers_list"] for o in claim_lines)
@@ -778,12 +784,18 @@ class Detector:
             pct, learned = self.mppr_pct(l)
             note = " (this payer's usual practice)" if learned else ""
             return int(round(rate * pct)), f"{basis}; multiple-procedure rank {rank} -> {int(pct*100)}%{note}"
-        if self._same_day_policy_claim(l):
-            others = [o for o in self.lines_by_claim.get(l["claim_key"], []) if o["line_key"] != l["line_key"] and (o.get("allowed_cents") or 0) > 0]
-            if any((o.get("allowed_cents") or 0) > rate for o in others):
-                pct = MEDICARE_SAME_DAY_EM["pct"]
-                return int(round(rate * pct)), f"{basis}; Medicare same-day visit and procedure rule from {MEDICARE_SAME_DAY_EM['effective']} -> {int(pct*100)}%"
+        if self._same_day_reduced(l, rate):
+            pct = MEDICARE_SAME_DAY_EM["pct"]
+            return int(round(rate * pct)), f"{basis}; Medicare same-day visit and procedure rule from {MEDICARE_SAME_DAY_EM['effective']} -> {int(pct*100)}%"
         return rate, basis
+
+    def _same_day_reduced(self, l: dict, rate: int) -> bool:
+        """True when the same-day rule pays this line at 80 percent: the rule covers its claim and another service on
+        the claim was worth more, so this one is not the most expensive."""
+        if not self._same_day_policy_claim(l):
+            return False
+        others = [o for o in self.lines_by_claim.get(l["claim_key"], []) if o["line_key"] != l["line_key"] and (o.get("allowed_cents") or 0) > 0]
+        return any((o.get("allowed_cents") or 0) > rate for o in others)
 
     def downcode_expected(self, l: dict, billed: str, paid_code: str, allowed: int) -> tuple[int | None, str]:
         """Expected allowed for the billed code of a downcoded line. Where the payer has no baseline for this place of
@@ -1675,6 +1687,10 @@ class Detector:
                     if c59 > 0:
                         self._emit("MPPR_EXCESS", "underpayment", "high", "appeal", f"Multiple-procedure reduction applied to add-on code {code}", l, allowed + c59, c59, "59", rarc, {"basis": basis})
                         continue
+                if self._same_day_reduced(l, rate):
+                    # paid at 80 percent by Medicare's same-day rule (and by a Medicare Advantage plan that follows it)
+                    rate = int(round(rate * MEDICARE_SAME_DAY_EM["pct"]))
+                    basis = f"{basis}; Medicare same-day visit and procedure rule from {MEDICARE_SAME_DAY_EM['effective']} -> 80%"
                 if allowed < rate and (rate - allowed) >= 200 and (rate - allowed) / rate >= 0.05:
                     one_off = ("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal",
                                f"{code} allowed ${allowed/100:.2f} vs usual ${rate/100:.2f} ({l['payer_group']})", l, rate, rate - allowed, top, rarc,
