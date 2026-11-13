@@ -1061,6 +1061,20 @@ def _activity(fn, *args):
         conn.close()
 
 
+@app.get("/api/brief")
+def brief(_: str = Depends(require_auth)):
+    """Everything the home screen shows in one call: the open work still inside its filing window by the kind of work it
+    takes and what falls due soon, what came back, the bigger levers that are not claim by claim (payer rates against
+    Medicare, fees below what payers allow, payment fees, denial causes that keep recurring) and what in the data is
+    hiding money. About the practice as a whole, so it is open to every login."""
+    from . import insights
+    conn = db()
+    try:
+        return insights.brief(conn)
+    finally:
+        conn.close()
+
+
 @app.get("/api/coverage")
 def coverage(_: str = Depends(require_auth)):
     """How complete the newest months of service are, and the weeks in which a payer that pays every week sent next to

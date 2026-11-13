@@ -1,0 +1,246 @@
+"""
+What the home screen says: the work still inside a filing window grouped by the kind of work it takes, the bigger
+levers that are not claim by claim (payer rates against Medicare, fees set below what payers allow, payment fees,
+denial causes that keep recurring), and what in the data is hiding money (a stale feed, missing remittance weeks, EMA
+exports that miss visits, deadlines resting on unconfirmed rules).
+
+Everything here reads tables the dashboard's serverless copy keeps (findings, payer_rates, exposure, meta), so it
+works on both hosts. Amounts are cents.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import date, timedelta
+
+OPEN = ("open", "in_progress", "appealed")
+
+# The kind of work each finding takes, in the order the home screen lists them. A signal not named here falls to its
+# action (fix and resend, appeal, ask the payer) and then to "review".
+WORK_TYPES: list[dict] = [
+    {"key": "fix", "label": "Fix and resend", "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send it again before the date shown."},
+    {"key": "note", "label": "Appeal with the visit note", "how": "The payer says the visit or level was not supported, or bundled a separately documented visit. Send the note with the appeal; the site drafts the letter."},
+    {"key": "rules", "label": "Appeal on the coding rules", "how": "The payer applied a bundling, frequency or duplicate rule that the claim does not break. The letter cites the rule; a note is rarely needed."},
+    {"key": "front", "label": "Front desk: authorization, eligibility, coverage", "how": "Denied for an authorization, coverage or enrollment problem. Get the retro-authorization or the right coverage, then resend or bill the patient."},
+    {"key": "rate", "label": "Ask the payer to pay its usual rate", "how": "Paid below what this payer normally allows for the code. One call or portal request per claim, or one for a whole pattern."},
+    {"key": "review", "label": "Look into", "how": "Needs a person to decide what happened."},
+]
+_WORK_OF = {
+    "fix": {"DENIED_MISSING_MODIFIER", "DENIED_CODING", "DENIED_MISSING_INFO", "DENIED_MISSING_PRIMARY", "EM_BUNDLED_NO_MODIFIER", "EM_BUNDLED_MOD57_MINOR"},
+    "note": {"EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24", "DENIED_MEDICAL_NECESSITY", "DENIED_LEVEL_OF_SERVICE", "DOWNCODE_SVC06",
+             "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE", "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED", "CODE_CHANGED"},
+    "rules": {"PROCEDURE_BUNDLED", "ADDON_BUNDLED", "MPPR_EXCESS", "DENIED_DUPLICATE_UNPAID", "DENIED_FREQUENCY", "DENIED_OTHER"},
+    "front": {"DENIED_AUTH", "DENIED_NONCOVERED", "DENIED_PROVIDER", "CLAIM_DENIED_UNPAID", "DENIED_TIMELY_FILING"},
+    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE"},
+}
+SIGNAL_WORK = {sig: key for key, sigs in _WORK_OF.items() for sig in sigs}
+WORK_SIGNALS = set(SIGNAL_WORK)
+
+
+def work_type(signal: str | None, actionable: str | None) -> str:
+    if signal in SIGNAL_WORK:
+        return SIGNAL_WORK[signal]
+    return {"correct_and_resubmit": "fix", "appeal": "rules"}.get(actionable or "", "review")
+
+
+def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
+    cur = conn.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _tables(conn: sqlite3.Connection) -> set:
+    return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def _meta(conn: sqlite3.Connection, key: str):
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
+    except (sqlite3.Error, ValueError, TypeError):
+        return None
+
+
+def newest_payment(conn: sqlite3.Connection) -> str | None:
+    if "transactions" not in _tables(conn):
+        return None
+    r = conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
+    return r[0] if r and r[0] else None
+
+
+def work(conn: sqlite3.Connection, today: str) -> dict:
+    """Open work still inside its filing window, by the kind of work it takes, with what falls due in 7 and 30 days.
+    A routine-rate pattern counts once, on its own latest date (its claims' dates are on the finding)."""
+    soon7 = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
+    soon30 = (date.fromisoformat(today) + timedelta(days=30)).isoformat()
+    out = {t["key"]: dict(t, n=0, cents=0, due7_n=0, due7_cents=0, due30_n=0, due30_cents=0, working_n=0) for t in WORK_TYPES}
+    for r in conn.execute(f"""SELECT signal, actionable, status, appeal_deadline, COALESCE(shortfall_cents,0) FROM findings
+                              WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0 AND appeal_deadline >= ?
+                                AND category IN ('denial','bundling','downcoding','underpayment')""", OPEN + (today,)):
+        sig, act, status, dl, cents = r
+        w = out[work_type(sig, act)]
+        w["n"] += 1
+        w["cents"] += cents
+        if status != "open":
+            w["working_n"] += 1
+        if dl < soon7:
+            w["due7_n"] += 1
+            w["due7_cents"] += cents
+        if dl < soon30:
+            w["due30_n"] += 1
+            w["due30_cents"] += cents
+    types = [out[t["key"]] for t in WORK_TYPES if out[t["key"]]["n"]]
+    total = {k: sum(t[k] for t in types) for k in ("n", "cents", "due7_n", "due7_cents", "due30_n", "due30_cents", "working_n")}
+    expired = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status IN ({','.join('?' * len(OPEN))})
+                               AND COALESCE(stale,0)=0 AND appeal_deadline < ? AND category IN ('denial','bundling','downcoding','underpayment')""",
+                           OPEN + (today,)).fetchone()
+    return {"types": types, "total": total, "expired_n": expired[0], "expired_cents": expired[1]}
+
+
+def recovered(conn: sqlite3.Connection, today: str) -> dict:
+    """What came back: findings marked recovered, by a person or by a later payment, in the last 30 days and this year."""
+    d30 = (date.fromisoformat(today) - timedelta(days=30)).isoformat()
+    year = today[:4]
+    r = conn.execute("""SELECT COALESCE(SUM(CASE WHEN COALESCE(recovered_date, status_changed_at, last_seen) >= ? THEN recovered_cents END),0),
+                               COALESCE(SUM(CASE WHEN COALESCE(recovered_date, status_changed_at, last_seen) >= ? THEN 1 END),0),
+                               COALESCE(SUM(CASE WHEN substr(COALESCE(recovered_date, status_changed_at, last_seen),1,4) = ? THEN recovered_cents END),0)
+                        FROM findings WHERE status='resolved' AND COALESCE(recovered_cents,0) > 0""", (d30, d30, year)).fetchone()
+    return {"last30_cents": r[0], "last30_n": r[1], "year_cents": r[2], "year": year}
+
+
+def contract_levers(conn: sqlite3.Connection, newest: str | None) -> dict:
+    """Each commercial and Medicare Advantage payer's usual office rates against what Medicare pays the practice for the
+    same codes, over the last full year of volume: the payer's mode times each code's lines, against Medicare's. Only
+    codes with at least 20 clean lines carry a rate. A payer below Medicare is a contract question, not an appeal."""
+    if not newest or not {"payer_rates", "exposure"} <= _tables(conn):
+        return {"year": None, "payers": []}
+    year = str(int(newest[:4]) - 1) if newest[5:7] < "12" else newest[:4]
+    rates = {}
+    for r in conn.execute("""SELECT payer_group, code, tier, mode_cents, medicare_cents FROM payer_rates
+                             WHERE year=? AND pos_class='office' AND n >= 20 AND medicare_cents > 0 AND mode_cents > 0""", (year,)):
+        rates[(r[0], r[1], r[2])] = (r[3], r[4])
+    agg: dict[str, dict] = {}
+    for grp, kind, code, tier, lines in conn.execute("""SELECT payer_group, payer_kind, code, tier, SUM(lines) FROM exposure
+                                                      WHERE substr(month,1,4)=? AND pos_class='office' AND payer_kind IN ('commercial','medicare_advantage')
+                                                      GROUP BY 1,2,3,4""", (year,)):
+        rt = rates.get((grp, code, tier))
+        if not rt or not lines:
+            continue
+        a = agg.setdefault(grp, {"payer_group": grp, "payer_kind": kind, "lines": 0, "payer_cents": 0, "medicare_cents": 0, "em_payer": 0, "em_medicare": 0})
+        a["lines"] += lines
+        a["payer_cents"] += rt[0] * lines
+        a["medicare_cents"] += rt[1] * lines
+        if code.startswith("992"):
+            a["em_payer"] += rt[0] * lines
+            a["em_medicare"] += rt[1] * lines
+    payers = []
+    for a in agg.values():
+        if a["lines"] < 200 or not a["medicare_cents"]:
+            continue
+        payers.append({"payer_group": a["payer_group"], "payer_kind": a["payer_kind"], "lines": a["lines"],
+                       "pct_of_medicare": round(a["payer_cents"] / a["medicare_cents"], 3),
+                       "visit_pct_of_medicare": round(a["em_payer"] / a["em_medicare"], 3) if a["em_medicare"] else None,
+                       "gap_cents": a["medicare_cents"] - a["payer_cents"]})
+    payers.sort(key=lambda p: -p["gap_cents"])
+    return {"year": year, "payers": payers}
+
+
+def fee_levers(conn: sqlite3.Connection) -> dict:
+    """Fees set below what a payer allows (CHARGE_BELOW_RATE) and payment-vendor fees (FEE_SKIM), last two years."""
+    caps = _rows(conn, """SELECT procedure_code code, payer_group, year, shortfall_cents cents, title FROM findings
+                          WHERE signal='CHARGE_BELOW_RATE' AND COALESCE(stale,0)=0 ORDER BY year DESC, shortfall_cents DESC""")
+    fees = _rows(conn, """SELECT payer_group, SUM(shortfall_cents) cents, COUNT(*) months, MAX(month) last_month FROM findings
+                          WHERE signal='FEE_SKIM' AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') GROUP BY payer_group ORDER BY cents DESC""")
+    return {"charge_caps": caps, "charge_cap_cents": sum(c["cents"] or 0 for c in caps), "payment_fees": fees,
+            "payment_fee_cents": sum(f["cents"] or 0 for f in fees)}
+
+
+CAUSES = {
+    "DENIED_AUTH": "No authorization", "DENIED_MISSING_INFO": "Information missing on the claim", "DENIED_MISSING_MODIFIER": "Modifier missing or wrong",
+    "DENIED_CODING": "Code or modifier combination", "DENIED_NONCOVERED": "Not covered by the plan", "DENIED_MEDICAL_NECESSITY": "Medical necessity",
+    "DENIED_FREQUENCY": "Frequency or units", "DENIED_DUPLICATE_UNPAID": "Called a duplicate", "DENIED_TIMELY_FILING": "Filed too late",
+    "DENIED_PROVIDER": "Provider enrollment", "DENIED_MISSING_PRIMARY": "Add-on without its main code", "CLAIM_DENIED_UNPAID": "Whole claim denied",
+    "EM_BUNDLED_MOD25": "Visit with modifier 25 not paid", "EM_BUNDLED_NO_MODIFIER": "Visit billed with a procedure, no modifier",
+    "EM_BUNDLED_MOD57_MINOR": "Modifier 57 on a minor procedure", "PROCEDURE_BUNDLED": "Procedure bundled into another",
+}
+
+
+def denial_causes(conn: sqlite3.Connection, newest: str | None) -> list[dict]:
+    """The causes that keep coming back, by payment date: the last 90 days against the 90 before. Prevention, not
+    appeals: each is a habit or a front-desk step to change."""
+    if not newest:
+        return []
+    end = date.fromisoformat(newest[:10])
+    a, b = (end - timedelta(days=90)).isoformat(), (end - timedelta(days=180)).isoformat()
+    out = []
+    for sig, label in CAUSES.items():
+        r = conn.execute("""SELECT SUM(CASE WHEN payment_date > ? THEN 1 ELSE 0 END), SUM(CASE WHEN payment_date > ? THEN shortfall_cents ELSE 0 END),
+                                   SUM(CASE WHEN payment_date > ? AND payment_date <= ? THEN 1 ELSE 0 END),
+                                   SUM(CASE WHEN payment_date > ? AND payment_date <= ? THEN shortfall_cents ELSE 0 END)
+                            FROM findings WHERE signal=? AND COALESCE(stale,0)=0""", (a, a, b, a, b, a, sig)).fetchone()
+        n90, c90, nprev, cprev = (r[0] or 0), (r[1] or 0), (r[2] or 0), (r[3] or 0)
+        if n90 or nprev:
+            out.append({"signal": sig, "label": label, "work": work_type(sig, None), "n90": n90, "cents90": c90, "n_prev": nprev, "cents_prev": cprev})
+    out.sort(key=lambda x: -x["cents90"])
+    return out
+
+
+def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> list[dict]:
+    """What in the data is hiding money, most urgent first. Each item says what to do and who does it."""
+    items = []
+    if newest:
+        age = (date.fromisoformat(today) - date.fromisoformat(newest[:10])).days
+        items.append({"key": "feed", "ok": age <= 10, "days": age, "newest": newest[:10],
+                      "title": "Remittance files are current" if age <= 10 else f"No new remittance files for {age} days",
+                      "detail": "Payments after the newest file are not in the site, so worked and paid items still show as open." if age > 10 else "",
+                      "who": "Billing lead: put the latest TriZetto downloads in the Dropbox folder."})
+    info = _meta(conn, "activity:info") or {}
+    gaps = info.get("gaps") or []
+    if gaps:
+        weeks = sum(int(g.get("weeks") or 0) for g in gaps)
+        short: dict[str, int] = {}          # a payer's gaps share the months they leave short, so take each payer's largest
+        for g in gaps:
+            key = g.get("payer_id") or g.get("payer") or ""
+            short[key] = max(short.get(key, 0), int(g.get("missing") or 0))
+        missing = sum(short.values())
+        items.append({"key": "missing_weeks", "ok": False, "n": len(gaps), "weeks": weeks, "payers": len(short), "claims": missing,
+                      "title": f"{weeks} {'week' if weeks == 1 else 'weeks'} of remittances look missing from {len(short)} {'payer' if len(short) == 1 else 'payers'}",
+                      "detail": f"About {missing:,} claims those weeks would have paid are not in the site.",
+                      "who": "Billing lead, with TriZetto: send the files for those weeks again."})
+    ema = _meta(conn, "ema:coverage") or {}
+    thin = [w for w in ema.get("weeks") or [] if w.get("claims", 0) >= ema.get("min_claims", 30) and w.get("in_ema", 0) < ema.get("share", 0.8) * w["claims"]]
+    if thin:
+        items.append({"key": "ema_gaps", "ok": False, "n": len(thin), "weeks": [w["week"] for w in thin],
+                      "title": f"EMA charge exports miss {len(thin)} {'week' if len(thin) == 1 else 'weeks'} of visits",
+                      "detail": "What was billed cannot be checked against what was paid for those visits.",
+                      "who": "Practice administrator: pull Encounter & Charge Lines again for those dates of service."})
+    r = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0
+                         AND appeal_deadline >= ? AND deadline_basis LIKE '%not confirmed%'""", OPEN + (today,)).fetchone()
+    if r[0]:
+        items.append({"key": "deadlines", "ok": False, "n": r[0], "cents": r[1],
+                      "title": f"{r[0]:,} open items rest on a filing window not yet confirmed",
+                      "detail": "The date shown is a conservative default for that payer type; the contract or the payer's manual decides.",
+                      "who": "Practice administrator: check the window in the payer's agreement."})
+    h = conn.execute(f"""SELECT COUNT(*), SUM(ema_handling IS NOT NULL) FROM findings WHERE status IN ({','.join('?' * len(OPEN))})
+                         AND COALESCE(stale,0)=0 AND appeal_deadline >= ? AND category IN ('denial','bundling','downcoding','underpayment')""",
+                     OPEN + (today,)).fetchone()
+    if h[0]:
+        share = (h[1] or 0) / h[0]
+        if share < 0.5:
+            items.append({"key": "ema_handling", "ok": False, "share": round(share, 3),
+                          "title": f"EMA's side is known for {share:.0%} of the open work",
+                          "detail": "For the rest the site cannot tell whether a biller already wrote it off, moved it to the patient or resent it.",
+                          "who": "Practice administrator: export ERA & Payment Line Adjustments every week (and once from November 2024)."})
+    return items
+
+
+def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
+    """Everything the home screen shows, in one call."""
+    today = today or date.today().isoformat()
+    tables = _tables(conn)
+    if "findings" not in tables:
+        return {"ready": False}
+    newest = newest_payment(conn)
+    return {"ready": True, "today": today, "newest_payment": newest, "work": work(conn, today), "recovered": recovered(conn, today),
+            "contracts": contract_levers(conn, newest), "fees": fee_levers(conn), "causes": denial_causes(conn, newest),
+            "health": data_health(conn, newest, today), "work_types": WORK_TYPES}
