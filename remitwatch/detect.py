@@ -1566,7 +1566,14 @@ class Detector:
                     continue
                 if top in DUP_CARCS:
                     have = self.paid_cover(bill_of(l["patient_control_number"]), code, l.get("service_date"), exp)
-                    if self.units_paid(have) < self.units_billed(l["claim_key"], code, l.get("service_date")):
+                    # Units at stake: this line's, plus lines of the code and date paid on this same claim (a second specimen
+                    # denied as a duplicate of the first). Other lines denied as duplicates are not counted: a resubmission
+                    # that repeats a paid service three times is three copies of one service, not three services.
+                    need = abs(l.get("original_units") or l.get("paid_units") or 1) + sum(
+                        abs(o.get("original_units") or o.get("paid_units") or 1) for o in self.lines_by_claim.get(l["claim_key"], [])
+                        if o["line_key"] != l["line_key"] and o.get("procedure_code") == code and o.get("service_date") == l.get("service_date")
+                        and (o.get("paid_cents") or 0) > 0)
+                    if self.units_paid(have) < need:
                         self._emit("DENIED_DUPLICATE_UNPAID", "denial", "medium", "review", f"{code} denied as duplicate but never paid", l, exp, exp, top, rarc, {"basis": basis})
                     self._emit = emit
                     continue

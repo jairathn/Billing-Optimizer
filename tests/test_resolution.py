@@ -259,6 +259,22 @@ def test_a_bills_finding_stays_on_its_submission_and_a_denial_after_someone_acte
     assert rows == [("CB0000300C017", "appealed"), ("CB0000300C031", "open")]
     store.close()
 
+
+def test_a_resubmission_that_repeats_a_paid_service_is_not_three_unpaid_services(tmp_path):
+    """Seen in the archive: a Mohs stage paid once, then a later remittance for the same claim listing the code three
+    times, all denied as duplicates. One service, paid: nothing to list. A second specimen denied as a duplicate of a line
+    paid on the same claim is still listed (tests/review3/test_r3_siblings.py)."""
+    who = "ELM*BO****MI*W55500302"
+    mohs = lambda paid: svc("17311", "1200.00", paid, paid if float(paid) else None, "CAS*CO*45*500.00~" if float(paid) else "CAS*CO*18*1200.00~")
+    head = lambda i, n: (f"CLP*CB{i:07d}C017*1*{1200 * n:.2f}*{'700.00' if n == 1 else '0.00'}*0.00*12*PC{i}*11~NM1*QC*1*{who}~"
+                         f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~")
+    store = build_store(tmp_path, clean_visits(1, 25, "17311", "1200.00", "700.00") + [head(300, 1) + mohs("700.00")], pay_date="20260415")
+    store.close()
+    store = build_store(tmp_path, [head(300, 3) + mohs("0.00") * 3], pay_date="20260520")
+    Detector(store, run_id="t").run()
+    assert store.query("SELECT COUNT(*) FROM findings WHERE signal='DENIED_DUPLICATE_UNPAID'")[0][0] == 0
+    store.close()
+
 # --------------------------------------------------------------------------- what the practice manager expected to close
 def test_a_duplicates_denial_closes_when_the_service_was_already_paid_on_another_claim(tmp_path):
     store = build_store(tmp_path, base_visits() + [visit(300, "ASH*RO****MI*W55500304")], pay_date="20260415")
