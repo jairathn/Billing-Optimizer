@@ -365,7 +365,14 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
 FINDING_COLS = ("finding_id, signal, category, severity, actionable, title, patient_control_number, claim_key, line_key, payer_name, payer_group, payer_kind, "
                 "rendering_provider_name, rendering_provider_npi, provider_tier, service_date, payment_date, year, procedure_code, modifiers, original_procedure_code, "
                 "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, ema_handling, status, notes, first_seen, last_seen, "
-                "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note")
+                "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note, hint")
+
+
+def _finding_cols() -> str:
+    """FINDING_COLS, with NULL for a column the store does not have yet. A store saved by an earlier release lacks the
+    newest columns until the next detection run adds them, and the dashboard must work in that window."""
+    have = {r["name"] for r in rows("PRAGMA table_info(findings)")}
+    return ", ".join(c if c in have else f"NULL AS {c}" for c in (x.strip() for x in FINDING_COLS.split(",")))
 
 
 EXTRA_FILTERS = {"plan": "COALESCE(plan,'')", "billed_code": "billed_code", "code_pair": "code_pair", "month": "month", "modifier": "modifier_class",
@@ -525,7 +532,7 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
                          _extra(request), patient_of)
     order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": "appeal_deadline ASC", "payer": "payer_group, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
-    data = _with_patient(rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset)))
+    data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset)))
     return {"total": total["n"], "shortfall_cents": total["shortfall_cents"], "items": data}
 
 
@@ -546,7 +553,7 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                  patient_of: Optional[str] = Query(None, max_length=200), request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
                          _extra(request), patient_of)
-    data = rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
+    data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
     if SHOW_PHI:
         _with_patient(data)     # with names hidden the file carries the claim ID only: initials beside a date and a clinician would point at a person
 
@@ -640,9 +647,10 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
         pcn = f.get("patient_control_number")
         if pcn:
             out["history"] = rows("SELECT c.claim_key, c.claim_status_code, c.charge_cents, c.paid_cents, c.payment_date, c.payer_name, c.trace_number FROM claims c JOIN transactions t ON t.transaction_key=c.transaction_key WHERE c.patient_control_number=? AND t.superseded=0 ORDER BY c.payment_date", (pcn,))
-            out["events"] = rows("SELECT at, kind, from_status, to_status, amount_cents, actor, note FROM finding_events WHERE finding_id=? ORDER BY at DESC, id DESC LIMIT 30", (finding_id,)) if has_table("finding_events") else []
-            out["packets"] = _packets_for(finding_id)
             out["ema"] = rows("SELECT family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents, claim_status, activity_type, carc, rarc, adjustment_status, adjustment_subtype, provider, payer, denial_category, previously_denied FROM ema_rows WHERE claim_id=? ORDER BY family, service_date, row_index", (pcn,))
+    # the record of what people did, for every finding (a payer's routine rate belongs to no one claim)
+    out["events"] = rows("SELECT at, kind, from_status, to_status, amount_cents, actor, note FROM finding_events WHERE finding_id=? ORDER BY at DESC, id DESC LIMIT 30", (finding_id,)) if has_table("finding_events") else []
+    out["packets"] = _packets_for(finding_id)
     return out
 
 

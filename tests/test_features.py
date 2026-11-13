@@ -786,16 +786,22 @@ def test_a_payers_routine_lower_rate_is_one_question_and_a_one_off_is_an_appeal(
     assert len(pattern) == 1
     p = pattern[0]
     ev = json.loads(p["evidence"])
-    assert (p["category"], p["actionable"], p["appeal_deadline"], p["shortfall_cents"]) == ("contract", "review", None, 8 * 1760)
+    # one finding with its claims, still an underpayment, with the earliest filing deadline of its claims so it cannot lapse unseen
+    assert (p["category"], p["actionable"], p["shortfall_cents"]) == ("underpayment", "review", 8 * 1760) and p["appeal_deadline"] == "2028-04-14"
     assert (ev["lines"], ev["amount_cents"], ev["usual_cents"], ev["pct_of_usual"]) == (8, 10000, 11760, 0.85)
     assert "physician assistant or nurse practitioner" in ev["note"] and "before appealing" in ev["note"] and "$100.00 instead of its usual $117.60 on 8 lines" in p["title"]
     assert sorted(c[0] for c in ev["claims"]) == [f"CB{i:07d}C017" for i in range(101, 109)]
     # a pattern at half the usual rate reads as the multiple-procedure rule; a lone amount below it stays a one-off
     from remitwatch.detect import second_rate_reason
-    assert "multiple-procedure" in second_rate_reason(0.5, Counter({"physician": 6}), Counter(), Counter(), None, None)
-    assert "Indiana visits" in second_rate_reason(0.66, Counter({"physician": 9}), Counter({"IN": 8, "KY": 1}), Counter({"KY": 40}), None, None)
-    assert "rate change" in second_rate_reason(0.9, Counter({"physician": 9}), Counter(), Counter(), "2026-05-01", "2026-04-28")
-    assert "\"BLUE PPO\"" in second_rate_reason(0.7, Counter(), Counter(), Counter(), None, None, Counter({"BLUE PPO": 6}), Counter({"PPO": 30}))
+    doc = Counter({"physician": 6})
+    reason = lambda *a, **k: second_rate_reason(*a, **k)
+    assert "multiple-procedure" in reason(0.5, "physician", doc, Counter(), Counter(), None, None, surgical_with_another=1.0)[0]
+    assert reason(0.5, "physician", doc, Counter(), Counter(), None, None)[1] is False           # half a visit's rate is not that rule
+    assert reason(0.85, "physician", doc, Counter(), Counter(), None, None)[1] is False           # physicians at 85%: no PA explanation
+    assert reason(0.85, "nonphysician", Counter({"nonphysician": 6}), Counter(), Counter(), None, None)[1] is False   # a cut on the PA rate
+    assert "Indiana visits" in reason(0.66, "physician", doc, Counter({"IN": 8, "KY": 1}), Counter({"KY": 40}), None, None)[0]
+    assert "rate change" in reason(0.9, "physician", doc, Counter(), Counter(), "2026-05-01", "2026-04-28")[0]
+    assert "\"BLUE PPO\"" in reason(0.7, "physician", doc, Counter(), Counter(), None, None, Counter({"BLUE PPO": 6}), Counter({"PPO": 30}))[0]
     store.close()
 
 
@@ -814,10 +820,20 @@ def test_a_denial_paid_on_a_corrected_claim_or_by_another_payer_is_closed(tmp_pa
     store.close()
     store = build_store(tmp_path, [visit(701, "BIRCH*ANN****MI*H99900301", "117.60")], pay_date="20260521", payer="HUMANA")
     Detector(store, run_id="t").run()
-    rows = {r["patient_control_number"]: r for r in store.query("SELECT patient_control_number, status, auto_note, recovered_cents FROM findings WHERE category='denial'")}
+    q = "SELECT patient_control_number, status, auto_note, recovered_cents, hint FROM findings WHERE category='denial'"
+    rows = {r["patient_control_number"]: r for r in store.query(q)}
     assert rows["CB0000300C017"]["status"] == "resolved" and "under claim CB0000700C017" in rows["CB0000300C017"]["auto_note"]
+    assert rows["CB0000300C017"]["recovered_cents"] == 11760 and rows["CB0000302C017"]["status"] == "open"
+    # another payer means another member number: the same name alone is not enough, it is shown as a possible match
+    assert rows["CB0000301C017"]["status"] == "open" and rows["CB0000301C017"]["hint"] == "Possibly paid on claim CB0000701C017 (2026-05-21)"
+    # once EMA ties both claims to one patient, it closes
+    store.conn.executemany("INSERT INTO ema_rows (row_fingerprint, family, source_name, row_index, service_date, claim_id, cpt, activity_type, patient_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                           [("p1", "charge_lines", "Encounter & Charge Lines.xlsx", 1, "2026-04-01", "CB0000301C017", "99214", "Charge", "EMA-77"),
+                            ("p2", "charge_lines", "Encounter & Charge Lines.xlsx", 2, "2026-04-01", "CB0000701C017", "99214", "Charge", "EMA-77")])
+    store.conn.commit()
+    Detector(store, run_id="t2").run()
+    rows = {r["patient_control_number"]: r for r in store.query(q)}
     assert rows["CB0000301C017"]["status"] == "resolved" and "under claim CB0000701C017" in rows["CB0000301C017"]["auto_note"]
-    assert rows["CB0000302C017"]["status"] == "open" and rows["CB0000300C017"]["recovered_cents"] == 11760
     store.close()
 
 
@@ -836,7 +852,7 @@ def test_a_denial_of_a_code_billed_twice_on_a_date_is_not_closed_by_another_clai
     f = store.query("SELECT status, evidence FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'")[0]
     ev = json.loads(f["evidence"])
     assert f["status"] == "open" and ev["maybe_paid_later"]["claim"] == "CB0000700C017"
-    assert "more than once on a date" in ev["maybe_paid_later"]["why_not_closed"]
+    assert "more than once" in ev["maybe_paid_later"]["why_not_closed"]
     # and EMA's rows, which are by claim, code and date, cannot close one of two 88305 lines on a claim: the other was paid
     twin = ("CLP*CB0000400C017*1*240.00*71.27*0.00*12*PC400*11~NM1*QC*1*BIRCH*ANN****MI*W55500400~NM1*82*2*TEST PROVIDER*****XX*" + NPI
             + "~DTM*232*20260401~" + svc("88305", "120.00", "71.27", "71.27", "CAS*CO*45*48.73~") + svc("88305", "120.00", "0.00", None, "CAS*CO*16*120.00~"))
@@ -850,7 +866,7 @@ def test_a_denial_of_a_code_billed_twice_on_a_date_is_not_closed_by_another_clai
     store.close()
 
 
-def test_a_denial_ema_shows_paid_is_closed_before_its_remittance_arrives(tmp_path):
+def test_a_denial_ema_shows_paid_gets_a_hint_not_a_closure(tmp_path):
     denied = ("CLP*CB0000300C017*1*223.65*0.00*0.00*12*PC300*11~NM1*QC*1*ORCHARD*LEE****MI*W55500300~NM1*82*2*TEST PROVIDER*****XX*" + NPI
               + "~DTM*232*20260401~" + svc("99214", "223.65", "0.00", None, "CAS*CO*16*223.65~"))
     store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied])
@@ -860,12 +876,15 @@ def test_a_denial_ema_shows_paid_is_closed_before_its_remittance_arrives(tmp_pat
                            [("f1", "charge_lines", "Encounter & Charge Lines.xlsx", 1, "2026-04-01", "CB0000300C017", "99214", "Charge", 11760)])
     store.conn.commit()
     Detector(store, run_id="t").run()
-    f = store.query("SELECT status, auto_note, recovered_cents FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'")[0]
-    assert f["status"] == "resolved" and f["auto_note"].startswith("Paid per EMA") and "not in the TriZetto files yet" in f["auto_note"] and f["recovered_cents"] == 11760
-    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=2000")     # a payment under half the expected amount does not close it
+    q = "SELECT status, hint, evidence FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'"
+    f = store.query(q)[0]
+    # EMA's figure is by claim, code and date, with no payer: it is shown, never taken as the payment
+    assert f["status"] == "open" and f["hint"] == "EMA shows $117.60 paid by insurance; check before marking recovered"
+    assert json.loads(f["evidence"])["ema_shows_paid"]["paid_cents"] == 11760
+    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=2000")     # under half the expected amount: no hint
     store.conn.commit()
     Detector(store, run_id="t2").run()
-    assert store.query("SELECT status FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'")[0]["status"] == "open"
+    assert store.query(q)[0]["hint"] is None
     store.close()
 
 

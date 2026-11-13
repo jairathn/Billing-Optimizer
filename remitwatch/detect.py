@@ -66,7 +66,9 @@ from .codes import (ADD_ON_CODES, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_VERSION = "2.2"
+DETECT_RULES = "2.3"
+# The version recorded with each run, compared on the next cycle: any change to this file re-analyses the archive once.
+DETECT_VERSION = DETECT_RULES + "-" + hashlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
 DERIVED_SCHEMA = "3"        # bump when the layout of a derived table changes; the tables are dropped and rebuilt
 
 BUNDLING_CARCS = {"97", "B10", "236", "234", "231", "M15"}
@@ -95,7 +97,7 @@ EXTRA_FINDING_COLS = {
     "ema_handling": "TEXT", "billed_code": "TEXT", "code_pair": "TEXT", "level_drop": "INTEGER", "pos": "TEXT", "pos_class": "TEXT",
     "plan": "TEXT", "month": "TEXT", "service_month": "TEXT", "modifier_class": "TEXT", "location": "TEXT", "diagnosis": "TEXT",
     "deadline_basis": "TEXT", "recovered_cents": "INTEGER", "recovered_date": "TEXT", "appealed_at": "TEXT", "status_changed_at": "TEXT",
-    "stale": "INTEGER DEFAULT 0", "auto_note": "TEXT", "prev_status": "TEXT",
+    "stale": "INTEGER DEFAULT 0", "auto_note": "TEXT", "prev_status": "TEXT", "hint": "TEXT",
 }
 EM_SQL = ",".join(f"'{c}'" for c in sorted(EM_CODES))
 AUTO_NOTE_PREFIX = "Paid on a later remittance"
@@ -284,30 +286,30 @@ SECOND_RATE_MIN_LINES = 5        # a lower amount the payer allowed this often f
 STATE_NAMES = {"KY": "Kentucky", "IN": "Indiana"}
 
 
-def patient_keys(pid: str | None, last: str | None, first: str | None) -> tuple:
-    """Ways to recognise one patient across claims: the member number, and the name (a corrected claim sent to another
-    payer carries another member number)."""
+def patient_keys(pid: str | None, last: str | None, first: str | None) -> tuple[str | None, str | None]:
+    """(same person, same name). The first needs the member number AND the name, the rule the dashboard uses for "this
+    patient": one member number often covers a family, and two people can share a name. The second, the name alone,
+    is used only when EMA ties both claims to one patient (a claim sent to another payer has another member number)."""
     norm = lambda v: "".join(ch for ch in (v or "").upper() if ch.isalnum())
-    keys = []
-    p = norm(pid)
-    if len(p) >= 6:
-        keys.append("I:" + p)
-    if norm(last) and norm(first):
-        keys.append("N:" + norm(last) + "|" + norm(first))
-    return tuple(keys)
+    p, name = norm(pid), (norm(last) + "|" + norm(first)) if norm(last) and norm(first) else None
+    return (f"P:{p}|{name}" if len(p) >= 6 and name else None), (f"N:{name}" if name else None)
 
 
-def second_rate_reason(ratio: float, tiers: Counter, states: Counter, usual_states: Counter, first_dos: str | None,
-                       usual_last_dos: str | None, plans: Counter | None = None, usual_plans: Counter | None = None) -> str:
-    """The likely explanation for a payer's routine lower amount, in plain words, from what the remittances show."""
+def second_rate_reason(ratio: float, key_tier: str, tiers: Counter, states: Counter, usual_states: Counter, first_dos: str | None,
+                       usual_last_dos: str | None, plans: Counter | None = None, usual_plans: Counter | None = None,
+                       surgical_with_another: float = 0.0) -> tuple[str, bool]:
+    """The likely explanation for a payer's routine lower amount, in plain words, and whether the remittances support one.
+    Without support the lines stay one-off underpayments to appeal."""
     n = sum(tiers.values()) or 1
     parts = []
-    if 0.83 <= ratio <= 0.87:
-        npp = tiers.get("nonphysician", 0)
+    npp = tiers.get("nonphysician", 0) + tiers.get("unknown", 0)
+    if 0.83 <= ratio <= 0.87 and key_tier in ("physician", "unknown") and npp / n >= 0.8:
         parts.append("85 percent of the usual rate is what many plans pay a physician assistant or nurse practitioner"
-                     + (f"; {npp} of these {n} lines are by a PA or NP" if npp else "; the remittances do not name the clinician on these lines"))
-    elif 0.48 <= ratio <= 0.52:
-        parts.append("Half the usual rate is how most payers pay a second procedure on the same day (the multiple-procedure rule)")
+                     + (f"; {tiers.get('nonphysician', 0)} of these {n} lines are by a PA or NP" if tiers.get("nonphysician")
+                        else "; the remittances do not name the clinician on these lines"))
+    if 0.48 <= ratio <= 0.52 and surgical_with_another >= 0.5:
+        parts.append("Half the usual rate, with another procedure for the patient that day: how most payers pay a second procedure "
+                     "(the multiple-procedure rule)")
     known = {k: v for k, v in states.items() if k in STATE_NAMES}
     uknown = {k: v for k, v in usual_states.items() if k in STATE_NAMES}
     kn, un = sum(known.values()), sum(uknown.values())
@@ -330,9 +332,10 @@ def second_rate_reason(ratio: float, tiers: Counter, states: Counter, usual_stat
     if first_dos and usual_last_dos and first_dos > usual_last_dos:
         parts.append(f"Every line is from {first_dos} on, after the last visit paid at the usual rate ({usual_last_dos}): a rate change")
     if not parts:
-        parts.append("A lower amount this payer allows routinely for this code")
-    parts.append("Check which contract, plan or rule it comes from before appealing; if it is wrong, one request can fix every claim listed")
-    return ". ".join(parts) + "."
+        return "", False
+    parts.append("Check it against the contract before appealing; if the payer is wrong, one request can fix every claim listed, "
+                 "within the earliest filing deadline shown")
+    return ". ".join(parts) + ".", True
 
 
 def bill_of(pcn: str | None) -> str:
@@ -350,6 +353,10 @@ class Detector:
         self.findings: dict[str, dict] = {}
         self.second_rates: dict[tuple, list] = defaultdict(list)     # (baseline key, amount) -> lines the payer routinely allowed less
         self.ema_paid: dict[tuple, tuple] = {}                        # (claim id, code, date) -> (insurance payments in EMA, export)
+        self.ema_patient: dict[str, str] = {}                         # claim id -> EMA patient id (full charge layout only)
+        self.worked_underpaid: set[str] = {r[0] for r in store.conn.execute(
+            """SELECT line_key FROM findings WHERE signal='UNDERPAID_VS_OWN_RATE' AND line_key IS NOT NULL
+               AND (status != 'open' OR notes IS NOT NULL OR appealed_at IS NOT NULL)""")}       # their own finding is kept, never folded
 
     # ------------------------------------------------------------------ loading
     def load(self) -> None:
@@ -416,15 +423,28 @@ class Detector:
         self.paid_events: dict[tuple, list[tuple]] = defaultdict(list)   # (bill, code, dos) -> [(payment_date, trace, paid, status)]
         self.bill_paid_dates: dict[str, list[str]] = defaultdict(list)
         self.lines_by_claim: dict[str, list[dict]] = defaultdict(list)
+        # a payment the payer later reversed (claim status 22) and did not pay again no longer counts as paid
+        back: dict[tuple, int] = defaultdict(int)
+        for l in self.lines:
+            if l.get("claim_status_code") == "22" and l.get("paid_cents"):
+                back[(l["patient_control_number"], l["procedure_code"], l.get("service_date"))] -= abs(l["paid_cents"])
+        if back:
+            for l in self.lines:
+                k = (l["patient_control_number"], l["procedure_code"], l.get("service_date"))
+                if k in back and l.get("claim_status_code") in ("1", "19", "2", "3") and (l.get("paid_cents") or 0) > 0:
+                    back[k] += l["paid_cents"]
+        self.taken_back = {k for k, net in back.items() if net <= 0}
         for l in self.lines:
             self.lines_by_claim[l["claim_key"]].append(l)
-            if (l.get("paid_cents") or 0) > 0 and l.get("claim_status_code") in ("1", "19", "2", "3"):
+            if (l.get("paid_cents") or 0) > 0 and l.get("claim_status_code") in ("1", "19", "2", "3") \
+                    and (l["patient_control_number"], l["procedure_code"], l.get("service_date")) not in self.taken_back:
                 bill = bill_of(l["patient_control_number"])
                 dos = l.get("service_date")
                 self.paid_line_keys.add((bill, l["procedure_code"], dos))
                 self.paid_pcns.add(l["patient_control_number"])
                 pd_ = l.get("payment_date") or l.get("txn_payment_date") or ""
-                self.paid_events[(bill, l["procedure_code"], dos)].append((pd_, l.get("trace_number"), l["paid_cents"], l.get("claim_status_code")))
+                self.paid_events[(bill, l["procedure_code"], dos)].append((pd_, l.get("trace_number"), l["paid_cents"], l.get("claim_status_code"),
+                                                                           l["patient_control_number"]))
                 self.bill_paid_dates[bill].append(pd_)
         # EMA links and biller handling (built by link.build_links when EMA exports are loaded)
         self.links: dict[str, dict] = {}
@@ -468,11 +488,21 @@ class Detector:
             for r in c.execute("SELECT line_key, carc, rarc, adjustment_status, adjustment_subtype, adjustments_cents, payments_cents, transaction_date FROM line_handling"):
                 self.handling[r["line_key"]].append(dict(r))
         if "ema_rows" in tables:
-            # what EMA has posted from insurers on each billed line (the full Encounter and Charge Lines layout carries it)
-            for cid, cpt, dos, paid, src in c.execute("""SELECT claim_id, cpt, service_date, MAX(insurance_payments_cents), MAX(source_name) FROM ema_rows
-                                                         WHERE family='charge_lines' AND activity_type='Charge' AND claim_id IS NOT NULL
-                                                           AND COALESCE(insurance_payments_cents,0) > 0 GROUP BY 1,2,3"""):
-                self.ema_paid[(cid, cpt, dos)] = (paid, src)
+            # what EMA has posted from insurers on each billed line, as of the newest export that lists it (the full Encounter
+            # and Charge Lines layout carries it). Only ever a hint: it is by claim, code and date, not by line or payer.
+            when = "COALESCE(s.created_at, '')" if "ema_sources" in tables else "''"
+            join = "LEFT JOIN ema_sources s ON s.sha256 = e.source_sha256" if "ema_sources" in tables else ""
+            newest: dict[tuple, tuple] = {}
+            for cid, cpt, dos, paid, src, at in c.execute(f"""SELECT e.claim_id, e.cpt, e.service_date, e.insurance_payments_cents, e.source_name, {when}
+                                                             FROM ema_rows e {join}
+                                                             WHERE e.family='charge_lines' AND e.activity_type='Charge' AND e.claim_id IS NOT NULL
+                                                               AND e.insurance_payments_cents IS NOT NULL"""):
+                k = (cid, cpt, dos)
+                if k not in newest or (at, src or "") > newest[k][1:]:
+                    newest[k] = (paid or 0, at, src or "")
+            self.ema_paid = {k: (v[0], v[2]) for k, v in newest.items() if v[0] > 0}
+            self.ema_patient = {cid: pat for cid, pat in c.execute("""SELECT claim_id, MAX(patient_id) FROM ema_rows WHERE family='charge_lines'
+                                                                      AND claim_id IS NOT NULL AND COALESCE(patient_id,'') <> '' GROUP BY 1""")}
         # surgical rank within each claim: 1 = highest allowed surgical procedure (paid 100 percent), 2+ reduced
         for claim_lines in self.lines_by_claim.values():
             surg = [x for x in claim_lines if is_surgical(x.get("procedure_code")) and (x.get("allowed_cents") or 0) > 0]
@@ -747,28 +777,21 @@ class Detector:
             events = [e for e in events if (e[2] or 0) >= min_paid]
         return min(events) if events else None
 
-    def second_rate_anchor(self, r: dict, allowed: int) -> int | None:
-        """When the payer allowed about this amount (within 1 percent) on at least SECOND_RATE_MIN_LINES clean lines for this
-        code, return the amount it uses (the commonest nearby one); None for a one-off amount."""
-        cnt = self.rate_counts.get(r.get("key")) if r else None
-        if not cnt:
-            return None
-        tol = max(50, int(round(allowed * 0.01)))
-        near = [(n, a) for a, n in cnt.items() if abs(a - allowed) <= tol]
-        if sum(n for n, _a in near) < SECOND_RATE_MIN_LINES:
-            return None
-        return max(near, key=lambda x: (x[0], -x[1]))[1]
-
     def emit_second_rates(self) -> None:
-        """One finding per payer, code, year and routine lower amount, with what the remittances say about why."""
+        """A payer's routine lower amount for a code (the same amount on at least SECOND_RATE_MIN_LINES clean lines) becomes
+        one finding with its claims, when the remittances support a reason for it (the rate for a PA or NP, one office's
+        plan, one plan, a multiple-procedure reduction, a rate change). It carries each claim's filing deadline and shows the last.
+        Without a reason, each line stays a one-off underpayment to appeal."""
         if not self.second_rates:
             return
         day_state: dict[tuple, str] = {}
+        bill_day_surg: Counter = Counter()
         for l in self.lines:
             grp = l.get("payer_group") or ""
-            if grp.startswith("Medicare KY") or grp.startswith("Medicare IN"):
-                if l.get("rendering_provider_npi") and l.get("service_date"):
-                    day_state[(l["rendering_provider_npi"], l["service_date"])] = grp[9:11]
+            if (grp.startswith("Medicare KY") or grp.startswith("Medicare IN")) and l.get("rendering_provider_npi") and l.get("service_date"):
+                day_state[(l["rendering_provider_npi"], l["service_date"])] = grp[9:11]
+            if is_surgical(l.get("procedure_code")) and l.get("procedure_code") not in ADD_ON_CODES:
+                bill_day_surg[(bill_of(l.get("patient_control_number")), l.get("service_date"))] += 1
         state_of = lambda l: day_state.get((l.get("rendering_provider_npi"), l.get("service_date")), "unknown")
         usual = {key: self.rates[key]["mode"] for key, _a in self.second_rates if key in self.rates}
         usual_states: dict[tuple, Counter] = defaultdict(Counter)
@@ -784,37 +807,65 @@ class Detector:
                 d = l.get("service_date") or ""
                 if d > usual_last.get(key, ""):
                     usual_last[key] = d
-        for (key, anchor), lines in self.second_rates.items():
+        for (key, amount), group in self.second_rates.items():
             r = self.rates.get(key)
-            if not r or not lines:
+            if not r or not group:
                 continue
+            lines = [l for l, _one in group]
             grp, year, code, tier, pos = key
             rate = r["mode"]
-            gap = sum(rate - (l.get("allowed_cents") or 0) for l in lines)
-            ratio = anchor / rate
+            ratio = amount / rate
             tiers = Counter(l.get("provider_tier") or "unknown" for l in lines)
             states = Counter(state_of(l) for l in lines)
             dos = sorted(l.get("service_date") or "" for l in lines)
             plans = Counter((l.get("contract_class") or "").strip() or "(none)" for l in lines)
+            surgical = is_surgical(code) and code not in ADD_ON_CODES
+            with_another = (sum(1 for l in lines if (l.get("surg_count") or 0) >= 2
+                                or bill_day_surg[(bill_of(l.get("patient_control_number")), l.get("service_date"))] >= 2) / len(lines)) if surgical else 0.0
+            note, supported = second_rate_reason(ratio, tier, tiers, states, usual_states.get(key, Counter()), dos[0] or None, usual_last.get(key),
+                                                 plans, usual_plans.get(key, Counter()), with_another)
+            if not supported:
+                for _l, one_off in group:
+                    self._emit(*one_off)
+                continue
+            gap = sum(rate - (l.get("allowed_cents") or 0) for l in lines)
             quarters = Counter(f"{d[:4]}-Q{(int(d[5:7]) + 2) // 3}" for d in dos if len(d) >= 7)
             names = Counter(l.get("payer_name") for l in lines)
-            note = second_rate_reason(ratio, tiers, states, usual_states.get(key, Counter()), dos[0] or None, usual_last.get(key),
-                                      plans, usual_plans.get(key, Counter()))
             n = len(lines)
+            deadlines, due, by_due = [], {}, defaultdict(lambda: [0, 0])
+            for l in lines:
+                rule = appeal_rule(grp, l.get("payer_kind"), (l.get("contract_class") or "").strip() or None)
+                d = _add_days(l.get("payment_date") or l.get("txn_payment_date"), rule["days"])
+                if d:
+                    deadlines.append((d, rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")))
+                    due[l["line_key"]] = d
+                    by_due[d][0] += 1
+                    by_due[d][1] += rate - (l.get("allowed_cents") or 0)
             base = {"payer_group": grp, "payer_kind": self.kinds.get(grp), "payer_name": names.most_common(1)[0][0] or grp, "year": year,
                     "procedure_code": code, "provider_tier": tier, "pos_class": pos,
                     "payment_date": max((l.get("payment_date") or l.get("txn_payment_date") or "") for l in lines) or None}
-            evidence = {"usual_cents": rate, "amount_cents": anchor, "pct_of_usual": round(ratio, 3), "lines": n,
-                        "payer_lines_at_this_amount": sum(v for a, v in self.rate_counts[key].items() if abs(a - anchor) <= max(50, int(round(anchor * 0.01)))),
-                        "payer_lines_for_code": r["n"], "by_provider_type": dict(tiers), "by_office_state": dict(states),
-                        "by_plan": dict(plans.most_common(6)), "by_quarter": dict(sorted(quarters.items())), "first_visit": dos[0] or None,
-                        "last_visit": dos[-1] or None, "note": note,
-                        "claims": [[l.get("patient_control_number"), l.get("service_date"), l.get("allowed_cents")]
-                                   for l in sorted(lines, key=lambda x: x.get("service_date") or "")[:60]]}
-            title = (f"{grp} allowed {code} at ${anchor/100:,.2f} instead of its usual ${rate/100:,.2f} on {n} line{'s' if n != 1 else ''} "
+            evidence = {"usual_cents": rate, "amount_cents": amount, "pct_of_usual": round(ratio, 3), "lines": n,
+                        "payer_lines_at_this_amount": self.rate_counts[key][amount], "payer_lines_for_code": r["n"],
+                        "by_provider_type": dict(tiers), "by_office_state": dict(states), "by_plan": dict(plans.most_common(6)),
+                        "by_quarter": dict(sorted(quarters.items())), "first_visit": dos[0] or None, "last_visit": dos[-1] or None, "note": note,
+                        # each claim keeps its own filing deadline: the page counts the ones still open on the day it is read
+                        "claims": [[l.get("patient_control_number"), l.get("service_date"), l.get("allowed_cents"), due.get(l["line_key"])]
+                                   for l in sorted(lines, key=lambda x: x.get("service_date") or "")[:60]],
+                        "deadlines": [[d, v[0], v[1]] for d, v in sorted(by_due.items())]}
+            title = (f"{grp} allowed {code} at ${amount/100:,.2f} instead of its usual ${rate/100:,.2f} on {n} line{'s' if n != 1 else ''} "
                      f"in {year} ({ratio:.0%} of usual)")
-            self._emit("SECOND_RATE", "contract", "medium" if gap >= 100000 else "low", "review", title, None, rate * n, gap, None, None,
-                       evidence, key_parts=("SECOND_RATE", grp, year, code, tier, pos, anchor), claim=base)
+            key_parts = ("SECOND_RATE", grp, year, code, tier, pos, amount)
+            self._emit("SECOND_RATE", "underpayment", "medium" if gap >= 100000 else "low", "review", title, None, rate * n, gap, None, None,
+                       evidence, key_parts=key_parts, claim=base)
+            f = self.findings.get(_fid("SECOND_RATE", *key_parts))
+            if f is not None and deadlines:
+                # The last deadline, so the pattern stays in the open work while any of its claims can still be raised; the
+                # first is on the row, and the finding counts how many claims are still inside their windows.
+                first, last = min(deadlines), max(deadlines)
+                f["appeal_deadline"] = last[0]
+                f["deadline_basis"] = (f"the last of its {n} claims to close; the first closes on {first[0]}. Each claim has its own window. {last[1]}"
+                                       if first[0] != last[0] else f"all {n} claims. {last[1]}")
+                f["hint"] = f"Filing windows close {first[0]} to {last[0]}" if first[0] != last[0] else None
 
     def _mark_paid(self, f: dict, paid_date: str | None, paid: int, note: str, detail: dict) -> None:
         """Close a finding the way a later payment on the same bill does, after the line rules have run."""
@@ -829,109 +880,130 @@ class Detector:
         f["auto_status"], f["auto_notes"] = "resolved", note
 
     def resolve_elsewhere(self) -> None:
-        """A denial is closed when the service was paid later on another claim: a corrected claim under a new bill number,
-        or the claim sent to another payer (same patient by member number or name, same date and code, a primary payment
-        or one covering half the expected amount). When the remittance has not reached the folder yet but EMA shows the
-        insurer's payment, that closes it too."""
-        open_denials = [f for f in self.findings.values() if f["category"] == "denial" and not f.get("auto_status")]
-        if not open_denials:
+        """Close a denial, or a bundled visit, that was paid on another claim: a corrected claim under a new bill number, or
+        the claim sent to another payer. It must be the same patient (member number and name; another member number only
+        when EMA ties both claims to one patient), the same date and code, a primary payment (or one covering half the
+        expected amount) the payer did not take back, covering the units denied, for a code paid at most once per patient
+        and date, and, for a claim-level denial, every code on the claim. A duplicate's denial also closes when the service
+        was paid on another claim before it. Anything short of that, and anything EMA alone shows as paid, is left open
+        with a hint."""
+        todo = [f for f in self.findings.values() if not f.get("auto_status") and f.get("claim_key")
+                and (f["category"] == "denial" or (f["category"] == "bundling" and f.get("procedure_code") in EM_CODES))]
+        if not todo:
             return
         c = self.conn
-        once: set[str] = set()      # filled below for the codes that matter: billed once per patient and date
-        # the codes each open denial needs paid, by claim
-        want_codes: dict[str, set] = defaultdict(set)
-        for f in open_denials:
-            if f.get("line_key") and f.get("procedure_code"):
-                want_codes[f["claim_key"]].add(f["procedure_code"])
-            elif f.get("claim_key"):
-                for ln in self.lines_by_claim.get(f["claim_key"], []):
-                    if ln.get("procedure_code"):
-                        want_codes[f["claim_key"]].add(ln["procedure_code"])
-        keys = list(want_codes)
+        lines_of = lambda f: [ln for ln in self.lines_by_claim.get(f["claim_key"], []) if not f.get("line_key") or ln["line_key"] == f["line_key"]]
+        codes_of = lambda f: [f["procedure_code"]] if f.get("line_key") else sorted({ln["procedure_code"] for ln in lines_of(f) if ln.get("procedure_code")})
+        dates_of = lambda f: {ln.get("service_date") for ln in lines_of(f)} or {f.get("service_date")}
+        keys = sorted({f["claim_key"] for f in todo})
         who: dict[str, tuple] = {}
         for i in range(0, len(keys), 500):
             part = keys[i:i + 500]
             for ck, pid, last, first in c.execute(f"SELECT claim_key, patient_id, patient_last, patient_first FROM claims WHERE claim_key IN ({','.join('?' * len(part))})", part):
                 who[ck] = patient_keys(pid, last, first)
-        wanted = {k for ks in who.values() for k in ks}
-        # every claim for those patients (one pass, no index needed), then their paid primary lines
+        need: set[tuple] = set()          # (patient key, code, date) the open findings need paid
+        for f in todo:
+            for k in who.get(f["claim_key"], (None, None)):
+                if k:
+                    for code in codes_of(f):
+                        for dos in dates_of(f):
+                            need.add((k, code, dos))
+        if not need:
+            return
+        patients = {k for k, _c, _d in need}
         claim_who: dict[str, tuple] = {}
-        if wanted:
-            for ck, pid, last, first in c.execute("SELECT claim_key, patient_id, patient_last, patient_first FROM claims"):
-                ks = patient_keys(pid, last, first)
-                if any(k in wanted for k in ks):
-                    claim_who[ck] = ks
+        for ck, pid, last, first in c.execute("SELECT claim_key, patient_id, patient_last, patient_first FROM claims"):
+            ks = patient_keys(pid, last, first)
+            if ks[0] in patients or ks[1] in patients:
+                claim_who[ck] = ks
         paid: dict[tuple, list] = defaultdict(list)
         for l in self.lines:
             ks = claim_who.get(l["claim_key"])
             if not ks or (l.get("paid_cents") or 0) <= 0 or l.get("claim_status_code") not in ("1", "19", "2", "3"):
                 continue
-            for k in ks:
-                paid[(k, l.get("procedure_code"), l.get("service_date"))].append(
-                    (l.get("payment_date") or l.get("txn_payment_date") or "", l.get("patient_control_number"), l.get("trace_number"),
-                     l["paid_cents"], l.get("claim_status_code")))
-        # Codes billed more than once for a patient on a date (Mohs stages, units, fractions): a payment on another claim may
-        # be for a different stage or lesion, so it never closes a denial of such a code on its own. A code counts as billed
-        # once when at least 20 patient-dates had it paid and no more than 1.5 percent had two or more paid lines of it, on one
-        # bill or several (a denial and its paid correction count once). Measured only for the codes the open denials need.
-        codes_needed = sorted({code for v in want_codes.values() for code in v})
-        if codes_needed:
-            groups, repeats = Counter(), Counter()
-            for code, n in c.execute(f"""SELECT l.procedure_code, COUNT(DISTINCT substr(l.patient_control_number,1,9) || ':' || l.line_seq)
-                                         FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
-                                         WHERE t.superseded = 0 AND l.claim_status_code IN ('1','19') AND l.paid_cents > 0 AND COALESCE(cl.patient_id,'') <> ''
-                                           AND l.procedure_code IN ({','.join('?' * len(codes_needed))})
-                                         GROUP BY l.procedure_code, cl.patient_id, l.service_date""", codes_needed):
-                groups[code] += 1
-                repeats[code] += n > 1
-            once = {code for code, g in groups.items() if g >= 20 and repeats[code] <= 0.015 * g}
-        for f in open_denials:
-            mine = f.get("payment_date") or ""
-            bill = bill_of(f.get("patient_control_number"))
-            exp = f.get("expected_cents") or 0
-            claim_lines = self.lines_by_claim.get(f.get("claim_key"), [])
-            lines = [ln for ln in claim_lines if not f.get("line_key") or ln["line_key"] == f["line_key"]]
-            codes = [f["procedure_code"]] if f.get("line_key") else sorted(want_codes.get(f.get("claim_key"), ()))
-            dos_list = {ln.get("service_date") for ln in lines} or {f.get("service_date")}
-            found: dict[str, tuple] = {}          # code -> earliest qualifying payment on another claim
-            for k in who.get(f.get("claim_key"), ()):
-                for code in codes:
-                    for dos in dos_list:
-                        for e in paid.get((k, code, dos), []):
-                            if e[0] > mine and bill_of(e[1]) != bill and (e[4] in ("1", "19") or (exp and e[3] >= 0.5 * exp)):
-                                if code not in found or e[0] < found[code][0]:
-                                    found[code] = e
-            # every code the denial covers must be paid again, and each must be a code billed once on a date
-            closes = bool(found) and all(code in found for code in codes) and all(code in once for code in codes)
-            best = min(found.values(), key=lambda e: e[0]) if found else None
-            if best and not closes:
-                ev = json.loads(f["evidence"]) if f.get("evidence") else {}
-                ev["maybe_paid_later"] = {"claim": best[1], "payment_date": best[0], "paid_cents": best[3], "codes_paid": sorted(found),
-                                          "why_not_closed": "this code can be billed more than once on a date" if any(cd not in once for cd in found)
-                                          else "not every code on the denied claim was paid again"}
-                f["evidence"] = json.dumps(ev, default=str)
-            if best and closes:
-                self._mark_paid(f, best[0], best[3], f"Paid on a later remittance under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f})",
-                                {"payment_date": best[0], "claim": best[1], "trace": best[2], "paid_cents": best[3], "claim_status": best[4],
-                                 "how": "another claim for the same patient, date of service and code"})
+            if (l["patient_control_number"], l.get("procedure_code"), l.get("service_date")) in self.taken_back:
                 continue
-            # EMA shows the insurer's payment (posted from a remittance not in the folder yet, a paper EOB or another channel)
-            ema = None
-            per_code = Counter((ln.get("service_date"), ln.get("procedure_code")) for ln in claim_lines)
-            for ln in lines:
-                if per_code[(ln.get("service_date"), ln.get("procedure_code"))] > 1:
-                    continue        # EMA's rows are by claim, code and date: they cannot tell this line from its twin
-                for h in self.handling.get(ln["line_key"], []):
-                    amt, when = h.get("payments_cents") or 0, h.get("transaction_date") or ""
-                    if amt > 0 and when > mine and (not exp or amt >= 0.5 * exp) and (ema is None or amt > ema[0]):
-                        ema = (amt, when, "EMA ERA & Payment Lines")
-                got = self.ema_paid.get((ln.get("patient_control_number"), ln.get("procedure_code"), ln.get("service_date")))
-                if got and (not exp or got[0] >= 0.5 * exp) and (ema is None or got[0] > ema[0]):
-                    ema = (got[0], None, got[1])
-            if ema:
-                when = f" on {ema[1]}" if ema[1] else ""
-                self._mark_paid(f, ema[1], ema[0], f"Paid per EMA{when} (${ema[0]/100:.2f}, from {ema[2]}); that payment's remittance is not in the TriZetto files yet",
-                                {"payment_date": ema[1], "paid_cents": ema[0], "source": ema[2], "how": "insurer payment posted in EMA"})
+            for k in ks:
+                if k and (k, l.get("procedure_code"), l.get("service_date")) in need:
+                    paid[(k, l.get("procedure_code"), l.get("service_date"))].append(
+                        (l.get("payment_date") or l.get("txn_payment_date") or "", l["patient_control_number"], l.get("trace_number"),
+                         l["paid_cents"], l.get("claim_status_code"), abs(l.get("paid_units") or 1)))
+        # Codes paid more than once for a patient on a date (Mohs stages, units, fractions): a payment on another claim may
+        # be for another stage or lesion. A code counts as paid once when at least 20 patient-dates had it paid and no more
+        # than 1.5 percent had two or more paid lines of it, on one bill or several. Measured for the codes needed.
+        codes_needed = sorted({code for _k, code, _d in need if code})
+        groups, repeats = Counter(), Counter()
+        for code, n in c.execute(f"""SELECT l.procedure_code, COUNT(DISTINCT substr(l.patient_control_number,1,9) || ':' || l.line_seq)
+                                     FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
+                                     WHERE t.superseded = 0 AND l.claim_status_code IN ('1','19') AND l.paid_cents > 0 AND COALESCE(cl.patient_id,'') <> ''
+                                       AND l.procedure_code IN ({','.join('?' * len(codes_needed))})
+                                     GROUP BY l.procedure_code, cl.patient_id, l.service_date""", codes_needed):
+            groups[code] += 1
+            repeats[code] += n > 1
+        once = {code for code, g in groups.items() if g >= 20 and repeats[code] <= 0.015 * g}
+        for f in todo:
+            mine = f.get("payment_date") or ""
+            bill = bill_of(f["patient_control_number"])
+            exp = f.get("expected_cents") or 0
+            dup = f.get("signal") == "DENIED_DUPLICATE_UNPAID"
+            strict, name = who.get(f["claim_key"], (None, None))
+            mine_ema = self.ema_patient.get(f["patient_control_number"])
+            units: Counter = Counter()
+            for ln in lines_of(f):
+                units[ln.get("procedure_code")] += abs(ln.get("original_units") or ln.get("paid_units") or 1)
+            found: dict[str, dict] = defaultdict(dict)       # same patient: can close
+            weak: dict[str, dict] = defaultdict(dict)        # the same name on another member number, not tied by EMA: a hint only
+            for code in codes_of(f):
+                for dos in dates_of(f):
+                    for k, other_payer in ((strict, False), (name, True)):
+                        for e in paid.get((k, code, dos), []) if k else []:
+                            if bill_of(e[1]) == bill or (not dup and e[0] <= mine):
+                                continue
+                            if not (e[4] in ("1", "19") or (exp and e[3] >= 0.5 * exp)):
+                                continue
+                            if other_payer and not (mine_ema and self.ema_patient.get(e[1]) == mine_ema):
+                                weak[code][(e[1], e[0])] = e
+                            else:
+                                found[code][(e[1], e[0])] = e
+            covered = [code for code in codes_of(f) if code in found and sum(e[5] for e in found[code].values()) >= units.get(code, 1)]
+            best = min((e for v in found.values() for e in v.values()), key=lambda e: e[0], default=None)
+            if best and len(covered) == len(codes_of(f)) and all(code in once for code in codes_of(f)):
+                how = "the service was already paid on another claim" if dup and best[0] <= mine else "another claim for the same patient, date of service and code"
+                self._mark_paid(f, best[0], best[3], f"Paid on a later remittance under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f})"
+                                if best[0] > mine else f"Already paid under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f}): this denial is of a duplicate",
+                                {"payment_date": best[0], "claim": best[1], "trace": best[2], "paid_cents": best[3], "claim_status": best[4], "how": how})
+                f["hint"] = None
+                continue
+            ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+            if best is None:
+                best = min((e for v in weak.values() for e in v.values()), key=lambda e: e[0], default=None)
+                if best is not None:
+                    found = weak
+            if best:
+                why = ("it is the same name on another member number, and nothing ties the two claims to one patient" if found is weak
+                       else "this code can be paid more than once for a patient on a date" if any(code not in once for code in codes_of(f))
+                       else "the units paid there are fewer than the units denied" if any(code in found for code in codes_of(f) if code not in covered)
+                       else "not every code on the denied claim was paid again")
+                ev["maybe_paid_later"] = {"claim": best[1], "payment_date": best[0], "paid_cents": best[3], "codes_paid": sorted(found), "why_not_closed": why}
+                f["hint"] = f"Possibly paid on claim {best[1]} ({best[0]})"
+            else:
+                # EMA's figures are by claim, code and date: a hint where the claim carries the code once on that date
+                per_code = Counter((ln.get("service_date"), ln.get("procedure_code")) for ln in self.lines_by_claim.get(f["claim_key"], []))
+                hint = None
+                for ln in lines_of(f):
+                    if per_code[(ln.get("service_date"), ln.get("procedure_code"))] > 1:
+                        continue
+                    for h in self.handling.get(ln["line_key"], []):
+                        amt, when = h.get("payments_cents") or 0, h.get("transaction_date") or ""
+                        if amt > 0 and when > mine and (not exp or amt >= 0.5 * exp) and (hint is None or amt > hint[0]):
+                            hint = (amt, when, "EMA ERA & Payment Lines")
+                    got = self.ema_paid.get((ln.get("patient_control_number"), ln.get("procedure_code"), ln.get("service_date")))
+                    if got and (not exp or got[0] >= 0.5 * exp) and (hint is None or got[0] > hint[0]):
+                        hint = (got[0], None, got[1])
+                if hint:
+                    ev["ema_shows_paid"] = {"paid_cents": hint[0], "date": hint[1], "source": hint[2]}
+                    f["hint"] = f"EMA shows ${hint[0]/100:,.2f} paid by insurance" + (f" on {hint[1]}" if hint[1] else "") + "; check before marking recovered"
+            f["evidence"] = json.dumps(ev, default=str)
 
     def _emit(self, signal, category, severity, actionable, title, l, expected, shortfall, carc, rarc, evidence,
               key_parts=None, claim=None, resolved_by: tuple | None = None) -> None:
@@ -1267,13 +1339,13 @@ class Detector:
                         self._emit("MPPR_EXCESS", "underpayment", "high", "appeal", f"Multiple-procedure reduction applied to add-on code {code}", l, allowed + c59, c59, "59", rarc, {"basis": basis})
                         continue
                 if allowed < rate and (rate - allowed) >= 200 and (rate - allowed) / rate >= 0.05:
-                    anchor = self.second_rate_anchor(r, allowed)
-                    if anchor is not None:
-                        self.second_rates[(r["key"], anchor)].append(l)
-                        continue
-                    self._emit("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal",
+                    one_off = ("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal",
                                f"{code} allowed ${allowed/100:.2f} vs usual ${rate/100:.2f} ({l['payer_group']})", l, rate, rate - allowed, top, rarc,
                                {"basis": basis, "usual_share": round(r["share"], 3), "usual_n": r["n"], "rank": rank})
+                    if l["line_key"] not in self.worked_underpaid and self.rate_counts.get(r.get("key"), {}).get(allowed, 0) >= SECOND_RATE_MIN_LINES:
+                        self.second_rates[(r["key"], allowed)].append((l, one_off))       # grouped if a reason is found, else emitted as is
+                        continue
+                    self._emit(*one_off)
 
     # ------------------------------------------------------------------ claim rules
     def run_claim_rules(self) -> None:
@@ -1292,6 +1364,13 @@ class Detector:
             cl["year"] = (cl.get("statement_from") or cl.get("payment_date") or "")[:4]
             cl["rp_name"] = cl.get("rendering_provider_name")
             lines = self.lines_by_claim.get(cl["claim_key"], [])
+            # Every code on it was paid by a primary payer under another claim of the same bill, at any date, and not taken
+            # back: the payer denied a resubmission of a visit it had paid (often right after taking back the first payment).
+            bill = bill_of(cl["patient_control_number"])
+            if lines and all(any(e[3] in ("1", "19") and e[4] != cl["patient_control_number"]
+                                 for e in self.paid_events.get((bill, ln["procedure_code"], ln.get("service_date")), []))
+                             for ln in lines):
+                continue
             adj = self.claim_adj.get(cl["claim_key"], []) + [(g, rc, a) for ln in lines for g, rc, a in self.adj.get(ln["line_key"], [])]
             carcs = Counter(rc for _g, rc, _a in adj if rc not in IGNORE_CARCS)
             top = top_of(carcs)[0] if carcs else None
