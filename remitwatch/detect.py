@@ -837,6 +837,7 @@ class Detector:
         if not open_denials:
             return
         c = self.conn
+        once: set[str] = set()      # filled below for the codes that matter: billed once per patient and date
         # the codes each open denial needs paid, by claim
         want_codes: dict[str, set] = defaultdict(set)
         for f in open_denials:
@@ -869,29 +870,57 @@ class Detector:
                 paid[(k, l.get("procedure_code"), l.get("service_date"))].append(
                     (l.get("payment_date") or l.get("txn_payment_date") or "", l.get("patient_control_number"), l.get("trace_number"),
                      l["paid_cents"], l.get("claim_status_code")))
+        # Codes billed more than once for a patient on a date (Mohs stages, units, fractions): a payment on another claim may
+        # be for a different stage or lesion, so it never closes a denial of such a code on its own. A code counts as billed
+        # once when at least 20 patient-dates had it paid and no more than 1.5 percent had two or more paid lines of it, on one
+        # bill or several (a denial and its paid correction count once). Measured only for the codes the open denials need.
+        codes_needed = sorted({code for v in want_codes.values() for code in v})
+        if codes_needed:
+            groups, repeats = Counter(), Counter()
+            for code, n in c.execute(f"""SELECT l.procedure_code, COUNT(DISTINCT substr(l.patient_control_number,1,9) || ':' || l.line_seq)
+                                         FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
+                                         WHERE t.superseded = 0 AND l.claim_status_code IN ('1','19') AND l.paid_cents > 0 AND COALESCE(cl.patient_id,'') <> ''
+                                           AND l.procedure_code IN ({','.join('?' * len(codes_needed))})
+                                         GROUP BY l.procedure_code, cl.patient_id, l.service_date""", codes_needed):
+                groups[code] += 1
+                repeats[code] += n > 1
+            once = {code for code, g in groups.items() if g >= 20 and repeats[code] <= 0.015 * g}
         for f in open_denials:
             mine = f.get("payment_date") or ""
             bill = bill_of(f.get("patient_control_number"))
             exp = f.get("expected_cents") or 0
-            lines = [ln for ln in self.lines_by_claim.get(f.get("claim_key"), []) if not f.get("line_key") or ln["line_key"] == f["line_key"]]
+            claim_lines = self.lines_by_claim.get(f.get("claim_key"), [])
+            lines = [ln for ln in claim_lines if not f.get("line_key") or ln["line_key"] == f["line_key"]]
             codes = [f["procedure_code"]] if f.get("line_key") else sorted(want_codes.get(f.get("claim_key"), ()))
             dos_list = {ln.get("service_date") for ln in lines} or {f.get("service_date")}
-            best = None
+            found: dict[str, tuple] = {}          # code -> earliest qualifying payment on another claim
             for k in who.get(f.get("claim_key"), ()):
                 for code in codes:
                     for dos in dos_list:
                         for e in paid.get((k, code, dos), []):
                             if e[0] > mine and bill_of(e[1]) != bill and (e[4] in ("1", "19") or (exp and e[3] >= 0.5 * exp)):
-                                if best is None or e[0] < best[0]:      # the earliest such payment
-                                    best = e
-            if best:
+                                if code not in found or e[0] < found[code][0]:
+                                    found[code] = e
+            # every code the denial covers must be paid again, and each must be a code billed once on a date
+            closes = bool(found) and all(code in found for code in codes) and all(code in once for code in codes)
+            best = min(found.values(), key=lambda e: e[0]) if found else None
+            if best and not closes:
+                ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+                ev["maybe_paid_later"] = {"claim": best[1], "payment_date": best[0], "paid_cents": best[3], "codes_paid": sorted(found),
+                                          "why_not_closed": "this code can be billed more than once on a date" if any(cd not in once for cd in found)
+                                          else "not every code on the denied claim was paid again"}
+                f["evidence"] = json.dumps(ev, default=str)
+            if best and closes:
                 self._mark_paid(f, best[0], best[3], f"Paid on a later remittance under claim {best[1]} ({best[0]}, trace {best[2]}, ${best[3]/100:.2f})",
                                 {"payment_date": best[0], "claim": best[1], "trace": best[2], "paid_cents": best[3], "claim_status": best[4],
                                  "how": "another claim for the same patient, date of service and code"})
                 continue
             # EMA shows the insurer's payment (posted from a remittance not in the folder yet, a paper EOB or another channel)
             ema = None
+            per_code = Counter((ln.get("service_date"), ln.get("procedure_code")) for ln in claim_lines)
             for ln in lines:
+                if per_code[(ln.get("service_date"), ln.get("procedure_code"))] > 1:
+                    continue        # EMA's rows are by claim, code and date: they cannot tell this line from its twin
                 for h in self.handling.get(ln["line_key"], []):
                     amt, when = h.get("payments_cents") or 0, h.get("transaction_date") or ""
                     if amt > 0 and when > mine and (not exp or amt >= 0.5 * exp) and (ema is None or amt > ema[0]):

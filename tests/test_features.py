@@ -821,6 +821,35 @@ def test_a_denial_paid_on_a_corrected_claim_or_by_another_payer_is_closed(tmp_pa
     store.close()
 
 
+def test_a_denial_of_a_code_billed_twice_on_a_date_is_not_closed_by_another_claim(tmp_path):
+    # pathology is read per specimen: 88305 often appears twice on one claim, so a later claim that pays 88305 for the
+    # same patient and date may be for other specimens. It is shown as a possible match, not closed.
+    def path_claim(i: int, who: str, paid: str, cas: str = "", allowed: str | None = "71.27", n: int = 2) -> str:
+        lines = "".join(svc("88305", "120.00", paid, allowed, cas or f"CAS*CO*45*{120 - float(paid):.2f}~") for _ in range(n))
+        return f"CLP*CB{i:07d}C017*1*240.00*{float(paid) * n:.2f}*0.00*12*PC{i}*11~NM1*QC*1*{who}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~" + lines
+    usual = [path_claim(10 + i, f"P{i:03d}*PAT****MI*W1{i:07d}", "71.27") for i in range(25)]
+    denied = path_claim(300, "ORCHARD*LEE****MI*W55500300", "0.00", "CAS*CO*16*120.00~", None, n=1)
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + usual + [denied], pay_date="20260415")
+    store.close()
+    store = build_store(tmp_path, [path_claim(700, "ORCHARD*LEE****MI*W55500300", "71.27")], pay_date="20260520")
+    Detector(store, run_id="t").run()
+    f = store.query("SELECT status, evidence FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'")[0]
+    ev = json.loads(f["evidence"])
+    assert f["status"] == "open" and ev["maybe_paid_later"]["claim"] == "CB0000700C017"
+    assert "more than once on a date" in ev["maybe_paid_later"]["why_not_closed"]
+    # and EMA's rows, which are by claim, code and date, cannot close one of two 88305 lines on a claim: the other was paid
+    twin = ("CLP*CB0000400C017*1*240.00*71.27*0.00*12*PC400*11~NM1*QC*1*BIRCH*ANN****MI*W55500400~NM1*82*2*TEST PROVIDER*****XX*" + NPI
+            + "~DTM*232*20260401~" + svc("88305", "120.00", "71.27", "71.27", "CAS*CO*45*48.73~") + svc("88305", "120.00", "0.00", None, "CAS*CO*16*120.00~"))
+    store.close()
+    store = build_store(tmp_path, [twin], pay_date="20260416")
+    store.conn.execute("""INSERT INTO ema_rows (row_fingerprint, family, source_name, row_index, service_date, claim_id, cpt, activity_type, insurance_payments_cents)
+                          VALUES ('t1','charge_lines','Encounter & Charge Lines.xlsx',1,'2026-04-01','CB0000400C017','88305','Charge',7127)""")
+    store.conn.commit()
+    Detector(store, run_id="t2").run()
+    assert store.query("SELECT status FROM findings WHERE patient_control_number='CB0000400C017' AND category='denial'")[0]["status"] == "open"
+    store.close()
+
+
 def test_a_denial_ema_shows_paid_is_closed_before_its_remittance_arrives(tmp_path):
     denied = ("CLP*CB0000300C017*1*223.65*0.00*0.00*12*PC300*11~NM1*QC*1*ORCHARD*LEE****MI*W55500300~NM1*82*2*TEST PROVIDER*****XX*" + NPI
               + "~DTM*232*20260401~" + svc("99214", "223.65", "0.00", None, "CAS*CO*16*223.65~"))

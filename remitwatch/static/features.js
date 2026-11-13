@@ -241,7 +241,8 @@ function drawerExtras(f, r){
     ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? String(f.appealed_at).slice(0,10) : null]].filter(x=>x[1]!=null && x[1]!=='');
   const ev = f.evidence || {};
   const why = f.signal==='SECOND_RATE' && ev.note ? `<div class="note"><b>Likely reason.</b> ${esc(ev.note)}</div>` : '';
-  const later = ev.paid_later ? `<div class="note">${esc(f.auto_note || 'Paid later.')}</div>` : '';
+  const later = ev.paid_later ? `<div class="note">${esc(f.auto_note || 'Paid later.')}</div>`
+    : ev.maybe_paid_later ? `<div class="note"><b>Possibly paid on another claim.</b> Claim ${esc(ev.maybe_paid_later.claim)} for this patient and date paid ${esc((ev.maybe_paid_later.codes_paid||[]).join(', '))} on ${esc(ev.maybe_paid_later.payment_date)}. It was not closed automatically because ${esc(ev.maybe_paid_later.why_not_closed)}. If that claim covers this line, mark it recovered.</div>` : '';
   const claims = f.signal==='SECOND_RATE' && (ev.claims||[]).length ? `<h3 class="small">Claims paid at this amount${ev.lines > ev.claims.length ? ' (first '+ev.claims.length+' of '+ev.lines+')' : ''}</h3>
     <table class="small"><thead><tr><th>EMA claim ID</th><th>Date of service</th><th class="num">Allowed</th></tr></thead><tbody>${ev.claims.map(c=>`<tr><td>${esc(c[0])}</td><td>${esc(c[1])}</td><td class="num">${money2(c[2])}</td></tr>`).join('')}</tbody></table>` : '';
   return `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${why}${later}${claims}
