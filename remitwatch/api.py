@@ -431,7 +431,7 @@ def _search_text(request: Request | None, q: str | None) -> str | None:
 
 
 def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None,
-             patient_of: str | None = None):
+             patient_of: str | None = None, kind: str | None = None):
     where, params = [], []
     if patient_of:
         if SHOW_PHI:
@@ -453,6 +453,15 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         sigs = [s for s in signal.split(",") if s]
         where.append("signal IN (%s)" % ",".join("?" * len(sigs)))
         params += sigs
+    if kind:
+        from .insights import SIGNAL_WORK
+        sigs = sorted(sg for sg, k in SIGNAL_WORK.items() if k == kind)
+        if kind == "review":
+            where.append("signal NOT IN (%s)" % ",".join("?" * len(SIGNAL_WORK)))
+            params += sorted(SIGNAL_WORK)
+        else:
+            where.append("signal IN (%s)" % ",".join("?" * len(sigs)) if sigs else "0")
+            params += sigs
     if category:
         cats = [c for c in category.split(",") if c]
         where.append("category IN (%s)" % ",".join("?" * len(cats)))
@@ -466,8 +475,9 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
     if status == "active":
         where.append("status != 'dismissed'")
     elif status and status != "all":
-        where.append("status=?")
-        params.append(status)
+        wanted = [x for x in status.split(",") if x]
+        where.append("status IN (%s)" % ",".join("?" * len(wanted)))
+        params += wanted
     if severity:
         where.append("severity=?")
         params.append(severity)
@@ -490,6 +500,10 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         where.append("appeal_deadline < date('now')")
     elif deadline == "valid":
         where.append("appeal_deadline >= date('now')")
+    elif deadline in ("week", "month"):
+        where.append(f"appeal_deadline >= date('now') AND appeal_deadline < date('now','+{7 if deadline == 'week' else 30} days')")
+    elif deadline == "none":
+        where.append("appeal_deadline IS NULL")
     q = (q or "").strip()[:200]
     if q:
         clause = "patient_control_number LIKE ? OR title LIKE ? OR payer_name LIKE ? OR procedure_code LIKE ? OR carc LIKE ? OR rarc LIKE ?"
@@ -557,10 +571,12 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
              status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
              provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
              patient_of: Optional[str] = Query(None, max_length=200), sort: str = "shortfall", limit: int = Query(100, ge=1, le=2000),
-             offset: int = Query(0, ge=0, le=10**9), request: Request = None, _: str = Depends(require_auth)):
+             offset: int = Query(0, ge=0, le=10**9), kind: Optional[str] = Query(None, max_length=20), request: Request = None,
+             _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of)
-    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": "appeal_deadline ASC", "payer": "payer_group, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
+                         _extra(request), patient_of, kind)
+    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": "appeal_deadline ASC, shortfall_cents DESC",
+             "payer": "payer_group, appeal_deadline ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset)))
     return {"total": total["n"], "shortfall_cents": total["shortfall_cents"], "items": data}
@@ -580,9 +596,10 @@ def _csv_cell(v: Any) -> Any:
 def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, payer: Optional[str] = None, year: Optional[str] = None,
                  status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
-                 patient_of: Optional[str] = Query(None, max_length=200), request: Request = None, _: str = Depends(require_auth)):
+                 patient_of: Optional[str] = Query(None, max_length=200), kind: Optional[str] = Query(None, max_length=20), request: Request = None,
+                 _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of)
+                         _extra(request), patient_of, kind)
     data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
     # a routine-rate finding is about many claims: list them, each with its own filing deadline
     pattern = {r["finding_id"]: r["evidence"] for r in rows("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'")} \
