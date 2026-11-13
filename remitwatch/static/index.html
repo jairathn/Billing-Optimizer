@@ -434,16 +434,17 @@ async function data(v){
   </div>
   <div class="panel"><h2>Data the practice still needs to supply</h2>
     <ol class="small">
-      <li><b>Annual ModMed EMA exports</b> (Encounter &amp; Charge Lines, ERA &amp; Payment Line Adjustments, Claim &amp; Claim Status) for 2024, 2025 and 2026 year-to-date. Only weekly exports from late July 2026 onward are in Dropbox. These let the system show how each shortfall was handled in EMA (written off, transferred to patient, appealed).</li>
-      <li><b>Submitted claim files (837P)</b> on an ongoing basis from TriZetto, so every paid line can be compared to the exact line billed. Only October 5 to 9, 2026 exists today.</li>
-      <li><b>Executed payer contracts and fee schedules</b> (Anthem/BCBS, Humana, UnitedHealthcare, Aetna, Cigna, UMWA) with effective dates, so "below contract" can replace "below usual rate".</li>
+      <li><b>The TriZetto remittance files every week.</b> Everything on this site is only as current as the newest file in the folder. TriZetto can also deliver them to an SFTP mailbox; ask first whether that would take them away from ModMed.</li>
+      <li><b>Executed payer contracts and fee schedules</b> with effective dates, Anthem commercial and Humana Medicare Advantage first, then UnitedHealthcare, Aetna, Cigna and UMWA, so "below contract" can replace "below the payer's usual rate".</li>
+      <li><b>ModMed's all-patient EHI export, once</b> (free; request it through ModMed support): every claim, submission, ERA link, adjustment and payment for the whole history in one consistent form. Then <b>every week, the last six weeks by date of service</b>: Encounter &amp; Charge Lines in the full layout (with Patient ID, Bill ID and Bill Creation Date), ERA &amp; Payment Line Adjustments, and Claim &amp; Claim Status with Patient ID added. A week pulled as it ends misses every visit not billed yet.</li>
+      <li><b>The remittance files for any weeks listed above as missing</b>, from TriZetto.</li>
       <li><b>Zelis / Optum Pay / Payspan enrollment status</b> for each payer, to stop fee-bearing payments.</li>
       <li><b>Provider roster</b> (NPI, credential, start date) to replace the inferred physician / non-physician tiers.</li>
-      <li><b>MIPS feedback reports</b> (QPP) for 2022 to 2024 performance years to explain the drop in the Medicare bonus.</li>
-      <li><b>The EMA appointment export</b> (scheduled, arrived, no-show, cancelled, with clinician and office). Nothing on this site reads it yet. With it, the Providers tab can be extended to tell an empty schedule from patients who did not come.</li>
-      <li><b>Encounter &amp; Charge Lines in the full layout for a rolling six weeks each week</b> (with Bill Creation Date, Bill ID and Patient ID), by date of service. An export pulled as the week ends misses every visit not billed yet.</li>
+      <li><b>The EMA appointment export</b> (scheduled, arrived, no-show, cancelled, with clinician and office). Nothing on this site reads it yet. With it, the Providers tab can tell an empty schedule from patients who did not come, and the site can list arrived visits that never became a bill.</li>
       <li><b>Remittances for VA community care</b>, if TriZetto can supply them. None has ever arrived, so those visits are in no count here.</li>
-    </ol></div>`;
+      <li><b>The 2026 MIPS payment adjustment file</b> (qpp.cms.gov, Performance Feedback). The drop since 2024 is mostly the end of CMS's exceptional performance bonus; 2025 was close to the national maximum.</li>
+    </ol>
+    <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></div>`;
   await feedPanel(v.querySelector('#feedPanel'));
 }
 
