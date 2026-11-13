@@ -55,6 +55,18 @@ Findings are rebuilt on every run and matched to the previous run by id. What pe
 
 `appeals.py` writes the letter for each signal from templates, with statute wording that was checked against the Kentucky and Indiana sources (`codes.LEGAL`) and filing windows from `codes.appeal_rule`. `notes.py` adds the clinical part: it extracts text from the uploaded note, removes the identifiers known from the remittance and common identifier patterns, and asks Claude (`claude-opus-5-5`, structured output) to audit the note against the CPT rules for the dispute and return levels, word-for-word quotes, gaps and a recommendation. The paragraphs go into the letter unless the recommendation is not to appeal. The packet is rendered as one PDF with reportlab and stored in `appeal_packets`. Without an API key the same packet is built from the template.
 
+## Provider activity
+
+`activity.py` runs after detection and answers a different question from the same lines: what each clinician did. It writes its own small tables (`provider_roster`, `provider_days`, `provider_services`, `provider_payers`, `provider_panels`, `provider_cohorts`, `provider_recall`, `provider_ema_days`, `provider_ema_lag`) and never fails the run that called it.
+
+- A bill is the first nine characters of CLP01. Every remittance line for a bill is folded into one service per billed line: by the line control number within a payer, and across payers by date and billed code, because a second payer often returns its own numbers or its own charge. Each payer's decision is kept apart; the amount allowed is the first payer's that still stands, a reversal undoes only that payer's decision, and paid is every insurer payment added up.
+- The clinician is the rendering NPI when it is a person; an NPI seen under many names is the group. After that the line-level provider reference, the name, another remittance for the same bill and last the EMA export decide.
+- Encounters are typed: a visit or procedure is a patient seen; a slide read on its own bill, a radiation treatment, a post-operative check and a nurse-only visit are counted apart. A clinic day is a day with at least five patients seen, and carries the state of the Medicare contractor that paid that day's Medicare claims.
+- Panels (distinct patients in twelve months), who came back, new-patient return and what first biopsies led to come from following each patient through the store by name. The name is used in memory and never stored.
+- Completeness: the service-to-payment lag curve is measured from the store, a month counts as complete at 97 percent, and weeks in which a payer that pays weekly sent next to nothing and then resumed are found and subtracted from the months they would have paid.
+- The EMA charge exports are a second source for recent weeks. Each export's pull time is read from the workbook (`ema_sources`), and a day counts only when an export covering it was pulled late enough for that clinician's bills to exist.
+- `ACTIVITY_VERSION` changes whenever the tables or the way they are filled change; they are then rebuilt once, without re-running detection. The API runs one reader at a time (`_ACTIVITY_LOCK`): several at once are far slower than the same calls in turn.
+
 ## Serving
 
 `api.py` exposes JSON endpoints: summary, findings with filters and CSV export, finding detail, payer rates, `breakdown` (any one or two of 23 dimensions with denominators), `progress`, `alerts`, `sync/status`, `sync/run`, the Dropbox webhook, and the appeal packet endpoints. `static/index.html` and `static/features.js` are a single-page dashboard (vanilla JS, Chart.js from a CDN, no build step).
@@ -79,7 +91,7 @@ Authentication is one shared HTTP Basic login. State-changing calls must carry a
 - The dashboard reads a smaller database built by each run: findings, rates, exposure, alerts and the claim detail behind each finding. Every instance keeps a local copy under a new file name per version and overlays the journal (`actions/*.json`), so a status change shows at once and reaches the store on the next run. Replaying a journal entry is harmless.
 - The first load reads `Trizetto.zip` in one download when the data folder has it, and recognises the same files met later as loose copies by their Dropbox content hash.
 
-Measured on the five-year archive: first load in two runs (77 and 38 seconds on a 2.1 GHz core), 1.42 GB peak. Results equal the disk-based store's: same findings count, same dollars, same rates and alerts.
+Measured on the archive (almost three years of remittances): first load in two runs (54 and 36 seconds on a 2.1 GHz core), 1.43 GB peak; a routine re-analysis peaks at about 1.5 GB. Results equal the disk-based store's: same findings count, same dollars, same rates and alerts.
 
 Rules that keep the two modes equal: a file keeps its own name and date when it is ingested, the most common rate of a group does not depend on the order files were read in (`usual_amount`), and when a payer sends the same payment twice the copy from the newer file wins.
 
@@ -88,6 +100,6 @@ Rules that keep the two modes equal: a file keeps its own name and date when it 
 - Expected amounts are revealed-rate baselines, not contracts. Loading contracts would turn "below usual" into "below contract".
 - Filing windows come from provider manuals where they were read and from payer type otherwise; a contract can differ.
 - Location and diagnosis are known only where EMA exports exist (late July 2026 onward); location is otherwise estimated from the provider's usual site.
-- The store is one SQLite file (about 0.9 GB for 32K remittances, 0.5 GB in the compact form). Detection holds every line in memory: a run peaks at about 1.4 GB, which fits a 2 GB serverless function today and grows with the archive.
+- The store is one SQLite file (about 0.9 GB for 32K remittances, 0.5 GB in the compact form). Detection holds every line in memory: a run peaks at about 1.5 GB, which fits a 2 GB serverless function today and grows with the archive.
 - A store held in memory from a serialized image cannot pass 1 GB (SQLite's default limit for it).
 - The visit-note review has not been exercised against the live API in this build.

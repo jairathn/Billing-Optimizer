@@ -22,8 +22,8 @@ first load of tens of thousands of files completes across several short runs.
 The dashboard never waits on a cycle. Each instance keeps a copy of serving.sqlite.gz in its scratch space, checks for
 a newer one every 45 seconds, and lays the journal over it so a status change shows at once.
 
-Memory is the limit that matters: the whole store is held in memory while a cycle runs (about 0.5 GB for five years of
-remittances) and detection needs about as much again. Each cycle records its peak in status.json.
+Memory is the limit that matters: the whole store is held in memory while a cycle runs (about 0.9 GB for almost three
+years of remittances) and detection needs about half as much again. Each cycle records its peak in status.json.
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "2"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
+SERVING_BUILD = "3"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -907,6 +907,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 gc.collect()
                 conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_seconds', ?)", (str(round(time.time() - t1, 1)),))
                 conn.execute("DELETE FROM meta WHERE key='cloud:detect_pending'")
+                activity.mark_pending(conn)             # the provider tables are behind the store until they are rebuilt
                 out["detect"] = {"findings": sum(summary.values()), "seconds": round(time.time() - t1, 1)}
                 ran_detect = True
                 mem["detect"] = peak_mb()
@@ -914,12 +915,14 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
         conn.commit()
 
-        # What each clinician did: rebuilt whenever detection ran, and once after an upgrade changed how it is built.
+        # What each clinician did: rebuilt after detection, after an upgrade that changed how it is built, and by the next
+        # run when this one has no time left for it (the store keeps a note that the tables are behind).
         ran_activity = False
-        if has_lines and not remaining and "deferred" not in out and (ran_detect or activity.stale(conn)) \
-                and budget - (time.time() - t0) > 45:
+        if has_lines and not remaining and "deferred" not in out and activity.stale(conn) and budget - (time.time() - t0) > 45:
+            before = activity.status(conn)["error"]
             out["activity"] = activity.refresh(store, log=log)
-            ran_activity = "error" not in out["activity"]
+            # a build that failed is saved once too, so the dashboard can say why the tab is empty
+            ran_activity = "error" not in out["activity"] or out["activity"]["error"] != before
             gc.collect()
             mem["activity"] = peak_mb()
 
@@ -1157,6 +1160,14 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         + (f"; appeal packets may be emailed to {domains}" if domains else "; appeal packets cannot be emailed until APPEAL_EMAIL_DOMAINS names the domains allowed"))
     add("note_review", "Visit-note review (optional)", bool(env("ANTHROPIC_API_KEY")) or None,
         "on" if env("ANTHROPIC_API_KEY") else "off: packets are built from the template")
+    owner = env("REMITWATCH_OWNER_PASSWORD") or ""
+    owner_ok = owner.isascii() and len(owner) >= 12 and owner != pw
+    add("owner_login", "Owner's own login for the Providers tab (optional)", (owner_ok if owner else None),
+        "on: the Providers tab answers only to the owner's login" if owner_ok else
+        ("off: everyone who can sign in sees the Providers tab" if not owner else
+         "set, but it is shorter than 12 characters, not plain letters and digits, or the same as the dashboard password"),
+        "Replace REMITWATCH_OWNER_PASSWORD in Vercel with 12 or more plain letters and digits, different from the dashboard password, "
+        "then redeploy. Until then the Providers tab is closed to everyone.")
     if base_url:
         out["webhook_url"] = f"{base_url.rstrip('/')}/api/dropbox/webhook"
     st = state_from_env(fast=True) if (key and secret and token) or env("REMITWATCH_STATE_DIR") else None

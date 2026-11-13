@@ -21,6 +21,8 @@ redeploy after every change.
 | `DROPBOX_REFRESH_TOKEN` | The Connect Dropbox step on the site's `/setup` page | Yes |
 | `DROPBOX_ROOT_PATH` | The data folder. Default `/Trizetto Data`. | No |
 | `DROPBOX_PATH_ROOT_NS` | Only for a Dropbox team space. `/setup` shows the number when it is needed. | Sometimes |
+| `REMITWATCH_OWNER_PASSWORD` | Made up by the owner, 12 or more plain letters and digits, different from the dashboard password. When it is set, the Providers tab (what each clinician is doing) opens only for the user `owner` with this password, at `/owner`; the shared login keeps everything else. Without it, everyone who can sign in sees that tab. | No |
+| `REMITWATCH_OWNER_USER` | The owner's user name. Default `owner`. | No |
 | `REMITWATCH_STATE_PATH` | Where the site keeps its own files in Dropbox. Default `/RemitWatch-state`. | No |
 | `REMITWATCH_MAX_SECONDS` | Time allowed for one run. Default 240, one minute under the function limit in `vercel.json`. | No |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |

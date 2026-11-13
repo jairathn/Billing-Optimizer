@@ -65,8 +65,18 @@ textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid 
 #feedChip{font-size:12px;color:var(--muted)}
 td.row{cursor:pointer}
 tr.picked{background:var(--chip)}
-table.pvt th{white-space:normal;vertical-align:bottom;max-width:150px}
+table.pvt th{white-space:normal;vertical-align:bottom;max-width:150px;cursor:default}
 table.pvt td:first-child{white-space:nowrap}
+table.pvt th:first-child,table.pvt td:first-child{position:sticky;left:0;background:var(--panel);z-index:1}
+table.pvt tr.picked td:first-child{background:var(--chip)}
+table.pvt tr.row:hover td:first-child{background:var(--soft)}
+table.pvt td .sub{display:block;color:var(--muted);font-size:11px;font-weight:400}
+.grid.two > *{min-width:0}
+.filters select{max-width:72vw}
+.scroll{overflow:auto}
+.busy{opacity:.55;transition:opacity .15s}
+.warnbox{border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:12px}
+nav a.owner{font-style:italic}
 .rng{position:relative;height:10px;min-width:140px;background:var(--soft);border-radius:5px}
 .rng i{position:absolute;top:0;height:100%;border-radius:5px;background:var(--pv1,var(--accent));opacity:.55}
 .rng b{position:absolute;top:-3px;width:2px;height:16px;margin-left:-1px;background:var(--ink)}
@@ -145,21 +155,24 @@ const money = c => (c==null?'–':(c<0?'-':'')+'$'+Math.round(Math.abs(c)/100).t
 const money2 = c => (c==null?'–':'$'+(c/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}));
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const mods = js => { try { const a = JSON.parse(js||'[]'); return Array.isArray(a)&&a.length ? '-'+esc(a.join(',')) : ''; } catch(e){ return ''; } };
-async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); } const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} throw new Error(m || (path+' '+r.status)); } return r.json(); }
+async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); } const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); const err = new Error(m || (path+' '+r.status)); err.status = r.status; throw err; } return r.json(); }
 function qs(o){ return Object.entries(o).filter(([k,v])=>v!==''&&v!=null).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&'); }
+function sweepCharts(){ Object.keys(state.charts).forEach(id=>{ const c=state.charts[id]; if(!c.canvas || !c.canvas.isConnected){ c.destroy(); delete state.charts[id]; } }); }
 function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el) return;
   if(!el.parentElement.classList.contains('chartbox')){ const box=document.createElement('div'); box.className='chartbox'; el.parentElement.insertBefore(box, el); box.appendChild(el); }
   cfg.options = Object.assign({maintainAspectRatio:false}, cfg.options||{});
   state.charts[id]=new Chart(el, cfg); }
 const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8c6d1f','#6c757d'];
 
+function tabOpen(k){ if(!TABS.some(t=>t[0]===k)) return false; const p = state.meta && state.meta.providers; return k!=='providers' || !p || p.open; }
 function initNav(){
-  $('#nav').innerHTML = TABS.map(([k,l])=>`<a data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`).join('');
-  $('#nav').querySelectorAll('a').forEach(a=>a.onclick=()=>{state.tab=a.dataset.tab; location.hash=state.tab; render();});
+  $('#nav').innerHTML = TABS.map(([k,l])=> tabOpen(k) ? `<a data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`
+    : `<a class="owner" href="/owner" title="What each clinician is doing. Opens with the owner's login.">${l} (owner sign-in)</a>`).join('');
+  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=()=>{state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
   $('#themeBtn').onclick = ()=>{const r=document.documentElement; const dark = r.dataset.theme==='dark' || (r.dataset.theme!=='light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    r.dataset.theme = dark?'light':'dark'; if(state.tab==='providers') render(); };
+    r.dataset.theme = dark?'light':'dark'; if(state.tab==='providers'){ if(typeof pvRedraw==='function' && pvRedraw()) return; render(); } };
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
   $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
@@ -176,11 +189,15 @@ async function loadSummary(){
   ys.value = cur;
 }
 async function render(){
-  $('#nav').querySelectorAll('a').forEach(a=>a.classList.toggle('active',a.dataset.tab===state.tab));
+  const run = state.run = (state.run||0) + 1;       // a slower, older run must not draw over a newer one
+  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active',a.dataset.tab===state.tab));
+  ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = state.tab==='providers' ? 'none' : ''; });
   await loadSummary();
-  const v = $('#view'); v.innerHTML = '<div class="muted">loading…</div>';
+  if(run !== state.run) return;
+  const v = $('#view'); v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
   const fn = {overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data, alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab}[state.tab] || overview;
-  try { await fn(v); } catch(e){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; console.error(e); }
+  try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
+  if(run === state.run) sweepCharts();
 }
 function sumBy(rows, key){ const m={}; rows.forEach(r=>{m[r[key]]=(m[r[key]]||0)+(r.shortfall_cents||0);}); return m; }
 function sigRows(sigs){ return state.summary.by_signal.filter(r=>sigs.includes(r.signal)); }
@@ -349,7 +366,14 @@ async function appeals(v){
 }
 async function data(v){
   const m = state.meta;
-  v.innerHTML = `<div id="feedPanel"></div><div class="grid two">
+  let cov = {gaps: []};
+  try { cov = await api('/api/coverage'); } catch(e){}
+  const day = d => { const x = new Date(d + 'T00:00:00Z'); return isNaN(x) ? esc(d) : x.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}); };
+  const gaps = (cov.gaps||[]).length ? `<div class="panel"><h2>Remittance weeks that look missing</h2>
+    <div class="note">A payer that pays every week sent next to nothing in these weeks and then started again. Either its 835 files for those weeks never reached the Dropbox folder or it paid nothing. Ask TriZetto to send the files again. Until they arrive, the visits that payer would have paid in those weeks are missing from every count on this site, and so is any downcoding in them.</div>
+    <table><thead><tr><th>Payer</th><th>Payer ID</th><th>From</th><th>To</th><th class="num">Weeks</th><th class="num">Claims received</th><th class="num">Usual for those weeks</th></tr></thead>
+    <tbody>${cov.gaps.map(g=>`<tr><td>${esc(g.payer)}</td><td class="small muted">${esc(g.payer_id)}</td><td>${day(g.from)}</td><td>${day(g.to)}</td><td class="num">${esc(g.weeks)}</td><td class="num">${Number(g.seen||0).toLocaleString()}</td><td class="num">${Number(g.usual||0).toLocaleString()}</td></tr>`).join('')}</tbody></table></div>` : '';
+  v.innerHTML = `<div id="feedPanel"></div>${gaps}<div class="grid two">
     <div class="panel"><h2>What is loaded</h2><table>
       <tr><td>Files ingested</td><td class="num">${(m.files.n||0).toLocaleString()} (${m.files.n835||0} remits, ${m.files.nema||0} EMA exports)</td></tr>
       <tr><td>Last ingest</td><td class="num">${esc(m.files.last_ingest||'–')}</td></tr>
@@ -368,8 +392,9 @@ async function data(v){
       <li><b>Zelis / Optum Pay / Payspan enrollment status</b> for each payer, to stop fee-bearing payments.</li>
       <li><b>Provider roster</b> (NPI, credential, start date) to replace the inferred physician / non-physician tiers.</li>
       <li><b>MIPS feedback reports</b> (QPP) for 2022 to 2024 performance years to explain the drop in the Medicare bonus.</li>
-      <li><b>The EMA appointment export</b> (scheduled, arrived, no-show, cancelled, with clinician and office), so the Providers tab can tell an empty schedule from patients who did not come.</li>
-      <li><b>Encounter &amp; Charge Lines in the full layout for a rolling six weeks each week</b> (with Bill Creation Date, Bill ID and Patient ID). An export pulled as the week ends misses every visit not billed yet.</li>
+      <li><b>The EMA appointment export</b> (scheduled, arrived, no-show, cancelled, with clinician and office). Nothing on this site reads it yet. With it, the Providers tab can be extended to tell an empty schedule from patients who did not come.</li>
+      <li><b>Encounter &amp; Charge Lines in the full layout for a rolling six weeks each week</b> (with Bill Creation Date, Bill ID and Patient ID), by date of service. An export pulled as the week ends misses every visit not billed yet.</li>
+      <li><b>Remittances for VA community care</b>, if TriZetto can supply them. None has ever arrived, so those visits are in no count here.</li>
     </ol></div>`;
   await feedPanel(v.querySelector('#feedPanel'));
 }
@@ -425,11 +450,11 @@ async function openDetail(id){
   };
 }
 
-window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(TABS.some(t=>t[0]===h) && h!==state.tab){ state.tab=h; render(); } });
+window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(tabOpen(h) && h!==state.tab){ state.tab=h; render(); } });
 (async function(){
-  if(location.hash && TABS.some(t=>t[0]===location.hash.slice(1))) state.tab=location.hash.slice(1);
-  initNav();
   try { await loadMeta(); } catch(e){ $('#fresh').textContent='no data loaded yet'; }
+  if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
+  initNav();
   await refreshHeader();
   render();
   setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);

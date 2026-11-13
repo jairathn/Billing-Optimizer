@@ -211,6 +211,8 @@ Dropbox reads and writes, the first load on Vercel, the webhook from Dropbox, ma
 
 ## Provider view (November 12, 2026)
 
+(First version. The fold, the EMA pull time and several measures were changed the next day: see the section after this one.)
+
 The user asked whether the same data can show what each provider is doing, and pasted a productivity memo from another assistant
 built on one EMA charge export. Answer: yes, for almost three years of insured visits. Provider-level figures are NOT written in
 this repository (it is public); they are in the password-protected dashboard and in the conversation.
@@ -244,3 +246,53 @@ this repository (it is public); they are in the password-protected dashboard and
 - Measured on the real archive: the build takes about 7 seconds and adds no memory. A routine re-analysis peaks at about 1.5 GB;
   the 1.42 GB written earlier was a first load, which peaks lower. Docs corrected.
 - Not in any file: schedule fill and no-shows (needs the EMA appointment export), staff cost, pay terms. Listed in MISSING_DATA.md.
+
+## Provider view, second pass (November 13, 2026; activity version 2)
+
+Five independent reviewers checked the first version: one recomputed every per-clinician figure from the raw tables, one argued
+against the conclusions drawn from them, one tested the method, one read the engine and one drove the screen and checked the diff
+for leaks. The per-clinician counts held (within 5 percent everywhere). What changed as a result:
+
+- **The fold** (`activity.py`, `_fold` and `_settle`). About one service in ten was counted twice, because a second payer often
+  returns its own line control number or its own charge for the same billed line, and a reversal from any payer wiped what another
+  payer had allowed. Lines now fold per billed line across payers (control number within a payer, then date and billed code), each
+  payer's decision is kept apart, and the amount allowed is the first payer's that still stands. Two checks are stored with every
+  build (`activity:info`, key `checks`): visit codes per patient visit (1.004 on the archive) and insurer paid over allowed by
+  family and quarter.
+- **Typed contacts.** A patient-day whose only service is a post-operative check, a light-box session or a staff injection is no
+  longer a patient seen (`other_contacts`). More biopsy codes count as biopsies (nail, lip, ear, eyelid and similar sites).
+- **Office state.** Each clinic day carries the state of the Medicare contractor that paid its Medicare claims (`place`), which
+  follows the office. Every clinician with days in two states can be compared between them.
+- **Who comes back.** `provider_panels` now holds kept by anyone, kept among established patients only, and kept by the same
+  clinician. The first figure mostly measured how many first-time patients a clinician had the year before.
+- **What biopsies find.** Only a first biopsy counts (none in the 120 days before, no cancer treated in the year before), and the
+  screen prints the fixed period it covers. It stays a floor and is not a quality measure; pathology results are.
+- **Missing payer weeks** (`find_gaps`). Weeks in which a payer that pays weekly sent under a quarter of its usual claims and then
+  resumed are found, listed on the Data tab (`/api/coverage`) and subtracted from the completeness of the months they would have
+  paid. Five such spans exist in the archive (listed in MISSING_DATA.md, item 2).
+- **EMA pull time.** An export's pull time is the workbook's creation time (`ema_exports.export_created`, table `ema_sources`,
+  recorded at ingestion), not a guess from its contents. A later export moves a day's pull date forward even when all its rows are
+  repeats, and an export by transaction date covers no day. This released several weeks the first version held back as "waiting".
+- **Screen** (`static/providers.js`). Answers are kept in `state.pv.data` and a change of filter, metric, theme or pick redraws
+  from memory without moving the reader; a late answer can no longer draw over a newer one; month boxes ignore half-typed values;
+  fixed-period columns say so; the call-back table no longer depends on the window; charts whose canvas has gone are released.
+- **Owner login.** `REMITWATCH_OWNER_PASSWORD` (optional) keeps `/api/activity/*` for a second login (`owner` by default);
+  `/api/meta` tells the page whether to show the tab, and `/owner` asks the browser for the owner's login. Unset, behaviour is
+  unchanged. A weak value closes the tab to everyone and `/setup` says why.
+- **Speed.** The readers pull thousands of rows into Python and crawled when several ran at once (six together took about seven
+  seconds each on the archive, against 0.05 alone). The API now runs one at a time (`_ACTIVITY_LOCK`).
+- `ACTIVITY_VERSION` is "2" and `SERVING_BUILD` "3". Measured on the simulated Dropbox: a site holding state from the previous
+  release rebuilds its provider tables in one run of 27 seconds (peak 1.33 GB, no detection); a first load from nothing takes two
+  runs (54 and 36 seconds, peak 1.43 GB) and gives the same findings count as before (17,407). The dashboard copy built by the
+  cloud cycle equals the store built by the CLI for every provider figure except charges and paid for two clinicians, which differ
+  by a few hundred dollars: eight pairs of duplicate remittances from October and November 2024 survive as different copies
+  depending on the order files are read in. Known, small, not fixed.
+
+Things a later session should not redo or get wrong:
+
+- Provider-level figures, clinician names and office names stay out of this repository. Tests use made-up people.
+- Do not compare clinicians on "kept from the year before" without the established-only column, on biopsy yield across offices, or
+  on a recent EMA export without checking when it was pulled.
+- The memo the owner pasted was right about its own arithmetic and wrong about two clinicians because its export was pulled three
+  days after the period ended. The pattern in the data is an office effect, not a clinician effect.
+- Still not built: the EMA appointment export (no sample exists yet), pathology results, cost per clinician.

@@ -415,7 +415,7 @@ def sync(store, client: DropboxClient | None = None, root_path: str | None = Non
 
 def ingest_new_files(store, paths: list[str], log=print) -> dict:
     """Route downloaded files to the right loader."""
-    from .ema_exports import iter_rows
+    from .ema_exports import export_created, iter_rows
     from .x12_835 import looks_like_x12
 
     out = {"remits": 0, "ema": 0, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []}
@@ -433,6 +433,7 @@ def ingest_new_files(store, paths: list[str], log=print) -> dict:
                 r = store.ingest_ema_rows(rows)
                 fam = rows[0]["family"] if rows else "unknown"
                 store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
+                store.record_export(os.path.basename(p), sha, fam, export_created(p), len(rows))
                 out["ema"] += 1
             except Exception as exc:
                 out["errors"] += 1

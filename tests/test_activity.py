@@ -27,7 +27,7 @@ def bill(n: int) -> str:
     return f"CB{n:07d}"
 
 
-def clp(n: int, lines: str, *, status: str = "1", who: str = "ann", patient: tuple = None, cfi: str = "12", suffix: str = "C017") -> str:
+def clp(n: int, lines: str, *, status: str = "1", who: str = "ann", patient: tuple = None, cfi: str = "12", suffix: str = "C017", pcn: str | None = None) -> str:
     """One claim loop. `who` picks how the payer named the rendering provider."""
     last, first = patient or (f"PATIENT{n:03d}", "PAT")
     render = {
@@ -35,11 +35,12 @@ def clp(n: int, lines: str, *, status: str = "1", who: str = "ann", patient: tup
         "group_named_ann": f"NM1*82*1*ALPHA*ANN****XX*{GROUP}~", "group": f"NM1*82*2*TEST DERMATOLOGY ASSOCIATES*****XX*{GROUP}~",
         "name_only_ann": "NM1*82*1*ANN ALPHA PA~", "none": "",
     }[who]
-    return f"CLP*{bill(n)}{suffix}*{status}*100.00*80.00*0.00*{cfi}*PC{n}{status}*11~NM1*QC*1*{last}*{first}****MI*M{n:06d}~{render}{lines}"
+    return f"CLP*{pcn or bill(n) + suffix}*{status}*100.00*80.00*0.00*{cfi}*PC{n}{status}*11~NM1*QC*1*{last}*{first}****MI*M{n:06d}~{render}{lines}"
 
 
-def svc(code: str, charge: str, paid: str, allowed: str | None, dos: str, *, lcn: str | None = None, units: int = 1, hpi: str | None = None, cas: str = "") -> str:
-    out = f"SVC*HC:{code}*{charge}*{paid}**{units}~DTM*472*{dos}~{cas}"
+def svc(code: str, charge: str, paid: str, allowed: str | None, dos: str | None, *, lcn: str | None = None, units: int = 1, hpi: str | None = None,
+        cas: str = "", dtm: str = "472") -> str:
+    out = f"SVC*HC:{code}*{charge}*{paid}**{units}~" + (f"DTM*{dtm}*{dos}~" if dos else "") + cas
     if lcn:
         out += f"REF*6R*{lcn}~"
     if hpi:
@@ -180,9 +181,10 @@ def test_names_as_payers_write_them():
     assert activity.match_person(people, ("NOBODY", "ANN")) is None
     assert activity.clean_code("11102 59") == "11102" and activity.clean_code(None) == ""
     assert [activity.service_family(c) for c in ("99203", "99215", "11103", "17000", "17110", "17262", "17311", "11402", "13132", "88305", "77401", "G6012",
-                                                 "Q4316", "J3301", "96372", "96910", "G2211", "10060")] == \
+                                                 "Q4316", "J3301", "11900", "96372", "96910", "G2211", "99024", "69100", "10060")] == \
         ["new_visit", "est_visit", "biopsy", "destruction_premalignant", "destruction_benign", "destruction_malignant", "mohs", "excision", "repair",
-         "pathology", "radiation", "radiation", "skin_substitute", "drug", "injection", "phototherapy", "visit_addon", "other"]
+         "pathology", "radiation", "radiation", "skin_substitute", "drug", "injection", "therapy_injection", "phototherapy", "visit_addon", "postop",
+         "biopsy", "other"]
 
 
 def test_who_rendered_each_visit_and_what_counts_as_a_patient(built):
@@ -265,7 +267,10 @@ def test_patients_treated_for_a_skin_cancer_and_not_seen_since_are_counted_under
     assert BOB not in rows
     ov = activity.overview(store.conn)
     assert ov["recall"]["overdue_12"] == 1 and ov["recall"]["cancer_patients"] == 4 and ov["recall"]["as_of"] == "2025-12-31"
-    assert next(r for r in ov["providers"] if r["provider_id"] == ANN)["recall"] == {"cancer_patients": 3, "overdue_12": 1, "overdue_18": 1}
+    # the list does not depend on the months chosen: a clinician with no visit in the window still has patients to call back
+    assert [(r["provider_id"], r["name"], r["cancer_patients"], r["overdue_12"], r["overdue_18"]) for r in ov["recall"]["by_provider"]] == \
+        [(ANN, "Alpha, Ann", 3, 1, 1), ("unattributed", "No clinician on the remittance", 1, 0, 0)]
+    assert activity.overview(store.conn, "2026-02", "2026-02")["recall"]["by_provider"] == ov["recall"]["by_provider"]
     store.close()
 
 
@@ -318,10 +323,12 @@ def test_ema_side_counts_a_day_only_when_the_export_could_hold_it(built):
     ann = next(p for p in rc["providers"] if p["provider"] == "Alpha, Ann")
     # nine in ten of her bills exist within six days. 2 to 5 March were pulled almost four weeks later and count;
     # 27 March (pulled three days later) and 10 April (pulled the same day) wait instead of being read as light days.
-    assert ann["lag"] == {"median": 3, "p75": 5, "p90": 6, "bills": 23, "basis": "every bill in the exports"} and ann["hold_days"] == 6
+    assert ann["lag"] == {"median": 3, "p75": 5, "p90": 6, "bills": 23, "basis": "every bill for an office visit in the exports", "at_least": False}
+    assert ann["hold_days"] == 6 and (ann["counted_from"], ann["counted_to"]) == ("2026-03-02", "2026-03-05") and ann["named_share"] == 1.0
     assert ann["clinic_days"] == 4 and ann["days_waiting"] == 2 and ann["patients_per_day"] == 5.5 and ann["insured_share"] == round(21 / 22, 4)
     assert ann["raw_days"] == 6 and ann["raw_patients_per_day"] == 5.0 and ann["new_per_day"] == round(1 / 4, 1)
-    assert ann["remit_patients_per_day"] == round((6 + 6 + 1 + 0) / 4, 1)
+    assert ann["remit_patients_per_day"] == round((6 + 6 + 1 + 0) / 4, 1) and ann["remit_days"] == 4 and ann["remit_share"] is None      # too few to say
+    assert (rc["counted_from"], rc["counted_to"]) == ("2026-03-02", "2026-03-05")
     assert ann["offices"] == [{"name": "North Office", "share": 1.0}] and ann["tier"] == "nonphysician"
     assert activity._short_names({"North Dermatology Associates", "South Dermatology Associates", "Laser Center"}) == \
         {"North Dermatology Associates": "North", "South Dermatology Associates": "South", "Laser Center": "Laser Center"}
@@ -395,6 +402,11 @@ def test_api_and_the_dashboard_copy(tmp_path, monkeypatch):
     ov = tc.get("/api/activity/overview?from=2026-03&to=2026-04", auth=auth).json()
     assert ov["ready"] is True and [r["provider_id"] for r in ov["providers"]] == [ANN, BOB] and ov["built_at"]
     assert tc.get("/api/activity/overview?from=March", auth=auth).status_code == 422
+    for month in ("2026-13", "2026-00", "2026-1", "２０２６-03"):        # months that do not exist, and digits that are not plain digits
+        assert tc.get("/api/activity/overview", params={"from": month}, auth=auth).status_code == 422, month
+        assert tc.get(f"/api/activity/provider/{ANN}", params={"to": month}, auth=auth).status_code == 422, month
+    cov = tc.get("/api/coverage", auth=auth).json()
+    assert cov["ready"] is True and cov["gaps"] == [] and cov["months"] and tc.get("/api/coverage").status_code == 401
     assert tc.get("/api/activity/trend?by=week", auth=auth).status_code == 422 and tc.get("/api/activity/trend", auth=auth).json()["by"] == "quarter"
     assert tc.get("/api/activity/recent", auth=auth).json()["providers"] == []          # no EMA export in this store
     assert tc.get(f"/api/activity/provider/{ANN}?from=2026-03&to=2026-04", auth=auth).json()["provider"]["name"] == "Alpha, Ann"
@@ -414,3 +426,347 @@ def test_api_and_the_dashboard_copy(tmp_path, monkeypatch):
     assert activity.status(copy)["ready"] is True and activity.overview(copy, "2026-03", "2026-04")["providers"][0]["patients"] == 13
     copy.close()
     store.close()
+
+
+# --------------------------------------------------------------------------- one service per billed line, whoever reports it
+SEED = ("20200110", "ANTHEM", [visit(9000 + i, "20200102", patient=(f"SEEDA{i}", "X")) for i in range(3)]
+        + [visit(9100 + i, "20200102", who="bob", patient=(f"SEEDB{i}", "X")) for i in range(3)])
+D = "20260302"
+MEDICARE_PAID = clp(1, svc("99213", "150.00", "72.00", "90.00", D, lcn="50000001") + svc("11102", "180.00", "80.00", "100.00", D, lcn="50000002")
+                    + svc("11103", "120.00", "48.00", "60.00", D, lcn="50000003", units=2), cfi="MB", status="19")
+
+
+def fold(tmp_path, name: str, files: list) -> tuple[dict, dict, set, dict]:
+    """A store from a few remittances (plus enough plain claims for both clinicians to be known as people): Ann's one day in
+    2026, her services by code, the kinds of payer her encounters were filed under, and the build's own record."""
+    folder = tmp_path / name
+    folder.mkdir()
+    store = Store(str(folder / "s.sqlite"))
+    assert store.ingest_835_paths(write_files(folder, [SEED] + list(files)))["errors"] == 0
+    activity.build_activity(store, log=lambda *a: None)
+    store.conn.row_factory = sqlite3.Row
+    days = [dict(r) for r in store.conn.execute("SELECT * FROM provider_days WHERE service_date >= '2026-01-01' AND provider_id=?", (ANN,))]
+    svcs = {r["code"]: dict(r) for r in store.conn.execute("SELECT * FROM provider_services WHERE month >= '2026-01' AND provider_id=?", (ANN,))}
+    kinds = {r["payer_kind"] for r in store.conn.execute("SELECT payer_kind FROM provider_payers WHERE month >= '2026-01' AND provider_id=?", (ANN,))}
+    info = activity.info(store.conn)
+    store.close()
+    assert len(days) == 1, days
+    return days[0], svcs, kinds, info
+
+
+def test_a_second_payer_never_makes_a_second_service(tmp_path):
+    def supplement(status, numbers, charges, allowed):
+        lines = "".join(svc(code, charge, paid, alw, D, lcn=lcn, units=units) for (code, paid, units), lcn, charge, alw in zip(
+            (("99213", "18.00", 1), ("11102", "20.00", 1), ("11103", "12.00", 2)), numbers, charges, allowed))
+        return ("20260325", "MUTUAL OF OMAHA", [clp(1, lines, status=status, who="group", suffix="C024")])
+    same, full = ("50000001", "50000002", "50000003"), ("150.00", "180.00", "120.00")
+    cases = {
+        "its own line numbers": supplement("2", ("1", "2", "3"), full, (None,) * 3),
+        "no numbers and its own charges": supplement("2", (None,) * 3, ("18.00", "20.00", "12.00"), (None,) * 3),
+        "calls itself primary, own numbers": supplement("1", ("1", "2", "3"), full, ("18.00", "20.00", "12.00")),
+        "calls itself primary, same numbers": supplement("1", same, full, ("18.00", "20.00", "12.00")),
+    }
+    for i, (what, second) in enumerate(cases.items()):
+        day_, svcs, kinds, info = fold(tmp_path, f"c{i}", [("20260320", "KY MEDICARE", [MEDICARE_PAID]), second])
+        got = (day_["items"], day_["patients"], day_["visits"], day_["biopsy_lesions"], day_["charge_cents"], day_["allowed_cents"], day_["paid_cents"])
+        assert got == (3, 1, 1, 3.0, 45000, 25000, 25000), (what, got)          # Medicare's allowed, both payers' payments, three services
+        assert svcs["99213"]["items"] == 1 and svcs["11103"]["units"] == 2.0 and kinds == {"medicare"}, what
+        assert info["checks"]["visit_codes_per_visit"] == 1.0, what
+
+
+def test_reversals_denials_and_two_payers_that_both_decide(tmp_path):
+    paid = clp(1, svc("99214", "200.00", "104.00", "130.00", D, lcn="50000001"), cfi="MB", status="19")
+    omaha = lambda amount, status: clp(1, svc("99214", "200.00" if status != "22" else "-200.00", amount, None, D, lcn="50000001"),      # noqa: E731
+                                       status=status, who="group", suffix="C024")
+    # a supplement reverses its own payment and pays again: what Medicare allowed is untouched
+    day_, svcs, _k, _i = fold(tmp_path, "a", [("20260320", "KY MEDICARE", [paid]), ("20260325", "MUTUAL OF OMAHA", [omaha("26.00", "2")]),
+                                              ("20260410", "MUTUAL OF OMAHA", [omaha("-26.00", "22"), omaha("26.00", "2")])])
+    assert (day_["items"], day_["allowed_cents"], day_["paid_cents"]) == (1, 13000, 13000)
+    # paid, then reversed, then denied by the same payer: denied, nothing allowed, nothing paid
+    day_, svcs, _k, _i = fold(tmp_path, "b", [
+        ("20260320", "KY MEDICARE", [clp(1, svc("99214", "200.00", "104.00", "130.00", D, lcn="50000001"), cfi="MB")]),
+        ("20260410", "KY MEDICARE", [clp(1, svc("99214", "-200.00", "-104.00", None, D, lcn="50000001"), cfi="MB", status="22"),
+                                     clp(1, svc("99214", "200.00", "0.00", None, D, lcn="50000001", cas="CAS*CO*50*200.00~"), cfi="MB", status="4")])])
+    assert (day_["allowed_cents"], day_["paid_cents"], svcs["99214"]["denied"]) == (0, 0, 1)
+    # the wrong contractor pays, the right one pays, the wrong one takes its money back and denies: the right one's decision stands
+    wrong, right = "IN MEDICARE", "KY MEDICARE"
+    day_, svcs, kinds, _i = fold(tmp_path, "c", [
+        ("20260320", wrong, [clp(1, svc("99214", "200.00", "100.00", "125.00", D, lcn="50000001"), cfi="MB")]),
+        ("20260325", right, [clp(1, svc("99214", "200.00", "104.00", "130.00", D, lcn="50000001"), cfi="MB")]),
+        ("20260410", wrong, [clp(1, svc("99214", "-200.00", "-100.00", None, D, lcn="50000001"), cfi="MB", status="22"),
+                             clp(1, svc("99214", "200.00", "0.00", None, D, lcn="50000001", cas="CAS*CO*109*200.00~"), cfi="MB")])])
+    assert (day_["items"], day_["allowed_cents"], day_["paid_cents"], svcs["99214"]["denied"], day_["place"]) == (1, 13000, 10400, 0, None)
+    # a payer that pays without saying what it allowed: at least what it paid
+    day_, _s, _k, _i = fold(tmp_path, "d", [("20260320", "ANTHEM", [clp(1, svc("99213", "150.00", "72.00", None, D, lcn="50000001"))])])
+    assert (day_["allowed_cents"], day_["paid_cents"]) == (7200, 7200)
+
+
+def test_odd_lines_one_number_for_a_claim_a_split_line_missing_dates_short_ids(tmp_path):
+    # one control number on every line of the claim: still three services
+    day_, svcs, _k, _i = fold(tmp_path, "a", [("20260320", "ANTHEM", [clp(1, svc("99213", "150.00", "72.00", "90.00", D, lcn="AB17")
+                                                                         + svc("11102", "180.00", "80.00", "100.00", D, lcn="AB17")
+                                                                         + svc("11103", "120.00", "48.00", "60.00", D, lcn="AB17", units=2))])])
+    assert (day_["items"], day_["visits"], day_["biopsy_lesions"], day_["allowed_cents"]) == (3, 1, 3.0, 25000)
+    # a billed line the payer split in two under its number (two units paid, one denied): one service of three units
+    day_, svcs, _k, _i = fold(tmp_path, "b", [("20260320", "KY MEDICARE", [clp(1, svc("99213", "150.00", "72.00", "90.00", D, lcn="50000001")
+                                                                              + svc("11103", "120.00", "48.00", "60.00", D, lcn="50000003", units=2)
+                                                                              + svc("11103", "60.00", "0.00", None, D, lcn="50000003", units=1, cas="CAS*CO*151*60.00~"),
+                                                                              cfi="MB")])])
+    assert (svcs["11103"]["items"], svcs["11103"]["units"], svcs["11103"]["allowed_cents"], svcs["11103"]["charge_cents"]) == (1, 3.0, 6000, 18000)
+    # a line dated only by a service period, and a line with no date at all on a bill with one date: both belong to that visit
+    day_, svcs, _k, info = fold(tmp_path, "c", [("20260320", "ANTHEM", [clp(1, svc("99213", "150.00", "72.00", "90.00", D, lcn="50000001", dtm="150")
+                                                                           + svc("17000", "110.00", "48.00", "60.00", None, lcn="50000002"))])])
+    assert (day_["service_date"], day_["items"], day_["visits"], day_["proc_only"], info["undated_services"]) == ("2026-03-02", 2, 1, 0, 0)
+    # a short patient control number is still one bill: paid, reversed and paid again is one visit, not two
+    short = lambda status, charge, paid, allowed: clp(1, svc("99213", charge, paid, allowed, D, lcn="50000001"), status=status, pcn="A1234")      # noqa: E731
+    day_, svcs, _k, _i = fold(tmp_path, "d", [("20260320", "ANTHEM", [short("1", "150.00", "72.00", "90.00")]),
+                                              ("20260410", "ANTHEM", [short("22", "-150.00", "-72.00", None), short("1", "150.00", "80.00", "100.00")])])
+    assert (day_["patients"], day_["items"], day_["allowed_cents"], day_["paid_cents"]) == (1, 1, 10000, 8000)
+
+
+def test_what_a_day_holds_office_state_visits_without_a_procedure_and_contacts_that_are_not_patients(tmp_path):
+    ky = [clp(1, svc("99214", "200.00", "104.00", "130.00", D, lcn="L1"), cfi="MB"),                                  # established, no procedure, high level
+          clp(2, svc("99213", "150.00", "72.00", "90.00", D, lcn="L2"), cfi="MB"),                                    # established, no procedure
+          clp(3, svc("99214", "200.00", "104.00", "130.00", D, lcn="L3a") + svc("11102", "180.00", "80.00", "100.00", D, lcn="L3b"), cfi="MB"),
+          clp(4, svc("99024", "0.00", "0.00", None, D, lcn="L4"), cfi="MB"),                                          # a post-operative check only
+          clp(5, svc("96910", "80.00", "40.00", "50.00", D, lcn="L5"), cfi="MB"),                                     # a light-box session only
+          clp(101, svc("88305", "100.00", "48.00", "60.00", D, lcn="L101"), who="bob", patient=("PATIENT003", "PAT"), cfi="MB")]
+    folder = tmp_path / "s"
+    folder.mkdir()
+    store = Store(str(folder / "s.sqlite"))
+    store.ingest_835_paths(write_files(folder, [SEED, ("20260320", "KY MEDICARE", ky),
+                                                ("20260321", "IN MEDICARE", [visit(6, "20260303", cfi="MB"), visit(7, "20260303", cfi="MB")]),
+                                                ("20260322", "ANTHEM", [visit(8, "20260304"), visit(9, "20260304")])]))
+    activity.build_activity(store, log=lambda *a: None)
+    d = day(store.conn, ANN, "2026-03-02")
+    assert (d["patients"], d["visits"], d["est_visits"], d["est_alone"], d["est_alone_high"], d["other_contacts"]) == (3, 3, 3, 2, 1, 2)
+    assert (d["biopsy_patients"], d["path_read_patients"], d["path_generated_cents"], d["place"]) == (1, 1, 6000, "KY")
+    assert day(store.conn, ANN, "2026-03-03")["place"] == "IN" and day(store.conn, ANN, "2026-03-04")["place"] is None      # no Medicare claim that day
+    ov = activity.overview(store.conn, "2026-03", "2026-03")
+    ann = next(r for r in ov["providers"] if r["provider_id"] == ANN)
+    assert ann["other_contacts"] == 2 and ann["patients"] == 7 and ann["path_read_share"] is None and ann["est_alone_high_share"] is None    # too few to quote a share
+    assert [p["place"] for p in activity.detail(store.conn, ANN, "2026-03", "2026-03")["places"]] == []                # no clinic day of five yet
+    store.close()
+
+
+def test_panels_keep_established_patients_apart_and_count_only_a_first_biopsy(tmp_path):
+    store = Store(str(tmp_path / "s.sqlite"))
+    activity.ensure_schema(store.conn)
+    journeys = {
+        ("OLD", "A"): [("2024-03-10", ANN, False, False), ("2025-03-10", ANN, False, False)],       # established, came back to Ann
+        ("NEW", "B"): [("2024-05-10", ANN, True, False)],                                           # new in the first year, never back
+        ("NEW", "C"): [("2024-06-10", ANN, True, False), ("2025-06-10", BOB, False, False)],        # new in the first year, back to Bob
+        ("EST", "D"): [("2024-02-10", ANN, False, False)],                                          # established, not seen again
+        ("BX", "E"): [("2025-01-10", ANN, False, True), ("2025-02-10", ANN, False, True), ("2025-09-10", ANN, False, True)],
+    }
+    treated = {("BX", "E"): ["2025-03-01", "2025-10-01"]}
+    activity.build_panels(store.conn, journeys, treated, "2024-01-01", "2025-12-31")
+    store.conn.row_factory = sqlite3.Row
+    rows = {(r["provider_id"], r["month"]): dict(r) for r in store.conn.execute("SELECT * FROM provider_panels")}
+    # December 2025 looks back on 2025 against 2024. Ann saw four people in 2024; two were seen again (one by Bob), one by her.
+    # Leaving out the two who were new to her that year: two established, one kept.
+    assert rows[(ANN, "2025-12")] == {"provider_id": ANN, "month": "2025-12", "panel": 2, "prior_panel": 4, "kept": 2, "kept_same": 1,
+                                      "prior_est": 2, "kept_est": 1}
+    assert rows[(BOB, "2025-12")]["panel"] == 1 and rows[(BOB, "2025-12")]["prior_panel"] == 0
+    assert rows[(ANN, "2024-12")]["panel"] == 4 and rows[(ANN, "2024-12")]["prior_panel"] is None        # nothing to look back on yet
+    co = {(r["provider_id"], r["quarter"]): dict(r) for r in store.conn.execute("SELECT * FROM provider_cohorts")}
+    # the second biopsy follows the first by a month, the third follows a treated cancer: only the first is counted, and it found one
+    assert (co[(ANN, "2025-Q1")]["biopsied"], co[(ANN, "2025-Q1")]["treated_120"]) == (1, 1) and (ANN, "2025-Q3") not in co
+    q2 = co[(ANN, "2024-Q2")]
+    assert (q2["new_patients"], q2["back_90"], q2["back_365"], q2["back_same"], q2["return_visits"]) == (2, 0, 1, 0, 1)
+    store.close()
+
+
+def test_weeks_a_payer_went_missing_are_found_and_lower_the_months_they_touch(tmp_path):
+    from datetime import date, timedelta
+    files, n = [], 0
+    monday = date(2025, 1, 6)
+    for w in range(24):
+        paid = (monday + timedelta(days=7 * w + 2)).strftime("%Y%m%d")                # every Wednesday
+        dos = (monday + timedelta(days=7 * w - 14)).strftime("%Y%m%d")
+        if w not in (16, 17):                                                         # a payer that pays every week skips two, then resumes
+            files.append((paid, "ANTHEM", [visit(n := n + 1, dos) for _ in range(30)]))
+        if w % 2 == 0:                                                                # a fund that pays every other week: its empty weeks are normal
+            files.append((paid, "UMWA HEALTH & RETIREMENT FUNDS", [visit(n := n + 1, dos) for _ in range(45)]))
+    store = Store(str(tmp_path / "s.sqlite"))
+    assert store.ingest_835_paths(write_files(tmp_path, files))["errors"] == 0
+    activity.build_activity(store, log=lambda *a: None)
+    gaps = activity.info(store.conn)["gaps"]
+    assert len(gaps) == 1 and gaps[0]["payer"] == "ANTHEM" and (gaps[0]["from"], gaps[0]["to"], gaps[0]["weeks"]) == ("2025-04-28", "2025-05-11", 2)
+    assert gaps[0]["seen"] == 0 and gaps[0]["usual"] == 60 and 0.5 < gaps[0]["share"] < 0.6
+    cdf = [min(1.0, d / 30) for d in range(151)]
+    whole, net = activity.month_completeness("2025-04", "2025-06-18", cdf), activity.month_completeness("2025-04", "2025-06-18", cdf, gaps)
+    assert whole == 1.0 and 0.7 < net < 0.9                    # April's visits would have been paid partly in the missing weeks
+    assert activity.month_completeness("2025-01", "2025-06-18", cdf, gaps) == 1.0
+    cov = activity.coverage(store.conn)
+    assert cov["gaps"] == gaps and any(m["missing_to_gaps"] > 0 for m in cov["months"])
+    store.close()
+
+
+def test_export_pull_times_voids_and_exports_by_transaction_date(tmp_path):
+    store = Store(str(tmp_path / "s.sqlite"))
+    rows, i = [], 0
+    early, later, posted = "Encounter & Charges early.xlsx", "Encounter & Charges later.xlsx", "Charges by Transaction Date.xlsx"
+    for source in (early, later):                       # the later export repeats the same five charges and nothing else
+        for n in range(1, 6):
+            rows.append(ema_row(i := i + 1, source, "2026-03-02", "Alpha, Ann", "99213", patient=f"P{n}", bill_no=n, created="2026-03-03"))
+    void = dict(ema_row(i := i + 1, early, "2026-03-02", "Alpha, Ann", "99213", patient="P1", bill_no=1, created="2026-03-03"), activity_type="Void Payment")
+    gone = dict(ema_row(i := i + 1, early, "2026-03-02", "Alpha, Ann", "99213", patient="P2", bill_no=2, created="2026-03-03"), activity_type="Void Charge")
+    for k, d in enumerate(("2026-03-09", "2026-03-10", "2026-03-11")):      # charges posted on one day for three days of service
+        for n in range(5):
+            rows.append(dict(ema_row(i := i + 1, posted, d, "Alpha, Ann", "99213", patient=f"Q{k}{n}", bill_no=100 + 10 * k + n, created="2026-03-20"),
+                             transaction_date="2026-03-20"))
+    store.ingest_ema_rows(rows + [void, gone])
+    store.record_export(early, "sha-a", "charge_lines", "2026-03-04T15:00:00Z", 5)
+    store.record_export(later, "sha-b", "charge_lines", "2026-04-08T15:00:00Z", 5)
+    store.record_export(posted, "sha-c", "charge_lines", "2026-04-08T16:00:00Z", 15)
+    activity.build_activity(store, log=lambda *a: None)
+    store.conn.row_factory = sqlite3.Row
+    days = {r["service_date"]: dict(r) for r in store.conn.execute("SELECT * FROM provider_ema_days")}
+    # the later export moved the day's pull date although every one of its rows was a repeat; a voided payment leaves the
+    # charge alone, a voided charge removes it
+    assert (days["2026-03-02"]["patients"], days["2026-03-02"]["pulled"]) == (4, "2026-04-08")
+    # the export by transaction date adds its charges but covers no day: those days wait
+    assert [(d, days[d]["patients"], days[d]["pulled"]) for d in ("2026-03-09", "2026-03-10", "2026-03-11")] == \
+        [("2026-03-09", 5, None), ("2026-03-10", 5, None), ("2026-03-11", 5, None)]
+    meta = activity.info(store.conn)["ema"]
+    assert meta["exports"] == 3 and meta["exports_with_a_creation_time"] == 3 and meta["last_pulled"] == "2026-04-08"
+    ann = activity.recent(store.conn)["providers"][0]
+    assert ann["days_waiting"] == 3 and ann["clinic_days"] == 0 and ann["raw_days"] == 4
+    store.close()
+
+
+def test_export_creation_time_is_read_from_the_workbook_and_kept_at_ingestion(tmp_path):
+    import datetime
+
+    import openpyxl
+
+    from remitwatch.dropbox_sync import ingest_new_files
+    from remitwatch.ema_exports import export_created
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Service Date", "Primary Provider", "Claim ID", "CPT/Product", "Units", "Charges", "Activity Type", "Bill Item Identifier", "Payer", "Location"])
+    ws.append(["2026-03-02", "Alpha, Ann", "CB0000001C017", "99213", 1, 150.0, "Charge", 7000001, "Blue Cross", "North Office"])
+    wb.properties.created = datetime.datetime(2026, 3, 30, 14, 5, 6)
+    p = tmp_path / "Encounter & Charge Lines.xlsx"
+    wb.save(p)
+    assert export_created(str(p)) == "2026-03-30T14:05:06Z" and export_created(str(tmp_path / "missing.xlsx")) is None
+    (tmp_path / "not-a-workbook.xlsx").write_bytes(b"nothing")
+    assert export_created(str(tmp_path / "not-a-workbook.xlsx")) is None
+    store = Store(str(tmp_path / "s.sqlite"))
+    assert ingest_new_files(store, [str(p)], log=lambda *a: None)["ema"] == 1
+    assert [tuple(r) for r in store.conn.execute("SELECT source_name, family, created_at, rows FROM ema_sources")] == \
+        [("Encounter & Charge Lines.xlsx", "charge_lines", "2026-03-30T14:05:06Z", 1)]
+    activity.build_activity(store, log=lambda *a: None)
+    assert store.conn.execute("SELECT pulled FROM provider_ema_days").fetchone()[0] == "2026-03-30"
+    store.close()
+
+
+def test_tables_left_behind_by_a_run_without_time_are_rebuilt_by_the_next(tmp_path):
+    store = Store(str(tmp_path / "s.sqlite"))
+    store.ingest_835_paths(write_files(tmp_path))
+    assert activity.refresh(store, log=lambda *a: None)["people"] == 2 and activity.stale(store.conn) is False
+    activity.mark_pending(store.conn)                   # what a detection run does when it changes the store
+    store.conn.commit()
+    assert activity.stale(store.conn) is True
+    activity.refresh(store, log=lambda *a: None)
+    assert activity.stale(store.conn) is False
+    store.close()
+
+
+def test_the_providers_tab_can_be_kept_for_the_owners_login(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from remitwatch import api
+    db = str(tmp_path / "s.sqlite")
+    store = Store(db)
+    store.ingest_835_paths(write_files(tmp_path))
+    store.close()
+    run_detection(db)
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "_FAILED", {})
+    monkeypatch.delenv("REMITWATCH_MODE", raising=False)
+    tc, shared, owner = TestClient(api.app), ("oda", PW), ("owner", "a-second-long-password-9")
+    routes = ("/api/activity/overview", "/api/activity/trend", "/api/activity/recent", f"/api/activity/provider/{ANN}")
+    # with no owner password, everyone who can sign in sees the tab
+    assert tc.get("/api/meta", auth=shared).json()["providers"] == {"open": True, "owner_login": False}
+    assert all(tc.get(r, auth=shared).status_code == 200 for r in routes)
+    assert tc.get("/owner", auth=shared, follow_redirects=False).headers["location"] == "/#providers"
+    assert tc.get("/api/summary", auth=owner).status_code == 401                 # and there is no owner login to guess at
+
+    monkeypatch.setattr(api, "OWNER_PASSWORD", owner[1])
+    monkeypatch.setattr(api, "_FAILED", {})
+    # the shared login keeps everything else, is told the tab is not for it, and is refused by every provider route
+    assert tc.get("/api/meta", auth=shared).json()["providers"] == {"open": False, "owner_login": True}
+    assert tc.get("/api/summary", auth=shared).status_code == 200 and tc.get("/api/coverage", auth=shared).status_code == 200
+    for r in routes:
+        got = tc.get(r, auth=shared)
+        assert got.status_code == 403 and "owner" in got.json()["detail"], r
+        assert tc.get(r).status_code == 401, r
+    # the owner's login opens them, and everything the shared login can
+    assert tc.get("/api/meta", auth=owner).json()["providers"] == {"open": True, "owner_login": True}
+    assert all(tc.get(r, auth=owner).status_code == 200 for r in routes)
+    assert tc.get("/api/summary", auth=owner).status_code == 200 and tc.get("/", auth=owner).status_code == 200
+    # /owner asks the browser for a login until the owner's is given; the shared login asking is not a wrong guess
+    for _ in range(api.FAIL_LIMIT + 2):
+        ask = tc.get("/owner", auth=shared, follow_redirects=False)
+        assert ask.status_code == 401 and ask.headers["www-authenticate"].startswith("Basic") and "owner" in ask.text
+    assert tc.get("/owner", follow_redirects=False).status_code == 401
+    assert tc.get("/owner", auth=owner, follow_redirects=False).headers["location"] == "/#providers"
+    # each half of a login belongs to its own pair
+    assert tc.get("/api/summary", auth=("oda", owner[1])).status_code == 401
+    assert tc.get("/api/summary", auth=("owner", PW)).status_code == 401
+    monkeypatch.setattr(api, "_FAILED", {})
+    # wrong guesses at the owner's password are slowed like any other
+    for i in range(api.FAIL_LIMIT):
+        assert tc.get("/owner", auth=("owner", f"guess-{i}"), follow_redirects=False).status_code == 401
+    assert tc.get("/owner", auth=owner, follow_redirects=False).status_code == 429
+    monkeypatch.setattr(api, "_FAILED", {})
+
+    # an owner password that is too short, or the same as the shared one, closes the tab to everyone and says why
+    for bad, why in (("short", "shorter than 12"), (PW, "the same as the dashboard password"), ("pässword-long-enough", "browser cannot send")):
+        monkeypatch.setattr(api, "OWNER_PASSWORD", bad)
+        for who in (shared, ("owner", bad)):
+            got = tc.get("/api/activity/overview", auth=who)
+            assert got.status_code in (503, 401) and (got.status_code == 401 or why in got.json()["detail"]), (bad, who[0], got.status_code)
+        assert tc.get("/api/activity/overview", auth=shared).status_code == 503
+        assert tc.get("/api/meta", auth=shared).json()["providers"]["open"] is False
+        assert tc.get("/api/summary", auth=shared).status_code == 200            # the rest of the site is untouched
+        monkeypatch.setattr(api, "_FAILED", {})
+
+
+def test_several_readers_at_once_take_turns(tmp_path, monkeypatch):
+    """The readers are slow when they interleave, so the API lets one run at a time."""
+    import threading
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from remitwatch import api
+    db = str(tmp_path / "s.sqlite")
+    store = Store(db)
+    store.ingest_835_paths(write_files(tmp_path))
+    store.close()
+    run_detection(db)
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", "")
+    monkeypatch.delenv("REMITWATCH_MODE", raising=False)
+    inside, most = [0], [0]
+    real = activity.overview
+
+    def slow(conn, *args):
+        inside[0] += 1
+        most[0] = max(most[0], inside[0])
+        time.sleep(0.05)
+        try:
+            return real(conn, *args)
+        finally:
+            inside[0] -= 1
+    monkeypatch.setattr(activity, "overview", slow)
+    tc = TestClient(api.app)
+    threads = [threading.Thread(target=lambda: tc.get("/api/activity/overview")) for _ in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert most[0] == 1

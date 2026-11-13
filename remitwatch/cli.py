@@ -43,7 +43,7 @@ def cmd_ingest_835(args: argparse.Namespace) -> int:
 def cmd_ingest_ema(args: argparse.Namespace) -> int:
     import hashlib
 
-    from .ema_exports import iter_export_paths, iter_rows
+    from .ema_exports import export_created, iter_export_paths, iter_rows
     from .store import Store
 
     store = Store(args.db)
@@ -66,6 +66,7 @@ def cmd_ingest_ema(args: argparse.Namespace) -> int:
             r = store.ingest_ema_rows(rows)
             fam = rows[0]["family"] if rows else "unknown"
             store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
+            store.record_export(os.path.basename(p), sha, fam, export_created(p), len(rows))
             total["rows"] += len(rows)
             total["inserted"] += r["inserted"]
             print(f"  {fam:12s} rows={len(rows):6d} new={r['inserted']:6d}  {os.path.basename(p)}", file=sys.stderr)

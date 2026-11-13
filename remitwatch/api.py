@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -41,6 +42,10 @@ from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema
 DB_PATH = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
 PASSWORD = os.environ.get("REMITWATCH_PASSWORD", "")
 USERNAME = os.environ.get("REMITWATCH_USER", "oda")
+# An optional second login. When it is set, the Providers tab (what each clinician is doing) answers only to it; the
+# shared login keeps everything else. Without it, everyone who can sign in sees that tab.
+OWNER_PASSWORD = os.environ.get("REMITWATCH_OWNER_PASSWORD", "")
+OWNER_USERNAME = os.environ.get("REMITWATCH_OWNER_USER", "owner")
 SHOW_PHI = os.environ.get("REMITWATCH_SHOW_PHI", "0") == "1"
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -135,6 +140,32 @@ def password_problem() -> str | None:
     return None
 
 
+def owner_problem() -> str | None:
+    """Why the owner's password cannot be used, or None when it can or when there is none. A weak one is never quietly
+    ignored: the Providers tab is then refused to everyone until it is fixed."""
+    if not OWNER_PASSWORD:
+        return None
+    if not OWNER_PASSWORD.isascii() or not OWNER_USERNAME.isascii():
+        return "has a character a browser cannot send in a login (use plain letters and digits)"
+    if len(OWNER_PASSWORD) < MIN_PASSWORD:
+        return f"shorter than {MIN_PASSWORD} characters"
+    if secrets.compare_digest(OWNER_PASSWORD.encode(), PASSWORD.encode()):
+        return "the same as the dashboard password"
+    return None
+
+
+def login_kind(credentials: Optional[HTTPBasicCredentials]) -> str | None:
+    """Which login these credentials are: 'owner', 'shared', or None when they are neither. Both pairs are compared
+    every time, so how long the answer takes says nothing about which part was wrong."""
+    if credentials is None:
+        return None
+    user, word = credentials.username.encode(), credentials.password.encode()
+    shared = secrets.compare_digest(user, USERNAME.encode()) & secrets.compare_digest(word, PASSWORD.encode()) & bool(PASSWORD)
+    owner = secrets.compare_digest(user, OWNER_USERNAME.encode()) & secrets.compare_digest(word, OWNER_PASSWORD.encode()) \
+        & bool(OWNER_PASSWORD) & (owner_problem() is None)
+    return "owner" if owner else ("shared" if shared else None)
+
+
 _FAILED: dict[str, list[float]] = {}        # address -> times of recent wrong logins (this instance only)
 FAIL_LIMIT, FAIL_WINDOW = 10, 600
 
@@ -164,7 +195,7 @@ def _blocked(who: str, record: bool = False) -> bool:
 
 
 def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
-    """Basic auth with a single shared password. When no password is configured the
+    """Basic auth with the shared password, or with the owner's when one is set. When no password is configured the
     dashboard is open (local use only)."""
     problem = password_problem()
     if problem:
@@ -174,13 +205,31 @@ def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredent
     who = _caller(request)
     if _blocked(who):
         raise HTTPException(status_code=429, detail="Too many wrong logins from this address. Wait ten minutes.")
-    ok = credentials is not None and secrets.compare_digest(credentials.username.encode(), USERNAME.encode()) \
-        and secrets.compare_digest(credentials.password.encode(), PASSWORD.encode())
-    if not ok:
+    if not login_kind(credentials):
         if credentials is not None:
             _blocked(who, record=True)
         raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic realm=RemitWatch"})
     return credentials.username
+
+
+def providers_open_to(credentials: Optional[HTTPBasicCredentials]) -> bool:
+    """Whether this login may see what each clinician is doing."""
+    return not OWNER_PASSWORD or login_kind(credentials) == "owner"
+
+
+def require_owner(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
+    """The Providers tab compares named clinicians. With no owner password it is open to everyone who can sign in;
+    with one, only to that login."""
+    user = require_auth(request, credentials)
+    if not OWNER_PASSWORD:
+        return user
+    problem = owner_problem()
+    if problem:
+        raise HTTPException(status_code=503, detail=f"The provider figures are switched off: REMITWATCH_OWNER_PASSWORD is {problem}. "
+                                                    "Replace it in the host's settings and redeploy.")
+    if login_kind(credentials) != "owner":
+        raise HTTPException(status_code=403, detail="The provider figures are for the owner's login.")
+    return user
 
 
 def db() -> sqlite3.Connection:
@@ -235,6 +284,31 @@ def index(request: Request, credentials: Optional[HTTPBasicCredentials] = Depend
     return HTMLResponse("<h1>RemitWatch</h1><p>static/index.html missing</p>")
 
 
+@app.get("/owner", include_in_schema=False)
+def owner_sign_in(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    """Change to the owner's login: the browser asks for a user name and password until the owner's are given, then
+    opens the Providers tab. A browser keeps one login per site, so this is also how to leave the shared one."""
+    if password_problem() and not open_allowed():
+        return RedirectResponse("/setup")
+    if not OWNER_PASSWORD:
+        require_auth(request, credentials)
+        return RedirectResponse("/#providers")
+    problem = owner_problem()
+    if problem:
+        raise HTTPException(status_code=503, detail=f"REMITWATCH_OWNER_PASSWORD is {problem}. Replace it in the host's settings and redeploy.")
+    who = _caller(request)
+    if _blocked(who):
+        raise HTTPException(status_code=429, detail="Too many wrong logins from this address. Wait ten minutes.")
+    kind = login_kind(credentials)
+    if kind != "owner":
+        if credentials is not None and kind is None:
+            _blocked(who, record=True)          # a wrong guess; the shared login asking to change is not one
+        return HTMLResponse('<!doctype html><meta charset="utf-8"><title>RemitWatch</title><body style="font:15px system-ui;margin:40px">'
+                            "<p>This part of the dashboard is for the owner's login.</p><p><a href=\"/\">Back to the dashboard</a></p>",
+                            status_code=401, headers={"WWW-Authenticate": "Basic realm=RemitWatch", "Cache-Control": "no-store"})
+    return RedirectResponse("/#providers")
+
+
 @app.get("/robots.txt", include_in_schema=False)
 def robots():
     return PlainTextResponse("User-agent: *\nDisallow: /\n")
@@ -254,8 +328,10 @@ def health():
 
 
 @app.get("/api/meta")
-def meta(_: str = Depends(require_auth)):
-    out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server"}
+def meta(credentials: Optional[HTTPBasicCredentials] = Depends(security), _: str = Depends(require_auth)):
+    out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server",
+                           # whether this login may open the Providers tab, and whether a separate owner login exists
+                           "providers": {"open": providers_open_to(credentials), "owner_login": bool(OWNER_PASSWORD)}}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -719,6 +795,13 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
 
 
 # --------------------------------------------------------------------------- providers: what each clinician is doing
+MONTH_PATTERN = r"^[0-9]{4}-(0[1-9]|1[0-2])$"
+# The readers pull a few thousand rows into Python. Several at once crawl, because every row hands the interpreter lock
+# from thread to thread (six together took seconds each on the real archive); one after another they take a few
+# hundredths of a second each. The page asks for three at a time, so they queue here.
+_ACTIVITY_LOCK = threading.Lock()
+
+
 def _activity(fn, *args):
     """Run one of the readers in remitwatch.activity on the dashboard's database; say so plainly when the tables are not built yet."""
     from . import activity
@@ -728,7 +811,8 @@ def _activity(fn, *args):
         if not state["ready"] or not has_table("provider_days"):
             return {"ready": False, "error": state.get("error"),
                     "message": "The provider figures are built by the next analysis run. Press Sync and analyse now on the Data tab."}
-        out = fn(conn, *args)
+        with _ACTIVITY_LOCK:
+            out = fn(conn, *args)
         if out is None:
             raise HTTPException(404, "No such clinician")
         out["ready"] = True
@@ -738,9 +822,26 @@ def _activity(fn, *args):
         conn.close()
 
 
+@app.get("/api/coverage")
+def coverage(_: str = Depends(require_auth)):
+    """How complete the newest months of service are, and the weeks in which a payer that pays every week sent next to
+    nothing and then resumed. About payers and the practice as a whole, so it is open to every login."""
+    from . import activity
+    conn = db()
+    try:
+        if not has_table("meta") or not has_table("provider_days") or not activity.status(conn)["ready"]:
+            return {"ready": False, "gaps": [], "months": []}
+        with _ACTIVITY_LOCK:
+            cov = activity.coverage(conn)
+        return {"ready": True, "gaps": cov["gaps"], "months": cov["months"][-6:], "lag": cov["lag"], "last_payment": cov["last_payment"],
+                "last_complete_month": cov["last_complete_month"], "complete_share": cov["complete_share"]}
+    finally:
+        conn.close()
+
+
 @app.get("/api/activity/overview")
-def activity_overview(month_from: Optional[str] = Query(None, alias="from", pattern=r"^\d{4}-\d{2}$"),
-                      month_to: Optional[str] = Query(None, alias="to", pattern=r"^\d{4}-\d{2}$"), _: str = Depends(require_auth)):
+def activity_overview(month_from: Optional[str] = Query(None, alias="from", pattern=MONTH_PATTERN),
+                      month_to: Optional[str] = Query(None, alias="to", pattern=MONTH_PATTERN), _: str = Depends(require_owner)):
     """One row per clinician for a window of months of service: clinic days, patients per day, new patients, visit
     levels, biopsies, what the services were allowed, how many patients stay."""
     from . import activity
@@ -748,21 +849,21 @@ def activity_overview(month_from: Optional[str] = Query(None, alias="from", patt
 
 
 @app.get("/api/activity/trend")
-def activity_trend(by: str = Query("quarter", pattern="^(quarter|month)$"), _: str = Depends(require_auth)):
+def activity_trend(by: str = Query("quarter", pattern="^(quarter|month)$"), _: str = Depends(require_owner)):
     from . import activity
     return _activity(activity.trend, by)
 
 
 @app.get("/api/activity/recent")
-def activity_recent(_: str = Depends(require_auth)):
+def activity_recent(_: str = Depends(require_owner)):
     """The newest weeks from the EMA charge exports, with the days an export could not have captured yet set apart."""
     from . import activity
     return _activity(activity.recent)
 
 
 @app.get("/api/activity/provider/{provider_id}")
-def activity_provider(provider_id: str, month_from: Optional[str] = Query(None, alias="from", pattern=r"^\d{4}-\d{2}$"),
-                      month_to: Optional[str] = Query(None, alias="to", pattern=r"^\d{4}-\d{2}$"), _: str = Depends(require_auth)):
+def activity_provider(provider_id: str, month_from: Optional[str] = Query(None, alias="from", pattern=MONTH_PATTERN),
+                      month_to: Optional[str] = Query(None, alias="to", pattern=MONTH_PATTERN), _: str = Depends(require_owner)):
     from . import activity
     if not re.fullmatch(r"[A-Za-z0-9:_-]{1,60}", provider_id):
         raise HTTPException(404, "No such clinician")

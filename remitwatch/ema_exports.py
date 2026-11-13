@@ -145,6 +145,20 @@ def split_carc(v: Any) -> tuple[str | None, str | None]:
     return None, s
 
 
+def export_created(path: str) -> str | None:
+    """When the workbook was created, as it records itself (docProps/core.xml), in ISO form; None when it does not say.
+    For an export saved straight out of EMA or Excel this is the moment the export was pulled."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as z:
+            core = z.read("docProps/core.xml").decode("utf-8", "replace")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+    m = re.search(r"<dcterms:created[^>]*>\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", core)
+    return m.group(1) + "Z" if m else None
+
+
 def read_export(path: str) -> tuple[list[dict], str, str]:
     """Return (rows as dicts keyed by canonical column name, family, sha256 of the file). First sheet only."""
     import openpyxl

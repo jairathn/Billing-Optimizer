@@ -44,13 +44,27 @@ The header of every page shows the newest payment date in the store and whether 
 
 ### The Providers tab
 
-The same cycle rebuilds the provider tables after detection (`remitwatch/activity.py`; `python -m remitwatch.cli activity` rebuilds them alone). Three things decide how far the tab can be trusted:
+The same cycle rebuilds the provider tables after detection (`remitwatch/activity.py`; `python -m remitwatch.cli activity` rebuilds them alone). Five things decide how far the tab can be trusted:
 
 - **Remittances lag the visit.** Half of all visits are paid within about three weeks and nine in ten within about five. The tab works out that curve from the store and treats a month of service as complete only when 97 percent of its visits should have been paid; the default window ends there.
-- **An EMA charge export only holds the visits that had become a bill when it was pulled.** Bills are written days after the visit, and how many days differs by clinician, so a week exported on its last day undercounts everyone and undercounts the slowest billers most. The tab counts a day only when an export covering it was pulled late enough for that clinician's bills to exist, and lists the other days as waiting. To keep the recent-weeks panel current, export the full Encounter and Charge Lines layout (the one with Bill Creation Date, Bill ID and Patient ID) for the last six weeks each week. Overlapping exports are merged.
-- **Insured visits only, on the remittance side.** A self-pay or cosmetic visit never reaches a payer. The EMA panel includes them.
+- **A payer's remittances can go missing for a week or more.** The build looks for weeks in which a payer that pays every week sent next to nothing and then started again. They are listed on the Data tab ("Remittance weeks that look missing"), and the months they touch are marked short on the Providers tab. Ask TriZetto for those files: until they arrive every count on the site is missing those visits, downcoding included.
+- **An EMA charge export only holds the visits that had become a bill when it was pulled.** Bills are written days after the visit, and how many days differs by clinician, so a week exported on its last day undercounts everyone and undercounts the slowest billers most. The tab reads the pull time from the workbook itself (the time EMA created the file), counts a day only when an export covering it was pulled late enough for that clinician's bills to exist, and lists the other days as waiting. To keep the recent-weeks panel current, export the full Encounter and Charge Lines layout (the one with Bill Creation Date, Bill ID and Patient ID) by date of service for the last six weeks each week. Overlapping exports are merged, and a later export moves a day's pull date forward. An export by transaction date adds its charges but cannot vouch for any day.
+- **Visits an insurer has decided, on the remittance side.** A self-pay or cosmetic visit never reaches a payer, and no remittance for VA community care has ever arrived in the folder. The EMA panel includes both. About 3 percent of visits name no clinician because the payer reported only the group; they are not spread evenly across clinicians.
+- **One service is counted once, however many payers report it.** A second payer often sends its own line numbers or its own charge for the same billed line. The build folds every report into one service and keeps what the payer that decided it allowed; a reversal only undoes that payer's own decision. Each build records two checks with its other totals: visit codes per patient visit (close to 1) and whether insurers paid more than was allowed in any quarter.
 
-What the files cannot show: whether a light day was an empty schedule or patients who did not come (that needs the EMA appointment export), what each clinician costs, and pay terms.
+How the measures are built, so they are not read for more than they say:
+
+- A clinic day is a day with at least five patients seen. A half day counts as one, so compare patients a week as well as per day, and open a clinician's row for the weekday table.
+- "Per clinic day, by state" uses the state of the Medicare contractor that paid that day's Medicare claims, which follows the office where the visit took place.
+- A post-operative check, a light-box session or an injection given by staff on its own is not a patient seen by the clinician. Those are counted in their own column.
+- "Kept from the year before" is shown three ways: everyone, established patients only, and patients who came back to the same clinician. First-time patients return far less often than established ones whoever sees them, so the first figure mostly reflects how many new patients a clinician had.
+- Visit level is compared on established visits with no procedure the same day.
+- "Skin cancer treated here per 100 first biopsies" counts only a first biopsy (none in the four months before, no skin cancer treated in the year before) and is a floor: treatment elsewhere never shows. It does not say whether a biopsy was well chosen. The pathology results do.
+- Two columns follow each patient forward in time and so use fixed periods, printed under their tables, whatever months are chosen.
+
+What the files cannot show: whether a light day was an empty schedule or patients who did not come (that needs the EMA appointment export, which nothing reads yet), what each clinician costs, and pay terms.
+
+**Who can open it.** The tab compares named clinicians. By default everyone with the dashboard login sees it. To keep it for the owner, set `REMITWATCH_OWNER_PASSWORD` (12 or more plain letters and digits, different from the dashboard password; the user name is `owner` unless `REMITWATCH_OWNER_USER` says otherwise). The shared login then keeps every other tab and is refused the provider figures. The owner signs in at `/owner`, or through the "Providers (owner sign-in)" link that replaces the tab, and sees everything. A browser holds one login per site: use a private window to go back to the shared one. A weak owner password is not ignored; the tab stays closed to everyone until it is fixed, and `/setup` says so.
 
 ## 5. Alerts
 

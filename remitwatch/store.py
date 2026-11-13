@@ -169,6 +169,10 @@ CREATE TABLE IF NOT EXISTS ema_rows (
     recreated_bill TEXT, adjustment_status TEXT, adjustment_subtype TEXT,
     denial_category TEXT, previously_denied TEXT, submission_format TEXT
 );
+-- one row per export file: when the workbook says it was created is when the export was pulled
+CREATE TABLE IF NOT EXISTS ema_sources (
+    source_name TEXT PRIMARY KEY, sha256 TEXT, family TEXT, created_at TEXT, rows INTEGER, recorded_at TEXT
+);
 CREATE INDEX IF NOT EXISTS ix_ema_family ON ema_rows(family);
 CREATE INDEX IF NOT EXISTS ix_ema_claim ON ema_rows(claim_id);
 CREATE INDEX IF NOT EXISTS ix_ema_bill_item ON ema_rows(bill_item_id);
@@ -397,6 +401,13 @@ class Store:
         self.conn.executemany(sql, [_row(r, "ema_rows", cols) for r in rows])
         self.conn.commit()
         return {"inserted": self.conn.total_changes - before}
+
+    def record_export(self, source_name: str, sha256: str, family: str, created_at: str | None, rows: int) -> None:
+        """Keep when an EMA export was pulled. An export only holds the visits that had become a bill by then, so the
+        provider view needs it to tell a light day from a day whose bills were not written yet."""
+        self.conn.execute("INSERT OR REPLACE INTO ema_sources (source_name, sha256, family, created_at, rows, recorded_at) VALUES (?,?,?,?,?,?)",
+                          (source_name, sha256, family, created_at, rows, utcnow()))
+        self.conn.commit()
 
     def record_file(self, sha256: str, path: str, kind: str, status: str = "ok", **counts) -> None:
         try:
