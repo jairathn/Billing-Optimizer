@@ -568,6 +568,54 @@ def test_identifiers_stay_on_the_server_when_names_are_hidden(tmp_path, monkeypa
     assert c.post(f"/api/packets/{pid}/email", json={"to": "x@example.org"}, headers={"X-Requested-With": "remitwatch"}).json()["sent"] is False
 
 
+def test_the_queue_names_the_patient_only_when_names_are_switched_on(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    def denied(i: int, last: str, first: str, member: str) -> str:
+        return (f"CLP*CB{i:07d}C017*1*223.65*0.00*0.00*12*PC{i}*11~NM1*QC*1*{last}*{first}*Q***MI*{member}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~"
+                "DTM*232*20260401~" + svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~"))
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60")
+                        + [denied(300, "ORCHARD", "LEE", "W55500300"), denied(301, "=BIRCH", "ANN", "W55500301")])
+    Detector(store, run_id="t").run()
+    store.close()
+    import remitwatch.api as api_mod
+
+    monkeypatch.setattr(api_mod, "DB_PATH", str(tmp_path / "s.sqlite"))
+    monkeypatch.setattr(api_mod, "PASSWORD", "")
+    c = TestClient(api_mod.app)
+    url = "/api/findings?signal=DENIED_MEDICAL_NECESSITY"
+    found = lambda q: c.get(url, params={"q": q}).json()["total"]
+
+    # names hidden: initials only, and the search box cannot be used to ask whether a name or member number exists
+    monkeypatch.setattr(api_mod, "SHOW_PHI", False)
+    hidden = c.get(url)
+    assert sorted(i["patient"] for i in hidden.json()["items"]) == ["A=", "LO"] and all("member_id" not in i for i in hidden.json()["items"])
+    export = c.get("/api/findings.csv?signal=DENIED_MEDICAL_NECESSITY").text
+    for page in (hidden.text, export):
+        for secret in ("ORCHARD", "BIRCH", "W55500300", "W55500301"):
+            assert secret not in page
+    assert "member_id" not in export.splitlines()[0]
+    assert [found(q) for q in ("orchard", "lee orchard", "W55500300", "birch", "LO")] == [0, 0, 0, 0, 0]
+    assert found("CB0000300") == 1                                           # the claim number is still searchable
+
+    # names shown: who it is, how to find them, and everything in the list for one patient
+    monkeypatch.setattr(api_mod, "SHOW_PHI", True)
+    shown = {i["patient_control_number"]: i for i in c.get(url).json()["items"]}
+    assert (shown["CB0000300C017"]["patient"], shown["CB0000300C017"]["member_id"]) == ("ORCHARD, LEE Q", "W55500300")
+    assert [found(q) for q in ("orchard", "lee orchard", "Orchard, L", "orchard,lee", "W55500300", "5500300")] == [1] * 6
+    assert [found(q) for q in ("birch orchard", "orchard zed", "W99999999")] == [0, 0, 0]
+    assert found("CB0000300") == 1 and found("99214") == 2
+    detail = c.get(f"/api/findings/{shown['CB0000300C017']['finding_id']}").json()["claim"]
+    assert (detail["patient"], detail["patient_id"]) == ("ORCHARD, LEE Q", "W55500300")
+    lines = c.get("/api/findings.csv?signal=DENIED_MEDICAL_NECESSITY").text.splitlines()
+    head = lines[0].split(",")
+    at = head.index("patient_control_number")
+    assert head[at + 1:at + 3] == ["patient", "member_id"]
+    assert any('"ORCHARD, LEE Q",W55500300' in ln for ln in lines)
+    # a name a payer file could carry must not run as a formula when the export is opened in a spreadsheet
+    assert any('"\'=BIRCH, ANN Q"' in ln for ln in lines) and not any(',"=BIRCH' in ln for ln in lines)
+
+
 def test_slow_climb_is_caught_by_the_quarter_against_the_year(tmp_path):
     conn = alert_store(tmp_path)
     # a year at 3 per 100, then a quarter at about 11 per 100: each month adds a little, so the four-week rule stays quiet

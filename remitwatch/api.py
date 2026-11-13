@@ -422,12 +422,48 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
     elif deadline == "valid":
         where.append("appeal_deadline >= date('now')")
     if q:
-        where.append("(patient_control_number LIKE ? OR title LIKE ? OR payer_name LIKE ? OR procedure_code LIKE ? OR carc LIKE ? OR rarc LIKE ?)")
+        clause = "patient_control_number LIKE ? OR title LIKE ? OR payer_name LIKE ? OR procedure_code LIKE ? OR carc LIKE ? OR rarc LIKE ?"
         params += [f"%{q}%"] * 6
+        words = [w for w in re.split(r"[\s,]+", q.strip()) if w][:4]
+        if SHOW_PHI and words:
+            # by patient: every word typed must be in the name ("smith john", "John Smith" and "smith, j" all find the same
+            # person), or the whole entry is part of the member number. One pass over the claims, no lookup per finding.
+            # With names hidden this is left out, or the search box would answer "is there a patient called ...".
+            name = " AND ".join("(COALESCE(patient_last,'') || ' ' || COALESCE(patient_first,'')) LIKE ?" for _ in words)
+            clause += f" OR claim_key IN (SELECT claim_key FROM claims WHERE ({name}) OR patient_id LIKE ?)"
+            params += [f"%{w}%" for w in words] + [f"%{q.strip()}%"]
+        where.append(f"({clause})")
     if handling:
         where.append("ema_handling=?")
         params.append(handling)
     return (" WHERE " + " AND ".join(where)) if where else "", params
+
+
+def _name(last: str | None, first: str | None, middle: str | None = None) -> str:
+    """The patient's name as the payer wrote it: LAST, FIRST M."""
+    out = ", ".join(x.strip() for x in (last or "", first or "") if x and x.strip())
+    return f"{out} {middle.strip()}" if out and middle and middle.strip() else out
+
+
+def _with_patient(items: list[dict]) -> list[dict]:
+    """Say who each finding is about. With names shown that is the name and member number from the remittance; with names
+    hidden it is the initials the detail view already gives. One query per 500 findings, by primary key, which is the
+    only index the cloud store keeps."""
+    keys = list({r["claim_key"] for r in items if r.get("claim_key")})
+    who: dict[str, dict] = {}
+    for i in range(0, len(keys), 500):
+        part = keys[i:i + 500]
+        for c in rows(f"SELECT claim_key, patient_last, patient_first, patient_middle, patient_id FROM claims WHERE claim_key IN ({','.join('?' * len(part))})",
+                      tuple(part)):
+            who[c["claim_key"]] = c
+    for r in items:
+        c = who.get(r.get("claim_key"))
+        if SHOW_PHI:
+            r["patient"] = _name(c["patient_last"], c["patient_first"], c["patient_middle"]) if c else ""
+            r["member_id"] = (c or {}).get("patient_id") or ""
+        else:
+            r["patient"] = _initials(c["patient_last"], c["patient_first"]) if c else ""
+    return items
 
 
 @app.get("/api/findings")
@@ -438,8 +474,18 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
     w, params = _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling, _extra(request))
     order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": "appeal_deadline ASC", "payer": "payer_group, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
-    data = rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset))
+    data = _with_patient(rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset)))
     return {"total": total["n"], "shortfall_cents": total["shortfall_cents"], "items": data}
+
+
+def _csv_cell(v: Any) -> Any:
+    """Text that came from a payer file must not be read as a formula when the export is opened in a spreadsheet."""
+    if isinstance(v, str) and v and v[0] in "=+-@\t\r":
+        try:
+            float(v)
+        except ValueError:
+            return "'" + v
+    return v
 
 
 @app.get("/api/findings.csv")
@@ -448,17 +494,22 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
                  request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling, _extra(request))
-    data = rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
+    data = _with_patient(rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params)))
 
     def chunks():       # sent in pieces: a streamed answer has no size limit on a serverless host
         buf = io.StringIO()
         if data:
-            writer = csv.DictWriter(buf, fieldnames=list(data[0].keys()))
+            who = [k for k in ("patient", "member_id") if k in data[0]]
+            fields = [k for k in data[0].keys() if k not in who]
+            at = fields.index("patient_control_number") + 1
+            writer = csv.DictWriter(buf, fieldnames=fields[:at] + who + fields[at:])
             writer.writeheader()
             for i, r in enumerate(data):
                 for k in list(r.keys()):
                     if k.endswith("_cents") and r[k] is not None:
                         r[k] = f"{r[k] / 100:.2f}"
+                    else:
+                        r[k] = _csv_cell(r[k])
                 writer.writerow(r)
                 if i % 400 == 399:
                     yield buf.getvalue()
@@ -510,6 +561,9 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
                 initials = _initials(cl.get("patient_last"), cl.get("patient_first"))
                 cl = {k: cl.get(k) for k in CLAIM_PUBLIC_COLS}
                 cl["patient"] = initials
+            else:
+                cl["patient"] = _name(cl.get("patient_last"), cl.get("patient_first"), cl.get("patient_middle"))
+                cl["insured"] = _name(cl.get("insured_last"), cl.get("insured_first"))
             out["claim"] = cl
         out["lines"] = rows("SELECT line_key, line_seq, procedure_code, modifiers, original_procedure_code, original_modifiers, charge_cents, paid_cents, allowed_cents, paid_units, service_date, line_control_number FROM lines WHERE claim_key=? ORDER BY line_seq", (claim_key,))
         adjs = rows("SELECT line_key, level, group_code, reason_code, amount_cents FROM adjustments WHERE claim_key=? ORDER BY line_key, cas_index", (claim_key,))

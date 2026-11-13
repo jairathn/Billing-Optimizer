@@ -22,6 +22,7 @@ redeploy after every change.
 | `DROPBOX_ROOT_PATH` | The data folder. Default `/Trizetto Data`. | No |
 | `DROPBOX_PATH_ROOT_NS` | Only for a Dropbox team space. `/setup` shows the number when it is needed. | Sometimes |
 | `REMITWATCH_OWNER_PASSWORD` | Made up by the owner, 12 or more plain letters and digits, different from the dashboard password. When it is set, what each clinician is doing (the Providers tab, and lines billed per clinician on Who and what) shows only after this password is typed into the Providers tab. Everyone keeps the same login and every other tab. Without it, everyone who can sign in sees those figures. | No |
+| `REMITWATCH_SHOW_PHI` | `1` shows each patient's name and member number in the work queue, the search box, the claim detail and the CSV export, to everyone who can sign in. Left out or `0`, patients show as initials and the billers look each one up in EMA by the claim ID shown beside it. Set `1` only with a long random `REMITWATCH_PASSWORD`, and with Vercel's business associate agreement in place. | No |
 | `REMITWATCH_STATE_PATH` | Where the site keeps its own files in Dropbox. Default `/RemitWatch-state`. | No |
 | `REMITWATCH_MAX_SECONDS` | Time allowed for one run. Default 240, one minute under the function limit in `vercel.json`. | No |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |
