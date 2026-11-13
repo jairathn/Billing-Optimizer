@@ -234,6 +234,86 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
     return items
 
 
+MONEY_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
+
+
+def batches(conn: sqlite3.Connection, today: str, limit: int = 200) -> list[dict]:
+    """Open work still inside its window, as batches: one kind of work for one payer, so one person can clear a pile
+    of the same thing in one sitting (one portal, one kind of letter). Each batch carries its first deadline, what
+    closes within 7 and 14 days, how many items someone has started or sent, and its commonest code."""
+    d7 = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
+    d14 = (date.fromisoformat(today) + timedelta(days=14)).isoformat()
+    out: dict[tuple, dict] = {}
+    for sig, act, status, dl, cents, payer, claim, code in conn.execute(
+            f"""SELECT signal, actionable, status, appeal_deadline, COALESCE(shortfall_cents,0), COALESCE(payer_group,'Unknown'), claim_key, procedure_code
+                FROM findings WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0 AND appeal_deadline >= ?
+                  AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""", OPEN + (today,) + MONEY_CATEGORIES):
+        kind = work_type(sig, act)
+        b = out.setdefault((kind, payer), {"kind": kind, "payer_group": payer, "n": 0, "cents": 0, "claims": set(), "first_deadline": dl,
+                                           "due7_n": 0, "due14_n": 0, "started_n": 0, "sent_n": 0, "codes": {}})
+        b["n"] += 1
+        b["cents"] += cents
+        if claim:
+            b["claims"].add(claim)
+        b["first_deadline"] = min(b["first_deadline"], dl)
+        b["due7_n"] += dl < d7
+        b["due14_n"] += dl < d14
+        b["started_n"] += status == "in_progress"
+        b["sent_n"] += status == "appealed"
+        if code:
+            b["codes"][code] = b["codes"].get(code, 0) + cents
+    rows = []
+    for b in out.values():
+        top = max(b["codes"].items(), key=lambda kv: kv[1])[0] if b["codes"] else None
+        rows.append(dict({k: v for k, v in b.items() if k not in ("claims", "codes")}, claims=len(b["claims"]), top_code=top))
+    rows.sort(key=lambda r: -r["cents"])
+    return rows[:limit]
+
+
+def to_decide(conn: sqlite3.Connection, newest: str | None, days: int = 120) -> dict:
+    """Items with no filing date because a person has to decide what they are (a code the payer changed, a service
+    called not covered, a duplicate, a payer's takeback): those paid in the last `days` days, by kind and payer."""
+    if not newest:
+        return {"n": 0, "cents": 0, "groups": []}
+    since = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
+    groups = _rows(conn, f"""SELECT signal, COALESCE(payer_group,'Unknown') payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents,
+                                    MAX(payment_date) last_paid
+                             FROM findings WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0 AND appeal_deadline IS NULL
+                               AND actionable='review' AND category IN ({','.join('?' * len(MONEY_CATEGORIES))}) AND payment_date >= ?
+                             GROUP BY 1,2 ORDER BY cents DESC""", OPEN + MONEY_CATEGORIES + (since,))
+    return {"n": sum(g["n"] for g in groups), "cents": sum(g["cents"] for g in groups), "since": since, "groups": groups[:30]}
+
+
+def missed(conn: sqlite3.Connection, today: str, days: int = 30) -> dict:
+    """Open items whose filing window closed in the last `days` days without anyone working them."""
+    since = (date.fromisoformat(today) - timedelta(days=days)).isoformat()
+    r = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status='open' AND COALESCE(stale,0)=0
+                         AND appeal_deadline >= ? AND appeal_deadline < ? AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""",
+                     (since, today) + MONEY_CATEGORIES).fetchone()
+    return {"n": r[0], "cents": r[1], "days": days}
+
+
+def done(conn: sqlite3.Connection, today: str) -> dict:
+    """What people moved today and this week (Monday on): items, and the dollars of those sent or recorded paid."""
+    week = (date.fromisoformat(today) - timedelta(days=date.fromisoformat(today).weekday())).isoformat()
+    if "finding_events" not in _tables(conn):
+        return {"today_n": 0, "week_n": 0, "week_cents": 0}
+    r = conn.execute("""SELECT SUM(substr(at,1,10) = ?), SUM(substr(at,1,10) >= ?),
+                               SUM(CASE WHEN substr(at,1,10) >= ? AND to_status IN ('appealed','resolved') THEN COALESCE(amount_cents,0) END)
+                        FROM finding_events WHERE kind='manual' AND substr(at,1,10) >= ?""", (today, week, week, week)).fetchone()
+    return {"today_n": r[0] or 0, "week_n": r[1] or 0, "week_cents": r[2] or 0, "week_start": week}
+
+
+def follow_ups(conn: sqlite3.Connection, newest: str | None, days: int = 30) -> dict:
+    """Items marked sent to the payer more than `days` days before the newest payment and still not paid."""
+    if not newest:
+        return {"n": 0, "cents": 0}
+    cut = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
+    r = conn.execute("""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status='appealed' AND COALESCE(stale,0)=0
+                        AND COALESCE(appealed_at, status_changed_at) < ?""", (cut,)).fetchone()
+    return {"n": r[0], "cents": r[1], "days": days}
+
+
 def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
     """Everything the home screen shows, in one call."""
     today = today or date.today().isoformat()
@@ -242,5 +322,6 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
         return {"ready": False}
     newest = newest_payment(conn)
     return {"ready": True, "today": today, "newest_payment": newest, "work": work(conn, today), "recovered": recovered(conn, today),
-            "contracts": contract_levers(conn, newest), "fees": fee_levers(conn), "causes": denial_causes(conn, newest),
-            "health": data_health(conn, newest, today), "work_types": WORK_TYPES}
+            "batches": batches(conn, today), "decide": to_decide(conn, newest), "missed": missed(conn, today), "done": done(conn, today),
+            "follow_ups": follow_ups(conn, newest), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn),
+            "causes": denial_causes(conn, newest), "health": data_health(conn, newest, today), "work_types": WORK_TYPES}

@@ -60,3 +60,29 @@ def test_every_signal_that_is_work_has_a_kind_and_the_endpoint_serves_it(tmp_pat
     b = tc.get("/api/brief", auth=("oda", PW)).json()
     assert b["ready"] and {t["key"] for t in b["work"]["types"]} == {"fix", "front"}
     assert "SAMPLE" not in json.dumps(b).upper()           # no patient on the home screen's data
+
+
+def test_batches_decisions_missed_and_done(tmp_path):
+    from remitwatch.actions import apply_status
+    st = store_with_work(tmp_path)
+    b = insights.brief(st.conn, today="2026-11-13")
+    kinds = {(x["kind"], x["payer_group"]): x for x in b["batches"]}
+    fix = kinds[("fix", "Anthem / BCBS")]
+    assert fix["n"] == 3 and fix["claims"] == 3 and fix["top_code"] == "99213" and fix["started_n"] == 0 and fix["first_deadline"] >= "2026-11-13"
+    assert kinds[("front", "Anthem / BCBS")]["n"] == 2
+    assert b["missed"]["n"] == 0 and b["follow_ups"]["n"] == 0 and b["decide"]["n"] == 0
+    # a person starts one and sends another: the batch shows it, and today's done counter counts both
+    fid = st.query("SELECT finding_id FROM findings WHERE signal='DENIED_MISSING_MODIFIER' ORDER BY finding_id")
+    apply_status(st.conn, fid[0][0], "in_progress", actor="biller", at="2026-11-13T15:00:00+00:00")
+    apply_status(st.conn, fid[1][0], "appealed", actor="biller", at="2026-11-13T15:05:00+00:00")
+    b = insights.brief(st.conn, today="2026-11-13")
+    fix = {(x["kind"], x["payer_group"]): x for x in b["batches"]}[("fix", "Anthem / BCBS")]
+    assert fix["started_n"] == 1 and fix["sent_n"] == 1 and fix["n"] == 3
+    assert b["done"]["today_n"] == 2 and b["done"]["week_n"] == 2 and b["done"]["week_cents"] > 0
+    # sent more than 30 days before the newest remittance and not paid: a follow-up
+    st.conn.execute("UPDATE findings SET appealed_at='2026-09-01T00:00:00+00:00' WHERE finding_id=?", (fid[1][0],))
+    assert insights.brief(st.conn, today="2026-11-13")["follow_ups"]["n"] == 1
+    # a window that closed in the last 30 days without anyone working the item is missed
+    st.conn.execute("UPDATE findings SET appeal_deadline='2026-11-01' WHERE finding_id=?", (fid[2][0],))
+    assert insights.brief(st.conn, today="2026-11-13")["missed"]["n"] == 1
+    st.close()
