@@ -4,7 +4,7 @@ RemitWatch reads the practice's own payer remittances (X12 835 files from TriZet
 
 It is a living site. While it runs it pulls new files from the `Trizetto Data` Dropbox folder on a schedule (and within a minute of an upload when the Dropbox webhook is set), re-runs detection, raises alerts when a payer changes behavior, and records every payment that arrives for a line that was first denied or cut.
 
-Built for Owensboro Dermatology Associates. Everything is practice-agnostic except `PRACTICE` in `remitwatch/appeals.py` and the payer rules in `remitwatch/codes.py`.
+Built for a dermatology practice. Everything is practice-agnostic except the payer rules in `remitwatch/codes.py`; the practice's own name, address, tax ID and NPI for the letters are settings (`PRACTICE_*`).
 
 ## What you get
 

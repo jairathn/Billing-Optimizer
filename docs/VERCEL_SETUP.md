@@ -26,6 +26,7 @@ redeploy after every change.
 | `REMITWATCH_MAX_SECONDS` | Time allowed for one run. Default 240, one minute under the function limit in `vercel.json`. | No |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |
 | `APPEAL_EMAIL_DOMAINS` | The domains appeal packets may be emailed to, comma separated. Until it is set, packets can be downloaded but not emailed. | To email packets |
+| `PRACTICE_NAME`, `PRACTICE_ADDRESS`, `PRACTICE_TIN`, `PRACTICE_NPI`, `PRACTICE_PHONE`, `PRACTICE_FAX`, `PRACTICE_EMAIL` | The practice's legal name, mailing address, tax ID, group NPI and billing contacts, as they should appear at the top of appeal letters. Until they are set the letters show bracketed words in their place. | For appeal letters |
 | `ANTHROPIC_API_KEY` | Turns on the visit-note review for appeal packets. Set it only when a business associate agreement covers that account. | No |
 
 The rest of `.env.example` (alert windows, letterhead, appeal email limits) works the same on Vercel.
@@ -95,8 +96,12 @@ and what the runtime offers.
 
 - One shared login (user `oda`). Ten wrong passwords from one address lock that address out for ten minutes.
 - Optionally a second password for the owner (`REMITWATCH_OWNER_PASSWORD`), typed into the Providers tab. It is not a login: the page sends it with the provider
-  calls and forgets it on reload, on Lock and after half an hour without use. Ten wrong tries from one address close that tab to the address for ten minutes
-  and leave the rest of the site alone.
+  calls and forgets it on Lock, on leaving or reloading the page and after half an hour without use.
+- What the owner's password does and does not do: it keeps the provider figures off the dashboard for people who have only the dashboard login. It does not
+  encrypt anything. The same tables are in the site's state folder in Dropbox (`serving.sqlite.gz`), next to the remittances they are built from, and the password
+  itself is a Vercel setting. So: the owner types the value into Vercel personally and marks it Sensitive, and the state folder lives where staff cannot open it.
+- Both brakes (ten wrong logins, ten wrong tries at the owner's password) count per address and per running copy of the site. Someone on the same office network
+  can therefore close the tab to the owner for ten minutes at a time by guessing; the owner can still open it from another network, and nothing else is affected.
 - Add the settings for the Production environment only. A preview build of another branch that was given them would
   hold the Dropbox token; the app refuses to run a cycle on a preview build either way.
 - No page can be framed by another site, answers with data are marked not to be stored, and the run address accepts the
@@ -125,7 +130,7 @@ both before real data goes through this deployment, and see [OPERATIONS.md](OPER
 ## Trying it without Vercel
 
 ```bash
-REMITWATCH_MODE=serverless REMITWATCH_STATE_DIR=/tmp/rw-state REMITWATCH_PASSWORD=pw CRON_SECRET=0123456789abcdef \
+REMITWATCH_MODE=serverless REMITWATCH_STATE_DIR=/tmp/rw-state REMITWATCH_PASSWORD=a-long-local-password CRON_SECRET=0123456789abcdef \
   uvicorn remitwatch.api:app
 ```
 

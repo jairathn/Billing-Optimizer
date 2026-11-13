@@ -95,13 +95,14 @@ details summary{cursor:pointer;color:var(--muted)}
   <button id="bellBtn" title="alerts">Alerts</button>
   <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
   <label class="small">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
+  <button id="lockBtn" style="display:none" title="forget the owner's password on this page: the Providers tab and lines billed by provider close again">Lock providers</button>
   <button id="themeBtn" title="theme">◐</button>
 </header>
 <nav id="nav"></nav>
 <main id="view"></main>
 <div id="drawer"></div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
 <script>
@@ -176,6 +177,7 @@ function initNav(){
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=()=>{state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
+  $('#lockBtn').onclick = ()=>{ pvForget(); render(); };
   $('#themeBtn').onclick = ()=>{const r=document.documentElement; const dark = r.dataset.theme==='dark' || (r.dataset.theme!=='light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     r.dataset.theme = dark?'light':'dark'; if(state.tab==='providers'){ if(typeof pvRedraw==='function' && pvRedraw()) return; render(); } };
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
@@ -334,7 +336,7 @@ async function contracts(v){
     <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','MPPR_POLICY','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
     <div class="panel"><h2>Allowed amount as % of Medicare, ${year} <select id="tierSel"><option value="physician" ${(state.filt.tier||'physician')==='physician'?'selected':''}>physicians</option><option value="nonphysician" ${state.filt.tier==='nonphysician'?'selected':''}>PAs / NPs</option></select></h2>
       <table class="heat"><thead><tr><th>Payer</th><th>Kind</th>${mx.codes.map(c=>`<th class="num">${c}</th>`).join('')}</tr></thead>
-      <tbody>${mx.payers.slice(0,25).map(p=>`<tr><td style="text-align:left">${esc(p.payer_group)}</td><td style="text-align:left" class="small muted">${esc(p.payer_kind)}</td>${mx.codes.map(c=>{const x=p.codes[c]; if(!x) return '<td class="muted">·</td>'; const pct=x.pct; const col = pct==null?'':(pct<0.8?'var(--bad)':(pct<0.95?'var(--warn)':'var(--good)')); return `<td title="${money2(x.cents)} on ${x.n} lines; Medicare ${money2(x.medicare_cents)}" style="color:${col}">${money2(x.cents)}<div class="small">${pct==null?'':Math.round(pct*100)+'%'}</div></td>`;}).join('')}</tr>`).join('')}</tbody></table></div>
+      <tbody>${mx.payers.slice(0,25).map(p=>`<tr><td style="text-align:left">${esc(p.payer_group)}</td><td style="text-align:left" class="small muted">${esc(p.payer_kind)}</td>${mx.codes.map(c=>{const x=p.codes[c]; if(!x) return '<td class="muted">·</td>'; const pct=x.pct; const col = pct==null?'':(pct<0.8?'var(--bad)':(pct<0.95?'var(--warn)':'var(--good)')); return `<td title="${money2(x.cents)}${x.n==null?'':' on '+x.n+' lines'}; Medicare ${money2(x.medicare_cents)}" style="color:${col}">${money2(x.cents)}<div class="small">${pct==null?'':Math.round(pct*100)+'%'}</div></td>`;}).join('')}</tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>Contract-level findings</h2><div id="tblC"></div></div>
     <div class="panel"><h2>Underpaid lines</h2><div id="tblU"></div></div>`;
   v.querySelector('#tierSel').onchange=e=>{state.filt.tier=e.target.value; render();};
@@ -461,6 +463,10 @@ async function openDetail(id){
 }
 
 window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(tabOpen(h) && h!==state.tab){ state.tab=h; render(); } });
+// Leaving the page locks what the owner's password opened. A browser may keep the page as it was and bring it back
+// on Back: it must come back locked, with nothing left on it.
+window.addEventListener('pagehide', ()=>{ if(state.ownerKey || (state.pv && state.pv.data)){ pvForget(); const v=$('#view'); if(v) v.innerHTML=''; sweepCharts(); } });
+window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
 (async function(){
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();

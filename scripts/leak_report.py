@@ -30,7 +30,7 @@ def main() -> None:
     lines = q(conn, "SELECT COUNT(*) n FROM lines")[0]["n"]
     claims = q(conn, "SELECT COUNT(*) n FROM claims")[0]["n"]
     run = q(conn, "SELECT * FROM detection_runs ORDER BY started_at DESC LIMIT 1")
-    p(f"# What the remittances say: where Owensboro Dermatology is losing money\n")
+    p(f"# What the remittances say: where the practice is losing money\n")
     p(f"Generated {date.today().isoformat()} from {meta['n']:,} unique 835 remittances ({claims:,} claims, {lines:,} service lines), "
       f"payment dates {meta['lo']} to {meta['hi']}, {money(meta['paid'])} paid. Detection version {run[0]['version'] if run else '?'}. "
       "Dollar figures are the allowed-amount shortfall against the payer's own usual rate (or Medicare where noted), not charges. "

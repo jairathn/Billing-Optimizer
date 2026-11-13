@@ -79,7 +79,7 @@ Weekly automatic Dropbox pull. No new staff. Owner: the practice's physician-own
 - [ ] Commit/push
 
 ## Run book for this session (where files live)
-- Scratch store with everything parsed: /tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad/data/remitwatch.sqlite
+- Scratch store with everything parsed: <scratchpad>
 - Dropbox mirror + unzipped archive: .../scratchpad/data/dropbox and .../scratchpad/data/zip_extract
 - Rebuild: python -m remitwatch.cli --db $DB ingest-835 <dir>; ingest-ema <dir>; detect; serve
 - Regenerate findings doc: python scripts/leak_report.py --db $DB > docs/DATA_FINDINGS.md
@@ -276,10 +276,17 @@ for leaks. The per-clinician counts held (within 5 percent everywhere). What cha
   from memory without moving the reader; a late answer can no longer draw over a newer one; month boxes ignore half-typed values;
   fixed-period columns say so; the call-back table no longer depends on the window; charts whose canvas has gone are released.
 - **Owner's password.** `REMITWATCH_OWNER_PASSWORD` (optional) keeps what each clinician is doing for the owner. It is typed into
-  the Providers tab, kept in the page's memory, and sent in `X-Owner-Password` with `/api/activity/*` and `/api/breakdown`. Without
-  it those routes answer 403 and `breakdown` leaves out lines billed per clinician (the same information by another door). Wrong
-  tries have their own brake. A first design swapped the browser's Basic login at `/owner`; a reviewer showed it signed billers out
-  in Chromium and left the owner's login in the browser, so it was dropped before release.
+  the Providers tab, kept in the page's memory, and sent in `X-Owner-Password` with `/api/activity/*`, `/api/breakdown` and the
+  rate routes. Without it the activity routes answer 403, and the breakdown and rate routes leave out line counts wherever a cell
+  is four fifths or more one clinician's work (the provider dimension, and stand-ins such as a provider type with one person in
+  it). Wrong tries have their own brake and are tried with one call. The page forgets the password on Lock (also in the page
+  header), on leaving the page (so the browser's Back cannot bring it back open), on reload and after half an hour; the box is
+  marked so that password managers leave it alone. Two designs were thrown away on the way: a second Basic login at `/owner`
+  (it signed billers out in Chromium and stayed in the browser), and hiding only the provider dimension (one physician alone
+  in the "unknown" provider type still showed). It is a screen for the dashboard, not encryption: the state folder in Dropbox
+  holds the same tables, and the docs say so.
+- The practice's own name, address, tax ID and NPI are no longer defaults in `appeals.py`; they are `PRACTICE_*` settings, and
+  letters show bracketed words until they are set. `/setup` lists them.
 - **Speed.** The readers pull thousands of rows into Python and crawled when several ran at once (six together took about seven
   seconds each on the archive, against 0.05 alone). The API now runs one at a time (`_ACTIVITY_LOCK`).
 - A second review (three reviewers: an independent recomputation, the gate and a leak check, the screen) found the engine sound
@@ -308,3 +315,7 @@ Things a later session should not redo or get wrong:
 - The memo the owner pasted was right about its own arithmetic and wrong about two clinicians because its export was pulled three
   days after the period ended. The pattern in the data is an office effect, not a clinician effect.
 - Still not built: the EMA appointment export (no sample exists yet), pathology results, cost per clinician.
+- Known and left: the Who and what denominators count remittance lines, not folded services, so a line two payers report
+  counts twice there; the Providers tab counts each service once. Rates by provider on the two tabs differ by a few percent.
+- Known and left: on a VM behind Caddy the brakes now count per visitor (uvicorn trusts the proxy header); on Vercel the
+  address is the caller's as Vercel reports it. Someone on the owner's own network can still hold the owner's tab closed.

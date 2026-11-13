@@ -19,7 +19,7 @@ from remitwatch.detect import Detector, run_detection  # noqa: E402
 from remitwatch.store import Store  # noqa: E402
 from tests.test_remitwatch import remit  # noqa: E402
 
-ANN, BOB, GROUP = "1111111111", "2222222222", "1821130295"      # a PA, a physician, and the group NPI the fixture pays
+ANN, BOB, GROUP = "1111111111", "2222222222", "1777777772"      # a PA, a physician, and the group NPI the fixture pays
 PW = "correct-horse-battery-7"
 
 
@@ -806,6 +806,13 @@ def test_the_provider_figures_can_be_kept_for_the_owner(tmp_path, monkeypatch):
         assert all(r["n"] for r in res["rows"])                                    # the findings themselves stay
     by_payer = tc.get("/api/breakdown?dim=payer&family=denial", auth=login).json()
     assert by_payer["rates_locked"] is False and any(r["lines"] for r in by_payer["rows"])
+    # grouped by something else, a cell that is four fifths one clinician's lines is that clinician's volume by another name:
+    # Ann has 16 of the 19 lines billed by her provider type and every level 4 visit, so those two cells are left out too
+    for path, shown in (("/api/breakdown?dim=tier&family=denial", 19), ("/api/breakdown?dim=billed_code&family=denial", 4)):
+        res = tc.get(path, auth=login).json()
+        assert res["rates_locked"] is True and [(r["lines"], r["rate"]) for r in res["rows"]] == [(None, None)] and res["total_lines"] == 26, path
+        assert [r["lines"] for r in tc.get(path, auth=login, headers=owner).json()["rows"]] == [shown], path
+    assert [r["lines"] for r in tc.get("/api/breakdown?dim=month&family=denial", auth=login).json()["rows"]] == [23]       # 16 of 23: not hers alone
     # with the owner's password beside the login everything opens; the page tries a password with one light call
     assert all(tc.get(r, auth=login, headers=owner).status_code == 200 for r in routes)
     assert tc.get("/api/activity/unlock", auth=login, headers=owner).json() == {"ok": True} and tc.get("/api/activity/unlock", auth=login).status_code == 403
@@ -833,8 +840,8 @@ def test_the_provider_figures_can_be_kept_for_the_owner(tmp_path, monkeypatch):
         monkeypatch.setenv("REMITWATCH_OWNER_PASSWORD", bad)
         monkeypatch.setenv("REMITWATCH_PASSWORD", PW)
         for headers in ({}, {"X-Owner-Password": bad.encode("ascii", "ignore").decode()}):
-            got = tc.get(routes[0], auth=login, headers=headers)
-            assert got.status_code == 503 and why in got.json()["detail"], (bad, got.status_code)
+            got = tc.get(routes[0], auth=login, headers=headers)        # the reason is on /setup, not handed to whoever asks
+            assert got.status_code == 503 and "setup page" in got.json()["detail"] and why not in got.json()["detail"], (bad, got.status_code)
         assert tc.get(by_clinician[0], auth=login).json()["rates_locked"] is True
         assert tc.get("/api/summary", auth=login).status_code == 200
         check = next(c for c in cloud.setup_status(probe=False)["checks"] if c["key"] == "owner_password")

@@ -141,15 +141,15 @@ def _run_selftest() -> dict:
 
 
 def owner_password_problem(owner: str, shared: str, min_length: int = 12) -> str | None:
-    """Why an owner's password cannot be used, or None when it can or when there is none."""
+    """What is wrong with an owner's password, as words that follow "it", or None when it can be used or there is none."""
     if not owner:
         return None
-    if not owner.isascii():
+    if any(not (0x20 <= ord(ch) <= 0x7e) for ch in owner):
         return "has a character a browser cannot send (use plain letters and digits)"
     if owner != owner.strip():
         return "has a space at one end"
     if len(owner) < min_length:
-        return f"shorter than {min_length} characters"
+        return f"is shorter than {min_length} characters"
     if owner == shared:
-        return "the same as the dashboard password"
+        return "is the same as the dashboard password"
     return None

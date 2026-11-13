@@ -66,12 +66,13 @@ What the files cannot show: whether a light day was an empty schedule or patient
 
 **Who can see it.** The tab compares named clinicians. By default everyone with the dashboard login sees it. To keep it for the owner, set `REMITWATCH_OWNER_PASSWORD` (12 or more plain letters and digits, different from the dashboard password). After that:
 
-- The Providers tab shows a box asking for the owner's password. Nothing about a clinician is sent to the browser until the right one is typed.
-- The password is kept in that page's memory only. Reloading or closing the page, pressing Lock, or half an hour without use closes the tab again. Press Lock before leaving a shared computer.
+- The Providers tab shows a box asking for the owner's password. Nothing from that tab is sent to the browser until the right one is typed.
+- The password is kept in that page's memory only. Pressing Lock (on the tab, or "Lock providers" in the page header from any tab), leaving the page, reloading or closing it, or half an hour without use closes it again. Press Lock before leaving a shared computer, and answer "never" if the browser offers to save the password.
 - Everyone keeps the same login, so nobody is signed out or switched, and every other tab works as before.
-- On Who and what, findings by provider still show (which clinician's visits are being downcoded is the billers' work), but "Lines billed" and "Per 100" by provider are blank until the Providers tab has been opened on that page, because lines billed per clinician is how busy each clinician is.
-- Still visible to everyone: findings and dollars at stake by provider, and the alert that says a payer is singling out one provider, which names how many of that provider's level 4 and 5 visits to that payer were downcoded.
-- Ten wrong tries at the owner's password from one address close the provider figures to that address for ten minutes. The rest of the site is not affected.
+- On Who and what and on Contracts, the number of lines billed (and the rate worked out from it) is left out wherever it would show how busy one clinician is: by provider, and in any other row that is four fifths or more one clinician's lines, such as a provider type or a code only one clinician bills. They show once the Providers tab has been opened on that page.
+- Still visible to everyone, because it is the billers' work: findings and dollars at stake by provider; the dates of service on those findings, which show on which days a clinician worked; and the alert that says a payer is singling out one provider, which names how many of that provider's level 4 and 5 visits to that payer were downcoded.
+- Ten wrong tries at the owner's password from one address close the provider figures to that address for ten minutes. The rest of the site is not affected. The count is per address, so someone in the same office can close the tab to the owner for a while by guessing; the owner can open it from another network.
+- What it is not: encryption. It keeps the figures off the dashboard for people who have only the dashboard login. Anyone who can open the site's state folder in Dropbox, the remittance files themselves, or the host's settings is outside it. Keep the state folder where staff cannot open it, and have the owner enter the password in the host's settings personally.
 - A weak owner password is not ignored: the figures stay closed to everyone until it is fixed, and `/setup` says why.
 
 ## 5. Alerts

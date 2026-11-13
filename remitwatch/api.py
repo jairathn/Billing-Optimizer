@@ -234,9 +234,8 @@ def require_owner(request: Request = None, credentials: Optional[HTTPBasicCreden
     state = owner_state(request)
     if state == "open":
         return user
-    if state == "unusable":
-        raise HTTPException(status_code=503, detail=f"The provider figures are switched off: REMITWATCH_OWNER_PASSWORD is {owner_problem()}. "
-                                                    "Replace it in the host's settings and redeploy.")
+    if state == "unusable":             # the reason is on /setup; said here it would only help someone guess
+        raise HTTPException(status_code=503, detail="The provider figures are switched off: the owner's password cannot be used as it is set. The setup page says why.")
     if state == "blocked":
         raise HTTPException(status_code=429, detail="Too many wrong tries at the owner's password from this address. Wait ten minutes.")
     raise HTTPException(status_code=403, detail="That is not the owner's password." if state == "wrong"
@@ -588,7 +587,8 @@ async def bulk_status(request: Request, user: str = Depends(require_auth)):
 
 # --------------------------------------------------------------------------- rates and references
 @app.get("/api/rates")
-def rates(payer: Optional[str] = None, year: Optional[str] = None, code: Optional[str] = None, min_n: int = 20, _: str = Depends(require_auth)):
+def rates(payer: Optional[str] = None, year: Optional[str] = None, code: Optional[str] = None, min_n: int = 20,
+          request: Request = None, _: str = Depends(require_auth)):
     where, params = ["n >= ?"], [min_n]
     if payer:
         where.append("payer_group=?"); params.append(payer)
@@ -596,20 +596,30 @@ def rates(payer: Optional[str] = None, year: Optional[str] = None, code: Optiona
         where.append("year=?"); params.append(year)
     if code:
         where.append("code=?"); params.append(code)
-    return rows(f"SELECT * FROM payer_rates WHERE {' AND '.join(where)} ORDER BY payer_group, year, code, tier, pos_class", tuple(params))
+    out = rows(f"SELECT * FROM payer_rates WHERE {' AND '.join(where)} ORDER BY payer_group, year, code, tier, pos_class", tuple(params))
+    if owner_state(request) != "open":
+        solo = _solo_rate_groups()
+        for r in out:
+            if (r.get("payer_group"), r.get("tier"), str(r.get("year"))) in solo:
+                r["n"] = None           # the rate stays; how many lines it rests on is one clinician's volume
+    return out
 
 
 @app.get("/api/rates/matrix")
-def rates_matrix(year: str, tier: str = "physician", codes: str = "99203,99204,99213,99214,11102,11103,17000,17003,17110,17311,88305,12031,13132,14040", _: str = Depends(require_auth)):
+def rates_matrix(year: str, tier: str = "physician", codes: str = "99203,99204,99213,99214,11102,11103,17000,17003,17110,17311,88305,12031,13132,14040",
+                 request: Request = None, _: str = Depends(require_auth)):
     code_list = [c for c in codes.split(",") if c]
+    solo = _solo_rate_groups() if owner_state(request) != "open" else set()
     data = rows(f"SELECT payer_group, payer_kind, code, mode_cents, n, medicare_cents, pct_of_medicare FROM payer_rates WHERE year=? AND tier=? AND pos_class='office' AND code IN ({','.join('?' * len(code_list))}) AND n >= 20",
                 (year, tier, *code_list))
     payers: dict[str, dict] = {}
     for r in data:
         p = payers.setdefault(r["payer_group"], {"payer_group": r["payer_group"], "payer_kind": r["payer_kind"], "codes": {}, "lines": 0})
-        p["codes"][r["code"]] = {"cents": r["mode_cents"], "n": r["n"], "medicare_cents": r["medicare_cents"], "pct": r["pct_of_medicare"]}
-        p["lines"] += r["n"]
-    out = sorted(payers.values(), key=lambda p: -p["lines"])
+        hide = (r["payer_group"], tier, str(year)) in solo
+        p["codes"][r["code"]] = {"cents": r["mode_cents"], "n": None if hide else r["n"], "medicare_cents": r["medicare_cents"], "pct": r["pct_of_medicare"]}
+        p["order"] = p.get("order", 0) + r["n"]
+        p["lines"] = None if hide else p["lines"] + r["n"]
+    out = sorted(payers.values(), key=lambda p: -p.pop("order", 0))
     return {"year": year, "tier": tier, "codes": code_list, "payers": out}
 
 
@@ -777,15 +787,74 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
     totals = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {' AND '.join(fwhere)}", tuple(fparams))
     total_lines = one(f"SELECT SUM(lines) lines FROM exposure WHERE {' AND '.join(ewhere)}", tuple(eparams)) if has_table("exposure") else {"lines": None}
     by_clinician = "provider" in dims or (provider is not None and provider != "")
-    locked = by_clinician and owner_state(request) != "open"
-    if locked:              # the rate goes too: the count divided by the rate gives the lines back
-        for r in data:
-            r["lines"] = r["rate"] = None
-        total_lines = {"lines": None}
+    locked = False
+    if owner_state(request) != "open":
+        if by_clinician:    # the rate goes too: the count divided by the rate gives the lines back
+            locked = True
+            for r in data:
+                r["lines"] = r["rate"] = None
+            total_lines = {"lines": None}
+        elif has_table("exposure"):
+            # grouped by something else (provider type, payer, code, month), a cell can still be one clinician's work
+            if exposure_level:
+                solo = _solo_cells(ecols, egrp, " AND ".join(ewhere), tuple(eparams))
+                for r in data:
+                    key = tuple(r[f"k{i+1}"] for i in range(exposure_level))
+                    if r["lines"] and solo.get(key, 0) >= SOLO_SHARE * r["lines"]:
+                        r["lines"] = r["rate"] = None
+                        locked = True
+            whole = (total_lines or {}).get("lines")
+            if whole and max(_solo_cells("1 k1", "1", " AND ".join(ewhere), tuple(eparams)).values(), default=0) >= SOLO_SHARE * whole:
+                total_lines = {"lines": None}
+                locked = True
     return {"dim": dim, "dim2": dim2, "family": family, "rows": data, "total": totals, "total_lines": (total_lines or {}).get("lines"),
             "rates_locked": locked,
             "rate_scope": {"downcoding": "office visit lines billed", "code_change": "procedure lines billed"}.get(family, "service lines billed"),
             "denominator_for": exposure_level, "dims": sorted(DIMS)}
+
+
+# --------------------------------------------------------------------------- one clinician must not show through a total
+SOLO_SHARE = 0.8        # a count that is four fifths one clinician's lines says how busy that clinician is
+
+
+def _clinicians() -> list[str]:
+    """NPIs that are people. From the provider tables when they are built; else every NPI the exposure table names."""
+    if has_table("provider_roster"):
+        got = [r["provider_id"] for r in rows("SELECT provider_id FROM provider_roster WHERE kind='person'")]
+        if got:
+            return got
+    return [r["npi"] for r in rows("SELECT DISTINCT npi FROM exposure WHERE COALESCE(npi,'') != ''")] if has_table("exposure") else []
+
+
+def _solo_cells(cols: str, group: str, where: str, params: tuple) -> dict[tuple, int]:
+    """For each cell of an exposure breakdown, the most lines any one clinician has in it."""
+    people = _clinicians()
+    if not people:
+        return {}
+    marks = ",".join("?" * len(people))
+    n = len(group.split(","))
+    keys = ", ".join(f"k{i + 1}" for i in range(n))
+    out: dict[tuple, int] = {}
+    for r in rows(f"""SELECT {keys}, MAX(l) top FROM (SELECT {cols}, npi, SUM(lines) l FROM exposure
+                      WHERE {where} AND npi IN ({marks}) GROUP BY {group}, npi) GROUP BY {keys}""", params + tuple(people)):
+        out[tuple(r[f"k{i + 1}"] for i in range(n))] = r["top"] or 0
+    return out
+
+
+def _solo_rate_groups() -> set[tuple]:
+    """(payer, provider type, year) groups whose lines are nearly all one clinician's: the count behind a usual rate
+    for such a group is that clinician's volume."""
+    if not has_table("exposure"):
+        return set()
+    people = set(_clinicians())
+    total: dict[tuple, int] = {}
+    top: dict[tuple, int] = {}
+    for r in rows("SELECT payer_group, tier, substr(month,1,4) y, COALESCE(npi,'') npi, SUM(lines) l FROM exposure GROUP BY 1, 2, 3, 4"):
+        k = (r["payer_group"], r["tier"], r["y"])
+        total[k] = total.get(k, 0) + (r["l"] or 0)
+        if r["npi"] in people:
+            top[k] = max(top.get(k, 0), r["l"] or 0)
+    return {k for k, n in total.items() if n and top.get(k, 0) >= SOLO_SHARE * n}
 
 
 # --------------------------------------------------------------------------- providers: what each clinician is doing

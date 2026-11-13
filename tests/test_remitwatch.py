@@ -24,9 +24,9 @@ def remit(claims: str, bpr: str, payer="ANTHEM", payer_id="ANTHM", seg_count=20,
     body = (
         f"ISA*00*          *00*          *ZZ*{payer_id:<15}*ZZ*3LDA           *260904*0909*^*00501*{isa_ctrl:>9}*0*P*:~"
         f"GS*HP*{payer_id}*3LDA*20260904*0909*1*X*005010X221A1~ST*835*000000001~"
-        f"BPR*I*{bpr}*C*ACH*CCP*01*061000052*DA*123*999**01*042100175*DA*555*{pay_date}~TRN*1*TRACE{isa_ctrl}*1350781558~"
+        f"BPR*I*{bpr}*C*ACH*CCP*01*999999992*DA*123*999**01*999999989*DA*555*{pay_date}~TRN*1*TRACE{isa_ctrl}*1350781558~"
         f"REF*EV*FEP~DTM*405*20251120~N1*PR*{payer}~N3*1 MAIN ST~N4*CINCINNATI*OH*45209~REF*2U*{payer_id}~PER*BL*PORTAL*TE*8005551212~"
-        f"N1*PE*TEST DERMATOLOGY*XX*1821130295~N3*2 MAIN ST~N4*ANYTOWN*KY*40000~REF*TJ*999999999~LX*1~"
+        f"N1*PE*TEST DERMATOLOGY*XX*1777777772~N3*2 MAIN ST~N4*ANYTOWN*KY*40000~REF*TJ*999999999~LX*1~"
         f"{claims}{plb}SE*{seg_count}*000000001~GE*1*1~IEA*1*{isa_ctrl}~"
     )
     return body.encode()
@@ -50,7 +50,7 @@ def test_parse_basic_remit_balances():
     assert r.counts()["claims"] == 2
     assert r.counts()["lines"] == 3
     t = r.transactions[0]
-    assert t["payer_name"] == "ANTHEM" and t["payer_id"] == "ANTHM" and t["payee_npi"] == "1821130295"
+    assert t["payer_name"] == "ANTHEM" and t["payer_id"] == "ANTHM" and t["payee_npi"] == "1777777772"
     assert t["payment_amount_cents"] == 16891 and t["payment_date"] == "2025-11-24"
     assert t["plb_total_cents"] == 150
     # BPR02 (168.91) = CLP04 total (77.60 + 91.31 = 168.91) - PLB (1.50) -> not balanced on purpose by 1.50
@@ -154,7 +154,7 @@ def test_837_parser():
     data = (
         "ISA*00*          *00*          *ZZ*999999999      *ZZ*TRIZETTO       *261005*1200*^*00501*000000101*0*P*:~GS*HC*999999999*TRIZETTO*20261005*1200*101*X*005010X222A1~"
         "ST*837*0001*005010X222A1~BHT*0019*00*123*20261005*1200*CH~NM1*41*2*TEST DERM*****46*999999999~PER*IC*BILLING*TE*2705551212~NM1*40*2*TRIZETTO*****46*TZ~"
-        "HL*1**20*1~NM1*85*2*TEST DERMATOLOGY*****XX*1821130295~N3*2 MAIN~N4*ANYTOWN*KY*40000~REF*EI*999999999~"
+        "HL*1**20*1~NM1*85*2*TEST DERMATOLOGY*****XX*1777777772~N3*2 MAIN~N4*ANYTOWN*KY*40000~REF*EI*999999999~"
         "HL*2*1*22*0~SBR*P*18*GRP1******CI~NM1*IL*1*DOE*JANE****MI*R000001~NM1*PR*2*ANTHEM*****PI*00660~"
         "CLM*CB00TEST01C017*223.65***11:B:1*Y*A*Y*Y~HI*ABK:L409~NM1*82*1*PROVIDER*TEST****XX*1888888882~"
         "LX*1~SV1*HC:99214:25*223.65*UN*1***1~DTP*472*D8*20261001~REF*6R*5001~LX*2~SV1*HC:17110*177.56*UN*1***1~DTP*472*D8*20261001~REF*6R*5002~SE*25*0001~GE*1*101~IEA*1*000000101~"

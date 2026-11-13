@@ -6,7 +6,9 @@
 # cron   -> same as serve (older deployments used this name)
 set -e
 case "$1" in
-  serve|cron) exec python -m uvicorn remitwatch.api:app --host 0.0.0.0 --port 8000 --workers 1 ;;
+  # port 8000 is only reachable from the Caddy container, which sets X-Forwarded-For itself: trust it, so that the brake
+  # on wrong logins counts each visitor's own address and one stranger's guesses do not lock everybody out
+  serve|cron) exec python -m uvicorn remitwatch.api:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips '*' ;;
   cycle)      exec python -m remitwatch.cli cycle ;;
   weekly)     exec python -m remitwatch.cli weekly ;;
   *) exec "$@" ;;

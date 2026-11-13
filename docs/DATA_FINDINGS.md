@@ -1,4 +1,4 @@
-# What the remittances say: where Owensboro Dermatology is losing money
+# What the remittances say: where the practice is losing money
 
 Generated 2026-11-12 from 32,550 unique 835 remittances (192,851 claims, 419,023 service lines), payment dates 2024-01-01 to 2026-10-09, $29,967,034 paid. Detection version 2.1. Dollar figures are the allowed-amount shortfall against the payer's own usual rate (or Medicare where noted), not charges. A finding stays open until a later remittance pays it or a biller marks it.
 

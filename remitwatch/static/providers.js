@@ -69,12 +69,18 @@ const pvKeep = (tier, r) => tier === 'all' || r.tier === tier;
    and after half an hour without use. */
 const PV_IDLE_MS = 30 * 60 * 1000;
 const pvLocked = () => !!(state.meta && state.meta.providers && state.meta.providers.locked);
-function pvForget(){ state.ownerKey = ''; if(state.pv){ state.pv.data = null; state.pv.detail = null; clearTimeout(state.pv.idle); } }
+function pvForget(){ state.ownerKey = ''; if(state.pv){ state.pv.data = null; state.pv.detail = null; clearTimeout(state.pv.idle); } pvKeyUi(); }
+function pvKeyUi(){ const b = document.getElementById('lockBtn'); if(b) b.style.display = state.ownerKey ? '' : 'none'; }       // a Lock button on every tab while the password is held
+function pvArmIdle(){        // any tab can show what the password opened (lines billed by provider on Who and what), so the timer redraws whatever is showing
+  if(!state.pv) return;
+  clearTimeout(state.pv.idle);
+  if(state.ownerKey) state.pv.idle = setTimeout(() => { pvForget(); render(); }, PV_IDLE_MS);
+}
 function pvUnlockForm(v, message){
   v.classList.remove('busy');
   v.innerHTML = `<div class="panel" style="max-width:560px"><h2>What each clinician is doing</h2>
-    <div class="note">This tab compares named clinicians, so it is kept for the owner. Type the owner's password to open it. It is not saved anywhere: closing or reloading the page, or pressing Lock, closes the tab again, and so does half an hour without use.</div>
-    <form id="pvUnlock" class="filters"><input id="pvKey" type="password" autocomplete="off" aria-label="owner's password" placeholder="owner's password" style="min-width:240px"> <button class="primary">Open</button></form>
+    <div class="note">This tab compares named clinicians, so it is kept for the owner. Type the owner's password to open it. The page keeps it in memory only. Pressing Lock, leaving, reloading or closing the page closes the tab again, and so does half an hour without use. If the browser offers to save the password, say never.</div>
+    <form id="pvUnlock" class="filters"><input id="pvKey" type="password" autocomplete="one-time-code" data-1p-ignore data-lpignore="true" data-form-type="other" aria-label="owner's password" placeholder="owner's password" style="min-width:240px"> <button class="primary">Open</button></form>
     ${message ? `<div class="small sev-medium">${esc(message)}</div>` : ''}</div>`;
   v.querySelector('#pvUnlock').onsubmit = e => {
     e.preventDefault();
@@ -83,7 +89,7 @@ function pvUnlockForm(v, message){
     if(/[^\x20-\x7e]/.test(key)){ pvUnlockForm(v, "That is not the owner's password."); return; }      // a browser cannot send it, and the site would not accept it
     state.ownerKey = key;
     v.classList.add('busy');
-    api('/api/activity/unlock').then(() => { if(state.tab === 'providers') render(); },         // tried with one call, so a wrong try counts once
+    api('/api/activity/unlock').then(() => { pvKeyUi(); pvArmIdle(); if(state.tab === 'providers') render(); },         // tried with one call, so a wrong try counts once
       err => { pvForget(); if(state.tab === 'providers' && v.isConnected) pvUnlockForm(v, err.message); });
   };
   v.querySelector('#pvKey').focus();
@@ -288,8 +294,7 @@ function pvDraw(){
   sweepCharts();
   if(pvLocked()){
     v.querySelector('#pvLock').onclick = () => { pvForget(); render(); };
-    clearTimeout(pv.idle);
-    pv.idle = setTimeout(() => { pvForget(); if(state.tab === 'providers') render(); }, PV_IDLE_MS);
+    pvArmIdle();
   }
   const redraw = () => pvDraw();
   v.querySelector('#pvPreset').onchange = e => {

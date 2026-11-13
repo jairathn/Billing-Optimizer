@@ -1160,13 +1160,16 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         + (f"; appeal packets may be emailed to {domains}" if domains else "; appeal packets cannot be emailed until APPEAL_EMAIL_DOMAINS names the domains allowed"))
     add("note_review", "Visit-note review (optional)", bool(env("ANTHROPIC_API_KEY")) or None,
         "on" if env("ANTHROPIC_API_KEY") else "off: packets are built from the template")
+    missing = [k for k in ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI") if not env(k)]
+    add("letterhead", "Practice details for appeal letters (optional)", None if missing else True,
+        "set" if not missing else "not set: " + ", ".join(missing) + ". Letters show bracketed words in their place.")
     owner = env("REMITWATCH_OWNER_PASSWORD") or ""
     owner_bad = runtime.owner_password_problem(owner, pw)
     add("owner_password", "Owner's password for the Providers tab (optional)", (not owner_bad) if owner else None,
-        ("on: what each clinician is doing opens only after the owner's password is typed into the Providers tab" if not owner_bad else f"set, but it is {owner_bad}")
+        ("on: what each clinician is doing opens only after the owner's password is typed into the Providers tab" if not owner_bad else f"set, but it {owner_bad}")
         if owner else "off: everyone who can sign in sees the Providers tab",
-        "Replace REMITWATCH_OWNER_PASSWORD in Vercel with 12 or more plain letters and digits, different from the dashboard password, "
-        "then redeploy. Until then the Providers tab is closed to everyone.")
+        "Replace REMITWATCH_OWNER_PASSWORD in Vercel with 12 or more plain letters and digits and redeploy. Leave the dashboard password as it is. "
+        "Until then the Providers tab is closed to everyone.")
     if base_url:
         out["webhook_url"] = f"{base_url.rstrip('/')}/api/dropbox/webhook"
     st = state_from_env(fast=True) if (key and secret and token) or env("REMITWATCH_STATE_DIR") else None

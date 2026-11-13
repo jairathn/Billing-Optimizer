@@ -18,11 +18,13 @@ from typing import Any
 
 from .codes import CARC, LEGAL, RARC, appeal_rule
 
+# Who the letters come from. Set PRACTICE_NAME, PRACTICE_ADDRESS, PRACTICE_TIN and PRACTICE_NPI (and the contact lines)
+# in the host's settings: until then the letters carry the bracketed words, which shows at a glance what is missing.
 PRACTICE = {
-    "name": os.environ.get("PRACTICE_NAME", "Owensboro Dermatology Associates, PSC"),
-    "address": os.environ.get("PRACTICE_ADDRESS", "2821 New Hartford Rd, Owensboro, KY 42303"),
-    "tin": os.environ.get("PRACTICE_TIN", "31-1488176"),
-    "npi": os.environ.get("PRACTICE_NPI", "1821130295"),
+    "name": os.environ.get("PRACTICE_NAME", "[practice name]"),
+    "address": os.environ.get("PRACTICE_ADDRESS", "[practice address]"),
+    "tin": os.environ.get("PRACTICE_TIN", "[practice tax ID]"),
+    "npi": os.environ.get("PRACTICE_NPI", "[group NPI]"),
     "phone": os.environ.get("PRACTICE_PHONE", "[practice phone]"),
     "fax": os.environ.get("PRACTICE_FAX", "[practice fax]"),
     "email": os.environ.get("PRACTICE_EMAIL", "[billing email]"),

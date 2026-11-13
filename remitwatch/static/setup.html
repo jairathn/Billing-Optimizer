@@ -111,7 +111,7 @@ function describe(lc){
 let poll = null;
 async function loadStatus(s){
   const lc = s.last_cycle, running = s.running;
-  const stalled = s.stalled ? `<div class="no">A run that started ${esc(String(s.stalled.since||'').replace('T',' ').slice(0,16))} UTC stopped without finishing: it ran out of memory or time. Press the button to continue from where it stopped. If this message comes back twice, stop and tell Dr. Jairath: the site needs the larger function size (Vercel, Settings, Functions, Function CPU, Performance).</div>` : '';
+  const stalled = s.stalled ? `<div class="no">A run that started ${esc(String(s.stalled.since||'').replace('T',' ').slice(0,16))} UTC stopped without finishing: it ran out of memory or time. Press the button to continue from where it stopped. If this message comes back twice, stop and tell the practice owner: the site needs the larger function size (Vercel, Settings, Functions, Function CPU, Performance).</div>` : '';
   // a run that said "more to do" normally starts the next one within seconds; if none has started after two minutes, say so
   const idle = lc && lc.more && !running && !s.stalled && lc.finished && (Date.now() - Date.parse(lc.finished) > 120000);
   const nudge = idle ? '<div class="no">The next run has not started by itself. Click Run the first load now to continue from where it stopped.</div>' : '';
