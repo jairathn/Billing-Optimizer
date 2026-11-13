@@ -110,7 +110,8 @@ Rules that keep the two modes equal: a file keeps its own name and date when it 
 ## Limits and next steps
 
 - Expected amounts are revealed-rate baselines, not contracts. Loading contracts would turn "below usual" into "below contract".
-- Filing windows come from provider manuals where they were read and from payer type otherwise; a contract can differ.
+- Filing windows come from provider manuals where they were read and from payer type otherwise; a contract can differ. A finding to fix and resend uses the payer's corrected-claim clock where one is published (`codes.CORRECTED_RULES`: Medicare Part B reopening, Humana and Anthem Medicare Advantage, Humana's Kentucky Medicaid plan), counted from the remittance or the date of service as the payer says; otherwise it keeps the appeal window with a note that the agreement's filing limit applies.
+- `CHARGE_BELOW_RATE`: per payer group, year, code, provider type and place of service, lines paid exactly their charge while the payer's usual amount on lines it did not cap is higher (at least five such lines, $100 between them, the charge at least 40 percent of the rate and $5). The payer paid the lesser of charge and rate, so nothing is appealable; the action is to raise the fee.
 - Location and diagnosis are known only where EMA exports exist (late July 2026 onward); location is otherwise estimated from the provider's usual site.
 - The store is one SQLite file (about 0.9 GB for 32K remittances, 0.5 GB in the compact form). Detection holds every line in memory: a run peaks at about 1.5 GB, which fits a 2 GB serverless function today and grows with the archive.
 - A store held in memory from a serialized image cannot pass 1 GB (SQLite's default limit for it).

@@ -296,18 +296,24 @@ APPEAL_RULES: list[dict] = [
      "label": "Anthem commercial: Claim Payment Reconsideration within two years of the EOP issue date; "
               "Claim Payment Appeal within 90 days of the reconsideration decision",
      "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual, effective September 1, 2026, Claim Payment Disputes"},
-    {"match": r"^Anthem", "kinds": {"medicare_advantage"}, "days": 120, "verified": False,
-     "label": "Anthem Medicare Advantage: reconsideration within 120 days of the EOP; appeal within 30 days of the reconsideration letter",
-     "source": "Anthem Medicare Advantage provider guidebook (as reported in research; not re-read)"},
+    {"match": r"^Anthem", "kinds": {"medicare_advantage"}, "days": 120, "verified": True,
+     "label": "Anthem Medicare Advantage: reconsideration within 120 days of the date on the EOP; appeal within 30 days of the reconsideration letter",
+     "source": "Anthem Medicare Advantage provider guidebook, effective January 1, 2027 (linked from the Kentucky and Indiana manual pages)"},
     {"match": r"^Anthem", "kinds": {"medicaid"}, "days": 90, "verified": True,
      "label": "Anthem Kentucky Medicaid: payment appeal within 90 calendar days of the remittance date",
      "source": "Anthem Kentucky Medicaid Provider Manual, payment appeals"},
-    {"match": r"^(UnitedHealthcare|UMR|UHC|Optum|Surest)", "kinds": None, "days": 365, "verified": False,
-     "label": "UnitedHealthcare: reconsideration and appeal both within 12 months of the original EOB or PRA",
-     "source": "UnitedHealthcare Care Provider Administrative Guide 2026, chapter 10 (as quoted in research)"},
-    {"match": r"^Humana", "kinds": None, "days": 540, "verified": False,
-     "label": "Humana: claim dispute within 18 months of the paid date",
-     "source": "Humana provider manual (as reported in research; not re-read)"},
+    {"match": r"^(UnitedHealthcare|UHC)", "kinds": None, "days": 365, "verified": True,
+     "label": "UnitedHealthcare: reconsideration and appeal together within 12 months of the original EOB or PRA (one window for both steps)",
+     "source": "UnitedHealthcare Administrative Guide 2026, chapter 10 (revised May 13, 2026); uhcprovider.com appeals page"},
+    {"match": r"^(UMR|Optum|Surest)", "kinds": None, "days": 365, "verified": False,
+     "label": "UnitedHealthcare-administered plan: 12 months from the original EOB or PRA, as for UnitedHealthcare",
+     "source": "UnitedHealthcare Administrative Guide 2026 (the plan's own rules not checked)"},
+    {"match": r"^Humana", "kinds": {"medicaid"}, "days": 540, "verified": False,
+     "label": "Humana Medicaid: 18 months used; Humana Healthy Horizons in Kentucky allows 24 months for a claim dispute, Indiana's plan 60 days",
+     "source": "Humana Healthy Horizons in Kentucky claim dispute notice (2025); Humana Healthy Horizons in Indiana provider manual (2026)"},
+    {"match": r"^Humana", "kinds": None, "days": 540, "verified": True,
+     "label": "Humana: claim dispute within 18 months of receiving the original claim determination (counted here from the remittance date)",
+     "source": "Humana Provider Manual 2026 (773902ALL0725), claims disputes, for all products"},
     {"match": r"^Aetna", "kinds": None, "days": 180, "verified": False,
      "label": "Aetna: reconsideration within 180 days of the claim decision; appeal within 60 days of the reconsideration decision",
      "source": "Aetna provider dispute page (as reported in research)"},
@@ -325,6 +331,43 @@ APPEAL_DEFAULTS: dict[str, tuple[int, str]] = {
     "va": (90, "VA Community Care: 90 days from the denial"),
     "other": (180, "Default 180 days"),
 }
+
+
+# A claim fixed and sent again (a corrected claim, or for Medicare Part B a reopening) runs on its own clock, which is
+# not the appeal window: some payers count from the date of service, others from the original remittance. Only rules
+# read in the payer's own manual or the regulation are listed; for other payers the filing limit in the participation
+# agreement applies, and the finding keeps the appeal window with a note saying so.
+CORRECTED_RULES: list[dict] = [
+    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "rarc": "MA130", "days": 365, "clock": "dos", "verified": True,
+     "label": "Medicare Part B: a claim returned as unprocessable (MA130) is fixed by sending a new claim within 1 calendar year of the date of service (42 CFR 424.44)",
+     "source": "42 CFR 424.44; WPS, How to correct a rejected claim"},
+    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 365, "clock": "remit", "verified": True,
+     "label": "Medicare Part B takes no corrected claims: ask for a reopening (a clerical error, including a wrong or missing modifier) within 1 year of the initial determination (42 CFR 405.980)",
+     "source": "42 CFR 405.980(b); CMS Claims Processing Manual ch. 34 sec. 10.4; CGS reopening and redetermination job aid, December 2025"},
+    {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "clock": "remit", "verified": True,
+     "label": "Humana Medicare Advantage: corrected claim within 1 year of the original claim determination, unless the agreement says otherwise",
+     "source": "Humana, Claim Disputes and Corrected Claims tip sheet, August 2026"},
+    {"match": r"^Humana", "kinds": {"medicaid"}, "days": 365, "clock": "dos", "verified": True,
+     "label": "Humana Healthy Horizons in Kentucky: corrected claim within 365 days of the date of service",
+     "source": "Humana Healthy Horizons in Kentucky provider manual, 2025"},
+    {"match": r"^Anthem", "kinds": {"medicare_advantage"}, "days": 365, "clock": "dos", "verified": True,
+     "label": "Anthem Medicare Advantage: corrected claim within 365 days of the date of service, if the original claim was sent on time",
+     "source": "Anthem Medicare Advantage provider guidebook (effective January 1, 2027); Anthem corrected claims reimbursement policy"},
+]
+AGREEMENT_FILING_NOTE = (" For a corrected claim the filing limit in the participation agreement applies instead, counted from the date of "
+                         "service, and it can be much shorter (often 90 days).")
+
+
+def corrected_rule(payer_group: str | None, payer_kind: str | None, rarcs: str | None = None) -> dict | None:
+    """The clock for fixing and resending a claim to this payer: {'days', 'clock' ('dos' or 'remit'), 'label', 'source',
+    'verified'}, or None when only the participation agreement says."""
+    grp, kind = payer_group or "", payer_kind or "other"
+    for r in CORRECTED_RULES:
+        if r.get("rarc") and r["rarc"] not in (rarcs or ""):
+            continue
+        if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
+            return {k: r[k] for k in ("days", "clock", "label", "source", "verified")}
+    return None
 
 
 def appeal_rule(payer_group: str | None, payer_kind: str | None, plan: str | None = None) -> dict:

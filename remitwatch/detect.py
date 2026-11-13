@@ -47,6 +47,7 @@ fees         FEE_SKIM                  PLB fees withheld (Zelis transaction fees
 contract     CONTRACT_RATE_GAP         commercial payer's usual rate far below Medicare for a high-volume code
              MA_BELOW_MEDICARE         Medicare Advantage payer's usual rate below the Medicare fee schedule
              MPPR_POLICY               payer routinely pays later procedures below the standard 50 percent
+             CHARGE_BELOW_RATE         the practice's charge is below what the payer allows, so the payer paid the charge
              SECOND_RATE               payer routinely allows a lower amount for a code (PA/NP rate, another office's plan,
                                        multiple-procedure rule, a rate change): one finding per payer, code, year and amount
 info         G2211_DENIED              per payer and year: G2211 denied most of the time
@@ -63,8 +64,8 @@ import sqlite3
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from .codes import (ADD_ON_CODES, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, appeal_rule, carc_text, code_category,
-                    normalize_payer, payer_group_kind, pos_class, rarc_text)
+from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, appeal_rule, carc_text,
+                    code_category, corrected_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
@@ -1337,9 +1338,17 @@ class Detector:
         plan = base.get("plan") or (base.get("contract_class") or "").strip() or None
         rule = appeal_rule(grp, kind, plan)
         deadline, deadline_basis = None, None
-        if actionable in ("appeal", "correct_and_resubmit"):
+        fix = corrected_rule(grp, kind, rarc) if actionable == "correct_and_resubmit" else None
+        if fix:
+            # a corrected claim (a reopening for Medicare Part B) runs on its own clock, from the remittance or the date of service
+            start = pay_date if fix["clock"] == "remit" else (base.get("service_date") or base.get("statement_from") or pay_date)
+            deadline = _add_days(start, fix["days"])
+            deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
+        elif actionable in ("appeal", "correct_and_resubmit"):
             deadline = _add_days(pay_date, rule["days"])
             deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
+            if actionable == "correct_and_resubmit":
+                deadline_basis += AGREEMENT_FILING_NOTE
         code = base.get("procedure_code")
         billed = evidence.get("billed_code") or base.get("original_procedure_code") or evidence.get("charge_implies") or code
         fam_b, fam_p = family_of(billed), family_of(code)
@@ -2027,6 +2036,53 @@ class Detector:
                            {"payer_rate_cents": r["mode"], "medicare_cents": med, "lines": r["n"], "pct_of_medicare": round(pct, 3), "mode_share": round(r["share"], 3),
                             "note": "Contracted MA rates follow the contract; non-contracted providers must receive at least the Medicare amount."},
                            key_parts=(grp, year, code, tier), claim=base)
+        self.emit_charge_caps()
+
+    def emit_charge_caps(self) -> None:
+        """The practice's own charge below what a payer allows. Payers pay the lesser of the charge and their rate, so
+        on such a line the payer paid exactly the charge and the rest is lost, on every line, until the fee is raised.
+        Measured within one payer group, year, code, provider type and place of service: the payer's rate is the most
+        common amount it allowed on clean lines it did not cap (allowed below the charge, at least five of them), and a
+        line counts when it was paid exactly its charge and that charge is below the rate (but at least 40 percent of it and
+        $5: a token charge is something else). One finding per group with at least five such lines and $100 between them.
+        Nothing here can be appealed: the payer paid what was billed."""
+        capped: dict[tuple, list] = defaultdict(list)
+        uncapped: dict[tuple, Counter] = defaultdict(Counter)
+        for l in self.lines:
+            if l.get("claim_status_code") not in ("1", "19") or (l.get("paid_cents") or 0) <= 0:
+                continue
+            allowed, charge = l.get("allowed_cents") or 0, l.get("charge_cents") or 0
+            if allowed <= 0 or charge <= 0 or l.get("original_procedure_code") or l.get("paid_units") not in (None, 1, 1.0) \
+                    or l.get("pricing_mod") or l.get("surg_rank", 0) > 1 or not l.get("procedure_code"):
+                continue
+            key = (l["payer_group"], l["year"], l["procedure_code"], l.get("provider_tier") or "unknown", l.get("pos_class") or "office")
+            if allowed == charge:
+                capped[key].append(l)
+            elif allowed < charge:
+                uncapped[key][allowed] += 1
+        for key in sorted(capped):
+            cnt = uncapped.get(key)
+            if not cnt or sum(cnt.values()) < 5:
+                continue
+            rate, _n = usual_amount(cnt)
+            # a charge far below the rate is a billing oddity (a balance or a token amount), not a fee set too low
+            short = [l for l in capped[key] if 0.4 * rate <= l["charge_cents"] < rate and l["charge_cents"] >= 500]
+            gap = sum(rate - l["charge_cents"] for l in short)
+            if len(short) < 5 or gap < 10000:
+                continue
+            grp, year, code, tier, pos = key
+            charges = Counter(l["charge_cents"] for l in short)
+            charge = charges.most_common(1)[0][0]
+            base = {"payer_group": grp, "payer_kind": self.kinds.get(grp), "payer_name": grp, "year": year, "procedure_code": code,
+                    "provider_tier": tier, "pos_class": pos}
+            self._emit("CHARGE_BELOW_RATE", "contract", "high" if gap >= 200000 else "medium", "raise_fee",
+                       f"{grp} allows ${rate/100:,.2f} for {code} but paid your charge of ${charge/100:,.2f} on {len(short)} lines ({year})",
+                       None, rate, gap, None, None,
+                       {"payer_rate_cents": rate, "charge_cents": charge, "charges": {str(k): v for k, v in charges.most_common(5)}, "lines": len(short),
+                        "uncapped_lines": sum(cnt.values()),
+                        "note": "The payer pays the lesser of your charge and its rate, so these lines were paid what was billed and cannot be appealed. "
+                                "Raise your fee for this code above the highest amount any payer allows; claims billed after that are paid in full."},
+                       key_parts=("CHARGE_BELOW_RATE", grp, year, code, tier, pos), claim=base)
 
     # ------------------------------------------------------------------ persistence
     def save(self) -> dict:

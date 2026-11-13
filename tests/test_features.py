@@ -910,3 +910,56 @@ def test_slow_climb_is_caught_by_the_quarter_against_the_year(tmp_path):
     assert kinds == {"RISING"}
     rising = next(a for a in active.values() if a["kind"] == "RISING")
     assert rising["n_recent"] == 16 and "over the last three months" in rising["title"] and abs(rising["baseline"] - 0.03) < 1e-9
+
+
+# --------------------------------------------------------------------------- the practice's charge below what a payer allows
+
+def test_a_charge_below_the_payer_rate_is_one_finding_to_raise_the_fee_not_an_appeal(tmp_path):
+    rate = [claim(i, svc("88305", "150.00", "90.00", "90.00", "CAS*CO*45*60.00~")) for i in range(1, 7)]           # the payer's rate: $90
+    capped = [claim(i, svc("88305", "75.00", "75.00", "75.00")) for i in range(10, 18)] \
+        + [claim(i, svc("88305", "95.00", "95.00", "95.00")) for i in range(60, 62)]                                 # eight lines paid the $75 charge; two charged above the rate
+    big = [claim(i, svc("14040", "1000.00", "700.00", "700.00", "CAS*CO*45*300.00~")) for i in range(70, 76)] \
+        + [claim(i, svc("14040", "500.00", "500.00", "500.00")) for i in range(80, 83)]                              # $600 short, but on three lines only
+    above = [claim(i, svc("17000", "150.00", "80.00", "80.00", "CAS*CO*45*70.00~")) for i in range(50, 56)] \
+        + [claim(i, svc("17000", "90.00", "90.00", "90.00")) for i in range(20, 28)]                                 # paid at charge, but the charge is above the $80 rate
+    few = [claim(i, svc("11102", "150.00", "100.00", "100.00", "CAS*CO*45*50.00~")) for i in range(30, 34)] \
+        + [claim(i, svc("11102", "60.00", "60.00", "60.00")) for i in range(40, 48)]                                 # only four uncapped lines
+    token = [claim(i, svc("99499", "100.00", "53.00", "53.00", "CAS*CO*45*47.00~")) for i in range(90, 96)] \
+        + [claim(i, svc("99499", "0.15", "0.15", "0.15")) for i in range(100, 130)]                                  # a token charge is not a fee set too low
+    store = build_store(tmp_path, rate + capped + above + few + big + token)
+    Detector(store, run_id="caps").run()
+    rows = store.query("SELECT procedure_code, actionable, category, expected_cents, shortfall_cents, appeal_deadline, evidence, title FROM findings WHERE signal='CHARGE_BELOW_RATE'")
+    assert len(rows) == 1, rows
+    code, action, category, expected, shortfall, deadline, ev, title = rows[0]
+    assert (code, action, category, expected, shortfall, deadline) == ("88305", "raise_fee", "contract", 9000, 8 * 1500, None)
+    ev = json.loads(ev)
+    assert ev["payer_rate_cents"] == 9000 and ev["charge_cents"] == 7500 and ev["lines"] == 8 and ev["uncapped_lines"] == 6
+    assert "$90.00" in title and "$75.00" in title and "8 lines" in title
+    store.close()
+
+
+# --------------------------------------------------------------------------- a fixed claim runs on the corrected-claim clock
+
+def test_a_fixed_claim_runs_on_the_corrected_claim_clock_where_the_payer_publishes_one(tmp_path):
+    from remitwatch.codes import corrected_rule
+    assert {k: corrected_rule("Humana Medicare Advantage", "medicare_advantage")[k] for k in ("days", "clock")} == {"days": 365, "clock": "remit"}
+    assert corrected_rule("Humana Medicaid", "medicaid")["clock"] == "dos"
+    assert corrected_rule("Anthem / BCBS Medicare Advantage", "medicare_advantage")["clock"] == "dos"
+    assert corrected_rule("Medicare KY (CGS J15)", "medicare")["clock"] == "remit" and "reopening" in corrected_rule("Medicare IN (WPS J8)", "medicare")["label"]
+    assert corrected_rule("Medicare KY (CGS J15)", "medicare", "N822,MA130")["clock"] == "dos"
+    assert corrected_rule("Anthem / BCBS", "commercial") is None and corrected_rule("UnitedHealthcare", "commercial") is None
+    denied = "CAS*CO*16*150.00~LQ*HE*N822~"
+    for payer, cfi, sub in (("HUMANA", "16", "a"), ("KY MEDICARE", "MB", "b"), ("ANTHEM", "12", "c"), ("ANTHEM", "16", "d")):
+        st = build_store(tmp_path / sub, [claim(1, svc("99213", "150.00", "0.00", None, denied, dos="20260101"), dos="20260101", cfi=cfi)],
+                         payer=payer, pay_date="20260201")
+        Detector(st, run_id="fix").run()
+        (grp, deadline, basis), = st.query("SELECT payer_group, appeal_deadline, deadline_basis FROM findings WHERE signal='DENIED_MISSING_MODIFIER'")
+        if sub == "a":
+            assert grp == "Humana Medicare Advantage" and deadline == "2027-02-01" and "corrected claim within 1 year" in basis
+        elif sub == "b":
+            assert deadline == "2027-02-01" and "reopening" in basis and "not confirmed" not in basis
+        elif sub == "c":
+            assert deadline == "2028-02-01" and "participation agreement" in basis
+        else:
+            assert grp == "Anthem / BCBS Medicare Advantage" and deadline == "2027-01-01" and "date of service" in basis
+        st.close()
