@@ -895,7 +895,11 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         pending = conn.execute("SELECT 1 FROM meta WHERE key='cloud:detect_pending'").fetchone() is not None
         has_run = conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone() is not None
         has_lines = conn.execute("SELECT 1 FROM lines LIMIT 1").fetchone() is not None
-        need_detect = has_lines and (ingested or pending or force_detect or not has_run)
+        # a release that changed the rules re-analyses the archive once, even when no new file has arrived
+        from .detect import DETECT_VERSION
+        last_version = conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone() if has_run else None
+        rules_changed = bool(last_version) and last_version[0] != DETECT_VERSION
+        need_detect = has_lines and (ingested or pending or force_detect or not has_run or rules_changed)
         ran_detect = False
         if need_detect and not remaining:
             last = conn.execute("SELECT value FROM meta WHERE key='cloud:detect_seconds'").fetchone()

@@ -152,8 +152,13 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
         has_run = bool(store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='detection_runs'").fetchone()) and \
             bool(store.conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone())
+        rules_changed = False
+        if has_run:
+            from .detect import DETECT_VERSION
+            last = store.conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
+            rules_changed = bool(last) and last[0] != DETECT_VERSION     # a release that changed the rules re-analyses once
         store.close()
-        if changed or force_detect or not has_run:
+        if changed or force_detect or not has_run or rules_changed:
             summary = run_detection(db_path)
             out["detect"] = {"findings": sum(summary.values())}
         store = Store(db_path)

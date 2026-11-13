@@ -120,6 +120,7 @@ const SIGNAL_HELP = {
   DOWNCODE_LINE_SWAP:'The billed visit was denied and a lower-level visit line was paid in its place.',
   DENIED_LEVEL_OF_SERVICE:'Reason code 150 or 186 on a procedure: the payer says the records do not support the service as billed. Appeal with the operative note.',
   MPPR_POLICY:'This payer routinely allows third and later same-day procedures below the standard 50 percent. A contract question, not a one-off error.',
+  SECOND_RATE:'This payer routinely allows a lower amount for this code than its usual rate. Common reasons: the rate for a PA or NP, another office\'s plan, the multiple-procedure rule, or a rate change. It is one question for the payer or the contract, not an appeal per claim. The claims are listed under Evidence.',
   DOWNCODE_CHARGE:'Charge amount equals your fee for a higher level than the code the payer paid; the payer did not report the original code.',
   DOWNCODE_RATE:'Allowed amount equals the payer\'s usual rate for a lower level with no code change reported.',
   DOWNCODE_LEVEL_DENIED:'Visit paid $0 with reason code 150/186 or a level-of-service remark: payer says documentation does not support the level.',
@@ -144,7 +145,7 @@ const SIGNAL_HELP = {
   DENIED_DUPLICATE_UNPAID:'Denied as duplicate, but no remit ever paid this line. Find the original payment or reprocess.',
   DENIED_OTHER:'Paid $0 with another payer-responsibility reason code.',
   CLAIM_DENIED_UNPAID:'Whole claim denied (CLP02=4) and never paid later.',
-  UNDERPAID_VS_OWN_RATE:'Allowed below the payer\'s own usual rate for this code and provider type, with no reduction reason reported.',
+  UNDERPAID_VS_OWN_RATE:'Allowed below the payer\'s own usual rate for this code and provider type, at an amount the payer does not use routinely (a one-off), with no reduction reason reported.',
   MPPR_EXCESS:'Multiple-procedure reduction deeper than policy, or applied to an add-on code.',
   FEE_SKIM:'Payment fees withheld from the remittance (Zelis transaction fees, origination fees). Opt out: demand fee-free standard EFT.',
   TAKEBACK:'Overpayment recovery withheld from a later remittance (PLB WO). Review the reason and the recoupment notice.',
@@ -228,7 +229,7 @@ async function overview(v){
     ${kpi('Identified leakage', money(total(s.by_category)), 'all categories, '+(state.status==='all'?'all':'open')+' findings', 'overview')}
     ${kpi('Appealable', money(appealable.shortfall_cents), (appealable.n||0).toLocaleString()+' findings', 'appeals')}
     ${kpi('Correctable billing errors', money(fix.shortfall_cents), (fix.n||0).toLocaleString()+' lines to resubmit', 'appeals')}
-    ${kpi('Contract gap vs Medicare', money(cat.contract), 'commercial and MA rates', 'contracts')}
+    ${kpi('Rate and contract questions', money(cat.contract), 'below Medicare, or a payer\'s routine lower rate', 'contracts')}
     ${kpi('Bundled away', money(cat.bundling), 'E/M, add-ons, Mohs stages', 'bundling')}
     ${kpi('Denied, never paid', money(cat.denial), 'lines and whole claims', 'denials')}
     ${kpi('Downcoded', money(cat.downcoding), 'code or level reduced', 'downcoding')}
@@ -272,7 +273,8 @@ async function findingsTable(v, container, base, opts={}){
   const res = await api('/api/findings?'+qs(params), find);
   const sigs = base.signal ? base.signal.split(',') : state.summary.by_signal.filter(r=>!base.category||base.category.split(',').includes(r.category)).map(r=>r.signal);
   const payers = state.summary.by_payer.map(r=>r.payer_group);
-  container.innerHTML = `
+  const last = ((state.meta||{}).remits||{}).last_payment, behind = last ? Math.floor((Date.now() - new Date(last+'T00:00:00Z'))/86400000) : null;
+  container.innerHTML = `${behind!=null && behind > 10 ? `<div class="warnbox"><b>Payments after ${esc(last)} are not in the files yet.</b> The newest remittance in the Dropbox folder is ${behind} days old, so anything paid since then, including corrected claims, still shows here as open. Someone needs to put the latest TriZetto downloads in the folder.</div>` : ''}
     <div class="filters">
       <select data-f="signal"><option value="">All signals</option>${sigs.map(x=>`<option ${f.signal===x?'selected':''}>${x}</option>`).join('')}</select>
       <select data-f="payer"><option value="">All payers</option>${payers.map(x=>`<option ${f.payer===x?'selected':''}>${esc(x)}</option>`).join('')}</select>
@@ -358,8 +360,8 @@ async function contracts(v){
   const c = state.summary.by_signal.filter(r=>r.category==='contract'), u = state.summary.by_signal.filter(r=>r.category==='underpayment');
   const year = state.year || state.summary.years[state.summary.years.length-1];
   const mx = await api('/api/rates/matrix?'+qs({year, tier: state.filt.tier||'physician'}));
-  v.innerHTML = `<div class="panel"><h2>Contract rate gaps: ${money(total(c))} at Medicare parity · underpaid lines: ${money(total(u))}</h2>
-    <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','MPPR_POLICY','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
+  v.innerHTML = `<div class="panel"><h2>Rate and contract questions: ${money(total(c))} · one-off underpaid lines: ${money(total(u))}</h2>
+    <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','MPPR_POLICY','SECOND_RATE','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
     <div class="panel"><h2>Allowed amount as % of Medicare, ${year} <select id="tierSel"><option value="physician" ${(state.filt.tier||'physician')==='physician'?'selected':''}>physicians</option><option value="nonphysician" ${state.filt.tier==='nonphysician'?'selected':''}>PAs / NPs</option></select></h2>
       <table class="heat"><thead><tr><th>Payer</th><th>Kind</th>${mx.codes.map(c=>`<th class="num">${c}</th>`).join('')}</tr></thead>
       <tbody>${mx.payers.slice(0,25).map(p=>`<tr><td style="text-align:left">${esc(p.payer_group)}</td><td style="text-align:left" class="small muted">${esc(p.payer_kind)}</td>${mx.codes.map(c=>{const x=p.codes[c]; if(!x) return '<td class="muted">·</td>'; const pct=x.pct; const col = pct==null?'':(pct<0.8?'var(--bad)':(pct<0.95?'var(--warn)':'var(--good)')); return `<td title="${money2(x.cents)}${x.n==null?'':' on '+x.n+' lines'}; Medicare ${money2(x.medicare_cents)}" style="color:${col}">${money2(x.cents)}<div class="small">${pct==null?'':Math.round(pct*100)+'%'}</div></td>`;}).join('')}</tr>`).join('')}</tbody></table></div>

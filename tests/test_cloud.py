@@ -105,6 +105,16 @@ def test_first_load_then_nothing_new_then_one_new_file(box):
     assert status["started"] == again["started"] and status["last_change"] == out["finished"]
     assert status["totals"] == {"remit_files": 6, "findings": out["detect"]["findings"], "newest_payment": "2026-04-15"}
 
+    # a release that changed the rules re-analyses once with nothing new, and saves what it found for the dashboard
+    store, _existed = cloud.load_raw(state)
+    store.conn.execute("UPDATE detection_runs SET version='0.9'")
+    store.conn.commit()
+    cloud.save_raw(state, store)
+    store.close()
+    redo = cycle(state, client)
+    assert "detect" in redo and "store" in redo and "serving" in redo and redo["changed"] is True
+    assert "detect" not in cycle(state, client)
+
     # one new remittance: only that file is fetched, detection runs again and the dashboard's copy changes
     rev = state.meta(cloud.SERVING)["rev"]
     time.sleep(0.01)

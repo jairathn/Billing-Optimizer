@@ -11,6 +11,7 @@ import os
 import sqlite3
 import sys
 import types
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -322,6 +323,11 @@ def test_cycle_ingests_detects_alerts_and_releases_the_lock(tmp_path, monkeypatc
     # nothing new: no second detection run, and a cycle cannot start while another holds the lock
     again = run_cycle(db, sync=False, local=str(inbox), email=False, report=False)
     assert "detect" not in again and again["ingest"]["remits"] == 0
+    # a release that changed the rules re-analyses once, with no new file, and then rests again
+    store.conn.execute("UPDATE detection_runs SET version='0.9'")
+    store.conn.commit()
+    assert "detect" in run_cycle(db, sync=False, local=str(inbox), email=False, report=False)
+    assert "detect" not in run_cycle(db, sync=False, local=str(inbox), email=False, report=False)
     token = acquire_lock(store.conn)
     assert token and acquire_lock(store.conn) is None
     assert run_cycle(db, sync=False, email=False) == {"skipped": "another cycle is running"}
@@ -766,6 +772,72 @@ def test_member_numbers_and_the_name_click_follow_one_rule(tmp_path, monkeypatch
     assert "Member ID: [member ID]" in letter("405") and "123456789" not in letter("405")
     assert "Member ID: [member ID]" in letter("407") and "359876543" not in letter("407")
     assert "Member ID: RW8800123" in letter("413") and "666005555" not in letter("413")
+
+
+def test_a_payers_routine_lower_rate_is_one_question_and_a_one_off_is_an_appeal(tmp_path):
+    # Anthem allows 99214 at $117.60 on 25 visits, at $100.00 on 8 (its rate for someone or somewhere) and once at $90.00
+    claims = (clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(101, 8, "99214", "223.65", "100.00")
+              + clean_visits(201, 1, "99214", "223.65", "90.00"))
+    store = build_store(tmp_path, claims)
+    Detector(store, run_id="t").run()
+    one_off = store.query("SELECT patient_control_number, shortfall_cents FROM findings WHERE signal='UNDERPAID_VS_OWN_RATE'")
+    assert [(r["patient_control_number"], r["shortfall_cents"]) for r in one_off] == [("CB0000201C017", 2760)]
+    pattern = store.query("SELECT category, actionable, shortfall_cents, appeal_deadline, title, evidence FROM findings WHERE signal='SECOND_RATE'")
+    assert len(pattern) == 1
+    p = pattern[0]
+    ev = json.loads(p["evidence"])
+    assert (p["category"], p["actionable"], p["appeal_deadline"], p["shortfall_cents"]) == ("contract", "review", None, 8 * 1760)
+    assert (ev["lines"], ev["amount_cents"], ev["usual_cents"], ev["pct_of_usual"]) == (8, 10000, 11760, 0.85)
+    assert "physician assistant or nurse practitioner" in ev["note"] and "before appealing" in ev["note"] and "$100.00 instead of its usual $117.60 on 8 lines" in p["title"]
+    assert sorted(c[0] for c in ev["claims"]) == [f"CB{i:07d}C017" for i in range(101, 109)]
+    # a pattern at half the usual rate reads as the multiple-procedure rule; a lone amount below it stays a one-off
+    from remitwatch.detect import second_rate_reason
+    assert "multiple-procedure" in second_rate_reason(0.5, Counter({"physician": 6}), Counter(), Counter(), None, None)
+    assert "Indiana visits" in second_rate_reason(0.66, Counter({"physician": 9}), Counter({"IN": 8, "KY": 1}), Counter({"KY": 40}), None, None)
+    assert "rate change" in second_rate_reason(0.9, Counter({"physician": 9}), Counter(), Counter(), "2026-05-01", "2026-04-28")
+    assert "\"BLUE PPO\"" in second_rate_reason(0.7, Counter(), Counter(), Counter(), None, None, Counter({"BLUE PPO": 6}), Counter({"PPO": 30}))
+    store.close()
+
+
+def test_a_denial_paid_on_a_corrected_claim_or_by_another_payer_is_closed(tmp_path):
+    def visit(i: int, who: str, paid: str, cas: str = "", allowed: str | None = "117.60", status: str = "1") -> str:
+        return (f"CLP*CB{i:07d}C017*{status}*223.65*{paid}*0.00*12*PC{i}*11~NM1*QC*1*{who}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~"
+                + svc("99214", "223.65", paid, allowed, cas or f"CAS*CO*45*{223.65 - float(paid):.2f}~"))
+    denied = lambda i, who: visit(i, who, "0.00", "CAS*CO*16*223.65~", None)
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60")
+                        + [denied(300, "ORCHARD*LEE****MI*W55500300"), denied(301, "BIRCH*ANN****MI*W55500301"), denied(302, "ELM*BO****MI*W55500302")],
+                        pay_date="20260415")
+    store.close()
+    # weeks later: Orchard's visit paid on a corrected claim under a new bill number; Birch's paid by another payer
+    # (another member number); nothing for Elm
+    store = build_store(tmp_path, [visit(700, "ORCHARD*LEE****MI*W55500300", "117.60")], pay_date="20260520")
+    store.close()
+    store = build_store(tmp_path, [visit(701, "BIRCH*ANN****MI*H99900301", "117.60")], pay_date="20260521", payer="HUMANA")
+    Detector(store, run_id="t").run()
+    rows = {r["patient_control_number"]: r for r in store.query("SELECT patient_control_number, status, auto_note, recovered_cents FROM findings WHERE category='denial'")}
+    assert rows["CB0000300C017"]["status"] == "resolved" and "under claim CB0000700C017" in rows["CB0000300C017"]["auto_note"]
+    assert rows["CB0000301C017"]["status"] == "resolved" and "under claim CB0000701C017" in rows["CB0000301C017"]["auto_note"]
+    assert rows["CB0000302C017"]["status"] == "open" and rows["CB0000300C017"]["recovered_cents"] == 11760
+    store.close()
+
+
+def test_a_denial_ema_shows_paid_is_closed_before_its_remittance_arrives(tmp_path):
+    denied = ("CLP*CB0000300C017*1*223.65*0.00*0.00*12*PC300*11~NM1*QC*1*ORCHARD*LEE****MI*W55500300~NM1*82*2*TEST PROVIDER*****XX*" + NPI
+              + "~DTM*232*20260401~" + svc("99214", "223.65", "0.00", None, "CAS*CO*16*223.65~"))
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied])
+    # the full Encounter and Charge Lines export shows the insurer's payment on that line; a second line is paid too little
+    store.conn.executemany("""INSERT INTO ema_rows (row_fingerprint, family, source_name, row_index, service_date, claim_id, cpt, activity_type, insurance_payments_cents)
+                              VALUES (?,?,?,?,?,?,?,?,?)""",
+                           [("f1", "charge_lines", "Encounter & Charge Lines.xlsx", 1, "2026-04-01", "CB0000300C017", "99214", "Charge", 11760)])
+    store.conn.commit()
+    Detector(store, run_id="t").run()
+    f = store.query("SELECT status, auto_note, recovered_cents FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'")[0]
+    assert f["status"] == "resolved" and f["auto_note"].startswith("Paid per EMA") and "not in the TriZetto files yet" in f["auto_note"] and f["recovered_cents"] == 11760
+    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=2000")     # a payment under half the expected amount does not close it
+    store.conn.commit()
+    Detector(store, run_id="t2").run()
+    assert store.query("SELECT status FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'")[0]["status"] == "open"
+    store.close()
 
 
 def test_a_packet_is_mailed_only_to_named_domains_on_any_host(monkeypatch):

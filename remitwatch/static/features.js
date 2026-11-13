@@ -239,14 +239,19 @@ async function feedPanel(el){
 function drawerExtras(f, r){
   const facts = [['Billed code', f.billed_code], ['Billed → paid', f.code_pair], ['Plan on the remit', f.plan], ['Place of service', f.pos_class], ['Location', f.location], ['Diagnosis', f.diagnosis],
     ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? String(f.appealed_at).slice(0,10) : null]].filter(x=>x[1]!=null && x[1]!=='');
-  return `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}
+  const ev = f.evidence || {};
+  const why = f.signal==='SECOND_RATE' && ev.note ? `<div class="note"><b>Likely reason.</b> ${esc(ev.note)}</div>` : '';
+  const later = ev.paid_later ? `<div class="note">${esc(f.auto_note || 'Paid later.')}</div>` : '';
+  const claims = f.signal==='SECOND_RATE' && (ev.claims||[]).length ? `<h3 class="small">Claims paid at this amount${ev.lines > ev.claims.length ? ' (first '+ev.claims.length+' of '+ev.lines+')' : ''}</h3>
+    <table class="small"><thead><tr><th>EMA claim ID</th><th>Date of service</th><th class="num">Allowed</th></tr></thead><tbody>${ev.claims.map(c=>`<tr><td>${esc(c[0])}</td><td>${esc(c[1])}</td><td class="num">${money2(c[2])}</td></tr>`).join('')}</tbody></table>` : '';
+  return `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${why}${later}${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
       <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>
-    <div class="panel" style="margin:10px 0"><h2>Build the appeal from the visit note</h2>
+    ${f.claim_key ? `<div class="panel" style="margin:10px 0"><h2>Build the appeal from the visit note</h2>
       <div class="note">Attach the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
       <div class="filters"><input type="file" id="noteFile" accept=".pdf,.docx,.txt,.rtf,.html,.htm"><label class="small"><input type="checkbox" id="noteAi" checked> review with Claude</label><button class="primary" id="noteGo">Build packet</button></div>
       <textarea id="noteText" rows="4" placeholder="…or paste the note text here" style="width:100%"></textarea>
-      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div></div>
+      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div></div>` : ''}
     ${(r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b></td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:''}`;
 }
 const REC_LABEL = {appeal:['Appeal','ok'], appeal_with_caution:['Appeal with caution','sev-medium'], do_not_appeal:['Do not appeal','sev-high'], correct_and_resubmit:['Correct and resubmit','sev-medium'], review_manually:['Review by hand','muted']};
