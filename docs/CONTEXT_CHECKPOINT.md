@@ -302,6 +302,10 @@ for leaks. The per-clinician counts held (within 5 percent everywhere). What cha
   in 17,400 and about a hundred dollars, and four clinicians' paid totals differ by a few hundred dollars: eight pairs of duplicate
   remittances from October and November 2024 survive as different copies depending on the order files are read in. Known, small,
   not fixed.
+- A site whose first load ran on the previous release has exports with no pull time on record. The cycle fetches each such
+  export once more and reads it from the workbook (`cloud.backfill_export_times`), then rebuilds the provider tables. Measured
+  on a state written by the previous release: one run of 19 seconds, peak 1.33 GB, fourteen exports dated, and the same
+  recent-weeks figures as a clean build.
 - Older files held real identifiers and were cleaned in this pass (tests, research notes, this file): two claim ids, a bill item
   id, the practice's tax id, payment trace numbers, one clinician NPI, the owner's name and work email, a staff member's name, a
   Dropbox namespace id. They remain in the repository's history. The owner decides whether to rewrite it or make the repository

@@ -885,6 +885,13 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         remaining = (ingest.get("remaining") or 0) > 0
         mem["ingest"] = peak_mb()
 
+        # exports read by a release that did not yet keep their pull time: fetch that once (see backfill_export_times)
+        if client is not None and not remaining:
+            got = backfill_export_times(store, client, deadline=t0 + budget * 0.6, log=log)
+            if got:
+                out["export_times"] = got
+                activity.mark_pending(conn)     # the recent-weeks figures depend on them
+
         pending = conn.execute("SELECT 1 FROM meta WHERE key='cloud:detect_pending'").fetchone() is not None
         has_run = conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone() is not None
         has_lines = conn.execute("SELECT 1 FROM lines LIMIT 1").fetchone() is not None
@@ -1070,6 +1077,44 @@ def _same_site(a: str, b: str) -> bool:
     x = urlsplit(a)
     strip = lambda h: (h or "").lower().removeprefix("www.")       # noqa: E731
     return y.scheme == "https" and bool(y.hostname) and strip(x.hostname) == strip(y.hostname)
+
+
+def backfill_export_times(store, client, deadline: float, log=print) -> int:
+    """Exports read by an earlier release have no pull time on record, and the provider view needs it to tell a light day
+    from a day whose bills were not written yet. The workbook holds it, so each such export is fetched once more, the
+    time read, and noted. An export that can no longer be found is noted without a time and not asked for again.
+    Returns how many were given a time."""
+    import hashlib
+
+    from .ema_exports import export_created
+    conn = store.conn
+    missing = [r[0] for r in conn.execute(
+        """SELECT DISTINCT e.source_name FROM ema_rows e
+           WHERE e.family = 'charge_lines' AND e.source_name IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM ema_sources s WHERE s.source_name = e.source_name)""")]
+    if not missing:
+        return 0
+    where: dict[str, str] = {}
+    for (path,) in conn.execute("SELECT path FROM dropbox_seen WHERE lower(path) LIKE '%.xlsx' ORDER BY at DESC"):
+        if path:
+            where.setdefault(os.path.basename(path), path)
+    n = 0
+    for name in missing:
+        if time.time() > deadline:
+            break
+        path = where.get(name)
+        if not path:
+            store.record_export(name, None, "charge_lines", None, 0)
+            continue
+        try:
+            data, _meta = client.download_bytes(path)
+        except Exception as exc:        # noqa: BLE001  (tried again by the next run; nothing depends on it meanwhile)
+            log(f"export pull time: could not fetch {name}: {type(exc).__name__}")
+            continue
+        created = export_created(io.BytesIO(data))
+        store.record_export(name, hashlib.sha256(data).hexdigest(), "charge_lines", created, 0)
+        n += 1 if created else 0
+    return n
 
 
 # --------------------------------------------------------------------------- setup checks

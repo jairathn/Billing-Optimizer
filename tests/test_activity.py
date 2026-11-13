@@ -940,3 +940,37 @@ def test_the_build_does_not_need_the_indexes_the_cloud_store_leaves_out(tmp_path
     without, allowed_b = steps(True)
     assert allowed_a == allowed_b and allowed_a >= 400 * 9000           # the patient's share was found either way
     assert without < 3 * with_indexes + 200, (with_indexes, without)
+
+
+
+def test_exports_read_by_an_earlier_release_get_their_pull_time_from_dropbox(tmp_path):
+    import datetime
+    import time as clock
+
+    import openpyxl
+
+    from remitwatch import cloud
+    from remitwatch.dropbox_sync import ingest_new_files
+    from tests.fakes import FakeDropbox
+    root = tmp_path / "dbx"
+    (root / "Reports").mkdir(parents=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Service Date", "Primary Provider", "Claim ID", "CPT/Product", "Units", "Charges", "Activity Type", "Bill Item Identifier", "Payer", "Location"])
+    ws.append(["2026-03-02", "Alpha, Ann", "CB0000001C017", "99213", 1, 150.0, "Charge", 7000001, "Blue Cross", "North Office"])
+    wb.properties.created = datetime.datetime(2026, 3, 30, 14, 5, 6)
+    p = root / "Reports" / "Encounter & Charge Lines.xlsx"
+    wb.save(p)
+    store = Store(str(tmp_path / "s.sqlite"))
+    store.conn.executescript(cloud.CLOUD_DDL)
+    assert ingest_new_files(store, [str(p)], log=lambda *a: None)["ema"] == 1
+    store.conn.execute("DELETE FROM ema_sources")                   # as a store written by the earlier release would be
+    store.conn.execute("INSERT INTO ema_rows (row_fingerprint, source_name, row_index, family, service_date) VALUES ('lost', 'Gone.xlsx', 0, 'charge_lines', '2026-03-02')")
+    store.conn.execute("INSERT INTO dropbox_seen VALUES ('id:1', 'h', '/Reports/Encounter & Charge Lines.xlsx', '2026-04-01')")
+    store.conn.commit()
+    client = FakeDropbox(str(root))
+    assert cloud.backfill_export_times(store, client, deadline=clock.time() + 30, log=lambda *a: None) == 1
+    got = {r[0]: r[1] for r in store.conn.execute("SELECT source_name, created_at FROM ema_sources")}
+    assert got == {"Encounter & Charge Lines.xlsx": "2026-03-30T14:05:06Z", "Gone.xlsx": None}      # the one Dropbox no longer has is not asked for again
+    assert cloud.backfill_export_times(store, client, deadline=clock.time() + 30, log=lambda *a: None) == 0 and client.calls.get("download") == 1
+    store.close()
