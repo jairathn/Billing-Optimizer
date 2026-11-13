@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
@@ -68,8 +69,21 @@ from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
 DETECT_RULES = "2.3"
-# The version recorded with each run, compared on the next cycle: any change to this file re-analyses the archive once.
-DETECT_VERSION = DETECT_RULES + "-" + hashlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
+
+
+def _rules_hash() -> str:
+    """This file and the ones whose rules it applies: payer windows and reason codes (codes.py), fee families
+    (fees.py), and how remittance lines are tied to EMA rows (link.py)."""
+    h = hashlib.sha256()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("detect.py", "codes.py", "fees.py", "link.py"):
+        with open(os.path.join(here, name), "rb") as fh:
+            h.update(fh.read())
+    return h.hexdigest()[:8]
+
+
+# The version recorded with each run, compared on the next cycle: any change to these files re-analyses the archive once.
+DETECT_VERSION = DETECT_RULES + "-" + _rules_hash()
 DERIVED_SCHEMA = "3"        # bump when the layout of a derived table changes; the tables are dropped and rebuilt
 
 BUNDLING_CARCS = {"97", "B10", "236", "234", "231", "M15"}

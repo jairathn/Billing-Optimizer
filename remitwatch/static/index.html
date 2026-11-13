@@ -415,7 +415,13 @@ async function data(v){
     <div class="scroll"><table><thead><tr><th>Payer</th><th>Payer ID</th><th>From</th><th>To</th><th class="num">Weeks</th><th class="num">Claims received</th><th class="num">Usual for those weeks</th><th>Visits still short, about</th></tr></thead>
     <tbody>${cov.gaps.map(g=>`<tr><td>${esc(g.payer)}</td><td class="small muted">${esc(g.payer_id)}</td><td>${day(g.from)}</td><td>${day(g.to)}</td><td class="num">${esc(g.weeks)}</td><td class="num">${Number(g.seen||0).toLocaleString()}</td><td class="num">${Number(g.usual||0).toLocaleString()}</td>
       <td>${Object.entries(g.missing_by_month||{}).map(([m,n])=>`${Number(n).toLocaleString()} claims for ${esc(new Date(m+'-15T00:00:00Z').toLocaleString('en-US',{month:'short',year:'numeric',timeZone:'UTC'}))}`).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>` : '';
-  v.innerHTML = `<div id="feedPanel"></div>${gaps}<div class="grid two">
+  const ew = cov.ema || {};
+  const thin = (ew.weeks||[]).filter(w => w.claims >= (ew.min_claims||30) && w.in_ema < (ew.share||0.8) * w.claims);
+  const emaGaps = thin.length ? `<div class="panel"><h2>EMA charge exports that miss visits</h2>
+    <div class="note">For these weeks of service the remittances hold claims that no Encounter &amp; Charge Lines export in the EMA folder holds. An export only contains the visits that already had a bill when it was pulled, so a week pulled as it ended, or never pulled, shows up here. Pull Encounter &amp; Charge Lines again for these dates of service, in the layout with Patient ID, and put it in the EMA folder. Until then the site cannot check what was billed for those visits against what was paid.</div>
+    <div class="scroll"><table><thead><tr><th>Week of service</th><th class="num">Claims on remittances</th><th class="num">Found in an EMA charge export</th><th class="num">Share</th></tr></thead>
+    <tbody>${thin.map(w=>`<tr><td>${day(w.week)}</td><td class="num">${Number(w.claims).toLocaleString()}</td><td class="num">${Number(w.in_ema).toLocaleString()}</td><td class="num">${Math.round(100*w.in_ema/w.claims)}%</td></tr>`).join('')}</tbody></table></div></div>` : '';
+  v.innerHTML = `<div id="feedPanel"></div>${gaps}${emaGaps}<div class="grid two">
     <div class="panel"><h2>What is loaded</h2><table>
       <tr><td>Files ingested</td><td class="num">${(m.files.n||0).toLocaleString()} (${m.files.n835||0} remits, ${m.files.nema||0} EMA exports)</td></tr>
       <tr><td>Last ingest</td><td class="num">${esc(m.files.last_ingest||'–')}</td></tr>

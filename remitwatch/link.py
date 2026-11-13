@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter, defaultdict
+from datetime import date, timedelta
 
 from .store import Store
 
@@ -39,6 +40,76 @@ CREATE TABLE IF NOT EXISTS line_handling (
 );
 CREATE INDEX IF NOT EXISTS ix_handling_line ON line_handling(line_key);
 """
+
+
+EMA_WEEK_SHARE = 0.8        # a week of service with fewer of its remittance claims in an EMA charge export is listed
+EMA_WEEK_MIN_CLAIMS = 30    # claims a week needs on the remittances before its share says anything
+EMA_COVERAGE_KEY = "ema:coverage"
+
+
+def stored_ema_coverage(conn: sqlite3.Connection) -> dict:
+    """The coverage measured at the last analysis run (see ema_coverage), or nothing when no run has measured it."""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (EMA_COVERAGE_KEY,)).fetchone()
+        out = json.loads(row[0]) if row and row[0] else None
+    except (sqlite3.Error, ValueError, TypeError):
+        out = None
+    return out if isinstance(out, dict) else {"weeks": [], "first_week": None, "last_ema_service": None,
+                                              "share": EMA_WEEK_SHARE, "min_claims": EMA_WEEK_MIN_CLAIMS}
+
+
+def ema_coverage(conn: sqlite3.Connection) -> dict:
+    """For each week of service since the EMA charge exports began: how many claims the remittances hold for it, and
+    for how many of them an Encounter and Charge Lines export holds a charge row (by claim id, or by bill for a second
+    payer's claim). An export only holds the visits that had become a bill when it was pulled, so a week pulled as it
+    ended, or never pulled, shows up here with a low share.
+
+    The exports begin with the first week holding at least a fifth of the busiest week's charge rows (a stray older row
+    does not count), and run to the newest week the remittances have claims for. A week's claims are counted by the
+    date on each service line; lines without a date are left out."""
+    from .detect import bill_of
+    empty = {"weeks": [], "first_week": None, "last_ema_service": None, "share": EMA_WEEK_SHARE, "min_claims": EMA_WEEK_MIN_CLAIMS}
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {"ema_rows", "lines", "claims", "transactions"} <= tables:
+        return empty
+    monday = lambda d: (date.fromisoformat(d[:10]) - timedelta(days=date.fromisoformat(d[:10]).weekday())).isoformat()    # noqa: E731
+    ids: set = set()
+    bills: set = set()
+    rows_by_week: Counter = Counter()
+    last_service = None
+    for cid, d in conn.execute("""SELECT claim_id, service_date FROM ema_rows
+                                  WHERE family='charge_lines' AND activity_type='Charge' AND claim_id IS NOT NULL AND service_date IS NOT NULL"""):
+        try:
+            w = monday(d)
+        except ValueError:
+            continue
+        ids.add(cid)
+        bills.add(bill_of(cid))
+        rows_by_week[w] += 1
+        last_service = d[:10] if last_service is None or d[:10] > last_service else last_service
+    if not rows_by_week:
+        return empty
+    busiest = max(rows_by_week.values())
+    first = min(w for w, n in rows_by_week.items() if n * 5 >= busiest)
+    first_claim: dict[str, str] = {}
+    for pcn, d in conn.execute("""SELECT l.patient_control_number, l.service_date FROM lines l
+                                  JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
+                                  WHERE t.superseded = 0 AND c.claim_status_code != '22' AND l.service_date >= ? AND l.patient_control_number IS NOT NULL""",
+                               (first,)):
+        if d and (pcn not in first_claim or d < first_claim[pcn]):
+            first_claim[pcn] = d
+    claims: Counter = Counter()
+    held: Counter = Counter()
+    for pcn, d in first_claim.items():
+        try:
+            w = monday(d)
+        except ValueError:
+            continue
+        claims[w] += 1
+        if pcn in ids or bill_of(pcn) in bills:
+            held[w] += 1
+    weeks = [{"week": w, "claims": claims[w], "in_ema": held[w]} for w in sorted(claims)]
+    return dict(empty, weeks=weeks, first_week=first, last_ema_service=last_service)
 
 
 def _mods(js: str | None) -> tuple:
@@ -160,6 +231,9 @@ def build_links(store: Store, log=print) -> dict:
                                       h["adjustment_subtype"], h["adjustments_cents"], h["payments_cents"], h["transaction_date"], h["source_name"]))
     conn.executemany("INSERT OR REPLACE INTO line_links VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", link_rows)
     conn.executemany("INSERT INTO line_handling (line_key, claim_id, cpt, service_date, carc, rarc, adjustment_status, adjustment_subtype, adjustments_cents, payments_cents, transaction_date, ema_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", handling_rows)
+    # measured here, on the full store: the dashboard's serverless copy keeps only the lines behind findings
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (EMA_COVERAGE_KEY, json.dumps(ema_coverage(conn))))
     conn.commit()
     out = {"lines": sum(stats.values()), "states": dict(stats), "charge_pool_rows": sum(len(v) for v in pool.values()),
            "charge_conflicts": len(conflicts), "handling_rows": len(handling_rows)}

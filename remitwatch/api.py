@@ -1066,14 +1066,16 @@ def coverage(_: str = Depends(require_auth)):
     """How complete the newest months of service are, and the weeks in which a payer that pays every week sent next to
     nothing and then resumed. About payers and the practice as a whole, so it is open to every login."""
     from . import activity
+    from .link import stored_ema_coverage
     conn = db()
     try:
+        ema = stored_ema_coverage(conn) if has_table("meta") else {"weeks": []}
         if not has_table("meta") or not has_table("provider_days") or not activity.status(conn)["ready"]:
-            return {"ready": False, "gaps": [], "months": []}
+            return {"ready": False, "gaps": [], "months": [], "ema": ema}
         with _ACTIVITY_LOCK:
             cov = activity.coverage(conn)
         return {"ready": True, "gaps": cov["gaps"], "months": cov["months"][-6:], "lag": cov["lag"], "last_payment": cov["last_payment"],
-                "last_complete_month": cov["last_complete_month"], "complete_share": cov["complete_share"]}
+                "last_complete_month": cov["last_complete_month"], "complete_share": cov["complete_share"], "ema": ema}
     finally:
         conn.close()
 
