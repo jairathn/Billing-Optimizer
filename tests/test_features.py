@@ -624,7 +624,8 @@ def test_names_hidden_means_initials_on_screen_and_nothing_else(tmp_path, monkey
     assert [set(i) - cols for i in items] == [{"patient"}] * 6
     assert sorted(i["patient"] for i in items) == ["A=", "BE", "IY", "KO", "LO", "OY"]
     export = c.get(CSV_URL).text
-    assert set(export.splitlines()[0].split(",")) == cols and len(export.splitlines()) == 7
+    # "claims" lists a routine-rate finding's EMA claim IDs (empty on these rows): claim IDs only, as patient_control_number
+    assert set(export.splitlines()[0].split(",")) == cols | {"claims"} and len(export.splitlines()) == 7
     for page in (c.get(URL).text, export):
         for secret in PATIENT_SECRETS:
             assert secret not in page, secret
@@ -786,7 +787,7 @@ def test_a_payers_routine_lower_rate_is_one_question_and_a_one_off_is_an_appeal(
     assert len(pattern) == 1
     p = pattern[0]
     ev = json.loads(p["evidence"])
-    # one finding with its claims, still an underpayment, with the earliest filing deadline of its claims so it cannot lapse unseen
+    # one finding with its claims, still an underpayment, with its claims' filing deadlines (here all the same date)
     assert (p["category"], p["actionable"], p["shortfall_cents"]) == ("underpayment", "review", 8 * 1760) and p["appeal_deadline"] == "2028-04-14"
     assert (ev["lines"], ev["amount_cents"], ev["usual_cents"], ev["pct_of_usual"]) == (8, 10000, 11760, 0.85)
     assert "physician assistant or nurse practitioner" in ev["note"] and "before appealing" in ev["note"] and "$100.00 instead of its usual $117.60 on 8 lines" in p["title"]

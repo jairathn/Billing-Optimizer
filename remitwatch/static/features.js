@@ -241,15 +241,25 @@ function drawerExtras(f, r){
     ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? String(f.appealed_at).slice(0,10) : null]].filter(x=>x[1]!=null && x[1]!=='');
   const ev = f.evidence || {};
   const why = f.signal==='SECOND_RATE' && ev.note ? `<div class="note"><b>Likely reason.</b> ${esc(ev.note)}</div>` : '';
-  const today = new Date().toISOString().slice(0,10), dl = f.signal==='SECOND_RATE' ? (ev.deadlines||[]) : [], live = dl.filter(x=>x[0]>=today);
-  const windows = dl.length ? `<div class="note"><b>Filing windows.</b> ${live.length
-      ? `${live.reduce((a,x)=>a+x[1],0)} of its ${ev.lines} lines (${money2(live.reduce((a,x)=>a+x[2],0))} of the gap) are still inside their windows today; the next closes on <b>${esc(live[0][0])}</b>.`
-      : `Every line's window has passed; the last closed on ${esc(dl[dl.length-1][0])}.`}</div>` : '';
-  const later = ev.paid_later ? `<div class="note">${esc(f.auto_note || 'Paid later.')}</div>`
+  // today in the reader's own time zone: a window open until the end of its last day is still open that evening
+  const now = new Date(), today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  const dl = f.signal==='SECOND_RATE' && Array.isArray(ev.deadlines) ? ev.deadlines.filter(x=>Array.isArray(x)) : [];
+  const dated = dl.filter(x=>x[0]).sort((a,b)=>a[0]<b[0]?-1:1), live = dated.filter(x=>x[0]>=today);
+  const listed = dl.reduce((a,x)=>a+(x[1]||0),0), unknown = dl.filter(x=>!x[0]).reduce((a,x)=>a+(x[1]||0),0) + Math.max((ev.lines||0) - listed, 0);
+  const sumN = xs => xs.reduce((a,x)=>a+(x[1]||0),0), sumC = xs => xs.reduce((a,x)=>a+(x[2]||0),0);
+  const windows = dl.length || unknown ? `<div class="note"><b>Filing windows.</b> ${live.length
+      ? `${sumN(live)} of its ${esc(ev.lines||sumN(dl))} lines (${money2(sumC(live))} of the gap) are still inside their windows today; the next closes on <b>${esc(live[0][0])}</b>.`
+      : dated.length ? `No line with a known deadline is still inside its window; the last closed on ${esc(dated[dated.length-1][0])}.` : ''}${unknown
+      ? ` ${unknown} line${unknown===1?' has':'s have'} no payment date on the remittance, so ${unknown===1?'its window is':'their windows are'} unknown.` : ''}</div>` : '';
+  const pl = ev.paid_later || {}, plText = `${money2(pl.paid_cents)} on ${esc(pl.payment_date||'')}${pl.claim ? ' under claim '+esc(pl.claim) : ''}`;
+  const later = ev.paid_later && f.status!=='resolved' ? `<div class="note"><b>A later payment was found:</b> ${plText}. It was not applied because a person set this finding to ${esc(String(f.status).replace('_',' '))}. If it covers this line, mark it recovered.</div>`
+    : ev.paid_later ? `<div class="note">${esc(f.auto_note || 'Paid later.')}</div>`
+    : ev.partly_paid ? `<div class="note"><b>Partly paid.</b> Claim ${esc(ev.partly_paid.claim)} paid ${esc(ev.partly_paid.units_paid)} of the ${esc(ev.partly_paid.units_billed)} units billed (${money2(ev.partly_paid.paid_cents)} on ${esc(ev.partly_paid.payment_date)}). The rest is still unpaid.</div>`
+    : ev.adjudicated_elsewhere ? `<div class="note"><b>Processed on another claim.</b> Claim ${esc(ev.adjudicated_elsewhere.claim)} for this patient, date and code was processed on ${esc(ev.adjudicated_elsewhere.payment_date)} with ${money2(ev.adjudicated_elsewhere.patient_owes_cents)} owed by the patient (deductible, coinsurance or copay). If that is this service, the payer has decided it.</div>`
     : ev.maybe_paid_later ? `<div class="note"><b>Possibly paid on another claim.</b> Claim ${esc(ev.maybe_paid_later.claim)} for this patient and date paid ${esc((ev.maybe_paid_later.codes_paid||[]).join(', '))} on ${esc(ev.maybe_paid_later.payment_date)}. It was not closed automatically because ${esc(ev.maybe_paid_later.why_not_closed)}. If that claim covers this line, mark it recovered.</div>`
     : ev.ema_shows_paid ? `<div class="note"><b>EMA shows this line paid.</b> ${money2(ev.ema_shows_paid.paid_cents)} from insurance${ev.ema_shows_paid.date?' on '+esc(ev.ema_shows_paid.date):''} (${esc(ev.ema_shows_paid.source||'EMA')}), but no remittance in the files shows that payment. Check the payment in EMA; if it is real, mark this recovered. If the remittance for it is missing, put it in the Dropbox folder.</div>` : '';
   const claims = f.signal==='SECOND_RATE' && (ev.claims||[]).length ? `<h3 class="small">Claims paid at this amount${ev.lines > ev.claims.length ? ' (first '+ev.claims.length+' of '+ev.lines+')' : ''}</h3>
-    <table class="small"><thead><tr><th>EMA claim ID</th><th>Date of service</th><th class="num">Allowed</th><th>File by</th></tr></thead><tbody>${ev.claims.map(c=>`<tr><td>${esc(c[0])}</td><td>${esc(c[1])}</td><td class="num">${money2(c[2])}</td><td class="${c[3] && c[3] < today ? 'muted' : ''}">${esc(c[3]||'')}${c[3] && c[3] < today ? ' (passed)' : ''}</td></tr>`).join('')}</tbody></table>` : '';
+    <table class="small"><thead><tr><th>EMA claim ID</th><th>Date of service</th><th class="num">Allowed</th><th>File by</th></tr></thead><tbody>${ev.claims.map(c=>`<tr><td>${esc(c[0])}</td><td>${esc(c[1])}</td><td class="num">${money2(c[2])}</td><td class="${c[3] && c[3] < today ? 'muted' : ''}">${c[3] ? esc(c[3]) + (c[3] < today ? ' (passed)' : '') : '<span class="muted">unknown</span>'}</td></tr>`).join('')}</tbody></table>` : '';
   return `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${why}${windows}${later}${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
       <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>

@@ -30,8 +30,11 @@ def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: 
                            (finding_id, at, status, actor or "")).fetchone():
         return True     # a journal entry being replayed: it is already in this copy
     recovered = (recovered_cents if recovered_cents is not None else r["shortfall_cents"]) if status == "resolved" else None
+    # A person's status replaces whatever the automatic resolution recorded: its note no longer describes the finding, and
+    # the next analysis does not close it again on the same grounds (remitwatch.detect save()).
     conn.execute("""UPDATE findings SET status=?, notes=COALESCE(?, notes), status_changed_at=?, recovered_cents=?, recovered_date=?,
-                    appealed_at=CASE WHEN ?='appealed' AND appealed_at IS NULL THEN ? ELSE appealed_at END WHERE finding_id=?""",
+                    appealed_at=CASE WHEN ?='appealed' AND appealed_at IS NULL THEN ? ELSE appealed_at END, auto_note=NULL, prev_status=NULL
+                    WHERE finding_id=?""",
                  (status, notes, now, recovered, now[:10] if status == "resolved" else None, status, now, finding_id))
     conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) VALUES (?,?,?,?,?,?,?,?)",
                  (finding_id, now, "manual", r["status"], status, recovered if status == "resolved" else r["shortfall_cents"], actor, notes))

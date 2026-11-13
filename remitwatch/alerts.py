@@ -320,6 +320,19 @@ class AlertEngine:
             """SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents, MIN(appeal_deadline) first FROM findings
                WHERE status IN ('open','in_progress') AND COALESCE(stale,0) = 0 AND actionable IN ('appeal','correct_and_resubmit')
                  AND appeal_deadline >= ? AND appeal_deadline <= ? GROUP BY 1 ORDER BY cents DESC""", (self.today, horizon))]
+        # a payer's routine lower rate counts for its claims whose own windows close in the period
+        from .detect import pattern_windows
+        by_payer = {r["payer_group"]: r for r in rows}
+        counted: set = set()
+        for fid, grp, _code, d, _n, cents in pattern_windows(self.conn, ("open", "in_progress")):
+            if d and self.today <= d <= horizon:
+                r = by_payer.setdefault(grp, {"payer_group": grp, "n": 0, "cents": 0, "first": d})
+                r["cents"] = (r["cents"] or 0) + cents
+                r["first"] = min(r["first"] or d, d)
+                if fid not in counted:
+                    counted.add(fid)
+                    r["n"] += 1
+        rows = sorted(by_payer.values(), key=lambda r: -(r["cents"] or 0))
         n, cents = sum(r["n"] for r in rows), sum(r["cents"] or 0 for r in rows)
         if cents >= 100000:
             top = ", ".join(f"{r['payer_group']} {money(r['cents'])}" for r in rows[:4])

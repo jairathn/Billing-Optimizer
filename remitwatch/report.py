@@ -66,6 +66,20 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     due = q("""SELECT signal, payer_group, patient_control_number, service_date, procedure_code, shortfall_cents, appeal_deadline
                FROM findings WHERE status='open' AND actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')
                ORDER BY appeal_deadline, shortfall_cents DESC LIMIT 40""")
+    # a payer's routine lower rate: one row with the claims whose own windows close in the period
+    from .detect import pattern_windows
+    soon: dict[str, dict] = {}
+    today, horizon = tuple(q("SELECT date('now') a, date('now','+45 days') b")[0])
+    for fid, grp, code, d, n, cents in pattern_windows(store.conn):
+        if d and today <= d <= horizon:
+            r = soon.setdefault(fid, {"signal": "SECOND_RATE", "payer_group": grp, "patient_control_number": "", "service_date": "",
+                                      "procedure_code": code, "shortfall_cents": 0, "appeal_deadline": d, "n": 0})
+            r["shortfall_cents"] += cents
+            r["n"] += n
+            r["appeal_deadline"] = min(r["appeal_deadline"], d)
+    for r in soon.values():
+        r["patient_control_number"] = f"{r['n']} claim{'s' if r['n'] != 1 else ''} at the payer's routine lower rate"
+    due = sorted([dict(r) for r in due] + list(soon.values()), key=lambda r: (r["appeal_deadline"], -(r["shortfall_cents"] or 0)))
     lines.append("## Appeals due in the next 45 days")
     if due and not detail:
         lines.append(f"{len(due)}{'+' if len(due) == 40 else ''} findings are due; open the Appeals queue in the dashboard for the list.")

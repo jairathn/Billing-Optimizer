@@ -458,14 +458,15 @@ async function openDetail(id){
   d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:start"><h2>${esc(f.title)}</h2><button id="closeD">✕</button></div>
     <div class="small muted">${esc(f.signal)} · <span class="sev-${esc(f.severity)}">${esc(f.severity)}</span> · ${esc(f.actionable)} · status <b>${esc(f.status)}</b>${f.stale?' · stale':''}</div>
     <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div>
-    <div class="actions">${f.claim_key?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal packet'}</button>`:''}
+    <div class="actions">${f.signal!=='SECOND_RATE'?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal packet'}</button>`:''}
       ${[['open','open'],['in_progress','in progress'],['appealed','appealed'],['resolved','recovered'],['lost','lost'],['dismissed','dismiss']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled':''}>${l}</button>`).join('')}</div>
     <table class="small">
       ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
       <tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)}</td></tr>`:''}
-      <tr><td>Payer</td><td>${esc(f.payer_name)} (${esc(f.payer_group)}, ${esc(f.payer_kind)}) · ${esc(rem.payer_contact_phone)} ${esc(rem.payer_contact_url)}</td></tr>
-      ${f.claim_key?`<tr><td>Remit</td><td>trace ${esc(rem.trace_number)} · paid ${esc(rem.payment_date)} · ${esc(rem.payment_method)} ${money2(rem.payment_amount_cents)} · file ${esc(rem.source_name||'')}</td></tr>`:''}
-      <tr><td>Service</td><td>DOS ${esc(f.service_date)} · provider ${esc(f.rendering_provider_name||'')} (${esc(f.rendering_provider_npi)}, ${esc(f.provider_tier)})</td></tr>
+      <tr><td>Payer</td><td>${esc(f.payer_name)} (${esc(f.payer_group)}, ${esc(f.payer_kind)})${rem.payer_contact_phone||rem.payer_contact_url?' · '+esc(rem.payer_contact_phone||'')+' '+esc(rem.payer_contact_url||''):''}</td></tr>
+      ${r.remit?`<tr><td>Remit</td><td>trace ${esc(rem.trace_number)} · paid ${esc(rem.payment_date)} · ${esc(rem.payment_method)} ${money2(rem.payment_amount_cents)} · file ${esc(rem.source_name||'')}</td></tr>`:''}
+      ${f.claim_key?`<tr><td>Service</td><td>DOS ${esc(f.service_date)} · provider ${esc(f.rendering_provider_name||'')} (${esc(f.rendering_provider_npi)}, ${esc(f.provider_tier)})</td></tr>`
+        :f.provider_tier?`<tr><td>Service</td><td>${esc(f.procedure_code||'')} · provider type ${esc(f.provider_tier)}${f.pos_class?' · '+esc(f.pos_class):''}</td></tr>`:''}
       ${(f.notes||f.auto_note)?`<tr><td>Notes</td><td>${esc(f.notes||'')} ${f.auto_note?'<span class="muted">'+esc(f.auto_note)+'</span>':''}</td></tr>`:''}
       <tr><td>Money</td><td>charge ${money2(f.charge_cents)} · allowed ${money2(f.allowed_cents)} · paid ${money2(f.paid_cents)} · expected ${money2(f.expected_cents)} · <b>shortfall ${money2(f.shortfall_cents)}</b></td></tr>
       <tr><td>Codes</td><td>${f.carc?esc(f.carc)+': '+esc(f.carc_text):''} ${f.rarc?'<br>'+esc(f.rarc)+': '+esc(f.rarc_text):''}</td></tr>

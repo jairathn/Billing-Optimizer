@@ -262,9 +262,15 @@ def test_a_bundled_visit_corrected_with_modifier_25_on_a_new_bill_closes(tmp_pat
 
 
 # --------------------------------------------------------------------------- a payer's routine lower rate
-def cl(i, code, charge, allowed, npi=NPI, cfi="12", dos="20260401"):
+GROUP_NPI = "1777777773"
+
+
+def cl(i, code, charge, allowed, npi=NPI, cfi="12", dos="20260401", group=False):
+    """A cleanly paid claim. group=True: the remittance names only the practice (NM1*82*2 with the group's NPI), not who saw
+    the patient, as some payers' do."""
     co = f"{float(charge) - float(allowed):.2f}"
-    return (f"CLP*CB{i:07d}C017*1*{charge}*{allowed}*0.00*{cfi}*PC{i}*11~NM1*QC*1*SAMPLE*PAT****MI*M{i:08d}~NM1*82*1*CLINICIAN*ONE****XX*{npi}~REF*CE*PPO~"
+    who = f"NM1*82*2*TEST GROUP*****XX*{GROUP_NPI}~" if group else f"NM1*82*1*CLINICIAN*ONE****XX*{npi}~"
+    return (f"CLP*CB{i:07d}C017*1*{charge}*{allowed}*0.00*{cfi}*PC{i}*11~NM1*QC*1*SAMPLE*PAT****MI*M{i:08d}~{who}REF*CE*PPO~"
             f"DTM*232*{dos}~" + svc(code, charge, allowed, allowed, f"CAS*CO*45*{co}~", dos=dos))
 
 
@@ -344,7 +350,7 @@ def test_a_visit_at_half_rate_is_not_called_the_multiple_procedure_rule(tmp_path
 
 
 def test_one_offs_people_worked_stay_their_own_findings(tmp_path, monkeypatch):
-    store = build_store(tmp_path, [cl(100 + i, "99214", "223.65", "117.60") for i in range(25)] + [cl(200 + i, "99214", "223.65", "100.00") for i in range(8)])
+    store = build_store(tmp_path, [cl(100 + i, "99214", "223.65", "117.60") for i in range(25)] + [cl(200 + i, "99214", "223.65", "100.00", group=True) for i in range(8)])
     monkeypatch.setattr(det_mod, "SECOND_RATE_MIN_LINES", 10 ** 6)          # as an earlier release found them: eight one-offs
     Detector(store, run_id="before").run()
     ids = {r["patient_control_number"]: r["finding_id"] for r in store.query("SELECT finding_id, patient_control_number FROM findings WHERE signal='UNDERPAID_VS_OWN_RATE'")}
@@ -367,14 +373,14 @@ def test_one_offs_people_worked_stay_their_own_findings(tmp_path, monkeypatch):
 
 
 def test_a_dismissed_pattern_stays_dismissed_when_other_amounts_arrive(tmp_path):
-    store = build_store(tmp_path, [cl(100 + i, "99214", "223.65", "117.60") for i in range(25)] + [cl(200 + i, "99214", "223.65", "100.00") for i in range(5)]
-                        + [cl(300 + i, "99214", "223.65", "100.50") for i in range(4)])
+    store = build_store(tmp_path, [cl(100 + i, "99214", "223.65", "117.60") for i in range(25)] + [cl(200 + i, "99214", "223.65", "100.00", group=True) for i in range(5)]
+                        + [cl(300 + i, "99214", "223.65", "100.50", group=True) for i in range(4)])
     Detector(store, run_id="one").run()
     [p] = store.query("SELECT finding_id FROM findings WHERE signal='SECOND_RATE'")
     apply_status(store.conn, p[0], "dismissed", "PA rate per contract", actor="manager")
     store.conn.commit()
     store.close()
-    store = build_store(tmp_path, [cl(400 + i, "99214", "223.65", "100.50") for i in range(2)], pay_date="20260501")
+    store = build_store(tmp_path, [cl(400 + i, "99214", "223.65", "100.50", group=True) for i in range(2)], pay_date="20260501")
     Detector(store, run_id="two").run()
     assert store.query("SELECT status FROM findings WHERE finding_id=?", (p[0],))[0][0] == "dismissed"
     store.close()

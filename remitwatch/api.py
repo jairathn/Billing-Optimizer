@@ -19,7 +19,7 @@ import re
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,7 +38,7 @@ import asyncio
 from . import __version__, runtime
 from .actions import STATUSES, apply_alert_ack, apply_status
 from .codes import CARC, RARC, member_number
-from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema
+from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema, pattern_windows
 
 DB_PATH = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
 PASSWORD = os.environ.get("REMITWATCH_PASSWORD", "")
@@ -356,6 +356,18 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
     out["by_handling"] = rows(f"SELECT COALESCE(ema_handling,'unknown') ema_handling, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY 1 ORDER BY shortfall_cents DESC", tuple(params))
     out["resolved_by_later_remit"] = one("SELECT COUNT(*) n, SUM(recovered_cents) shortfall_cents FROM findings WHERE status='resolved' AND auto_note IS NOT NULL")
     out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < date('now') THEN 'expired' WHEN appeal_deadline < date('now','+30 days') THEN 'due_30d' WHEN appeal_deadline < date('now','+90 days') THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') GROUP BY 1")
+    # a routine-rate finding counts by its claims' own deadlines, each finding once per bucket it touches
+    buckets = {r["bucket"]: r for r in out["deadlines"]}
+    seen: dict[str, set] = {}
+    for fid, _g, _c, d, _n, cents in _windows():
+        if d:
+            b = "expired" if d < _day(0) else "due_30d" if d < _day(30) else "due_90d" if d < _day(90) else "later"
+            r = buckets.setdefault(b, {"bucket": b, "n": 0, "shortfall_cents": 0})
+            r["shortfall_cents"] = (r["shortfall_cents"] or 0) + cents
+            if fid not in seen.setdefault(b, set()):
+                seen[b].add(fid)
+                r["n"] = (r["n"] or 0) + 1
+    out["deadlines"] = list(buckets.values())
     out["info"] = rows("SELECT signal, year, title, shortfall_cents, evidence FROM findings WHERE category='info' ORDER BY signal, year")
     out["years"] = [r["year"] for r in rows("SELECT DISTINCT year FROM findings WHERE year >= '2023' ORDER BY year")]
     return out
@@ -366,6 +378,19 @@ FINDING_COLS = ("finding_id, signal, category, severity, actionable, title, pati
                 "rendering_provider_name, rendering_provider_npi, provider_tier, service_date, payment_date, year, procedure_code, modifiers, original_procedure_code, "
                 "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, ema_handling, status, notes, first_seen, last_seen, "
                 "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note, hint")
+
+
+def _day(offset: int) -> str:
+    """Today plus `offset` days, as the SQL date('now') sees it (UTC)."""
+    return (datetime.now(timezone.utc).date() + timedelta(days=offset)).isoformat()
+
+
+def _windows(statuses: tuple = ("open",)) -> list[tuple]:
+    conn = db()
+    try:
+        return pattern_windows(conn, statuses)
+    finally:
+        conn.close()
 
 
 def _finding_cols() -> str:
@@ -455,7 +480,11 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         where.append("procedure_code=?")
         params.append(code)
     if deadline == "due":
-        where.append("appeal_deadline >= date('now') AND appeal_deadline < date('now','+45 days')")
+        # a routine-rate finding is due when any of its claims is (its row shows the last of their dates)
+        ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and _day(0) <= d < _day(45)})
+        where.append("(appeal_deadline >= date('now') AND appeal_deadline < date('now','+45 days')"
+                     + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
+        params.extend(ids)
     elif deadline == "expired":
         where.append("appeal_deadline < date('now')")
     elif deadline == "valid":
@@ -554,6 +583,12 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
                          _extra(request), patient_of)
     data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
+    # a routine-rate finding is about many claims: list them, each with its own filing deadline
+    pattern = {r["finding_id"]: r["evidence"] for r in rows("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'")} \
+        if any(r.get("signal") == "SECOND_RATE" for r in data) else {}
+    for r in data:
+        ev = json.loads(pattern[r["finding_id"]]) if pattern.get(r.get("finding_id")) else {}
+        r["claims"] = "; ".join(f"{c[0]} ({c[1]}, file by {c[3] if len(c) > 3 and c[3] else 'unknown'})" for c in (ev.get("claims") or [])) or None
     if SHOW_PHI:
         _with_patient(data)     # with names hidden the file carries the claim ID only: initials beside a date and a clinician would point at a person
 
@@ -639,8 +674,6 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
         for r in rems:
             r["text"] = RARC.get(r["code"], "")
         out["remarks"] = rems
-        tx = one("SELECT transaction_key, source_name, payer_name, payer_id, payer_contact_phone, payer_contact_url, payment_method, payment_amount_cents, payment_date, trace_number, production_date, payee_npi FROM transactions WHERE transaction_key=?", (f["transaction_key"],))
-        out["remit"] = tx
         if f.get("line_key") and has_table("line_links"):
             out["link"] = one("SELECT * FROM line_links WHERE line_key=?", (f["line_key"],))
             out["handling"] = rows("SELECT * FROM line_handling WHERE line_key=? ORDER BY transaction_date", (f["line_key"],))
@@ -648,6 +681,8 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
         if pcn:
             out["history"] = rows("SELECT c.claim_key, c.claim_status_code, c.charge_cents, c.paid_cents, c.payment_date, c.payer_name, c.trace_number FROM claims c JOIN transactions t ON t.transaction_key=c.transaction_key WHERE c.patient_control_number=? AND t.superseded=0 ORDER BY c.payment_date", (pcn,))
             out["ema"] = rows("SELECT family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents, claim_status, activity_type, carc, rarc, adjustment_status, adjustment_subtype, provider, payer, denial_category, previously_denied FROM ema_rows WHERE claim_id=? ORDER BY family, service_date, row_index", (pcn,))
+    if f.get("transaction_key"):        # the remittance it came from (a takeback or a payment fee has one and no claim)
+        out["remit"] = one("SELECT transaction_key, source_name, payer_name, payer_id, payer_contact_phone, payer_contact_url, payment_method, payment_amount_cents, payment_date, trace_number, production_date, payee_npi FROM transactions WHERE transaction_key=?", (f["transaction_key"],))
     # the record of what people did, for every finding (a payer's routine rate belongs to no one claim)
     out["events"] = rows("SELECT at, kind, from_status, to_status, amount_cents, actor, note FROM finding_events WHERE finding_id=? ORDER BY at DESC, id DESC LIMIT 30", (finding_id,)) if has_table("finding_events") else []
     out["packets"] = _packets_for(finding_id)
@@ -1068,8 +1103,19 @@ MONEY = "category IN ('downcoding','bundling','denial','underpayment') AND COALE
 def progress(_: str = Depends(require_auth)):
     out: dict[str, Any] = {}
     out["pipeline"] = rows(f"SELECT status, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, COALESCE(SUM(recovered_cents),0) recovered_cents FROM findings WHERE {MONEY} GROUP BY 1")
-    out["live"] = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {MONEY} AND status IN ('open','in_progress') AND appeal_deadline >= date('now')")
-    out["expired"] = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {MONEY} AND status IN ('open','in_progress') AND appeal_deadline < date('now')")
+    out["live"] = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {MONEY} AND signal != 'SECOND_RATE' AND status IN ('open','in_progress') AND appeal_deadline >= date('now')")
+    out["expired"] = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {MONEY} AND signal != 'SECOND_RATE' AND status IN ('open','in_progress') AND appeal_deadline < date('now')")
+    # a routine-rate finding is live for the claims still inside their windows and expired for the rest
+    live_ids, gone_ids = set(), set()
+    for fid, _g, _c, d, _n, cents in _windows(("open", "in_progress")):
+        if d and d >= _day(0):
+            out["live"]["cents"] += cents
+            live_ids.add(fid)
+        elif d:
+            out["expired"]["cents"] += cents
+            gone_ids.add(fid)
+    out["live"]["n"] += len(live_ids)
+    out["expired"]["n"] += len(gone_ids - live_ids)
     out["recovered_by_month"] = rows(f"""SELECT substr(recovered_date,1,7) month, category, COUNT(*) n, COALESCE(SUM(recovered_cents),0) cents
                                          FROM findings WHERE {MONEY} AND status='resolved' AND recovered_date >= '2023-01' GROUP BY 1,2 ORDER BY 1""")
     out["cohorts"] = rows(f"""SELECT month, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n,
