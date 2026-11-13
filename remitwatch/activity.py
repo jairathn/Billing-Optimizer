@@ -131,6 +131,7 @@ MEDICARE = ("medicare", "medicare_advantage")
 # columns of the remittance stream read by build_activity
 (C_CLAIM, C_STATUS, C_CODE, C_ORIG, C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED, C_DATE, C_LCN, C_PAYDATE,
  C_NPI, C_LAST, C_FIRST, C_REFS, C_PLAST, C_PFIRST, C_PAYER, C_CFI, C_BILL, C_PAYERID, C_PATIENT_OWES) = range(23)
+C_LINEKEY = C_PATIENT_OWES      # the stream brings the line's key in this place; flush swaps it for what the payer left to the patient
 # one service while its remittance lines are folded in
 (I_DATE, I_CODE, I_UNITS, I_CHARGE, I_ALLOWED, I_PAID, I_LIVE, I_DECIDED, I_DENIED, I_KIND, I_FIRSTPAID, I_DECISIONS, I_GROUP, I_LAST) = range(14)
 
@@ -443,6 +444,14 @@ def build_activity(store, log=print) -> dict:
     state_cache: dict[str, str | None] = {}
     undated = 0
     over = [0, 0]                                                    # services insurers paid over a tenth above allowed, and by how much
+    owes: dict[str, int] = {}                                        # line -> deductible, coinsurance and copayment, where no allowed amount was stated
+    if "adjustments" in tables:
+        for line_key, cents in conn.execute(
+                """SELECT a.line_key, SUM(a.amount_cents) FROM adjustments a JOIN lines l ON l.line_key = a.line_key
+                   WHERE a.group_code = 'PR' AND a.reason_code IN ('1', '2', '3') AND a.line_key IS NOT NULL
+                     AND COALESCE(l.allowed_cents, 0) = 0 AND l.claim_status_code IN ('1', '19') GROUP BY 1"""):
+            if cents and cents > 0:
+                owes[line_key] = cents
 
     def payer(name, cfi) -> tuple:
         k = (name, cfi)
@@ -514,18 +523,22 @@ def build_activity(store, log=print) -> dict:
             code = clean_code(r[C_ORIG] or r[C_CODE])
             if not code:
                 continue
+            owed = owes.get(r[C_LINEKEY]) if owes else None
             if r[C_LCN]:
                 k = (r[C_CLAIM], r[C_LCN], code)
                 m = halves.get(k)
                 if m is not None:
-                    for c in (C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED, C_PATIENT_OWES):
+                    for c in (C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED):
                         if r[c] is not None:
                             m[c] = (m[c] or 0) + r[c]
+                    if owed:
+                        m[C_PATIENT_OWES] = (m[C_PATIENT_OWES] or 0) + owed
                     continue
                 m = halves[k] = list(r)
-                rows.append(m)
             else:
-                rows.append(r)
+                m = list(r)
+            m[C_PATIENT_OWES] = owed
+            rows.append(m)
 
         # ---- what: fold the remittance lines into services (see the module docstring)
         items: dict[int, list] = {}
@@ -669,10 +682,7 @@ def build_activity(store, log=print) -> dict:
                   CASE WHEN length(l.patient_control_number) >= 9 THEN substr(l.patient_control_number, 1, 9)
                        WHEN length(l.patient_control_number) >= 4 THEN l.patient_control_number
                        ELSE COALESCE(l.patient_control_number, '') || '|' || COALESCE(c.patient_last, '') || '|' || COALESCE(c.patient_first, '') END AS bill,
-                  NULLIF(l.payer_id, ''),
-                  CASE WHEN COALESCE(l.allowed_cents, 0) = 0 AND l.claim_status_code IN ('1', '19') THEN
-                       (SELECT SUM(a.amount_cents) FROM adjustments a
-                        WHERE a.line_key = l.line_key AND a.group_code = 'PR' AND a.reason_code IN ('1', '2', '3')) END
+                  NULLIF(l.payer_id, ''), l.line_key
            FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
            WHERE t.superseded = 0
            ORDER BY bill, l.payment_date, CASE WHEN l.claim_status_code = '22' THEN 0 ELSE 1 END, l.transaction_key, c.claim_seq, l.line_seq""")

@@ -907,3 +907,28 @@ def test_ema_patients_are_typed_like_remittance_patients_and_a_sliver_of_a_day_i
     d = dict(store.conn.execute("SELECT * FROM provider_ema_days").fetchone())
     assert (d["patients"], d["visits"], d["other_contacts"], d["pulled"]) == (6, 6, 3, "2026-03-04")
     store.close()
+
+
+def test_the_build_does_not_need_the_indexes_the_cloud_store_leaves_out(tmp_path):
+    """The store a serverless run holds in memory has no secondary indexes. A query that looks rows up one by one
+    without one scans a whole table per row: fine on a small fixture, minutes on the archive. The work the build does
+    is counted in SQLite's own steps, on a store with indexes and on one without, and must be about the same."""
+    files = [("20260320", "KY MEDICARE", [
+        clp(n, svc("99213", "150.00", "0.00", None, "20260302", lcn=f"L{n}", cas="CAS*CO*45*60.00~CAS*PR*1*90.00~"), cfi="MB") for n in range(1, 401)])]
+
+    def steps(compact: bool) -> tuple[int, int]:
+        folder = tmp_path / ("compact" if compact else "indexed")
+        folder.mkdir()
+        store = Store(":memory:", compact=compact)
+        assert store.ingest_835_paths(write_files(folder, [SEED] + files))["errors"] == 0
+        n = [0]
+        store.conn.set_progress_handler(lambda: n.__setitem__(0, n[0] + 1) or 0, 1000)
+        activity.build_activity(store, log=lambda *a: None)
+        store.conn.set_progress_handler(None, 0)
+        allowed = store.conn.execute("SELECT SUM(allowed_cents) FROM provider_days").fetchone()[0]
+        store.close()
+        return n[0], allowed
+    with_indexes, allowed_a = steps(False)
+    without, allowed_b = steps(True)
+    assert allowed_a == allowed_b and allowed_a >= 400 * 9000           # the patient's share was found either way
+    assert without < 3 * with_indexes + 200, (with_indexes, without)
