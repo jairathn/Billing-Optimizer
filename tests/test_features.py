@@ -703,6 +703,71 @@ def test_names_shown_says_who_and_never_shows_a_social_security_number(tmp_path,
     assert any('"\'=BIRCH, ANN Q"' in ln for ln in lines) and not any(',"=BIRCH' in ln for ln in lines)
 
 
+def identifier_store(tmp_path):
+    """Invented people whose names and numbers sit close together, and identifiers that are not member numbers."""
+    def denied(i: int, who: str, more: str = "") -> str:
+        return (f"CLP*CB{i:07d}C017*1*223.65*0.00*0.00*12*PC{i}*11~NM1*QC*1*{who}~{more}NM1*82*2*TEST PROVIDER*****XX*{NPI}~"
+                "DTM*232*20260401~" + svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~"))
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [
+        denied(400, "ASPEN*DEL*R***MI*ZZA100200"), denied(401, "ASPEN*DEL*R***MI*ZZA100200"),
+        denied(402, "ASPEN*DEL*T***MI*ZZA100299"),                  # same name, another number
+        denied(403, "ASPEN*FAY****MI*ZZA100200"),                   # same number, another first name
+        denied(404, "BIRCH*DEL*R***MI*ZZA100200"),                  # same number and first name, another last name
+        denied(405, "FIR*NED****MR*123456789"),                     # nine digits labelled a record number: can be an SSN
+        denied(406, "FIR*OLA****MR*98765432101"),
+        denied(407, "PINE*UMA", "NM1*IL*1*PINE*VIC****FI*359876543~"),     # the insured's number is a tax ID
+        denied(408, "XYLO*DAN****MI*PX1000"), denied(409, "XYLO*DAN****MI*PX10001"),
+        denied(410, "MAPLE*ROY*X***MI*BLANKQ4455"),
+        denied(411, "SPRUCE*YAN****MI*SP-4411-22"),                 # the payer wrote the number with dashes
+        denied(412, "NUÑEZ*JOSÉ****MI*NU5500"),
+        denied(413, "ROWAN*WES*C***34*666005555", "NM1*IL*1*ROWAN*XIA****MI*RW8800123~")])
+    Detector(store, run_id="t").run()
+    store.close()
+
+
+def test_member_numbers_and_the_name_click_follow_one_rule(tmp_path, monkeypatch):
+    import csv
+    import io
+    from fastapi.testclient import TestClient
+
+    identifier_store(tmp_path)
+    import remitwatch.api as api_mod
+
+    monkeypatch.setattr(api_mod, "DB_PATH", str(tmp_path / "s.sqlite"))
+    monkeypatch.setattr(api_mod, "PASSWORD", "")
+    monkeypatch.setattr(api_mod, "SHOW_PHI", True)
+    c = TestClient(api_mod.app)
+    items = c.get(URL).json()["items"]
+    by = {i["patient_control_number"][2:9].lstrip("0"): i for i in items}
+    export = {r["patient_control_number"][2:9].lstrip("0"): r for r in csv.DictReader(io.StringIO(c.get(CSV_URL).text))}
+    shown = {"400": "ZZA100200", "402": "ZZA100299", "403": "ZZA100200", "404": "ZZA100200", "405": "", "406": "98765432101", "407": "",
+             "408": "PX1000", "409": "PX10001", "410": "BLANKQ4455", "411": "SP-4411-22", "412": "NU5500", "413": "RW8800123"}
+    for n, number in shown.items():          # the list, the export and the detail view agree
+        detail = c.get(f"/api/findings/{by[n]['finding_id']}").json()["claim"]
+        assert (by[n]["member_id"], export[n]["member_id"], detail.get("member_id", "")) == (number, number, number), n
+
+    names = lambda q: sorted({i["patient_control_number"][2:9].lstrip("0") for i in c.get(URL, headers={"X-Search": q}).json()["items"]})
+    # numbers that are not member numbers are never found; the ones shown are found as the payer or a card writes them
+    assert [names(q) for q in ("123456789", "359876543", "666005555", "666-00-5555")] == [[]] * 4
+    assert names("98765432101") == ["406"] and names("RW8800123") == ["413"]
+    assert names("SP-4411-22") == names("SP441122") == names("4411%2022") == ["411"]
+    assert names("BLANKQ") == [] and names("4455") == ["410"]          # letters alone never match inside a number
+    assert names("nu%C3%B1ez") == names("NU%C3%91EZ") == names("jos%C3%A9") == ["412"]
+    # an empty search header leaves the search in the address in force
+    assert c.get(URL, params={"q": "aspen"}, headers={"X-Search": "%20"}).json()["total"] == 4
+
+    # a name lists that person only: same last name, first name and number, exactly
+    click = lambda n: sorted(i["patient_control_number"][2:9].lstrip("0") for i in c.get(URL, params={"patient_of": by[n]["claim_key"]}).json()["items"])
+    assert click("400") == ["400", "401"]
+    assert [click(n) for n in ("402", "403", "404", "408", "409")] == [["402"], ["403"], ["404"], ["408"], ["409"]]
+
+    # the letter prints the same number, and a placeholder where the payer sent no member number
+    letter = lambda n: c.get(f"/api/appeal/{by[n]['finding_id']}").json()["letter"]
+    assert "Member ID: [member ID]" in letter("405") and "123456789" not in letter("405")
+    assert "Member ID: [member ID]" in letter("407") and "359876543" not in letter("407")
+    assert "Member ID: RW8800123" in letter("413") and "666005555" not in letter("413")
+
+
 def test_a_packet_is_mailed_only_to_named_domains_on_any_host(monkeypatch):
     monkeypatch.setenv("SMTP_HOST", "smtp.invalid")
     monkeypatch.delenv("APPEAL_EMAIL_DOMAINS", raising=False)

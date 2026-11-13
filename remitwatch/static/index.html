@@ -265,7 +265,9 @@ async function findingsTable(v, container, base, opts={}){
   // an empty filter must not erase the tab's own scope. What was typed in the search box travels in a header, never in the
   // address: with names shown it can be a patient's name, and addresses are what access logs keep.
   const chosen = Object.fromEntries(Object.entries(f).filter(([k,val])=>val!==''&&val!=null&&k!=='q'&&k!=='patient_label'));
-  const find = Object.assign({cache:'no-store'}, f.q ? {headers:{'X-Search':encodeURIComponent(f.q)}} : {});
+  const typed = String(f.q||'').slice(0,200);
+  let sent = ''; try { sent = encodeURIComponent(typed); } catch(e){ sent = encodeURIComponent(typed.replace(/[\uD800-\uDFFF]/g,'')); }
+  const find = Object.assign({cache:'no-store'}, sent ? {headers:{'X-Search':sent}} : {});
   const params = Object.assign({}, base, chosen, {year:state.year, status:state.status, limit, offset:page*limit, sort: opts.sort||'shortfall'});
   const res = await api('/api/findings?'+qs(params), find);
   const sigs = base.signal ? base.signal.split(',') : state.summary.by_signal.filter(r=>!base.category||base.category.split(',').includes(r.category)).map(r=>r.signal);
@@ -278,10 +280,10 @@ async function findingsTable(v, container, base, opts={}){
       <select data-f="actionable"><option value="">Any action</option>${['appeal','correct_and_resubmit','review','opt_out','renegotiate'].map(x=>`<option ${f.actionable===x?'selected':''}>${x}</option>`).join('')}</select>
       <select data-f="deadline"><option value="">Any deadline</option><option value="valid" ${f.deadline==='valid'?'selected':''}>Still appealable</option><option value="due" ${f.deadline==='due'?'selected':''}>Due in 45 days</option><option value="expired" ${f.deadline==='expired'?'selected':''}>Expired</option></select>
       <select data-f="handling"><option value="">Any EMA handling</option>${Object.keys(HANDLING).map(x=>`<option value="${x}" ${f.handling===x?'selected':''}>${HANDLING[x]}</option>`).join('')}</select>
-      <input data-f="q" placeholder="${showPhi()?'patient name, member ID, claim ID, code…':'claim ID, code, CARC…'}" value="${esc(f.q)}" ${showPhi()?'style="min-width:20rem"':''}>
-      ${f.patient_of?`<span class="chip">Only ${esc(f.patient_label||'this patient')} <button id="ptClear" class="small" title="Show all patients" aria-label="Show all patients" style="padding:0 6px;margin-left:4px">✕</button></span>`:''}
+      <input data-f="q" maxlength="200" placeholder="${showPhi()?'patient name, member ID, claim ID, code…':'claim ID, code, CARC…'}" value="${esc(f.q)}" ${showPhi()?'style="min-width:20rem"':''}>
+      ${f.patient_of?`<span class="chip">Only ${esc(f.patient_label||'this patient')} <button class="small ptClear" title="Show all patients" aria-label="Show all patients" style="padding:0 6px;margin-left:4px">✕</button></span>`:''}
       <span class="muted small">${res.total.toLocaleString()} findings · ${money(res.shortfall_cents)}</span>
-      <button class="small" id="csvBtn">Export CSV</button>
+      <button class="small csvBtn">Export CSV</button>
       ${opts.bulk?'<button id="bulkAppealed" class="small">Mark selected appealed</button>':''}
     </div>
     <table><thead><tr>${opts.bulk?'<th></th>':''}<th>DOS</th><th>Patient</th><th>Payer</th><th>Provider</th><th>Code</th><th>Finding</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Expected</th><th class="num">Shortfall</th><th>CARC/RARC</th><th>Deadline</th><th>Status</th></tr></thead>
@@ -293,19 +295,22 @@ async function findingsTable(v, container, base, opts={}){
       <td><span class="sev-${esc(r.severity)}">●</span> ${esc(r.title)}<div class="small muted">${r.stale?'<span class="chip">stale</span>':''} ${r.ema_handling?'<span class="chip">'+esc(HANDLING[r.ema_handling]||r.ema_handling)+'</span>':''}</div></td>
       <td class="num">${money2(r.charge_cents)}</td><td class="num">${money2(r.allowed_cents)}</td><td class="num">${money2(r.expected_cents)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b></td>
       <td class="small">${esc(r.carc||'')}${r.rarc?'<br>'+esc(r.rarc):''}</td><td class="small day ${r.appeal_deadline&&r.appeal_deadline<new Date().toISOString().slice(0,10)?'sev-high':''}">${esc(r.appeal_deadline)}</td><td><span class="chip">${esc(r.status)}</span></td></tr>`).join('')}</tbody></table>
-    <div class="pager"><button id="prev" ${page===0?'disabled':''}>‹ prev</button><span>page ${page+1} of ${Math.max(1,Math.ceil(res.total/limit))}</span><button id="next" ${(page+1)*limit>=res.total?'disabled':''}>next ›</button></div>`;
+    <div class="pager"><button class="prev" ${page===0?'disabled':''}>‹ prev</button><span>page ${page+1} of ${Math.max(1,Math.ceil(res.total/limit))}</span><button class="next" ${(page+1)*limit>=res.total?'disabled':''}>next ›</button></div>`;
   container.querySelectorAll('[data-f]').forEach(el=>el.onchange=()=>{ state.filt[key]=Object.assign({}, f, {[el.dataset.f]:el.value}); state.page[key]=0; render(); });
-  container.querySelector('#prev').onclick=()=>{state.page[key]=page-1; render();};
-  container.querySelector('#next').onclick=()=>{state.page[key]=page+1; render();};
+  container.querySelector('.prev').onclick=()=>{state.page[key]=page-1; render();};
+  container.querySelector('.next').onclick=()=>{state.page[key]=page+1; render();};
   container.querySelectorAll('tr.row').forEach(tr=>{ tr.onclick=()=>openDetail(tr.dataset.id);
     tr.onkeydown=e=>{ if((e.key==='Enter'||e.key===' ') && e.target===tr){ e.preventDefault(); openDetail(tr.dataset.id); } }; });
   // a name lists that patient only: the same name and member number exactly, asked for by the claim, so that neither travels in the address
   container.querySelectorAll('a.pt').forEach(a=>a.onclick=e=>{ e.preventDefault(); e.stopPropagation(); state.filt[key]=Object.assign({}, f, {patient_of:a.dataset.claim, patient_label:a.dataset.label}); state.page[key]=0; state.focusPt=true; render(); });
-  const pc = container.querySelector('#ptClear');
-  if(pc){ pc.onclick=()=>{ state.filt[key]=Object.assign({}, f, {patient_of:'', patient_label:''}); state.page[key]=0; render(); }; if(state.focusPt) pc.focus(); }
-  state.focusPt=false;
-  container.querySelector('#csvBtn').onclick=async()=>{      // fetched, not linked, for the same reason the search text is not in the address
-    const r = await fetch('/api/findings.csv?'+qs(Object.assign({},base,chosen,{year:state.year,status:state.status})), find);
+  const pc = container.querySelector('.ptClear');
+  if(pc){ pc.onclick=()=>{ state.filt[key]=Object.assign({}, f, {patient_of:'', patient_label:''}); state.page[key]=0; state.focusQ=true; render(); }; if(state.focusPt) pc.focus(); }
+  if(state.focusQ){ const box = container.querySelector('[data-f="q"]'); if(box) box.focus(); }
+  state.focusPt=false; state.focusQ=false;
+  container.querySelector('.csvBtn').onclick=async()=>{      // fetched, not linked, for the same reason the search text is not in the address
+    let r;
+    try { r = await fetch('/api/findings.csv?'+qs(Object.assign({},base,chosen,{year:state.year,status:state.status})), find); }
+    catch(e){ alert('The export did not come back (no connection). Try again in a moment.'); return; }
     if(!r.ok){ alert('The export did not come back ('+r.status+'). Try again in a moment.'); return; }
     const url = URL.createObjectURL(await r.blob()), a = document.createElement('a');
     a.href = url; a.download = 'remitwatch-findings.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000); };
@@ -398,6 +403,7 @@ async function appeals(v){
 }
 async function data(v){
   const m = state.meta;
+  if(!m){ v.innerHTML = '<div class="panel"><h2>Data</h2><div class="note">The site did not answer with its settings. Reload the page in a minute.</div></div>'; return; }
   let cov = {gaps: []};
   try { cov = await api('/api/coverage'); } catch(e){}
   const day = d => { const x = new Date(d + 'T00:00:00Z'); return isNaN(x) ? esc(d) : x.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}); };
@@ -433,8 +439,16 @@ async function data(v){
 }
 
 // ---------------------------------------------------------------- detail drawer and appeal packet
+function closeDetail(){
+  const d = $('#drawer'); if(!d.classList.contains('open')) return;
+  d.classList.remove('open');
+  const back = state.detailFrom; state.detailFrom = null;
+  if(back && back.isConnected) back.focus();
+}
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
 async function openDetail(id){
   const d = $('#drawer'); d.classList.add('open'); d.innerHTML='<div class="muted">loading…</div>';
+  const from = document.activeElement; if(from && from.closest && from.closest('tr.row')) state.detailFrom = from.closest('tr.row');
   const r = await api('/api/findings/'+id); const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
@@ -465,7 +479,8 @@ async function openDetail(id){
     ${(r.handling||[]).length?`<div class="small"><b>How EMA handled it:</b> ${r.handling.map(x=>esc((x.carc||'')+' '+(x.adjustment_status||'')+' '+money2(x.adjustments_cents)+' on '+(x.transaction_date||''))).join(' · ')}</div>`:''}
     ${(r.ema||[]).length?`<h3 class="small">ModMed EMA rows for this claim</h3><table class="small"><thead><tr><th>Family</th><th>DOS</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adj</th><th>Status / handling</th></tr></thead><tbody>${r.ema.slice(0,40).map(e=>`<tr><td>${esc(e.family)}${e.activity_type?' · '+esc(e.activity_type):''}</td><td>${esc(e.service_date)}</td><td>${esc(e.cpt)}${mods(e.modifiers)}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc(e.claim_status||'')} ${e.carc?'· '+esc(e.carc):''} ${e.adjustment_status?'· '+esc(e.adjustment_status):''} ${e.denial_category?'· '+esc(e.denial_category):''}</td></tr>`).join('')}</tbody></table>`:'<div class="small muted">No EMA export rows for this claim (annual exports not loaded).</div>'}
     <h3 class="small">Evidence</h3><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre>`;
-  d.querySelector('#closeD').onclick=()=>d.classList.remove('open');
+  d.querySelector('#closeD').onclick=closeDetail;
+  d.querySelector('#closeD').focus({preventScroll:true});
   d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{ if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)) openDetail(id); });
   bindDrawerExtras(id, d);
   d.querySelector('#btnAppeal').onclick=async()=>{
@@ -492,9 +507,9 @@ window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
 (async function(){
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
-  try { await loadMeta(); } catch(e){ $('#fresh').textContent='no data loaded yet'; }
+  try { await loadMeta(); } catch(e){ if(!state.meta) $('#fresh').textContent='no data loaded yet'; }
   await refreshHeader();
-  render();
+  if(!state.run) render();       // a click while the first answer was slow has drawn the page already
   setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);
 })();
 </script>

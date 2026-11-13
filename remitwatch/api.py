@@ -37,7 +37,7 @@ import asyncio
 
 from . import __version__, runtime
 from .actions import STATUSES, apply_alert_ack, apply_status
-from .codes import CARC, RARC
+from .codes import CARC, RARC, member_number
 from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema
 
 DB_PATH = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
@@ -377,21 +377,12 @@ def _extra(request: Request) -> dict:
     return {k: request.query_params[k] for k in EXTRA_FILTERS if k in request.query_params}
 
 
-# What may be shown and searched as a member number. A payer can also send a Social Security number (34), the old
-# Medicare claim number built on one (HN) or a tax ID (FI) in the same place; those never leave the server.
-MEMBER_QUALS = ("MI", "II", "MR", "")
+# The member-number rule (codes.MEMBER_QUALS) as SQL, for the search.
 _MEMBER_SQL = ("(COALESCE({a}.{k}_id_qual,'') IN ('MI','II','MR','') AND NOT (COALESCE({a}.{k}_id_qual,'')='MR' AND {a}.{k}_id GLOB "
                "'[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'))")
 
 
-def _member(c: dict) -> str:
-    """The number to show for a patient: the member number the payer gave for them, else the insured person's (a
-    dependent is often listed under the policy holder's)."""
-    for k in ("patient", "insured"):
-        v, qual = (c.get(f"{k}_id") or "").strip(), c.get(f"{k}_id_qual") or ""
-        if v and qual in MEMBER_QUALS and not (qual == "MR" and re.fullmatch(r"\d{9}", v)):
-            return v
-    return ""
+_member = member_number
 
 
 def _search_text(request: Request | None, q: str | None) -> str | None:
@@ -400,7 +391,9 @@ def _search_text(request: Request | None, q: str | None) -> str | None:
     sent = request.headers.get("x-search") if request is not None else None
     if sent:
         from urllib.parse import unquote
-        return unquote(sent)
+        text = unquote(sent)
+        if text.strip():
+            return text
     return q
 
 
@@ -469,13 +462,22 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
             # by patient: every word typed must be in the name as the row shows it ("smith john", "John Smith" and
             # "SMITH, JOHN Q" all find the same person). One pass over the claims, no lookup per finding.
             # With names hidden this is left out, or the search box would answer "is there a patient called ...".
-            name = " AND ".join("(COALESCE(c.patient_last,'') || ' ' || COALESCE(c.patient_first,'') || ' ' || COALESCE(c.patient_middle,'')) LIKE ?" for _ in words)
-            who, who_params = f"({name})", [f"%{w}%" for w in words]
+            # SQLite compares letters outside A to Z by case, and remittances spell names in capitals, so a word is also
+            # tried in capitals ("nuñez" finds NUÑEZ)
+            full = "(COALESCE(c.patient_last,'') || ' ' || COALESCE(c.patient_first,'') || ' ' || COALESCE(c.patient_middle,''))"
+            parts, who_params = [], []
+            for w in words:
+                forms = list(dict.fromkeys([w, w.upper()]))
+                parts.append("(" + " OR ".join(f"{full} LIKE ?" for _ in forms) + ")")
+                who_params += [f"%{x}%" for x in forms]
+            who = "(" + " AND ".join(parts) + ")"
             number = re.sub(r"[\s\-]", "", q)
             if re.search(r"\d", number):
-                # or part of a member number, typed with or without the spaces and dashes a card prints
-                who += (f" OR (c.patient_id LIKE ? AND {_MEMBER_SQL.format(a='c', k='patient')})"
-                        f" OR (c.insured_id LIKE ? AND {_MEMBER_SQL.format(a='c', k='insured')})")
+                # or part of a member number, typed with or without the spaces and dashes a card prints, whichever way
+                # the payer wrote it
+                bare = "REPLACE(REPLACE(c.{k}_id,'-',''),' ','')"
+                who += (f" OR ({bare.format(k='patient')} LIKE ? AND {_MEMBER_SQL.format(a='c', k='patient')})"
+                        f" OR ({bare.format(k='insured')} LIKE ? AND {_MEMBER_SQL.format(a='c', k='insured')})")
                 who_params += [f"%{number}%"] * 2
             clause += f" OR claim_key IN (SELECT c.claim_key FROM claims c WHERE {who})"
             params += who_params

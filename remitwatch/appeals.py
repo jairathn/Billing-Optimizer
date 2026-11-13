@@ -16,7 +16,7 @@ import os
 from datetime import date
 from typing import Any
 
-from .codes import CARC, LEGAL, RARC, appeal_rule
+from .codes import CARC, LEGAL, RARC, appeal_rule, member_number
 
 # Who the letters come from. Set PRACTICE_NAME, PRACTICE_ADDRESS, PRACTICE_TIN and PRACTICE_NPI (and the contact lines)
 # in the host's settings: until then the letters carry the bracketed words, which shows at a glance what is missing.
@@ -107,7 +107,8 @@ def _header(d: dict, subject: str, show_phi: bool = False) -> str:
     claim = d.get("claim") or {}
     patient = "[patient name]    Member ID: [member ID]"
     if show_phi and (claim.get("patient_last") or claim.get("patient_id")):
-        patient = f"{claim.get('patient_first') or ''} {claim.get('patient_last') or ''}".strip() + f"    Member ID: {claim.get('patient_id') or claim.get('insured_id') or '[member ID]'}"
+        # only a number the payer labelled a member number: a Social Security number or tax ID is left for the biller to replace
+        patient = f"{claim.get('patient_first') or ''} {claim.get('patient_last') or ''}".strip() + f"    Member ID: {member_number(claim) or '[member ID]'}"
     return "\n".join([
         f"{date.today().isoformat()}",
         "",

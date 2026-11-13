@@ -157,6 +157,23 @@ SKIN_SUBSTITUTE_RE = re.compile(r"^Q4[0-9]{3}$|^A2[0-9]{3}$|^C9[0-9]{3}$")
 DRUG_RE = re.compile(r"^J[0-9]{4}$")
 
 
+# What may be shown, exported, searched and printed in a letter as a member number. A payer can also send a Social
+# Security number (34), the old Medicare claim number built on one (HN) or a tax ID (FI) in the same place, and a
+# nine-digit number labelled as a medical record number can be a Social Security number too; none of those leave the
+# server.
+MEMBER_QUALS = ("MI", "II", "MR", "")
+
+
+def member_number(c: dict) -> str:
+    """The number to show for a patient: the member number the payer gave for them, else the insured person's (a
+    dependent is often listed under the policy holder's). Empty when the payer sent nothing that is a member number."""
+    for k in ("patient", "insured"):
+        v, qual = (c.get(f"{k}_id") or "").strip(), (c.get(f"{k}_id_qual") or "").strip()
+        if v and qual in MEMBER_QUALS and not (qual == "MR" and re.fullmatch(r"\d{9}", v)):
+            return v
+    return ""
+
+
 def code_category(code: str | None) -> str:
     if not code:
         return "other"
