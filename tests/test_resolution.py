@@ -247,7 +247,7 @@ def test_a_bills_finding_stays_on_its_submission_and_a_denial_after_someone_acte
     store = build_store(tmp_path, [visit(300, who, paid="0.00", cas="CAS*CO*50*223.65~", status="4").replace("C017*4*", "C024*4*")], pay_date="20260520")
     Detector(store, run_id="t2").run()
     rows = store.query("SELECT finding_id, evidence FROM findings WHERE signal='CLAIM_DENIED_UNPAID' AND status='open'")
-    assert [r["finding_id"] for r in rows] == [fid] and json.loads(rows[0]["evidence"])["earlier_denied_submissions"] == ["CB0000300C024"]
+    assert [r["finding_id"] for r in rows] == [fid] and json.loads(rows[0]["evidence"])["other_denied_submissions"] == ["CB0000300C024"]
     # the biller appeals on June 1; a third submission is denied on June 20: that one is seen on its own
     apply_status(store.conn, fid, "appealed", "Appeal faxed", actor="biller", at="2026-06-01T15:00:00+00:00")
     store.conn.commit()

@@ -79,10 +79,12 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
             r["appeal_deadline"] = min(r["appeal_deadline"], d)
     for r in soon.values():
         r["patient_control_number"] = f"{r['n']} claim{'s' if r['n'] != 1 else ''} at the payer's routine lower rate"
+    due_n = q("""SELECT COUNT(*) n FROM findings WHERE status='open' AND actionable IN ('appeal','correct_and_resubmit')
+                  AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')""")[0]["n"] + len(soon)
     due = sorted([dict(r) for r in due] + list(soon.values()), key=lambda r: (r["appeal_deadline"], -(r["shortfall_cents"] or 0)))
     lines.append("## Appeals due in the next 45 days")
     if due and not detail:
-        lines.append(f"{len(due)}{'+' if len(due) == 40 else ''} findings are due; open the Appeals queue in the dashboard for the list.")
+        lines.append(f"{due_n} findings are due; open the Appeals queue in the dashboard for the list.")
     elif due:
         lines.append("| deadline | payer | claim | DOS | code | signal | dollars |")
         lines.append("|---|---|---|---|---|---|---:|")
@@ -91,9 +93,20 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     else:
         lines.append("Nothing due.")
     lines.append("")
-    top = q("""SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
+    top = [dict(r) for r in q("""SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
                WHERE status='open' AND category IN ('downcoding','bundling','denial','underpayment') AND appeal_deadline >= date('now')
-               GROUP BY 1 ORDER BY cents DESC LIMIT 10""")
+                 AND signal != 'SECOND_RATE' GROUP BY 1""")]
+    # a payer's routine lower rate: the claims whose own windows are still open
+    by_payer = {r["payer_group"]: r for r in top}
+    counted: set = set()
+    for fid, grp, _code, d, _n, cents in pattern_windows(store.conn):
+        if d and d >= today:
+            r = by_payer.setdefault(grp, {"payer_group": grp, "n": 0, "cents": 0})
+            r["cents"] = (r["cents"] or 0) + cents
+            if fid not in counted:
+                counted.add(fid)
+                r["n"] += 1
+    top = sorted(by_payer.values(), key=lambda r: -(r["cents"] or 0))[:10]
     lines.append("## Open, still appealable, by payer")
     lines.append("| payer | findings | dollars |")
     lines.append("|---|---:|---:|")

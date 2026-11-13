@@ -458,7 +458,7 @@ async function openDetail(id){
   d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:start"><h2>${esc(f.title)}</h2><button id="closeD">✕</button></div>
     <div class="small muted">${esc(f.signal)} · <span class="sev-${esc(f.severity)}">${esc(f.severity)}</span> · ${esc(f.actionable)} · status <b>${esc(f.status)}</b>${f.stale?' · stale':''}</div>
     <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div>
-    <div class="actions">${f.signal!=='SECOND_RATE'?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal packet'}</button>`:''}
+    <div class="actions">${f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal)?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal packet'}</button>`:''}
       ${[['open','open'],['in_progress','in progress'],['appealed','appealed'],['resolved','recovered'],['lost','lost'],['dismissed','dismiss']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled':''}>${l}</button>`).join('')}</div>
     <table class="small">
       ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>

@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections import defaultdict
 import os
 import re
 import secrets
@@ -696,16 +697,19 @@ def _record_status(ids: list[str], status: str, notes: str | None, recovered_cen
         from .cloud import SERVING_COPY
         conn = db()
         try:
-            known = [i for i in ids if conn.execute("SELECT 1 FROM findings WHERE finding_id=?", (i,)).fetchone()]
+            # the status each finding has on the copy the person is looking at: logged as what they changed it from
+            seen = {i: r[0] for i in ids for r in [conn.execute("SELECT status FROM findings WHERE finding_id=?", (i,)).fetchone()] if r}
         finally:
             conn.close()
+        known = [i for i in ids if i in seen]
         if not known:
             return 0
         if len(known) == 1:
             SERVING_COPY.record({"kind": "status", "finding_id": known[0], "status": status, "notes": notes,
-                                 "recovered_cents": recovered_cents, "actor": actor})
+                                 "recovered_cents": recovered_cents, "actor": actor, "seen": seen[known[0]]})
         else:
-            SERVING_COPY.record({"kind": "bulk_status", "ids": known, "status": status, "notes": notes, "actor": actor})
+            SERVING_COPY.record({"kind": "bulk_status", "ids": known, "status": status, "notes": notes, "actor": actor,
+                                 "seen": {i: seen[i] for i in known}})
         return len(known)
     conn = db()
     try:
@@ -831,6 +835,10 @@ def appeal(finding_id: str, _: str = Depends(require_auth)):
     from .appeals import build_packet
 
     detail = finding_detail(finding_id, "ok")
+    f = detail["finding"]
+    if not f.get("claim_key") and f.get("signal") not in ("TAKEBACK", "FEE_SKIM"):
+        # context rows (sequestration, MIPS) and contract-level findings have no letter: there is nothing to reprocess
+        raise HTTPException(400, "There is no letter for this kind of finding.")
     if SHOW_PHI and detail.get("claim"):
         detail = dict(detail, claim=one("SELECT * FROM claims WHERE claim_key=?", (detail["finding"]["claim_key"],)) or detail["claim"])
     return build_packet(detail, show_phi=SHOW_PHI)
@@ -917,8 +925,8 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
                            SUM(status IN ('open','in_progress','appealed')) open_n,
                            COALESCE(SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END),0) open_cents,
                            SUM(status='resolved') resolved_n, COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
-                           SUM(status='lost') lost_n, SUM(status IN ('open','in_progress') AND appeal_deadline >= date('now')) live_n,
-                           COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= date('now') THEN shortfall_cents END),0) live_cents
+                           SUM(status='lost') lost_n, SUM(status IN ('open','in_progress') AND appeal_deadline >= date('now') AND signal != 'SECOND_RATE') live_n,
+                           COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= date('now') AND signal != 'SECOND_RATE' THEN shortfall_cents END),0) live_cents
                     FROM findings WHERE {' AND '.join(fwhere)} GROUP BY {grp} ORDER BY cents DESC LIMIT ?""", tuple(fparams) + (limit,))
     # denominators: for both dimensions when the exposure table carries them, otherwise for the first only
     exp_dims = [d for d in dims if DIMS[d][1]]
@@ -931,6 +939,19 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
         for r in rows(f"SELECT {ecols}, SUM(lines) lines, SUM(charge_cents) charge_cents, SUM(allowed_cents) allowed_cents FROM exposure WHERE {' AND '.join(ewhere)} GROUP BY {egrp}", tuple(eparams)):
             exposure[tuple(r[f"k{i+1}"] for i in range(len(use)))] = r
         exposure_level = len(use)
+    # a routine-rate finding is still appealable for its claims whose own windows are open
+    live_by = defaultdict(int)
+    for fid, _g, _c, d, _n, cents in _windows(("open", "in_progress")):
+        if d and d >= _day(0):
+            live_by[fid] += cents
+    if live_by:
+        at = {tuple(r[f"k{i+1}"] for i in range(len(dims))): r for r in data}
+        for pr in rows(f"SELECT finding_id, {fcols} FROM findings WHERE {' AND '.join(fwhere)} AND signal='SECOND_RATE' AND status IN ('open','in_progress')",
+                       tuple(fparams)):
+            r = at.get(tuple(pr[f"k{i+1}"] for i in range(len(dims))))
+            if r is not None and live_by.get(pr["finding_id"]):
+                r["live_cents"] = (r["live_cents"] or 0) + live_by[pr["finding_id"]]
+                r["live_n"] = (r["live_n"] or 0) + 1
     names = _provider_names()
     for r in data:
         e = exposure.get(tuple(r[f"k{i+1}"] for i in range(exposure_level))) if exposure_level else None

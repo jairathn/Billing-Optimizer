@@ -246,7 +246,8 @@ def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> 
     for name, a in entries:
         try:
             if a.get("kind") == "bulk_status":
-                found = [actions_mod.apply_status(conn, fid, a["status"], a.get("notes"), None, a.get("actor") or "", a.get("at"))
+                found = [actions_mod.apply_status(conn, fid, a["status"], a.get("notes"), None, a.get("actor") or "", a.get("at"),
+                                                  (a.get("seen") or {}).get(fid))
                          for fid in a.get("ids") or []]
                 ok = all(found)
             else:

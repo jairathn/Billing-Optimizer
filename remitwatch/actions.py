@@ -17,8 +17,10 @@ def _now() -> str:
 
 
 def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: str | None = None, recovered_cents: int | None = None,
-                 actor: str = "", at: str | None = None) -> bool:
-    """Set a finding's status and log the change. Returns False when the finding does not exist."""
+                 actor: str = "", at: str | None = None, seen: str | None = None) -> bool:
+    """Set a finding's status and log the change. Returns False when the finding does not exist. `seen` is the status the
+    person was looking at when they made the change (recorded in the journal on a serverless host): it is logged as the
+    status they changed from, because the copy this is replayed on may have moved since."""
     if status not in STATUSES:
         raise ValueError("bad status")
     conn.row_factory = sqlite3.Row
@@ -37,7 +39,7 @@ def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: 
                     WHERE finding_id=?""",
                  (status, notes, now, recovered, now[:10] if status == "resolved" else None, status, now, finding_id))
     conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) VALUES (?,?,?,?,?,?,?,?)",
-                 (finding_id, now, "manual", r["status"], status, recovered if status == "resolved" else r["shortfall_cents"], actor, notes))
+                 (finding_id, now, "manual", seen or r["status"], status, recovered if status == "resolved" else r["shortfall_cents"], actor, notes))
     return True
 
 
@@ -50,7 +52,7 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
     kind = action.get("kind")
     if kind == "status":
         return apply_status(conn, action["finding_id"], action["status"], action.get("notes"), action.get("recovered_cents"),
-                            action.get("actor") or "", action.get("at"))
+                            action.get("actor") or "", action.get("at"), action.get("seen"))
     if kind == "alert_ack":
         apply_alert_ack(conn, action["alert_id"], action.get("at"))
         return True
