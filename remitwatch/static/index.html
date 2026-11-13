@@ -72,6 +72,10 @@ table.pvt tr.picked td:first-child{background:var(--chip)}
 table.pvt tr.row:hover td:first-child{background:var(--soft)}
 table.pvt td .sub{display:block;color:var(--muted);font-size:11px;font-weight:400}
 .grid.two > *{min-width:0}
+.panel{overflow-x:auto}
+tr.row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.smc > .small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:600px){table.pvt td:first-child{white-space:normal;min-width:112px;max-width:42vw}table.pvt td .sub{white-space:normal}}
 .filters select{max-width:72vw}
 .scroll{overflow:auto}
 .busy{opacity:.55;transition:opacity .15s}
@@ -157,7 +161,7 @@ const mods = js => { try { const a = JSON.parse(js||'[]'); return Array.isArray(
 async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); }
   // what each clinician is doing may be kept for the owner: the password typed into the Providers tab rides along on those calls only
   if(state.ownerKey && /^\/api\/(activity\/|breakdown)/.test(path)){ opts = Object.assign({}, opts||{}); opts.headers = Object.assign({'X-Owner-Password': state.ownerKey}, opts.headers||{}); }
-  const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); const err = new Error(m || (path+' '+r.status)); err.status = r.status; throw err; } return r.json(); }
+  const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); const err = new Error(m || ('The server did not answer as expected ('+r.status+').')); err.status = r.status; throw err; } return r.json(); }
 function qs(o){ return Object.entries(o).filter(([k,v])=>v!==''&&v!=null).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&'); }
 function sweepCharts(){ Object.keys(state.charts).forEach(id=>{ const c=state.charts[id]; if(!c.canvas || !c.canvas.isConnected){ c.destroy(); delete state.charts[id]; } }); }
 function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el) return;
@@ -193,9 +197,11 @@ async function render(){
   const run = state.run = (state.run||0) + 1;       // a slower, older run must not draw over a newer one
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active',a.dataset.tab===state.tab));
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = state.tab==='providers' ? 'none' : ''; });
-  await loadSummary();
+  if(state.tab !== 'providers' || !state.summary) await loadSummary();       // the Providers tab uses none of it
   if(run !== state.run) return;
-  const v = $('#view'); v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
+  const old = $('#view'), v = old.cloneNode(false);      // an older run still holds the old node and can only write into that
+  old.replaceWith(v);
+  v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
   const fn = {overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data, alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab}[state.tab] || overview;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
@@ -332,10 +338,12 @@ async function contracts(v){
     <div class="panel"><h2>Contract-level findings</h2><div id="tblC"></div></div>
     <div class="panel"><h2>Underpaid lines</h2><div id="tblU"></div></div>`;
   v.querySelector('#tierSel').onchange=e=>{state.filt.tier=e.target.value; render();};
-  const saveTab = state.tab;
-  state.tab='contractsC'; await findingsTable(v, v.querySelector('#tblC'), {category:'contract'});
-  state.tab='contractsU'; await findingsTable(v, v.querySelector('#tblU'), {category:'underpayment'});
-  state.tab=saveTab;
+  const saveTab = state.tab;        // the two tables keep their filters under their own keys
+  try {
+    state.tab='contractsC'; await findingsTable(v, v.querySelector('#tblC'), {category:'contract'});
+    if(state.tab!=='contractsC') return;        // the reader went to another tab while this one loaded: leave their tab alone
+    state.tab='contractsU'; await findingsTable(v, v.querySelector('#tblU'), {category:'underpayment'});
+  } finally { if(state.tab==='contractsC' || state.tab==='contractsU') state.tab=saveTab; }
 }
 async function fees(v){
   const vol = await api('/api/volume');
@@ -372,17 +380,17 @@ async function data(v){
   const day = d => { const x = new Date(d + 'T00:00:00Z'); return isNaN(x) ? esc(d) : x.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}); };
   const gaps = (cov.gaps||[]).length ? `<div class="panel"><h2>Remittance weeks that look missing</h2>
     <div class="note">A payer that pays every week sent next to nothing in these weeks and then started again, and the visits those weeks would have paid are still short. Either its 835 files for those weeks never reached the Dropbox folder or it paid nothing. Ask TriZetto to send the files again. Until they arrive, those visits are missing from every count on this site, and so is any downcoding in them. A week the payer made up afterwards is not listed.</div>
-    <table><thead><tr><th>Payer</th><th>Payer ID</th><th>From</th><th>To</th><th class="num">Weeks</th><th class="num">Claims received</th><th class="num">Usual for those weeks</th><th>Visits still short, about</th></tr></thead>
+    <div class="scroll"><table><thead><tr><th>Payer</th><th>Payer ID</th><th>From</th><th>To</th><th class="num">Weeks</th><th class="num">Claims received</th><th class="num">Usual for those weeks</th><th>Visits still short, about</th></tr></thead>
     <tbody>${cov.gaps.map(g=>`<tr><td>${esc(g.payer)}</td><td class="small muted">${esc(g.payer_id)}</td><td>${day(g.from)}</td><td>${day(g.to)}</td><td class="num">${esc(g.weeks)}</td><td class="num">${Number(g.seen||0).toLocaleString()}</td><td class="num">${Number(g.usual||0).toLocaleString()}</td>
-      <td>${Object.entries(g.missing_by_month||{}).map(([m,n])=>`${Number(n).toLocaleString()} claims for ${esc(new Date(m+'-15T00:00:00Z').toLocaleString('en-US',{month:'short',year:'numeric',timeZone:'UTC'}))}`).join(', ')}</td></tr>`).join('')}</tbody></table></div>` : '';
+      <td>${Object.entries(g.missing_by_month||{}).map(([m,n])=>`${Number(n).toLocaleString()} claims for ${esc(new Date(m+'-15T00:00:00Z').toLocaleString('en-US',{month:'short',year:'numeric',timeZone:'UTC'}))}`).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>` : '';
   v.innerHTML = `<div id="feedPanel"></div>${gaps}<div class="grid two">
     <div class="panel"><h2>What is loaded</h2><table>
       <tr><td>Files ingested</td><td class="num">${(m.files.n||0).toLocaleString()} (${m.files.n835||0} remits, ${m.files.nema||0} EMA exports)</td></tr>
       <tr><td>Last ingest</td><td class="num">${esc(m.files.last_ingest||'–')}</td></tr>
       <tr><td>Remittances</td><td class="num">${(m.remits.n||0).toLocaleString()} · ${money(m.remits.total_cents)}</td></tr>
-      <tr><td>Payment dates</td><td class="num">${esc(m.remits.first_payment)} → ${esc(m.remits.last_payment)}</td></tr>
-      <tr><td>Service lines</td><td class="num">${(m.lines.n||0).toLocaleString()} · DOS ${esc(m.lines.first_dos)} → ${esc(m.lines.last_dos)}</td></tr>
-      ${m.ema.map(e=>`<tr><td>EMA ${esc(e.family)}</td><td class="num">${e.n.toLocaleString()} rows · DOS ${esc(e.first_dos)} → ${esc(e.last_dos)}</td></tr>`).join('')}
+      <tr><td>Payment dates</td><td class="num">${esc(m.remits.first_payment)} to ${esc(m.remits.last_payment)}</td></tr>
+      <tr><td>Service lines</td><td class="num">${(m.lines.n||0).toLocaleString()} · service dates ${esc(m.lines.first_dos)} to ${esc(m.lines.last_dos)}</td></tr>
+      ${m.ema.map(e=>`<tr><td>EMA ${esc(e.family)}</td><td class="num">${e.n.toLocaleString()} rows · service dates ${esc(e.first_dos)} to ${esc(e.last_dos)}</td></tr>`).join('')}
     </table></div>
     <div class="panel"><h2>Analysis runs</h2><table><thead><tr><th>Run</th><th>Finished</th><th class="num">Lines</th><th class="num">Findings</th></tr></thead><tbody>${m.runs.map(r=>`<tr><td class="small">${esc(r.run_id)}</td><td class="small">${esc(r.finished_at)}</td><td class="num">${r.lines.toLocaleString()}</td><td class="num">${r.findings.toLocaleString()}</td></tr>`).join('')}</tbody></table></div>
   </div>
@@ -454,9 +462,9 @@ async function openDetail(id){
 
 window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(tabOpen(h) && h!==state.tab){ state.tab=h; render(); } });
 (async function(){
-  try { await loadMeta(); } catch(e){ $('#fresh').textContent='no data loaded yet'; }
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
+  try { await loadMeta(); } catch(e){ $('#fresh').textContent='no data loaded yet'; }
   await refreshHeader();
   render();
   setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);

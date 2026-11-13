@@ -15,7 +15,7 @@ const PV_GROUPS = [['Office visits', ['new_visit', 'est_visit', 'visit_addon']],
   ['Destruction', ['destruction_premalignant', 'destruction_benign', 'destruction_malignant']],
   ['Excision, repair and Mohs', ['excision', 'repair', 'mohs']], ['Pathology', ['pathology']], ['Radiation', ['radiation']],
   ['Skin substitutes and drugs', ['skin_substitute', 'drug']], ['Other', null]];       // null: every family not named above
-const PV_METRICS = {per_day: ['Patients per clinic day', 'median; quarters with fewer than 8 clinic days are left out'], clinic_days: ['Clinic days', ''],
+const PV_METRICS = {per_day: ['Patients per clinic day', 'each point is the median of that quarter\'s clinic days; quarters with fewer than 8 clinic days are left out'], clinic_days: ['Clinic days', ''],
   patients: ['Patients seen', ''], new_visits: ['New patient visits', ''],
   est_alone_high_share: ['Established visits with no procedure, share billed 99214 or 99215', 'quarters with fewer than 30 such visits are left out'],
   est_high_share: ['All established visits, share billed 99214 or 99215', 'quarters with fewer than 30 visits are left out'],
@@ -49,7 +49,7 @@ function pvAxes(t, extra){
 function pvTable(rows, cols, opts){
   const o = opts || {};
   return `<div class="scroll"><table class="pvt"><thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}"${c.tip ? ` title="${esc(c.tip)}"` : ''}>${c.h}</th>`).join('')}</tr></thead>
-    <tbody>${rows.map(r => `<tr${o.pick ? ` class="row${o.picked === r.provider_id ? ' picked' : ''}" data-pick="${esc(r.provider_id)}"` : ''}>${cols.map(c => `<td class="${c.num ? 'num' : ''}">${c.f(r)}</td>`).join('')}</tr>`).join('')
+    <tbody>${rows.map(r => `<tr${o.pick ? ` class="row${o.picked === r.provider_id ? ' picked' : ''}" data-pick="${esc(r.provider_id)}" tabindex="0"` : ''}>${cols.map(c => `<td class="${c.num ? 'num' : ''}">${c.f(r)}</td>`).join('')}</tr>`).join('')
       || `<tr><td colspan="${cols.length}" class="muted">Nobody to show for these months and this filter.</td></tr>`}</tbody></table></div>`;
 }
 function pvWho(r, sub){
@@ -113,16 +113,18 @@ async function pvLoad(){
     }
     throw e;
   }
-  if(seq !== pv.seq || state.tab !== 'providers' || !v.isConnected) return;      // a newer request is on its way, or the reader has left
+  if(seq !== pv.seq) return;                // a newer request is on its way and will take the dimming off
   v.classList.remove('busy');
+  if(!v.isConnected) return;                // the reader has left this tab
   pv.data = {ov: ans[0], tr: ans[1], rc: ans[2]};
   if(ans[0].ready && pv.preset === 'custom'){ pv.from = ans[0].from; pv.to = ans[0].to; }      // what the server answered (a reversed pair is put right there)
   pv.good = {from: pv.from, to: pv.to, preset: pv.preset};
   pvDraw();
 }
 function pvReload(){
-  pvLoad().catch(e => { const v = state.pv.el; console.error(e);
-    if(!v || !v.isConnected || state.tab !== 'providers') return;
+  const pv = state.pv, pending = pvLoad(), seq = pv.seq;         // pvLoad numbers itself before its first wait
+  pending.catch(e => { const v = pv.el; console.error(e);
+    if(seq !== pv.seq || !v || !v.isConnected) return;           // a request that failed after a newer one answered says nothing about what is on screen
     if(pvLocked() && [403, 429, 503].includes(e.status)){ pvForget(); pvUnlockForm(v, e.message); return; }
     pvDraw(); v.insertAdjacentHTML('afterbegin', `<div class="warnbox">Those months could not be loaded (${esc(e.message)}). Showing the months loaded before.</div>`); });
 }
@@ -156,7 +158,7 @@ function pvDraw(){
   const edge = r => {         // someone who started or left inside the window is not measured against all of it
     const out = [];
     if(r.first_clinic_day && r.first_clinic_day.slice(0, 7) > ov.from) out.push('first clinic day ' + dayName(r.first_clinic_day));
-    if(r.last_clinic_day && r.last_clinic_day.slice(0, 7) < ov.to) out.push('last clinic day ' + dayName(r.last_clinic_day));
+    if(r.last_clinic_day && r.last_clinic_day.slice(0, 7) < (last < ov.to ? last : ov.to)) out.push('last clinic day ' + dayName(r.last_clinic_day));
     return out.join(', ');
   };
   const sub = r => [where[r.provider_id], edge(r)].filter(Boolean).join(' · ');
@@ -167,7 +169,7 @@ function pvDraw(){
   const short = inWindow.filter(m => (m.missing_to_gaps || 0) >= 0.005);
   const gaps = (cov.gaps || []).filter(g => Object.keys(g.missing_by_month || {}).some(m => m >= ov.from && m <= ov.to));
   const followed = ov.followed || {}, fNew = followed.new_back, fCa = followed.cancer;
-  const span = q => q ? `${quarterName(q[0])} to ${quarterName(q[1])}` : 'no finished quarters yet';
+  const span = q => q ? `${esc(quarterName(q[0]))} to ${esc(quarterName(q[1]))}` : 'no finished quarters yet';
   const preset = pv.preset || 'year';
 
   const volume = pvTable(rows, [
@@ -179,7 +181,7 @@ function pvDraw(){
     {h: 'Per clinic day', num: 1, f: r => `<b>${n0((r.per_day || {}).median)}</b>`, tip: 'median over clinic days'},
     {h: `<span class="muted">0 to ${n0(maxDay)} a day</span>`, f: r => pvRange(r, maxDay)},
     {h: 'Per clinic day, by state', num: 1, f: places, tip: 'median on clinic days that had a Medicare claim, by the state of the Medicare contractor that paid it, which follows the office where the visit took place. Days with no Medicare claim carry no state.'},
-    {h: 'New patients a day', num: 1, f: r => n1(r.new_per_day)},
+    {h: 'New patients a clinic day', num: 1, f: r => n1(r.new_per_day), tip: 'mean over clinic days'},
     {h: 'New, share of visits', num: 1, f: r => pctv(r.new_share)},
     {h: 'Post-op and nurse contacts', num: 1, f: r => r.other_contacts ? n0(r.other_contacts) : '–', tip: 'patient-days whose only service was a post-operative check, a light-box session or an injection given by staff; not counted as patients seen'},
   ], {pick: true, picked: pv.pick});
@@ -208,7 +210,7 @@ function pvDraw(){
   const dollars = pvTable(rows, [
     {h: 'Clinician', f: r => pvWho(r)},
     {h: 'Allowed per patient seen', num: 1, f: r => `<b>${money(r.allowed_per_patient)}</b>`, tip: 'pathology, radiation, skin substitute products and drugs left out'},
-    {h: 'Allowed per clinic day', num: 1, f: r => money(r.allowed_per_clinic_day)},
+    {h: 'Allowed in the exam room, per clinic day', num: 1, f: r => money(r.allowed_per_clinic_day)},
     {h: 'Allowed in the exam room', num: 1, f: r => money(r.clinic_allowed_cents)},
     {h: 'Pathology read here on their biopsies, per patient', num: 1, tip: 'allowed for slides read in this practice on specimens this clinician took, billed under the reading physician', f: r => money(r.path_generated_per_patient)},
     {h: 'Skin substitutes and drugs', num: 1, f: r => r.product_allowed_cents ? money(r.product_allowed_cents) : '–', tip: 'allowed for the products themselves, which mostly covers what they cost'},
@@ -241,7 +243,8 @@ function pvDraw(){
     ${short.length && gaps.length ? `<div class="warnbox"><b>Remittances are missing for some weeks.</b> ${gaps.map(g => `${esc(g.payer)}, ${dayName(g.from)} to ${dayName(g.to)} (${plural(g.seen, 'claim', 'claims')} where about ${n0(g.usual)} are usual)`).join('; ')}.
       Visits in these months are short because of it: ${short.map(m => `${monthName(m.month)} by about ${Math.max(1, Math.round(100 * m.missing_to_gaps))}%`).join(', ')}. A clinician with more of that payer's patients is short by more. The Data tab lists the weeks to ask TriZetto for.</div>` : ''}</div>
 
-    <div class="panel"><h2>How busy</h2><div class="note">Per clinic day is the median, and the bar is the middle half of that clinician's clinic days on one scale. Click a row for that clinician's months, weekdays, offices and codes.</div>${volume}
+    <div class="panel"><h2>How busy</h2><div class="note">Per clinic day is the median, and the bar is the middle half of that clinician's clinic days on one scale. Click a row (or press Enter on it) for that clinician's months, weekdays, states and codes.</div>${volume}
+      <div class="small muted" style="margin-top:6px">A week is counted between that clinician's first and last clinic day in these months. By state: the state of the Medicare contractor that paid that day's Medicare claims, which follows the office where the visit took place; a day with no Medicare claim carries no state. New patients a clinic day is a mean.</div>
       ${Object.keys(where).length ? `<div class="small muted" style="margin-top:6px">Under each name: where their patients were seen in the EMA charge exports (visits ${dayName(ema.first_service)} to ${dayName(ema.last_service)}), whatever months are chosen above.</div>` : ''}
       ${minor.length ? `<div class="small muted" style="margin-top:6px">Fewer than three clinic days in these months: ${minor.map(r => `${esc(r.name)} (${[r.patients ? plural(r.patients, 'patient', 'patients') : '', r.radiation ? plural(r.radiation, 'radiation treatment', 'radiation treatments') : '', r.path_only ? plural(r.path_only, 'pathology bill', 'pathology bills') : ''].filter(Boolean).join(', ')})`).join('; ')}.</div>` : ''}</div>
     <div id="pvDetail"></div>
@@ -257,10 +260,11 @@ function pvDraw(){
       <div class="small muted" style="margin-top:6px">† Fixed period: new patients first seen ${span(fNew)}, because each needs a year of follow-up. It does not follow the months chosen above.</div></div>
 
     <div class="panel"><h2>What a visit holds</h2><div class="note">The level of a visit is easiest to compare on visits with no procedure the same day (in bold), because a procedure changes what the visit code may claim. Biopsy rates are shown within Medicare and within everyone else: age drives biopsies, and the payer is the nearest thing to age on a remittance.</div>${visits}
+      <div class="small muted" style="margin-top:6px">The bracket after "Downcoded per 100 visits" is the number of visits a payer paid at a lower level. Slides read here is the share of patients biopsied whose slide was billed by this practice the same day. Shares are left blank under 30 visits.</div>
       <div class="small muted" style="margin-top:6px">‡ Fixed period: biopsies taken ${span(fCa)}, whatever months are chosen above. Counts first biopsies only (no biopsy in the four months before and no skin cancer treated in the year before) and asks how many were followed, within 120 days, by a skin cancer treated in this practice (Mohs, a malignant excision or destruction, radiation). It is a floor. Treatment somewhere else never shows here, a surgeon who treats their own patients will show higher than a clinician who refers, and patients biopsied at an office far from the surgeons are treated elsewhere more often. The pathology results are the direct test.</div></div>
 
     ${recall.cancer_patients ? `<div class="panel"><h2>Patients to call back</h2>
-      <div class="note">People who had a skin cancer treated in this practice (Mohs, a malignant excision or destruction, radiation), and how many of them have not been seen for a visit in twelve months, counted under the clinician who saw them last, as of ${dayName(recall.as_of)}. In all, <b>${n0(recall.overdue_12)}</b> of ${n0(recall.cancer_patients)} have not been seen for twelve months and ${n0(recall.overdue_18)} for eighteen. This does not follow the months chosen above. It is a count from the remittances, where a patient is known only by name: some will have moved, died or be followed elsewhere. The list to work from is the recall report in EMA.</div>
+      <div class="note">People who had a skin cancer treated in this practice (Mohs, a malignant excision or destruction, radiation), and how many of them have not been seen for a visit in twelve months, counted under the clinician who saw them last. It covers people treated since the remittances begin (${monthName(cov.first_month)}) and is taken as of ${dayName(recall.as_of)}, sixty days before the newest payment, so that a recent visit still waiting to be paid is not read as an absence. In all, <b>${n0(recall.overdue_12)}</b> of ${n0(recall.cancer_patients)} have not been seen for twelve months and ${n0(recall.overdue_18)} for eighteen. This does not follow the months chosen above. It is a count from the remittances, where a patient is known only by name: some will have moved, died or be followed elsewhere. The list to work from is the recall report in EMA.</div>
       ${pvTable(recallRows, [
         {h: 'Seen last by', f: r => pvWho(r)},
         {h: 'Treated for a skin cancer here', num: 1, f: r => n0(r.cancer_patients)},
@@ -269,7 +273,7 @@ function pvDraw(){
         {h: 'Share not seen for 12 months', num: 1, f: r => pctv(r.cancer_patients ? r.overdue_12 / r.cancer_patients : null)},
       ])}</div>` : ''}
 
-    <div class="panel"><h2>What it brings in</h2><div class="note">Allowed is what the payer and the patient together owe under the contract. Per patient seen and "in the exam room" leave out pathology, radiation, and skin substitute products and drugs, which are paid mostly to cover their cost. The pathology column is what the slides from that clinician's biopsies were allowed when they were read in this practice, billed under the physician who read them. It depends on where the slides are sent as much as on what is biopsied. It is there to show what a biopsy brings in, not as a basis for pay: ask counsel before tying anyone's pay to pathology or radiation.</div>${dollars}
+    <div class="panel"><h2>What it brings in</h2><div class="note">Allowed is what the payer and the patient together owe under the contract. Per patient seen and "in the exam room" leave out pathology and radiation, which are not exam-room work, and skin substitute products and drugs, which are paid mostly to cover their cost. The pathology column is what the slides from that clinician's biopsies were allowed when they were read in this practice, billed under the physician who read them. It depends on where the slides are sent as much as on what is biopsied. It is there to show what a biopsy brings in, not as a basis for pay: ask counsel before tying anyone's pay to pathology or radiation.</div>${dollars}
       <h3 class="small" style="margin:14px 0 4px">Where the allowed dollars come from</h3><div class="chartbox" style="height:${Math.max(160, 34 * rows.length + 70)}px"><canvas id="pvMix"></canvas></div>
       <details class="small" style="margin-top:8px"><summary>The same numbers as a table</summary><div id="pvMixTable"></div></details></div>
 
@@ -298,21 +302,34 @@ function pvDraw(){
     pv.preset = p;
     if(p === 'custom') redraw(); else pvReload();
   };
-  const month = (box, key) => {         // a half-typed or out-of-range month is ignored, not sent
-    const m = box.value;
-    if(!PV_MONTH.test(m) || m < cov.first_month || m > cov.last_month || m === ov[key]) return;
-    Object.assign(pv, {from: ov.from, to: ov.to, preset: 'custom'});
-    pv[key] = m;
+  const usable = m => PV_MONTH.test(m) && m >= cov.first_month && m <= cov.last_month;
+  const boxes = {from: v.querySelector('#pvFrom'), to: v.querySelector('#pvTo')};
+  const month = key => {                // a half-typed or out-of-range month is not sent
+    clearTimeout(pv.typing);
+    if(!boxes[key].isConnected) return;
+    // both boxes are read, so a change made in one while the other was still waiting is not lost
+    const next = {from: usable(boxes.from.value) ? boxes.from.value : ov.from, to: usable(boxes.to.value) ? boxes.to.value : ov.to, preset: 'custom'};
+    if(next.from > next.to){ if(key === 'from') next.to = next.from; else next.from = next.to; }       // the other end follows; the pair is never swapped behind the reader's back
+    if(next.from === ov.from && next.to === ov.to) return;
+    Object.assign(pv, next);
     pvReload();
   };
-  v.querySelector('#pvFrom').onchange = e => month(e.target, 'from');
-  v.querySelector('#pvTo').onchange = e => month(e.target, 'to');
+  ['from', 'to'].forEach(key => {
+    const box = boxes[key];
+    // a typed month passes through other valid months on the way ("10" through "1"): wait for a pause, Enter or leaving the box
+    box.onchange = () => { clearTimeout(pv.typing); pv.typing = setTimeout(() => month(key), 800); };
+    box.onkeydown = e => { if(e.key === 'Enter'){ e.preventDefault(); month(key); } };
+    box.onblur = () => { if(!box.isConnected) return; if(usable(box.value)) month(key); else { box.value = ov[key]; } };
+  });
   v.querySelector('#pvTier').onchange = e => { pv.tier = e.target.value; redraw(); };
   v.querySelector('#pvMetric').onchange = e => { pv.metric = e.target.value; redraw(); };
-  v.querySelectorAll('tr.row[data-pick]').forEach(trEl => trEl.onclick = () => {
-    pv.pick = pv.pick === trEl.dataset.pick ? '' : trEl.dataset.pick;
-    v.querySelectorAll('tr.row[data-pick]').forEach(t => t.classList.toggle('picked', t.dataset.pick === pv.pick));
-    pvShowDetail(true);
+  v.querySelectorAll('tr.row[data-pick]').forEach(trEl => {
+    trEl.onclick = () => {
+      pv.pick = pv.pick === trEl.dataset.pick ? '' : trEl.dataset.pick;
+      v.querySelectorAll('tr.row[data-pick]').forEach(t => t.classList.toggle('picked', t.dataset.pick === pv.pick));
+      pvShowDetail(true);
+    };
+    trEl.onkeydown = e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); trEl.click(); } };
   });
 
   const theme = pvTheme();
@@ -395,7 +412,7 @@ function pvRecent(el, rc, keep){
   const list = (rc.providers || []).filter(p => keep({tier: p.tier}));
   if(!(rc.providers || []).length){ el.innerHTML = '<div class="muted small">No Encounter and Charge Lines export has been loaded yet.</div>'; return; }
   const days = (n, more) => n == null ? '–' : `${n0(n)}${more ? '+' : ''} ${Math.round(n) === 1 && !more ? 'day' : 'days'}`;
-  el.innerHTML = `<div class="note">These exports include self-pay visits and arrive weeks before the remittances. An export holds only the visits that had become a bill when it was pulled, and a bill appears days after the visit, so a day is counted only when an export covering it was pulled late enough for that clinician's bills to exist. "At face value" is what the same exports say if that is ignored. Where an export does not name the patient, a visit is counted by its bill.</div>
+  el.innerHTML = `<div class="note">These exports include self-pay visits and arrive weeks before the remittances. An export holds only the visits that had become a bill when it was pulled, and a bill appears days after the visit. So a day is counted only when an export that covers it was pulled late enough for that clinician's bills to exist. "At face value" is what the same exports say if that is ignored. Where an export does not name the patient, a visit is counted by its bill. A plus sign after a number of days means at least that many: the exports only show bills written within about three weeks of the visit.</div>
     ${pvTable(list, [
       {h: 'Clinician', f: p => `<b>${esc(p.provider)}</b> <span class="chip">${esc(tierLabel(p.tier))}</span>${p.offices && p.offices.length ? `<span class="sub">${p.offices.map(o => `${esc(o.name)} ${Math.round(100 * o.share)}%`).join(' · ')}</span>` : ''}`},
       {h: 'Days counted', num: 1, f: p => `${n0(p.clinic_days)}${p.counted_from ? `<span class="sub">${dayName(p.counted_from, false)} to ${dayName(p.counted_to, false)}</span>` : ''}`,
@@ -404,8 +421,9 @@ function pvRecent(el, rc, keep){
       {h: 'Insured', num: 1, f: p => pctv(p.insured_share), tip: 'share of those patients with a claim to an insurer'},
       {h: 'Charges a day', num: 1, f: p => money(p.charges_per_day_cents), tip: 'pathology, radiation, skin substitute products and drugs left out'},
       {h: 'New patients a day', num: 1, f: p => n1(p.new_per_day)},
-      {h: 'The same days on remittances', num: 1, f: p => p.remit_patients_per_day == null || p.tier === 'staff' ? '–' : `${n1(p.remit_patients_per_day)}${p.remit_share == null ? '' : `<span class="sub">${pctv(p.remit_share)} of the export's count</span>`}`,
-       tip: 'patients a day the remittances show for the counted days old enough to have been paid, and what share of the export\'s patients that is. The rest are self-pay, or a payer whose remittances do not arrive here.'},
+      {h: 'On remittances, for the days old enough to be paid', num: 1, f: p => p.remit_patients_per_day == null || p.tier === 'staff' ? '–'
+         : `${n1(p.remit_patients_per_day)} of ${n1(p.ema_patients_per_day_same_days)} a day<span class="sub">${plural(p.remit_days, 'day', 'days')}${p.remit_share == null ? '' : ', ' + pctv(p.remit_share)}</span>`,
+       tip: 'for the counted days at least 45 days older than the newest payment: patients a day on the remittances, beside what the exports show for those same days. The rest are self-pay, or a payer whose remittances do not arrive here.'},
       {h: 'Visit to bill, median', num: 1, f: p => `<span title="${esc(p.lag.basis ? 'measured on ' + p.lag.basis + ' (' + n0(p.lag.bills) + ')' : '')}">${days(p.lag.median)}</span>`},
       {h: 'Nine in ten within', num: 1, f: p => days(p.lag.p90, p.lag.at_least), tip: 'a plus sign means at least: the exports only show bills written within about three weeks of the visit'},
       {h: 'Days still waiting on bills', num: 1, f: p => p.days_waiting ? `<span class="sev-medium">${n0(p.days_waiting)}</span>` : '0'},
@@ -434,9 +452,9 @@ async function pvShowDetail(scroll){
       return;
     }
     if(pv.pick !== id || !el.isConnected) return;       // another clinician was picked meanwhile, or the page was redrawn
-    pv.detail = {key, d};
+    if(d.ready) pv.detail = {key, d};
   }
-  if(!d.ready){ el.innerHTML = ''; return; }
+  if(!d.ready){ el.innerHTML = `<div class="panel muted">${esc(d.message || 'These figures are not ready yet. Try again in a minute.')}</div>`; return; }
   const theme = pvTheme(), who = d.provider || {}, row = ov.providers.find(r => r.provider_id === id) || {};
   const wk = d.weekdays.filter(w => w.clinic_days);
   const maxWk = Math.max(1, ...wk.map(w => w.per_day || 0));
@@ -452,18 +470,18 @@ async function pvShowDetail(scroll){
         ${low.size ? '<div class="small muted">Months marked * are not complete yet, or a payer\'s remittances are missing for part of them.</div>' : ''}
         <details class="small" style="margin-top:6px"><summary>The same numbers as a table</summary><div class="scroll"><table class="small"><thead><tr><th>Month</th><th class="num">Clinic days</th><th class="num">Patients</th><th class="num">Per clinic day</th><th class="num">New</th><th class="num">Allowed in the exam room</th></tr></thead>
           <tbody>${d.months.map(m => `<tr><td>${monthName(m.month)}${low.has(m.month) ? ' *' : ''}</td><td class="num">${n0(m.clinic_days)}</td><td class="num">${n0(m.patients)}</td><td class="num">${n1(m.per_day)}</td><td class="num">${n0(m.new_visits)}</td><td class="num">${money(m.clinic_allowed_cents)}</td></tr>`).join('')}</tbody></table></div></details></div>
-      <div><h3 class="small" style="margin:4px 0">How many clinic days ended at each size</h3><div class="chartbox" style="height:220px"><canvas id="pvHist"></canvas></div>
+      <div><h3 class="small" style="margin:4px 0">Clinic days by the number of patients seen</h3><div class="chartbox" style="height:220px"><canvas id="pvHist"></canvas></div>
         <details class="small" style="margin-top:6px"><summary>The same numbers as a table</summary><div class="scroll"><table class="small"><thead><tr><th>Patients that day</th><th class="num">Clinic days</th></tr></thead>
           <tbody>${d.histogram.map(h => `<tr><td>${h.from >= 60 ? '60 or more' : `${n0(h.from)} to ${n0(h.from + 4)}`}</td><td class="num">${n0(h.days)}</td></tr>`).join('')}</tbody></table></div></details></div>
     </div>
     <div class="grid two" style="margin-top:8px">
-      <div><h3 class="small" style="margin:4px 0">By weekday</h3><div class="scroll"><table class="small"><thead><tr><th>Day</th><th class="num">Clinic days</th><th class="num">Patients a day</th><th style="width:45%"></th></tr></thead>
+      <div><h3 class="small" style="margin:4px 0">By weekday</h3><div class="scroll"><table class="small"><thead><tr><th>Day</th><th class="num">Clinic days</th><th class="num">Patients a day (mean)</th><th style="width:45%"></th></tr></thead>
         <tbody>${wk.map(w => `<tr><td>${esc(w.day)}</td><td class="num">${n0(w.clinic_days)}</td><td class="num">${n1(w.per_day)}</td><td><div class="bar"><i style="width:${Math.round(100 * (w.per_day || 0) / maxWk)}%;background:var(--pv1)"></i></div></td></tr>`).join('')}</tbody></table></div>
         ${places.length ? `<h3 class="small" style="margin:12px 0 4px">By state of the office</h3><div class="scroll"><table class="small"><thead><tr><th title="the state of the Medicare contractor that paid that day's Medicare claims">State</th><th class="num">Clinic days</th><th class="num">Patients a day, median</th><th class="num">Mean</th></tr></thead>
         <tbody>${places.map(p => `<tr><td>${p.place ? esc(p.place) : '<span class="muted">no Medicare claim that day</span>'}</td><td class="num">${n0(p.clinic_days)}</td><td class="num">${n1(p.per_day)}</td><td class="num">${n1(p.mean)}</td></tr>`).join('')}</tbody></table></div>` : ''}
         <h3 class="small" style="margin:12px 0 4px">By payer</h3><div class="scroll"><table class="small"><thead><tr><th>Payer type</th><th class="num" title="visits, and bills for a slide or a radiation treatment on their own">Bills</th><th class="num">Allowed</th><th class="num">Per bill</th></tr></thead>
         <tbody>${d.payers.map(p => `<tr><td>${esc(PAYER_LABEL[p.payer_kind] || p.payer_kind)}</td><td class="num">${n0(p.encounters)}</td><td class="num">${money(p.allowed_cents)}</td><td class="num">${p.encounters ? money(p.allowed_cents / p.encounters) : '–'}</td></tr>`).join('')}</tbody></table></div></div>
-      <div><h3 class="small" style="margin:4px 0">The ${n0(d.codes.length)} largest codes, by allowed dollars</h3><div style="max-height:460px;overflow:auto"><table class="small"><thead><tr><th>Code</th><th class="num">Services</th><th class="num">Units</th><th class="num">Unpaid</th><th class="num">Allowed</th><th class="num" title="share of everything this clinician was allowed in these months">Share of all</th></tr></thead>
+      <div><h3 class="small" style="margin:4px 0">The ${n0(d.codes.length)} largest codes, by allowed dollars</h3><div style="max-height:460px;overflow:auto"><table class="small"><thead><tr><th>Code</th><th class="num">Services</th><th class="num">Units</th><th class="num" title="a payer decided the service and nothing was allowed or paid">Denied</th><th class="num">Allowed</th><th class="num" title="share of everything this clinician was allowed in these months">Share of all</th></tr></thead>
         <tbody>${d.codes.map(c => `<tr><td>${esc(c.code)}</td><td class="num">${n0(c.items)}</td><td class="num">${n0(c.units)}</td><td class="num">${c.denied ? n0(c.denied) : ''}</td><td class="num">${money(c.allowed_cents)}</td><td class="num">${(100 * (c.allowed_cents || 0) / whole).toFixed(1)}%</td></tr>`).join('')}
         ${whole - listed > 50 ? `<tr><td class="muted" colspan="4">every other code</td><td class="num muted">${money(whole - listed)}</td><td class="num muted">${(100 * (whole - listed) / whole).toFixed(1)}%</td></tr>` : ''}</tbody></table></div></div>
     </div></div>`;
@@ -476,5 +494,9 @@ async function pvShowDetail(scroll){
     datasets: [{label: 'clinic days', data: d.histogram.map(h => h.days), backgroundColor: theme.series[0], maxBarThickness: 24, borderRadius: {topLeft: 4, topRight: 4}}]},
     options: {animation: false, plugins: {legend: {display: false}}, scales: pvAxes(theme, {x: {title: {display: true, text: 'patients seen that day', color: theme.muted}}})}});
   sweepCharts();
-  if(scroll) el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  if(scroll){             // the page header stays at the top of the window: land below it
+    const head = document.querySelector('header');
+    el.style.scrollMarginTop = ((head ? head.offsetHeight : 0) + 8) + 'px';
+    el.scrollIntoView({behavior: 'auto', block: 'start'});
+  }
 }

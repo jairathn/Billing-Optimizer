@@ -280,11 +280,12 @@ def test_overview_trend_detail_and_the_months_that_are_complete(built):
     ann = next(r for r in ov["providers"] if r["provider_id"] == ANN)
     assert ann["name"] == "Alpha, Ann" and ann["clinic_days"] == 2 and ann["days_any"] == 4 and ann["patients"] == 14
     assert ann["per_day"] == {"median": 6.0, "p25": 6.0, "p75": 6.0, "mean": 6.0, "max": 6}
-    assert ann["new_visits"] == 1 and ann["levels"] == {"99203": 1, "99213": 11, "99214": 1} and ann["est_high_share"] == round(1 / 12, 4)
+    assert ann["new_visits"] == 1 and ann["levels"] == {"99203": 1, "99213": 11, "99214": 1}
+    assert ann["est_high_share"] is None and ann["new_high_share"] is None            # twelve visits are too few to quote a share
     assert ann["biopsied_per_100_patients"] == round(100 / 14, 1) and ann["lesions_per_biopsied_patient"] == 3.0
     assert ann["path_generated_cents"] == 18000 and ann["allowed_per_patient"] == round(ann["clinic_allowed_cents"] / 14)
     assert [f["family"] for f in ann["families"]][:3] == ["est_visit", "biopsy", "new_visit"]          # largest allowed first
-    assert [r["provider_id"] for r in ov["unassigned"]] == ["group"] and ov["unassigned_share"] == round(1 / 18, 4)
+    assert [r["provider_id"] for r in ov["unassigned"]] == ["group"] and ov["unassigned_share"] == round(1 / 18, 6)
     assert ov["clinic_day_min"] == activity.CLINIC_DAY_MIN and ov["from"] == "2026-03" and ov["to"] == "2026-04"
     bob = next(r for r in ov["providers"] if r["provider_id"] == BOB)
     assert bob["path_only"] == 1 and bob["radiation"] == 1 and bob["patients"] == 3 and bob["clinic_days"] == 0 and bob["per_day"]["median"] is None
@@ -325,7 +326,7 @@ def test_ema_side_counts_a_day_only_when_the_export_could_hold_it(built):
     # 27 March (pulled three days later) and 10 April (pulled the same day) wait instead of being read as light days.
     assert ann["lag"] == {"median": 3, "p75": 5, "p90": 6, "bills": 23, "basis": "every bill for an office visit in the exports", "at_least": False}
     assert ann["hold_days"] == 6 and (ann["counted_from"], ann["counted_to"]) == ("2026-03-02", "2026-03-05") and ann["named_share"] == 1.0
-    assert ann["clinic_days"] == 4 and ann["days_waiting"] == 2 and ann["patients_per_day"] == 5.5 and ann["insured_share"] == round(21 / 22, 4)
+    assert ann["clinic_days"] == 4 and ann["days_waiting"] == 2 and ann["patients_per_day"] == 5.5 and ann["insured_share"] == round(21 / 22, 6)
     assert ann["raw_days"] == 6 and ann["raw_patients_per_day"] == 5.0 and ann["new_per_day"] == round(1 / 4, 1)
     assert ann["remit_patients_per_day"] == round((6 + 6 + 1 + 0) / 4, 1) and ann["remit_days"] == 4 and ann["remit_share"] is None      # too few to say
     assert (rc["counted_from"], rc["counted_to"]) == ("2026-03-02", "2026-03-05")

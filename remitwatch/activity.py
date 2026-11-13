@@ -1206,6 +1206,7 @@ def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> di
     seen_sig: dict[tuple, str] = {}
     day: dict[tuple, dict] = {}
     bills: dict[tuple, list] = {}
+    dated: set = set()                              # exports whose rows say when the bill was created
     nameless = 0
     for (source, provider, role, d, patient, bill_id, claim_id, item, cpt, units, charge, created, location, mods) in conn.execute(
             f"""SELECT source_name, provider, provider_role, service_date, patient_id, bill_id, claim_id, bill_item_id, cpt, units, charges_cents,
@@ -1256,6 +1257,7 @@ def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> di
         if location:
             e["loc"][location] += 1
         if bill and created:
+            dated.add(source)
             b = bills.get((provider, bill))
             if b is None:
                 b = bills[(provider, bill)] = [d, created[:10], pulled_at.get(source, ""), False]
@@ -1289,7 +1291,7 @@ def build_ema(conn: sqlite3.Connection, ema_id, tables: set | None = None) -> di
         lag[(provider, "visit" if visit else "other", min(n, 90), mature)] += 1
     conn.executemany("INSERT INTO provider_ema_lag VALUES (?,?,?,?,?,?)", [(k[0], ema_id(k[0]), k[1], k[2], v, k[3]) for k, v in sorted(lag.items())])
     return {"first_service": first_service, "last_service": last_service, "last_bill_created": last_created, "exports": len(pulled_at),
-            "exports_with_bill_dates": len({b[2] for b in bills.values()}), "exports_with_a_creation_time": len([s for s in pulled_at if s in made]),
+            "exports_with_bill_dates": len(dated), "exports_with_a_creation_time": len([s for s in pulled_at if s in made]),
             "last_pulled": max(pulled_at.values(), default=None), "charge_rows": len(seen_sig), "provider_days": len(rows)}
 
 
@@ -1380,7 +1382,7 @@ def _weeks(a: str, b: str) -> float:
 
 
 def _share(n, d) -> float | None:
-    return round(n / d, 4) if n is not None and d else None
+    return round(n / d, 6) if n is not None and d else None        # rounded once, on the page
 
 
 def _rate(mix: dict, only: tuple | None, without: tuple = ()) -> float | None:
@@ -1469,6 +1471,8 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
     used: dict[str, list] = {"new_back": [], "cancer": []}
     for r in conn.execute("SELECT * FROM provider_cohorts ORDER BY quarter"):
         q_end = _quarter_end(r["quarter"])
+        if cov.get("first_month") and _add_months(q_end, -2) < cov["first_month"]:
+            continue            # the quarter began before the remittances do: only the visits that were paid late are in it
         x = came_back[r["provider_id"]]
         if _add_months(q_end, 4) <= horizon and _add_months(q_end, 4) > _add_months(horizon, -24):       # 120 days of follow-up
             x[6] += r["biopsied"] or 0
@@ -1501,8 +1505,8 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
             "provider_id": pid, "name": who.get("name"), "kind": who.get("kind"), "tier": who.get("tier"), "role": who.get("role"),
             "days_any": sum(1 for x in p["days"] if x > 0), "clinic_days": len(clinic),
             "first_clinic_day": min(p["clinic"]) if p["clinic"] else None, "last_clinic_day": max(p["clinic"]) if p["clinic"] else None,
-            "days_per_week": round(len(clinic) / span, 2) if span else None,
-            "patients_per_week": round(s["patients"] / span, 1) if span else None,
+            "days_per_week": round(len(clinic) / span, 4) if span else None,
+            "patients_per_week": round(s["patients"] / span, 3) if span else None,
             "patients": s["patients"], "per_day": {"median": _quantile(clinic, 0.5), "p25": _quantile(clinic, 0.25), "p75": _quantile(clinic, 0.75),
                                                    "mean": round(sum(clinic) / len(clinic), 1) if clinic else None, "max": max(clinic) if clinic else None},
             "places": [{"place": k, "clinic_days": len(v), "per_day": _quantile(v, 0.5), "mean": round(sum(v) / len(v), 1)}
@@ -1510,7 +1514,7 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
             "clinic_days_no_state": s["no_state_days"],
             "visits": s["visits"], "new_visits": s["new_visits"], "est_visits": s["est_visits"], "proc_only": s["proc_only"],
             "other_contacts": s["other_contacts"],
-            "new_share": _share(s["new_visits"], s["visits"]), "new_per_day": round(s["clinic_new"] / len(clinic), 2) if clinic else None,
+            "new_share": _share(s["new_visits"], s["visits"]), "new_per_day": round(s["clinic_new"] / len(clinic), 4) if clinic else None,
             "path_only": s["path_only"], "radiation": s["radiation"],
             "biopsy_lesions": round(s["biopsy_lesions"], 1), "biopsy_patients": s["biopsy_patients"],
             "biopsied_per_100_patients": round(100 * s["biopsy_patients"] / s["patients"], 1) if s["patients"] else None,
@@ -1518,7 +1522,8 @@ def overview(conn: sqlite3.Connection, month_from: str | None = None, month_to: 
             "lesions_per_clinic_day": round(s["biopsy_lesions"] / len(clinic), 1) if clinic else None,
             "path_read_share": _share(s["path_read_patients"], s["biopsy_patients"]) if s["biopsy_patients"] >= 30 else None,
             "levels": {k: c[k] for k in EM_NEW + EM_EST if c[k]},
-            "est_high_share": _share(c["99214"] + c["99215"], est_n), "new_high_share": _share(c["99204"] + c["99205"], new_n),
+            "est_high_share": _share(c["99214"] + c["99215"], est_n) if est_n >= 30 else None,
+            "new_high_share": _share(c["99204"] + c["99205"], new_n) if new_n >= 30 else None,
             "est_alone_high_share": _share(s["est_alone_high"], s["est_alone"]) if s["est_alone"] >= 30 else None,
             "charge_cents": s["charge_cents"], "allowed_cents": s["allowed_cents"], "paid_cents": s["paid_cents"],
             "clinic_allowed_cents": s["clinic_allowed_cents"], "path_generated_cents": s["path_generated_cents"],
@@ -1798,6 +1803,7 @@ def recent(conn: sqlite3.Connection) -> dict:
                     "at_least": bool(known and p90 is not None and p90 >= 19)},
             "remit_days": len(match),
             "remit_patients_per_day": round(seen_remit / len(match), 1) if match else None,
+            "ema_patients_per_day_same_days": round(seen_ema / len(match), 1) if match else None,
             "remit_share": _share(seen_remit, seen_ema) if seen_ema >= 50 else None,
             "offices": _offices(worked, short),
         })
