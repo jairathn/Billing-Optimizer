@@ -530,11 +530,9 @@ def send_pdf(pdf: bytes, packet_id: str, to: str, note: str = "") -> dict:
         return {"sent": False, "reason": "not a valid email address"}
     allowed = [d.strip().lower() for d in os.environ.get("APPEAL_EMAIL_DOMAINS", "").split(",") if d.strip()]
     if not allowed:
-        from . import runtime
-        if runtime.serverless():
-            # a packet carries the patient's name, member number and visit note: a deployed site sends one only to
-            # domains the practice has named, never to whatever was typed
-            return {"sent": False, "reason": "APPEAL_EMAIL_DOMAINS is not set. Name the domains packets may be sent to (for example the practice's own) and redeploy."}
+        # a packet carries the patient's name, member number and visit note: it goes only to domains the practice has
+        # named, never to whatever was typed, on every kind of host
+        return {"sent": False, "reason": "APPEAL_EMAIL_DOMAINS is not set. Name the domains packets may be sent to (for example the practice's own) and restart or redeploy."}
     if allowed and to.split("@")[-1].lower() not in allowed:
         return {"sent": False, "reason": f"address is outside the allowed domains ({', '.join(allowed)})"}
     if not pdf:

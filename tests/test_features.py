@@ -568,52 +568,147 @@ def test_identifiers_stay_on_the_server_when_names_are_hidden(tmp_path, monkeypa
     assert c.post(f"/api/packets/{pid}/email", json={"to": "x@example.org"}, headers={"X-Requested-With": "remitwatch"}).json()["sent"] is False
 
 
-def test_the_queue_names_the_patient_only_when_names_are_switched_on(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-
-    def denied(i: int, last: str, first: str, member: str) -> str:
-        return (f"CLP*CB{i:07d}C017*1*223.65*0.00*0.00*12*PC{i}*11~NM1*QC*1*{last}*{first}*Q***MI*{member}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~"
+def patient_store(tmp_path):
+    """Six invented patients with one denied visit each, in an order the alphabet would change: a policy holder, a
+    dependent on the same member number, two people whose 'member number' is a Social Security number or the old
+    Medicare number built on one, one with no number at all, and one whose name a spreadsheet would read as a formula."""
+    def denied(i: int, who: str, more: str = "") -> str:
+        return (f"CLP*CB{i:07d}C017*1*223.65*0.00*0.00*12*PC{i}*11~NM1*QC*1*{who}~{more}NM1*82*2*TEST PROVIDER*****XX*{NPI}~"
                 "DTM*232*20260401~" + svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~"))
-    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60")
-                        + [denied(300, "ORCHARD", "LEE", "W55500300"), denied(301, "=BIRCH", "ANN", "W55500301")])
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [
+        denied(300, "ORCHARD*LEE*Q***MI*W55500300", "NM1*IL*1*HOLDER*IVY****MI*SUB7770001~NM1*74*1*ORCHARDE*LEA~REF*1W*MEMB999888~"),
+        denied(301, "=BIRCH*ANN*Q***MI*W55500301", "NM1*IL*1*=BIRCH*ANN****MI*W55500301~"),        # insured in their own right
+        denied(302, "ORCHARD*KIM*J", "NM1*IL*1*ORCHARD*LEE****MI*W55500300~"),
+        denied(303, "YEW*IVY*Q***34*999001234"),
+        denied(304, "YEW*OTTO*Q***HN*999001234A"),
+        denied(305, "ELM*BO*Q")])
     Detector(store, run_id="t").run()
     store.close()
+
+
+URL = "/api/findings?signal=DENIED_MEDICAL_NECESSITY"
+CSV_URL = "/api/findings.csv?signal=DENIED_MEDICAL_NECESSITY"
+PATIENT_SECRETS = ("ORCHARD", "BIRCH", "LEE", "KIM", "YEW", "OTTO", "ELM", "W5550030", "HOLDER", "IVY", "SUB7770001", "ORCHARDE", "MEMB999888", "999001234")
+
+
+def test_names_hidden_means_initials_on_screen_and_nothing_else(tmp_path, monkeypatch):
+    import csv
+    import io
+    from fastapi.testclient import TestClient
+
+    patient_store(tmp_path)
     import remitwatch.api as api_mod
 
     monkeypatch.setattr(api_mod, "DB_PATH", str(tmp_path / "s.sqlite"))
     monkeypatch.setattr(api_mod, "PASSWORD", "")
-    c = TestClient(api_mod.app)
-    url = "/api/findings?signal=DENIED_MEDICAL_NECESSITY"
-    found = lambda q: c.get(url, params={"q": q}).json()["total"]
-
-    # names hidden: initials only, and the search box cannot be used to ask whether a name or member number exists
     monkeypatch.setattr(api_mod, "SHOW_PHI", False)
-    hidden = c.get(url)
-    assert sorted(i["patient"] for i in hidden.json()["items"]) == ["A=", "LO"] and all("member_id" not in i for i in hidden.json()["items"])
-    export = c.get("/api/findings.csv?signal=DENIED_MEDICAL_NECESSITY").text
-    for page in (hidden.text, export):
-        for secret in ("ORCHARD", "BIRCH", "W55500300", "W55500301"):
-            assert secret not in page
-    assert "member_id" not in export.splitlines()[0]
-    assert [found(q) for q in ("orchard", "lee orchard", "W55500300", "birch", "LO")] == [0, 0, 0, 0, 0]
-    assert found("CB0000300") == 1                                           # the claim number is still searchable
+    ran: list[str] = []
+    real_db = api_mod.db
 
-    # names shown: who it is, how to find them, and everything in the list for one patient
+    def traced():
+        conn = real_db()
+        conn.set_trace_callback(ran.append)
+        return conn
+    monkeypatch.setattr(api_mod, "db", traced)
+    c = TestClient(api_mod.app)
+    cols = {k.strip() for k in api_mod.FINDING_COLS.split(",")}
+
+    # every key of every row: the finding and the initials, never a number; the export carries no patient column at all
+    items = c.get(URL).json()["items"]
+    assert [set(i) - cols for i in items] == [{"patient"}] * 6
+    assert sorted(i["patient"] for i in items) == ["A=", "BE", "IY", "KO", "LO", "OY"]
+    export = c.get(CSV_URL).text
+    assert set(export.splitlines()[0].split(",")) == cols and len(export.splitlines()) == 7
+    for page in (c.get(URL).text, export):
+        for secret in PATIENT_SECRETS:
+            assert secret not in page, secret
+
+    # no spelling of a name or number finds anything, in the address or in the header the page uses, and such a
+    # search never reads the claims table (so it cannot be timed either)
+    for q in ("ORCHARD", "orchard", "LEE", "ORCHARD, LEE", "ORCHARD, LEE Q", "lee orchard", "orch%", "_RCHARD", "W55500300", "W555", "5500300",
+              "W555003__", "W555-00300", "HOLDER", "SUB7770001", "MEMB999888", "ORCHARDE", "999001234", "LO"):
+        for ask in ({"params": {"q": q}}, {"headers": {"X-Search": q.replace("%", "%25").replace(" ", "%20").replace(",", "%2C")}}):
+            ran.clear()
+            assert c.get(URL, **ask).json()["total"] == 0, q
+            assert not [s for s in ran if any(k in s for k in (" claims", "patient_last", "patient_first", "patient_middle", "patient_id", "insured_"))], q
+            assert c.get(CSV_URL, **ask).text == "", q
+    assert c.get(URL, params={"q": "CB0000300"}).json()["total"] == 1                      # the claim number is still searchable
+    assert c.get(URL, headers={"X-Search": "CB0000300%20"}).json()["total"] == 1           # and a stray space does not lose it
+
+    # nothing says which findings belong to one person, and no sort key reaches the name
+    assert c.get(URL, params={"patient_of": items[0]["claim_key"]}).json()["total"] == 0
+    for sort in ("patient", "name", "patient_last", "member_id"):
+        assert [i["finding_id"] for i in c.get(URL, params={"sort": sort}).json()["items"]] == [i["finding_id"] for i in items], sort
+    assert [r["finding_id"] for r in csv.DictReader(io.StringIO(export))] == [i["finding_id"] for i in items]
+
+    # the page size has a floor as well as a ceiling
+    assert [c.get(URL, params=p).status_code for p in ({"limit": -1}, {"limit": 0}, {"limit": 2001}, {"offset": -1})] == [422] * 4
+    assert c.get(URL, params={"q": "x" * 60000}).status_code == 200
+
+
+def test_names_shown_says_who_and_never_shows_a_social_security_number(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    patient_store(tmp_path)
+    import remitwatch.api as api_mod
+
+    monkeypatch.setattr(api_mod, "DB_PATH", str(tmp_path / "s.sqlite"))
+    monkeypatch.setattr(api_mod, "PASSWORD", "")
     monkeypatch.setattr(api_mod, "SHOW_PHI", True)
-    shown = {i["patient_control_number"]: i for i in c.get(url).json()["items"]}
-    assert (shown["CB0000300C017"]["patient"], shown["CB0000300C017"]["member_id"]) == ("ORCHARD, LEE Q", "W55500300")
-    assert [found(q) for q in ("orchard", "lee orchard", "Orchard, L", "orchard,lee", "W55500300", "5500300")] == [1] * 6
-    assert [found(q) for q in ("birch orchard", "orchard zed", "W99999999")] == [0, 0, 0]
-    assert found("CB0000300") == 1 and found("99214") == 2
-    detail = c.get(f"/api/findings/{shown['CB0000300C017']['finding_id']}").json()["claim"]
-    assert (detail["patient"], detail["patient_id"]) == ("ORCHARD, LEE Q", "W55500300")
-    lines = c.get("/api/findings.csv?signal=DENIED_MEDICAL_NECESSITY").text.splitlines()
+    c = TestClient(api_mod.app)
+    listing = c.get(URL)
+    shown = {i["patient_control_number"][:9]: i for i in listing.json()["items"]}
+    who = lambda n: (shown[f"CB0000{n}"]["patient"], shown[f"CB0000{n}"]["member_id"])
+    assert who(300) == ("ORCHARD, LEE Q", "W55500300") and who(301) == ("=BIRCH, ANN Q", "W55500301")
+    assert who(302) == ("ORCHARD, KIM J", "W55500300")              # a dependent: the policy holder's number
+    assert who(303) == ("YEW, IVY Q", "") and who(304) == ("YEW, OTTO Q", "") and who(305) == ("ELM, BO Q", "")
+
+    # found by name in any order, as the row prints it, and by member number as a card prints it
+    found = lambda q, **kw: c.get(URL, headers={"X-Search": q.replace("%", "%25").replace(" ", "%20").replace(",", "%2C")}, **kw).json()["total"]
+    assert [found(q) for q in ("orchard", "lee orchard", "Orchard, L", "orchard,lee", "ORCHARD, LEE Q", "ORCHARD, KIM J", "yew", "ELM, BO Q")] == [2, 1, 1, 1, 1, 1, 2, 1]
+    assert [found(q) for q in ("W55500300", "5500300", "W555-00300", "W555 00300", "W55500301")] == [2, 2, 2, 2, 1]
+    assert [found(q) for q in ("birch orchard", "orchard zed", "W99999999", "MEMB999888")] == [0] * 4
+    assert found("SUB7770001") == 1                                 # the policy holder's number finds the claim as well
+    assert c.get(URL, params={"q": "orchard"}).json()["total"] == 2 and found("CB0000300 ") == 1 and found("99214") == 6
+
+    # a Social Security number, or the old Medicare number built on one, is not a member number: not shown, exported or searchable
+    export = c.get(CSV_URL).text
+    detail = lambda n: c.get(f"/api/findings/{shown[f'CB0000{n}']['finding_id']}")
+    for page in (listing.text, export, detail(303).text, detail(304).text):
+        assert "999001234" not in page
+    assert found("999001234") == 0 and found("999-00-1234") == 0
+
+    # a name lists that person only: not the rest of a family on the same number, and it works without a number
+    one_patient = lambda n: sorted(i["patient"] for i in c.get(URL, params={"patient_of": shown[f"CB0000{n}"]["claim_key"]}).json()["items"])
+    assert one_patient(300) == ["ORCHARD, LEE Q"] and one_patient(302) == ["ORCHARD, KIM J"]
+    assert one_patient(305) == ["ELM, BO Q"] and one_patient(303) == ["YEW, IVY Q"]
+    assert c.get(URL, params={"patient_of": "no-such-claim"}).json()["total"] == 0
+
+    # the detail view: who, their number, the insured person when that is someone else, and none of the rest of the claim loop
+    d300 = detail(300).json()["claim"]
+    assert (d300["patient"], d300["member_id"], d300["insured"]) == ("ORCHARD, LEE Q", "W55500300", "HOLDER, IVY")
+    assert set(d300) == set(api_mod.CLAIM_PUBLIC_COLS) | {"patient", "member_id", "insured"}
+    for secret in ("MEMB999888", "ORCHARDE", "SUB7770001"):
+        assert secret not in detail(300).text
+    d302 = detail(302).json()["claim"]
+    assert (d302["patient"], d302["member_id"], d302["insured"]) == ("ORCHARD, KIM J", "W55500300", "ORCHARD, LEE")
+    assert "insured" not in detail(301).json()["claim"]             # the patient is not listed a second time as the insured
+
+    # the export: the same two columns beside the claim number, and a name must not run as a formula in a spreadsheet
+    lines = export.splitlines()
     head = lines[0].split(",")
     at = head.index("patient_control_number")
     assert head[at + 1:at + 3] == ["patient", "member_id"]
     assert any('"ORCHARD, LEE Q",W55500300' in ln for ln in lines)
-    # a name a payer file could carry must not run as a formula when the export is opened in a spreadsheet
     assert any('"\'=BIRCH, ANN Q"' in ln for ln in lines) and not any(',"=BIRCH' in ln for ln in lines)
+
+
+def test_a_packet_is_mailed_only_to_named_domains_on_any_host(monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "smtp.invalid")
+    monkeypatch.delenv("APPEAL_EMAIL_DOMAINS", raising=False)
+    monkeypatch.delenv("REMITWATCH_MODE", raising=False)
+    out = notes.send_pdf(b"%PDF-1.4", "p1", "someone@outside.example")
+    assert out["sent"] is False and "APPEAL_EMAIL_DOMAINS" in out["reason"]
 
 
 def test_slow_climb_is_caught_by_the_quarter_against_the_year(tmp_path):

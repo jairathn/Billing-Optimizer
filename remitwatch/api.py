@@ -3,10 +3,11 @@ RemitWatch API and dashboard server.
 
     REMITWATCH_DB=data/remitwatch.sqlite REMITWATCH_PASSWORD=... uvicorn remitwatch.api:app
 
-Every endpoint reads the SQLite store built by `remitwatch.cli`. Patient
-names never leave the server: list endpoints return claim identifiers only,
-and the detail endpoint returns the patient's initials unless
-REMITWATCH_SHOW_PHI=1 is set.
+Every endpoint reads the SQLite store built by `remitwatch.cli`. Unless
+REMITWATCH_SHOW_PHI=1 is set, the lists and the detail view say who a finding
+is about with initials only and the search box does not look at names. That
+setting covers the screens and the CSV export, nothing more: an appeal packet
+PDF always carries the patient's name and member number, for every login.
 """
 from __future__ import annotations
 
@@ -376,8 +377,46 @@ def _extra(request: Request) -> dict:
     return {k: request.query_params[k] for k in EXTRA_FILTERS if k in request.query_params}
 
 
-def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None):
+# What may be shown and searched as a member number. A payer can also send a Social Security number (34), the old
+# Medicare claim number built on one (HN) or a tax ID (FI) in the same place; those never leave the server.
+MEMBER_QUALS = ("MI", "II", "MR", "")
+_MEMBER_SQL = ("(COALESCE({a}.{k}_id_qual,'') IN ('MI','II','MR','') AND NOT (COALESCE({a}.{k}_id_qual,'')='MR' AND {a}.{k}_id GLOB "
+               "'[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'))")
+
+
+def _member(c: dict) -> str:
+    """The number to show for a patient: the member number the payer gave for them, else the insured person's (a
+    dependent is often listed under the policy holder's)."""
+    for k in ("patient", "insured"):
+        v, qual = (c.get(f"{k}_id") or "").strip(), c.get(f"{k}_id_qual") or ""
+        if v and qual in MEMBER_QUALS and not (qual == "MR" and re.fullmatch(r"\d{9}", v)):
+            return v
+    return ""
+
+
+def _search_text(request: Request | None, q: str | None) -> str | None:
+    """What was typed in the search box. The page sends it in a header, so that a patient's name is never part of an
+    address, where access logs would keep it. A q in the address still works."""
+    sent = request.headers.get("x-search") if request is not None else None
+    if sent:
+        from urllib.parse import unquote
+        return unquote(sent)
+    return q
+
+
+def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None,
+             patient_of: str | None = None):
     where, params = [], []
+    if patient_of:
+        if SHOW_PHI:
+            # everything for the patient on this claim: same name and same member number, exactly. A search on the number
+            # would also bring in the rest of a family on one policy.
+            ident = "COALESCE(NULLIF({a}.patient_id,''), {a}.insured_id)"
+            where.append("claim_key IN (SELECT c.claim_key FROM claims c, claims k WHERE k.claim_key=? AND c.patient_last IS k.patient_last "
+                         f"AND c.patient_first IS k.patient_first AND {ident.format(a='c')} IS {ident.format(a='k')})")
+            params.append(patient_of)
+        else:
+            where.append("0")       # with names hidden nothing says which findings belong to one person
     for k, v in (extra or {}).items():
         if k == "quarter":
             where.append("(substr(month,1,4) || '-Q' || ((CAST(substr(month,6,2) AS INTEGER)+2)/3)) = ?")
@@ -421,17 +460,25 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         where.append("appeal_deadline < date('now')")
     elif deadline == "valid":
         where.append("appeal_deadline >= date('now')")
+    q = (q or "").strip()[:200]
     if q:
         clause = "patient_control_number LIKE ? OR title LIKE ? OR payer_name LIKE ? OR procedure_code LIKE ? OR carc LIKE ? OR rarc LIKE ?"
         params += [f"%{q}%"] * 6
-        words = [w for w in re.split(r"[\s,]+", q.strip()) if w][:4]
+        words = [w for w in re.split(r"[\s,]+", q) if w][:6]
         if SHOW_PHI and words:
-            # by patient: every word typed must be in the name ("smith john", "John Smith" and "smith, j" all find the same
-            # person), or the whole entry is part of the member number. One pass over the claims, no lookup per finding.
+            # by patient: every word typed must be in the name as the row shows it ("smith john", "John Smith" and
+            # "SMITH, JOHN Q" all find the same person). One pass over the claims, no lookup per finding.
             # With names hidden this is left out, or the search box would answer "is there a patient called ...".
-            name = " AND ".join("(COALESCE(patient_last,'') || ' ' || COALESCE(patient_first,'')) LIKE ?" for _ in words)
-            clause += f" OR claim_key IN (SELECT claim_key FROM claims WHERE ({name}) OR patient_id LIKE ?)"
-            params += [f"%{w}%" for w in words] + [f"%{q.strip()}%"]
+            name = " AND ".join("(COALESCE(c.patient_last,'') || ' ' || COALESCE(c.patient_first,'') || ' ' || COALESCE(c.patient_middle,'')) LIKE ?" for _ in words)
+            who, who_params = f"({name})", [f"%{w}%" for w in words]
+            number = re.sub(r"[\s\-]", "", q)
+            if re.search(r"\d", number):
+                # or part of a member number, typed with or without the spaces and dashes a card prints
+                who += (f" OR (c.patient_id LIKE ? AND {_MEMBER_SQL.format(a='c', k='patient')})"
+                        f" OR (c.insured_id LIKE ? AND {_MEMBER_SQL.format(a='c', k='insured')})")
+                who_params += [f"%{number}%"] * 2
+            clause += f" OR claim_key IN (SELECT c.claim_key FROM claims c WHERE {who})"
+            params += who_params
         where.append(f"({clause})")
     if handling:
         where.append("ema_handling=?")
@@ -447,20 +494,20 @@ def _name(last: str | None, first: str | None, middle: str | None = None) -> str
 
 def _with_patient(items: list[dict]) -> list[dict]:
     """Say who each finding is about. With names shown that is the name and member number from the remittance; with names
-    hidden it is the initials the detail view already gives. One query per 500 findings, by primary key, which is the
-    only index the cloud store keeps."""
+    hidden it is the initials the detail view already gives. One query per 500 findings, by primary key, so it needs
+    none of the other indexes."""
     keys = list({r["claim_key"] for r in items if r.get("claim_key")})
     who: dict[str, dict] = {}
     for i in range(0, len(keys), 500):
         part = keys[i:i + 500]
-        for c in rows(f"SELECT claim_key, patient_last, patient_first, patient_middle, patient_id FROM claims WHERE claim_key IN ({','.join('?' * len(part))})",
-                      tuple(part)):
+        for c in rows("SELECT claim_key, patient_last, patient_first, patient_middle, patient_id, patient_id_qual, insured_id, insured_id_qual "
+                      f"FROM claims WHERE claim_key IN ({','.join('?' * len(part))})", tuple(part)):
             who[c["claim_key"]] = c
     for r in items:
         c = who.get(r.get("claim_key"))
         if SHOW_PHI:
             r["patient"] = _name(c["patient_last"], c["patient_first"], c["patient_middle"]) if c else ""
-            r["member_id"] = (c or {}).get("patient_id") or ""
+            r["member_id"] = _member(c) if c else ""
         else:
             r["patient"] = _initials(c["patient_last"], c["patient_first"]) if c else ""
     return items
@@ -470,8 +517,10 @@ def _with_patient(items: list[dict]) -> list[dict]:
 def findings(signal: Optional[str] = None, category: Optional[str] = None, payer: Optional[str] = None, year: Optional[str] = None,
              status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
              provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
-             sort: str = "shortfall", limit: int = Query(100, le=2000), offset: int = 0, request: Request = None, _: str = Depends(require_auth)):
-    w, params = _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling, _extra(request))
+             patient_of: Optional[str] = Query(None, max_length=200), sort: str = "shortfall", limit: int = Query(100, ge=1, le=2000),
+             offset: int = Query(0, ge=0, le=10**9), request: Request = None, _: str = Depends(require_auth)):
+    w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
+                         _extra(request), patient_of)
     order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": "appeal_deadline ASC", "payer": "payer_group, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset)))
@@ -492,9 +541,12 @@ def _csv_cell(v: Any) -> Any:
 def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, payer: Optional[str] = None, year: Optional[str] = None,
                  status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
-                 request: Request = None, _: str = Depends(require_auth)):
-    w, params = _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling, _extra(request))
-    data = _with_patient(rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params)))
+                 patient_of: Optional[str] = Query(None, max_length=200), request: Request = None, _: str = Depends(require_auth)):
+    w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
+                         _extra(request), patient_of)
+    data = rows(f"SELECT {FINDING_COLS} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
+    if SHOW_PHI:
+        _with_patient(data)     # with names hidden the file carries the claim ID only: initials beside a date and a clinician would point at a person
 
     def chunks():       # sent in pieces: a streamed answer has no size limit on a serverless host
         buf = io.StringIO()
@@ -555,15 +607,19 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
     if claim_key:
         cl = one("SELECT * FROM claims WHERE claim_key=?", (claim_key,))
         if cl:
+            # only columns known to carry no patient identifier leave the server (the claim loop also holds other
+            # subscribers' names, free-form references and sometimes a Social Security number), plus who the patient is:
+            # initials, or with names shown the name, the member number and the insured person when that is someone else
+            raw, cl = cl, {k: cl.get(k) for k in CLAIM_PUBLIC_COLS}
             if not SHOW_PHI:
-                # only columns known to carry no patient identifier leave the server (the claim loop also holds member numbers,
-                # other subscribers' names and free-form references)
-                initials = _initials(cl.get("patient_last"), cl.get("patient_first"))
-                cl = {k: cl.get(k) for k in CLAIM_PUBLIC_COLS}
-                cl["patient"] = initials
+                cl["patient"] = _initials(raw.get("patient_last"), raw.get("patient_first"))
             else:
-                cl["patient"] = _name(cl.get("patient_last"), cl.get("patient_first"), cl.get("patient_middle"))
-                cl["insured"] = _name(cl.get("insured_last"), cl.get("insured_first"))
+                cl["patient"] = _name(raw.get("patient_last"), raw.get("patient_first"), raw.get("patient_middle"))
+                cl["member_id"] = _member(raw)
+                same = lambda a, b: (a or "").strip().upper() == (b or "").strip().upper()
+                if (raw.get("insured_last") or raw.get("insured_first")) and not (same(raw.get("insured_last"), raw.get("patient_last"))
+                                                                                    and same(raw.get("insured_first"), raw.get("patient_first"))):
+                    cl["insured"] = _name(raw.get("insured_last"), raw.get("insured_first"))
             out["claim"] = cl
         out["lines"] = rows("SELECT line_key, line_seq, procedure_code, modifiers, original_procedure_code, original_modifiers, charge_cents, paid_cents, allowed_cents, paid_units, service_date, line_control_number FROM lines WHERE claim_key=? ORDER BY line_seq", (claim_key,))
         adjs = rows("SELECT line_key, level, group_code, reason_code, amount_cents FROM adjustments WHERE claim_key=? ORDER BY line_key, cas_index", (claim_key,))

@@ -159,6 +159,7 @@ const HANDLING = {WRITE_OFF:'written off in EMA', TRANSFER_RESPONSIBILITY:'moved
 const $ = s => document.querySelector(s);
 const money = c => (c==null?'–':(c<0?'-':'')+'$'+Math.round(Math.abs(c)/100).toLocaleString());
 const money2 = c => (c==null?'–':'$'+(c/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}));
+const showPhi = () => !!(state.meta && state.meta.show_phi);       // names on screen; false until the site's settings have arrived
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const mods = js => { try { const a = JSON.parse(js||'[]'); return Array.isArray(a)&&a.length ? '-'+esc(a.join(',')) : ''; } catch(e){ return ''; } };
 async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); }
@@ -199,6 +200,7 @@ async function loadSummary(){
 }
 async function render(){
   const run = state.run = (state.run||0) + 1;       // a slower, older run must not draw over a newer one
+  if(!state.meta){ try { await loadMeta(); } catch(e){} if(run !== state.run) return; }      // a cold start can fail the first call
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active',a.dataset.tab===state.tab));
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = state.tab==='providers' ? 'none' : ''; });
   if(state.tab !== 'providers' || !state.summary) await loadSummary();       // the Providers tab uses none of it
@@ -258,11 +260,14 @@ function kpi(l,v,s,go){ return `<div class="kpi" data-go="${go}"><div class="l">
 
 // ---------------------------------------------------------------- findings table (shared)
 async function findingsTable(v, container, base, opts={}){
-  const key = state.tab; const f = Object.assign({signal:'',payer:'',severity:'',actionable:'',q:'',deadline:'',handling:''}, state.filt[key]||{});
+  const key = state.tab; const f = Object.assign({signal:'',payer:'',severity:'',actionable:'',q:'',deadline:'',handling:'',patient_of:'',patient_label:''}, state.filt[key]||{});
   const page = state.page[key]||0, limit = 100;
-  const chosen = Object.fromEntries(Object.entries(f).filter(([k,val])=>val!==''&&val!=null));    // an empty filter must not erase the tab's own scope
+  // an empty filter must not erase the tab's own scope. What was typed in the search box travels in a header, never in the
+  // address: with names shown it can be a patient's name, and addresses are what access logs keep.
+  const chosen = Object.fromEntries(Object.entries(f).filter(([k,val])=>val!==''&&val!=null&&k!=='q'&&k!=='patient_label'));
+  const find = Object.assign({cache:'no-store'}, f.q ? {headers:{'X-Search':encodeURIComponent(f.q)}} : {});
   const params = Object.assign({}, base, chosen, {year:state.year, status:state.status, limit, offset:page*limit, sort: opts.sort||'shortfall'});
-  const res = await api('/api/findings?'+qs(params));
+  const res = await api('/api/findings?'+qs(params), find);
   const sigs = base.signal ? base.signal.split(',') : state.summary.by_signal.filter(r=>!base.category||base.category.split(',').includes(r.category)).map(r=>r.signal);
   const payers = state.summary.by_payer.map(r=>r.payer_group);
   container.innerHTML = `
@@ -273,15 +278,16 @@ async function findingsTable(v, container, base, opts={}){
       <select data-f="actionable"><option value="">Any action</option>${['appeal','correct_and_resubmit','review','opt_out','renegotiate'].map(x=>`<option ${f.actionable===x?'selected':''}>${x}</option>`).join('')}</select>
       <select data-f="deadline"><option value="">Any deadline</option><option value="valid" ${f.deadline==='valid'?'selected':''}>Still appealable</option><option value="due" ${f.deadline==='due'?'selected':''}>Due in 45 days</option><option value="expired" ${f.deadline==='expired'?'selected':''}>Expired</option></select>
       <select data-f="handling"><option value="">Any EMA handling</option>${Object.keys(HANDLING).map(x=>`<option value="${x}" ${f.handling===x?'selected':''}>${HANDLING[x]}</option>`).join('')}</select>
-      <input data-f="q" placeholder="${state.meta.show_phi?'patient name, member ID, claim ID, code…':'claim ID, code, CARC…'}" value="${esc(f.q)}" ${state.meta.show_phi?'style="min-width:20rem"':''}>
+      <input data-f="q" placeholder="${showPhi()?'patient name, member ID, claim ID, code…':'claim ID, code, CARC…'}" value="${esc(f.q)}" ${showPhi()?'style="min-width:20rem"':''}>
+      ${f.patient_of?`<span class="chip">Only ${esc(f.patient_label||'this patient')} <button id="ptClear" class="small" title="Show all patients" aria-label="Show all patients" style="padding:0 6px;margin-left:4px">✕</button></span>`:''}
       <span class="muted small">${res.total.toLocaleString()} findings · ${money(res.shortfall_cents)}</span>
-      <a class="small" href="/api/findings.csv?${qs(Object.assign({},base,chosen,{year:state.year,status:state.status}))}">Export CSV</a>
+      <button class="small" id="csvBtn">Export CSV</button>
       ${opts.bulk?'<button id="bulkAppealed" class="small">Mark selected appealed</button>':''}
     </div>
     <table><thead><tr>${opts.bulk?'<th></th>':''}<th>DOS</th><th>Patient</th><th>Payer</th><th>Provider</th><th>Code</th><th>Finding</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Expected</th><th class="num">Shortfall</th><th>CARC/RARC</th><th>Deadline</th><th>Status</th></tr></thead>
-    <tbody>${res.items.map(r=>`<tr class="row" data-id="${esc(r.finding_id)}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" onclick="event.stopPropagation()"></td>`:''}
+    <tbody>${res.items.map(r=>`<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" onclick="event.stopPropagation()"></td>`:''}
       <td class="day">${esc(r.service_date)}</td>
-      <td class="who">${state.meta.show_phi&&r.patient?`<a href="#" class="pt" data-q="${esc(r.member_id||r.patient)}" title="Everything in this list for this patient">${esc(r.patient)}</a>`:esc(r.patient||'')}<div class="small muted">claim ${esc(r.patient_control_number||'')}${r.member_id?'<br>member '+esc(r.member_id):''}</div></td>
+      <td class="who">${showPhi()&&r.patient&&r.claim_key?`<a href="#" class="pt" data-claim="${esc(r.claim_key)}" data-label="${esc(r.patient+(r.member_id?' · '+r.member_id:''))}" title="Everything in this list for this patient (same name and member number)">${esc(r.patient)}</a>`:esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}${r.member_id?'<br>member '+esc(r.member_id):''}</div></td>
       <td>${esc(r.payer_group)}</td><td class="small">${esc((r.rendering_provider_name||'').replace(/\s+/g,' ').trim())}</td>
       <td>${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}</td>
       <td><span class="sev-${esc(r.severity)}">●</span> ${esc(r.title)}<div class="small muted">${r.stale?'<span class="chip">stale</span>':''} ${r.ema_handling?'<span class="chip">'+esc(HANDLING[r.ema_handling]||r.ema_handling)+'</span>':''}</div></td>
@@ -291,8 +297,18 @@ async function findingsTable(v, container, base, opts={}){
   container.querySelectorAll('[data-f]').forEach(el=>el.onchange=()=>{ state.filt[key]=Object.assign({}, f, {[el.dataset.f]:el.value}); state.page[key]=0; render(); });
   container.querySelector('#prev').onclick=()=>{state.page[key]=page-1; render();};
   container.querySelector('#next').onclick=()=>{state.page[key]=page+1; render();};
-  container.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>openDetail(tr.dataset.id));
-  container.querySelectorAll('a.pt').forEach(a=>a.onclick=e=>{ e.preventDefault(); e.stopPropagation(); state.filt[key]=Object.assign({}, f, {q:a.dataset.q}); state.page[key]=0; render(); });
+  container.querySelectorAll('tr.row').forEach(tr=>{ tr.onclick=()=>openDetail(tr.dataset.id);
+    tr.onkeydown=e=>{ if((e.key==='Enter'||e.key===' ') && e.target===tr){ e.preventDefault(); openDetail(tr.dataset.id); } }; });
+  // a name lists that patient only: the same name and member number exactly, asked for by the claim, so that neither travels in the address
+  container.querySelectorAll('a.pt').forEach(a=>a.onclick=e=>{ e.preventDefault(); e.stopPropagation(); state.filt[key]=Object.assign({}, f, {patient_of:a.dataset.claim, patient_label:a.dataset.label}); state.page[key]=0; state.focusPt=true; render(); });
+  const pc = container.querySelector('#ptClear');
+  if(pc){ pc.onclick=()=>{ state.filt[key]=Object.assign({}, f, {patient_of:'', patient_label:''}); state.page[key]=0; render(); }; if(state.focusPt) pc.focus(); }
+  state.focusPt=false;
+  container.querySelector('#csvBtn').onclick=async()=>{      // fetched, not linked, for the same reason the search text is not in the address
+    const r = await fetch('/api/findings.csv?'+qs(Object.assign({},base,chosen,{year:state.year,status:state.status})), find);
+    if(!r.ok){ alert('The export did not come back ('+r.status+'). Try again in a moment.'); return; }
+    const url = URL.createObjectURL(await r.blob()), a = document.createElement('a');
+    a.href = url; a.download = 'remitwatch-findings.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000); };
   const b = container.querySelector('#bulkAppealed'); if(b) b.onclick=async()=>{ const ids=[...container.querySelectorAll('.sel:checked')].map(x=>x.value); if(!ids.length) return; await api('/api/findings/bulk-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,status:'appealed'})}); render(); };
 }
 async function trendChart(id, params, label){
@@ -376,7 +392,7 @@ async function payers(v){
 async function appeals(v){
   const dl = Object.fromEntries(state.summary.deadlines.map(d=>[d.bucket,d]));
   v.innerHTML = `<div class="grid kpis">${kpi('Due within 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' findings','appeals')}${kpi('Due within 90 days', money((dl.due_90d||{}).shortfall_cents), ((dl.due_90d||{}).n||0)+' findings','appeals')}${kpi('Later', money((dl.later||{}).shortfall_cents), ((dl.later||{}).n||0)+' findings','appeals')}${kpi('Expired', money((dl.expired||{}).shortfall_cents), ((dl.expired||{}).n||0)+' findings (deadlines are estimates)','appeals')}</div>
-    <div class="panel"><h2>Work queue</h2><div class="note">Everything open that is either appealable or a correctable billing error, soonest deadline first. Open a row for the evidence and a ready-to-send letter. Deadlines come from each payer's published provider manual where we have it (Anthem commercial allows two years from the remittance) and from the payer type otherwise; each finding shows its basis. A contract can set a different period. ${state.meta.show_phi?'Search by patient name, member ID or claim ID; click a name for everything in the queue for that patient. The claim ID under each name is the Claim ID in EMA.':'Patients show as initials because names are switched off on this site (the owner can switch them on in the site settings). The claim ID under the initials is the Claim ID in EMA.'}</div><div id="tbl"></div></div>`;
+    <div class="panel"><h2>Work queue</h2><div class="note">Everything open that is either appealable or a correctable billing error, soonest deadline first. Open a row for the evidence and a ready-to-send letter. Deadlines come from each payer's published provider manual where we have it (Anthem commercial allows two years from the remittance) and from the payer type otherwise; each finding shows its basis. A contract can set a different period. ${showPhi()?'Search by patient name, member ID or claim ID; click a name for everything in the queue for that patient. The claim ID under each name is the Claim ID in EMA.':'Patients show as initials because names are switched off on this site (the owner can switch them on in the site settings). The claim ID under the initials is the Claim ID in EMA.'}</div><div id="tbl"></div></div>`;
   if(!state.filt.appeals) state.filt.appeals={deadline:'valid'};
   await findingsTable(v, v.querySelector('#tbl'), {category:'downcoding,bundling,denial,underpayment'}, {sort:'deadline', bulk:true});
 }
@@ -428,8 +444,8 @@ async function openDetail(id){
     <div class="actions"><button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal packet'}</button>
       ${[['open','open'],['in_progress','in progress'],['appealed','appealed'],['resolved','recovered'],['lost','lost'],['dismissed','dismiss']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled':''}>${l}</button>`).join('')}</div>
     <table class="small">
-      <tr><td>Patient</td><td>${state.meta.show_phi?`<b>${esc(cl.patient||'')}</b>${cl.patient_id?' · member ID '+esc(cl.patient_id):''}${cl.insured&&cl.insured!==cl.patient?' · insured '+esc(cl.insured)+(cl.insured_id?' ('+esc(cl.insured_id)+')':''):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
-      <tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)}</td></tr>
+      ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
+      <tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)}</td></tr>`:''}
       <tr><td>Payer</td><td>${esc(f.payer_name)} (${esc(f.payer_group)}, ${esc(f.payer_kind)}) · ${esc(rem.payer_contact_phone)} ${esc(rem.payer_contact_url)}</td></tr>
       <tr><td>Remit</td><td>trace ${esc(rem.trace_number)} · paid ${esc(rem.payment_date)} · ${esc(rem.payment_method)} ${money2(rem.payment_amount_cents)} · file ${esc(rem.source_name||'')}</td></tr>
       <tr><td>Service</td><td>DOS ${esc(f.service_date)} · provider ${esc(f.rendering_provider_name||'')} (${esc(f.rendering_provider_npi)}, ${esc(f.provider_tier)})</td></tr>
