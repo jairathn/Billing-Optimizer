@@ -15,32 +15,86 @@ from datetime import date, timedelta
 
 OPEN = ("open", "in_progress", "appealed")
 
-# The kind of work each finding takes, in the order the home screen lists them. A signal not named here falls to its
-# action (fix and resend, appeal, ask the payer) and then to "review".
+# The kind of work each finding takes. A signal not named here falls to its action (fix and resubmit, appeal) and then
+# to "check first".
 WORK_TYPES: list[dict] = [
-    {"key": "fix", "label": "Fix and resend", "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send it again before the date shown."},
-    {"key": "note", "label": "Appeal with the visit note", "how": "The payer says the visit or level was not supported, or bundled a separately documented visit. Send the note with the appeal; the site drafts the letter."},
-    {"key": "rules", "label": "Appeal on the coding rules", "how": "The payer applied a bundling, frequency or duplicate rule that the claim does not break. The letter cites the rule; a note is rarely needed."},
-    {"key": "front", "label": "Front desk: authorization, eligibility, coverage", "how": "Denied for an authorization, coverage or enrollment problem. Get the retro-authorization or the right coverage, then resend or bill the patient."},
-    {"key": "rate", "label": "Ask the payer to pay its usual rate", "how": "Paid below what this payer normally allows for the code. One call or portal request per claim, or one for a whole pattern."},
-    {"key": "review", "label": "Look into", "how": "Needs a person to decide what happened."},
+    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number",
+     "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send it as a corrected claim before the date shown, then press Mark sent."},
+    {"key": "auth", "label": "Get the authorization", "needs": "The authorization record, or the payer's portal",
+     "how": "Denied for a missing prior authorization. Find the authorization in EMA and appeal with it; if there is none, ask the payer for a retro-authorization. Tell the front desk so it does not happen again."},
+    {"key": "note", "label": "Appeal with the visit note", "needs": "The visit or procedure note from EMA",
+     "how": "The payer says the visit or level was not supported, or bundled a separately documented visit. Build the appeal letter, attach the note for that date, send it, then press Mark sent."},
+    {"key": "rule", "label": "Appeal on the coding rules", "needs": "Nothing extra: the letter cites the rule",
+     "how": "The payer bundled a procedure or add-on that the coding rules let you bill. Appeal with the letter; if the rule allows a modifier and the sites were separate, add 59 or XS and resubmit instead."},
+    {"key": "rate", "label": "Ask for the usual rate", "needs": "The payer's phone line or portal",
+     "how": "Paid less than this payer usually pays for the code. Ask it to reprocess at its usual rate; one request can list every claim for the same code."},
+    {"key": "check", "label": "Check first", "needs": "A look at the claim",
+     "how": "Something a person has to decide: bill another payer or the patient, fix an enrollment, find an earlier payment, or let it go."},
 ]
 _WORK_OF = {
-    "fix": {"DENIED_MISSING_MODIFIER", "DENIED_CODING", "DENIED_MISSING_INFO", "DENIED_MISSING_PRIMARY", "EM_BUNDLED_NO_MODIFIER", "EM_BUNDLED_MOD57_MINOR"},
-    "note": {"EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24", "DENIED_MEDICAL_NECESSITY", "DENIED_LEVEL_OF_SERVICE", "DOWNCODE_SVC06",
-             "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE", "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED", "CODE_CHANGED"},
-    "rules": {"PROCEDURE_BUNDLED", "ADDON_BUNDLED", "MPPR_EXCESS", "DENIED_DUPLICATE_UNPAID", "DENIED_FREQUENCY", "DENIED_OTHER"},
-    "front": {"DENIED_AUTH", "DENIED_NONCOVERED", "DENIED_PROVIDER", "CLAIM_DENIED_UNPAID", "DENIED_TIMELY_FILING"},
-    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE"},
+    "fix": {"DENIED_MISSING_MODIFIER", "DENIED_CODING", "DENIED_MISSING_INFO", "EM_BUNDLED_NO_MODIFIER", "EM_BUNDLED_MOD57_MINOR"},
+    "auth": {"DENIED_AUTH"},
+    "note": {"EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24", "DENIED_MEDICAL_NECESSITY", "DENIED_FREQUENCY", "DENIED_LEVEL_OF_SERVICE",
+             "DOWNCODE_SVC06", "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE", "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED"},
+    "rule": {"PROCEDURE_BUNDLED", "ADDON_BUNDLED"},
+    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS"},
+    "check": {"DENIED_NONCOVERED", "DENIED_DUPLICATE_UNPAID", "DENIED_PROVIDER", "DENIED_TIMELY_FILING", "DENIED_OTHER", "DENIED_MISSING_PRIMARY",
+              "CODE_CHANGED", "CLAIM_DENIED_UNPAID"},
 }
 SIGNAL_WORK = {sig: key for key, sigs in _WORK_OF.items() for sig in sigs}
 WORK_SIGNALS = set(SIGNAL_WORK)
+
+# What each finding is, in plain words, and the next step. Reason codes stay on the finding as detail.
+SIGNAL_LABELS: dict[str, tuple[str, str]] = {
+    "DOWNCODE_SVC06": ("Visit paid at a lower level than billed", "Appeal with the visit note for the level billed."),
+    "DOWNCODE_VS_BILLED": ("Visit paid at a lower level than EMA shows was billed", "Check in EMA which code went out. If the higher level was sent, appeal with the visit note."),
+    "DOWNCODE_CHARGE": ("Charged for a higher visit level than the code paid", "Check in EMA which code was sent. If it was the higher level, appeal with the visit note."),
+    "DOWNCODE_LEVEL_REDUCED": ("Visit payment cut for its level, code left unchanged", "Appeal with the visit note showing the level billed."),
+    "DOWNCODE_RATE": ("Visit paid at a lower level's rate", "Ask the payer why. If it is a level cut, appeal with the visit note."),
+    "DOWNCODE_LINE_SWAP": ("Visit denied and a lower level paid instead", "Appeal with the visit note for the level billed."),
+    "DOWNCODE_LEVEL_DENIED": ("Visit denied because of its level", "Appeal with the visit note; if it supports a lower level, resubmit at that level."),
+    "CODE_CHANGED": ("Payer changed a procedure code", "Compare the note with both codes. If yours was right, appeal; if the payer's was, let it go and change how it is billed."),
+    "EM_BUNDLED_NO_MODIFIER": ("Visit not paid: billed with a procedure and no modifier 25", "If the note shows a separate problem, add 25 and resubmit as a corrected claim."),
+    "EM_BUNDLED_MOD57_MINOR": ("Visit not paid: modifier 57 used with a minor procedure", "Change 57 to 25 and resubmit as a corrected claim."),
+    "EM_BUNDLED_MOD57_MAJOR": ("Visit on the day of a major surgery decision not paid", "Appeal with the visit note showing the decision for surgery was made at this visit."),
+    "EM_BUNDLED_MOD25": ("Visit with modifier 25 not paid: bundled into a same-day procedure", "Appeal with the visit note showing a significant, separate problem."),
+    "EM_BUNDLED_MOD24": ("Visit in a post-op period denied (modifier 24)", "Appeal with the note showing the problem was unrelated to the surgery."),
+    "ADDON_BUNDLED": ("Add-on code paid $0", "Appeal: add-on codes such as 17312, 11103 and 17003 are paid with their main code."),
+    "PROCEDURE_BUNDLED": ("Procedure bundled into another one done the same day", "Appeal with the operative note; if the rule allows a modifier and the sites were separate, add 59 or XS and resubmit."),
+    "DENIED_MISSING_MODIFIER": ("Denied: a modifier is missing or wrong", "Add or correct the modifier the remark names and resubmit as a corrected claim."),
+    "DENIED_CODING": ("Denied: the code and modifier do not fit together", "Fix the code or modifier and resubmit as a corrected claim."),
+    "DENIED_MISSING_PRIMARY": ("Add-on denied because its main procedure was not paid", "Work the main procedure first; once it is paid, ask the payer to reprocess the add-on."),
+    "DENIED_MISSING_INFO": ("Denied: information missing", "Send what the remark asks for (a diagnosis, an NDC number, a record) and resubmit."),
+    "DENIED_AUTH": ("Denied: no authorization", "Find the authorization and appeal with it, or ask for a retro-authorization. Tell the front desk."),
+    "DENIED_LEVEL_OF_SERVICE": ("Procedure denied: the payer says the records do not support it", "Appeal with the procedure note and the pathology report."),
+    "DENIED_MEDICAL_NECESSITY": ("Denied as not medically necessary", "Appeal with the visit note and the coverage criteria it meets."),
+    "DENIED_FREQUENCY": ("Denied: too many units or too often", "If the units were right, appeal with the note; if not, resubmit with the right units."),
+    "DENIED_NONCOVERED": ("Not covered by this plan", "Check benefits: send it to the right payer, bill the patient where allowed, or let it go."),
+    "DENIED_TIMELY_FILING": ("Denied: sent too late", "If the clearinghouse report shows it went out on time, appeal with that proof; otherwise let it go."),
+    "DENIED_PROVIDER": ("Denied: the clinician is not enrolled with this payer", "Fix the enrollment, then ask the payer to reprocess."),
+    "DENIED_DUPLICATE_UNPAID": ("Denied as a duplicate, but never paid", "Look for the first claim's payment; if none was ever paid, ask the payer to reprocess."),
+    "DENIED_OTHER": ("Paid $0 for another reason", "Read the reason on the item, then fix and resubmit, appeal, or let it go."),
+    "CLAIM_DENIED_UNPAID": ("Whole claim denied and never paid", "Read the reason: fix and resubmit if it names an error, appeal if not, let it go if the payer is right."),
+    "UNDERPAID_VS_OWN_RATE": ("Paid less than this payer usually pays", "Ask the payer to reprocess at its usual rate; one request can list every claim for the code."),
+    "SECOND_RATE": ("Payer pays a second, lower amount for this code", "Ask the payer once about all the claims at this amount, giving the likely reason shown."),
+    "MPPR_EXCESS": ("Multiple-procedure reduction cut too deep", "Ask the payer to reprocess: add-ons are not reduced, and later procedures are cut by half, not more."),
+    "FEE_SKIM": ("Payment fee taken out of a payment", "Ask the payer or its payment vendor for standard direct deposit with no fee."),
+    "TAKEBACK": ("Money taken back from a later payment", "Match it to the payer's overpayment letter; if it was not owed, dispute it."),
+    "CONTRACT_RATE_GAP": ("Commercial payer pays far below Medicare for a common code", "Bring it to the payer's contract review."),
+    "MA_BELOW_MEDICARE": ("Medicare Advantage plan pays below Medicare", "Check the contract; if it promises a share of Medicare, ask for the difference."),
+    "MPPR_POLICY": ("Payer pays third and later procedures below half", "Raise the multiple-procedure terms at contract review."),
+    "CHARGE_BELOW_RATE": ("Your fee is lower than what the payer allows", "Raise your fee for this code above the highest amount any payer allows. Past claims cannot be appealed."),
+    "G2211_DENIED": ("G2211 denied on most visits by this payer", "Decide whether to keep billing G2211 to this payer. From 2027 it becomes modifier B1."),
+    "MIPS_ADJUSTMENT": ("Medicare quality program (MIPS) adjustment", "For information."),
+    "SEQUESTRATION": ("Federal 2 percent Medicare reduction", "For information; not recoverable."),
+}
+STATUS_LABELS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
 
 
 def work_type(signal: str | None, actionable: str | None) -> str:
     if signal in SIGNAL_WORK:
         return SIGNAL_WORK[signal]
-    return {"correct_and_resubmit": "fix", "appeal": "rules"}.get(actionable or "", "review")
+    return {"correct_and_resubmit": "fix", "appeal": "rule"}.get(actionable or "", "check")
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
@@ -324,4 +378,5 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
     return {"ready": True, "today": today, "newest_payment": newest, "work": work(conn, today), "recovered": recovered(conn, today),
             "batches": batches(conn, today), "decide": to_decide(conn, newest), "missed": missed(conn, today), "done": done(conn, today),
             "follow_ups": follow_ups(conn, newest), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn),
-            "causes": denial_causes(conn, newest), "health": data_health(conn, newest, today), "work_types": WORK_TYPES}
+            "causes": denial_causes(conn, newest), "health": data_health(conn, newest, today), "work_types": WORK_TYPES,
+            "labels": {k: {"label": v[0], "next": v[1], "work": SIGNAL_WORK.get(k)} for k, v in SIGNAL_LABELS.items()}, "statuses": STATUS_LABELS}

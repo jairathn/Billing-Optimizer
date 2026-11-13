@@ -28,7 +28,7 @@ def test_open_work_is_grouped_by_the_kind_of_work_and_what_falls_due(tmp_path):
     b = insights.brief(st.conn, today="2026-11-13")
     assert b["ready"] and b["newest_payment"] == "2026-10-15"
     types = {t["key"]: t for t in b["work"]["types"]}
-    assert types["fix"]["n"] == 3 and types["front"]["n"] == 2 and "rate" not in types       # paid lines are not work
+    assert types["fix"]["n"] == 3 and types["auth"]["n"] == 2 and "rate" not in types       # paid lines are not work
     assert b["work"]["total"]["n"] == 5 and b["work"]["total"]["cents"] == sum(t["cents"] for t in b["work"]["types"])
     # an Anthem fix runs on the appeal window (two years) with the agreement note: nothing falls due within 30 days
     assert b["work"]["total"]["due30_n"] == 0 and b["work"]["expired_n"] == 0
@@ -36,8 +36,9 @@ def test_open_work_is_grouped_by_the_kind_of_work_and_what_falls_due(tmp_path):
     feed = b["health"][0]
     assert feed["key"] == "feed" and feed["ok"] is False and feed["days"] == 29
     causes = {c["signal"]: c for c in b["causes"]}
-    assert causes["DENIED_MISSING_MODIFIER"]["n90"] == 3 and causes["DENIED_AUTH"]["work"] == "front"
-    assert [t["key"] for t in b["work_types"]] == ["fix", "note", "rules", "front", "rate", "review"]
+    assert causes["DENIED_MISSING_MODIFIER"]["n90"] == 3 and causes["DENIED_AUTH"]["work"] == "auth"
+    assert [t["key"] for t in b["work_types"]] == ["fix", "auth", "note", "rule", "rate", "check"]
+    assert b["labels"]["DENIED_AUTH"]["label"] == "Denied: no authorization" and b["statuses"]["appealed"] == "Sent"
     st.close()
 
 
@@ -58,7 +59,7 @@ def test_every_signal_that_is_work_has_a_kind_and_the_endpoint_serves_it(tmp_pat
     tc = TestClient(api.app)
     assert tc.get("/api/brief").status_code == 401
     b = tc.get("/api/brief", auth=("oda", PW)).json()
-    assert b["ready"] and {t["key"] for t in b["work"]["types"]} == {"fix", "front"}
+    assert b["ready"] and {t["key"] for t in b["work"]["types"]} == {"fix", "auth"}
     assert "SAMPLE" not in json.dumps(b).upper()           # no patient on the home screen's data
 
 
@@ -69,7 +70,7 @@ def test_batches_decisions_missed_and_done(tmp_path):
     kinds = {(x["kind"], x["payer_group"]): x for x in b["batches"]}
     fix = kinds[("fix", "Anthem / BCBS")]
     assert fix["n"] == 3 and fix["claims"] == 3 and fix["top_code"] == "99213" and fix["started_n"] == 0 and fix["first_deadline"] >= "2026-11-13"
-    assert kinds[("front", "Anthem / BCBS")]["n"] == 2
+    assert kinds[("auth", "Anthem / BCBS")]["n"] == 2
     assert b["missed"]["n"] == 0 and b["follow_ups"]["n"] == 0 and b["decide"]["n"] == 0
     # a person starts one and sends another: the batch shows it, and today's done counter counts both
     fid = st.query("SELECT finding_id FROM findings WHERE signal='DENIED_MISSING_MODIFIER' ORDER BY finding_id")
@@ -86,3 +87,13 @@ def test_batches_decisions_missed_and_done(tmp_path):
     st.conn.execute("UPDATE findings SET appeal_deadline='2026-11-01' WHERE finding_id=?", (fid[2][0],))
     assert insights.brief(st.conn, today="2026-11-13")["missed"]["n"] == 1
     st.close()
+
+
+def test_every_signal_the_page_knows_has_a_plain_label():
+    import re
+    page = open(os.path.join(os.path.dirname(insights.__file__), "static", "index.html"), encoding="utf-8").read()
+    help_block = page[page.index("const SIGNAL_HELP = {"):page.index("};", page.index("const SIGNAL_HELP = {"))]
+    known = set(re.findall(r"^\s*([A-Z][A-Z0-9_]+):", help_block, flags=re.M))
+    assert known and known <= set(insights.SIGNAL_LABELS), known - set(insights.SIGNAL_LABELS)
+    for sig, (label, nxt) in insights.SIGNAL_LABELS.items():
+        assert label and nxt and "—" not in label + nxt, sig          # plain words, no dashes standing in for punctuation
