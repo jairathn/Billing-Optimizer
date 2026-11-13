@@ -344,9 +344,10 @@ CORRECTED_RULES: list[dict] = [
     {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 365, "clock": "remit", "verified": True,
      "label": "Medicare Part B takes no corrected claims: ask for a reopening (a clerical error, including a wrong or missing modifier) within 1 year of the initial determination (42 CFR 405.980)",
      "source": "42 CFR 405.980(b); CMS Claims Processing Manual ch. 34 sec. 10.4; CGS reopening and redetermination job aid, December 2025"},
-    {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "clock": "remit", "verified": True,
-     "label": "Humana Medicare Advantage: corrected claim within 1 year of the original claim determination, unless the agreement says otherwise",
-     "source": "Humana, Claim Disputes and Corrected Claims tip sheet, August 2026"},
+    {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "clock": "dos", "verified": True,
+     "label": "Humana Medicare Advantage: corrected claim within 1 year. Humana's tip sheet counts the year from the original determination, "
+              "but its manual limits claims to 1 year from the date of service, so the earlier date is shown",
+     "source": "Humana, Claim Disputes and Corrected Claims tip sheet, August 2026; Humana Provider Manual 2026, claims submission"},
     {"match": r"^Humana", "kinds": {"medicaid"}, "days": 365, "clock": "dos", "verified": True,
      "label": "Humana Healthy Horizons in Kentucky: corrected claim within 365 days of the date of service",
      "source": "Humana Healthy Horizons in Kentucky provider manual, 2025"},

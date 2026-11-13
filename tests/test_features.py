@@ -942,7 +942,7 @@ def test_a_charge_below_the_payer_rate_is_one_finding_to_raise_the_fee_not_an_ap
 
 def test_a_fixed_claim_runs_on_the_corrected_claim_clock_where_the_payer_publishes_one(tmp_path):
     from remitwatch.codes import corrected_rule
-    assert {k: corrected_rule("Humana Medicare Advantage", "medicare_advantage")[k] for k in ("days", "clock")} == {"days": 365, "clock": "remit"}
+    assert {k: corrected_rule("Humana Medicare Advantage", "medicare_advantage")[k] for k in ("days", "clock")} == {"days": 365, "clock": "dos"}
     assert corrected_rule("Humana Medicaid", "medicaid")["clock"] == "dos"
     assert corrected_rule("Anthem / BCBS Medicare Advantage", "medicare_advantage")["clock"] == "dos"
     assert corrected_rule("Medicare KY (CGS J15)", "medicare")["clock"] == "remit" and "reopening" in corrected_rule("Medicare IN (WPS J8)", "medicare")["label"]
@@ -955,7 +955,7 @@ def test_a_fixed_claim_runs_on_the_corrected_claim_clock_where_the_payer_publish
         Detector(st, run_id="fix").run()
         (grp, deadline, basis), = st.query("SELECT payer_group, appeal_deadline, deadline_basis FROM findings WHERE signal='DENIED_MISSING_MODIFIER'")
         if sub == "a":
-            assert grp == "Humana Medicare Advantage" and deadline == "2027-02-01" and "corrected claim within 1 year" in basis
+            assert grp == "Humana Medicare Advantage" and deadline == "2027-01-01" and "corrected claim within 1 year" in basis
         elif sub == "b":
             assert deadline == "2027-02-01" and "reopening" in basis and "not confirmed" not in basis
         elif sub == "c":
