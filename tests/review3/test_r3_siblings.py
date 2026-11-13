@@ -35,8 +35,11 @@ def test_a_whole_claim_denial_with_one_of_two_specimens_paid_counts_one_specimen
 
 def test_a_second_specimen_denied_as_a_duplicate_of_the_first_is_listed(tmp_path):
     """On one claim, specimen 1 (88305) is paid and specimen 2 (88305, modifier 59 left off) is denied CO-18 as a
-    duplicate. The whole-claim version of this is listed (tests/test_review_takeback.py); the line version is hidden."""
+    duplicate. The whole-claim version of this is listed (tests/test_review_takeback.py); the line version is hidden.
+    Here the practice bills specimens as separate lines (five visits with two specimens each, both paid), so 88305 is a
+    code paid more than once a day; where a code is paid at most once a day, a second line is a charge posted twice."""
     base(tmp_path, "88305", "150.00", "70.00").close()
+    add(tmp_path, [clm(f"CB{900 + i:07d}C017", "1", "300.00", "140.00", PAID + PAID) for i in range(5)], "20260310").close()
     store = add(tmp_path, [clm("CB0000300C017", "1", "300.00", "70.00", PAID + spec("0.00", "CAS*CO*18*150.00~"))], "20260415")
     Detector(store, run_id="t").run()
     rows = by_key(store)
