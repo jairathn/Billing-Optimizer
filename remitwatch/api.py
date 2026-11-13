@@ -814,7 +814,7 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
 
 
 # --------------------------------------------------------------------------- one clinician must not show through a total
-SOLO_SHARE = 0.8        # a count that is four fifths one clinician's lines says how busy that clinician is
+SOLO_SHARE = 0.75       # a count that is three quarters one clinician's lines says how busy that clinician is (the usual dominance rule for published tables)
 
 
 def _clinicians() -> list[str]:

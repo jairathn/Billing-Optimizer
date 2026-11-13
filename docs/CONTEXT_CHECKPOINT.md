@@ -278,7 +278,7 @@ for leaks. The per-clinician counts held (within 5 percent everywhere). What cha
 - **Owner's password.** `REMITWATCH_OWNER_PASSWORD` (optional) keeps what each clinician is doing for the owner. It is typed into
   the Providers tab, kept in the page's memory, and sent in `X-Owner-Password` with `/api/activity/*`, `/api/breakdown` and the
   rate routes. Without it the activity routes answer 403, and the breakdown and rate routes leave out line counts wherever a cell
-  is four fifths or more one clinician's work (the provider dimension, and stand-ins such as a provider type with one person in
+  is three quarters or more one clinician's work (the provider dimension, and stand-ins such as a provider type with one person in
   it). Wrong tries have their own brake and are tried with one call. The page forgets the password on Lock (also in the page
   header), on leaving the page (so the browser's Back cannot bring it back open), on reload and after half an hour; the box is
   marked so that password managers leave it alone. Two designs were thrown away on the way: a second Basic login at `/owner`

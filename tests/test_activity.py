@@ -806,7 +806,7 @@ def test_the_provider_figures_can_be_kept_for_the_owner(tmp_path, monkeypatch):
         assert all(r["n"] for r in res["rows"])                                    # the findings themselves stay
     by_payer = tc.get("/api/breakdown?dim=payer&family=denial", auth=login).json()
     assert by_payer["rates_locked"] is False and any(r["lines"] for r in by_payer["rows"])
-    # grouped by something else, a cell that is four fifths one clinician's lines is that clinician's volume by another name:
+    # grouped by something else, a cell that is three quarters one clinician's lines is that clinician's volume by another name:
     # Ann has 16 of the 19 lines billed by her provider type and every level 4 visit, so those two cells are left out too
     for path, shown in (("/api/breakdown?dim=tier&family=denial", 19), ("/api/breakdown?dim=billed_code&family=denial", 4)):
         res = tc.get(path, auth=login).json()
