@@ -387,6 +387,12 @@ class Detector:
                AND (status != 'open' OR notes IS NOT NULL OR appealed_at IS NOT NULL)""")}       # their own finding is kept, never folded
         # A routine-rate finding someone worked keeps exactly the lines it had when they worked it, whatever the rules now say
         # about its amount or reason; lines paid at that amount later go to a new finding.
+        # whole-claim denials already listed: a bill's finding stays on the submission that has it (and the work on it)
+        self.prev_claims: dict[str, dict] = {}
+        for ck, st, notes, appealed, changed in store.conn.execute(
+                """SELECT claim_key, status, notes, appealed_at, status_changed_at FROM findings
+                   WHERE signal='CLAIM_DENIED_UNPAID' AND claim_key IS NOT NULL AND COALESCE(stale,0)=0"""):
+            self.prev_claims[ck] = {"worked": st != "open" or bool(notes) or bool(appealed), "changed": changed or ""}
         self.worked_patterns: dict[str, dict] = {}
         self.line_to_pattern: dict[str, str] = {}
         self.pattern_lines: dict[str, list] = defaultdict(list)
@@ -1554,8 +1560,10 @@ class Detector:
         bill has not been paid for, at any date, by a payment still standing (a primary payment, or a secondary one covering
         half the expected amount) that covers the units billed: a resubmission denied as a duplicate of a visit already paid,
         or a denial the corrected claim has since paid, is not unpaid. A claim with no service lines counts unless a primary
-        payment on the bill came after it. A bill denied in several submissions is one unpaid service: the newest submission
-        carries the finding and lists the others; an older one adds only lines the newer ones do not have."""
+        payment on the bill came after it. A bill denied in several submissions is one unpaid service: one submission carries
+        the finding and lists the others, which add only lines it does not have. The carrier is the submission that already
+        has a finding someone worked, else one that already has a finding, else the newest; a submission denied after the
+        last change someone made on a worked carrier is listed on its own, so a repeat denial is seen."""
         c = self.conn
         c.row_factory = sqlite3.Row
         by_bill: dict[str, list[dict]] = defaultdict(list)
@@ -1569,8 +1577,10 @@ class Detector:
                 bill_primary[b] += [e[0] for e in evs if e[3] in ("1", "19")]
         for bill, claims in by_bill.items():
             claims.sort(key=lambda cl: (cl.get("payment_date") or cl.get("txn_payment_date") or "", cl["patient_control_number"]), reverse=True)
+            claims.sort(key=lambda cl: 0 if self.prev_claims.get(cl["claim_key"], {}).get("worked") else 1 if cl["claim_key"] in self.prev_claims else 2)
             reported: set[tuple] = set()
             carrier: dict | None = None
+            decided = ""            # when someone last changed the carrier's finding, if they worked it
             for cl in claims:
                 when = cl.get("payment_date") or cl.get("txn_payment_date") or ""
                 grp, kind = payer_group_kind(cl.get("payer_name"), cl.get("claim_filing_indicator"))
@@ -1591,7 +1601,10 @@ class Detector:
                           if sum(e[5] for e in self.paid_cover(bill, k[0], k[1], v[1] // max(v[0], 1) if v[1] else None)) < v[0]}
                 if lines and not unpaid:
                     continue
-                novel = {k: v for k, v in unpaid.items() if k not in reported} if lines else ({} if carrier else {("*", None): [1, 0]})
+                if decided and when > decided[:10]:
+                    novel = unpaid if lines else {("*", None): [1, 0]}       # denied again after someone acted: its own finding
+                else:
+                    novel = {k: v for k, v in unpaid.items() if k not in reported} if lines else ({} if carrier else {("*", None): [1, 0]})
                 if not novel:
                     if carrier is not None:
                         carrier.setdefault("_also", []).append(cl["patient_control_number"])
@@ -1622,6 +1635,8 @@ class Detector:
                 f = self.findings.get(_fid("CLAIM_DENIED_UNPAID", cl["claim_key"]))
                 if carrier is None and f is not None:
                     carrier = f
+                    prev = self.prev_claims.get(cl["claim_key"])
+                    decided = prev["changed"] if prev and prev["worked"] else ""
             if carrier is not None and carrier.get("_also"):
                 ev = json.loads(carrier["evidence"])
                 ev["earlier_denied_submissions"] = carrier.pop("_also")

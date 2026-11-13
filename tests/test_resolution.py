@@ -236,6 +236,29 @@ def test_a_primary_takeback_with_only_a_secondary_payment_left_is_still_a_denial
     store.close()
 
 
+
+def test_a_bills_finding_stays_on_its_submission_and_a_denial_after_someone_acted_is_seen(tmp_path):
+    who = "ELM*BO****MI*W55500302"
+    store = build_store(tmp_path, base_visits() + [visit(300, who, paid="0.00", cas="CAS*CO*16*223.65~", status="4")], pay_date="20260415")
+    Detector(store, run_id="t1").run()
+    [(fid,)] = store.query("SELECT finding_id FROM findings WHERE signal='CLAIM_DENIED_UNPAID'")
+    store.close()
+    # the corrected claim is denied too: still one finding, on the submission that had it, listing the other
+    store = build_store(tmp_path, [visit(300, who, paid="0.00", cas="CAS*CO*50*223.65~", status="4").replace("C017*4*", "C024*4*")], pay_date="20260520")
+    Detector(store, run_id="t2").run()
+    rows = store.query("SELECT finding_id, evidence FROM findings WHERE signal='CLAIM_DENIED_UNPAID' AND status='open'")
+    assert [r["finding_id"] for r in rows] == [fid] and json.loads(rows[0]["evidence"])["earlier_denied_submissions"] == ["CB0000300C024"]
+    # the biller appeals on June 1; a third submission is denied on June 20: that one is seen on its own
+    apply_status(store.conn, fid, "appealed", "Appeal faxed", actor="biller", at="2026-06-01T15:00:00+00:00")
+    store.conn.commit()
+    store.close()
+    store = build_store(tmp_path, [visit(300, who, paid="0.00", cas="CAS*CO*50*223.65~", status="4").replace("C017*4*", "C031*4*")], pay_date="20260620")
+    Detector(store, run_id="t3").run()
+    rows = sorted((r["patient_control_number"], r["status"]) for r in store.query(
+        "SELECT patient_control_number, status FROM findings WHERE signal='CLAIM_DENIED_UNPAID' AND COALESCE(stale,0)=0"))
+    assert rows == [("CB0000300C017", "appealed"), ("CB0000300C031", "open")]
+    store.close()
+
 # --------------------------------------------------------------------------- what the practice manager expected to close
 def test_a_duplicates_denial_closes_when_the_service_was_already_paid_on_another_claim(tmp_path):
     store = build_store(tmp_path, base_visits() + [visit(300, "ASH*RO****MI*W55500304")], pay_date="20260415")
