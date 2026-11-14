@@ -53,6 +53,131 @@ const calcFmt = {n0: v => Math.round(v).toLocaleString(), n1: v => (Math.round(v
 const KIND_LABEL = {medicare: 'Medicare', medicare_advantage: 'Medicare Advantage', commercial: 'Commercial', medicaid: 'Medicaid', supplement: 'Supplement', other: 'Other'};
 const ROLE_LABEL = {mohs: 'Mohs surgeon', general: 'General dermatologist', apps: 'APP'};
 const moneyK = c => { const v = Math.round((c || 0) / 100000) * 100000; return v < 0 ? '−' + money(-v) : money(v); };   // a year's figure, to the nearest $1,000
+const roundK = c => Math.round((c || 0) / 100000) * 100000;
+
+// a yearly dollar figure as a person types it: 1,600,000, $1,600,000, 1.6m, 1.6M, 950k, 1600k. NaN for anything else.
+// Used by the target here and on the provider sheet.
+function calcMoney(s){
+  const t = String(s == null ? '' : s).trim().replace(/^\$\s*/, '').replace(/\s+/g, '');
+  const m = /^((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)([kKmM]?)$/.exec(t);
+  if(!m) return NaN;
+  return +m[1].replace(/,/g, '') * (!m[2] ? 1 : /k/i.test(m[2]) ? 1e3 : 1e6);
+}
+
+// the most a slider can mean: weeks in a year, a clinic day a day of the week, 14 AKs before 17004 takes over
+const CALC_CAP = {weeks_per_year: 52, days_per_week: 6, ak_per_patient: 14};
+// a slider's range: wide enough for the clinician's own figure, never past what is possible. A share of patients or cases
+// stops at 100%; closures per 100 cases stop at 200 (the model allows a second closure on a case, a later procedure of
+// the day); the ancillary sliders are against now and keep their own range.
+function calcRange(cs, def){
+  const [k, , mn, mx, st, f, grp] = def, now = +cs.base[k] || 0;
+  const dec = (String(st).split('.')[1] || '').length, fix = v => +(+v).toFixed(dec);
+  let hi = Math.max(mx, Math.ceil(now * 1.5 / st) * st);
+  if(CALC_CAP[k] != null) hi = Math.min(hi, Math.max(CALC_CAP[k], now));
+  else if(f === 'pct' && !grp) hi = Math.min(hi, Math.max(1, now));
+  else if(f === 'per100') hi = Math.min(hi, Math.max(2, now));
+  const lo = Math.min(mn, Math.floor(now / st) * st);
+  return [fix(Math.max(0, lo)), fix(hi)];
+}
+
+// folds stay as the reader left them, and the focused control keeps the focus, when a panel is drawn again
+function calcFold(key, dflt){ const f = state.calc.folds = state.calc.folds || {}; return (f[key] == null ? dflt : f[key]) ? 'open' : ''; }
+function calcFoldWire(box){
+  box.querySelectorAll('details[data-fold]').forEach(el => el.addEventListener('toggle', () => { (state.calc.folds = state.calc.folds || {})[el.dataset.fold] = el.open; }));
+}
+const CALC_KEYS = ['data-calc-fix', 'data-calc-idx', 'data-calc-t', 'data-calc-year', 'data-calc-who', 'data-calc-view', 'data-num', 'data-qnum'];
+function calcKeyOf(el){
+  if(el.id) return '#' + CSS.escape(el.id);
+  for(const at of CALC_KEYS) if(el.hasAttribute(at)) return `[${at}="${CSS.escape(el.getAttribute(at))}"]`;
+  const det = el.tagName === 'SUMMARY' && el.parentElement && el.parentElement.dataset.fold;
+  return det ? `details[data-fold="${CSS.escape(det)}"] > summary` : null;
+}
+function calcFocusKeep(root){
+  const a = document.activeElement;
+  if(!root || !a || a === document.body || !root.contains(a)) return () => {};
+  const sel = calcKeyOf(a);
+  let s0 = null, s1 = null;
+  try { s0 = a.selectionStart; s1 = a.selectionEnd; } catch(e){}
+  return () => {
+    if(!sel) return;
+    const el = root.querySelector(sel);
+    if(!el || el === document.activeElement) return;
+    el.focus({preventScroll: true});
+    try { if(s0 != null) el.setSelectionRange(s0, s1); } catch(e){}
+  };
+}
+function calcRedraw(box, html){ const back = calcFocusKeep(box); box.innerHTML = html; calcFoldWire(box); back(); }
+
+// rows rounded to $1,000 so that they add up to the rounded total (largest remainders)
+function calcRoundRows(values, total){
+  const U = 100000, T = Math.round(total / U), fl = values.map(v => Math.floor(v / U));
+  const order = values.map((v, i) => [v / U - fl[i], i]).sort((a, b) => b[0] - a[0]);
+  let left = T - fl.reduce((a, b) => a + b, 0);
+  for(let j = 0; left > 0 && order.length; j = (j + 1) % order.length, left--) fl[order[j][1]] += 1;
+  for(let j = order.length - 1; left < 0 && order.length; j = (j - 1 + order.length) % order.length, left++) fl[order[j][1]] -= 1;
+  return fl.map(v => v * U);
+}
+
+// what carries over to another clinician, another window and 'Back to the schedule now': the year and the assumptions
+// (patient balances, the 2027 readings, ancillary, contracts); the levers start again from the new schedule
+const CALC_ASSUME = ['q', 'ma_same_day', 'cut_add_ons', 'bx_visit_share', 'mohs_visit_share', 'include_ancillary', 'include_path', 'fix_mode', 'target_pct',
+                     'corrected', 'targets', 'indexed'];
+function calcKeep(x, d, base){
+  if(!x) return {};
+  const keep = {}, has = g => !!(d.payers || {})[g];
+  for(const k of CALC_ASSUME) if(x[k] != null) keep[k] = JSON.parse(JSON.stringify(x[k]));
+  if(x.year === d.rate_year || (d.next_year && x.year === d.next_year)) keep.year = x.year;
+  for(const k of ['corrected', 'targets']) if(keep[k]) keep[k] = Object.fromEntries(Object.entries(keep[k]).filter(([g]) => has(g)));
+  if(keep.indexed) keep.indexed = Object.assign({}, base.indexed, Object.fromEntries(Object.entries(keep.indexed).filter(([g]) => has(g))));
+  return keep;
+}
+// strategies that stop applying (another clinician's work, or 2027-only on this year's rates) are unticked, not left
+// ticked and greyed out
+function calcLabFit(cs){
+  const chosen = cs.lab && cs.lab.chosen;
+  if(!chosen || typeof LabModel === 'undefined' || !cs.data || !cs.x) return;
+  for(const [id, c] of Object.entries(chosen)){
+    const S = LabModel.STRATEGIES.find(s => s.id === id);
+    if(c && c.on && S && ((S.only === 'next' && cs.x.year !== cs.data.next_year) || (S.applies && !S.applies(cs.data, cs.x)))) c.on = false;
+  }
+}
+
+// moving a slider or ticking a box is use: the owner's idle lock waits (at most one restart of its timer every 15 seconds)
+const calcIdleWired = new WeakSet();
+let calcIdleAt = 0;
+function calcActive(){
+  if(state.tab !== 'calculator' || !state.ownerKey || typeof pvArmIdle !== 'function') return;
+  const t = Date.now(); if(t - calcIdleAt < 15000) return;
+  calcIdleAt = t; pvArmIdle();
+}
+
+// narrow screens: the wide tables wrap or stack inside their panel instead of scrolling sideways
+function calcStyle(){
+  if(document.getElementById('calcStyle')) return;
+  const s = document.createElement('style'); s.id = 'calcStyle';
+  s.textContent = `table.calc-lines td:first-child,table.calc-goal td:first-child{white-space:normal}
+@media(max-width:640px){
+  table.calc-lines th,table.calc-lines td{padding:5px 4px}
+  table.calc-lines td:first-child{font-size:12px}
+  table.calc-payers thead{display:none}
+  table.calc-payers,table.calc-payers tbody{display:block;width:100%}
+  table.calc-payers tr{display:grid;grid-template-columns:26px repeat(3,minmax(0,1fr));gap:2px 6px;border-bottom:1px solid var(--line);padding:6px 0}
+  table.calc-payers td{display:block;border:0;padding:0;min-width:0}
+  table.calc-payers td.c-payer{grid-column:2 / -1;overflow-wrap:anywhere}
+  table.calc-payers td.c-share{display:none}
+  table.calc-payers td.c-pays{grid-column:2}table.calc-payers td.c-target{grid-column:3}table.calc-payers td.c-up{grid-column:4}
+  table.calc-payers td.num{text-align:left;white-space:normal}
+  table.calc-payers td.num[data-label]::before{content:attr(data-label);display:block;font-size:11px;color:var(--muted)}
+  table.calc-payers td.c-target .calc-num{width:64px}
+  table.calc-cards thead{display:none}
+  table.calc-cards,table.calc-cards tbody{display:block;width:100%}
+  table.calc-cards tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 10px;border-bottom:1px solid var(--line);padding:6px 0}
+  table.calc-cards td{display:block;border:0;padding:0;min-width:0;text-align:left;white-space:normal}
+  table.calc-cards td:first-child{grid-column:1 / -1;font-weight:600}
+  table.calc-cards td[data-label]::before{content:attr(data-label);display:block;font-size:11px;font-weight:400;color:var(--muted)}
+}`;
+  document.head.appendChild(s);
+}
 
 async function calculatorTab(v){
   const cs = state.calc = Object.assign({provider: 'mohs', months: 6, data: null, x: null, cal: null, target: '', view: 'calc'}, state.calc || {});
