@@ -349,7 +349,11 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
     w = " AND ".join(where)
     out: dict[str, Any] = {}
     out["by_category"] = rows(f"SELECT category, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY category ORDER BY shortfall_cents DESC", tuple(params))
-    out["by_signal"] = rows(f"SELECT signal, category, severity, actionable, COUNT(*) n, SUM(shortfall_cents) shortfall_cents, SUM(charge_cents) charge_cents FROM findings WHERE {w} GROUP BY signal, category, severity, actionable ORDER BY shortfall_cents DESC", tuple(params))
+    # one row per signal (its highest severity, every action it takes), so a row opens a list of the same size
+    out["by_signal"] = rows(f"""SELECT signal, category, CASE MIN(CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END)
+                                       WHEN 0 THEN 'high' WHEN 1 THEN 'medium' WHEN 2 THEN 'low' ELSE 'info' END severity,
+                                       GROUP_CONCAT(DISTINCT actionable) actionable, COUNT(*) n, SUM(shortfall_cents) shortfall_cents, SUM(charge_cents) charge_cents
+                                FROM findings WHERE {w} GROUP BY signal, category ORDER BY shortfall_cents DESC""", tuple(params))
     out["by_payer"] = rows(f"SELECT payer_group, payer_kind, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY payer_group, payer_kind ORDER BY shortfall_cents DESC LIMIT 25", tuple(params))
     out["by_year"] = rows(f"SELECT year, category, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY year, category ORDER BY year", tuple(params))
     out["by_month"] = rows(f"SELECT substr(COALESCE(service_date, payment_date),1,7) month, category, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} AND COALESCE(service_date, payment_date) >= '2023-01' GROUP BY 1,2 ORDER BY 1", tuple(params))
@@ -820,10 +824,12 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
             out["handling"] = rows("SELECT * FROM line_handling WHERE line_key=? ORDER BY transaction_date", (f["line_key"],))
         pcn = f.get("patient_control_number")
         if pcn:
-            from .detect import bill_of
-            out["bill"] = bill_of(pcn)
-            out["history"] = rows("SELECT c.claim_key, c.claim_status_code, c.charge_cents, c.paid_cents, c.payment_date, c.payer_name, c.trace_number FROM claims c JOIN transactions t ON t.transaction_key=c.transaction_key WHERE c.patient_control_number=? AND t.superseded=0 ORDER BY c.payment_date", (pcn,))
+            out["history"] = rows(f"SELECT c.claim_key, c.claim_status_code, c.charge_cents, c.paid_cents, c.payment_date, c.payer_name, c.trace_number FROM claims c JOIN transactions t ON t.transaction_key=c.transaction_key WHERE c.patient_control_number=? AND t.superseded=0 ORDER BY {PAYER_ORDER}", (pcn,))
             out["ema"] = rows("SELECT family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents, claim_status, activity_type, carc, rarc, adjustment_status, adjustment_subtype, provider, payer, denial_category, previously_denied FROM ema_rows WHERE claim_id=? ORDER BY family, service_date, row_index", (pcn,))
+    from .detect import bill_of
+    bill = bill_of(f["patient_control_number"]) if f.get("patient_control_number") else (_bill_of_reference((f["evidence"] or {}).get("reference")) if f.get("signal") == "TAKEBACK" else None)
+    if bill and _bill_ok(bill):
+        out["bill"] = bill                  # the whole claim opens from the drawer: "See the whole claim"
     if f.get("transaction_key"):        # the remittance it came from (a takeback or a payment fee has one and no claim)
         out["remit"] = one("SELECT transaction_key, source_name, payer_name, payer_id, payer_contact_phone, payer_contact_url, payment_method, payment_amount_cents, payment_date, trace_number, production_date, payee_npi FROM transactions WHERE transaction_key=?", (f["transaction_key"],))
     # the record of what people did, for every finding (a payer's routine rate belongs to no one claim)
@@ -995,7 +1001,30 @@ CLP02_WORDS = {"1": "Processed as primary", "2": "Processed as secondary", "3": 
                "19": "Processed as primary, sent on to another payer", "20": "Processed as secondary, sent on to another payer",
                "21": "Processed as tertiary, sent on to another payer", "22": "Reversal of an earlier payment",
                "23": "Not this payer's claim, sent on to another payer", "25": "Priced only (predetermination)"}
-_BILL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]{2,39}")
+# a remittance list in the payer's order: by payment date, a reversal before its re-payment that day, then the file's order
+PAYER_ORDER = "c.payment_date, CASE WHEN c.claim_status_code='22' THEN 0 ELSE 1 END, c.transaction_key, c.claim_seq"
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _bill_ok(bill: str | None) -> bool:
+    """A claim ID the view opens: 3 to 40 printable characters (shorter ones are placeholders shared by unrelated claims)."""
+    return bool(bill) and 3 <= len(bill) <= 40 and not _CONTROL.search(bill)
+
+
+def _ref_tokens(ref: str | None) -> list[str]:
+    return [t for t in re.split(r"[\s/]+", (ref or "").strip().upper()) if len(t) >= 3]
+
+
+def _bill_of_reference(ref: str | None) -> str | None:
+    """The bill a payer's provider-level adjustment (a takeback) names in its reference: a claim ID, or the payer's claim
+    number of one."""
+    from .detect import bill_of
+    for tok in _ref_tokens(ref):
+        r = one("SELECT patient_control_number pcn FROM claims WHERE patient_control_number=? LIMIT 1", (tok,)) \
+            or one("SELECT patient_control_number pcn FROM claims WHERE payer_claim_control_number=? LIMIT 1", (tok,))
+        if r and r["pcn"]:
+            return bill_of(r["pcn"])
+    return None
 
 
 def _who(raw: dict) -> dict:
@@ -1014,11 +1043,59 @@ def _bill_ids(bill: str) -> list[str]:
     return sorted(r["pcn"] for r in found if r["pcn"] and bill_of(r["pcn"]) == bill)
 
 
+def _ema_ids(bill: str) -> list[str]:
+    """The bill's claim IDs in the EMA exports, answered by a payer or not."""
+    from .detect import bill_of
+    if not has_table("ema_rows"):
+        return []
+    found = rows("SELECT DISTINCT claim_id FROM ema_rows WHERE claim_id >= ? AND claim_id < ?", (bill, bill + "\uffff"))
+    return sorted(r["claim_id"] for r in found if r["claim_id"] and bill_of(r["claim_id"]) == bill)
+
+
 def _bill_remits(pcns: list[str]) -> list[dict]:
+    if not pcns:
+        return []
     q = ",".join("?" * len(pcns))
-    return rows(f"""SELECT c.*, t.source_name, t.payment_method, t.payment_amount_cents remit_amount_cents FROM claims c
-                    JOIN transactions t ON t.transaction_key = c.transaction_key
-                    WHERE c.patient_control_number IN ({q}) AND COALESCE(t.superseded,0)=0 ORDER BY c.payment_date, c.claim_key""", tuple(pcns))
+    return rows(f"""SELECT c.*, t.source_name, t.payment_method, t.payment_amount_cents remit_amount_cents, t.payer_contact_phone,
+                           t.payer_contact_url FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
+                    WHERE c.patient_control_number IN ({q}) AND COALESCE(t.superseded,0)=0 ORDER BY {PAYER_ORDER}""", tuple(pcns))
+
+
+def _bill_extras(pcns: list[str], payer_numbers: set, line_keys: set) -> tuple[list, list, list]:
+    """What names this bill without being on its claims: the takebacks whose reference names one of its claim IDs or the
+    payer's claim numbers, the money the payer took back or held over naming it (provider-level adjustments), and the
+    routine-rate patterns one of its lines belongs to."""
+    ids = {p.upper() for p in pcns} | {x.upper() for x in payer_numbers if x}
+    plb, takebacks, seen = [], [], set()
+    for x in sorted(ids):
+        if len(x) < 3:
+            continue
+        for r in rows("""SELECT p.id, p.payment_date, p.payer_name, p.reason_code, p.reference, p.amount_cents, p.trace_number, t.source_name
+                         FROM plb p JOIN transactions t ON t.transaction_key = p.transaction_key
+                         WHERE p.reference LIKE ? AND COALESCE(t.superseded,0)=0""", (f"%{x}%",)):
+            if r["id"] not in seen and set(_ref_tokens(r["reference"])) & ids:
+                seen.add(r["id"])
+                plb.append(r)
+        for f in rows("""SELECT finding_id, signal, category, status, shortfall_cents, appeal_deadline, procedure_code, claim_key, line_key, stale,
+                                payment_date remit_date, payer_name remit_payer, evidence FROM findings WHERE signal='TAKEBACK' AND evidence LIKE ?""", (f"%{x}%",)):
+            ev = json.loads(f.pop("evidence") or "{}")
+            if f["finding_id"] not in {t["finding_id"] for t in takebacks} and set(_ref_tokens(ev.get("reference"))) & ids:
+                takebacks.append(dict(f, via="takeback"))
+    plb.sort(key=lambda r: (r["payment_date"] or "", r["id"]))
+    patterns = []
+    if line_keys:
+        for f in rows("""SELECT finding_id, signal, category, status, shortfall_cents, appeal_deadline, procedure_code, stale, evidence
+                         FROM findings WHERE signal='SECOND_RATE' AND COALESCE(stale,0)=0"""):
+            ev = json.loads(f.pop("evidence") or "{}")
+            mine = set(ev.get("line_keys") or []) & line_keys
+            if not mine:
+                continue
+            per = max((ev.get("usual_cents") or 0) - (ev.get("amount_cents") or 0), 0)
+            own = [c for c in (ev.get("claims") or []) if isinstance(c, list) and c and str(c[0]).upper() in {p.upper() for p in pcns}]
+            patterns.append(dict(f, via="pattern", line_keys=sorted(mine), claim_cents=per * len(mine),
+                                 claim_deadline=(own[0][3] if own and len(own[0]) > 3 else None)))
+    return plb, takebacks, patterns
+
 
 
 @app.get("/api/claims/search")
@@ -1033,7 +1110,15 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
     up = re.sub(r"\s+", "", text).upper()
     found = rows("SELECT patient_control_number pcn FROM claims WHERE patient_control_number >= ? AND patient_control_number < ? LIMIT 500",
                  (up, up + "\uffff"))
-    found += rows("SELECT patient_control_number pcn FROM claims WHERE payer_claim_control_number = ? LIMIT 100", (text,))
+    found += [{"pcn": b} for b in (bill_of(up), up)]                      # any submission of a bill, answered or not
+    # the payer's claim number however it is typed: case, spaces, dashes and slashes do not matter; a start of 6 or more
+    # characters, or any 8 in a row, also finds it
+    norm = re.sub(r"[\s\-/]+", "", text).upper()
+    stored = "REPLACE(REPLACE(REPLACE(UPPER(payer_claim_control_number),' ',''),'-',''),'/','')"
+    if norm:
+        found += rows(f"""SELECT patient_control_number pcn FROM claims WHERE {stored} = ?
+                          OR (? >= 6 AND {stored} LIKE ? ) OR (? >= 8 AND INSTR({stored}, ?) > 0) LIMIT 100""",
+                      (norm, len(norm), norm + "%", len(norm), norm))
     if SHOW_PHI:
         # the same rules as the findings search: every word in the name as the remittance spells it (also in capitals),
         # or part of a number the payer labelled a member number
@@ -1052,40 +1137,61 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
                        f" OR ({bare.format(k='insured')} LIKE ? AND {_MEMBER_SQL.format(a='c', k='insured')})")
             params += [f"%{number}%"] * 2
         found += rows(f"SELECT c.patient_control_number pcn FROM claims c WHERE {clause} LIMIT 500", tuple(params))
+    # and claims EMA holds that no payer has answered yet
+    if has_table("ema_rows"):
+        found += rows("SELECT DISTINCT claim_id pcn FROM ema_rows WHERE claim_id >= ? AND claim_id < ? LIMIT 200", (up, up + "\uffff"))
     bills: list[str] = []
     for r in found:
         b = bill_of(r["pcn"]) if r["pcn"] else None
-        if b and b not in bills:
+        if b and _bill_ok(b) and b not in bills:
             bills.append(b)
     items = []
-    for b in bills[:25]:
+    for b in bills:
+        if len(items) >= 25:
+            break
         pcns = _bill_ids(b)
-        rem = _bill_remits(pcns) if pcns else []
-        if not rem:
+        rem = _bill_remits(pcns)
+        ema_ids = _ema_ids(b)
+        if not rem and not ema_ids:
             continue
-        q2 = ",".join("?" * len(pcns))
-        n_open = one(f"""SELECT COUNT(*) n FROM findings WHERE patient_control_number IN ({q2}) AND status IN ('open','in_progress')
-                         AND COALESCE(stale,0)=0""", tuple(pcns))["n"]
-        items.append(dict(_who(rem[-1]), bill=b, claim_ids=pcns, payers=sorted({x["payer_name"] for x in rem if x["payer_name"]}), remits=len(rem),
-                          first_payment=rem[0]["payment_date"], last_payment=rem[-1]["payment_date"],
-                          charge_cents=max((x["charge_cents"] or 0) for x in rem), paid_cents=sum((x["paid_cents"] or 0) for x in rem), open_findings=n_open))
-    items.sort(key=lambda x: x["last_payment"] or "", reverse=True)
-    return {"items": items, "more": len(bills) > 25}
+        open_ids = set()
+        if pcns:
+            q2 = ",".join("?" * len(pcns))
+            open_ids = {r["finding_id"] for r in rows(f"""SELECT finding_id FROM findings WHERE patient_control_number IN ({q2})
+                                                           AND status IN ('open','in_progress') AND COALESCE(stale,0)=0""", tuple(pcns))}
+            keys = [x["claim_key"] for x in rem]
+            lks = {r["line_key"] for r in rows(f"SELECT line_key FROM lines WHERE claim_key IN ({','.join('?' * len(keys))})", tuple(keys))} if keys else set()
+            _plb, tbs, pats = _bill_extras(pcns, {x["payer_claim_control_number"] for x in rem if x.get("payer_claim_control_number")}, lks)
+            open_ids |= {x["finding_id"] for x in tbs + pats if x["status"] in ("open", "in_progress")}
+        who = _who(rem[-1]) if rem else {"patient": ""}
+        items.append(dict(who, bill=b, claim_ids=sorted(set(pcns) | set(ema_ids)), payers=sorted({x["payer_name"] for x in rem if x["payer_name"]}), remits=len(rem),
+                          first_payment=rem[0]["payment_date"] if rem else None, last_payment=rem[-1]["payment_date"] if rem else None,
+                          charge_cents=max(((x["charge_cents"] or 0) for x in rem), default=0), paid_cents=sum((x["paid_cents"] or 0) for x in rem),
+                          open_findings=len(open_ids), exact=(b == up)))
+    items.sort(key=lambda x: (not x["exact"], -(int((x["last_payment"] or "0000-00-00").replace("-", "")))))
+    return {"items": items, "more": len(bills) > len(items) and len(items) >= 25}
 
 
-@app.get("/api/claims/{bill}")
-def claim_view(bill: str, _: str = Depends(require_auth)):
-    """Everything about one bill: every submission (claim ID) and every remittance for them, oldest first, each with every
-    line, adjustment and remark in words; the findings on it; the EMA rows. The same allowlist of claim columns as the
-    finding detail, and the patient as it shows them."""
-    if not _BILL_RE.fullmatch(bill or ""):
+@app.get("/api/claims/view")
+def claim_view(request: Request, _: str = Depends(require_auth)):
+    """Everything about one bill: every submission (claim ID) and every remittance for them in the payer's order, each with
+    every line, adjustment and remark in words; the items found on it (its own, the takebacks and routine-rate patterns
+    that name it); the money taken back on it; the EMA rows, also of submissions no payer has answered yet. The claim ID
+    comes in the X-Claim header, never in the address. The same allowlist of claim columns as the finding detail, and the
+    patient as it shows them."""
+    from urllib.parse import unquote
+    from .detect import bill_of
+    raw = unquote(request.headers.get("x-claim") or "").strip().upper()
+    bill = bill_of(raw) if raw else ""
+    if not _bill_ok(bill):
         raise HTTPException(400, "That is not a claim ID.")
-    pcns = _bill_ids(bill.upper())
-    rem = _bill_remits(pcns) if pcns else []
-    if not rem:
-        raise HTTPException(404, "No remittance in the files has that claim ID.")
-    keys = [r["claim_key"] for r in rem]
-    qk, qp = ",".join("?" * len(keys)), ",".join("?" * len(pcns))
+    pcns = _bill_ids(bill)
+    rem = _bill_remits(pcns)
+    ema_ids = _ema_ids(bill)
+    if not rem and not ema_ids:
+        raise HTTPException(404, "No remittance in the files and no EMA row has that claim ID.")
+    keys = [r["claim_key"] for r in rem] or [""]
+    qk = ",".join("?" * len(keys))
     lines = rows(f"""SELECT claim_key, line_key, line_seq, procedure_code, modifiers, original_procedure_code, original_modifiers, original_units,
                             charge_cents, allowed_cents, paid_cents, paid_units, service_date, line_control_number FROM lines
                      WHERE claim_key IN ({qk}) ORDER BY claim_key, line_seq""", tuple(keys))
@@ -1099,18 +1205,29 @@ def claim_view(bill: str, _: str = Depends(require_auth)):
     for r in rem:
         out = {k: r.get(k) for k in CLAIM_PUBLIC_COLS}
         out.update(status_words=CLP02_WORDS.get(str(r.get("claim_status_code") or ""), f"Status {r.get('claim_status_code') or '?'}"),
-                   source_name=r.get("source_name"), payment_method=r.get("payment_method"),
+                   source_name=r.get("source_name"), payment_method=r.get("payment_method"), sent_on_to=r.get("crossover_carrier_name"),
+                   payer_phone=r.get("payer_contact_phone"), payer_url=r.get("payer_contact_url"),
                    adjustments=[a for a in adjs if a["claim_key"] == r["claim_key"] and not a["line_key"]],
                    remarks=[x for x in rems if x["claim_key"] == r["claim_key"] and not x["line_key"]],
                    lines=[dict(l, adjustments=[a for a in adjs if a["line_key"] == l["line_key"]], remarks=[x for x in rems if x["line_key"] == l["line_key"]])
                           for l in lines if l["claim_key"] == r["claim_key"]])
         remits.append(out)
-    findings = rows(f"""SELECT finding_id, signal, category, status, shortfall_cents, appeal_deadline, procedure_code, claim_key, line_key, stale
-                        FROM findings WHERE patient_control_number IN ({qp}) ORDER BY payment_date, finding_id""", tuple(pcns))
+    findings = []
+    if pcns:
+        qp = ",".join("?" * len(pcns))
+        findings = [dict(f, via="line") for f in rows(f"""SELECT f.finding_id, f.signal, f.category, f.status, f.shortfall_cents, f.appeal_deadline, f.procedure_code,
+                                                                f.claim_key, f.line_key, f.stale, c.payment_date remit_date, c.payer_name remit_payer
+                                                         FROM findings f LEFT JOIN claims c ON c.claim_key = f.claim_key
+                                                         WHERE f.patient_control_number IN ({qp}) ORDER BY f.payment_date, f.finding_id""", tuple(pcns))]
+    plb, takebacks, patterns = _bill_extras(pcns, {r["payer_claim_control_number"] for r in rem if r.get("payer_claim_control_number")},
+                                            {l["line_key"] for l in lines})
+    ids = sorted(set(pcns) | set(ema_ids))
+    qe = ",".join("?" * len(ids))
     ema = rows(f"""SELECT claim_id, family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents,
-                          claim_status, activity_type, carc, rarc, adjustment_status, denial_category FROM ema_rows WHERE claim_id IN ({qp})
-                   ORDER BY family, service_date, row_index""", tuple(pcns)) if has_table("ema_rows") else []
-    return dict(_who(rem[-1]), bill=bill.upper(), claim_ids=pcns, remits=remits, findings=findings, ema=ema)
+                          claim_status, activity_type, carc, rarc, adjustment_status, denial_category, posted_date, claim_submission_date, transaction_date
+                   FROM ema_rows WHERE claim_id IN ({qe}) ORDER BY claim_id, family, service_date, row_index""", tuple(ids)) if has_table("ema_rows") and ids else []
+    who = _who(rem[-1]) if rem else {"patient": ""}
+    return dict(who, bill=bill, claim_ids=ids, answered=pcns, remits=remits, findings=findings + takebacks + patterns, taken_back=plb, ema=ema)
 
 
 # --------------------------------------------------------------------------- payment fees: one request per payer
@@ -1169,10 +1286,14 @@ def _fee_payers(statuses: tuple = ("open", "in_progress"), payer_name: str | Non
 
 @app.get("/api/fees/payers")
 def fee_payers(_: str = Depends(require_auth)):
-    """Payment fees still to stop, one row per payer (largest in the last 12 full months first), and the payers already
-    asked, waiting for the change. About payers and the practice's payments: no patient or claim."""
+    """Payment fees still to stop, one row per payer (largest in the last 12 full months first); the payers already asked,
+    waiting for the change; and what the vendors took in all (every fee month but those let go), which asking does not
+    change. About payers and the practice's payments: no patient or claim."""
     out = _fee_payers()
-    out["asked"] = [{k: p[k] for k in ("payer_name", "payer_group", "cents", "asked")} for p in _fee_payers(("appealed",))["payers"]]
+    asked = _fee_payers(("appealed",))
+    every = _fee_payers(("open", "in_progress", "appealed", "resolved", "lost"))
+    out["asked"] = asked["payers"]
+    out["history"] = {k: every[k] for k in ("cents12", "payers12", "cents", "since")}
     return out
 
 
@@ -1182,7 +1303,9 @@ def fee_letter(payer: str = Query(..., max_length=200), _: str = Depends(require
     from .appeals import fee_request_letter
     s = _fee_payers(payer_name=payer)
     if not s["payers"]:
-        raise HTTPException(404, "No open payment fees for this payer.")
+        s = _fee_payers(("appealed",), payer_name=payer)            # asked already: the same letter again
+    if not s["payers"]:
+        raise HTTPException(404, "No payment fees to ask about for this payer.")
     return fee_request_letter(dict(s["payers"][0], period_from=s["from"], period_to=s["to"]))
 
 
@@ -1428,12 +1551,12 @@ def brief(_: str = Depends(require_auth)):
 @app.get("/api/worklist/counts")
 def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None, status: str = "open", deadline: Optional[str] = None,
                     q: Optional[str] = None, signal: Optional[str] = None, live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650),
-                    min: int = Query(0, ge=0, le=10**6), kind: Optional[str] = Query(None, max_length=20), request: Request = None,
-                    _: str = Depends(require_auth)):
+                    min: int = Query(0, ge=0, le=10**6), kind: Optional[str] = Query(None, max_length=20), year: Optional[str] = Query(None, max_length=4),
+                    request: Request = None, _: str = Depends(require_auth)):
     """Items and dollars for each kind of work under the worklist's other filters, so each tab counts what a click on it
     opens, and for each reason (signal), so a reason chip counts what it opens too. Counts only: no patient, claim or date."""
     from .insights import WORK_TYPES, work_type
-    w, params = _filters(signal, category, payer, None, status, None, None, _search_text(request, q), None, None, deadline, None, None,
+    w, params = _filters(signal, category, payer, year, status, None, None, _search_text(request, q), None, None, deadline, None, None,
                          None, kind, bool(live), paid, min)
     out = {t["key"]: {"key": t["key"], "n": 0, "cents": 0} for t in WORK_TYPES}
     by_signal: dict[str, dict] = {}
@@ -1472,20 +1595,20 @@ BADGE_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
 CLAIM_CATEGORIES = ",".join(BADGE_CATEGORIES)          # the four claim pages together: the Worklist
 
 
-def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None) -> dict:
+def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None, year=None) -> dict:
     """Items and dollars under exactly the filter /api/findings uses for the same choices (live findings only): the
     count line of the list a click opens. A routine-rate pattern counts its claims in range, as the list does."""
-    w, params = _filters(signal, category, payer, None, status, None, None, None, None, None, deadline, None, None, None, kind, True, 0, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, None, None, None, deadline, None, None, None, kind, True, 0, min_dollars)
     r = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}", tuple(params))
     delta, _each = _pattern_cents(w, params, deadline)
     return {"n": r["n"], "cents": (r["cents"] or 0) + (delta if r["n"] else 0)}
 
 
-def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None) -> dict:
+def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None, year=None) -> dict:
     """The kinds of work under one filter, largest dollars first, each with its three biggest payer piles; a pile's count
     and dollars are what the list shows for that kind and payer."""
     from .insights import WORK_TYPES, work_type
-    w, params = _filters(signal, category, payer, None, status, None, None, q, None, None, deadline, None, None, None, None, True, paid_days, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, q, None, None, deadline, None, None, None, None, True, paid_days, min_dollars)
     kinds = {t["key"]: {"key": t["key"], "n": 0, "cents": 0, "payers": {}} for t in WORK_TYPES}
     for r in rows(f"""SELECT signal, actionable, carc, payer_group pg, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}
                       GROUP BY 1,2,3,4""", tuple(params)):
@@ -1521,7 +1644,7 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
          status: str = Query(TODO_STATUSES, max_length=80), deadline: Optional[str] = Query(None, max_length=20),
          signal: Optional[str] = Query(None, max_length=400), paid: int = Query(0, ge=0, le=3650), tiles: int = Query(1, ge=0, le=1),
          kind: Optional[str] = Query(None, max_length=20), reason: Optional[str] = Query(None, max_length=60), q: Optional[str] = None,
-         request: Request = None, _: str = Depends(require_auth)):
+         year: Optional[str] = Query(None, max_length=4), request: Request = None, _: str = Depends(require_auth)):
     """A category page in one call: its tiles (closes in 7 and 30 days, window open, to decide, older with no date, window
     closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), and the kinds of work under
     the chosen status, filing date, payment window and search with their payer piles. `signal` narrows the whole page;
@@ -1529,9 +1652,9 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
     another can be chosen). Every number is the count line of the list it opens. Counts only: no patient, claim or date."""
     token = _WINDOWS_MEMO.set({})
     try:
-        out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid, _search_text(request, q))}
+        out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid, _search_text(request, q), year)}
         if tiles:
-            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind) for name, st, dl in DESK_TILES}
+            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year) for name, st, dl in DESK_TILES}
         return out
     finally:
         _WINDOWS_MEMO.reset(token)

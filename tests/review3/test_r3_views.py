@@ -144,7 +144,7 @@ def test_the_drawer_of_a_530_claim_pattern_shows_only_passed_windows(tmp_path):
     assert res.returncode == 0, res.stderr
     html = json.loads(res.stdout)["out"][0]["html"]
     text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
-    rows = re.findall(r"<tr><td>(CB\d+C017)</td>", html)
+    rows = re.findall(r"<tr><td>(?:<a [^>]*>)?(CB\d+C017)(?:</a>)?</td>", html)          # each claim ID links to its whole claim
     passed = text.count("(passed)")
     print(text[:330])
     print("claim rows:", len(rows), "| marked passed:", passed)

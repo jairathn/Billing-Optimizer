@@ -24,7 +24,7 @@ const KIND_SHORT = {fix:'Correct it in EMA and resend it the way the item says.'
   note:'Send the appeal letter with the visit note from EMA.', rule:'Send the appeal letter; it cites the coding rule.',
   rate:'Ask the payer to reprocess at its usual rate.', check:'Decide: other payer, the patient, appeal, or let go.'};
 const ROWS = 20;
-const DESK_DEFAULTS = {kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:'', min:''};
+const DESK_DEFAULTS = {kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:'', min:'', year:''};
 const ALERT_FLOOR = 50000;          // a payer change worth less than $500 takes no line on a category page
 const CHANGE_WORDS = {RAMP:'ramping up', RISING:'climbing', RESUMED:'back again'};
 const BULK_WORDS = {in_progress:'Mark started', appealed:'Mark sent', dismissed:'Let go', open:'Back to To do'};
@@ -73,11 +73,11 @@ async function deskTab(v, key){
   const typed = String(f.q||'').slice(0,200);
   let sent = ''; try { sent = encodeURIComponent(typed); } catch(e){ sent = encodeURIComponent(typed.replace(/[\uD800-\uDFFF]/g,'')); }
   const find = Object.assign({cache:'no-store'}, sent ? {headers:{'X-Search':sent}} : {});
-  const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min};
+  const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min, year:f.year};
   const listUrl = n => '/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit:n, offset:0}));
   // the tiles count under the chosen kind of work and reason; the kinds of work under the chosen tile, payment window and search
   const [dk, res, why, payers] = await Promise.all([
-    api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal}), find),
+    api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal, year:f.year}), find),
     api(listUrl(lim), find),
     f.kind ? api('/api/worklist/counts?'+qs(Object.assign({}, scope, {signal:'', kind:f.kind})), find) : Promise.resolve(null),
     payerList()]);
@@ -130,6 +130,7 @@ async function deskTab(v, key){
   if(f.signal) chips.push(chip('signal', esc(shortOf(b, f.signal))));
   if(f.payer) chips.push(chip('payer', esc(f.payer)));
   if(f.paid) chips.push(chip('paid', `Paid in the last ${esc(f.paid)} days`));
+  if(f.year) chips.push(chip('year', `Year ${esc(f.year)}`));
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
   if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Window open">✕</button></span>`);
   const sel = (name, label, opts, cur) => `<select data-f="${name}" aria-label="${label}">${opts.map(([val,l])=>`<option value="${esc(val)}" ${String(cur)===val?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
@@ -143,7 +144,7 @@ async function deskTab(v, key){
       ${startLbl ? `<div class="ph-go"><button class="primary" id="startFirst">${startLbl}</button></div>` : ''}</div>
     ${dataLine(b)}
     <div class="tiles">${tiles}</div>
-    ${key==='worklist' ? (only ? `<div class="small muted allopen">Counting ${esc(only)} only.</div>` : '') : `<div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}<a href="#" class="see-all" title="${esc(allTip)}">Everything to do, any window: ${num(all.n)} · ${money(all.cents)}</a></div>`}
+    ${key==='worklist' ? (only ? `<div class="small muted allopen">Counting ${esc(only)} only.</div>` : '') : `<div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}<a href="#" class="see-all" title="${esc(allTip)}">Everything open, any window: ${num(all.n)} · ${money(all.cents)}</a></div>`}
     <div class="todo-chips" aria-label="What to do">${kinds.map(k=>`<button class="seg ${f.kind===k.key?'on':''}" data-kind="${k.key}"><span>${esc(kindOf(b,k.key).label)} <span class="cnt">${num(k.n)}</span></span><span class="seg-sub">${money(k.cents)}</span></button>`).join('')}</div>
     ${f.kind || single ? `<div class="howline"><b>What to do:</b> ${esc(doText(f.kind || kinds[0].key))}</div>` : ''}
     <div class="ph-what">${f.kind ? reasonChips : ''}${single && !f.payer ? pileRows(kinds[0]) : ''}</div>
@@ -210,7 +211,9 @@ async function deskTab(v, key){
         .catch(e=>{ const el = v.querySelector('#foldBody'); if(el) el.textContent = 'Could not load: ' + e.message; }); } };
     fold.ontoggle = () => { foldRemember(key, fold.open); load(); }; load();
   }
-  if(state.refocus){ const el = v.querySelector(state.refocus); state.refocus = null; if(el){ el.focus({preventScroll: el.id !== 'listHead'}); if(el.id === 'listHead') el.scrollIntoView({block:'start'}); } }
+  // the control that made the change gets the focus back: the visible one (a phone copy may sit hidden before it)
+  if(state.refocus){ const el = [...v.querySelectorAll(state.refocus)].find(e => e.offsetParent !== null); state.refocus = null;
+    if(el){ el.focus({preventScroll: el.id !== 'listHead'}); if(el.id === 'listHead') el.scrollIntoView({block:'start'}); } }
   if(f.first === '1' && res.items.length){ state.filt[key] = Object.assign({}, f, {first:''}); openDetail(res.items[0].finding_id); }
 }
 const DETAILS_SUMMARY = {denials:'Details: by reason, by month, what each label means', bundling:'Details: by reason, by month, the 2027 changes, label meanings',
@@ -226,7 +229,13 @@ function bindBulk(v){
   const sync = () => { const n = picked().length; bulk.hidden = !n; bulkN.textContent = n + ' selected'; };
   v.querySelectorAll('.sel').forEach(cb=>cb.onchange=sync);
   const all = v.querySelector('#selAll'); if(all) all.onchange = e => { v.querySelectorAll('.sel').forEach(cb=>cb.checked = e.target.checked); sync(); };
-  v.querySelectorAll('[data-bulk]').forEach(bt=>bt.onclick=async()=>{ const ids = picked(); if(!ids.length) return;
+  v.querySelectorAll('[data-bulk]').forEach(bt=>bt.onclick=async()=>{ let ids = picked(); if(!ids.length) return;
+    if(['appealed','in_progress'].includes(bt.dataset.bulk)){
+      const shut = new Set([...v.querySelectorAll('tr.row[data-closed]')].map(tr=>tr.dataset.id));
+      const keep = ids.filter(id=>!shut.has(id));
+      if(keep.length < ids.length && !confirm(`${pl(ids.length-keep.length, 'item')} ${ids.length-keep.length===1?'has':'have'} a closed filing window and will be left out: nothing to send there.${keep.length?'':' Nothing else is ticked.'}`)) return;
+      ids = keep; if(!ids.length) return;
+    }
     if(bt.dataset.bulk==='dismissed' && !confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.`)) return;
     if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
     bt.disabled = true;
@@ -251,7 +260,8 @@ function rowHtml(b, r, o){
     : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
   const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>` : '';
   const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
-  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}"><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
+  const shut = live && due && daysUntil(due) < 0;
+  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
     <td class="day">${when}</td>
     <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
     ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}
@@ -267,7 +277,7 @@ function fixOnce(key, b){
   const trend = x => !x.n_prev ? 'new' : (x.cents90 > x.cents_prev*1.15 ? 'rising' : (x.cents90 < x.cents_prev*0.85 ? 'falling' : 'steady'));
   const line = (tag, txt, link) => `<div class="fixonce"><span class="fo-tag">${tag}</span> ${txt} ${link||''}</div>`;
   const dated = [], rising = [], change = [], steady = [];
-  if(key==='bundling' && localDay() < '2027-01-01') dated.push(line('Before Jan 1', 'G2211 becomes modifier B1: change the EMA charge setup. Billing.', '<a href="#wins" class="go-wins" data-anchor="wins-2027">Bigger wins</a>'));
+  if(key==='bundling' && siteDay() < '2027-01-01') dated.push(line('Before Jan 1', 'G2211 becomes modifier B1: change the EMA charge setup. Billing.', '<a href="#wins" class="go-wins" data-anchor="wins-2027">Bigger wins</a>'));
   if(catOf[key]){
     const top = causes.filter(x=>catOf[key].test(x.signal)).sort((a,c)=>c.cents90-a.cents90)[0];
     if(top) (trend(top)==='rising' ? rising : steady).push(line('Fix once', `<b>${esc(top.label)}:</b> ${money(top.cents90)} in 90 days, ${trend(top)}. ${esc(OWNER_OF[top.work]||'Billing')}.`, '<a href="#wins" class="go-wins" data-anchor="wins-leaks">Bigger wins</a>'));
@@ -374,23 +384,25 @@ async function feesDesk(v){
     };
   }
   const top = ((dk.scope.kinds[0]||{}).piles||[])[0], since = ((state.meta||{}).remits||{}).first_payment;
+  const fh = fp.history || {cents12: fp.cents12, payers12: fp.payers12, cents: fp.cents, since: fp.since};       // what vendors took, asked or not
   const older = fp.payers.length - fp.payers12;
   const startLbl = onFees ? (fp.payers.length ? 'Start with the biggest payer' : '') : (on90 && tbl.items.length ? 'Start with the newest takeback' : '');
   v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">Fees & takebacks</h1> <span class="muted">Money taken out of payments: vendor fees to stop once, and takebacks to check against the payer's letter.</span></div>
       ${startLbl ? `<div class="ph-go"><button class="primary" id="startFirst">${startLbl}</button></div>` : ''}</div>
     ${dataLine(b)}
     <div class="tiles">
-      <div class="tile ${onFees?'on':''}" role="button" tabindex="0" data-l="fees"><span class="t-l">Payment fees, last 12 months</span><span class="t-v">${money(fp.cents12)}</span>
-        <span class="t-s">${fp.from ? `${esc(rwMonth(fp.from))} to ${esc(rwMonth(fp.to))}, ${pl(fp.payers12, 'payer')}` : ''}${fp.since ? `; ${money(fp.cents)} since ${esc(rwMonth(fp.since))}` : ''}</span></div>
+      <div class="tile ${onFees?'on':''}" role="button" tabindex="0" data-l="fees"><span class="t-l">Payment fees, last 12 months</span><span class="t-v">${money(fh.cents12)}</span>
+        <span class="t-s">${fp.from ? `${esc(rwMonth(fp.from))} to ${esc(rwMonth(fp.to))}, ${pl(fh.payers12, 'payer')}` : ''}${fh.since ? `; ${money(fh.cents)} since ${esc(rwMonth(fh.since))}` : ''}</span></div>
       <div class="tile ${tb90.total?'t-amber':'t-ok'} ${on90?'on':''}" role="button" tabindex="0" data-l="takebacks" data-paid="90"><span class="t-l">Taken back, last 90 days</span><span class="t-v">${tb90.total ? num(tb90.total) : 'None'}<small>${tb90.total ? short$(tb90.shortfall_cents) : ''}</small></span><span class="t-s">check each one</span></div>
       <div class="tile t-grey ${onAll?'on':''}" role="button" tabindex="0" data-l="takebacks" data-paid=""><span class="t-l">All takebacks</span><span class="t-v">${num(tbAll.total)}<small>${tbAll.total ? short$(tbAll.shortfall_cents) : ''}</small></span><span class="t-s">${since ? 'since '+esc(rwMonth(since.slice(0,7)))+' · ' : ''}${num(tbBig.total)} of $5,000 or more</span></div></div>
     <div class="todo-list"><div class="sec">What to do</div>
-      <div class="todo-row ${onFees?'on':''}" role="button" tabindex="0" data-l="fees"><span class="fo-tag">Fix once</span><span class="tr-do">Ask each payer or its vendor for direct deposit with no fee.</span><span class="tr-n"><b>${pl(fp.payers12, 'payer')}</b> · ${money(fp.cents12)} in 12 months</span><span class="tr-pile small muted">${fp.payers[0] ? 'Most: '+esc(fp.payers[0].payer_name) : ''}</span></div>
+      <div class="todo-row ${onFees?'on':''}" role="button" tabindex="0" data-l="fees"><span class="fo-tag">Fix once</span><span class="tr-do">Ask each payer or its vendor for direct deposit with no fee.</span><span class="tr-n"><b>${pl(fp.payers12, 'payer')}</b> to ask · ${money(fp.cents12)} in 12 months</span><span class="tr-pile small muted">${fp.payers[0] ? 'Most: '+esc(fp.payers[0].payer_name) : ''}</span></div>
       <div class="todo-row ${on90?'on':''}" role="button" tabindex="0" data-l="takebacks" data-paid="90"><span class="kind k-check">Check first</span><span class="tr-do">${tb90.total ? "Match each takeback to the payer's letter; dispute any not owed." : 'No takebacks in the last 90 days.'}</span><span class="tr-n"><b>${num(tb90.total)}</b> · ${money(tb90.shortfall_cents||0)}</span><span class="tr-pile small muted">${top ? `Most: ${esc(top.payer)} (${num(top.n)})` : ''}</span></div></div>
     ${onFees ? feeListHtml(fp, older) : `<div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(tbl.total, 'takeback')}</b> · <b>${money(tbl.shortfall_cents)}</b>${on90 ? ' in the last 90 days' : ', every one in the files'}</span></div>
         <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${['in_progress','appealed','dismissed','open'].map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}</div>
-        <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every takeback shown"></th><th>Taken</th><th>Payer</th><th class="num">Taken back</th></tr></thead>
-        <tbody>${tbl.items.map(r=>`<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}"><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this takeback"></td><td class="day">${esc(rwMonth((r.payment_date||'').slice(0,7)))}</td><td class="payer">${esc(r.payer_group)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b>${r.status!=='open'?`<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`:''}</td></tr>`).join('')}</tbody></table></div>
+        <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every takeback shown"></th><th>Taken</th><th>Dispute by</th><th>Payer</th><th class="num">Taken back</th></tr></thead>
+        <tbody>${tbl.items.map(r=>{ const c = closesText(r.appeal_deadline), live = ['open','in_progress'].includes(r.status);
+          return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" ${live && r.appeal_deadline && daysUntil(r.appeal_deadline) < 0 ? 'data-closed="1"' : ''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this takeback"></td><td>${esc(rwMonth((r.payment_date||'').slice(0,7)))}</td><td class="day">${r.appeal_deadline ? `<span class="${live?c.cls:'muted'}" title="${esc(r.deadline_basis||'')}">${esc(c.text)}</span>` : '<span class="muted">no date</span>'}</td><td class="payer">${esc(r.payer_group)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b>${r.status!=='open'?`<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`:''}</td></tr>`; }).join('')}</tbody></table></div>
         ${tbl.items.length ? '' : `<div class="empty">${on90 ? 'No takebacks in the last 90 days. All takebacks are in the grey box above.' : 'No takebacks.'}</div>`}
         ${tbl.total > tbl.items.length ? `<button class="ghost" id="moreRows">Show ${Math.min(ROWS, tbl.total-tbl.items.length)} more</button>` : ''}`}
     <details class="fold" id="fold" ${foldIsOpen('fees')?'open':''}><summary>Details: money held back by month, MIPS and the 2% reduction</summary><div id="foldBody" class="muted small">Loading…</div></details>`;
@@ -398,6 +410,11 @@ async function feesDesk(v){
   v.querySelectorAll('[data-l]').forEach(el=>{ const fn = () => go(el.dataset.l, el.dataset.paid != null ? el.dataset.paid : f.paid);
     el.onclick = fn; el.onkeydown = e => { if((e.key==='Enter'||e.key===' ') && e.target===el){ e.preventDefault(); fn(); } }; });
   v.querySelectorAll('.go-data').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab='data'; location.hash='data'; render(); });
+  v.querySelectorAll('button.fee-again').forEach(bt=>bt.onclick=()=>openFeeLetter(fp.asked[Number(bt.dataset.a)]));
+  v.querySelectorAll('button.fee-undo').forEach(bt=>bt.onclick=async()=>{ const a = fp.asked[Number(bt.dataset.a)]; if(!a) return;
+    bt.disabled = true;
+    try { await post('/api/findings/bulk-status', {ids: a.ids, status: 'open'}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    state.brief = null; render(); });
   v.querySelectorAll('tr.fee-row, button.fee-letter').forEach(el=>{ const fn = e => { if(e) e.stopPropagation(); openFeeLetter(fp.payers[Number(el.dataset.i)]); };
     el.onclick = fn; if(el.tagName === 'TR') el.onkeydown = e => { if((e.key==='Enter'||e.key===' ') && e.target===el){ e.preventDefault(); fn(); } }; });
   const st = v.querySelector('#startFirst'); if(st) st.onclick = () => { if(onFees){ if(fp.payers[0]) openFeeLetter(fp.payers[0]); } else if(tbl.items.length) openDetail(tbl.items[0].finding_id); };
@@ -416,7 +433,9 @@ function feeListHtml(fp, older){
     <div class="scroll"><table class="fees"><thead><tr><th>Payer</th><th class="num">Last 12 months</th><th class="num">Since ${esc(rwMonth(fp.since))}</th><th class="num">Months with a fee</th><th>Last fee</th><th></th></tr></thead>
     <tbody>${fp.payers.map((p,i)=>`<tr class="row fee-row" tabindex="0" data-i="${i}"><td>${esc(p.payer_name)}${p.payer_group && p.payer_group !== p.payer_name ? `<div class="small muted">${esc(p.payer_group)}</div>` : ''}</td><td class="num">${p.cents12 ? money(p.cents12) : '–'}</td><td class="num">${money(p.cents)}</td><td class="num">${num(p.months)}</td><td>${esc(rwMonth(p.last_month))}</td><td><button class="ghost small fee-letter" data-i="${i}">Request letter</button></td></tr>`).join('')}</tbody></table></div>
     ${fp.payers.length ? '' : '<div class="empty">No payment fees to stop.</div>'}
-    ${asked.length ? `<div class="small muted" style="margin-top:10px"><b>Asked, waiting for the change:</b> ${asked.map(a=>`${esc(a.payer_name)}${a.asked ? ` (asked ${esc(longDate(String(a.asked).slice(0,10)))})` : ''}`).join(' · ')}</div>` : ''}`;
+    ${asked.length ? `<h3 class="small" style="margin-top:14px">Asked, waiting for the change: ${pl(asked.length, 'payer')} · ${money(asked.reduce((s,a)=>s+(a.cents12||0),0))} in the last 12 full months</h3>
+      <div class="scroll"><table class="fees"><tbody>${asked.map((a,i)=>`<tr><td>${esc(a.payer_name)}</td><td class="small muted">${a.asked ? 'asked '+esc(longDate(String(a.asked).slice(0,10))) : ''}</td><td class="num">${money(a.cents12||0)}</td>
+        <td><button class="ghost small fee-again" data-a="${i}">Letter again</button><button class="ghost small fee-undo" data-a="${i}">Not asked yet</button></td></tr>`).join('')}</tbody></table></div>` : ''}`;
 }
 // the request letter for one payer, and one filled button: Mark asked moves its fee months to Sent
 async function openFeeLetter(p){
@@ -424,17 +443,17 @@ async function openFeeLetter(p){
   let L; try { L = await api('/api/fees/letter?'+qs({payer: p.payer_name})); } catch(e){ alert('The letter did not come back: '+e.message); return; }
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Payment fees: ${esc(p.payer_name)}</h2><button id="closeM" aria-label="Close">✕</button></div>
     <div class="note">${esc(L.evidence)} Send it through the payer's provider portal, by fax or by mail, then press Mark asked: its ${pl(p.ids.length, 'fee month')} move to Sent. Fees that keep arriving afterwards show here again.</div>
-    <div class="actions"><button class="primary" id="feeAsked">Mark asked</button><button id="copyL">Copy letter</button></div>
+    <div class="actions">${p.asked ? `<span class="small muted">Asked ${esc(longDate(String(p.asked).slice(0,10)))}.</span>` : '<button class="primary" id="feeAsked">Mark asked</button>'}<button id="copyL">Copy letter</button></div>
     <div class="st-err sev-high small" role="alert"></div>
     <pre id="letter">${esc(L.letter)}</pre>`;
   $('#modal').classList.add('open');
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
   $('#copyL').onclick = () => navigator.clipboard.writeText(L.letter);
-  $('#feeAsked').onclick = async () => { const bt = $('#feeAsked'); bt.disabled = true;
+  const fa = $('#feeAsked'); if(fa) fa.onclick = async () => { const bt = $('#feeAsked'); bt.disabled = true;
     try { await post('/api/findings/bulk-status', {ids: p.ids, status: 'appealed'}); }
     catch(e){ bt.disabled = false; const er = $('#modalBox .st-err'); if(er) er.textContent = 'Not saved: ' + e.message; return; }
     $('#modal').classList.remove('open'); state.brief = null; render(); };
-  $('#feeAsked').focus();
+  $('#closeM').focus();
 }
 const PLB_WORDS = {WO:'Taken back', FB:'Forwarding balance', CS:'Adjustment (payment fees)', AH:'Origination fee', L6:'Interest', 72:'Authorized return', J1:'Non-reimbursable'};
 async function feesDetails(el){

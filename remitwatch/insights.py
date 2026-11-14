@@ -354,7 +354,7 @@ def fee_levers(conn: sqlite3.Connection, newest: str | None = None) -> dict:
     lo, hi = fee_months(newest)
     fees = _rows(conn, """SELECT payer_group, SUM(shortfall_cents) cents, COUNT(DISTINCT month) months, MIN(month) first_month, MAX(month) last_month,
                                  COALESCE(SUM(CASE WHEN month >= ? AND month <= ? THEN shortfall_cents END),0) cents12
-                          FROM findings WHERE signal='FEE_SKIM' AND COALESCE(stale,0)=0 AND status IN ('open','in_progress')
+                          FROM findings WHERE signal='FEE_SKIM' AND COALESCE(stale,0)=0 AND status != 'dismissed'
                           GROUP BY payer_group ORDER BY cents DESC""", (lo or "", hi or ""))
     return {"charge_caps": caps, "charge_cap_cents": sum(c["cents"] for c in caps), "payment_fees": fees,
             "payment_fee_cents": sum(f["cents"] or 0 for f in fees),
@@ -540,9 +540,13 @@ def done(conn: sqlite3.Connection, today: str) -> dict:
     if "finding_events" not in _tables(conn):
         return {"today_n": 0, "week_n": 0, "week_cents": 0}
     last: dict[str, tuple] = {}          # each item's last change by a person this week: an undo leaves nothing done
-    for fid, at, to, cents in conn.execute("""SELECT finding_id, at, to_status, COALESCE(amount_cents,0) FROM finding_events
-                                              WHERE kind='manual' AND substr(at,1,10) >= ? ORDER BY at, id""", (week,)):
-        last[fid] = (at[:10], to, cents)
+    for fid, at, to, cents, sig, payer in conn.execute("""SELECT e.finding_id, e.at, e.to_status, COALESCE(e.amount_cents,0), f.signal, f.payer_name
+                                                         FROM finding_events e LEFT JOIN findings f ON f.finding_id = e.finding_id
+                                                         WHERE e.kind='manual' AND substr(e.at,1,10) >= ? ORDER BY e.at, e.id""", (week,)):
+        # asking a payer to stop its payment fees moves all its fee months at once: that is one request, and fees are not
+        # money sent or paid
+        key = ("fee", payer) if sig == "FEE_SKIM" else fid
+        last[key] = (at[:10], to, 0 if sig == "FEE_SKIM" else cents)
     moved = [v for v in last.values() if v[1] != "open"]
     return {"today_n": sum(1 for v in moved if v[0] == today), "week_n": len(moved),
             "week_cents": sum(v[2] for v in moved if v[1] in ("appealed", "resolved")), "week_start": week}

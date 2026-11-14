@@ -21,9 +21,9 @@ async function brief(force){
 }
 function kindOf(b, k){ return (b.work_types||[]).find(t=>t.key===k) || {key:k, label:k, how:'', needs:''}; }
 function labelOf(b, sig){ return (b.labels||{})[sig] || {label: sig, next: '', work: null}; }
-// today in the reader's own time zone: a filing window stays open until the end of its last day where the reader is
-function localDay(){ const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; }
-function daysUntil(d){ if(!d) return null; const t = new Date(d+'T00:00:00Z'), n = new Date(localDay()+'T00:00:00Z'); return Math.round((t-n)/86400000); }
+// today as the site counts it (the brief's date): the page then agrees with the lists on which windows are still open
+function siteDay(){ return (state.brief && state.brief.today) || new Date().toISOString().slice(0,10); }
+function daysUntil(d){ if(!d) return null; const t = new Date(d+'T00:00:00Z'), n = new Date(siteDay()+'T00:00:00Z'); return Math.round((t-n)/86400000); }
 function closesText(d){
   const n = daysUntil(d);
   if(n==null) return {text:'no date', cls:'muted'};
@@ -148,7 +148,7 @@ const MONEY_CATS = 'denial,bundling,downcoding,underpayment';
 function whatToDoHtml(f, letter){
   const b = state.brief; if(!b || !b.labels) return '';
   const lb = labelOf(b, f.signal), kk = kindFor(b, f), k = kindOf(b, kk), est = /not confirmed/.test(f.deadline_basis||'');
-  const ev = (f.evidence && typeof f.evidence === 'object') ? f.evidence : {}, today = localDay();
+  const ev = (f.evidence && typeof f.evidence === 'object') ? f.evidence : {}, today = siteDay();
   const open = (ev.deadlines||[]).filter(x=>Array.isArray(x) && x[0] && x[0] >= today).map(x=>x[0]).sort();
   const due = open[0] || f.appeal_deadline, c = closesText(due);
   const next = f.next_step || ((f.signal === 'CLAIM_DENIED_UNPAID' && kk !== 'check') ? k.how : lb.next);

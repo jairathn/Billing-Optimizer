@@ -150,7 +150,9 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 .sigchip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;font-size:13px;text-align:left}
 .sigchip.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
 @media(max-width:640px){.sigchips{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}.sigchip{flex:0 0 auto}}
-#drawer td,#drawer .todo-box{overflow-wrap:anywhere}
+#drawer td,#drawer .todo-box{overflow-wrap:break-word}
+#drawer td.num,#drawer td.day,#drawer td.code{white-space:nowrap}
+#drawer tr.has-item{background:var(--soft)}
 .todo-err:empty,.st-err:empty{display:none}
 table.wl input.sel,#selAll{width:20px;height:20px}
 /* category pages: tiles, what to do, the strip, the list head, the Details fold */
@@ -191,7 +193,7 @@ details.fold{margin-top:16px}details.fold > summary{padding:10px 0;font-size:13p
 table.fees td{vertical-align:middle}
 .dr-head{display:flex;justify-content:space-between;align-items:start;gap:8px}
 #claimFind{width:13rem;font:inherit;font-size:13px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
-@media(max-width:640px){#claimFind{width:100%;order:9}}
+@media(max-width:640px){#claimFind{width:100%;order:9;font-size:16px}}
 details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > summary{padding:4px 0;font-size:13px}
 .why-fold{font-size:12px;margin:2px 0 8px}.why-fold .note{margin:4px 0 0}
 @media(max-width:640px){.ph-row{flex-direction:column}.ph-go{text-align:left}.lh-tools{margin-left:0}.tiles{grid-template-columns:1fr 1fr}.tile{padding:7px 10px}.tile .t-v{font-size:19px}
@@ -396,11 +398,10 @@ async function overview(v){
   <div class="panel"><h2>Context</h2>${s.info.map(r=>`<div class="small">• ${esc(r.title)}</div>`).join('')||'<div class="muted small">No context rows yet.</div>'}</div>`;
   v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{state.tab=k.dataset.go; render();});
   if(v.querySelector('#goAlerts')) v.querySelector('#goAlerts').onclick=()=>{state.tab='alerts'; render();};
-  v.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>{ const cat = tr.dataset.cat, sig = tr.dataset.sig;
-    if(cat === 'contract') return goDetails('contracts');                  // contract rates are in the Contracts page's Details
-    if(cat === 'fees'){ state.filt.feesDesk = sig === 'FEE_SKIM' ? {list:'fees'} : {list:'takebacks', paid:''}; state.tab = 'fees'; location.hash = 'fees'; return render(); }
-    state.tab = {downcoding:'downcoding', bundling:'bundling', denial:'denials', underpayment:'contracts'}[cat] || 'worklist'; location.hash = state.tab;
-    state.filt[state.tab] = {signal: sig, deadline:'', status: state.status || 'open', sort:'shortfall'}; render(); });
+  v.querySelectorAll('tr.row').forEach(tr=>{ const cat = tr.dataset.cat, sig = tr.dataset.sig;
+    if(!['downcoding','bundling','denial','underpayment'].includes(cat)){ tr.classList.remove('row'); return; }   // fees and contract rows count other things
+    tr.onclick = () => { state.tab = {downcoding:'downcoding', bundling:'bundling', denial:'denials', underpayment:'contracts'}[cat]; location.hash = state.tab;
+      state.filt[state.tab] = {signal: sig, deadline:'', status: state.status || 'open', year: state.year || '', sort:'shortfall'}; render(); }; });
   // charts
   const months = [...new Set(s.by_month.map(r=>r.month))].sort(), cats=['downcoding','bundling','denial','underpayment','fees','contract'];
   chart('cMonth',{type:'bar',data:{labels:months,datasets:cats.map((c,i)=>({label:c,backgroundColor:palette[i],data:months.map(m=>{const r=s.by_month.find(x=>x.month===m&&x.category===c);return r?r.shortfall_cents/100:0;})}))},
@@ -557,7 +558,7 @@ async function openDetail(id){
     <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
-    ${r.bill ? `<div class="small" style="margin:6px 0"><a href="#" id="openClaim">See the whole claim: every remittance, line and adjustment</a></div>` : ''}
+    ${r.bill ? `<div class="small" style="margin:6px 0"><a href="#" id="openClaim">${f.signal === 'TAKEBACK' ? 'See the claim this was taken from: every remittance, line and adjustment' : 'See the whole claim: every remittance, line and adjustment'}</a></div>` : ''}
     <details class="dfold"><summary>Claim details</summary>
     <table class="small">
       ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
@@ -593,6 +594,7 @@ async function openDetail(id){
     catch(e){ const er = d.querySelector('.st-err'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; } });
   bindWhatToDo(f, d);
   const oc = d.querySelector('#openClaim'); if(oc) oc.onclick = e => { e.preventDefault(); openClaim(r.bill, id); };
+  d.querySelectorAll('a.claim-link').forEach(a => a.onclick = e => { e.preventDefault(); openClaim(a.dataset.claim, id); });
   bindDrawerExtras(id, d);
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);

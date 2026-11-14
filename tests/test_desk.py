@@ -283,3 +283,76 @@ def test_payment_fees_are_one_request_per_payer_about_its_payments(tmp_path, mon
     via = tc.get("/api/appeal/fa2", auth=auth).json()
     assert via["letter"].split("\n", 1)[1] == text.split("\n", 1)[1] and via["finding_id"] == "fa2"
     assert tc.get("/api/fees/letter", params={"payer": "NOBODY"}, auth=auth).status_code == 404
+
+
+def test_asking_a_payer_keeps_its_fees_in_the_history_and_counts_once_on_today(tmp_path, monkeypatch):
+    """Mark asked moves a payer's fee months to Sent: what vendors took stays in every total (the tile, Today, Bigger wins),
+    the payer moves to Asked with its letter still to hand, and Today's done box counts one request with no dollars."""
+    from fastapi.testclient import TestClient
+
+    from remitwatch import api
+    from tests.test_features import build_store, claim, svc
+    st = build_store(tmp_path, [claim(1, svc("99213", "150.00", "90.00", "90.00", "CAS*CO*45*60.00~", dos="20261001"), dos="20261001")], pay_date="20261015")
+    Detector(st, run_id="fees").run()
+    st.conn.execute("DELETE FROM findings WHERE signal='FEE_SKIM'")
+    cols = {r[1] for r in st.conn.execute("PRAGMA table_info(findings)")}
+    for fid, name, month, cents in (("a1", "CARRIER ONE", "2026-01", 900), ("a2", "CARRIER ONE", "2026-02", 400), ("b1", "CARRIER TWO", "2026-03", 300)):
+        row = {"finding_id": fid, "signal": "FEE_SKIM", "category": "fees", "payer_group": "Supplement carriers", "payer_name": name, "payer_kind": "supplement",
+               "month": month, "shortfall_cents": cents, "status": "open", "stale": 0, "severity": "medium", "actionable": "opt_out", "title": "fees",
+               "evidence": json.dumps({"references": {"ZELIS TRANSACTION FEE": 1}})}
+        row = {k: v for k, v in row.items() if k in cols}
+        st.conn.execute(f"INSERT INTO findings ({','.join(row)}) VALUES ({','.join('?' * len(row))})", tuple(row.values()))
+    st.conn.commit()
+    st.close()
+    monkeypatch.setattr(api, "DB_PATH", str(tmp_path / "s.sqlite"))
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.delenv("REMITWATCH_MODE", raising=False)
+    tc, auth = TestClient(api.app), ("oda", PW)
+    before = tc.get("/api/fees/payers", auth=auth).json()
+    brief0 = tc.get("/api/brief", auth=auth).json()
+    one = [p for p in before["payers"] if p["payer_name"] == "CARRIER ONE"][0]
+    r = tc.post("/api/findings/bulk-status", json={"ids": one["ids"], "status": "appealed"}, headers={"X-Requested-With": "remitwatch"}, auth=auth)
+    assert r.status_code == 200, r.text
+    after = tc.get("/api/fees/payers", auth=auth).json()
+    assert after["history"] == before["history"] and after["history"]["cents"] == 1600
+    assert [p["payer_name"] for p in after["payers"]] == ["CARRIER TWO"] and [a["payer_name"] for a in after["asked"]] == ["CARRIER ONE"]
+    assert sorted(after["asked"][0]["ids"]) == ["a1", "a2"] and after["asked"][0]["asked"]
+    again = tc.get("/api/fees/letter", params={"payer": "CARRIER ONE"}, auth=auth)
+    assert again.status_code == 200 and "CARRIER ONE" in again.json()["letter"]
+    brief1 = tc.get("/api/brief", auth=auth).json()
+    assert brief1["fees"]["payment_fee_cents"] == brief0["fees"]["payment_fee_cents"] == 1600
+    done = brief1["done"]
+    assert (done["today_n"], done["week_n"], done["week_cents"]) == (1, 1, 0), done
+    # put back: the payer is to ask again, and Today's request is undone
+    tc.post("/api/findings/bulk-status", json={"ids": one["ids"], "status": "open"}, headers={"X-Requested-With": "remitwatch"}, auth=auth)
+    assert {p["payer_name"] for p in tc.get("/api/fees/payers", auth=auth).json()["payers"]} == {"CARRIER ONE", "CARRIER TWO"}
+    assert tc.get("/api/brief", auth=auth).json()["done"]["week_n"] == 0
+
+
+def test_overview_rows_are_one_per_signal_and_a_year_narrows_the_category_page(tmp_path, monkeypatch):
+    from remitwatch.api import DESK_TILES
+    tc, auth = _client(tmp_path, monkeypatch)
+    s = tc.get("/api/summary", params={"status": "all"}, auth=auth).json()
+    sigs = [(r["signal"], r["category"]) for r in s["by_signal"]]
+    assert len(sigs) == len(set(sigs)), "one row per signal"
+    for r in s["by_signal"]:
+        if r["category"] in CATEGORIES:
+            got = tc.get("/api/findings", params={"category": r["category"], "signal": r["signal"], "status": "all", "live": 1, "limit": 1}, auth=auth).json()
+            assert got["total"] == r["n"], r
+    # half the items in another year, so the year filter has something to tell apart
+    import sqlite3
+
+    from remitwatch import api
+    con = sqlite3.connect(api.DB_PATH)
+    con.execute("UPDATE findings SET year='2025' WHERE rowid % 2 = 0")
+    con.commit()
+    con.close()
+    years = sorted({r[0] for r in sqlite3.connect(api.DB_PATH).execute("SELECT DISTINCT year FROM findings WHERE year IS NOT NULL")})
+    assert len(years) >= 2
+    for y in years:
+        d = tc.get("/api/desk", params={"category": MONEY, "year": y}, auth=auth).json()
+        for name, status, deadline in DESK_TILES:
+            p = {"category": MONEY, "live": 1, "limit": 1, "status": status, "year": y, **({"deadline": deadline} if deadline else {})}
+            r = tc.get("/api/findings", params=p, auth=auth).json()
+            assert (r["total"], r["shortfall_cents"] or 0) == (d["tiles"][name]["n"], d["tiles"][name]["cents"]), (y, name)

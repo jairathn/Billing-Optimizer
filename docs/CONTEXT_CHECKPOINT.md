@@ -351,3 +351,18 @@ category headers were better for a billing team, and that inside those dashboard
 Not done from the merged design, on purpose or for later: folding the Data and Providers pages into one-line summaries, the
 per-category trend table on Progress, rebuilding Payers & rates as one table and moving its clinician table behind the owner's
 password, a by-payer table inside each Details fold.
+
+Later the same day (Find a claim, two more independent reviews):
+- The owner asked whether a biller can dig into any claim's row-level detail and history intuitively. Answer built: "Find a
+  claim" in the header and "See the whole claim" in every item's drawer open `/api/claims/view` (claim in the `X-Claim`
+  header): every submission and remittance of the bill in the payer's order, every line, adjustment and remark in words,
+  the items on it (its own, takebacks naming it, routine-rate patterns it is in), money taken back naming it, EMA rows (also
+  of unanswered submissions), and a CSV of all of it. `tests/test_claims.py`.
+- Takebacks now have a dispute-by date (payer's appeal window from the remittance that took the money; the payer's letter
+  may start the clock earlier, which the 835 does not show). A detection change: the archive re-analyses once; on a copy
+  every money number was identical afterwards.
+- Payment fees: one letter per payer as the remittance names it (`appeals.fee_request_letter`); Mark asked moves its fee
+  months to Sent, counts once on Today with no dollars, keeps the fees in every history total, and can be undone.
+- Overview's signal table is one row per signal; category pages take a year; tiles follow the chosen kind and reason; the
+  kinds follow the search; a tab's red number opens its 7-day list. The page uses the site's date (UTC, as the lists do):
+  windows roll over at midnight UTC, about 7 to 8 pm in Kentucky and Indiana.

@@ -1360,9 +1360,13 @@ class Detector:
             start = pay_date if fix["clock"] == "remit" else (self._first_service_day(base) or pay_date)
             deadline = _add_days(start, fix["days"])
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
-        elif actionable in ("appeal", "correct_and_resubmit"):
+        elif actionable in ("appeal", "correct_and_resubmit") or signal == "TAKEBACK":
+            # a takeback is disputed inside the payer's appeal window from the remittance that took the money back
             deadline = _add_days(pay_date, rule["days"])
             deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
+            if signal == "TAKEBACK":
+                deadline_basis += (". Counted from the remittance that took the money back; the payer's overpayment letter, which the "
+                                   "remittance does not carry, may start the clock earlier")
             if actionable == "correct_and_resubmit":
                 deadline_basis += AGREEMENT_FILING_NOTE
         code = base.get("procedure_code")
