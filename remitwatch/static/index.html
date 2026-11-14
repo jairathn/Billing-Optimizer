@@ -89,12 +89,80 @@ tr.row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .sm{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
 .key{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle}
 details summary{cursor:pointer;color:var(--muted)}
+/* daily screens: Today, Worklist, Bigger wins, More */
+a{color:var(--accent)}
+.brand{font-size:18px;font-weight:700;color:var(--ink);text-decoration:none;margin-right:6px}
+@media(max-width:700px){#fresh{display:none}}
+button.ghost{background:none;border-color:transparent;color:var(--accent)} button.ghost:hover{background:var(--soft)}
+button:disabled{opacity:.5;cursor:default}
+.page-title{font-size:22px;line-height:1.2;margin:0}
+.page-head{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;margin:2px 0 10px}
+.today-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:8px 16px;margin:2px 0 12px}
+.donebox{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)} .donebox b{color:var(--ink)}
+.banner{border:1px solid var(--line);border-left:4px solid var(--warn);background:var(--panel);border-radius:10px;padding:10px 14px;margin-bottom:12px}
+.plan{display:grid;gap:10px}
+.step{display:flex;gap:14px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.step .num{flex:0 0 32px;height:32px;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-weight:700}
+.step.is-done .num{background:var(--good)}
+.step .body{flex:1;min-width:0} .step .title{font-weight:650;font-size:15px} .step .line{color:var(--muted);margin-top:2px} .step .chips{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.step button{flex:0 0 auto;padding:8px 14px}
+@media(max-width:640px){.step{flex-wrap:wrap}.step button{width:100%}}
+.kind{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap;background:var(--chip)}
+.k-fix{background:rgba(31,95,191,.13);color:#1849a9}.k-auth{background:rgba(105,39,218,.12);color:#6927da}.k-note{background:rgba(14,122,92,.13);color:#0e7a5c}
+.k-rule{background:rgba(53,56,205,.12);color:#3538cd}.k-rate{background:rgba(181,71,8,.13);color:#93370d}.k-check{background:rgba(71,84,103,.13);color:#475467}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .k-fix{color:#9ec0ff}:root:not([data-theme="light"]) .k-auth{color:#c7a8ff}:root:not([data-theme="light"]) .k-note{color:#6fdcb6}:root:not([data-theme="light"]) .k-rule{color:#a9b0ff}:root:not([data-theme="light"]) .k-rate{color:#f5b878}:root:not([data-theme="light"]) .k-check{color:#c0c9d4}}
+:root[data-theme="dark"] .k-fix{color:#9ec0ff}:root[data-theme="dark"] .k-auth{color:#c7a8ff}:root[data-theme="dark"] .k-note{color:#6fdcb6}:root[data-theme="dark"] .k-rule{color:#a9b0ff}:root[data-theme="dark"] .k-rate{color:#f5b878}:root[data-theme="dark"] .k-check{color:#c0c9d4}
+.due-now{color:var(--bad);font-weight:650}.due-soon{color:var(--warn);font-weight:600}
+.panel-head{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;margin-bottom:6px}.panel-head h2{margin:0}
+.batch{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+.batch:last-child{border-bottom:0}
+@media(max-width:760px){.batch{grid-template-columns:1fr 1fr}.batch .b-main{grid-column:1/-1}.batch button{grid-column:1/-1}}
+.change{display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)} .change > div{flex:1;min-width:0}
+.wins-list{margin:4px 0 10px;padding-left:18px} .wins-list li{margin:5px 0}
+.guide{background:var(--panel);border:1px solid var(--accent);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+.guide-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.guide h2{margin:0;font-size:17px}
+.guide .lead{margin:6px 0 8px}.guide .steps{margin:0 0 8px;padding-left:20px}.guide .steps li{margin:5px 0}.guide-more{color:var(--muted);font-size:13px;margin-bottom:10px}
+.segs{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}
+.seg{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 10px;border-radius:8px;text-align:left}
+.seg.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
+.seg .cnt{color:var(--muted);font-size:12px;margin-left:2px}.seg-sub{font-size:11px;color:var(--muted)}
+.howbox{background:var(--soft);border-radius:8px;padding:8px 12px;margin:6px 0;font-size:13px}
+.wl-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;margin:6px 0}
+.bulk{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
+table.wl td{vertical-align:middle} table.wl th{cursor:default}
+.st{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;background:var(--chip);white-space:nowrap}
+.st-in_progress{background:rgba(181,71,8,.13)}.st-appealed{background:rgba(31,95,191,.13)}.st-resolved{background:rgba(14,122,92,.15)}.st-lost,.st-dismissed{background:rgba(71,84,103,.13)}
+.empty{padding:24px;text-align:center;color:var(--muted)}
+.todo-box{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 12px;margin:8px 0 10px;background:var(--soft)}
+.todo-top{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-bottom:6px}.todo-what,.todo-next{margin:4px 0}
+.todo-actions{margin-top:8px}
+.more-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+.more-card{display:flex;flex-direction:column;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--ink);text-decoration:none}
+.more-card:hover{border-color:var(--accent)}
+.check{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line)}.check:last-child{border-bottom:0}
+.check .mark{flex:0 0 22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px}
+.check.ok .mark{background:rgba(6,118,71,.15);color:var(--good)}.check.bad .mark{background:rgba(180,35,24,.13);color:var(--bad)}
+.missed{margin:14px 2px}
+.fchip{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 10px;border-radius:999px;background:var(--chip);font-size:12px}
+.fchip button{border:0;background:none;padding:0 6px;color:var(--muted)}
+.statusbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+@media(max-width:640px){
+  .segs{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}.seg{flex:0 0 auto}
+  table.wl thead{display:none}
+  table.wl,table.wl tbody,table.wl tr,table.wl td{display:block;width:100%}
+  table.wl tr{position:relative;border:1px solid var(--line);border-radius:10px;margin:8px 0;padding:8px 40px 8px 10px;background:var(--panel)}
+  table.wl td{border:0;padding:2px 0}
+  table.wl td:first-child{position:absolute;right:6px;top:8px;width:auto}
+  table.wl td.num{text-align:left}
+  #drawer{padding:12px}
+}
 </style>
 </head>
 <body>
 <header>
-  <h1>RemitWatch</h1>
-  <div class="fresh"><div id="fresh">loading…</div><div id="feedChip"></div></div>
+  <a class="brand" href="#today">RemitWatch</a>
+  <div class="fresh"><div id="feedChip"></div><div id="fresh">loading…</div></div>
+  <button id="guideBtn" class="ghost" title="What this site does and how to use it">How this works</button>
   <button id="bellBtn" title="alerts">Alerts</button>
   <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
   <label class="small">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
@@ -108,12 +176,13 @@ details summary{cursor:pointer;color:var(--muted)}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
+<script src="/static/today.js"></script>
 <script>
-const TABS = [
-  ['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['downcoding','Downcoding'],['bundling','Bundling & modifiers'],
-  ['denials','Denials'],['contracts','Contracts & underpayment'],['fees','Fees & takebacks'],['appeals','Appeals queue'],['progress','Progress'],
-  ['payers','Payers & rates'],['providers','Providers'],['data','Data']
-];
+// the daily screens first; the analysis pages are under More (and still open by their address)
+const TABS = [['today','Today'],['worklist','Worklist'],['wins','Bigger wins'],['progress','Results'],['data','Data'],['providers','Providers'],['more','More']];
+const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['downcoding','Downcoding'],['bundling','Bundling & modifiers'],
+  ['denials','Denials'],['contracts','Contracts & underpayment'],['fees','Fees & takebacks'],['appeals','Appeals queue'],['payers','Payers & rates']];
+const NEEDS_SUMMARY = new Set(['overview','explorer','downcoding','bundling','denials','contracts','fees','appeals','payers']);
 const SIGNAL_HELP = {
   DOWNCODE_SVC06:'Payer reported the code you billed (835 SVC06) and paid a lower level.',
   DOWNCODE_VS_BILLED:'The claim file or EMA shows a higher level was billed than the code on the remit, and the payer reported no change.',
@@ -157,7 +226,7 @@ const SIGNAL_HELP = {
   MIPS_ADJUSTMENT:'Net MIPS adjustment on Medicare lines (positive = bonus).',
   SEQUESTRATION:'2 percent federal sequestration withheld on Medicare and MA lines (not recoverable).'
 };
-const state = {tab:'overview', year:'', status:'open', page:{}, filt:{}, summary:null, meta:null, charts:{}};
+const state = {tab:'today', year:'', status:'open', page:{}, filt:{}, summary:null, meta:null, charts:{}};
 const HANDLING = {WRITE_OFF:'written off in EMA', TRANSFER_RESPONSIBILITY:'moved to patient in EMA', IGNORE:'ignored in EMA', MIXED:'mixed handling in EMA'};
 const $ = s => document.querySelector(s);
 const money = c => (c==null?'–':(c<0?'-':'')+'$'+Math.round(Math.abs(c)/100).toLocaleString());
@@ -177,7 +246,7 @@ function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const 
   state.charts[id]=new Chart(el, cfg); }
 const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8c6d1f','#6c757d'];
 
-function tabOpen(k){ return TABS.some(t=>t[0]===k); }
+function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k); }
 function initNav(){
   $('#nav').innerHTML = TABS.map(([k,l])=>`<a data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`).join('');
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=()=>{state.tab=a.dataset.tab; location.hash=state.tab; render();});
@@ -189,6 +258,7 @@ function initNav(){
   $('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); };
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
   $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
+  $('#guideBtn').onclick = ()=>openGuide();
 }
 async function loadMeta(){
   state.meta = await api('/api/meta');
@@ -204,14 +274,18 @@ async function loadSummary(){
 async function render(){
   const run = state.run = (state.run||0) + 1;       // a slower, older run must not draw over a newer one
   if(!state.meta){ try { await loadMeta(); } catch(e){} if(run !== state.run) return; }      // a cold start can fail the first call
-  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active',a.dataset.tab===state.tab));
-  ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = state.tab==='providers' ? 'none' : ''; });
-  if(state.tab !== 'providers' || !state.summary) await loadSummary();       // the Providers tab uses none of it
+  const classic = CLASSIC.some(t=>t[0]===state.tab);
+  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
+  // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
+  ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
+  if(state.tab !== 'worklist') state.worklist = null;      // "item 3 of 50" only means something inside the worklist
+  if(NEEDS_SUMMARY.has(state.tab)) await loadSummary();
   if(run !== state.run) return;
   const old = $('#view'), v = old.cloneNode(false);      // an older run still holds the old node and can only write into that
   old.replaceWith(v);
   v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
-  const fn = {overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data, alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab}[state.tab] || overview;
+  const fn = {today: todayTab, worklist: worklistTab, wins: winsTab, more: moreTab, overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data,
+    alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab}[state.tab] || todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
 }
@@ -231,7 +305,7 @@ async function overview(v){
     ${kpi('Identified leakage', money(total(s.by_category)), 'all categories, '+(state.status==='all'?'all':'open')+' findings', 'overview')}
     ${kpi('Appealable', money(appealable.shortfall_cents), (appealable.n||0).toLocaleString()+' findings', 'appeals')}
     ${kpi('Correctable billing errors', money(fix.shortfall_cents), (fix.n||0).toLocaleString()+' lines to resubmit', 'appeals')}
-    ${kpi('Contract gap vs Medicare', money(cat.contract), 'commercial and MA rates', 'contracts')}
+    ${kpi('Contract gap vs Medicare', money((cat.contract||0) - total(sigRows(['CHARGE_BELOW_RATE']))), 'commercial and MA rates', 'contracts')}
     ${kpi('Bundled away', money(cat.bundling), 'E/M, add-ons, Mohs stages', 'bundling')}
     ${kpi('Denied, never paid', money(cat.denial), 'lines and whole claims', 'denials')}
     ${kpi('Downcoded', money(cat.downcoding), 'code or level reduced', 'downcoding')}
@@ -281,7 +355,7 @@ async function findingsTable(v, container, base, opts={}){
       <select data-f="signal"><option value="">All signals</option>${sigs.map(x=>`<option ${f.signal===x?'selected':''}>${x}</option>`).join('')}</select>
       <select data-f="payer"><option value="">All payers</option>${payers.map(x=>`<option ${f.payer===x?'selected':''}>${esc(x)}</option>`).join('')}</select>
       <select data-f="severity"><option value="">Any severity</option>${['high','medium','low'].map(x=>`<option ${f.severity===x?'selected':''}>${x}</option>`).join('')}</select>
-      <select data-f="actionable"><option value="">Any action</option>${['appeal','correct_and_resubmit','review','opt_out','renegotiate'].map(x=>`<option ${f.actionable===x?'selected':''}>${x}</option>`).join('')}</select>
+      <select data-f="actionable"><option value="">Any action</option>${['appeal','correct_and_resubmit','review','opt_out','renegotiate','raise_fee'].map(x=>`<option ${f.actionable===x?'selected':''}>${x}</option>`).join('')}</select>
       <select data-f="deadline"><option value="">Any deadline</option><option value="valid" ${f.deadline==='valid'?'selected':''}>Still appealable</option><option value="due" ${f.deadline==='due'?'selected':''}>Due in 45 days</option><option value="expired" ${f.deadline==='expired'?'selected':''}>Expired</option></select>
       <select data-f="handling"><option value="">Any EMA handling</option>${Object.keys(HANDLING).map(x=>`<option value="${x}" ${f.handling===x?'selected':''}>${HANDLING[x]}</option>`).join('')}</select>
       <input data-f="q" maxlength="200" placeholder="${showPhi()?'patient name, member ID, claim ID, code…':'claim ID, code, CARC…'}" value="${esc(f.q)}" ${showPhi()?'style="min-width:20rem"':''}>
@@ -362,8 +436,9 @@ async function contracts(v){
   const c = state.summary.by_signal.filter(r=>r.category==='contract'), u = state.summary.by_signal.filter(r=>r.category==='underpayment');
   const year = state.year || state.summary.years[state.summary.years.length-1];
   const mx = await api('/api/rates/matrix?'+qs({year, tier: state.filt.tier||'physician'}));
-  v.innerHTML = `<div class="panel"><h2>Contract rate gaps: ${money(total(c))} at Medicare parity · underpayments: ${money(total(u))}</h2>
-    <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','MPPR_POLICY','SECOND_RATE','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
+  const caps = c.filter(r=>r.signal==='CHARGE_BELOW_RATE');
+  v.innerHTML = `<div class="panel"><h2>Contract rate gaps: ${money(total(c)-total(caps))} at Medicare parity · underpayments: ${money(total(u))}${caps.length?` · fees below a payer's rate: ${money(total(caps))}`:''}</h2>
+    <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change, not capped at your own charge). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','MPPR_POLICY','CHARGE_BELOW_RATE','SECOND_RATE','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
     <div class="panel"><h2>Allowed amount as % of Medicare, ${year} <select id="tierSel"><option value="physician" ${(state.filt.tier||'physician')==='physician'?'selected':''}>physicians</option><option value="nonphysician" ${state.filt.tier==='nonphysician'?'selected':''}>PAs / NPs</option></select></h2>
       <table class="heat"><thead><tr><th>Payer</th><th>Kind</th>${mx.codes.map(c=>`<th class="num">${c}</th>`).join('')}</tr></thead>
       <tbody>${mx.payers.slice(0,25).map(p=>`<tr><td style="text-align:left">${esc(p.payer_group)}</td><td style="text-align:left" class="small muted">${esc(p.payer_kind)}</td>${mx.codes.map(c=>{const x=p.codes[c]; if(!x) return '<td class="muted">·</td>'; const pct=x.pct; const col = pct==null?'':(pct<0.8?'var(--bad)':(pct<0.95?'var(--warn)':'var(--good)')); return `<td title="${money2(x.cents)}${x.n==null?'':' on '+x.n+' lines'}; Medicare ${money2(x.medicare_cents)}" style="color:${col}">${money2(x.cents)}<div class="small">${pct==null?'':Math.round(pct*100)+'%'}</div></td>`;}).join('')}</tr>`).join('')}</tbody></table></div>
@@ -418,11 +493,11 @@ async function data(v){
       <td>${Object.entries(g.missing_by_month||{}).map(([m,n])=>`${Number(n).toLocaleString()} claims for ${esc(new Date(m+'-15T00:00:00Z').toLocaleString('en-US',{month:'short',year:'numeric',timeZone:'UTC'}))}`).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>` : '';
   const ew = cov.ema || {};
   const thin = (ew.weeks||[]).filter(w => w.claims >= (ew.min_claims||30) && w.in_ema < (ew.share||0.8) * w.claims);
-  const emaGaps = thin.length ? `<div class="panel"><h2>EMA charge exports that miss visits</h2>
+  const emaGaps = thin.length ? `<div class="panel"><h2>EMA charge exports that miss visits${ew.measured_at?` <span class="small muted" style="font-weight:400">checked ${day(String(ew.measured_at).slice(0,10))}</span>`:''}</h2>
     <div class="note">For these weeks of service the remittances hold claims that no Encounter &amp; Charge Lines export in the EMA folder holds. An export only contains the visits that already had a bill when it was pulled, so a week pulled as it ended, or never pulled, shows up here. Pull Encounter &amp; Charge Lines again for these dates of service, in the layout with Patient ID, and put it in the EMA folder. Until then the site cannot check what was billed for those visits against what was paid.</div>
     <div class="scroll"><table><thead><tr><th>Week of service</th><th class="num">Claims on remittances</th><th class="num">Found in an EMA charge export</th><th class="num">Share</th></tr></thead>
     <tbody>${thin.map(w=>`<tr><td>${day(w.week)}</td><td class="num">${Number(w.claims).toLocaleString()}</td><td class="num">${Number(w.in_ema).toLocaleString()}</td><td class="num">${Math.round(100*w.in_ema/w.claims)}%</td></tr>`).join('')}</tbody></table></div></div>` : '';
-  v.innerHTML = `<div id="feedPanel"></div>${gaps}${emaGaps}<div class="grid two">
+  v.innerHTML = `<div id="checks"></div><div id="feedPanel"></div>${gaps}${emaGaps}<div class="grid two">
     <div class="panel"><h2>What is loaded</h2><table>
       <tr><td>Files ingested</td><td class="num">${(m.files.n||0).toLocaleString()} (${m.files.n835||0} remits, ${m.files.nema||0} EMA exports)</td></tr>
       <tr><td>Last ingest</td><td class="num">${esc(m.files.last_ingest||'–')}</td></tr>
@@ -437,7 +512,8 @@ async function data(v){
     <ol class="small">
       <li><b>The TriZetto remittance files every week.</b> Everything on this site is only as current as the newest file in the folder. TriZetto can also deliver them to an SFTP mailbox; ask first whether that would take them away from ModMed.</li>
       <li><b>Executed payer contracts and fee schedules</b> with effective dates, Anthem commercial and Humana Medicare Advantage first, then UnitedHealthcare, Aetna, Cigna and UMWA, so "below contract" can replace "below the payer's usual rate".</li>
-      <li><b>ModMed's all-patient EHI export, once</b> (free; request it through ModMed support): every claim, submission, ERA link, adjustment and payment for the whole history in one consistent form. Then <b>every week, the last six weeks by date of service</b>: Encounter &amp; Charge Lines in the full layout (with Patient ID, Bill ID and Bill Creation Date), ERA &amp; Payment Line Adjustments, and Claim &amp; Claim Status with Patient ID added. A week pulled as it ends misses every visit not billed yet.</li>
+      <li><b>Every week, the last six weeks by date of service</b>: Encounter &amp; Charge Lines in the full layout (with Patient ID, Bill ID and Bill Creation Date), ERA &amp; Payment Line Adjustments, and Claim &amp; Claim Status with Patient ID added. A week pulled as it ends misses every visit not billed yet.</li>
+      <li><b>ModMed's all-patient EHI export, once</b> (free; request it through ModMed support): every claim, submission, ERA link, adjustment and payment for the whole history in one consistent form. Nothing on this site reads it yet; it is the next reader to build once a copy is in hand, so putting it in the folder changes nothing today.</li>
       <li><b>The remittance files for any weeks listed above as missing</b>, from TriZetto.</li>
       <li><b>Zelis / Optum Pay / Payspan enrollment status</b> for each payer, to stop fee-bearing payments.</li>
       <li><b>Provider roster</b> (NPI, credential, start date) to replace the inferred physician / non-physician tiers.</li>
@@ -446,7 +522,7 @@ async function data(v){
       <li><b>The 2026 MIPS payment adjustment file</b> (qpp.cms.gov, Performance Feedback). The drop since 2024 is mostly the end of CMS's exceptional performance bonus; 2025 was close to the national maximum.</li>
     </ol>
     <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></div>`;
-  await feedPanel(v.querySelector('#feedPanel'));
+  await Promise.all([dataChecks(v.querySelector('#checks')), feedPanel(v.querySelector('#feedPanel'))]);
 }
 
 // ---------------------------------------------------------------- detail drawer and appeal packet
@@ -454,6 +530,7 @@ function closeDetail(){
   const d = $('#drawer'); if(!d.classList.contains('open')) return;
   d.classList.remove('open');
   const back = state.detailFrom; state.detailFrom = null;
+  if(state.dirty){ state.dirty = false; if(['today','worklist'].includes(state.tab)){ render(); return; } }     // statuses changed: redraw the list behind
   if(back && back.isConnected) back.focus();
 }
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
@@ -461,13 +538,15 @@ async function openDetail(id){
   const d = $('#drawer'); d.classList.add('open'); d.innerHTML='<div class="muted">loading…</div>';
   const from = document.activeElement; if(from && from.closest && from.closest('tr.row')) state.detailFrom = from.closest('tr.row');
   const r = await api('/api/findings/'+id); const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
+  if(!state.brief){ try { await brief(); } catch(e){} }        // the plain labels and the kinds of work
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
-  d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:start"><h2>${esc(f.title)}</h2><button id="closeD">✕</button></div>
-    <div class="small muted">${esc(f.signal)} · <span class="sev-${esc(f.severity)}">${esc(f.severity)}</span> · ${esc(f.actionable)} · status <b>${esc(f.status)}</b>${f.stale?' · stale':''}</div>
+  d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:start;gap:8px"><h2>${esc(f.title)}</h2><button id="closeD" aria-label="Close">✕</button></div>
+    ${whatToDoHtml(f)}
+    <div class="actions">${f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal)?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>`:''}</div>
+    <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
+    <div class="small muted">${esc(f.signal)} · <span class="sev-${esc(f.severity)}">${esc(f.severity)}</span> · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
     <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div>
-    <div class="actions">${f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal)?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal packet'}</button>`:''}
-      ${[['open','open'],['in_progress','in progress'],['appealed','appealed'],['resolved','recovered'],['lost','lost'],['dismissed','dismiss']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled':''}>${l}</button>`).join('')}</div>
     <table class="small">
       ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
       <tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)}</td></tr>`:''}
@@ -493,7 +572,8 @@ async function openDetail(id){
     <h3 class="small">Evidence</h3><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre>`;
   d.querySelector('#closeD').onclick=closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
-  d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{ if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)) openDetail(id); });
+  d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{ if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)){ state.brief = null; state.dirty = true; openDetail(id); } });
+  bindWhatToDo(f, d);
   bindDrawerExtras(id, d);
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);

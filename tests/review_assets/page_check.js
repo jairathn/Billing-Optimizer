@@ -19,7 +19,7 @@ const port = process.argv[2], OUT = process.argv[3] + '/';
   }));
   const out = { injected: {} };
 
-  await page.goto(base); await settle();
+  await page.goto(base + '#overview'); await settle();          // the classic overview (the page opens on Today)
   await page.selectOption('#statusSel', 'all'); await settle();
   out.injected.overview = await injected();
 
