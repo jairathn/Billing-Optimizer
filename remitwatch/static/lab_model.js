@@ -121,6 +121,13 @@
     return mix.reduce((t, [g, s]) => t + (kinds.includes(CM.payerKind(d, g)) ? s : 0), 0);
   }
   const clamp = (v, a, b) => Math.min(b, Math.max(a, +v || 0));
+  // what a patient slot brings in a year's collections terms: allowed per patient seen, times the plan's collected share
+  function slotValue(d, x, cal) {
+    const per = (d.schedule || {}).allowed_per_patient;
+    if (!per) return 0;
+    const ev = CM.evaluate(d, x, cal);
+    return per * (ev.production.allowed > 0 ? ev.production.collections / ev.production.allowed : 1);
+  }
 
   // one Mohs case at one payer, in the office or in an ASC: the professional fee (and the ASC's facility fee), with the
   // multiple-procedure rules of each, before collections. cases[] = [[probability, closure code or null]]
@@ -161,8 +168,9 @@
       compliance: "CMS, in the 2027 final rule: \"we do not find it appropriate to schedule medical services for patients to maximize payment, which would create undue burden and potential medical risk for beneficiaries.\" Stage a closure when the wound or the patient calls for it, and say why in the note. Staging for the fee is a pattern payers and auditors look for.",
       params: [['share', 'Share of the bigger closures done on a later day', 0, 1, 0.05, 'pct', 0.2],
                ['all', 'Count every flap and graft, not only the bigger ones (grafts, interpolation flaps, flaps over 10 sq cm)', 0, 1, 1, 'bool', 0],
-               ['return_rate', 'Patients who come back for the closure', 0, 1, 0.01, 'pct', 1]],
-      apply(d, x, A, p) {
+               ['return_rate', 'Patients who come back for the closure', 0, 1, 0.01, 'pct', 1],
+               ['full', 'The schedule is full: each return visit takes a slot another patient would have had', 0, 1, 1, 'bool', 1]],
+      apply(d, x, A, p, cal) {
         const codes = Object.keys(d.levers.flap_graft.mix).filter(c => p.all ? true : BIGGER(c));
         const share = clamp(p.share, 0, 1) * clamp(p.return_rate, 0, 1);
         const unitsFG = CM.units(d, x);
@@ -172,9 +180,29 @@
         const needs = [];
         if (turn == null) needs.push('minutes.turnover');
         if (perEnc == null) needs.push('costs.per_encounter');
+        const slot = p.full ? staged * days * slotValue(d, x, cal) : 0;
         return { x: Object.assign({}, x, { stage: { codes, share } }),
-                 extra: { minutes: staged * (turn || 0), encounters: staged, cost: staged * (perEnc || 0) * days * 100 },
-                 notes: [`${staged.toFixed(2)} closures a clinic day move to another visit (${codes.length} closure codes in scope).`], needs };
+                 extra: { minutes: staged * (turn || 0), encounters: staged, cost: staged * (perEnc || 0) * days * 100, collections: -slot },
+                 notes: [`${staged.toFixed(2)} closures a clinic day move to another visit (${codes.length} closure codes in scope)${slot ? `; the slots they take would have brought about ${Math.round(slot / 100).toLocaleString()} dollars a year` : ''}. Medicare patients pay 20% of what the first stage gains, as coinsurance.`], needs };
+      },
+    },
+    {
+      id: 'other_surgeon', title: 'Same-day reconstruction by a surgeon of another specialty', tier: 'low', applies: (d, x) => x.mohs_cases > 0 && Object.keys(d.levers.flap_graft.mix).length > 0,
+      why: "Medicare's multiple-procedure rule applies to one surgeon, or surgeons of the same specialty in a group. A flap or graft done the same day by a surgeon of another specialty (a facial plastic or oculoplastic surgeon, say) leaves the Mohs first stage paid in full, with no second visit. The closure is then that surgeon's.",
+      compliance: "Claims Processing Manual ch. 12 sec. 40.8.B: when surgeons of different specialties each perform a different procedure, neither co-surgery nor multiple-surgery rules apply; physicians of the same specialty in a group are paid as one. It needs a real surgeon of another specialty, not a relabel. Whether a PA or NP closing the defect counts is not settled.",
+      params: [['share', 'Share of flap and graft closures done by that surgeon', 0, 1, 0.05, 'pct', 0.2],
+               ['employed', 'The surgeon is employed by the practice (the closure stays practice revenue)', 0, 1, 1, 'bool', 1],
+               ['cost', "What the surgeon costs a year, dollars", 0, 1000000, 5000, 'usd', 0]],
+      apply(d, x, A, p, cal) {
+        const codes = Object.keys(d.levers.flap_graft.mix), share = clamp(p.share, 0, 1);
+        const y = Object.assign({}, x, { stage: { codes, share } });
+        // the closures that leave this clinician's production: their collections in the plan with the first stage unpaired
+        const ev = CM.evaluate(d, y, cal);
+        let moved = 0;
+        for (const c of codes) moved += ((ev.byCode[c] || {}).collections || 0) * share;
+        const kept = p.employed ? moved : 0;
+        return { x: y, extra: { collections: -moved + kept, practice_only: kept, cost: Math.max(0, +p.cost || 0) * 100 },
+                 notes: [`About ${Math.round(moved / 100).toLocaleString()} dollars a year of closures move to the other surgeon${p.employed ? ', kept by the practice' : ''}.`], needs: [] };
       },
     },
     {
@@ -182,8 +210,9 @@
       why: "From 2027, a Medicare visit billed with a biopsy the same day pays 20% less on every service but the highest. A biopsy done at a later procedure-only visit avoids the cut and uses another slot.",
       compliance: "The same 2027 rule says CMS does \"not find it appropriate to schedule medical services for patients to maximize payment\". A delayed biopsy also delays a diagnosis, and some patients will not come back.",
       params: [['share', 'Share of biopsied Medicare patients asked to come back', 0, 1, 0.05, 'pct', 0.5],
-               ['return_rate', 'Of those, the share who come back', 0, 1, 0.01, 'pct', 0.9]],
-      apply(d, x, A, p) {
+               ['return_rate', 'Of those, the share who come back', 0, 1, 0.01, 'pct', 0.9],
+               ['full', 'The schedule is full: each return visit takes a slot another patient would have had', 0, 1, 1, 'bool', 1]],
+      apply(d, x, A, p, cal) {
         const med = kindShare(d, 'biopsy', x.ma_same_day ? ['medicare', 'medicare_advantage'] : ['medicare']);
         const moved = Math.max(0, x.bx_patients) * med * clamp(x.bx_visit_share, 0, 1) * clamp(p.share, 0, 1);
         const lost = moved * (1 - clamp(p.return_rate, 0, 1));
@@ -195,8 +224,9 @@
         const needs = [];
         if (turn == null) needs.push('minutes.turnover');
         if (perEnc == null) needs.push('costs.per_encounter');
-        return { x: y, extra: { minutes: back * (turn || 0), encounters: back, cost: back * (perEnc || 0) * days * 100 },
-                 notes: [`${back.toFixed(2)} extra procedure-only visits a clinic day; ${lost.toFixed(2)} biopsies a day not done because the patient did not return.`], needs };
+        const slot = p.full ? back * days * slotValue(d, x, cal) : 0;
+        return { x: y, extra: { minutes: back * (turn || 0), encounters: back, cost: back * (perEnc || 0) * days * 100, collections: -slot },
+                 notes: [`${back.toFixed(2)} extra procedure-only visits a clinic day; ${lost.toFixed(2)} biopsies a day not done because the patient did not return${slot ? `; the slots the return visits take would have brought about ${Math.round(slot / 100).toLocaleString()} dollars a year` : ''}. Not counted: the multiple-procedure reduction also avoided on other procedures of the visit day (about $16 a moved patient on the archive), and a second copayment for many patients.${x.ma_same_day ? '' : ' Medicare Advantage patients gain nothing unless their plan applies the rule.'}`], needs };
       },
     },
     {
@@ -274,7 +304,7 @@
     {
       id: 'b1', title: 'Bill the visit complexity add-on wherever it applies', tier: 'low',
       why: "G2211 (from 2027, modifier B1 at 16% of the visit) pays Medicare visits that are part of ongoing care for a serious or complex condition. It is not paid on a visit billed with modifier 25.",
-      compliance: "Only where the note shows the longitudinal relationship; never on a visit with a same-day procedure (modifier 25), except preventive services, a wellness visit or a vaccine.",
+      compliance: "Only where the note shows the ongoing relationship for a serious or complex condition; CMS's own example of a visit that does not qualify is a mole removal. Not with modifier 25, except preventive services, a wellness visit or a vaccine. Appended to every visit by default it invites review. Medicare only: commercial payers are not expected to pay it.",
       params: [['capture', 'Share of Medicare visits without a same-day procedure billed with it', 0, 1, 0.05, 'pct', 0.5],
                ['eligible', 'Share of Medicare visits with no same-day procedure', 0, 1, 0.05, 'pct', 0.6]],
       apply(d, x, A, p) {

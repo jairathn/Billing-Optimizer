@@ -7,7 +7,7 @@
 const LAB_GROUPS = [
   ['Money already earned', ['appeals', 'vendor_fees', 'collect', 'b1', 'contract_month']],
   ['Staffing and clinic time', ['app_shift', 'add_session']],
-  ['Where cases are done', ['asc']],
+  ['Where cases are done, and by whom', ['asc', 'other_surgeon']],
   ['Timing of procedures', ['stage', 'biopsy_return']],
 ];
 const LAB_TIER = {low: ['routine', 'ok'], medium: ['check first', 'sev-medium'], high: ['audit exposure', 'sev-high']};
@@ -278,7 +278,7 @@ async function sheetDraw(v){
         ${plan ? `<tr><td>Pay under your plan</td><td class="num">${labMoney(LabModel.pay(plan, now.collections, wNow))}</td><td class="num">${labMoney(LabModel.pay(plan, planned.collections, wPlan))}</td></tr>` : ''}
       </tbody></table>
       ${goal}
-      <p class="small muted">Collections are estimates from the practice's remittances at each payer's rates${x.year === d.next_year ? ` and Medicare's ${esc(x.year)} rules` : ''}, for services you perform yourself. Pathology, radiation, drugs and other services you order are not counted, as the law requires for productivity pay. Stages, closures and visit levels follow each patient's needs and are not targets.</p>`;
+      <p class="small muted">Collections are estimates from the practice's remittances at each payer's rates${x.year === d.next_year ? ` and Medicare's ${esc(x.year)} rules` : ''}, for services you perform yourself. Pathology, radiation, drugs and other services you order are not counted, as the law requires for productivity pay (a slide you read yourself, or radiation you manage yourself, may count; ask the practice). Stages, closures and visit levels follow each patient's needs and are not targets.</p>`;
   };
   body.querySelector('#sheetTarget').oninput = e => { cs.sheetTarget = e.target.value; draw(); };
   body.querySelector('#sheetPrint').onclick = () => window.print();

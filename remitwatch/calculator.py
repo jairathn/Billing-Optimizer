@@ -360,9 +360,15 @@ def _schedule(conn, ids: list[str], d0: str, d1: str, window_weeks: float, full_
         f"SELECT clinic_allowed_cents FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
         (*ids, d0, d1, CLINIC_DAY_MIN)) if r[0] is not None)
     q = (lambda f: vals[min(len(vals) - 1, int(f * (len(vals) - 1) + 0.5))] if vals else None)
+    # what a patient slot brings: allowed for the clinician's own clinic services per patient seen on clinic days (the
+    # value a return visit gives up when it takes a slot another patient would have filled)
+    al, pts = conn.execute(
+        f"SELECT COALESCE(SUM(clinic_allowed_cents),0), COALESCE(SUM(patients),0) FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
+        (*ids, d0, d1, CLINIC_DAY_MIN)).fetchone()
     return {"clinic_days": len(days), "clinicians_with_days": len(per),
             "days_per_week": round(dpw, 2), "weeks_per_year": round(wpy, 1), "clinic_days_per_year": round(dpw * wpy, 1),
-            "clinic_day_allowed": {"p25": q(0.25), "p50": q(0.5), "p75": q(0.75), "p90": q(0.9), "n": len(vals)}}
+            "clinic_day_allowed": {"p25": q(0.25), "p50": q(0.5), "p75": q(0.75), "p90": q(0.9), "n": len(vals)},
+            "allowed_per_patient": round(al / pts) if pts else None, "patients_per_day": round(pts / len(days), 1) if days else None}
 
 
 def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, dict]:

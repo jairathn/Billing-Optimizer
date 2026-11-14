@@ -18,7 +18,10 @@
   const OTHER_INPUT = { radiation: 'other_radiation', skin: 'other_skin', path: 'other_path', drug: 'other_drug', nurse: 'other_nurse', rest: 'other_rest' };
   const ANCILLARY = ['radiation', 'skin', 'path', 'drug', 'nurse'];    // the practice's, not the clinician's own production
   const EM = ['99202', '99203', '99204', '99205', '99211', '99212', '99213', '99214', '99215'];
-  const Q_DEFAULT = { commercial: 0.70, medicare: 0.80, medicare_advantage: 0.80, supplement: 0.80, other: 0.50, medicaid: 0 };
+  // patient balances collected, by kind of payer: assumptions until the practice's patient payments are loaded. Early
+  // ledger exports showed about 59% commercial and 54% Medicare Advantage collected within 2-5 weeks (a floor), and
+  // little of what Medicare leaves after a supplement
+  const Q_DEFAULT = { commercial: 0.70, medicare: 0.50, medicare_advantage: 0.70, supplement: 0.50, other: 0.30, medicaid: 0 };
 
   // ------------------------------------------------------------------ inputs
   function shareOf(mix, codes) { return codes.reduce((t, c) => t + (mix[c] || 0), 0); }
