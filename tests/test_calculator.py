@@ -257,6 +257,42 @@ def test_asc_table_matches_cms():
     # wage-adjusted for Newburgh (CBSA 21780, 2027 index 0.9555): national x (0.5 x 0.9555 + 0.5)
     assert asc_amount("2027", "newburgh", "14040") == round(105608 * (0.5 * WAGE_INDEX["2027"]["newburgh"] + 0.5)) == 103258
     assert asc_amount("2027", "newburgh", "17312") is None
+    # skin-substitute application is on CMS's ASC list (15271 G2, 15275 P3; the add-ons packaged)
+    assert ASC["2027"]["15271"][:2] == ("G2", 39148) and ASC["2027"]["15275"][0] == "P3" and ASC["2027"]["15272"][0] == "N1"
+    assert ASC["2026"]["15271"][0] == "G2" and asc_amount("2027", "newburgh", "15276") is None
+
+
+def test_asc_payload_keeps_the_years_and_adds_the_cases(db):
+    """d.asc keeps each year's rates as before and adds where the ASC is, Medicare's Indiana amounts, the ranked codes and
+    add-ons, the ASCQR factor and the cases the activity build counted (invented counts here)."""
+    c = sqlite3.connect(db)
+    med = {"mohs": [["IN", "asc", "14040 17311", 3, 1.5], ["IN", "clinic", "13132 17311", 2, 0]], "excision": [["IN", "clinic", "11643 13132", 1]]}
+    com = {"mohs": [["KY", "clinic", "14040 17313", 2, 0]], "excision": []}
+    c.execute("UPDATE provider_payers SET asc_cases=? WHERE provider_id=? AND month='2026-03' AND payer_kind='medicare'", (json.dumps(med), DOC))
+    c.execute("UPDATE provider_payers SET asc_cases=? WHERE provider_id=? AND month='2026-04' AND payer_kind='medicare'", (json.dumps(med), DOC))
+    c.execute("UPDATE provider_payers SET asc_cases=? WHERE provider_id=? AND month='2026-03' AND payer_kind='commercial'", (json.dumps(com), DOC))
+    c.commit()
+    c.close()
+    d = _calc(db, DOC)
+    A = d["asc"]
+    assert {"2026", "2027"} <= set(A) and A["2027"]["14040"][0] == "A2" and A["2027"]["17311"][0] == "P2"     # the year rows as before
+    assert A["site"] == {"office": "newburgh", "state": "IN", "label": "Newburgh"} and A["ascqr"]["2027"] == pytest.approx(56.592 / 57.721, abs=1e-6)
+    C = A["cases"]
+    assert C["from"] == "provider_payers" and C["clinic_days"] == d["schedule"]["clinic_days"]
+    assert C["mohs"] == [["13132 17311", "clinic", "medicare", "IN", 4, 0], ["14040 17311", "asc", "medicare", "IN", 6, 3.0],
+                         ["14040 17313", "clinic", "commercial", "KY", 2, 0]]
+    assert C["excision"] == [["11643 13132", "clinic", "medicare", "IN", 2, 1]]
+    # a code only the cases bill (11643) is priced too: its ASC row, its Indiana amounts, ranked by the multiple-procedure rule
+    assert "11643" not in d["codes"] and A["2026"]["11643"][0] == "P3" and A["medicare"]["11643"]["2027"] == list(MPFS["2027"]["IN"]["11643"])
+    assert {"17311", "14040", "11643", "13132"} <= set(A["mppr"]) and "17312" in A["add_on"] and "17312" not in A["mppr"]
+    # an APP's excisions are flagged: they cannot move as the APP's cases
+    c = sqlite3.connect(db)
+    c.execute("UPDATE provider_payers SET asc_cases=? WHERE provider_id=? AND month='2026-03' AND payer_kind='medicare'", (json.dumps(med), PA))
+    c.commit()
+    c.close()
+    assert _calc(db, PA)["asc"]["cases"]["excision"] == [["11643 13132", "clinic", "medicare", "IN", 1, 0]]
+    # the old payload keys are all still there
+    assert {"medicare", "medicare_fac", "mppr", "add_on", "global_days", "strategy"} <= set(d)
 
 
 # --------------------------------------------------------------------------- review fixes (invented data only)

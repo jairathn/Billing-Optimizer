@@ -1038,3 +1038,68 @@ def test_the_dashboard_copy_carries_the_counts_and_the_calculator_reads_them_the
     assert calculator._own_read_share(store.conn, [BOB], d0, d1, route="lines") == (1.0, "lines")
     copy.close()
     store.close()
+
+
+# --------------------------------------------------------------------------- closures and excisions, in the clinic or the ASC
+
+def _asc_files():
+    """Bob on one day, Medicare of Indiana and Anthem. Mohs in the clinic with the flap on a bill of its own at the ASC
+    (place of service 24); Mohs and a layered repair with its add-on, all in the clinic, with two extra stages; an
+    excision and its repair at the ASC; a Mohs nobody paid, with a closure that was paid (not a case, and not an excision
+    case either); an Anthem Mohs with a flap in the clinic."""
+    asc = lambda s: s.replace("*11~NM1*QC", "*24~NM1*QC", 1)                                # noqa: E731
+    m = lambda n, lines, pt, pos24=False: (asc if pos24 else (lambda s: s))(clp(n, lines, who="bob", patient=(pt, "PAT"), cfi="MB"))  # noqa: E731
+    line = lambda code, allowed="600.00", units=1: svc(code, "900.00", "480.00" if float(allowed) else "0.00", allowed, D, units=units,  # noqa: E731
+                                                       cas="" if float(allowed) else "CAS*CO*97*900.00~")
+    indiana = [m(401, line("17311"), "ASCA"), m(402, line("14040"), "ASCA", pos24=True),
+               m(403, line("17311") + line("17312", units=2) + line("13132") + line("13133"), "CLINB"),
+               m(404, line("11643") + line("13132"), "EXCC", pos24=True),
+               m(405, line("17311", allowed="0.00") + line("12032"), "UNPD")]
+    anthem = [clp(406, line("17311") + line("14040"), who="bob", patient=("ANTH", "PAT"))]
+    return [SEED, ("20260320", "IN MEDICARE", indiana), ("20260322", "ANTHEM", anthem)]
+
+
+def test_closures_billed_at_an_asc_join_the_mohs_of_the_day_and_the_routes_agree(tmp_path):
+    from remitwatch import calculator, cloud
+    from remitwatch.detect import ensure_schema
+    store = Store(str(tmp_path / "s.sqlite"))
+    assert store.ingest_835_paths(write_files(tmp_path, _asc_files()))["errors"] == 0
+    ensure_schema(store.conn)
+    activity.build_activity(store, log=lambda *a: None)
+    rows = {r["payer_kind"]: json.loads(r["asc_cases"]) for r in store.conn.execute(
+        "SELECT payer_kind, asc_cases FROM provider_payers WHERE provider_id=? AND month='2026-03' AND asc_cases IS NOT NULL", (BOB,))}
+    # Medicare of Indiana: the flap billed at the ASC joins the clinic's Mohs; the clinic case keeps its add-on and two stages
+    assert rows["medicare"] == {"mohs": [["IN", "asc", "14040 17311", 1, 0.0], ["IN", "clinic", "13132 13133 17311", 1, 2.0]],
+                                "excision": [["IN", "asc", "11643 13132", 1]]}
+    # Anthem names no state: the day's (Bob's Medicare patients that day were in Indiana)
+    assert rows["commercial"] == {"mohs": [["IN", "clinic", "14040 17311", 1, 0.0]], "excision": []}
+    assert activity.case_label("14040 17311") == "flap" and activity.case_label("13132 13133 17311") == "complex"
+    # the dashboard's copy carries the column; the calculator reads it there, and from the lines on the full store, alike
+    path = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(store.conn, path)
+    copy = sqlite3.connect(path)
+    d0, d1 = "2026-03-01", "2026-03-31"
+    served = calculator._asc_cases(copy, [BOB], d0, d1)
+    full = calculator._asc_cases(store.conn, [BOB], d0, d1, route="lines")
+    assert served["from"] == "provider_payers" and full["from"] == "lines"
+    assert served["mohs"] == full["mohs"] == [["13132 13133 17311", "clinic", "medicare", "IN", 1, 2.0], ["14040 17311", "asc", "medicare", "IN", 1, 0.0],
+                                              ["14040 17311", "clinic", "commercial", "IN", 1, 0.0]]
+    assert served["excision"] == full["excision"] == [["11643 13132", "asc", "medicare", "IN", 1, 1]]
+    # a copy built before the column was kept: not measured, never an error
+    copy.execute("ALTER TABLE provider_payers DROP COLUMN asc_cases")
+    assert calculator._asc_cases(copy, [BOB], d0, d1) == {"from": None, "mohs": [], "excision": []}
+    copy.close()
+    store.close()
+
+
+def test_asc_cases_are_codes_and_counts_and_version_four_stays_readable():
+    assert activity.ACTIVITY_VERSION == "5" and {"3", "4", "5"} <= activity.READABLE_VERSIONS
+    items = [("17311", 1.0, False, "medicare", "IN"), ("17312", 1.0, False, "medicare", "IN"), ("15260", 1.0, True, "medicare", "IN"),
+             ("15261", 2.0, True, "medicare", "IN")]
+    assert activity.asc_case(items) == ("mohs", "medicare", "IN", "asc", "15260 15261x2 17311", 1.0)
+    # a closure split between the clinic and the ASC, a Mohs day with nothing paid on the Mohs, and an excision with no repair
+    assert activity.asc_case(items[:3] + [("13132", 1.0, False, "medicare", "IN")])[3] == "both"
+    assert activity.asc_case([("1731x", 0.0, False, "medicare", "IN"), ("11643", 1.0, False, "medicare", "IN"), ("13132", 1.0, False, "medicare", "IN")]) is None
+    assert activity.asc_case([("11643", 1.0, True, "commercial", None)]) is None
+    assert [activity.closure_type(c) for c in ("12032", "13153", "14301", "15240", "15271", "13160", "11643", "17311")] == \
+        ["intermediate", "complex", "flap", "graft", "other", "other", None, None]

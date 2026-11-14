@@ -14,7 +14,7 @@ const LAB_GROUPS = [
   ['Coding and contracts', ['b1', 'contract_month']],
   ['Staffing and clinic time', ['app_shift', 'add_session']],
   ['Where cases are done, and by whom', ['asc', 'other_surgeon']],
-  ['Timing of procedures: what-ifs, never in the plan', ['stage', 'biopsy_return']],
+  ['Timing of procedures: what-ifs, never in the plan', ['stage', 'biopsy_return', 'asc_later']],
 ];
 const LAB_TIER = {low: ['routine', 'ok'], medium: ['check first', 'sev-medium'], high: ['audit exposure', 'sev-high']};
 
@@ -73,8 +73,10 @@ async function labSave(change){
 
 const labMoney = c => c == null ? '–' : moneyK(c);
 const labSigned = c => !c || Math.abs(c) < 50000 ? '<span class="muted">–</span>' : `<span class="${c>0?'ok':'sev-high'}">${c>0?'+':'−'}${moneyK(Math.abs(c))}</span>`;
-const LAB_NEED_LABEL = Object.fromEntries([...LabModel.MINUTES.map(([k, l]) => ['minutes.' + k, 'minutes: ' + l.toLowerCase()]),
-                                           ...LabModel.COSTS.map(([k, l]) => ['costs.' + k, 'cost: ' + l.toLowerCase()])]);
+// a label inside a sentence: its first letter in lower case, unless it starts with a name (Medicare, Mohs, ASC...)
+const labLower = l => /^(Medicare|Medicaid|Mohs|ASC|APP|[A-Z]{2,})\b/.test(l) ? l : l.charAt(0).toLowerCase() + l.slice(1);
+const LAB_NEED_LABEL = Object.fromEntries([...LabModel.MINUTES.map(([k, l]) => ['minutes.' + k, 'minutes: ' + labLower(l)]),
+                                           ...LabModel.COSTS.map(([k, l]) => ['costs.' + k, 'cost: ' + labLower(l)])]);
 const labNum = v => (typeof v === 'number' && isFinite(v)) ? v : null;
 
 // ------------------------------------------------------------------ the lab
@@ -127,7 +129,7 @@ function labCard(S){
     const k = fmt === 'pct' ? 100 : 1;
     return `<div class="calc-row"><label>${esc(label)}</label><div class="calc-ctl">
       <input type="range" min="${mn}" max="${mx}" step="${st}" value="${val == null ? mn : val}" data-lab-p="${esc(S.id)}|${esc(key)}|${esc(fmt)}" aria-label="${esc(label)}">
-      <input type="number" class="calc-num" min="${mn * k}" max="${mx * k}" step="any" value="${esc(shown)}" placeholder="${val == null ? 'not entered' : ''}" data-lab-p="${esc(S.id)}|${esc(key)}|${esc(fmt)}" data-lab-twin="${esc(S.id)}|${esc(key)}" aria-label="${esc(label)}">${fmt==='pct'?'<span class="small">%</span>':''}</div></div>`;
+      <input type="number" class="calc-num" min="${mn * k}" max="${mx * k}" step="any" value="${esc(shown)}" placeholder="${val == null ? 'not entered' : ''}"${val == null ? ' style="width:100px"' : ''} data-lab-p="${esc(S.id)}|${esc(key)}|${esc(fmt)}" data-lab-twin="${esc(S.id)}|${esc(key)}" aria-label="${esc(label)}">${fmt==='pct'?'<span class="small">%</span>':''}</div></div>`;
   };
   return `<div class="lab-card" data-lab-card="${esc(S.id)}">
     <label class="lab-head"><input type="checkbox" data-lab-on="${esc(S.id)}" ${c.on?'checked':''} ${off?'disabled':''}> <b>${esc(S.title)}</b>
@@ -145,7 +147,7 @@ function labSoon(v){ if(labTimer) return; labTimer = requestAnimationFrame(() =>
 
 function labNeeds(S, needs){
   const fig = needs.filter(n => !n.startsWith('param.')), par = needs.filter(n => n.startsWith('param.'));
-  const parLabel = n => { const q = (S.params || []).find(p => p[0] === n.slice(6)); return (q ? q[1].toLowerCase() : n) + ' (in this card\'s settings)'; };
+  const parLabel = n => { const q = (S.params || []).find(p => p[0] === n.slice(6)); return (q ? labLower(q[1]) : n) + ' (in this card\'s settings)'; };
   return `<div class="sev-medium">Not entered yet: ${[...fig.map(n => esc(LAB_NEED_LABEL[n] || n)), ...par.map(n => esc(parLabel(n)))].join('; ')}.${fig.length ? ' <a href="#" data-goto-figures>Practice figures</a>' : ''}</div>`;
 }
 
@@ -157,16 +159,22 @@ function labUpdate(v){
   for(const S of LabModel.STRATEGIES){
     const el = body.querySelector(`[data-lab-impact="${S.id}"]`); if(!el) continue;
     const st = r.steps.find(s => s.id === S.id);
-    if(!st){ el.innerHTML = ''; continue; }
+    if(!st){ el.innerHTML = S.id === 'asc' ? labAscNow(d, x) : ''; continue; }
     if(st.skipped){ el.innerHTML = `<span class="muted">${esc(st.skipped)}</span>`; continue; }
     const bits = [`${st.whatif ? 'what-if: ' : ''}collections ${labSigned(st.collections)} a year`];
+    if(S.id === 'asc' && st.detail && Math.abs(st.practiceOnly) >= 50000){
+      bits.push(`of which ASC facility fees ${labSigned(st.practiceOnly)} (the practice's)`);
+      bits.push(`the surgeon's own fees ${labSigned(st.ownProduction)}`);
+    }
     if(Math.abs(st.cost) >= 50000) bits.push(`costs ${st.cost > 0 ? '+' : '−'}${moneyK(Math.abs(st.cost))}`);
     if(Math.abs(st.cost) >= 50000) bits.push(`net ${labSigned(st.collections - st.cost)}`);
     if(Math.abs(st.encountersDay) >= 0.01) bits.push(`${st.encountersDay > 0 ? '+' : ''}${st.encountersDay.toFixed(2)} visits a clinic day`);
     if(Math.abs(st.minutesDay) >= 0.5) bits.push(`${st.minutesDay > 0 ? '+' : ''}${st.minutesDay.toFixed(0)} clinician minutes a day`);
     if(st.oneTime) bits.push(`one-time ${moneyK(st.oneTime)}`);
-    el.innerHTML = bits.join(' · ') + (st.notes.length ? `<div class="muted">${st.notes.map(esc).join(' ')}</div>` : '')
-      + (st.needs.length ? labNeeds(S, st.needs) : '');
+    el.innerHTML = bits.join(' · ') + (S.id === 'asc' && st.detail ? labAscViews(st.detail) : '')
+      + (st.notes.length ? (S.id === 'asc' ? st.notes.map(n => `<div class="muted" style="margin-top:3px">${esc(n)}</div>`).join('')
+                                             : `<div class="muted">${st.notes.map(esc).join(' ')}</div>`) : '')
+      + (st.needs.length ? labNeeds(S, st.needs) : '') + (S.id === 'asc' && st.detail ? labAscTypes(st.detail) : '');
   }
   const R = r.result, B = r.base, W = r.whatif;
   const costKnown = !R.costs.missing.length;
@@ -176,7 +184,7 @@ function labUpdate(v){
   body.querySelector('#labSummary').innerHTML = `<table class="calc-fall"><tbody>
     <tr><td>The calculator's plan</td><td class="num">${moneyK(B.collections)}</td></tr>
     ${planSteps.map(s => `<tr><td>${esc(s.title)}</td><td class="num">${labSigned(s.collections)}</td></tr>`).join('')}
-    <tr class="calc-total"><td><b>Collections a year with these strategies</b>${R.practiceOnly >= 50000 ? `<div class="small muted">of which ${moneyK(R.practiceOnly)} is the practice's (ancillary lines, APP visits, vendor fees, another surgeon's closures), not this clinician's production</div>` : ''}</td><td class="num"><b style="font-size:20px">${moneyK(R.collections)}</b></td></tr>
+    <tr class="calc-total"><td><b>Collections a year with these strategies</b>${R.practiceOnly >= 50000 ? `<div class="small muted">of which ${moneyK(R.practiceOnly)} is the practice's (ancillary lines, APP visits, vendor fees, another surgeon's closures, ASC facility fees), not this clinician's production</div>` : ''}</td><td class="num"><b style="font-size:20px">${moneyK(R.collections)}</b></td></tr>
     <tr><td>Costs a year${costKnown ? '' : ' <span class="small sev-medium">(some not entered)</span>'}</td><td class="num">${R.cost ? moneyK(R.cost) : '<span class="muted">not entered</span>'}</td></tr>
     ${R.cost ? `<tr><td><b>Left after costs</b></td><td class="num"><b>${moneyK(R.collections - R.cost)}</b> <span class="small muted">(${labSigned((R.collections - R.cost) - (B.collections - B.cost))})</span></td></tr>` : ''}
     ${R.oneTime ? `<tr><td>One-time cash (appeals)</td><td class="num">${moneyK(R.oneTime)}</td></tr>` : ''}
@@ -199,6 +207,38 @@ function labUpdate(v){
     ${pm.sort((a, b) => (b.perMinute || 0) - (a.perMinute || 0)).map(m => `<tr><td>${esc(m.label)}</td><td class="num">${money(m.value)}</td><td class="num">${m.minutes == null ? '<span class="muted">not entered</span>' : m.minutes.toFixed(0)}</td><td class="num">${m.perMinute == null ? '–' : money(m.perMinute)}</td></tr>`).join('')}
     </tbody></table>`;
   labScenarioRows(v);
+}
+
+// ------------------------------------------------------------------ the ASC card
+const labCase = c => `<span class="${c > 0 ? 'ok' : c < 0 ? 'sev-high' : 'muted'}">${c > 0 ? '+' : c < 0 ? '−' : ''}${money(Math.abs(c))}</span>`;
+// the practice's share of the ASC's fee not entered: the year with all of the fee and with none of it, side by side
+function labAscViews(D){
+  if(D.own != null || !(D.moved || D.back || D.excisions)) return '';
+  return `<div class="lab-views" style="display:flex;flex-wrap:wrap;gap:6px 24px;margin:6px 0"><div><div class="small muted">With the whole facility fee</div><b>${labSigned(D.withFee)}</b> <span class="small">a year</span></div>
+    <div><div class="small muted">Without the fee (the practice owns none of the ASC)</div><b>${labSigned(D.withoutFee)}</b> <span class="small">a year</span></div></div>
+    <div class="small muted">Enter the share of the ASC's facility fee the practice keeps (by capital) in this card's settings to count it.${D.costKnown ? '' : ' Before costs: the ASC\'s cost per case is not entered.'}</div>`;
+}
+// per closure: the cases a year at Newburgh and what one case moved to the ASC the same day is worth, at Medicare's amounts
+function labAscTypes(D){
+  if(!D.types || !D.types.length) return '';
+  const low = D.types.filter(t => t.lowMargin);
+  return `<table class="calc-cards lab-asc" style="margin-top:6px"><thead><tr><th>Closure, after a clinic Mohs</th><th class="num">A year: clinic / ASC now</th><th class="num">ASC fee a case</th>
+      <th class="num">Practice, with the fee</th><th class="num">Practice, without it</th><th class="num">Patient pays more</th><th class="num">A later day adds</th></tr></thead><tbody>
+    ${D.types.map(t => `<tr><td>${esc(t.label)}${t.lowMargin ? `<div class="small sev-medium">Small ASC fee: with the ASC's own staff and supplies it may not cover the ASC's cost, even for an owner.</div>` : ''}</td>
+      <td class="num" data-label="A year: clinic / ASC now">${Math.round(t.clinic)} / ${Math.round(t.asc)}</td>
+      <td class="num" data-label="ASC fee a case">${money(t.fee)}</td>
+      <td class="num" data-label="Practice, with the fee">${labCase(t.owner)}</td>
+      <td class="num" data-label="Practice, without it">${labCase(t.nonOwner)}</td>
+      <td class="num" data-label="Patient pays more">${money(t.coins)}</td>
+      <td class="num" data-label="A later day adds">${labCase(t.delay)}</td></tr>`).join('')}</tbody></table>
+    <div class="small muted">One case moved to the ASC the same day, against closing it in the clinic: Medicare's ${esc(D.year)} Indiana amounts, at this clinician's own codes for that closure. "Without it" is also the change in the surgeon's own fees. The patient pays 20% of each allowed amount, and the ASC's coinsurance is not capped. A later day: what closing in the ASC on another day adds, all of it from the delay (see the what-if below).${low.length ? ' Intermediate repairs and 13131/13132 bring the ASC little (P3 rates and the lowest A2 rate); flaps, grafts and 13151/13152 carry real margin.' : ''}</div>`;
+}
+// the card before it is ticked: where the closures are done now, and what that routing is worth
+function labAscNow(d, x){
+  const T = LabModel.ascTotals(d, x, LabModel.ascPlan({}));
+  if(!T.book.ok || !(T.pool.n > 0)) return '';
+  const pro = T.current.pro, fee = T.current.fee;
+  return `<span class="muted">Now: ${Math.round(T.pool.asc)} of ${Math.round(T.pool.n)} same-day closures a year at Newburgh are done in the ASC.${T.current.n > 0 ? ` Against closing them in the clinic, the ${Math.round(T.current.n)} of them billed to Medicare fee-for-service are worth ${labSigned(pro + fee)} a year with the whole facility fee, ${labSigned(pro)} without it.` : ''}</span>`;
 }
 
 // pay is worked out on the clinician's own production only, whatever the calculator adds to the totals

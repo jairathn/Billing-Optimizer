@@ -8,7 +8,8 @@ needs no extra analysis run:
     provider_services   what each clinician billed, by code and month of service, folded (one service per billed line
                         across payers, reversals and second payers): units, and what was finally allowed and paid
     provider_days       one row per clinician and day: patients seen, biopsy lesions, pathology the biopsies brought in
-    provider_payers     allowed and paid (second payers included) by kind of payer: the share a patient is left to pay
+    provider_payers     allowed and paid (second payers included) by kind of payer: the share a patient is left to pay;
+                        and the Mohs closures and excisions done in the clinic or at the ASC (asc_cases), for the strategy lab
     exposure            primary-claim lines by payer, clinician and code: which payers a service line is billed to
     payer_rates         each payer's usual allowed amount per code, year and tier (physician or not), and Medicare's
 
@@ -32,6 +33,7 @@ the patient was left to pay, not what the patient paid, so that last share is an
 from __future__ import annotations
 
 import calendar
+import json
 import re
 import sqlite3
 import statistics
@@ -67,6 +69,12 @@ MPPR_SHARE = 0.5            # second to fifth procedures of the same day: 50% of
                             # the sixth and later are paid 'by report', priced by the contractor, and taken at 50% here too)
 PACE_GAP_DAYS = 42          # no clinic day this long before the pace window starts (or before the window ends): the
                             # clinician started (or stopped) inside it, longer than any holiday
+ASC_SITE = {"office": "newburgh", "state": "IN", "label": "Newburgh"}    # where the practice's ASC is: Newburgh, Indiana (WPS,
+                                                                         # CBSA 21780). Only cases seen at the Indiana office can
+                                                                         # move to it the same day.
+# An ASC that does not meet quality reporting (ASCQR) is paid on a lower conversion factor for A2, G2 and P2 codes (P3
+# office-based codes are unchanged): CY2026 $55.224 against $56.322, CY2027 $56.592 against $57.721 (OPPS/ASC final rules)
+ASCQR_FACTOR = {"2026": round(55.224 / 56.322, 6), "2027": round(56.592 / 57.721, 6)}
 
 
 def _add_on(code: str) -> bool:
@@ -574,8 +582,11 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         rate_card[code] = row
     medicare = {code: {y: v for y in MPFS_YEARS for v in [rates.medicare(code, y)] if v} for code in codes}
     medicare_fac = {code: {y: v for y in MPFS_YEARS for v in [rates.medicare(code, y, facility=True)] if v} for code in codes}
-    asc = {y: {c: [ASC[y][c][0], ASC[y][c][2], {o: asc_amount(y, o, c) for o in WAGE_INDEX.get(y, {})}] for c in codes if c in ASC.get(y, {})}
-           for y in ASC}
+    asc_in = _asc_cases(conn, ids, d0, d1)
+    asc_codes = set(codes) | {c.split("x")[0] for rows in (asc_in["mohs"], asc_in["excision"]) for r in rows for c in r[0].split()}
+    asc: dict = {y: {c: [ASC[y][c][0], ASC[y][c][2], {o: asc_amount(y, o, c) for o in WAGE_INDEX.get(y, {})}] for c in sorted(asc_codes)
+                     if c in ASC.get(y, {})} for y in ASC}
+    asc.update(_asc_payload(asc_codes, asc_in, sched.get("clinic_days") or 0))
     for c in codes:
         codes[c]["units_by_year"] = {y: round(v, 2) for y, v in units_m.get(c, {}).items()}
 
@@ -886,6 +897,124 @@ def _visit_shares(conn, ids: list[str], d0: str, d1: str, route: str | None = No
         if own:
             out[key] = round(sum(own) / len(own), 4)
     return out
+
+
+def _asc_items_lines(conn, ids: list[str], d0: str, d1: str) -> dict[tuple, list]:
+    """The lines asc_case reads, per clinician, patient and day, from the remittance lines: for each bill, day and code
+    the newest primary claim's lines that allowed something (units and allowed added up), its place of service and its
+    payer. The patient is the
+    name on the claim (kept in memory only; the bill where there is no name), so a closure billed on an ASC claim joins
+    the Mohs billed on the clinic's claim the same day, as in remitwatch.activity."""
+    rows = conn.execute(
+        f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi), substr(l.patient_control_number, 1, 9),
+                   l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code),
+                   COALESCE(NULLIF(l.original_units, 0), l.paid_units), l.allowed_cents, l.paid_cents, cl.facility_type_code,
+                   cl.payer_name, cl.claim_filing_indicator, cl.patient_last, cl.patient_first, l.payment_date, cl.claim_key
+            FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
+            WHERE t.superseded = 0 AND cl.claim_status_code IN ('1', '19') AND l.service_date BETWEEN ? AND ?
+              AND (substr(COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code), 1, 2) IN ('11', '12', '13', '14', '15', '17'))
+              AND COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) IN ({_in(ids)})""",
+        (d0, d1, *ids)).fetchall()
+    kinds: dict[tuple, tuple] = {}
+    claims: dict[tuple, dict] = defaultdict(dict)       # (npi, bill, day, code) -> claim -> [paid on, units, allowed, pos, payer, patient]
+    for npi, bill, day, raw, units, allowed, paid, pos, payer, cfi, last, first, paid_on, claim in rows:
+        code = activity.clean_code(raw)
+        if not day or not (activity.asc_code(code) or code[:4] == "1731"):
+            continue
+        k = (payer, cfi)
+        if k not in kinds:
+            kinds[k] = payer_group_kind(payer, cfi)
+        patient = (re.sub(r"[^A-Z0-9]", "", last.upper()), re.sub(r"[^A-Z0-9]", "", (first or "").upper())) if (last or "").strip() else ("#", bill)
+        c = claims[(npi, bill, day[:10], code)].setdefault(claim, [paid_on or "", 0.0, 0, pos, kinds[k], patient])
+        c[1] += abs(units or 1)
+        c[2] += max(allowed or 0, 0) or max(paid or 0, 0)
+    out: dict[tuple, list] = defaultdict(list)
+    for (npi, _, day, code), by_claim in claims.items():
+        # the newest claim that allowed something, as the build keeps the newest decision still standing
+        _, units, allowed, pos, (group, kind), patient = max(by_claim.values(), key=lambda v: (v[2] > 0, v[0]))
+        m = activity._STATE.match(group or "")
+        paid_line = allowed > 0 and activity.asc_code(code)
+        out[(npi, patient, day)].append((code if paid_line else "1731x", units or 1.0, pos == activity.ASC_POS, kind, m.group(1) if m else None))
+    return out
+
+
+def _asc_cases(conn, ids: list[str], d0: str, d1: str, route: str | None = None) -> dict:
+    """The clinicians' Mohs cases with a closure the same day, and excisions with a repair (no Mohs that day), over the
+    window, by the codes billed, where the closure was billed (clinic or ASC), the kind of payer and the state the case
+    was seen in (Medicare's contractor; for other payers, the clinic day's state). Pooled over the clinicians of a role.
+
+        mohs      [[codes, site, kind of payer, state, cases, extra stages]]
+        excision  [[codes, site, kind of payer, state, cases, 1 for a physician's cases, 0 for an APP's]]
+
+    Read from the remittance lines where the database holds the window's (the full store), else from what the activity
+    build keeps in provider_payers.asc_cases (the dashboard's copy); 'from' says which, or is None where neither can say
+    (a copy built before the column was kept). `route` ('lines' or 'provider_payers') forces one, for comparing them.
+    Codes and counts only: nothing about a patient leaves here."""
+    out: dict = {"from": None, "mohs": [], "excision": []}
+    if not ids:
+        return out
+    try:
+        lines = _lines_complete(conn, d0, d1) if route is None else route == "lines"
+    except sqlite3.Error:
+        lines = False
+    tiers = {r[0]: r[1] for r in conn.execute(f"SELECT provider_id, tier FROM provider_roster WHERE provider_id IN ({_in(ids)})", ids)}
+    agg: Counter = Counter()
+    extra: Counter = Counter()
+    try:
+        if lines:
+            place = {(p, d[:10]): pl for p, d, pl in conn.execute(
+                f"SELECT provider_id, service_date, place FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?",
+                (*ids, d0, d1))}
+            for (npi, _, day), items in _asc_items_lines(conn, ids, d0, d1).items():
+                case = activity.asc_case(items)
+                if case:
+                    what, kind, state, site, codes, stages = case
+                    k = (what, npi, kind, state or place.get((npi, day)) or "", site, codes)
+                    agg[k] += 1
+                    extra[k] += stages
+        else:
+            for pid, kind, js in conn.execute(
+                    f"""SELECT provider_id, payer_kind, asc_cases FROM provider_payers WHERE provider_id IN ({_in(ids)}) AND month BETWEEN ? AND ?
+                        AND asc_cases IS NOT NULL""", (*ids, d0[:7], d1[:7])):
+                v = json.loads(js)
+                for state, site, codes, n, stages in v.get("mohs", []):
+                    agg[("mohs", pid, kind, state, site, codes)] += n
+                    extra[("mohs", pid, kind, state, site, codes)] += stages
+                for state, site, codes, n in v.get("excision", []):
+                    agg[("excision", pid, kind, state, site, codes)] += n
+    except (sqlite3.Error, ValueError):       # a copy made before the build kept the cases
+        return out
+    pooled: Counter = Counter()
+    stages_of: Counter = Counter()
+    for (what, pid, kind, state, site, codes), n in agg.items():
+        # only a physician operates in an ASC (42 CFR 416.42); a clinician the roster cannot place counts as a physician, as
+        # the rest of the calculator takes them
+        tail = round(extra[(what, pid, kind, state, site, codes)], 2) if what == "mohs" else int(tiers.get(pid) != "nonphysician")
+        k = (what, codes, site, kind, state) + (() if what == "mohs" else (tail,))
+        pooled[k] += n
+        if what == "mohs":
+            stages_of[k] += tail
+    for k, n in sorted(pooled.items()):
+        what, rest = k[0], list(k[1:])
+        out[what].append(rest + [n, round(stages_of[k], 2)] if what == "mohs" else rest[:4] + [n, rest[4]])
+    out["from"] = "lines" if lines else "provider_payers"
+    return out
+
+
+def _asc_payload(codes: set, cases: dict, clinic_days: int) -> dict:
+    """What the strategy lab's ASC comparison reads besides the ASC's rates by year (asc[year]): where the ASC is, Medicare's
+    Indiana amounts (office and facility, physician) of every code it may price, which of them the multiple-procedure
+    rule ranks and which are add-ons, the factor for an ASC failing quality reporting, and the cases (_asc_cases) with
+    the clinic days they were counted over."""
+    st = ASC_SITE["state"]
+    return {
+        "site": dict(ASC_SITE),
+        "medicare": {c: {y: list(MPFS[y][st][c]) for y in MPFS_YEARS if MPFS.get(y, {}).get(st, {}).get(c)} for c in sorted(codes)},
+        "mppr": sorted(c for c in codes if (PFS_INDICATORS.get(c) or ("", ""))[1] == "2"),
+        "add_on": sorted(c for c in codes if _add_on(c)),
+        "ascqr": dict(ASCQR_FACTOR),
+        "cases": dict(cases, clinic_days=clinic_days),
+    }
 
 
 def _lever_codes(conn, tier: str, a: str, b: str) -> list[str]:

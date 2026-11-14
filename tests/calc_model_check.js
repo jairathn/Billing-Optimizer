@@ -362,13 +362,16 @@ const LM = require('../remitwatch/static/lab_model.js');
   A.minutes.turnover = 10; A.costs.per_encounter = 20;
   const r2 = LM.run(d, x, A, { stage: { on: true, params: { share: 1 } } }, cal);
   ok('lab_stage_costs', near(r2.steps[0].cost, 0.5 * 20 * 100, 1e-9) && near(r2.steps[0].minutesDay, 5, 1e-9) && r2.steps[0].needs.length === 0, JSON.stringify(r2.steps[0]));
-  // the ASC: facility payment added, professional fee at the facility amounts, both at the multiple-procedure rules
-  const r3 = LM.run(d, x, A, { asc: { on: true, params: { cases: 1, own: 1, commercial_pct: 1 } } }, cal);
-  const o = LM.caseValue(d, x, cal, 'Medicare KY', '17311', '14040', '2026', 'office', 'newburgh');
-  const z = LM.caseValue(d, x, cal, 'Medicare KY', '17311', '14040', '2026', 'asc', 'newburgh');
-  ok('lab_asc_office_case', near(o.pro, 70000 + 0.5 * 60000), o.pro);
-  ok('lab_asc_asc_case', near(z.pro, 0.45 * 70000 + 0.5 * 0.45 * 60000, 1e-3) && near(z.facility, 110000 + 0.5 * 40000), JSON.stringify(z));
-  ok('lab_asc_positive', r3.steps[0].collections > 0, r3.steps[0].collections);
+  // the ASC: Mohs stays in the clinic at the office amount (its ASC row is never paid); the closure moves to the facility
+  // amount, ranked against the clinic Mohs across the two claims, and the ASC is paid for the closure alone
+  Object.assign(d.asc, { site: { office: 'newburgh', state: 'IN' }, mppr: ['17311', '14040', '15260'], add_on: ['17312'],
+                         medicare: { '17311': { '2026': [70000, 30000] }, '17312': { '2026': [37000, 20000] }, '14040': { '2026': [60000, 45000] } },
+                         cases: { from: 'lines', clinic_days: 1, mohs: [['17311 14040', 'clinic', 'medicare', 'IN', 1, 0]], excision: [] } });
+  const r3 = LM.run(d, x, A, { asc: { on: true, params: { to_asc: 1, own: 1 } } }, cal);
+  const v = LM.ascCase(d, '2026', 'mohs', '17311 14040');
+  ok('lab_asc_office_case', near(v.A, 70000 + 0.5 * 60000), v.A);
+  ok('lab_asc_asc_case', near(v.B, 70000 + 0.5 * 45000) && near(v.fee, 110000) && near(v.C, 70000 + 45000), JSON.stringify(v));
+  ok('lab_asc_positive', r3.steps[0].collections > 0 && near(r3.steps[0].practiceOnly, r3.steps[0].collections - r3.steps[0].ownProduction, 1e-9), r3.steps[0].collections);
   // appeals are one-time cash; vendor fees a year (12 months of window here), practice-wide
   const r4 = LM.run(d, x, A, { appeals: { on: true, params: { share: 0.5 } }, vendor_fees: { on: true, params: { share: 1 } } }, cal);
   ok('lab_appeals_one_time', near(r4.steps[0].oneTime, 50000) && near(r4.steps[0].collections, 0), JSON.stringify(r4.steps[0]));

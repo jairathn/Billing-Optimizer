@@ -46,10 +46,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from .codes import DRUG_RE, RADIATION_CODES, SKIN_SUBSTITUTE_RE, payer_group_kind
 
-ACTIVITY_VERSION = "4"      # bump when the tables or the way they are filled change; they are then rebuilt
-# Tables built by these versions stay readable until the next run rebuilds them: version 4 only added columns (Medicare
-# visit counts, pathology read by the biopsy's own clinician), which the readers treat as not measured when absent.
-READABLE_VERSIONS = {"3", ACTIVITY_VERSION}
+ACTIVITY_VERSION = "5"      # bump when the tables or the way they are filled change; they are then rebuilt
+# Tables built by these versions stay readable until the next run rebuilds them: versions 4 and 5 only added columns
+# (4: Medicare visit counts, pathology read by the biopsy's own clinician; 5: the closures and excisions a clinician did
+# in the clinic or the ASC, provider_payers.asc_cases), which the readers treat as not measured when absent.
+READABLE_VERSIONS = {"3", "4", ACTIVITY_VERSION}
 CLINIC_DAY_MIN = 5          # a day counts as a clinic day when the clinician saw at least this many patients
 COMPLETE_SHARE = 0.97       # a month of service is treated as complete when this share of its visits has been paid
 LAG_DAYS = 150              # how far the service-to-payment curve is kept
@@ -77,7 +78,7 @@ CREATE TABLE IF NOT EXISTS provider_services (
 );
 CREATE TABLE IF NOT EXISTS provider_payers (
     provider_id TEXT, month TEXT, payer_kind TEXT, encounters INTEGER, charge_cents INTEGER, allowed_cents INTEGER, paid_cents INTEGER,
-    seen INTEGER, biopsied INTEGER,
+    seen INTEGER, biopsied INTEGER, asc_cases TEXT,
     PRIMARY KEY (provider_id, month, payer_kind)
 );
 CREATE TABLE IF NOT EXISTS provider_panels (
@@ -142,11 +143,12 @@ _MODIFIER = re.compile(r"[0-9A-Z]{2}")
 
 # columns of the remittance stream read by build_activity
 (C_CLAIM, C_STATUS, C_CODE, C_ORIG, C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED, C_DATE, C_LCN, C_PAYDATE,
- C_NPI, C_LAST, C_FIRST, C_REFS, C_PLAST, C_PFIRST, C_PAYER, C_CFI, C_BILL, C_PAYERID, C_PATIENT_OWES, C_MODS) = range(24)
+ C_NPI, C_LAST, C_FIRST, C_REFS, C_PLAST, C_PFIRST, C_PAYER, C_CFI, C_BILL, C_PAYERID, C_PATIENT_OWES, C_MODS, C_POS) = range(25)
 C_LINEKEY = C_PATIENT_OWES      # the stream brings the line's key in this place; flush swaps it for what the payer left to the patient
 # one service while its remittance lines are folded in
 (I_DATE, I_CODE, I_UNITS, I_CHARGE, I_ALLOWED, I_PAID, I_LIVE, I_DECIDED, I_DENIED, I_KIND, I_FIRSTPAID, I_DECISIONS, I_GROUP, I_LAST,
- I_MODS) = range(15)      # I_MODS: an E/M billed with modifier 25 (DAY_E25) or 57 (DAY_E57) on any of its lines
+ I_MODS, I_POS) = range(16)      # I_MODS: an E/M billed with modifier 25 (DAY_E25) or 57 (DAY_E57) on any of its lines;
+                                 # I_POS: the place of service of its claim (CLP08), '24' for an ambulatory surgical center
 
 
 def clean_code(code: str | None) -> str:
@@ -575,7 +577,7 @@ def build_activity(store, log=print) -> dict:
                     key = fits[-1]          # a second payer that lists one service on several lines does not make it several
                 if key is None:
                     key = len(items)
-                    items[key] = [None, code, 0.0, 0, 0, 0, False, False, False, None, None, {}, None, None, 0]
+                    items[key] = [None, code, 0.0, 0, 0, 0, False, False, False, None, None, {}, None, None, 0, None]
                     by_code[code].append(key)
                 if r[C_LCN]:
                     by_lcn.setdefault((r[C_LCN], code), key)
@@ -664,6 +666,16 @@ def build_activity(store, log=print) -> dict:
                 treated.setdefault(patient, []).append(d)
             if lesions and seen_today and provider not in ("group", "unattributed"):
                 took.setdefault((patient, d), provider)
+            # the lines of a Mohs case's closure, or of an excision and its repair, with where they were billed (asc_case)
+            cut = None
+            if seen_today:
+                for it in its:
+                    c = it[I_CODE]
+                    paid_line = it[I_ALLOWED] > 0 and asc_code(c)
+                    if paid_line or c[:4] == "1731":         # a Mohs line nobody paid still makes the day a Mohs day
+                        cut = cut or []
+                        cut.append((c if paid_line else "1731x", it[I_UNITS] or 1.0, it[I_POS] == ASC_POS, enc_kind or "secondary only",
+                                    state_of(enc_group)))
             # a Medicare fee-for-service encounter: what the visit-beside-a-procedure shares count
             mflags = 0
             if enc_kind == "medicare" and seen_today:
@@ -686,7 +698,7 @@ def build_activity(store, log=print) -> dict:
                 seen = days[(provider, d)].get(patient)
                 proc = any(f in PROCEDURE for f in fams)
                 if seen is None:
-                    days[(provider, d)][patient] = [kind == "visit", new, est, lesions, high, proc, mflags]
+                    days[(provider, d)][patient] = [kind == "visit", new, est, lesions, high, proc, mflags, cut]
                 else:
                     seen[0] = seen[0] or kind == "visit"
                     seen[1] = seen[1] or new
@@ -695,6 +707,8 @@ def build_activity(store, log=print) -> dict:
                     seen[4] = seen[4] or high
                     seen[5] = seen[5] or proc
                     seen[6] |= mflags
+                    if cut is not None:
+                        seen[7] = (seen[7] or []) + cut
             if first_paid and ref_from and ref_from <= d <= ref_to:
                 lag = _days(d, first_paid)
                 if lag is not None and lag >= 0:
@@ -710,7 +724,8 @@ def build_activity(store, log=print) -> dict:
                   CASE WHEN length(l.patient_control_number) >= 9 THEN substr(l.patient_control_number, 1, 9)
                        WHEN length(l.patient_control_number) >= 4 THEN l.patient_control_number
                        ELSE COALESCE(l.patient_control_number, '') || '|' || COALESCE(c.patient_last, '') || '|' || COALESCE(c.patient_first, '') END AS bill,
-                  NULLIF(l.payer_id, ''), l.line_key, COALESCE(NULLIF(NULLIF(l.original_modifiers, ''), '[]'), l.modifiers)
+                  NULLIF(l.payer_id, ''), l.line_key, COALESCE(NULLIF(NULLIF(l.original_modifiers, ''), '[]'), l.modifiers),
+                  c.facility_type_code
            FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
            WHERE t.superseded = 0
            ORDER BY bill, l.payment_date, CASE WHEN l.claim_status_code = '22' THEN 0 ELSE 1 END, l.transaction_key, c.claim_seq, l.line_seq""")
@@ -749,6 +764,8 @@ def build_activity(store, log=print) -> dict:
     # ---- write the remittance side
     day_rows = []
     span: dict[str, list] = {}
+    cases: dict[tuple, Counter] = defaultdict(Counter)               # (provider, month, kind of payer) -> case (asc_case) -> count
+    stages: dict[tuple, Counter] = defaultdict(Counter)              # ... -> extra Mohs stages over those cases
     for key in sorted(set(days) | set(day_n)):
         provider, d = key
         seen = days.get(key, {})
@@ -767,6 +784,14 @@ def build_activity(store, log=print) -> dict:
             top, top_n = min(states.items(), key=lambda kv: (-kv[1], kv[0]))
             if top_n >= 0.7 * sum(states.values()) and (top_n >= 2 or len(states) == 1):
                 place = top
+        for v in vals:
+            if v[7]:
+                case = asc_case(v[7])
+                if case:
+                    what, kind_, state, site, codes, extra = case
+                    ck = (what, state or place or "", site, codes)
+                    cases[(provider, d[:7], kind_)][ck] += 1
+                    stages[(provider, d[:7], kind_)][ck] += extra
         day_rows.append((provider, d, pts, visits, new, est, pts - visits, len(alone), sum(1 for v in alone if v[4]), n[7], n[0], n[1],
                          sum(1 for v in vals if v[3]), sum(v[3] for v in vals), len(read_here.get(key, ())), n[2], n[3], n[4], n[5], n[6],
                          generated.get(key, 0), place,
@@ -782,9 +807,12 @@ def build_activity(store, log=print) -> dict:
     conn.executemany(f"INSERT INTO provider_days VALUES ({','.join('?' * 28)})", day_rows)
     conn.executemany("INSERT INTO provider_services VALUES (?,?,?,?,?,?,?,?,?,?)",
                      [(k[0], k[1], k[2], service_family(k[2]), v[0], v[1], v[2], v[3], v[4], v[5]) for k, v in sorted(services.items())])
-    conn.executemany("INSERT INTO provider_payers VALUES (?,?,?,?,?,?,?,?,?)", [k + tuple(v) for k, v in sorted(payers.items())])
+    for k in cases:                           # a case's kind of payer is its encounter's, which has its row already
+        payers.setdefault(k, [0, 0, 0, 0, 0, 0])
+    conn.executemany("INSERT INTO provider_payers VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     [k + tuple(v) + (asc_cases_json(cases.get(k), stages.get(k)),) for k, v in sorted(payers.items())])
     checks = _checks(services, day_rows, over)
-    for done in (days, day_n, services, payers, place_n):          # give the memory back before following patients through time
+    for done in (days, day_n, services, payers, place_n, cases, stages):     # give the memory back before following patients through time
         done.clear()
     build_panels(conn, journeys, treated, first_payment, last_payment)
     build_recall(conn, treated, last_visit, last_payment)
@@ -851,6 +879,96 @@ def build_activity(store, log=print) -> dict:
     return summary
 
 
+# --------------------------------------------------------------------------- closures and excisions, clinic or ASC
+# What the strategy lab's ASC comparison needs (remitwatch.calculator, the 'asc' strategy): for each clinician, month and
+# kind of payer, the cases of a Mohs first stage with a closure the same day, and of an excision (no Mohs that day) with
+# its repair, each as the codes billed (with units) and where the closure was billed: in the clinic, or at an ambulatory
+# surgical center (the claim's place of service 24). One case is one patient, one clinician, one day, whatever the bills:
+# a closure billed apart, on an ASC claim, joins the Mohs of the same patient that day. Codes and counts only.
+ASC_POS = "24"
+MOHS_STAGE = ("17312", "17314")
+
+
+def closure_type(code: str) -> str | None:
+    """'intermediate' (12031-12057), 'complex' (13100-13153), 'flap' (14000-14061, 14301-14302), 'graft' (full thickness,
+    15200-15261), 'other' (simple repairs, 13160, 14350, split and other grafts 15040-15157, skin substitutes 15271-15278,
+    other flaps 15570-15770), or None for a code that closes nothing."""
+    if len(code) != 5 or not code.isdigit():
+        return None
+    n = int(code)
+    if 12031 <= n <= 12057:
+        return "intermediate"
+    if 13100 <= n <= 13153:
+        return "complex"
+    if 14000 <= n <= 14061 or n in (14301, 14302):
+        return "flap"
+    if 15200 <= n <= 15261:
+        return "graft"
+    if 12001 <= n <= 12021 or n in (13160, 14350) or 15040 <= n <= 15157 or 15271 <= n <= 15278 or 15570 <= n <= 15770:
+        return "other"
+    return None
+
+
+def is_lesion_excision(code: str) -> bool:
+    """Benign (11400-11446) and malignant (11600-11646) lesion excisions."""
+    return len(code) == 5 and code.isdigit() and (11400 <= int(code) <= 11446 or 11600 <= int(code) <= 11646)
+
+
+def asc_code(code: str) -> bool:
+    return code in MOHS_FIRST or code in MOHS_STAGE or closure_type(code) is not None or is_lesion_excision(code)
+
+
+CASE_ORDER = ("graft", "flap", "complex", "intermediate", "other")
+
+
+def case_label(codes: str) -> str:
+    """The closure a case is known by: graft, then flap, complex, intermediate, other."""
+    types = {closure_type(c.split("x")[0]) for c in codes.split()}
+    return next((t for t in CASE_ORDER if t in types), "other")
+
+
+def asc_case(items: list) -> tuple | None:
+    """One patient's lines with one clinician on one day, each (code, units, at an ASC, kind of payer, Medicare state),
+    paid lines only (a Mohs line nobody paid comes as code '1731x'). Returns (what, kind of payer, state, site, codes,
+    extra stages) or None:
+        what     'mohs': a paid Mohs first stage and a paid closure; 'excision': no Mohs that day, a paid lesion excision
+                 and a paid repair
+        site     where the closure (with an excision, the excision and its repair) was billed: 'clinic', 'asc' or 'both'
+        codes    the first stage(s) and the closure codes, or the excisions and the repair codes: 'code' or 'codexunits',
+                 sorted, space-separated (extra Mohs stages apart, in extra stages)"""
+    mohs_day = any(i[0][:4] == "1731" for i in items)
+    if mohs_day:
+        lead = [i for i in items if i[0] in MOHS_FIRST]
+        moved = [i for i in items if closure_type(i[0])]
+        what = "mohs"
+    else:
+        lead = [i for i in items if is_lesion_excision(i[0])]
+        moved = [i for i in items if closure_type(i[0])]
+        what = "excision"
+    if not lead or not moved:
+        return None
+    where = {i[2] for i in (moved if mohs_day else lead + moved)}
+    site = "asc" if where == {True} else "clinic" if where == {False} else "both"
+    units: Counter = Counter()
+    for i in lead + moved:
+        units[i[0]] += max(1.0, float(i[1] or 1.0))
+    codes = " ".join(c if round(u) == 1 else f"{c}x{round(u)}" for c, u in sorted(units.items()))
+    extra = sum((float(i[1] or 1.0) for i in items if i[0] in MOHS_STAGE), 0.0) if mohs_day else 0.0
+    return what, lead[0][3], lead[0][4], site, codes, extra
+
+
+def asc_cases_json(cases: Counter | None, stages: Counter | None) -> str | None:
+    """A clinician's cases in a month at one kind of payer, as provider_payers.asc_cases keeps them:
+    {"mohs": [[state, site, codes, cases, extra stages]], "excision": [[state, site, codes, cases]]}."""
+    if not cases:
+        return None
+    out: dict = {"mohs": [], "excision": []}
+    for (what, state, site, codes), n in sorted(cases.items()):
+        row = [state, site, codes, n] + ([round((stages or {}).get((what, state, site, codes), 0.0), 2)] if what == "mohs" else [])
+        out[what].append(row)
+    return json.dumps(out, separators=(",", ":"))
+
+
 def _em_modifiers(mods: str | None, raw_code: str | None) -> int:
     """DAY_E25 and DAY_E57 for a visit line billed with modifier 25 or 57 (the modifiers as billed where the payer
     reported a change, else as paid; a few payers put them in the code field)."""
@@ -876,6 +994,8 @@ def _fold(it: list, r, payer) -> None:
     it[I_LIVE] = True
     if it[I_DATE] is None:
         it[I_DATE] = r[C_DATE]
+    if it[I_POS] is None and r[C_POS]:
+        it[I_POS] = r[C_POS]
     units = r[C_OUNITS] if r[C_OUNITS] else r[C_PUNITS]       # some payers send "0" for the units billed beside the units they paid
     if units and abs(units) > it[I_UNITS]:
         it[I_UNITS] = float(abs(units))

@@ -247,6 +247,127 @@ ok('bigger_closures', ['14001', '14021', '14041', '14061', '15260'].every(LM.BIG
   ok('vendor_hipaa', /HIPAA-covered health plans/.test(S('vendor_fees').why), '');
 }
 
+// ------------------------------------------------------------------ the ASC: Mohs in the clinic, closures and excisions may move
+// invented amounts: Medicare's office and facility amounts, ASC rates already wage-adjusted, and the cases a year counted
+function ascPayload() {
+  const e = payload();
+  const med = { '17311': [60000, 25000], '17312': [35000, 15000], '14040': [66000, 48000], '15260': [88000, 65000], '13132': [40000, 22000],
+                '13133': [15000, 9000], '11643': [30000, 17000], '12041': [25000, 14000] };
+  const rows = { '17311': ['P2', true, { newburgh: 40000 }], '17313': ['P2', true, { newburgh: 40000 }], '17312': ['N1', false, { newburgh: null }],
+                 '14040': ['A2', true, { newburgh: 100000 }], '15260': ['A2', true, { newburgh: 100000 }], '13132': ['A2', true, { newburgh: 20000 }],
+                 '13133': ['N1', false, { newburgh: null }], '11643': ['P3', true, { newburgh: 17000 }], '12041': ['P3', false, { newburgh: 16000 }] };
+  e.asc = { '2026': rows, '2027': rows, site: { office: 'newburgh', state: 'IN', label: 'Newburgh' },
+            medicare: Object.fromEntries(Object.entries(med).map(([c, v]) => [c, { '2026': v, '2027': v }])),
+            mppr: ['17311', '14040', '15260', '13132', '11643', '12041'], add_on: ['17312', '13133'], ascqr: { '2026': 0.98, '2027': 0.98 },
+            cases: { from: 'provider_payers', clinic_days: 10,
+                     mohs: [['14040 17311', 'clinic', 'medicare', 'IN', 4, 2], ['14040 17311', 'asc', 'medicare', 'IN', 6, 3],
+                            ['13132 13133 17311', 'clinic', 'medicare', 'IN', 2, 0], ['15260 17311', 'asc', 'medicare', 'IN', 2, 1],
+                            ['14040 17311', 'clinic', 'medicare_advantage', 'IN', 2, 0], ['14040 17311', 'clinic', 'medicare', 'KY', 5, 0],
+                            ['14040 17311', 'clinic', 'medicaid', 'IN', 1, 0]],
+                     excision: [['11643 13132', 'clinic', 'medicare', 'IN', 3, 1], ['11643 13132', 'clinic', 'medicare', 'IN', 2, 0]] } };
+  e.payers['Plan M'] = { kind: 'medicare_advantage', correctable: true, indexed: true };
+  e.payers['State plan'] = { kind: 'medicaid', correctable: false, indexed: false };
+  return e;
+}
+{
+  const e = ascPayload(), Y = '2026';
+  const per = 4 * 46 / 10;                 // a case counted in the window, a year on this plan (184 clinic days over 10)
+  const coll = c => M.collectShare(e, x0, 'Medicare KY', c);
+  // Mohs never earns an ASC fee, though its row is on CMS's list
+  ok('asc_no_mohs_fee', LM.ascFee(e, Y, [['17311', 1], ['17313', 1], ['17312', 2]]) === 0 && LM.ascCase(e, Y, 'mohs', '14040 17311').fee === 100000, '');
+  // one ranking across the clinic claim and the ASC claim, each line at its own setting's amount
+  const f = LM.ascCase(e, Y, 'mohs', '14040 17311');
+  ok('asc_cross_claim_ranking', f.A === 66000 + 30000 && f.B === 60000 + 24000 && f.C === 60000 + 48000, JSON.stringify(f));
+  // a graft at the facility amount outranks the clinic's Mohs: the Mohs is the line cut
+  const g = LM.ascCase(e, Y, 'mohs', '15260 17311');
+  ok('asc_graft_flip', g.B === 65000 + 30000 && g.A === 88000 + 30000, JSON.stringify(g));
+  // an add-on is never cut, and the ASC is paid nothing for it (N1): the repair alone, in full
+  const l = LM.ascCase(e, Y, 'mohs', '13132 13133 17311');
+  ok('asc_add_on_n1', l.A === 60000 + 20000 + 15000 && l.B === 60000 + 11000 + 9000 && l.fee === 20000, JSON.stringify(l));
+  // extra stages stay in the clinic in every option, never reduced
+  const st = LM.ascCase(e, Y, 'mohs', '14040 17311', { stages: 1 });
+  ok('asc_stages_in_clinic', st.A - f.A === 35000 && st.B - f.B === 35000 && st.C - f.C === 35000, JSON.stringify(st));
+  // an excision and its repair in the ASC: the ASC's discount (the highest in full, the other at half); not discounted: in full
+  const x1 = LM.ascCase(e, Y, 'excision', '11643 13132');
+  ok('asc_discount_excision_repair', x1.A === 40000 + 15000 && x1.B === 22000 + 8500 && x1.fee === 20000 + 8500
+     && LM.ascFee(e, Y, [['11643', 1], ['12041', 1]]) === 17000 + 16000, JSON.stringify(x1));
+  // a payer that does not cut across the two claims; ASCQR on A2 rows only (P3 unchanged)
+  const nc = LM.ascCase(e, Y, 'mohs', '14040 17311', { cross: false });
+  ok('asc_no_cross_option', nc.B === 60000 + 48000 && nc.C === nc.B, JSON.stringify(nc));
+  ok('asc_ascqr', LM.ascCase(e, Y, 'mohs', '14040 17311', { ascqr: true }).fee === 98000 && LM.ascCase(e, Y, 'excision', '11643 13132', { ascqr: true }).fee === 19600 + 8500, '');
+  // the 2027 same-day visit rule (every case with a visit here): the ASC's lines only with the open switch on
+  const off = LM.ascCase(e, Y, 'mohs', '14040 17311', { em: 1 }), on = LM.ascCase(e, Y, 'mohs', '14040 17311', { em: 1, emAsc: true });
+  ok('asc_em_rule_switch', off.A === 96000 - 6000 && off.B === 84000 && on.B === 84000 - 4800 && on.A === off.A && off.C === 108000, JSON.stringify([off, on]));
+
+  const run = params => LM.run(e, x0, A, { asc: { on: true, params } }, cal);
+  const step = r => stepOf(r, 'asc');
+  // nothing set: nothing moves, the routing now is shown, the share of the fee and the other plans' fee are asked for
+  const r0 = step(run({}));
+  ok('asc_baseline_nothing_moves', r0.collections === 0 && r0.detail.moved === 0 && r0.needs.includes('param.own') && r0.needs.includes('param.commercial_pct'), JSON.stringify(r0.needs));
+  const curPro = per * (6 * (f.B - f.A) * coll('14040') + 2 * (g.B - g.A) * coll('15260')), curFee = per * (6 * 100000 * coll('14040') + 2 * 100000 * coll('15260'));
+  ok('asc_current_routing', near(r0.detail.current.n, 8 * per) && near(r0.detail.current.pro, curPro, 1e-9) && near(r0.detail.current.fee, curFee, 1e-9)
+     && near(r0.detail.pool.n, 17 * per) && near(r0.detail.pool.asc, 8 * per), JSON.stringify(r0.detail.current));      // Medicaid's counted, not moved
+  // the change set: only Indiana's Medicare closures done in the clinic move (Kentucky, Medicaid and, until their fee is entered,
+  // Medicare Advantage stay); the share of the fee not entered: the year counts none of it, both views shown
+  const r1 = step(run({ to_asc: 1 }));
+  const pro1 = per * (4 * (f.B - f.A) * coll('14040') + 2 * (l.B - l.A) * coll('13132')), fee1 = per * (4 * 100000 * coll('14040') + 2 * 20000 * coll('13132'));
+  ok('asc_moves_clinic_rows_only', near(r1.detail.moved, 6 * per) && near(r1.collections, pro1, 1e-9) && near(r1.detail.withFee, pro1 + fee1, 1e-9)
+     && r1.practiceOnly === 0 && /With the whole fee/.test(r1.notes.join(' ')), `${r1.collections} ${pro1}`);
+  ok('asc_cost_asked', r1.needs.includes('costs.asc_per_case') && /Gross only/.test(r1.notes.join(' ')), r1.needs.join());
+  // the practice keeps all of the fee: the fee is the practice's, the surgeon's own production changes by the professional fees only
+  const A2 = LM.filled(A); A2.costs.asc_per_case = 300; A2.costs.office_per_case_saved = 50;
+  const r2 = step(LM.run(e, x0, A2, { asc: { on: true, params: { to_asc: 1, own: 1 } } }, cal));
+  ok('asc_owner_fee_is_practice_only', near(r2.collections, pro1 + fee1, 1e-9) && near(r2.practiceOnly, fee1, 1e-9) && near(r2.ownProduction, pro1, 1e-9)
+     && !r2.needs.includes('param.own') && near(r2.cost, 6 * per * (300 - 50) * 100, 1e-9), JSON.stringify([r2.collections, r2.practiceOnly, r2.ownProduction, r2.cost]));
+  const half = step(LM.run(e, x0, A2, { asc: { on: true, params: { to_asc: 1, own: 0.5 } } }, cal));
+  ok('asc_owner_share', near(half.practiceOnly, fee1 / 2, 1e-9) && near(half.cost, 6 * per * (150 - 50) * 100, 1e-9), '');
+  // closures brought back to the clinic, scoped to flaps and grafts
+  const rb = step(run({ to_clinic: 1, layered: 0, own: 0 }));
+  ok('asc_bring_back', near(rb.detail.back, 8 * per) && near(rb.collections, -curPro, 1e-9) && rb.practiceOnly === 0, `${rb.collections} ${-curPro}`);
+  // Medicare Advantage once its fee share is entered, and its own cross-claim switch
+  const ma = step(run({ to_asc: 1, own: 1, commercial_pct: 0.9 })), maOff = step(run({ to_asc: 1, own: 1, commercial_pct: 0.9, ma_cross: 0 }));
+  const collMA = M.collectShare(e, x0, 'Plan M', '14040');
+  ok('asc_ma_priced_when_entered', near(ma.detail.moved, 8 * per) && near(ma.collections - r2.collections, 2 * per * ((f.B - f.A) + 0.9 * 100000) * collMA, 1e-6)
+     && !ma.needs.includes('param.commercial_pct'), `${ma.collections - r2.collections}`);
+  ok('asc_ma_cross_switch', near(maOff.collections - ma.collections, 2 * per * (nc.B - f.B) * collMA, 1e-6), `${maOff.collections - ma.collections}`);
+  // excisions: a physician's only (an APP may not operate in an ASC), and not for an APP at all
+  const ex = step(run({ excisions: 1, own: 1 }));
+  ok('asc_excisions_physician_only', near(ex.detail.excisions, 3 * per) && near(ex.collections, 3 * per * (x1.B + x1.fee - x1.A) * coll('13132'), 1e-9), JSON.stringify(ex.detail.excisions));
+  const S = LM.STRATEGIES.find(z => z.id === 'asc');
+  ok('asc_not_for_apps', !S.applies(Object.assign({}, e, { tier: 'nonphysician' }), x0) && S.applies(e, x0) && !S.applies(d, x0), '');
+  // per closure, Medicare's amounts a case, with the margin warning on the small fees
+  const types = Object.fromEntries(r0.detail.types.map(t => [t.type, t]));
+  ok('asc_types', near(types.flap.owner, f.B + f.fee - f.A) && near(types.flap.nonOwner, f.B - f.A) && near(types.flap.coins, 0.2 * (f.B + f.fee - f.A))
+     && near(types.flap.delay, f.C - f.B) && types.complex.lowMargin && !types.flap.lowMargin && near(types.flap.asc, 6 * per) && near(types.flap.clinic, 4 * per + 2 * per + per),
+     JSON.stringify(types.flap));
+  // the patient's extra coinsurance, uncapped, in the notes
+  ok('asc_coinsurance_note', /pays about \$\d+ more per case moved/.test(r1.notes.join(' ')) && /not capped/.test(r1.notes.join(' ')), r1.notes.join(' '));
+  // the later day: a what-if on the closures in the ASC, the gain all from the delay, never in the plan's total
+  const L2 = LM.STRATEGIES.find(z => z.id === 'asc_later');
+  ok('asc_later_defaults', L2.whatif && L2.tier === 'high' && LM.paramDefaults(L2).share === 0 && /highly problematic/.test(L2.compliance) && /NCCI/.test(L2.compliance), '');
+  const lr = LM.run(e, x0, A, { asc_later: { on: true, params: { share: 1 } } }, cal), ls = stepOf(lr, 'asc_later');
+  const gain = per * (6 * (f.C - f.B) * coll('14040') + 2 * (g.C - g.B) * coll('15260'));
+  ok('asc_later_delay_only', near(ls.collections, gain, 1e-9) && near(lr.result.collections, lr.base.collections) && near(lr.whatif.collections - lr.result.collections, gain, 1e-9)
+     && /delay|same-day cut/.test(ls.notes[0]), `${ls.collections} ${gain}`);
+  // with the plan's moves (flaps and grafts only): the flaps moved to the ASC can be done later too; those brought back, and the
+  // layered repair left in the clinic, cannot
+  const lr2 = stepOf(LM.run(e, x0, A, { asc: { on: true, params: { to_asc: 1, to_clinic: 1, layered: 0 } }, asc_later: { on: true, params: { share: 1 } } }, cal), 'asc_later');
+  ok('asc_later_follows_plan', near(lr2.collections, per * 4 * (f.C - f.B) * coll('14040'), 1e-9), lr2.collections);
+  // the words: plain, no em dashes, and the compliance points
+  const words = [S.why, S.compliance, ...S.params.map(q => q[1]), L2.why, L2.compliance, ...L2.params.map(q => q[1]), ...r1.notes, ...r2.notes, ...rb.notes, ...ls.notes];
+  ok('asc_no_em_dash', words.every(w => !/[\u2014\u2013]/.test(w)), words.find(w => /[\u2014\u2013]/.test(w)));
+  ok('asc_compliance', ['14 sec. 20.1', '416.42', '1001.952(r)', 'distinct entity', 'Indiana license', 'modifier 57', 'Kentucky', 'in proportion to capital'].every(t => S.compliance.includes(t)), '');
+  ok('asc_own_label', S.params.find(q => q[0] === 'own')[1] === "Share of the ASC's facility fee the practice keeps (by capital)" && LM.paramDefaults(S).own === null
+     && LM.paramDefaults(S).commercial_pct === null && LM.paramDefaults(S).em_rule === 0 && LM.paramDefaults(S).ma_cross === 1, '');
+  // the open switch at the strategy: only on Medicare's 2027 rules, and it lowers what a same-day move brings
+  const em = (y, on) => step(LM.run(e, Object.assign({}, x0, { year: y, mohs_visit_share: 1 }), A, { asc: { on: true, params: { to_asc: 1, em_rule: on } } }, cal)).collections;
+  ok('asc_em_rule_2027_only', em('2027', 1) < em('2027', 0) && near(em('2026', 1), em('2026', 0)), [em('2027', 1), em('2027', 0)].join(' '));
+  // everything on, both years, with the ASC's cases: finite
+  const all = Object.fromEntries(LM.STRATEGIES.map(z => [z.id, { on: true, params: z.id === 'asc' ? { to_asc: 0.5, to_clinic: 0.2, excisions: 1, own: 0.4, commercial_pct: 1, em_rule: 1, ascqr: 1 } : {} }]));
+  const bad = ['2026', '2027'].filter(y => { const r = LM.run(e, Object.assign({}, x0, { year: y }), A2, all, cal); return !finiteDeep({ s: r.steps, c: r.result.collections, w: r.whatif && r.whatif.collections }); });
+  ok('asc_all_on_finite', !bad.length, bad.join());
+}
+
 // ------------------------------------------------------------------ everything on: no number that is not finite
 {
   const all = Object.fromEntries(LM.STRATEGIES.map(s => [s.id, { on: true }]));
