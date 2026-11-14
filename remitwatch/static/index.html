@@ -632,7 +632,7 @@ async function openDetail(id){
 window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(tabOpen(h) && h!==state.tab){ state.tab=h; render(); } });
 // Leaving the page locks what the owner's password opened. A browser may keep the page as it was and bring it back
 // on Back: it must come back locked, with nothing left on it.
-window.addEventListener('pagehide', ()=>{ if(state.ownerKey || (state.pv && state.pv.data)){ pvForget(); const v=$('#view'); if(v) v.innerHTML=''; sweepCharts(); } });
+window.addEventListener('pagehide', ()=>{ if(typeof pvForget === 'function') pvForget(); const v=$('#view'); if(v) v.innerHTML=''; sweepCharts(); });   // always: the calculator's figures can be in memory with no owner password set
 window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
 (async function(){
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
