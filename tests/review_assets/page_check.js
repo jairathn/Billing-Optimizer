@@ -60,19 +60,26 @@ const port = process.argv[2], OUT = process.argv[3] + '/';
   // Fees & takebacks: the recoupment dispute and the fee opt-out letters
   await page.goto(base + '#fees'); await settle();
   out.injected.fees = await injected();
-  out.fees_rows = await page.evaluate(() => [...document.querySelectorAll('#view table.wl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 140)));
   out.fees_drawers = {};
-  // a takeback is a row of the Takebacks list; a payer's payment fees open from the Payment fees by payer list
-  for (const [label, list, sel] of [['TAKEBACK', 'Takebacks', '#view table.wl tbody tr.row'], ['FEE_SKIM', 'Payment fees by payer', '#view tr.fee-row']]) {
-    await page.locator('#view .seg', { hasText: list }).first().click(); await settle();
-    const row = page.locator(sel).first();
-    if (!(await row.count())) { out.fees_drawers[label] = 'row not found'; continue; }
-    await row.click(); await page.waitForSelector('#drawer.open h2'); await page.waitForTimeout(500);
-    const fid = await page.evaluate(() => document.querySelector('#drawer [data-st]') && [...document.querySelectorAll('tr.row')].length);
-    out.fees_drawers[label] = await page.evaluate(() => ({ title: document.querySelector('#drawer h2').innerText,
+  // a takeback opens its drawer from the list of every takeback; a payer's payment fees open that payer's request letter
+  await page.locator('#view .tile[data-paid=""]').first().click(); await settle();
+  out.fees_rows = await page.evaluate(() => [...document.querySelectorAll('#view table.wl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 140)));
+  const tbRow = page.locator('#view table.wl tbody tr.row').first();
+  if (await tbRow.count()) {
+    await tbRow.click(); await page.waitForSelector('#drawer.open h2'); await page.waitForTimeout(500);
+    out.fees_drawers.TAKEBACK = await page.evaluate(() => ({ title: document.querySelector('#drawer h2').innerText,
       appeal_button: !!document.querySelector('#drawer #btnAppeal'), buttons: [...document.querySelectorAll('#drawer .actions button')].map(b => b.innerText) }));
     await page.click('#closeD');
-  }
+  } else out.fees_drawers.TAKEBACK = 'row not found';
+  await page.locator('#view .tile[data-l="fees"]').first().click(); await settle();
+  const feeRow = page.locator('#view tr.fee-row').first();
+  if (await feeRow.count()) {
+    await feeRow.click(); await page.waitForSelector('#modal.open #letter'); await page.waitForTimeout(300);
+    out.fees_drawers.FEE_SKIM = await page.evaluate(() => ({ title: document.querySelector('#modalBox h2').innerText,
+      appeal_button: !!document.querySelector('#modal.open #letter'), letter: document.querySelector('#modal #letter').innerText,
+      buttons: [...document.querySelectorAll('#modalBox .actions button')].map(b => b.innerText) }));
+    await page.click('#closeM');
+  } else out.fees_drawers.FEE_SKIM = 'row not found';
   out.fee_letters = await page.evaluate(async () => {
     const res = await (await fetch('/api/findings?category=fees&status=all')).json();
     const out = {};

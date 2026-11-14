@@ -21,7 +21,7 @@ SMALL_CENTS = 2000                      # items known to be worth under $20: abo
 # The kind of work each finding takes. A signal not named here falls to its action (fix and resubmit, appeal) and then
 # to "check first".
 WORK_TYPES: list[dict] = [
-    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number", "short": "Correct it in EMA and send a corrected claim.",
+    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number", "short": "Correct it in EMA and resend it the way the item says.",
      "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send the correction the way the payer takes it before the date shown (a corrected claim for most payers; for Medicare a reopening, a new claim or a redetermination, as the item says), then press Mark sent."},
     {"key": "auth", "label": "Get the authorization", "needs": "The authorization record, or the payer's portal",
      "short": "Find the authorization and appeal, or ask for a retro-auth.",

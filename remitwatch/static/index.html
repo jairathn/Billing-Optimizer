@@ -5,15 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RemitWatch</title>
 <style>
-:root{--bg:#f6f7f9;--panel:#ffffff;--ink:#17202a;--muted:#5d6b7a;--line:#e3e7ec;--accent:#1f5fbf;--accent-ink:#fff;--bad:#b42318;--warn:#b54708;--good:#067647;--soft:#eef2f7;--chip:#eaf0fb}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--accent-ink:#0b1220;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731;--chip:#22304a}}
-:root[data-theme="dark"]{--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--accent-ink:#0b1220;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731;--chip:#22304a}
+:root{color-scheme:light;--bg:#f6f7f9;--panel:#ffffff;--ink:#17202a;--muted:#5d6b7a;--line:#e3e7ec;--accent:#1f5fbf;--accent-ink:#fff;--bad:#b42318;--warn:#b54708;--good:#067647;--soft:#eef2f7;--chip:#eaf0fb}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--accent-ink:#0b1220;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731;--chip:#22304a}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0f141a;--panel:#171e26;--ink:#e8edf2;--muted:#9aa7b4;--line:#2a3441;--accent:#6ea2ff;--accent-ink:#0b1220;--bad:#ff7b6b;--warn:#f0a35a;--good:#5fd39b;--soft:#1e2731;--chip:#22304a}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
 header h1{font-size:18px;margin:0 16px 0 0}
 header .fresh{color:var(--muted);font-size:12px;flex:1 1 240px}
-header select,header input,.filters select,.filters input,button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+header select,header input,.filters select,.filters input,.lh-tools select,.lh-tools input,.more-f select,.more-f input,#tierSel,button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
 button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);cursor:pointer}
 button{cursor:pointer}
 nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
@@ -154,14 +154,15 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 .todo-err:empty,.st-err:empty{display:none}
 table.wl input.sel,#selAll{width:20px;height:20px}
 /* category pages: tiles, what to do, the strip, the list head, the Details fold */
-.ph-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.ph-row>div:first-child{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline}
+.ph-row{display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:flex-start;gap:12px}.ph-row>div:first-child{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;flex:1;min-width:0}
 .ph-go{text-align:right;flex:0 0 auto}
 .allopen{margin:-4px 2px 8px}
 .why-chips{display:flex;flex-wrap:wrap;gap:6px;padding:4px 4px 8px 18px;align-items:center}
-nav a .bdg{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:var(--bad);color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:16px}
+nav a .bdg{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:var(--bad);color:var(--accent-ink);font-size:11px;font-weight:700;text-align:center;line-height:16px}
 nav a .bdg[hidden]{display:none}
 nav .gap{flex:1 1 12px}nav a.ref{font-size:13px}
-@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]),nav .gap{display:none}nav a{padding:6px 8px}}
+@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]),nav .gap{display:none}nav a{padding:6px 8px}
+  nav[data-cur=progress] a[data-tab=more],nav[data-cur=data] a[data-tab=more],nav[data-cur=providers] a[data-tab=more]{background:var(--chip);color:var(--ink);font-weight:600}}
 .mid-only{display:none}@media(min-width:641px) and (max-width:1359px){.mid-only{display:flex}}
 a.pile{color:var(--muted);text-decoration:none}a.pile:hover{text-decoration:underline;color:var(--accent)}
 .pile-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;padding:5px 4px 5px 18px;border-top:1px dashed var(--line);font-size:13px;cursor:pointer}.pile-row:hover{background:var(--soft)}
@@ -175,7 +176,7 @@ a.pile{color:var(--muted);text-decoration:none}a.pile:hover{text-decoration:unde
 .desk-mid{display:grid;gap:10px}.desk-mid.has-side{grid-template-columns:minmax(0,1.6fr) minmax(0,1fr)}@media(max-width:900px){.desk-mid.has-side{grid-template-columns:1fr}}
 .todo-list,.fo-side{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 12px}
 .sec{font-size:12px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px}
-.todo-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto minmax(0,19rem);gap:10px;align-items:center;padding:7px 4px;border-top:1px solid var(--line);cursor:pointer}
+.todo-row{display:grid;grid-template-columns:auto minmax(12rem,1fr) auto fit-content(19rem);gap:10px;align-items:center;padding:7px 4px;border-top:1px solid var(--line);cursor:pointer}
 .todo-list .sec + .todo-row{border-top:0}.todo-row:hover{background:var(--soft)}.todo-row.on{background:var(--chip)}
 .todo-row .tr-n{white-space:nowrap;font-variant-numeric:tabular-nums}.todo-row .tr-pile{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:700px){.todo-row{grid-template-columns:auto 1fr}.todo-row .tr-do{grid-column:1/-1;grid-row:2}.todo-row .tr-pile{grid-column:1/-1}}
@@ -185,12 +186,16 @@ table.mini td{padding:4px 6px}
 .more-f{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-end;margin:4px 0}.more-f[hidden]{display:none}.ph-only{display:none}
 div.bulk{display:flex;margin:4px 0}div.bulk[hidden]{display:none}
 details.fold{margin-top:16px}details.fold > summary{padding:10px 0;font-size:13px}
-.todo-chips,.fix-after,.howline{display:none}
+.todo-chips,.fix-after,.howline,.ph-what{display:none}
+.kpi[data-go=""]{cursor:default}
+table.fees td{vertical-align:middle}
 .dr-head{display:flex;justify-content:space-between;align-items:start;gap:8px}
+#claimFind{width:13rem;font:inherit;font-size:13px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+@media(max-width:640px){#claimFind{width:100%;order:9}}
 details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > summary{padding:4px 0;font-size:13px}
 .why-fold{font-size:12px;margin:2px 0 8px}.why-fold .note{margin:4px 0 0}
 @media(max-width:640px){.ph-row{flex-direction:column}.ph-go{text-align:left}.lh-tools{margin-left:0}.tiles{grid-template-columns:1fr 1fr}.tile{padding:7px 10px}.tile .t-v{font-size:19px}
-  .desk-mid .todo-list,.fix-top{display:none}.todo-chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}.todo-chips .seg{flex:0 0 auto}.howline{display:block;font-size:13px;margin:4px 0}
+  .desk-mid .todo-list,.fix-top{display:none}.todo-chips{display:flex;flex-wrap:wrap;gap:6px;padding-bottom:4px}.ph-what{display:block}.todo-chips .seg{flex:0 0 auto}.howline{display:block;font-size:13px;margin:4px 0}
   .fix-after{display:block;margin-top:12px}.lh-tools select:not([data-f=payer]),.lh-tools input{display:none}.ph-only{display:contents}.more-f{justify-content:flex-start}}
 @media(max-width:640px){
   header{position:static;padding:8px 12px}
@@ -216,6 +221,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <header>
   <a class="brand" href="#today">RemitWatch</a>
   <div class="fresh"><div id="feedChip"></div><div id="fresh">loading…</div></div>
+  <input id="claimFind" type="search" maxlength="200" placeholder="Find a claim" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line">
   <button id="guideBtn" class="ghost" title="What this site does and how to use it">How this works</button>
   <button id="bellBtn" title="alerts">Alerts</button>
   <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
@@ -232,6 +238,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/providers.js"></script>
 <script src="/static/today.js"></script>
 <script src="/static/desk.js"></script>
+<script src="/static/claim.js"></script>
 <script>
 // Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
 // right in smaller type. The analysis pages are under More (and open by their address).
@@ -307,7 +314,8 @@ const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8
 function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || k in ALIASES; }
 function initNav(){
   $('#nav').innerHTML = TABS.map(([k,l])=>`${k==='progress'?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
-  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab=a.dataset.tab; location.hash=state.tab; render();});
+  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
+    state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
   $('#lockBtn').onclick = ()=>{ pvForget(); render(); };
@@ -317,11 +325,13 @@ function initNav(){
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
   $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
   $('#guideBtn').onclick = ()=>openGuide();
+  $('#claimFind').onkeydown = e=>{ if(e.key==='Enter'){ e.preventDefault(); findClaim(e.target.value); } };
 }
 async function loadMeta(){
   state.meta = await api('/api/meta');
   const m = state.meta, r = m.remits||{}, runs = (m.runs||[])[0];
   $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?runs.finished_at.replace('T',' ').slice(0,16):'never'} · files ${m.files?m.files.n:0}`;
+  $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
 }
 async function loadSummary(){
   state.summary = await api('/api/summary?'+qs({year:state.year,status:state.status}));
@@ -334,11 +344,12 @@ async function render(){
   if(!state.meta){ try { await loadMeta(); } catch(e){} if(run !== state.run) return; }      // a cold start can fail the first call
   if(ALIASES[state.tab]){ state.tab = ALIASES[state.tab]; history.replaceState(null, '', '#'+state.tab); }
   const classic = CLASSIC.some(t=>t[0]===state.tab);
+  $('#nav').dataset.cur = state.tab;            // between 641 and 1,359 px More stands for Progress, Data and Providers
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
   const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
-  if(!DESKS[state.tab] && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; }   // "item 3 of 50" means something on a list page only
+  if(!DESKS[state.tab] && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; state.wlKey = null; }   // "item 3 of 50" means something on a list page only
   if(NEEDS_SUMMARY.has(state.tab)) await loadSummary();
   if(run !== state.run) return;
   const old = $('#view'), v = old.cloneNode(false);      // an older run still holds the old node and can only write into that
@@ -385,7 +396,11 @@ async function overview(v){
   <div class="panel"><h2>Context</h2>${s.info.map(r=>`<div class="small">• ${esc(r.title)}</div>`).join('')||'<div class="muted small">No context rows yet.</div>'}</div>`;
   v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{state.tab=k.dataset.go; render();});
   if(v.querySelector('#goAlerts')) v.querySelector('#goAlerts').onclick=()=>{state.tab='alerts'; render();};
-  v.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>{ const cat=tr.dataset.cat; state.tab = {downcoding:'downcoding',bundling:'bundling',denial:'denials',underpayment:'contracts',contract:'contracts',fees:'fees'}[cat]||'denials'; state.filt[state.tab]={signal:tr.dataset.sig}; render(); });
+  v.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>{ const cat = tr.dataset.cat, sig = tr.dataset.sig;
+    if(cat === 'contract') return goDetails('contracts');                  // contract rates are in the Contracts page's Details
+    if(cat === 'fees'){ state.filt.feesDesk = sig === 'FEE_SKIM' ? {list:'fees'} : {list:'takebacks', paid:''}; state.tab = 'fees'; location.hash = 'fees'; return render(); }
+    state.tab = {downcoding:'downcoding', bundling:'bundling', denial:'denials', underpayment:'contracts'}[cat] || 'worklist'; location.hash = state.tab;
+    state.filt[state.tab] = {signal: sig, deadline:'', status: state.status || 'open', sort:'shortfall'}; render(); });
   // charts
   const months = [...new Set(s.by_month.map(r=>r.month))].sort(), cats=['downcoding','bundling','denial','underpayment','fees','contract'];
   chart('cMonth',{type:'bar',data:{labels:months,datasets:cats.map((c,i)=>({label:c,backgroundColor:palette[i],data:months.map(m=>{const r=s.by_month.find(x=>x.month===m&&x.category===c);return r?r.shortfall_cents/100:0;})}))},
@@ -529,19 +544,20 @@ function closeDetail(){
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
 async function openDetail(id){
   const d = $('#drawer'); d.classList.add('open'); d.inert = false; d.innerHTML='<div class="muted">loading…</div>';
-  const from = document.activeElement; if(from && from.closest && from.closest('tr.row')) state.detailFrom = from.closest('tr.row');
+  const from = document.activeElement; if(from && from.closest && from.closest('#view')) state.detailFrom = from.closest('tr.row') || from;
   const r = await api('/api/findings/'+id); const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
   if(!state.brief){ try { await brief(); } catch(e){} }        // the plain labels and the kinds of work
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
   const ex = drawerExtras(f, r), plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : f.title;
   const letter = f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal) ? `<button id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>` : '';
-  const noteWork = !!state.brief && kindFor(state.brief, f) === 'note';
+  const noteWork = !!state.brief && kindFor(state.brief, f) === 'note' && ['open','in_progress'].includes(f.status);
   d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')}</div></div><button id="closeD" aria-label="Close">✕</button></div>
     ${whatToDoHtml(f, letter) || (letter ? `<div class="actions">${letter}</div>` : '')}
     <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
+    ${r.bill ? `<div class="small" style="margin:6px 0"><a href="#" id="openClaim">See the whole claim: every remittance, line and adjustment</a></div>` : ''}
     <details class="dfold"><summary>Claim details</summary>
     <table class="small">
       ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
@@ -576,6 +592,7 @@ async function openDetail(id){
     try { if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)){ state.brief = null; state.dirty = true; openDetail(id); } }
     catch(e){ const er = d.querySelector('.st-err'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; } });
   bindWhatToDo(f, d);
+  const oc = d.querySelector('#openClaim'); if(oc) oc.onclick = e => { e.preventDefault(); openClaim(r.bill, id); };
   bindDrawerExtras(id, d);
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);

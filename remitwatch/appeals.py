@@ -217,10 +217,73 @@ def _closing(d: dict, ask: str) -> str:
     ])
 
 
+def _month_words(m: str | None) -> str:
+    try:
+        return date(int(m[:4]), int(m[5:7]), 1).strftime("%B %Y")
+    except (TypeError, ValueError, IndexError):
+        return m or "[month]"
+
+
+def fee_request_letter(s: dict) -> dict[str, Any]:
+    """The request to one payer, as its remittances name it, to pay this practice by standard EFT with no fee. It is about
+    the practice's payments, not a claim: no patient, no claim lines, no appeal rights or prompt-pay statutes. `s` is that
+    payer's fee summary (api._fee_payers): cents and cents12, months, first_month and last_month, the 12-month period and
+    the payment vendors the remittances name."""
+    payer = s.get("payer_name") or s.get("payer_group") or "[payer]"
+    subject = "Request for standard ACH electronic funds transfer with no payment fees"
+    vendors = " and ".join(s.get("vendors") or []) or "a payment vendor"
+    months = int(s.get("months") or 0)
+    since = _month_words(s.get("first_month"))
+    if s.get("cents12") and s.get("period_from"):
+        amounts = (f"{money(s.get('cents12'))} in the 12 months {_month_words(s.get('period_from'))} to {_month_words(s.get('period_to'))}, "
+                   f"and {money(s.get('cents'))} since {since} ({months} {'month' if months == 1 else 'months'} with a fee)")
+    else:
+        amounts = (f"{money(s.get('cents'))} between {since} and {_month_words(s.get('last_month'))} "
+                   f"({months} {'month' if months == 1 else 'months'} with a fee)")
+    letter = "\n".join([
+        f"{date.today().isoformat()}",
+        "",
+        f"To: {payer}, Provider Services (electronic funds transfer enrollment)",
+        f"From: {PRACTICE['name']}, {PRACTICE['address']}, TIN {PRACTICE['tin']}, Group NPI {PRACTICE['npi']}",
+        f"Re: {subject}",
+        "",
+        f"Payments from {payer} to this practice have arrived through {vendors}, which withheld fees from them: {amounts}.",
+        "",
+        "We did not agree to a fee-based payment service. We request delivery of all payments by the standard health care electronic funds transfer "
+        "(ACH CCD+ with the reassociation trace number, 45 CFR 162.1601 and 162.1602), with no enrollment in any virtual card or fee-based "
+        "payment product, and written confirmation of the date the change takes effect. Our banking details will be supplied through your "
+        "standard EFT enrollment process.",
+        "",
+        "Requested action: move this practice to standard ACH EFT with no fees, and refund the fees withheld to date.",
+        "",
+        "Sincerely,",
+        "",
+        "____________________________",
+        f"Billing Department, {PRACTICE['name']}",
+        f"Phone: {PRACTICE['phone']}    Fax: {PRACTICE['fax']}    Email: {PRACTICE['email']}",
+    ])
+    return {
+        "finding_id": s.get("finding_id"), "signal": "FEE_SKIM", "subject": subject, "letter": letter, "payer_name": payer,
+        "deadline_basis": "No filing window: ask once. Fees that keep arriving after the change was asked for show up again.",
+        "process": None, "corrected_claim_instructions": None,
+        "attachments": ["Copy of this letter", "Remittance pages showing the fee adjustments (PLB segments)"],
+        "evidence": f"Payment fees withheld by {payer}: {amounts}. Vendors named on the remittances: {vendors}.",
+        "deadline": None, "payer_contact": {"phone": None, "url": None},
+    }
+
+
 def build_packet(d: dict, show_phi: bool = False, clinical: list[str] | None = None) -> dict[str, Any]:
     """`clinical` is the list of paragraphs written from the reviewed note; without it the letter carries prompts in brackets."""
     f = d["finding"]
     sig = f["signal"]
+    if sig == "FEE_SKIM":
+        # a payer's fees are one request about its payments, never a claim appeal: the summary of all its fee months when
+        # the caller has it, else this month alone
+        ev = f.get("evidence") or {}
+        one = {"payer_name": f.get("payer_name"), "payer_group": f.get("payer_group"), "cents": f.get("shortfall_cents"), "cents12": 0,
+               "months": 1, "first_month": f.get("month"), "last_month": f.get("month"),
+               "vendors": ["Zelis"] if any("ZELIS" in str(k).upper() for k in (ev.get("references") or {})) else []}
+        return dict(fee_request_letter(d.get("fee_summary") or one), finding_id=f.get("finding_id"))
     code = f.get("procedure_code") or ""
     ev0 = f.get("evidence") or {}
     orig = f.get("original_procedure_code") or ev0.get("billed_code") or ev0.get("charge_implies")

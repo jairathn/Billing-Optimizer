@@ -498,7 +498,11 @@ def test_P5_the_takeback_dispute_and_fee_opt_out_letters_are_gone_from_the_page(
     assert out["fee_letters"].get("TAKEBACK", "").startswith("Dispute of overpayment recoupment")
     assert out["fee_letters"].get("FEE_SKIM", "").startswith("Request for standard ACH")
     assert out["fees_drawers"]["TAKEBACK"]["appeal_button"] and out["fees_drawers"]["FEE_SKIM"]["appeal_button"], \
-        "the recoupment dispute letter and the fee opt-out letter can no longer be opened from the finding"
+        "the recoupment dispute letter and the fee opt-out letter can no longer be opened from the page"
+    # the fee request goes to the payer about its payments: no claim block, no appeal statutes
+    fee = out["fees_drawers"]["FEE_SKIM"]["letter"]
+    assert "Re: Request for standard ACH" in fee and "45 CFR 162.1601" in fee and "Patient:" not in fee and "ERISA" not in fee and "KRS" not in fee, fee
+    assert "Mark asked" in out["fees_drawers"]["FEE_SKIM"]["buttons"]
 
 
 def test_G3_next_years_underpaid_lines_join_last_years_dismissed_pattern(tmp_path, monkeypatch):

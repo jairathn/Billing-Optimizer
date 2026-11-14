@@ -149,8 +149,9 @@ function matrixHtml(res, ex){
 }
 
 // panels on the Downcoding tab
-async function downcodeWho(el){
-  const p = {family:'downcoding', status:statusScope(), year:state.year};
+async function downcodeWho(el, o){
+  o = o || {};
+  const p = {family:'downcoding', status: o.status || statusScope(), year: o.year != null ? o.year : state.year};
   const [prov, plan, pair, q, mx] = await Promise.all(['provider','plan','code_pair','quarter'].map(d=>api('/api/breakdown?'+qs(Object.assign({dim:d}, p)))).concat([api('/api/breakdown?'+qs(Object.assign({dim:'provider', dim2:'payer'}, p)))]));
   state.provNames = Object.fromEntries(prov.rows.map(r=>[r.k1, r.label1]));
   const tbl = (res, label, n=8) => { const rate = res.denominator_for >= 1;
@@ -175,11 +176,11 @@ async function progressTab(v){
   const identified = p.pipeline.filter(r=>r.status!=='dismissed').reduce((a,r)=>a+r.cents,0);
   v.innerHTML = `<div class="page-head"><h1 class="page-title">Progress</h1><span class="muted small">What came back after a fix or appeal, what is being worked, and what is still open.</span></div>
     <div class="grid kpis">
-    ${kpi('Paid back', money(g('resolved').recovered_cents), g('resolved').n.toLocaleString()+' items paid after rework', 'progress')}
-    ${kpi('Being worked', money(g('appealed').cents+g('in_progress').cents), (g('appealed').n+g('in_progress').n).toLocaleString()+' sent or started', 'worklist')}
-    ${kpi('Window open', money(p.live.cents), p.live.n.toLocaleString()+' items you can still get back', 'worklist')}
-    ${kpi('Window closed', money(p.expired.cents), p.expired.n.toLocaleString()+' items (filing rules partly estimated)', 'progress')}
-    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', 'progress') : ''}</div>
+    ${kpi('Paid back', money(g('resolved').recovered_cents), g('resolved').n.toLocaleString()+' items paid after rework', '')}
+    ${kpi('Being worked', money(g('appealed').cents+g('in_progress').cents), (g('appealed').n+g('in_progress').n).toLocaleString()+' sent or started', 'working')}
+    ${kpi('Window open', money(p.live.cents), p.live.n.toLocaleString()+' items you can still get back', 'open')}
+    ${kpi('Window closed', money(p.expired.cents), p.expired.n.toLocaleString()+' items (filing rules partly estimated)', 'closed')}
+    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', '') : ''}</div>
     <div class="grid two">
       <div class="panel"><h2>Recovered by month</h2><div class="note">Money paid on a later remittance for lines that were first denied, bundled or cut. Counted automatically when the payment arrives.</div><canvas id="cRec"></canvas></div>
       <div class="panel"><h2>Share recovered, by month of the first payment</h2><div class="note">Of what went wrong in each month, how much has been won back so far. Recent months are still in play.</div><canvas id="cCoh"></canvas></div>
@@ -189,7 +190,9 @@ async function progressTab(v){
       <tbody>${p.by_payer.map(r=>`<tr class="row" data-p="${esc(r.payer_group)}"><td>${esc(r.payer_group)}</td><td class="num">${r.n.toLocaleString()}</td><td class="num">${money(r.cents)}</td><td class="num">${money(r.recovered_cents)}</td><td class="num">${pct(r.resolved_n/r.n,0)}</td><td class="num">${r.avg_days==null?'–':r.avg_days}</td><td class="num">${r.working_n}</td><td class="num">${r.lost_n}</td><td class="num">${money(r.open_cents)}</td><td class="num">${money(r.live_cents)}</td></tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>Activity</h2><table class="small"><thead><tr><th>When</th><th>What</th><th>Payer</th><th>Finding</th><th class="num">Amount</th><th>By</th></tr></thead>
       <tbody>${p.events.map(e=>`<tr class="row" data-id="${e.finding_id}"><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>${e.kind==='paid_on_later_remit'?' (paid on a later remit)':''}</td><td>${esc(e.payer_group||'')}</td><td>${esc(e.signal||'')} ${esc(e.procedure_code||'')}</td><td class="num">${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No status changes yet. Mark findings appealed, resolved or lost from their detail panel and they show up here.</td></tr>'}</tbody></table></div>`;
-  v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{ if(k.dataset.go!=='progress'){ state.tab=k.dataset.go; location.hash=k.dataset.go; render(); } });
+  // each card opens the Worklist list of its own number
+  const KPI_GO = {working:{status:'in_progress,appealed', deadline:'', sort:'deadline'}, open:{deadline:'valid', sort:'deadline'}, closed:{deadline:'expired', sort:'deadline'}};
+  v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{ const go = KPI_GO[k.dataset.go]; if(go) goWork(go); });
   v.querySelectorAll('tr.row[data-p]').forEach(tr=>tr.onclick=()=>{ state.tab='explorer'; state.ex={family:'all', dim:'signal', dim2:'', payer:tr.dataset.p}; render(); });
   v.querySelectorAll('tr.row[data-id]').forEach(tr=>tr.onclick=()=>openDetail(tr.dataset.id));
   const cats = ['denial','bundling','downcoding','underpayment'];

@@ -21,7 +21,9 @@ async function brief(force){
 }
 function kindOf(b, k){ return (b.work_types||[]).find(t=>t.key===k) || {key:k, label:k, how:'', needs:''}; }
 function labelOf(b, sig){ return (b.labels||{})[sig] || {label: sig, next: '', work: null}; }
-function daysUntil(d){ if(!d) return null; const t = new Date(d+'T00:00:00Z'), n = new Date(new Date().toISOString().slice(0,10)+'T00:00:00Z'); return Math.round((t-n)/86400000); }
+// today in the reader's own time zone: a filing window stays open until the end of its last day where the reader is
+function localDay(){ const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; }
+function daysUntil(d){ if(!d) return null; const t = new Date(d+'T00:00:00Z'), n = new Date(localDay()+'T00:00:00Z'); return Math.round((t-n)/86400000); }
 function closesText(d){
   const n = daysUntil(d);
   if(n==null) return {text:'no date', cls:'muted'};
@@ -57,7 +59,7 @@ function guideHtml(b){
       <li><b>Open an item.</b> The box at the top says what happened and what to do. Do it in EMA or the payer's portal, then press <b>Mark sent</b>. The next item opens.</li>
       <li><b>When the payer pays,</b> RemitWatch sees it in the next remittance and marks the item Paid by itself. If the payer says no, press <b>Lost</b>.</li>
     </ol>
-    <div class="guide-more"><b>Worklist</b> has every item, sorted by what kind of work it takes. <b>Bigger wins</b> is money you fix once and collect on every future claim: contracts, your fees, payment fees and denial causes. <b>Data</b> tells you when the numbers cannot be trusted yet.</div>
+    <div class="guide-more">The tabs after Today (<b>Denials</b>, <b>Bundling & modifiers</b>, <b>Downcoding</b>, <b>Contracts & underpayment</b>, <b>Fees & takebacks</b>) hold the same work by category; the red number on a tab is what closes there within 7 days. <b>Worklist</b> has every claim item in one list, soonest first. <b>Bigger wins</b> is money you fix once and collect on every future claim: contracts, your fees, payment fees and denial causes. <b>Data</b> tells you when the numbers cannot be trusted yet.</div>
     <div class="actions"><button class="primary" id="guideGo">Show me the first item</button><button id="guideOk">Got it</button></div>
   </div>`;
 }
@@ -140,13 +142,13 @@ function winsTeaser(b){
 // ---------------------------------------------------------------- Worklist
 const WL_DEADLINES = [['valid','Window still open'],['week','Closes within 7 days'],['month','Closes within 30 days'],['decide','To decide (no filing date, paid in the last 120 days)'],['older','No filing date, paid before that'],
   ['followup','Sent over 30 days ago, not paid'],['missed','Window closed in the last 30 days'],['none','No filing date'],['expired','Window closed'],['','Any date']];
-const WL_STATUSES = [['open,in_progress','To do and started'],['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go'],['all','Everything']];
+const WL_STATUSES = [['open,in_progress','To do and started'],['open','To do'],['in_progress','Started'],['appealed','Sent'],['in_progress,appealed','Started and sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go'],['all','Everything']];
 const MONEY_CATS = 'denial,bundling,downcoding,underpayment';
 // the "What to do" box at the top of an item, and stepping through the list
 function whatToDoHtml(f, letter){
   const b = state.brief; if(!b || !b.labels) return '';
   const lb = labelOf(b, f.signal), kk = kindFor(b, f), k = kindOf(b, kk), est = /not confirmed/.test(f.deadline_basis||'');
-  const ev = (f.evidence && typeof f.evidence === 'object') ? f.evidence : {}, today = new Date().toISOString().slice(0,10);
+  const ev = (f.evidence && typeof f.evidence === 'object') ? f.evidence : {}, today = localDay();
   const open = (ev.deadlines||[]).filter(x=>Array.isArray(x) && x[0] && x[0] >= today).map(x=>x[0]).sort();
   const due = open[0] || f.appeal_deadline, c = closesText(due);
   const next = f.next_step || ((f.signal === 'CLAIM_DENIED_UNPAID' && kk !== 'check') ? k.how : lb.next);
@@ -154,35 +156,44 @@ function whatToDoHtml(f, letter){
   const stake = (ev.deadlines||[]).length ? `${money2(openCents)} at stake on the claims still inside their windows (of ${money2(f.shortfall_cents)} in all).`
     : (f.shortfall_cents ? money2(f.shortfall_cents)+' at stake.' : 'The amount is not known: this payer has no usual rate for the code to compare with.');
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
-  const more = i>=0 && (i < ids.length-1 || (!!state.wlNext && (state.wlTotal||0) > ids.length)), check = kk === 'check' || !due;
+  const more = i>=0 && (i < ids.length-1 || (!!state.wlNext && (state.wlTotal||0) > ids.length)), decide = kk === 'check' || !due;
   const waiting = {appealed:`Sent${f.appealed_at?' on '+longDate(String(f.appealed_at).slice(0,10)):''}. It waits on the payer: if it is still unpaid 30 days after sending, follow up by portal or phone.`,
     resolved:'Paid. Nothing more to do.', lost:'Lost: the payer upheld its decision.', dismissed:'Let go.'}[f.status];
   const shut = !waiting && !!due && due < today;        // a closed window: nothing to send, so no send button and no letter
-  return `<div class="todo-box"><div class="todo-top">${kindBadge(b, kk)}<span class="${c.cls}">${due ? `File by ${longDate(due)} (${esc(c.text)})${est?', estimated rule':''}${open.length>1?`; its last claim by ${longDate(f.appeal_deadline)}`:''}` : 'No filing date'}</span>
+  // an item already sent, paid or let go: its filing date is history, not an alarm
+  const head = waiting ? `<span class="muted">${esc(STATUS_WORDS[f.status]||f.status)}${f.status==='appealed' && f.appealed_at ? ' '+longDate(String(f.appealed_at).slice(0,10)) : ''}${due ? ` · filing date ${longDate(due)}` : ''}</span>`
+    : `<span class="${c.cls}">${due ? `File by ${longDate(due)} (${esc(c.text)})${est?', estimated rule':''}${open.length>1?`; its last claim by ${longDate(f.appeal_deadline)}`:''}` : 'No filing date'}</span>`;
+  return `<div class="todo-box"><div class="todo-top">${kindBadge(b, kk)}${head}
       ${i>=0 ? `<span class="muted small">Item ${i+1} of ${Number(Math.max(state.wlTotal||0, ids.length)).toLocaleString()}</span>` : ''}</div>
     <div class="todo-what">${stake}</div>
     ${f.carc_text ? `<div class="small muted">Payer's reason: ${esc(f.carc)} ${esc(f.carc_text)}${f.rarc_text?' · '+esc(f.rarc)+' '+esc(f.rarc_text):''}</div>` : ''}
     ${shut ? `<div class="todo-next">The filing window closed on ${longDate(due)}. Nothing to send: keep it for the record, or mark it Lost or Let go.</div>` : waiting ? `<div class="todo-next"><b>Status:</b> ${esc(waiting)}</div>` : `<div class="todo-next"><b>What to do:</b> ${esc(next)}</div>
     <div class="small muted">You need: ${esc(k.needs||'')}</div>`}
     <div class="todo-err sev-high small" id="todoErr" role="alert"></div>
-    <div class="actions todo-actions">${more && !waiting && !shut ? `<button class="primary" id="sentNext" data-to="${check ? 'in_progress' : 'appealed'}">${check ? 'Mark started and open the next' : 'Mark sent and open the next'}</button>` : ''}
+    <div class="actions todo-actions">${more && !waiting && !shut ? `<button class="primary" id="sentNext" data-to="appealed">Mark sent and open the next</button>` : ''}
+      ${more && !waiting && !shut && decide ? `<button id="letGoNext" title="Billed to the patient or another payer, the payer was right, or not worth pursuing">Let go and open the next</button>` : ''}
       ${shut ? '' : (letter||'')}${i>0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div></div>`;
 }
 function bindWhatToDo(f, d){
-  const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
-  // the next item: from the rows shown, or the next rows of the same list, fetched at the end of them
+  // the item's place is read at the moment of the click: the list behind may have been redrawn while the drawer was open
+  // (a bulk change, another tile, another tab), and an item no longer on the list on screen ends the walk
+  const pos = () => (state.worklist||[]).indexOf(f.finding_id);
   const next = async () => {
-    if(i >= 0 && i < (state.worklist||[]).length - 1) return state.worklist[i+1];
+    const i = pos(); if(i < 0) return null;
+    if(i < state.worklist.length - 1) return state.worklist[i+1];
     if(state.wlNext){ try { await state.wlNext(); } catch(e){ return null; } }
     return (state.worklist||[])[i+1] || null;
   };
   const go = async () => { const id = await next(); if(id) openDetail(id); else closeDetail(); };
-  const sn = d.querySelector('#sentNext'); if(sn) sn.onclick = async () => {
-    sn.disabled = true;
-    try { await post('/api/findings/'+f.finding_id+'/status', {status: sn.dataset.to || 'appealed'}); }
-    catch(e){ sn.disabled = false; const er = d.querySelector('#todoErr'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; return; }
+  const decideAndGo = (bt, status) => async () => {
+    if(status === 'dismissed' && !confirm('Let go of this item? It leaves the list and counts as let go.')) return;
+    bt.disabled = true;
+    try { await post('/api/findings/'+f.finding_id+'/status', {status}); }
+    catch(e){ bt.disabled = false; const er = d.querySelector('#todoErr'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; return; }
     state.brief = null; state.dirty = true; go(); };
-  const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => openDetail(ids[i-1]);
+  const sn = d.querySelector('#sentNext'); if(sn) sn.onclick = decideAndGo(sn, sn.dataset.to || 'appealed');
+  const lg = d.querySelector('#letGoNext'); if(lg) lg.onclick = decideAndGo(lg, 'dismissed');
+  const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { const i = pos(); if(i > 0) openDetail(state.worklist[i-1]); else closeDetail(); };
   const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => go();
 }
 
