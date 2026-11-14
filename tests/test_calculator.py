@@ -257,3 +257,173 @@ def test_asc_table_matches_cms():
     # wage-adjusted for Newburgh (CBSA 21780, 2027 index 0.9555): national x (0.5 x 0.9555 + 0.5)
     assert asc_amount("2027", "newburgh", "14040") == round(105608 * (0.5 * WAGE_INDEX["2027"]["newburgh"] + 0.5)) == 103258
     assert asc_amount("2027", "newburgh", "17312") is None
+
+
+# --------------------------------------------------------------------------- review fixes (invented data only)
+
+def _clone(db, src, new, months=MONTHS, days=range(1, 17), dates=None):
+    """A second clinician with the same services as `src`, holding clinic on the given days of the given months (or on
+    the given dates)."""
+    dates = dates or [f"{m}-{dd:02d}" for m in months for dd in days]
+    months = sorted({d[:7] for d in dates})
+    c = sqlite3.connect(db)
+    c.execute("INSERT INTO provider_roster (provider_id, name, kind, tier, role) SELECT ?, 'FOXTROT FAY', kind, tier, role FROM provider_roster WHERE provider_id=?", (new, src))
+    c.executemany("INSERT INTO provider_days (provider_id, service_date, patients, biopsy_lesions, path_generated_cents, place) VALUES (?,?,?,?,?,?)",
+                  [(new, d, 20, 2.0, 0, "KY") for d in dates])
+    c.execute("""INSERT INTO provider_services SELECT ?, month, code, family, items, units, denied, charge_cents, allowed_cents, paid_cents
+                 FROM provider_services WHERE provider_id=? AND month IN (%s)""" % ",".join("?" * len(months)), (new, src, *months))
+    c.commit()
+    c.close()
+
+
+def _finding(c, fid, npi, cents, category="denial", signal="DENIAL", payment_date=None, payer_group=None):
+    c.execute("""INSERT INTO findings (finding_id, signal, category, status, stale, shortfall_cents, rendering_provider_npi, appeal_deadline,
+                 payment_date, payer_group) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+              (fid, signal, category, "open", 0, cents, npi, "2099-12-31", payment_date, payer_group))
+
+
+def test_role_average_appeals_are_one_clinicians_share(db):
+    """A role average plans one clinician's year: its open findings are the members' total divided by the members."""
+    second = "1000000006"
+    _clone(db, DOC, second)
+    c = sqlite3.connect(db)
+    _finding(c, "f1", DOC, 100000)
+    _finding(c, "f2", DOC, 100000)
+    _finding(c, "f3", second, 40000, category="underpayment", signal="UNDERPAID")
+    c.commit()
+    c.close()
+    d = _calc(db, "mohs")
+    assert d["who"]["clinicians"] == 2
+    s = d["strategy"]
+    assert s["open_findings_clinicians"] == 2
+    assert s["open_findings_total"] == {"denial": {"n": 2, "cents": 200000}, "underpayment": {"n": 1, "cents": 40000}}
+    assert s["open_findings"] == {"denial": {"n": 1.0, "cents": 100000}, "underpayment": {"n": 0.5, "cents": 20000}}
+    one = _calc(db, DOC)["strategy"]
+    assert one["open_findings"] == {"denial": {"n": 2, "cents": 200000}} == one["open_findings_total"]
+
+
+def test_pace_counts_only_the_weeks_there_was_anything_to_see(db):
+    """The fixture holds six months; the pace window is twelve. A clinician holding clinic 16 days a month has about 190
+    days a year, not the 95 that dividing by a whole year would give; a hire who started in April likewise."""
+    hire = "1000000007"
+    _clone(db, PA, hire, months=["2026-04", "2026-05", "2026-06"])
+    doc = _calc(db, DOC)["schedule"]
+    assert 175 <= doc["clinic_days_per_year"] <= 200 and doc["pace_from"] == "2026-01-01" and doc["pace_to"] == "2026-06-30"
+    new = _calc(db, hire)["schedule"]
+    assert new["clinic_days"] == 48 and 175 <= new["clinic_days_per_year"] <= 200 and new["pace_weeks"] < 14
+    # the APP average (the PA and the hire): neither shortens the other's year
+    apps = _calc(db, "apps")
+    assert apps["who"]["clinicians"] == 2 and 190 <= apps["schedule"]["clinic_days_per_year"] <= _calc(db, PA)["schedule"]["clinic_days_per_year"]
+
+
+def test_pace_ends_with_a_clinician_who_left(db):
+    """A clinician whose last clinic day is months before the window ends is measured over the weeks they worked: every
+    weekday from 5 January to 27 March is five days a week, not 60 days a year."""
+    from datetime import date, timedelta
+    left = "1000000008"
+    dates = [(date(2026, 1, 5) + timedelta(days=i)).isoformat() for i in range(82) if (date(2026, 1, 5) + timedelta(days=i)).weekday() < 5]
+    _clone(db, PA, left, dates=dates)
+    s = _calc(db, left)["schedule"]
+    assert s["clinic_days"] == 60 and s["days_per_week"] == 5 and s["weeks_per_year"] == 52 and s["pace_weeks"] == 12
+
+
+def test_vendor_fees_are_the_window_months(db):
+    """Fees taken from payments dated in the window's months, which the lab annualises over those months."""
+    c = sqlite3.connect(db)
+    _finding(c, "v1", None, 3000, category="fees", signal="FEE_SKIM", payment_date="2026-02-03", payer_group="Plan A")
+    _finding(c, "v2", None, 2000, category="fees", signal="FEE_SKIM", payment_date="2026-06-02", payer_group="Plan A")
+    _finding(c, "v3", None, 9000, category="fees", signal="FEE_SKIM", payment_date="2026-08-04", payer_group="Plan A")    # after the window
+    _finding(c, "v4", None, 7000, category="fees", signal="FEE_SKIM", payment_date="2025-12-01", payer_group="Plan B")    # before it
+    c.commit()
+    c.close()
+    s = _calc(db, DOC)["strategy"]
+    assert s["vendor_fees"] == {"Plan A": 5000}
+    assert (s["vendor_fees_from"], s["vendor_fees_to"], s["vendor_fees_months"]) == ("2026-01", "2026-06", 6)
+
+
+def _give_back(levers: dict) -> dict:
+    js = ("const M=require(process.argv[1]);const L=JSON.parse(process.argv[2]);const d={levers:L,constants:{ak_lesions_15_plus:%d},schedule:{},codes:{},payers:{}};"
+          "process.stdout.write(JSON.stringify(M.units(d,M.defaults(d))));") % calculator.AK_LESIONS_15_PLUS
+    out = subprocess.run([NODE, "-e", js, os.path.join(ROOT, "remitwatch", "static", "calc_model.js"), json.dumps(levers)],
+                         capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+@pytest.mark.parametrize("units", [
+    {"17003": 30, "17004": 2, "99213": 100},                                   # 17003 with no 17000
+    {"17000": 2, "17003": 40, "99213": 100},                                   # more than 13 17003 for each 17000
+    {"11602": 2, "12032": 10, "99213": 100},                                   # layered repairs past two per excision, no Mohs
+    {"17311": 10, "11602": 2, "12032": 10, "13132": 3, "13133": 2},            # ...with Mohs cases to carry the rest
+    {"17311": 2, "11602": 2, "12032": 20},                                     # past two per case and per excision
+    {"17311": 2, "14040": 6, "14301": 1, "14302": 1},                          # flaps past two per case
+    {"17313": 5, "17312": 3, "17314": 2, "11103": 4, "G2211": 3, "15261": 1, "13133": 1, "11602": 1},   # add-ons with no first code
+])
+def test_levers_give_back_unusual_codings(units):
+    svc = {c: {"family": activity.service_family(c), "units": float(u)} for c, u in units.items()}
+    days = 10
+    got = _give_back(calculator._levers(svc, days))
+    assert {c: round(v * days, 6) for c, v in got.items() if v} == {c: float(u) for c, u in units.items()}
+
+
+def test_payer_mix_per_code(db):
+    """A code with enough lines of its own gets its own payer mix; codes billed with the Mohs case keep the family's."""
+    c = sqlite3.connect(db)
+    c.execute("UPDATE exposure SET lines = 90 WHERE code = '99214' AND payer_group = 'Medicare KY (CGS J15)' AND npi = ?", (DOC,))
+    c.execute("UPDATE exposure SET lines = 10 WHERE code = '99214' AND payer_group = 'Plan A' AND npi = ?", (DOC,))
+    c.commit()
+    c.close()
+    d = _calc(db, DOC)
+    assert d["mix_code"]["99214"] == [["Medicare KY (CGS J15)", 0.9], ["Plan A", 0.1]]
+    assert d["mix_code"]["99213"] == [["Medicare KY (CGS J15)", 0.6], ["Plan A", 0.4]]
+    assert "17311" not in d["mix_code"] and "14040" not in d["mix_code"] and "13132" not in d["mix_code"]
+    assert {g for g, _ in d["mix_code"]["99214"]} <= set(d["rates"]["99214"])
+    assert d["payers"]["Plan A"]["negotiable"] == "yes" and d["payers"]["Medicare KY (CGS J15)"]["negotiable"] == "no"
+    assert calculator._negotiable("Humana Medicaid", "medicaid") == "rarely" and calculator._negotiable("Medicaid KY", "medicaid") == "no"
+
+
+def _remits(db, rows):
+    """Remittance lines on primary claims: (patient-day number, date, code, modifiers, payer name, filing indicator)."""
+    from remitwatch.store import DDL
+    c = sqlite3.connect(db)
+    c.executescript(DDL)
+    for i, (n, day, code, mods, payer, cfi) in enumerate(rows):
+        ck = f"CK{n:06d}{payer[:3]}"
+        c.execute("INSERT OR IGNORE INTO claims (claim_key, patient_control_number, claim_status_code, payer_name, claim_filing_indicator, rendering_provider_npi) "
+                  "VALUES (?,?,?,?,?,?)", (ck, f"TP{n:07d}A1", "1", payer, cfi, DOC))
+        c.execute("INSERT INTO lines (line_key, claim_key, procedure_code, modifiers, service_date, patient_control_number, rendering_provider_npi) "
+                  "VALUES (?,?,?,?,?,?,?)", (f"LK{i:07d}", ck, code, json.dumps(mods), day, f"TP{n:07d}A1", DOC))
+    c.commit()
+    c.close()
+
+
+def test_visit_shares_on_medicare_days(db, monkeypatch):
+    """Shares of Medicare Mohs patient-days with an E/M-57 or E/M-25, and of biopsy patient-days with an E/M-25."""
+    rows, n = [], 0
+    for i in range(25):                       # 25 Medicare Mohs patient-days: 10 with a visit billed -57, 2 with -25
+        n += 1
+        day = f"2026-0{1 + i % 6}-{1 + i // 6:02d}"
+        rows.append((n, day, "17311", [], "MEDICARE", "MB"))
+        if i < 10:
+            rows.append((n, day, "99213", ["57"], "MEDICARE", "MB"))
+        elif i < 12:
+            rows.append((n, day, "99214", ["25"], "MEDICARE", "MB"))
+    for i in range(30):                       # 30 Medicare biopsy patient-days, 27 with a visit billed -25
+        n += 1
+        day = f"2026-0{1 + i % 6}-{10 + i // 6:02d}"
+        rows.append((n, day, "11102", [], "MEDICARE", "MB"))
+        if i < 27:
+            rows.append((n, day, "99213", ["25"], "MEDICARE", "MB"))
+    for i in range(30):                       # commercial Mohs days, every one with a -57 visit: not Medicare, not counted
+        n += 1
+        rows += [(n, "2026-03-20", "17311", [], "PLAN A HEALTH", "CI"), (n, "2026-03-20", "99213", ["57"], "PLAN A HEALTH", "CI")]
+    _remits(db, rows)
+    # the fixture holds far fewer lines than services, like the dashboard's copy: nothing is measured
+    s = _calc(db, DOC)["strategy"]
+    assert s["mohs_visit57_share"] is None and s["bx_visit_share"] is None and s["visit_shares_payer"] is None
+    monkeypatch.setattr(calculator, "LINES_COMPLETE", 0.0)
+    s = _calc(db, DOC)["strategy"]
+    assert s["mohs_visit57_share"] == 0.4 and s["mohs_visit25_share"] == 0.08 and s["bx_visit_share"] == 0.9
+    assert s["visit_shares_days"] == {"mohs": 25, "biopsy": 30} and s["visit_shares_payer"] == "medicare"
+    assert _calc(db, "mohs")["strategy"]["mohs_visit57_share"] == 0.4          # the average of its one member
+    assert _calc(db, PA)["strategy"]["bx_visit_share"] is None                  # no days of their own

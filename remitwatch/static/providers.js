@@ -69,7 +69,14 @@ const pvKeep = (tier, r) => tier === 'all' || r.tier === tier;
    and after half an hour without use. */
 const PV_IDLE_MS = 30 * 60 * 1000;
 const pvLocked = () => !!(state.meta && state.meta.providers && state.meta.providers.locked);
-function pvForget(){ state.ownerKey = ''; if(state.pv){ state.pv.data = null; state.pv.detail = null; clearTimeout(state.pv.idle); } if(state.calc) state.calc.data = null; pvKeyUi(); }
+function pvForget(){ state.ownerKey = ''; if(state.pv){ state.pv.data = null; state.pv.detail = null; clearTimeout(state.pv.idle); } pvForgetCalc(); pvKeyUi(); }
+// the calculator's figures go too: every clinician's pay plan, costs and scenarios (A), the clinician's schedule,
+// calibration, plan, lab results and typed targets. Only which clinician, which months and which view were open stay.
+function pvForgetCalc(){
+  const cs = state.calc;
+  if(!cs) return;
+  for(const k of Object.keys(cs)) if(!['provider', 'months', 'view'].includes(k)) delete cs[k];
+}
 const OWNER_TABS = ['providers', 'calculator'];
 function pvKeyUi(){ const b = document.getElementById('lockBtn'); if(b) b.style.display = state.ownerKey ? '' : 'none'; }       // a Lock button on every tab while the password is held
 function pvArmIdle(){        // any tab can show what the password opened (lines billed by provider on Who and what), so the timer redraws whatever is showing

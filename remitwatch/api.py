@@ -1732,12 +1732,112 @@ def activity_calculator(provider: str = Query("mohs", pattern=r"^[A-Za-z0-9:_-]{
 ASSUMPTIONS = "calculator/assumptions.json"     # in the state folder (cloud) or the meta table (server)
 ASSUMPTIONS_KEY = "calculator:assumptions"
 MAX_ASSUMPTIONS_BYTES = 256 * 1024
+MAX_SCENARIOS = 200                 # as the page's LabModel.MAX_SCENARIOS
+MAX_FIGURE = 1e9
+FIGURES_VERSION_HEADER = "x-figures-version"
+_FIG_KEY = re.compile(r"[a-z0-9_]{1,40}")
+_FIG_ID = re.compile(r"[A-Za-z0-9:_-]{1,60}")
+_COMP_TYPES = ("pct", "wrvu", "base")
+_COMP_FIELDS = ("pct", "per_wrvu", "base", "threshold", "above_pct")
+
+
+def require_owner_password(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
+    """The practice figures hold what each clinician is paid. With no owner's password set, require_owner lets every
+    login in (the Providers tab is open then); these figures are refused to everyone instead, until one is set."""
+    user = require_owner(request, credentials)
+    if not OWNER_PASSWORD:
+        raise HTTPException(status_code=403, detail="The practice figures hold what each clinician is paid, so they need an owner's "
+                            "password. Set REMITWATCH_OWNER_PASSWORD to use them.")
+    return user
+
+
+def _figures_version(raw: bytes | None) -> str | None:
+    """A version of the saved figures: a fingerprint of what is stored. A save names the version it started from."""
+    return hashlib.sha256(raw).hexdigest()[:16] if raw else None
+
+
+def _figures_problem(data: Any) -> str | None:
+    """Why a document cannot be stored as the practice figures, or None. Every figure is a number of 0 or more, or empty;
+    pay plans are of a known kind; scenarios carry a name, a clinician and plain settings (numbers, true or false,
+    short text). The page draws these values, so nothing else is let in."""
+    import math
+
+    def number(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    def fig(v: Any, top: float = MAX_FIGURE) -> bool:
+        return v is None or (number(v) and 0 <= v <= top)
+
+    def plain(v: Any, depth: int) -> bool:
+        if v is None or isinstance(v, (bool, int, float)):
+            return v is None or isinstance(v, bool) or number(v)
+        if isinstance(v, str):
+            return len(v) <= 200
+        if depth <= 0:
+            return False
+        if isinstance(v, list):
+            return len(v) <= 100 and all(plain(w, depth - 1) for w in v)
+        if isinstance(v, dict):
+            return len(v) <= 500 and all(isinstance(k, str) and len(k) <= 120 and plain(w, depth - 1) for k, w in v.items())
+        return False
+
+    if not isinstance(data, dict):
+        return "expected an object"
+    extra = set(data) - {"minutes", "costs", "session_minutes", "comp", "scenarios", "saved_at"}
+    if extra:
+        return f"unknown field {sorted(extra)[0][:40]!r}"
+    for group in ("minutes", "costs"):
+        g = data.get(group, {})
+        if not isinstance(g, dict):
+            return f"{group} must be an object"
+        for k, v in g.items():
+            if not _FIG_KEY.fullmatch(k) or not fig(v):
+                return f"{group}: each figure must be a number of 0 or more"
+    if not fig(data.get("session_minutes")):
+        return "the minutes in a clinic day must be a number of 0 or more"
+    comp = data.get("comp", {})
+    if not isinstance(comp, dict) or len(comp) > 1000:
+        return "comp must be an object"
+    for cid, plan in comp.items():
+        if not _FIG_ID.fullmatch(cid) or not isinstance(plan, dict) or plan.get("type") not in _COMP_TYPES or set(plan) - {"type", *_COMP_FIELDS}:
+            return "each pay plan needs a clinician and a known kind of plan"
+        if not all(fig(plan.get(k), 1 if k.endswith("pct") else MAX_FIGURE) for k in _COMP_FIELDS):
+            return "a pay plan's figures must be numbers of 0 or more (shares at most 100%)"
+    scenarios = data.get("scenarios", [])
+    if not isinstance(scenarios, list):
+        return "scenarios must be a list"
+    if len(scenarios) > MAX_SCENARIOS:
+        return f"at most {MAX_SCENARIOS} saved scenarios: delete some first"
+    for sc in scenarios:
+        if not isinstance(sc, dict) or set(sc) - {"name", "who", "x", "chosen", "saved_at"}:
+            return "a scenario has an unknown field"
+        name = sc.get("name")
+        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+            return "each scenario needs a name of up to 100 characters"
+        if not isinstance(sc.get("who"), str) or not _FIG_ID.fullmatch(sc["who"]):
+            return "each scenario needs a clinician"
+        if "saved_at" in sc and not (isinstance(sc["saved_at"], str) and len(sc["saved_at"]) <= 40):
+            return "a scenario's date must be short text"
+        x = sc.get("x", {})
+        if not isinstance(x, dict) or not plain(x, 3):
+            return "a scenario's plan must hold plain settings"
+        chosen = sc.get("chosen", {})
+        if not isinstance(chosen, dict) or len(chosen) > 50:
+            return "a scenario's strategies must be an object"
+        for sid, c in chosen.items():
+            if not _FIG_KEY.fullmatch(sid) or not isinstance(c, dict) or set(c) - {"on", "params"} or not isinstance(c.get("on", False), bool):
+                return "a scenario's strategy settings are not valid"
+            params = c.get("params", {})
+            if not isinstance(params, dict) or len(params) > 50 or not all(_FIG_KEY.fullmatch(k) and number(v) for k, v in params.items()):
+                return "a scenario's strategy settings must be numbers"
+    return None
 
 
 @app.get("/api/activity/assumptions")
-def activity_assumptions(_: str = Depends(require_owner)):
+def activity_assumptions(_: str = Depends(require_owner_password)):
     """The practice's own figures the strategy lab works with (minutes per service, costs, pay plans, saved
-    scenarios), as the owner last saved them. Owner only: it holds what each clinician is paid."""
+    scenarios), as the owner last saved them, with their version. Owner only: it holds what each clinician is paid."""
+    import math
     raw = None
     if runtime.serverless():
         _, st = _cloud_state()
@@ -1752,38 +1852,64 @@ def activity_assumptions(_: str = Depends(require_owner)):
             conn.close()
     if not raw:
         return {"assumptions": None}
-    try:
-        return {"assumptions": json.loads(raw)}
-    except ValueError:
-        return {"assumptions": None, "error": "the saved figures could not be read"}
+    version = _figures_version(raw)
+    try:      # a number that is not finite, saved before the checks below existed, comes back empty, not as an error
+        data = json.loads(raw, parse_constant=lambda c: None, parse_float=lambda t: (lambda f: f if math.isfinite(f) else None)(float(t)))
+    except (ValueError, RecursionError):
+        data = None
+    if not isinstance(data, dict):
+        return {"assumptions": None, "error": "the saved figures could not be read", "version": version}
+    return {"assumptions": data, "version": version}
 
 
 @app.post("/api/activity/assumptions")
-async def activity_assumptions_save(request: Request, user: str = Depends(require_owner)):
+async def activity_assumptions_save(request: Request, user: str = Depends(require_owner_password)):
+    """Replace the saved figures. The request names the version it was made from (X-Figures-Version, empty when there
+    were none); when another window has saved since, it is refused with 409 and the page reads them again."""
     require_xhr(request)
     body = await request.body()
     if len(body) > MAX_ASSUMPTIONS_BYTES:
-        raise HTTPException(413, "too large")
+        raise HTTPException(413, "The saved figures would be too large: delete some saved scenarios.")
+
+    def not_a_number(name: str):
+        raise ValueError(name)
     try:
-        data = json.loads(body or b"{}")
-    except ValueError:
-        raise HTTPException(400, "not JSON")
+        data = json.loads(body or b"{}", parse_constant=not_a_number)
+    except (ValueError, RecursionError):
+        raise HTTPException(400, "not JSON (or a number that is not finite)")
     if not isinstance(data, dict):
         raise HTTPException(400, "expected an object")
+    problem = _figures_problem(data)
+    if problem:
+        raise HTTPException(400, problem)
     data["saved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     blob = json.dumps(data, separators=(",", ":")).encode()
+    sent = (request.headers.get(FIGURES_VERSION_HEADER) or "").strip() or None
+    stale = HTTPException(409, "These figures were changed in another window since this one read them. Read them again and save once more.")
     if runtime.serverless():
+        from .state import Conflict
         _, st = _cloud_state()
-        st.put(ASSUMPTIONS, blob)
+        meta = st.meta(ASSUMPTIONS)
+        if _figures_version(st.get(ASSUMPTIONS) if meta else None) != sent:
+            raise stale
+        try:      # written only if nobody wrote in between
+            st.put(ASSUMPTIONS, blob, mode="update", rev=meta["rev"]) if meta else st.put(ASSUMPTIONS, blob, mode="add")
+        except Conflict:
+            raise stale
     else:
         conn = db()
         try:
             conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("BEGIN IMMEDIATE")
+            r = conn.execute("SELECT value FROM meta WHERE key=?", (ASSUMPTIONS_KEY,)).fetchone()
+            if _figures_version(r[0].encode() if r else None) != sent:
+                conn.rollback()
+                raise stale
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ASSUMPTIONS_KEY, blob.decode()))
             conn.commit()
         finally:
             conn.close()
-    return {"ok": True, "saved_at": data["saved_at"]}
+    return {"ok": True, "saved_at": data["saved_at"], "version": _figures_version(blob)}
 
 
 # --------------------------------------------------------------------------- progress: are we winning

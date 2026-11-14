@@ -197,6 +197,145 @@ function payload() {
   ok('goal_seek_volume_only', M.goalSeek(d, x, 1e9, cal).every(m => m.kind === 'volume'), '');
 }
 
+// ------------------------------------------------------------------ fixes after the review (one check each)
+// 11. goal seek for a clinician with no Mohs: the gap is on every row and on the list; no Mohs move is offered
+{
+  const d = payload(); d.tier = 'nonphysician'; d.levers.mohs.cases = 0; delete d.rates['17311']; delete d.rates['17312'];
+  const x = M.defaults(d), cal = M.calibrate(d), base = M.evaluate(d, x, cal).totalCollections;
+  const up = M.goalSeek(d, x, base + 5e6, cal), down = M.goalSeek(d, x, base - 5e6, cal);
+  ok('goal_seek_gap_without_mohs', near(up.gap, 5e6) && up.every(m => near(m.gap, 5e6)) && near(up[0].gap, 5e6) && near(down.gap, -5e6)
+     && !up.some(m => m.key === 'mohs_cases') && up.some(m => m.needed > 0), JSON.stringify(up.map(m => [m.key, m.gap, m.needed])));
+  ok('no_mohs_moves_without_mohs', !M.marginal(d, x, cal).some(m => M.MOHS_MOVES.includes(m.key))
+     && M.marginal(payload(), M.defaults(payload())).some(m => m.key === 'mohs_cases'), '');
+  // the same-day rule does not cut Mohs cases that have no price at the payer
+  const y = Object.assign({}, x, { year: '2027', mohs_cases: 2, mohs_visit_share: 1, visits: 10, bx_patients: 0, ak_patients: 0 });
+  ok('same_day_skips_unpriced_mohs', M.evaluate(d, y, { k: {}, info: {} }).sameDay.allowed === 0, M.evaluate(d, y, { k: {}, info: {} }).sameDay.allowed);
+}
+
+// 12. pathology from the biopsies: only with both boxes ticked, and without the reads billed under the clinician's own number
+{
+  const d = payload(); d.pathology = { per_lesion_cents: 5000, generated_cents: 100000, own_read_cents: 40000, biopsy_lesions: 20 };
+  const x = Object.assign(M.defaults(d), { year: '2026' }), cal = { k: {}, info: {} };
+  const r = o => M.evaluate(d, Object.assign({}, x, o), cal);
+  const off = r({ include_ancillary: true, include_path: false }), on = r({ include_ancillary: true, include_path: true }), none = r({ include_path: true });
+  const lesions = x.bx_patients * x.bx_per_patient * off.daysYear;
+  const lines = v => Object.values(v.byLine).reduce((t, l) => t + l.collections, 0) - v.sameDay.collections;
+  ok('include_path_box', near(off.totalCollections, off.collections + off.ancillary.collections) && near(off.totalCollections, lines(off))
+     && near(on.path, 5000 * 0.6 * lesions) && near(on.totalCollections, lines(on) + on.pathCollections) && near(none.totalCollections, none.collections),
+     [off.totalCollections, on.totalCollections, on.path].join(' '));
+}
+
+// 13. k per code and kind of payer: one plan's denials stay with that plan, and the code's total still comes back
+{
+  const d = payload(), x0 = M.defaults(d), days = d.schedule.clinic_days;
+  const a = M.allowedByCode(d, x0, '2026', false)['99214'];
+  const med = a['Medicare KY'] * days, com = a['Plan A'] * days;
+  d.codes['99214'].allowed_cents = med + 0.5 * com;
+  d.codes['99214'].by_kind = { medicare: { units: 60, allowed_cents: med }, commercial: { units: 40, allowed_cents: 0.5 * com } };
+  const cal = M.calibrate(d);
+  const e = M.evaluate(d, Object.assign({}, x0, { year: '2026' }), cal);
+  const yr = e.daysYear / days;
+  ok('k_by_kind', near(cal.kind['99214'].medicare, 1) && near(cal.kind['99214'].commercial, 0.5) && near(M.kAt(d, cal, '99214', 'Plan A'), 0.5)
+     && near(e.byCode['99214'].allowed, (med + 0.5 * com) * yr), JSON.stringify(cal.kind['99214']));
+  // a kind with too few units shares the rest of the code's money; the total still comes back
+  d.codes['99214'].by_kind = { medicare: { units: 90, allowed_cents: med }, commercial: { units: 10, allowed_cents: 0.5 * com } };
+  const cal2 = M.calibrate(d), e2 = M.evaluate(d, Object.assign({}, x0, { year: '2026' }), cal2);
+  ok('k_by_kind_rest', near(cal2.kind['99214']._rest, 0.5) && near(e2.byCode['99214'].allowed, (med + 0.5 * com) * yr), JSON.stringify(cal2.kind['99214']));
+}
+
+// 14. the payers' share of a code no payer prices has no patient balance in it
+{
+  const d = payload();
+  ok('payers_share_flat', near(M.payersShare(d, '_flat', '77600'), d.paid_share_fallback) && near(M.payersShare(d, 'Plan A', '99213'), 0.7), M.payersShare(d, '_flat', '77600'));
+}
+
+// 15. window months in the year CMS calls next are priced at that year's amounts, not left out of k
+{
+  const d = payload(); d.years = ['2026', '2027'];
+  for (const cc of Object.values(d.codes)) cc.units_by_year = { '2026': cc.units / 2, '2027': cc.units / 2 };
+  const x0 = M.defaults(d);
+  const a6 = M.allowedByCode(d, x0, '2026', false), a7 = M.allowedByCode(d, x0, '2027', false);
+  const tot = (a, c) => Object.values(a[c] || {}).reduce((t, v) => t + v, 0);
+  for (const [c, cc] of Object.entries(d.codes)) cc.allowed_cents = 0.9 * 0.5 * (tot(a6, c) + tot(a7, c)) * d.schedule.clinic_days;
+  const ks = Object.values(M.calibrate(d).info).filter(i => i.from === 'own').map(i => i.k);
+  ok('calibrate_next_year_months', ks.length > 5 && ks.every(k => near(k, 0.9, 1e-9)), JSON.stringify(ks));
+}
+
+// 16. the page's own helpers (calc.js): a typed target, slider ranges, rounded rows, what carries to another clinician
+const page = (() => {
+  const src = fs.readFileSync(require('path').join(__dirname, '../remitwatch/static/calc.js'), 'utf8');
+  const grab = head => { const i = src.indexOf(head); let j = src.indexOf('{', i), n = 0;
+    for (; j < src.length; j++) { if (src[j] === '{') n++; else if (src[j] === '}' && --n === 0) break; }
+    return src.slice(i, j + 1) + (head.startsWith('const') ? ';' : ''); };
+  const body = ['function calcMoney(', 'const CALC_CAP', 'function calcRange(', 'function calcRoundRows(', 'function calcKeep('].map(grab).join('\n');
+  const assume = src.slice(src.indexOf('const CALC_ASSUME'), src.indexOf('];', src.indexOf('const CALC_ASSUME')) + 2);
+  return new Function(assume + '\n' + body + '\nreturn {calcMoney, calcRange, calcRoundRows, calcKeep, CALC_CAP};')();
+})();
+{
+  const want = { '1.6m': 1.6e6, '1.6M': 1.6e6, '$1,600,000': 1.6e6, '1600k': 1.6e6, '1.5k': 1500, '2m': 2e6, ' 950 k ': 950000, '1600000': 1.6e6 };
+  const bad = ['abc', '1,6m', '-5', '1.2.3', '', '1e9', '12,34'];
+  ok('target_parser', Object.entries(want).every(([s, v]) => near(page.calcMoney(s), v)) && bad.every(s => !isFinite(page.calcMoney(s))),
+     JSON.stringify(Object.keys(want).map(s => [s, page.calcMoney(s)])));
+  const cs = { base: { weeks_per_year: 50, days_per_week: 5.8, bx_visit_share: 0.93, fg_share: 1.6, other_rest: 1, visits: 50, ak_per_patient: 12 } };
+  const hi = def => page.calcRange(cs, def)[1];
+  ok('slider_ranges', hi(['weeks_per_year', '', 20, 52, 1, 'n0']) === 52 && hi(['days_per_week', '', 0, 6, 0.1, 'n1']) === 6
+     && hi(['bx_visit_share', '', 0, 1, 0.01, 'pct']) === 1 && hi(['fg_share', '', 0, 1.5, 0.01, 'per100']) === 2
+     && hi(['other_rest', '', 0, 3, 0.05, 'pct', 'rest']) === 3 && hi(['visits', '', 0, 60, 0.5, 'n1']) === 75 && hi(['ak_per_patient', '', 1, 14, 0.1, 'n1']) === 14
+     && String(hi(['bx_visit_share', '', 0, 1, 0.01, 'pct'])).length < 6, '');
+  // a typed figure is held between these bounds; a part-time clinician's own figure stays inside them
+  const pt = { base: { weeks_per_year: 19.9 } }, [lo, top] = page.calcRange(pt, ['weeks_per_year', '', 20, 52, 1, 'n0']);
+  ok('number_box_bounds', lo <= 19.9 && top === 52, [lo, top].join());
+  const vals = [12345678, 9876543, 5550000, -2449999, 449999], tot = vals.reduce((a, b) => a + b, 0), r = page.calcRoundRows(vals, tot);
+  ok('rows_add_up', r.reduce((a, b) => a + b, 0) === Math.round(tot / 100000) * 100000 && r.every(v => v % 100000 === 0), JSON.stringify(r));
+  const d = payload(), base = M.defaults(d);
+  const old = Object.assign({}, base, { year: '2026', visits: 99, q: { commercial: 0.4 }, corrected: { 'Plan A': true, 'Gone Plan': true }, include_ancillary: true });
+  const keep = page.calcKeep(old, d, base);
+  ok('carry_over_rule', keep.year === '2026' && keep.q.commercial === 0.4 && keep.corrected['Plan A'] && !('Gone Plan' in keep.corrected) && !('visits' in keep)
+     && keep.include_ancillary === true, JSON.stringify(keep));
+}
+
+// 17. goal seek limited to chosen moves (the provider sheet: patient volume only), or measured on production alone
+{
+  const d = payload(), x = Object.assign(M.defaults(d), { include_ancillary: true }), cal = M.calibrate(d);
+  const pick = ['visits', 'new_visits', 'days_per_week'];
+  const a = M.goalSeek(d, x, 1e9, cal, { moves: pick }), b = M.goalSeek(d, x, 1e9, { moves: pick, cal });
+  const prod = M.goalSeek(d, x, 1e9, cal, { production: true });
+  const ev = M.evaluate(d, x, cal);
+  ok('goal_seek_moves_option', a.map(m => m.key).join() === pick.join() && b.map(m => m.key).join() === pick.join()
+     && near(prod.base, ev.collections) && near(M.goalSeek(d, x, 1e9, cal).base, ev.totalCollections), a.map(m => m.key).join());
+  // one more new-patient visit: one more visit, all of it new
+  const m = M.marginal(d, x, cal).find(r => r.key === 'new_visits');
+  const y = Object.assign({}, x, { visits: x.visits + m.step, new_share: (x.visits * x.new_share + m.step) / (x.visits + m.step) });
+  ok('new_patient_move', near(m.value, M.evaluate(d, y, cal).totalCollections - ev.totalCollections, 1e-9), m.value);
+}
+
+// 18. 2027: one switch for Medicare Advantage plans that move with Medicare (B1 and the same-day rule together), and the
+//     modifier-57 sensitivity when the payload carries the share
+{
+  const d = payload();
+  d.payers['Plan M'] = { kind: 'medicare_advantage', correctable: true, indexed: true };
+  for (const fam of ['mohs', 'repair', 'est_visit', 'visit_addon', 'biopsy']) d.mix[fam] = [['Medicare KY', 0.4], ['Plan A', 0.3], ['Plan M', 0.3]];
+  for (const c of Object.keys(d.rates)) d.rates[c]['Plan M'] = { '2026': d.rates[c]['Medicare KY']['2026'], how: 'own' };
+  const x = Object.assign(M.defaults(d), { year: '2027', visits: 10, bx_patients: 2, ak_patients: 0, other_radiation: 0 });
+  const cal = { k: {}, info: {} };
+  const on = Object.assign({}, x, { ma_same_day: true }), off = Object.assign({}, x, { ma_same_day: false });
+  const g = (xx) => M.allowedByCode(d, xx, '2027', false)['G2211']['Plan M'];
+  const cutM = xx => { const e = M.evaluate(d, xx, cal).sameDay.allowed; const y = Object.assign({}, xx, { indexed: { 'Plan M': false } }); return e - M.evaluate(d, y, cal).sameDay.allowed; };
+  const n = M.units(d, x)['G2211'];      // G2211 units a day; Plan M has 30% of them
+  ok('ma_one_switch', x.ma_same_day === true && near(g(off), n * 0.3 * M.price(d, off, 'G2211', 'Plan M', '2027', false))
+     && near(g(on), n * 0.3 * M.B1_SHARE * M.visitPrice(d, on, 'Plan M', '2027', false)) && cutM(on) > 0 && near(cutM(off), 0), [g(on), g(off), cutM(on), cutM(off)].join(' '));
+  const base57 = M.evaluate(d, Object.assign({}, x, { mohs_57: true, mohs_visit_share: 0 }), cal).sameDay.allowed;
+  d.strategy = { mohs_visit57_share: 0.5 };
+  const with57 = M.evaluate(d, Object.assign({}, x, { mohs_57: true, mohs_visit_share: 0 }), cal).sameDay.allowed;
+  const without = M.evaluate(d, Object.assign({}, x, { mohs_57: false, mohs_visit_share: 0 }), cal).sameDay.allowed;
+  ok('mohs_57_sensitivity', with57 > without && near(without, base57) && M.visit57Share(d) === 0.5, [base57, without, with57].join(' '));
+  ok('q_defaults_floor', M.Q_DEFAULT.commercial === 0.59 && M.Q_DEFAULT.medicare_advantage === 0.54 && M.defaults(d).q.commercial === 0.59, '');
+  // a code's own payer mix, where the payload has it, comes before its service line's
+  const e = payload(); e.mix_code = { '99214': [['Plan A', 1]] };
+  const a = M.allowedByCode(e, M.defaults(e), '2026', false)['99214'];
+  ok('code_mix_used', a['Plan A'] > 0 && !a['Medicare KY'], JSON.stringify(a));
+}
+
 // ------------------------------------------------------------------ the strategy lab (lab_model.js)
 const LM = require('../remitwatch/static/lab_model.js');
 {

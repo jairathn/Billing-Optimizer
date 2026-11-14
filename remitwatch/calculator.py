@@ -32,6 +32,7 @@ the patient was left to pay, not what the patient paid, so that last share is an
 from __future__ import annotations
 
 import calendar
+import re
 import sqlite3
 import statistics
 from collections import Counter, defaultdict
@@ -39,6 +40,7 @@ from datetime import date, timedelta
 
 from . import activity
 from .ascfs import ASC, WAGE_INDEX, asc_amount
+from .codes import payer_group_kind
 from .mpfs import MPFS, MPFS_YEARS, WORK_RVU
 from .pfs import PFS_INDICATORS
 
@@ -46,15 +48,23 @@ CLINIC_DAY_MIN = activity.CLINIC_DAY_MIN
 MIN_K_UNITS = 25            # fewer units than this in the window: k comes from the lever's codes together, then 1
 K_RANGE = (0.25, 2.0)       # k outside this means the rates do not describe the line (a facility setting, a code billed
                             # with another meaning, a product priced per unit): it is clamped, and the page says so
+MIN_CODE_MIX_LINES = 100   # primary-claim lines of a code that give it its own payer mix
+CASE_LEVERS = ("mohs_first", "mohs_stage", "mohs_block", "flap_graft", "layered")   # billed with the Mohs case, to its payer
 MIN_CLINIC_DAYS = 10        # clinicians with fewer clinic days in the window are not offered on their own
 FULL_TIME_DAYS = 60         # clinic days in the window for a clinician to set the pace of a tier's average year
 AK_LESIONS_15_PLUS = 20     # lesions assumed for a patient billed 17004 (15 or more); used only to turn lesions into patients
-CORRECTABLE_KINDS = ("commercial", "medicare_advantage")     # Medicaid plans follow the state's schedule; 'other' is
-                                                             # workers' comp, auto and unknown payers
-LAYERED_WEIGHT = (0.21, 0.75)   # share of Mohs cases and of excisions closed in layers, practice-wide: used only to share a
-                                 # clinician's layered repairs between the two (their own total is kept)
+CORRECTABLE_KINDS = ("commercial", "medicare_advantage")     # contracts the page offers to correct. A Medicaid managed-care
+                                                             # plan pays about the state's schedule and its contract is rarely
+                                                             # negotiable, though not impossible (payers[g].negotiable is
+                                                             # 'rarely'); the state's own Medicaid program is not, nor is
+                                                             # 'other': workers' comp, auto and unknown payers
+LAYERED_WEIGHT = (0.22, 0.77)   # layered (intermediate and complex) repairs per Mohs case and per excision on the same patient-
+                                 # day, practice-wide over the latest twelve complete months (the Mohs rate moves from year to
+                                 # year): used only to share a clinician's layered repairs between the two (their own total is
+                                 # kept)
 APP_MEDICARE_SHARE = 0.85   # Medicare pays an NP or PA 85% of the physician amount when the service is billed under their own number
-MPPR_SHARE = 0.5            # second and later procedures of the same day: 50% of the usual rate (Medicare's standard rule)
+MPPR_SHARE = 0.5            # second to fifth procedures of the same day: 50% of the usual rate (Medicare's standard rule;
+                            # the sixth and later are paid 'by report', priced by the contractor, and taken at 50% here too)
 PACE_GAP_DAYS = 42          # no clinic day this long before the pace window starts (or before the window ends): the
                             # clinician started (or stopped) inside it, longer than any holiday
 
@@ -414,17 +424,26 @@ def _schedule(conn, ids: list[str], d0: str, d1: str, full_days: int = 60, pace_
 
 def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, dict]:
     """Share of primary-claim lines by payer, per service family, for the clinicians; a family with few lines takes the
-    mix of every clinician of the tier, then of the practice. Payment months run a month behind the months of service."""
-    pa, pb = _month_plus(a, 1), _month_plus(b, 2)
+    mix of every clinician of the tier, then of the practice. Payment months run a month behind the months of service.
 
-    def mix(where: str, args: tuple) -> dict[str, Counter]:
+    Also, per code (mix_info['code']), the clinicians' own line shares for a code billed on at least MIN_CODE_MIX_LINES
+    lines, outside the Mohs case and its closures (the page bills a case's closures to the payer of its first stage, so
+    those keep the family's mix). Visits, biopsies and destructions are not billed to the same payers in the same
+    proportions, and a family's pooled mix misstates each payer's share of them."""
+    pa, pb = _month_plus(a, 1), _month_plus(b, 2)
+    by_code: dict[str, Counter] = defaultdict(Counter)
+
+    def mix(where: str, args: tuple, keep: bool = False) -> dict[str, Counter]:
         out: dict[str, Counter] = defaultdict(Counter)
         for code, g, n in conn.execute(
                 f"SELECT code, payer_group, SUM(lines) FROM exposure WHERE month BETWEEN ? AND ? {where} GROUP BY 1, 2", (pa, pb, *args)):
-            out[activity.service_family(activity.clean_code(code))][g] += n or 0
+            c = activity.clean_code(code)
+            out[activity.service_family(c)][g] += n or 0
+            if keep:
+                by_code[c][g] += n or 0
         return out
 
-    own = mix(f"AND npi IN ({_in(ids)})", tuple(ids)) if ids else {}
+    own = mix(f"AND npi IN ({_in(ids)})", tuple(ids), keep=True) if ids else {}
     tier_ids = [r[0] for r in conn.execute("SELECT provider_id FROM provider_roster WHERE kind='person' AND tier=?", (tier,))]
     peers = mix(f"AND npi IN ({_in(tier_ids)})", tuple(tier_ids)) if tier_ids else {}
     practice = mix("", ())
@@ -443,7 +462,9 @@ def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, d
                 break
     n_all = sum(overall.values())
     out["_overall"] = {g: v / n_all for g, v in overall.items()} if n_all else {}
-    return out, {"source": source, "kinds": kinds}
+    code_mix = {c: {g: v / sum(cnt.values()) for g, v in cnt.items() if v > 0} for c, cnt in by_code.items()
+                if sum(cnt.values()) >= MIN_CODE_MIX_LINES and lever_of(c) not in CASE_LEVERS}
+    return out, {"source": source, "kinds": kinds, "code": code_mix}
 
 
 def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str | None = None, month_to: str | None = None,
@@ -505,7 +526,8 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
     rate_card: dict[str, dict] = {}
     sources: Counter = Counter()
     for code in codes:
-        m = family_mix(code)
+        m = dict.fromkeys(family_mix(code))
+        m.update(dict.fromkeys(mix_info["code"].get(code) or {}))
         row = {}
         for g in m:
             per_year = {}
@@ -548,7 +570,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
     groups = {}
     for g in sorted(groups_used):
         kind = kinds.get(g) or "other"
-        groups[g] = {"kind": kind, "paid_share": paid_share.get(kind), "correctable": kind in CORRECTABLE_KINDS,
+        groups[g] = {"kind": kind, "paid_share": paid_share.get(kind), "correctable": kind in CORRECTABLE_KINDS, "negotiable": _negotiable(g, kind),
                      "share": round(mix.get("_overall", {}).get(g, 0.0), 4), "indexed": rates.indexed(g, year)}
     fallback_paid = None
     if paid_share:
@@ -557,6 +579,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
 
     levers = _levers(svc, sched.get("clinic_days") or 0)
     extras = _strategy_inputs(conn, ids, d0, d1, window_months)
+    extras.update(_visit_shares(conn, ids, d0, d1))
     path = conn.execute(
         f"SELECT COALESCE(SUM(path_generated_cents),0), COALESCE(SUM(biopsy_lesions),0) FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?",
         (*ids, d0, d1)).fetchone() if ids else (0, 0)
@@ -576,6 +599,8 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         "coverage": {"last_complete_month": cov.get("last_complete_month"), "last_payment": cov.get("last_payment")},
         "schedule": sched, "levers": levers, "codes": codes,
         "mix": {f: [[g, round(v, 5)] for g, v in sorted(m.items(), key=lambda kv: -kv[1])] for f, m in mix.items()},
+        # a code's own payer mix where it has enough lines (the page prefers it to its family's)
+        "mix_code": {c: [[g, round(v, 5)] for g, v in sorted(m.items(), key=lambda kv: -kv[1])] for c, m in mix_info["code"].items() if c in codes},
         "mix_source": mix_info["source"], "rates": rate_card, "medicare": medicare, "medicare_fac": medicare_fac, "asc": asc,
         "rate_sources": dict(sources),
         "payers": groups, "paid_share": paid_share, "paid_share_fallback": fallback_paid,
@@ -591,6 +616,17 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         "mppr": sorted(c for c in codes if (PFS_INDICATORS.get(c) or ("", ""))[1] == "2"),
         "global_days": {c: (PFS_INDICATORS.get(c) or ("", ""))[0] for c in codes if PFS_INDICATORS.get(c)},
     }
+
+
+def _negotiable(g: str, kind: str) -> str:
+    """Can the practice negotiate this payer's rates: 'yes' (commercial and Medicare Advantage contracts), 'rarely' (a
+    Medicaid managed-care plan: its contract can go above the state's schedule, though that seldom succeeds) or 'no'
+    (Medicare, the state's own Medicaid program, workers' comp, auto and unknown payers)."""
+    if kind in CORRECTABLE_KINDS:
+        return "yes"
+    if kind == "medicaid" and not g.startswith("Medicaid "):
+        return "rarely"
+    return "no"
 
 
 def _states(conn, ids: list[str], d0: str, d1: str) -> dict[str, float]:
@@ -645,6 +681,84 @@ def _strategy_inputs(conn, ids: list[str], d0: str, d1: str, months: int = 0) ->
             out["vendor_fees"][g or "unknown"] = cents
     except sqlite3.Error:
         pass
+    return out
+
+
+VISIT_SHARE_MIN_DAYS = 20   # Medicare patient-days of a kind a clinician needs for their own share of visits billed beside it
+LINES_COMPLETE = 0.8        # remittance lines held for the window against the services folded from them: below this the
+                            # database holds only some claims' lines (the dashboard's copy keeps those with findings)
+
+
+def _visit_shares(conn, ids: list[str], d0: str, d1: str) -> dict:
+    """On Medicare fee-for-service patient-days in the window: the share of Mohs patient-days (a first stage billed) on
+    which the clinician also billed an E/M with modifier 57 (mohs_visit57_share) or 25 (mohs_visit25_share), and the
+    share of biopsy patient-days (a first biopsy code) with an E/M with modifier 25 (bx_visit_share). A role average
+    gives the mean of its members' own shares (members with VISIT_SHARE_MIN_DAYS such days).
+
+    Read from the remittance lines (a line's rendering NPI, else its claim's; the patient-day is the bill, the first
+    nine characters of the patient control number, and the date), so only where the database holds the window's lines:
+    otherwise each share is None and the page keeps its default. Counts only, nothing about a patient leaves here."""
+    keys = ("mohs_visit57_share", "mohs_visit25_share", "bx_visit_share")
+    out: dict = {k: None for k in keys}
+    out["visit_shares_days"] = {"mohs": 0, "biopsy": 0}
+    out["visit_shares_payer"] = "medicare"
+    if not ids:
+        return out
+    try:
+        held = conn.execute("SELECT COUNT(*) FROM lines WHERE service_date BETWEEN ? AND ?", (d0, d1)).fetchone()[0]
+        folded = conn.execute("SELECT COALESCE(SUM(items), 0) FROM provider_services WHERE month BETWEEN ? AND ?", (d0[:7], d1[:7])).fetchone()[0]
+        if not folded or held < LINES_COMPLETE * folded:
+            out["visit_shares_payer"] = None
+            return out
+        rows = conn.execute(
+            f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) npi, substr(l.patient_control_number, 1, 9),
+                       l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code), l.modifiers, cl.payer_name,
+                       cl.claim_filing_indicator
+                FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
+                WHERE l.service_date BETWEEN ? AND ? AND cl.claim_status_code IN ('1', '19')
+                  AND (substr(l.procedure_code, 1, 3) IN ('992', '173') OR substr(l.original_procedure_code, 1, 3) IN ('992', '173')
+                       OR substr(l.procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}) OR substr(l.original_procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}))
+                  AND COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) IN ({_in(ids)})""",
+            (d0, d1, *BIOPSY_FIRST, *BIOPSY_FIRST, *ids)).fetchall()
+    except sqlite3.Error:
+        out["visit_shares_payer"] = None
+        return out
+    em = set(EM_NEW) | set(EM_EST)
+    kinds: dict[tuple, str] = {}
+    day: dict[tuple, list] = defaultdict(lambda: [False, False, False, False])      # Mohs, biopsy, E/M-57, E/M-25
+    for npi, bill, sd, raw, mods, payer, cfi in rows:
+        if not bill or not sd:
+            continue
+        k = (payer, cfi)
+        if k not in kinds:
+            kinds[k] = payer_group_kind(payer, cfi)[1]
+        if kinds[k] != "medicare":
+            continue
+        code = activity.clean_code(raw)
+        if code not in em and code not in ("17311", "17313") and code not in BIOPSY_FIRST:
+            continue
+        m = set(re.findall(r"[0-9A-Z]{2}", (mods or "") + " " + " ".join((raw or "").upper().split()[1:])))
+        f = day[(npi, bill, sd)]
+        f[0] = f[0] or code in ("17311", "17313")
+        f[1] = f[1] or code in BIOPSY_FIRST
+        if code in em:
+            f[2] = f[2] or "57" in m
+            f[3] = f[3] or "25" in m
+    per: dict[str, Counter] = defaultdict(Counter)
+    for (npi, _, _), (mohs, bx, e57, e25) in day.items():
+        c = per[npi]
+        if mohs:
+            c["mohs"] += 1
+            c["m57"] += e57
+            c["m25"] += e25
+        if bx:
+            c["bx"] += 1
+            c["b25"] += e25
+    out["visit_shares_days"] = {"mohs": sum(c["mohs"] for c in per.values()), "biopsy": sum(c["bx"] for c in per.values())}
+    for key, num, den in (("mohs_visit57_share", "m57", "mohs"), ("mohs_visit25_share", "m25", "mohs"), ("bx_visit_share", "b25", "bx")):
+        own = [c[num] / c[den] for c in per.values() if c[den] >= VISIT_SHARE_MIN_DAYS]
+        if own:
+            out[key] = round(sum(own) / len(own), 4)
     return out
 
 

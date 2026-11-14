@@ -19,15 +19,17 @@
   const ANCILLARY = ['radiation', 'skin', 'path', 'drug', 'nurse'];    // the practice's, not the clinician's own production
   const EM = ['99202', '99203', '99204', '99205', '99211', '99212', '99213', '99214', '99215'];
   // patient balances collected, by kind of payer: assumptions until the practice's patient payments are loaded. Early
-  // ledger exports showed about 59% commercial and 54% Medicare Advantage collected within 2-5 weeks (a floor), and
-  // little of what Medicare leaves after a supplement
-  const Q_DEFAULT = { commercial: 0.70, medicare: 0.50, medicare_advantage: 0.70, supplement: 0.50, other: 0.30, medicaid: 0 };
+  // ledger exports showed about 59% commercial and 54% Medicare Advantage collected within 2-5 weeks (a floor, used as the
+  // default), and little of what Medicare leaves after a supplement. Medicare cost-sharing of qualified Medicare
+  // beneficiaries (dual eligibles) may not be billed at all.
+  const Q_DEFAULT = { commercial: 0.59, medicare: 0.50, medicare_advantage: 0.54, supplement: 0.50, other: 0.30, medicaid: 0 };
 
   // ------------------------------------------------------------------ inputs
   function shareOf(mix, codes) { return codes.reduce((t, c) => t + (mix[c] || 0), 0); }
 
   function defaults(d) {
-    const L = d.levers, S = d.schedule || {};
+    const L = d.levers, S = d.schedule || {}, St = d.strategy || {};
+    const own = (v, dflt) => (v != null && isFinite(v) ? clamp(v, 0, 1) : dflt);
     return {
       days_per_week: round(S.days_per_week || 4, 2), weeks_per_year: round(S.weeks_per_year || 46, 1),
       mohs_cases: L.mohs.cases, mohs_hn: L.mohs.head_neck_share, mohs_stages: L.mohs.stages,
@@ -42,10 +44,15 @@
       q: Object.assign({}, Q_DEFAULT), include_path: false, include_ancillary: false,
       year: d.next_year || d.rate_year, target_pct: 1.0, targets: {}, fix_mode: 'contract', corrected: {},
       indexed: Object.fromEntries(Object.entries(d.payers || {}).map(([g, p]) => [g, !!p.indexed])),
-      bx_visit_share: 0.93,           // biopsied Medicare patients also billed a visit with modifier 25 that day
-      mohs_visit_share: 0.045,        // Mohs cases with a visit billed with modifier 25 the same day (57, decision for major
-                                      // surgery, is left out: the rule is identified on the claim by modifier 25)
-      ma_same_day: false,             // ...and apply its same-day rule (the rule governs Part B; a plan applies it only by contract)
+      // this clinician's own shares on Medicare patient-days where the payload has them (strategy.*), else the practice's
+      bx_visit_share: own(St.bx_visit_share, 0.93),         // biopsied Medicare patients also billed a visit with modifier 25 that day
+      mohs_visit_share: own(St.mohs_visit25_share, 0.045),  // Mohs cases with a visit billed with modifier 25 the same day (57,
+                                      // decision for major surgery, is left out: the rule is identified on the claim by
+                                      // modifier 25; see mohs_57)
+      ma_same_day: true,              // Medicare Advantage plans that move with Medicare take on its 2027 changes too: modifier B1
+                                      // in place of G2211 and the same-day rule (the rule governs Part B; a plan follows it by
+                                      // contract). One switch for both, so the plans are not favoured one way or the other.
+      mohs_57: false,                 // sensitivity: CMS's edits also catch a visit with modifier 57 beside a 0-day Mohs
       cut_add_ons: true,              // the same-day rule cuts add-on codes too (the literal reading; CMS has not said)
     };
   }
@@ -135,8 +142,29 @@
     return !!(d.payers[g] || {}).indexed;
   }
 
-  // the mix of payers a code is billed to (its service line's), as [[payer, share]]
+  // 2027's policy changes (B1 in place of G2211, the same-day rule): Medicare, and the Medicare Advantage plans that move
+  // with Medicare while the one switch for them is on
+  function followsMedicare(d, x, g) {
+    const kind = payerKind(d, g);
+    return kind === 'medicare' || (kind === 'medicare_advantage' && x.ma_same_day !== false && isIndexed(d, x, g));
+  }
+  // Mohs days with a visit E/M-57 beside the case, when the payload carries this clinician's share (calculator.py)
+  function visit57Share(d) {
+    const L = d.levers || {}, S = d.strategy || {};
+    for (const v of [L.mohs_visit57_share, (L.mohs || {}).visit57_share, (L.mohs || {}).mohs_visit57_share, S.mohs_visit57_share]) if (v != null && isFinite(v)) return +v;
+    return null;
+  }
+  // Mohs cases with a visit the 2027 rule cuts: modifier 25 always; with the sensitivity on, the E/M-57 visits too
+  function mohsVisitShare(d, x) {
+    const s57 = x.mohs_57 ? visit57Share(d) : null;
+    return clamp(x.mohs_visit_share, 0, 1) + (s57 != null ? clamp(s57, 0, 1) : 0);
+  }
+
+  // the mix of payers a code is billed to, as [[payer, share]]: the code's own where the payload has it (mix_code, codes
+  // with enough lines outside the Mohs case), its service line's otherwise
   function mixOf(d, code) {
+    const own = (d.mix_code || {})[code];
+    if (own && own.length) return own;
     const fam = (d.codes[code] || {}).family;
     return d.mix[fam] || d.mix._overall || [];
   }
@@ -152,7 +180,7 @@
     let p = base;
     const M = d.medicare[code] || {};
     if (next && isIndexed(d, x, g)) {
-      if (code === 'G2211' && (kind === 'medicare' || kind === 'medicare_advantage')) return null;   // replaced by modifier B1 (see allowedByCode)
+      if (code === 'G2211' && (kind === 'medicare' || (kind === 'medicare_advantage' && x.ma_same_day !== false))) return null;   // replaced by modifier B1 (see allowedByCode)
       if (M[d.rate_year] && M[year]) p = base * M[year] / M[d.rate_year];
     }
     if (corrected && x.corrected[g] && correctable(d, g) && M[year]) {
@@ -249,7 +277,7 @@
     if (next && U.G2211 > 0) {
       for (const [g, s] of mixOf(d, 'G2211')) {
         const kind = payerKind(d, g);
-        if (kind === 'medicare' || (kind === 'medicare_advantage' && isIndexed(d, x, g))) put('G2211', g, U.G2211 * s * B1_SHARE * visitPrice(d, x, g, year, corrected));
+        if (followsMedicare(d, x, g)) put('G2211', g, U.G2211 * s * B1_SHARE * visitPrice(d, x, g, year, corrected));
         else { const p = price(d, x, 'G2211', g, year, corrected); if (p != null) put('G2211', g, U.G2211 * s * p); }
       }
       done.add('G2211');
@@ -471,7 +499,7 @@
   function sameDayCut(d, x, cal, year, daysYear) {
     const k = (c, g) => kAt(d, cal, c, g);
     const L = d.levers;
-    const follows = g => { const kind = payerKind(d, g); return kind === 'medicare' || (kind === 'medicare_advantage' && x.ma_same_day); };
+    const follows = g => followsMedicare(d, x, g);
     const addOn = c => (d.add_on || []).includes(c);
     const cutAdd = v => (x.cut_add_ons ? v : 0);       // an add-on line counted among the lines the rule cuts, or not
     const pr = (c, g) => { const p = price(d, x, c, g, year, true); return p == null ? null : p * k(c, g); };
@@ -499,7 +527,7 @@
     const R = T > 1 ? R0 / T : R0, Lm = T > 1 ? L0 / T : L0;       // the closure paired with the first stage
     const rho = d.constants.mppr_share;
     for (const [f, site, addc] of [['17311', h, '17312'], ['17313', 1 - h, '17314']]) {
-      const cases = C * site * clamp(x.mohs_visit_share, 0, 1);
+      const cases = C * site * clamp(mohsVisitShare(d, x), 0, 1);
       if (!(cases > 0)) continue;
       const u = units(d, x), extraPerCase = C * site > 0 ? (u[addc] || 0) / (C * site) : 0;
       for (const [g, s] of mixOf(d, f)) {
@@ -533,6 +561,7 @@
     ['mohs_cases', 'One more Mohs case a week', 'week', 'Mohs cases', 'volume'],
     ['excisions', 'One more excision a week', 'week', 'Excisions', 'volume'],
     ['visits', 'One more visit a week', 'week', 'Visits', 'volume'],
+    ['new_visits', 'One more new-patient visit a week', 'week', 'New patients', 'volume'],
     ['bx_patients', 'One more biopsied patient a week', 'week', 'Biopsied patients', 'volume'],
     ['ak_patients', 'One more AK patient a week', 'week', 'AK patients', 'volume'],
     ['benign', 'One more benign-destruction patient a week', 'week', 'Benign-destruction patients', 'volume'],
@@ -558,24 +587,37 @@
     return ['17311', '17313'].some(c => Object.keys((d.rates || {})[c] || {}).length > 0);
   }
 
-  function marginal(d, x, cal) {
+  // one step of a move: the lever raised by dx; a new-patient visit is one more visit, all of it new
+  function moved(x, key, dx) {
+    if (key === 'new_visits') {
+      const V = Math.max(0, x.visits), nv = V * clamp(x.new_share, 0, 1);
+      return Object.assign({}, x, { visits: V + dx, new_share: V + dx > 0 ? (nv + dx) / (V + dx) : 1 });
+    }
+    return Object.assign({}, x, { [key]: x[key] + dx });
+  }
+  // opts (optional): moves, a list of MOVES keys to use; production, true to measure the clinician's own production only
+  // (ancillary and the biopsies' pathology left out, as pay on production is)
+  function measure(ev, opts) { return opts && opts.production ? ev.collections : ev.totalCollections; }
+
+  function marginal(d, x, cal, opts) {
     cal = cal || calibrate(d);
-    const base = evaluate(d, x, cal).totalCollections, mohs = hasMohs(d);
-    return MOVES.filter(([key]) => mohs || !MOHS_MOVES.includes(key)).map(([key, label, how, name, kind]) => {
+    const base = measure(evaluate(d, x, cal), opts), mohs = hasMohs(d), only = opts && Array.isArray(opts.moves) ? opts.moves : null;
+    return MOVES.filter(([key]) => (mohs || !MOHS_MOVES.includes(key)) && (!only || only.includes(key))).map(([key, label, how, name, kind]) => {
       const dx = step(x, key, how);
-      const y = Object.assign({}, x, { [key]: x[key] + dx });
-      const v = evaluate(d, y, cal).totalCollections - base;
+      const v = measure(evaluate(d, moved(x, key, dx), cal), opts) - base;
       return { key, label, name, kind, step: dx, value: v };
     });
   }
 
   // how much of one lever reaches a yearly target, the others held (collections are linear in each count lever). The gap
   // is the same for every lever and is on every row and on the list itself (res.gap); a lever worth nothing for this
-  // clinician (under a dollar a year) gets no count (needed: null).
-  function goalSeek(d, x, target, cal) {
+  // clinician (under a dollar a year) gets no count (needed: null). Called goalSeek(d, x, target, cal, opts); an opts
+  // object in cal's place is taken as opts (with opts.cal, if given, as the calibration).
+  function goalSeek(d, x, target, cal, opts) {
+    if (cal && !cal.k && (cal.moves || cal.production != null || cal.cal)) { opts = cal; cal = opts.cal; }
     cal = cal || calibrate(d);
-    const base = evaluate(d, x, cal).totalCollections, gap = target - base;
-    const res = marginal(d, x, cal).filter(m => m.kind === 'volume').map(m =>
+    const base = measure(evaluate(d, x, cal), opts), gap = target - base;
+    const res = marginal(d, x, cal, opts).filter(m => m.kind === 'volume').map(m =>
       Object.assign(m, { gap, needed: m.value >= 100 ? gap / m.value : null }));     // number of steps
     res.gap = gap; res.base = base;
     return res;
@@ -583,7 +625,7 @@
 
   const api = { defaults, units, allowedByCode, calibrate, evaluate, marginal, goalSeek, price, shiftLevels, LINES, MOVES, ANCILLARY, Q_DEFAULT, EM, isIndexed, payersShare,
                 MEDICARE_KINDS, SAME_DAY_CUT, B1_SHARE, collectShare, payerKind, correctable, mixOf, akPatients, visitPrice,
-                kAt, hasMohs, MOHS_MOVES, paidShare, pathPerLesion };
+                kAt, hasMohs, MOHS_MOVES, paidShare, pathPerLesion, followsMedicare, visit57Share, mohsVisitShare };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CalcModel = api;
 })(typeof window !== 'undefined' ? window : globalThis);
