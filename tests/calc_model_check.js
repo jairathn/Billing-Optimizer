@@ -197,4 +197,50 @@ function payload() {
   ok('goal_seek_volume_only', M.goalSeek(d, x, 1e9, cal).every(m => m.kind === 'volume'), '');
 }
 
+// ------------------------------------------------------------------ the strategy lab (lab_model.js)
+const LM = require('../remitwatch/static/lab_model.js');
+{
+  const d = payload(); d.levers.flap_graft.mix = { '15260': 0.5, '14040': 0.5 };
+  d.rates['15260'] = { 'Medicare KY': { '2026': 90000, how: 'own' }, 'Plan A': { '2026': 81000, how: 'own' } };
+  d.medicare['15260'] = { '2026': 90000, '2027': 85500 }; d.codes['15260'] = { family: 'repair', lever: 'flap_graft', units: 20, allowed_cents: 0, units_by_year: { '2026': 20 } };
+  d.medicare_fac = Object.fromEntries(Object.entries(d.medicare).map(([c, v]) => [c, { '2026': Math.round(v['2026'] * 0.45), '2027': Math.round(v['2027'] * 0.45) }]));
+  d.asc = { '2026': { '17311': ['P2', true, { newburgh: 40000 }], '14040': ['A2', true, { newburgh: 110000 }], '15260': ['A2', true, { newburgh: 110000 }] } };
+  d.work_rvu = { '2026': { '17311': 6.05, '99213': 1.3 } };
+  d.mppr.push('15260');
+  d.strategy = { open_findings: { denial: { n: 3, cents: 100000 } }, vendor_fees: { 'Plan A': 6000 } };
+  const cal = { k: {}, info: {} };
+  const x = Object.assign(M.defaults(d), { year: '2026', mohs_cases: 1, mohs_hn: 1, mohs_stages: 1, fg_share: 1, lay_mohs: 0, visits: 0, bx_patients: 0,
+                                           other_radiation: 0, days_per_week: 1, weeks_per_year: 1 });
+  const A = LM.blankAssumptions();
+  // staging every bigger closure (the graft, not 14040): the first stage on those cases is paid in full
+  const r = LM.run(d, x, A, { stage: { on: true, params: { share: 1 } } }, cal);
+  const s = r.steps[0];
+  const gain = 0.5 * (0.6 * 60000 + 0.4 * 54000) * 0.5;         // half the cases are grafts; their first stage was halved
+  ok('lab_stage_gain', near(s.collections, gain * 1, 1e-6) || near(s.collections / M.collectShare(d, x, 'Medicare KY', '17311'), gain, 0.05), s.collections + ' vs ' + gain);
+  ok('lab_stage_visits', near(s.encountersDay, 0.5, 1e-9), s.encountersDay);
+  ok('lab_needs_named', s.needs.includes('minutes.turnover') && s.needs.includes('costs.per_encounter'), s.needs.join());
+  // with the figures entered, the extra visit costs and takes minutes
+  A.minutes.turnover = 10; A.costs.per_encounter = 20;
+  const r2 = LM.run(d, x, A, { stage: { on: true, params: { share: 1 } } }, cal);
+  ok('lab_stage_costs', near(r2.steps[0].cost, 0.5 * 20 * 100, 1e-9) && near(r2.steps[0].minutesDay, 5, 1e-9) && r2.steps[0].needs.length === 0, JSON.stringify(r2.steps[0]));
+  // the ASC: facility payment added, professional fee at the facility amounts, both at the multiple-procedure rules
+  const r3 = LM.run(d, x, A, { asc: { on: true, params: { cases: 1, own: 1, commercial_pct: 1 } } }, cal);
+  const o = LM.caseValue(d, x, cal, 'Medicare KY', '17311', '14040', '2026', 'office', 'newburgh');
+  const z = LM.caseValue(d, x, cal, 'Medicare KY', '17311', '14040', '2026', 'asc', 'newburgh');
+  ok('lab_asc_office_case', near(o.pro, 70000 + 0.5 * 60000), o.pro);
+  ok('lab_asc_asc_case', near(z.pro, 0.45 * 70000 + 0.5 * 0.45 * 60000, 1e-3) && near(z.facility, 110000 + 0.5 * 40000), JSON.stringify(z));
+  ok('lab_asc_positive', r3.steps[0].collections > 0, r3.steps[0].collections);
+  // appeals are one-time cash; vendor fees a year (12 months of window here), practice-wide
+  const r4 = LM.run(d, x, A, { appeals: { on: true, params: { share: 0.5 } }, vendor_fees: { on: true, params: { share: 1 } } }, cal);
+  ok('lab_appeals_one_time', near(r4.steps[0].oneTime, 50000) && near(r4.steps[0].collections, 0), JSON.stringify(r4.steps[0]));
+  // pay plans and their inverse
+  ok('lab_pay_pct', near(LM.pay({ type: 'pct', pct: 0.35 }, 100000000, 0), 35000000), '');
+  ok('lab_pay_base', near(LM.pay({ type: 'base', base: 300000, threshold: 1000000, above_pct: 0.4 }, 150000000, 0), 30000000 + 0.4 * 50000000), '');
+  ok('lab_pay_wrvu', near(LM.pay({ type: 'wrvu', per_wrvu: 60 }, 0, 1000), 6000000), '');
+  ok('lab_collections_for', near(LM.collectionsFor({ type: 'base', base: 300000, threshold: 1000000, above_pct: 0.4 }, 50000000), 100000000 + 20000000 / 0.4), '');
+  // a 2027-only strategy is skipped, said so, on 2026 rates
+  const r5 = LM.run(d, x, A, { biopsy_return: { on: true } }, cal);
+  ok('lab_2027_only', r5.steps[0].skipped, '');
+}
+
 process.stdout.write(JSON.stringify(out));

@@ -37,7 +37,8 @@ from collections import Counter, defaultdict
 from datetime import date
 
 from . import activity
-from .mpfs import MPFS, MPFS_YEARS
+from .ascfs import ASC, WAGE_INDEX, asc_amount
+from .mpfs import MPFS, MPFS_YEARS, WORK_RVU
 from .pfs import PFS_INDICATORS
 
 CLINIC_DAY_MIN = activity.CLINIC_DAY_MIN
@@ -157,12 +158,13 @@ class Rates:
                     ratios[g].append(v / p)
         self.app_ratio = {g: statistics.median(v) for g, v in ratios.items() if len(v) >= 3}
 
-    def medicare(self, code: str, year: str, tier: str | None = None) -> int | None:
-        """Medicare's published amount for one unit in the office, weighted by the clinicians' states; 85% for an NP or PA."""
+    def medicare(self, code: str, year: str, tier: str | None = None, facility: bool = False) -> int | None:
+        """Medicare's published amount for one unit in the office (or a facility), weighted by the clinicians' states; 85%
+        for an NP or PA."""
         tier = tier or self.tier
         tot = w = 0.0
         for st, share in self.states.items():
-            v = (MPFS.get(year, {}).get(st, {}).get(code) or (None,))[0]
+            v = (MPFS.get(year, {}).get(st, {}).get(code) or (None, None))[1 if facility else 0]
             if v:
                 tot += share * v
                 w += share
@@ -472,6 +474,9 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
             groups_used.add(g)
         rate_card[code] = row
     medicare = {code: {y: v for y in MPFS_YEARS for v in [rates.medicare(code, y)] if v} for code in codes}
+    medicare_fac = {code: {y: v for y in MPFS_YEARS for v in [rates.medicare(code, y, facility=True)] if v} for code in codes}
+    asc = {y: {c: [ASC[y][c][0], ASC[y][c][2], {o: asc_amount(y, o, c) for o in WAGE_INDEX.get(y, {})}] for c in codes if c in ASC.get(y, {})}
+           for y in ASC}
     for c in codes:
         codes[c]["units_by_year"] = {y: round(v, 2) for y, v in units_m.get(c, {}).items()}
 
@@ -504,6 +509,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         fallback_paid = round(sum(paid_share.values()) / tot_a, 4)
 
     levers = _levers(svc, sched.get("clinic_days") or 0)
+    extras = _strategy_inputs(conn, ids, d0, d1)
     path = conn.execute(
         f"SELECT COALESCE(SUM(path_generated_cents),0), COALESCE(SUM(biopsy_lesions),0) FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?",
         (*ids, d0, d1)).fetchone() if ids else (0, 0)
@@ -523,7 +529,8 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         "coverage": {"last_complete_month": cov.get("last_complete_month"), "last_payment": cov.get("last_payment")},
         "schedule": sched, "levers": levers, "codes": codes,
         "mix": {f: [[g, round(v, 5)] for g, v in sorted(m.items(), key=lambda kv: -kv[1])] for f, m in mix.items()},
-        "mix_source": mix_info["source"], "rates": rate_card, "medicare": medicare, "rate_sources": dict(sources),
+        "mix_source": mix_info["source"], "rates": rate_card, "medicare": medicare, "medicare_fac": medicare_fac, "asc": asc,
+        "rate_sources": dict(sources),
         "payers": groups, "paid_share": paid_share, "paid_share_fallback": fallback_paid,
         "paid_share_class": paid_share_class, "paid_share_all": round(tot_pd / tot_al, 4) if tot_al else None,
         "pathology": {"generated_cents": path[0], "biopsy_lesions": path[1],
@@ -532,6 +539,8 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         "constants": {"ak_lesions_15_plus": AK_LESIONS_15_PLUS, "correctable_kinds": list(CORRECTABLE_KINDS), "k_range": list(K_RANGE),
                       "min_k_units": MIN_K_UNITS, "mppr_share": MPPR_SHARE, "app_medicare_share": APP_MEDICARE_SHARE},
         "add_on": sorted(c for c in codes if _add_on(c)),
+        "work_rvu": {y: {c: WORK_RVU[y][c] for c in codes if c in WORK_RVU.get(y, {})} for y in WORK_RVU},
+        "strategy": extras,
         "mppr": sorted(c for c in codes if (PFS_INDICATORS.get(c) or ("", ""))[1] == "2"),
         "global_days": {c: (PFS_INDICATORS.get(c) or ("", ""))[0] for c in codes if PFS_INDICATORS.get(c)},
     }
@@ -549,6 +558,39 @@ def _states(conn, ids: list[str], d0: str, d1: str) -> dict[str, float]:
                 n[st] += k
     tot = sum(n.values())
     return {st: round(v / tot, 4) for st, v in n.items()} if tot else {"KY": 1.0}
+
+
+def _strategy_inputs(conn, ids: list[str], d0: str, d1: str) -> dict:
+    """What the strategy lab needs beyond the schedule: money still recoverable on open findings this clinician
+    rendered, where the clinic days were (by office, from the EMA charge exports), and the fees payment vendors took."""
+    out: dict = {"open_findings": {}, "offices": {}, "vendor_fees": {}}
+    if not ids:
+        return out
+    try:
+        today = date.today().isoformat()
+        for cat, n, cents in conn.execute(
+                f"""SELECT category, COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings
+                    WHERE rendering_provider_npi IN ({_in(ids)}) AND status IN ('open', 'in_progress') AND COALESCE(stale, 0) = 0
+                      AND category IN ('denial', 'bundling', 'downcoding', 'underpayment') AND (appeal_deadline IS NULL OR appeal_deadline >= ?)
+                    GROUP BY 1""", (*ids, today)):
+            out["open_findings"][cat] = {"n": n, "cents": cents}
+    except sqlite3.Error:
+        pass
+    try:
+        for loc, days, pts in conn.execute(
+                f"""SELECT location, COUNT(*), SUM(patients) FROM provider_ema_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?
+                    AND location IS NOT NULL GROUP BY 1""", (*ids, d0, d1)):
+            out["offices"][loc] = {"days": days, "patients": pts or 0}
+    except sqlite3.Error:
+        pass
+    try:
+        for g, cents in conn.execute(
+                """SELECT payer_group, COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE signal = 'FEE_SKIM' AND COALESCE(stale, 0) = 0
+                   AND COALESCE(payment_date, '') >= ? GROUP BY 1""", (d0,)):
+            out["vendor_fees"][g or "unknown"] = cents
+    except sqlite3.Error:
+        pass
+    return out
 
 
 def _lever_codes(conn, tier: str, a: str, b: str) -> list[str]:

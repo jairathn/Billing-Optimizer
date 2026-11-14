@@ -55,7 +55,7 @@ const ROLE_LABEL = {mohs: 'Mohs surgeon', general: 'General dermatologist', apps
 const moneyK = c => { const v = Math.round((c || 0) / 100000) * 100000; return v < 0 ? '−' + money(-v) : money(v); };   // a year's figure, to the nearest $1,000
 
 async function calculatorTab(v){
-  const cs = state.calc = Object.assign({provider: 'mohs', months: 6, data: null, x: null, cal: null, target: ''}, state.calc || {});
+  const cs = state.calc = Object.assign({provider: 'mohs', months: 6, data: null, x: null, cal: null, target: '', view: 'calc'}, state.calc || {});
   state.pv = state.pv || {};
   cs.el = v;
   if(pvLocked() && !state.ownerKey){ pvUnlockForm(v); return; }
@@ -119,7 +119,9 @@ function calcDraw(v){
         <button class="seg ${x.year===d.rate_year?'on':''}" data-calc-year="${esc(d.rate_year)}">${esc(d.rate_year)} rates</button></div>` : ''}
       <button id="calcReset" class="ghost">Back to the schedule now</button>
     </div>
+    ${calcViews(v)}
   </div>
+  <div id="calcBody">
   <div class="panel" id="calcFall"></div>
   <div class="grid two">
     <div>
@@ -132,6 +134,7 @@ function calcDraw(v){
       <div class="panel" id="calcGoal"></div>
       <details class="panel" id="calcHow"><summary><b>How this is worked out</b></summary><div id="calcHowBody" class="small"></div></details>
     </div>
+  </div>
   </div>`;
   v.querySelectorAll('[data-calc-who]').forEach(b => b.onclick = () => { cs.provider = b.dataset.calcWho; render(); });
   v.querySelector('#calcWho').onchange = e => { if(e.target.value){ cs.provider = e.target.value; render(); } };
@@ -140,6 +143,12 @@ function calcDraw(v){
   v.querySelector('#calcReset').onclick = () => {
     const keep = {year: x.year, corrected: x.corrected, targets: x.targets, target_pct: x.target_pct, fix_mode: x.fix_mode, indexed: x.indexed, q: x.q};
     cs.x = Object.assign(JSON.parse(JSON.stringify(cs.base)), keep); calcDraw(v); };
+  v.querySelectorAll('[data-calc-view]').forEach(b => b.onclick = () => { cs.view = b.dataset.calcView; calcDraw(v); });
+  if(cs.view && cs.view !== 'calc'){
+    const run = {lab: labDraw, figures: figuresDraw, sheet: sheetDraw}[cs.view];
+    if(run) run(v).catch(e => { const b = v.querySelector('#calcBody'); if(b) b.innerHTML = `<div class="panel"><div class="note">${esc(e.message)}</div></div>`; });
+    return;
+  }
   calcInputs(v);
   calcUpdate();
   v.querySelector('#calcHowBody').innerHTML = calcHow(d);

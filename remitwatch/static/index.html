@@ -144,6 +144,11 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 h3.calc-h{font-size:13px;margin:12px 0 2px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 table.calc-fall td{padding:7px 8px}
 table.calc-fall tr.calc-total td{border-top:2px solid var(--ink)}
+.lab-card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}
+.lab-card .lab-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer}
+.lab-impact{margin:4px 0}
+.sheet h2{margin-top:0}
+@media print{header,nav,#drawer,.no-print,#calcCtl,.panel:not(.sheet){display:none !important} body{background:#fff} .sheet{border:0}}
 .more-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
 .more-card{display:flex;flex-direction:column;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--ink);text-decoration:none}
 .more-card:hover{border-color:var(--accent)}
@@ -251,6 +256,8 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/claim.js"></script>
 <script src="/static/calc_model.js"></script>
 <script src="/static/calc.js"></script>
+<script src="/static/lab_model.js"></script>
+<script src="/static/lab.js"></script>
 <script>
 // Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
 // right in smaller type. The analysis pages are under More (and open by their address).

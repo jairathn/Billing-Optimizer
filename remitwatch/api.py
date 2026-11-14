@@ -1729,6 +1729,63 @@ def activity_calculator(provider: str = Query("mohs", pattern=r"^[A-Za-z0-9:_-]{
     return _activity(calculator.calculator, provider, month_from, month_to, months)
 
 
+ASSUMPTIONS = "calculator/assumptions.json"     # in the state folder (cloud) or the meta table (server)
+ASSUMPTIONS_KEY = "calculator:assumptions"
+MAX_ASSUMPTIONS_BYTES = 256 * 1024
+
+
+@app.get("/api/activity/assumptions")
+def activity_assumptions(_: str = Depends(require_owner)):
+    """The practice's own figures the strategy lab works with (minutes per service, costs, pay plans, saved
+    scenarios), as the owner last saved them. Owner only: it holds what each clinician is paid."""
+    raw = None
+    if runtime.serverless():
+        _, st = _cloud_state()
+        raw = st.get(ASSUMPTIONS)
+    else:
+        conn = db()
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            r = conn.execute("SELECT value FROM meta WHERE key=?", (ASSUMPTIONS_KEY,)).fetchone()
+            raw = r[0].encode() if r else None
+        finally:
+            conn.close()
+    if not raw:
+        return {"assumptions": None}
+    try:
+        return {"assumptions": json.loads(raw)}
+    except ValueError:
+        return {"assumptions": None, "error": "the saved figures could not be read"}
+
+
+@app.post("/api/activity/assumptions")
+async def activity_assumptions_save(request: Request, user: str = Depends(require_owner)):
+    require_xhr(request)
+    body = await request.body()
+    if len(body) > MAX_ASSUMPTIONS_BYTES:
+        raise HTTPException(413, "too large")
+    try:
+        data = json.loads(body or b"{}")
+    except ValueError:
+        raise HTTPException(400, "not JSON")
+    if not isinstance(data, dict):
+        raise HTTPException(400, "expected an object")
+    data["saved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    blob = json.dumps(data, separators=(",", ":")).encode()
+    if runtime.serverless():
+        _, st = _cloud_state()
+        st.put(ASSUMPTIONS, blob)
+    else:
+        conn = db()
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ASSUMPTIONS_KEY, blob.decode()))
+            conn.commit()
+        finally:
+            conn.close()
+    return {"ok": True, "saved_at": data["saved_at"]}
+
+
 # --------------------------------------------------------------------------- progress: are we winning
 MONEY = "category IN ('downcoding','bundling','denial','underpayment') AND COALESCE(stale,0)=0"
 

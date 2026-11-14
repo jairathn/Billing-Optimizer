@@ -96,7 +96,7 @@
     const nw = shiftLevels(L.visits.new_mix, clamp(x.new_high, 0, 1), ['99204', '99205'], '99204', '99203');
     for (const [c, s] of Object.entries(est)) add(c, V * (1 - n) * s);
     for (const [c, s] of Object.entries(nw)) add(c, V * n * s);
-    add('G2211', V * (L.visits.g2211_per_visit || 0));
+    add('G2211', V * (L.visits.g2211_per_visit || 0) * (x.g2211_scale == null ? 1 : Math.max(0, x.g2211_scale)));
     // biopsies: one first code per patient, add-on codes for the rest
     const bp = Math.max(1, x.bx_per_patient || 1), P = Math.max(0, x.bx_patients), B = P * bp;
     for (const [c, s] of Object.entries(L.biopsy.first_mix)) add(c, P * s);
@@ -191,6 +191,8 @@
     // procedure of the day, paid at the reduced share
     const T = R + Lm, a = Math.min(1, T), fgPair = T > 0 ? R / T * a : 0, lmPair = T > 0 ? Lm / T * a : 0;
     const fgExtra = R - fgPair, lmExtra = Lm - lmPair;
+    // the strategy lab can move a share of chosen closures to a later day: they are then not paired with the first stage
+    const stage = x.stage || null, staged = c => (stage && stage.codes && stage.codes.includes(c) ? clamp(stage.share, 0, 1) : 0);
     const fg = Object.entries(L.flap_graft.mix), lay = Object.entries(L.layered.mix);
     for (const [f, siteShare] of [['17311', h], ['17313', 1 - h]]) {
       const Cs = C * siteShare;
@@ -198,9 +200,9 @@
       for (const [g, s, pf] of priced(f, mixOf(d, f))) {
         let firstFactor = 1 - a;
         for (const [j, phi] of fg) {
-          const pj = priceAt(j, g), paired = pairShare(f, j);
-          firstFactor += fgPair * phi * (paired && pf < pj ? rho : 1);
-          put(j, g, Cs * s * phi * pj * (fgPair * (paired && pf >= pj ? rho : 1) + fgExtra * (mppr.has(j) ? rho : 1)));
+          const pj = priceAt(j, g), paired = pairShare(f, j) , st = staged(j);
+          firstFactor += fgPair * phi * ((1 - st) * (paired && pf < pj ? rho : 1) + st);
+          put(j, g, Cs * s * phi * pj * (fgPair * ((1 - st) * (paired && pf >= pj ? rho : 1) + st) + fgExtra * (mppr.has(j) ? rho : 1)));
         }
         for (const [l, psi] of lay) {
           const pl = priceAt(l, g), paired = pairShare(f, l);

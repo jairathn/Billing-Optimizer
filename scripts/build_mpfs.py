@@ -193,6 +193,16 @@ def main() -> None:
         lines.append("    },")
     lines.append("}")
     lines.append("")
+    lines.append("# work RVUs per code (no modifier), the unit of most physician productivity pay")
+    lines.append("WORK_RVU: dict[str, dict[str, float]] = {")
+    for year, rv in ((a.year, rvu0), (a.next_year, rvu1)):
+        items = sorted((c, v[0]) for c, v in rv.items() if v[0])
+        lines.append(f"    {year!r}: {{")
+        for i in range(0, len(items), 10):
+            lines.append("        " + ", ".join(f"{c!r}: {w}" for c, w in items[i:i + 10]) + ",")
+        lines.append("    },")
+    lines.append("}")
+    lines.append("")
     lines.append("")
     lines.append("def medicare_amount(year: str, state: str, code: str, facility: bool = False) -> int | None:")
     lines.append('    """Cents Medicare allows a physician for one unit in that year and state; None when the code is not priced here."""')

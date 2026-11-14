@@ -225,3 +225,35 @@ def test_calculator_is_for_the_owner(db, monkeypatch):
     assert tc.get("/api/activity/calculator?provider=" + DOC, auth=("oda", "wrong-password-x")).status_code == 401
     assert tc.get("/api/activity/calculator?provider=nobody", auth=auth, headers={"X-Owner-Password": OWNER}).status_code == 404
     assert tc.get("/api/activity/calculator?provider=../x", auth=auth, headers={"X-Owner-Password": OWNER}).status_code == 422
+
+
+def test_assumptions_are_saved_for_the_owner(db, monkeypatch):
+    from fastapi.testclient import TestClient
+    from remitwatch import api
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "OWNER_PASSWORD", OWNER)
+    monkeypatch.delenv("REMITWATCH_MODE", raising=False)
+    tc, auth, owner = TestClient(api.app), ("oda", PW), {"X-Owner-Password": OWNER}
+    xhr = {"X-Requested-With": "remitwatch", **owner}
+    assert tc.get("/api/activity/assumptions", auth=auth).status_code == 403
+    assert tc.get("/api/activity/assumptions", auth=auth, headers=owner).json() == {"assumptions": None}
+    body = {"minutes": {"mohs_case": 20}, "costs": {"per_clinic_day": 3000}, "comp": {DOC: {"type": "pct", "pct": 0.35}}, "scenarios": []}
+    assert tc.post("/api/activity/assumptions", auth=auth, headers=owner, json=body).status_code == 400          # no X-Requested-With
+    assert tc.post("/api/activity/assumptions", auth=auth, headers={"X-Requested-With": "remitwatch"}, json=body).status_code == 403
+    r = tc.post("/api/activity/assumptions", auth=auth, headers=xhr, json=body)
+    assert r.status_code == 200 and r.json()["saved_at"]
+    got = tc.get("/api/activity/assumptions", auth=auth, headers=owner).json()["assumptions"]
+    assert got["minutes"] == {"mohs_case": 20} and got["comp"][DOC]["pct"] == 0.35
+    assert tc.post("/api/activity/assumptions", auth=auth, headers=xhr, content=b"[1,2]").status_code == 400
+    assert tc.post("/api/activity/assumptions", auth=auth, headers=xhr, content=b"x" * (300 * 1024)).status_code == 413
+
+
+def test_asc_table_matches_cms():
+    from remitwatch.ascfs import ASC, WAGE_INDEX, asc_amount
+    # Addendum AA CY2027: 17311 office-based (P2) at $391.48 national; 14040 A2 at $1,056.08; extra stages packaged (N1)
+    assert ASC["2027"]["17311"][:2] == ("P2", 39148) and ASC["2027"]["14040"][:2] == ("A2", 105608) and ASC["2027"]["17312"][0] == "N1"
+    # wage-adjusted for Newburgh (CBSA 21780, 2027 index 0.9555): national x (0.5 x 0.9555 + 0.5)
+    assert asc_amount("2027", "newburgh", "14040") == round(105608 * (0.5 * WAGE_INDEX["2027"]["newburgh"] + 0.5)) == 103258
+    assert asc_amount("2027", "newburgh", "17312") is None
