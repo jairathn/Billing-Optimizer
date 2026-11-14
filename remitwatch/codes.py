@@ -279,9 +279,10 @@ APPEAL_RULES: list[dict] = [
     {"match": r"^(UMR|Optum|Surest|UHC Integrated)", "kinds": None, "days": 365, "verified": False,
      "label": "UnitedHealthcare-administered plan: 12 months from the original EOB or PRA, as for UnitedHealthcare",
      "source": "UnitedHealthcare Administrative Guide 2026 (the plan's own rules not checked)"},
-    {"match": r"^Humana", "kinds": {"medicaid"}, "days": 540, "verified": False,
-     "label": "Humana Medicaid: 18 months used; Humana Healthy Horizons in Kentucky allows 24 months for a claim dispute, Indiana's plan 60 days",
-     "source": "Humana Healthy Horizons in Kentucky claim dispute notice (2025); Humana Healthy Horizons in Indiana provider manual (2026)"},
+    {"match": r"^Humana", "kinds": {"medicaid"}, "days": 120, "verified": False,
+     "label": "Humana Medicaid: 120 days used. Humana Healthy Horizons in Kentucky takes an appeal of a denial or reduction within 120 days "
+              "(KRS 205.534) and a contracted-rate dispute within 24 months; the Indiana plan allows 60 days. The remittance does not say which plan",
+     "source": "Humana Healthy Horizons in Kentucky appeals page (2026) and KRS 205.534; Humana Healthy Horizons in Indiana provider manual (2026)"},
     {"match": r"^Humana", "kinds": None, "days": 540, "verified": True,
      "label": "Humana: claim dispute within 18 months of receiving the original claim determination (counted here from the remittance date)",
      "source": "Humana Provider Manual 2026 (773902ALL0725), claims disputes, for all products"},

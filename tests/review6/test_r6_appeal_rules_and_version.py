@@ -40,12 +40,17 @@ def live_codes():
     return mod
 
 
+CHANGED_ON_PURPOSE = {("Humana Medicaid", "medicaid"): 120, ("Humana Medicare Advantage Medicaid", "medicaid"): 120}    # Kentucky 120 days, Indiana 60
+
+
 def test_no_payer_that_matched_before_gets_a_different_appeal_window():
-    """Fine: for every payer group the archive has, the number of days is what the live release used."""
+    """Fine: for every payer group the archive has, the number of days is what the live release used, except the
+    windows changed on purpose after the payers' pages were read again."""
     live = live_codes()
     for grp, kind in GROUPS:
         for plan in (None, "FEDERAL EMPLOYEE PROGRAM"):
-            assert appeal_rule(grp, kind, plan)["days"] == live.appeal_rule(grp, kind, plan)["days"], (grp, kind, plan)
+            want = CHANGED_ON_PURPOSE.get((grp, kind)) if not plan else None
+            assert appeal_rule(grp, kind, plan)["days"] == (want or live.appeal_rule(grp, kind, plan)["days"]), (grp, kind, plan)
 
 
 def test_a_unitedhealthcare_administered_tpa_is_now_called_confirmed():
