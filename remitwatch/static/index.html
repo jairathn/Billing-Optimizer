@@ -136,6 +136,12 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 .todo-box{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 12px;margin:8px 0 10px;background:var(--soft)}
 .todo-top{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-bottom:6px}.todo-what,.todo-next{margin:4px 0}
 .todo-actions{margin-top:8px}
+.calc-row{padding:6px 0;border-bottom:1px dashed var(--line)}
+.calc-row label{display:block;font-size:13px}
+.calc-ctl{display:flex;align-items:center;gap:8px}
+.calc-ctl input[type=range]{flex:1;min-width:0}
+.calc-num{width:78px}
+h3.calc-h{font-size:13px;margin:12px 0 2px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .more-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
 .more-card{display:flex;flex-direction:column;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--ink);text-decoration:none}
 .more-card:hover{border-color:var(--accent)}
@@ -241,12 +247,14 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/today.js"></script>
 <script src="/static/desk.js"></script>
 <script src="/static/claim.js"></script>
+<script src="/static/calc_model.js"></script>
+<script src="/static/calc.js"></script>
 <script>
 // Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
 // right in smaller type. The analysis pages are under More (and open by their address).
 const TABS = [['today','Today'],['denials','Denials'],['bundling','Bundling & modifiers'],['downcoding','Downcoding'],['contracts','Contracts & underpayment'],
-  ['fees','Fees & takebacks'],['worklist','Worklist'],['wins','Bigger wins'],['progress','Progress'],['data','Data'],['providers','Providers'],['more','More']];
-const REF_TABS = new Set(['progress','data','providers','more']);
+  ['fees','Fees & takebacks'],['worklist','Worklist'],['wins','Bigger wins'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
+const REF_TABS = new Set(['progress','data','providers','calculator','more']);
 const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates']];
 const ALIASES = {appeals:'worklist'};        // the earlier Appeals queue is the Worklist
 const NEEDS_SUMMARY = new Set(['overview','explorer','payers']);
@@ -359,7 +367,7 @@ async function render(){
   v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
   const fn = {today: todayTab, denials: x=>deskTab(x,'denials'), bundling: x=>deskTab(x,'bundling'), downcoding: x=>deskTab(x,'downcoding'),
     contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), wins: winsTab, more: moreTab, overview, payers, data,
-    alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab}[state.tab] || todayTab;
+    alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab, calculator: calculatorTab}[state.tab] || todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
 }

@@ -1717,6 +1717,17 @@ def activity_provider(provider_id: str, month_from: Optional[str] = Query(None, 
     return _activity(activity.detail, provider_id, month_from, month_to)
 
 
+@app.get("/api/activity/calculator")
+def activity_calculator(provider: str = Query("physicians", pattern=r"^[A-Za-z0-9:_-]{1,60}$"),
+                        month_from: Optional[str] = Query(None, alias="from", pattern=MONTH_PATTERN),
+                        month_to: Optional[str] = Query(None, alias="to", pattern=MONTH_PATTERN), _: str = Depends(require_owner)):
+    """What one clinician's schedule is worth at each payer's rates (remitwatch.calculator): the schedule now, per clinic
+    day, how it turns into billed codes, each payer's rate and Medicare's, and what was allowed. The page does the
+    arithmetic as the sliders move. Owner only: it is one named clinician's money."""
+    from . import calculator
+    return _activity(calculator.calculator, provider, month_from, month_to)
+
+
 # --------------------------------------------------------------------------- progress: are we winning
 MONEY = "category IN ('downcoding','bundling','denial','underpayment') AND COALESCE(stale,0)=0"
 
