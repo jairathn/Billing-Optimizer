@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 
 OPEN = ("open", "in_progress", "appealed")
+TODO = ("open", "in_progress")          # still to do: an item sent to the payer waits on the payer, not on a person
 
 # The kind of work each finding takes. A signal not named here falls to its action (fix and resubmit, appeal) and then
 # to "check first".
@@ -39,10 +41,18 @@ _WORK_OF = {
     "rule": {"PROCEDURE_BUNDLED", "ADDON_BUNDLED"},
     "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS"},
     "check": {"DENIED_NONCOVERED", "DENIED_DUPLICATE_UNPAID", "DENIED_PROVIDER", "DENIED_TIMELY_FILING", "DENIED_OTHER", "DENIED_MISSING_PRIMARY",
-              "CODE_CHANGED", "CLAIM_DENIED_UNPAID"},
+              "CODE_CHANGED"},
 }
 SIGNAL_WORK = {sig: key for key, sigs in _WORK_OF.items() for sig in sigs}
-WORK_SIGNALS = set(SIGNAL_WORK)
+# A whole claim denied takes the work its reason needs: fixed and sent again when the detector says so, else by the
+# reason (the same groups detect.py uses for lines), else a person checks it first.
+CLAIM_DENIAL = "CLAIM_DENIED_UNPAID"
+CLAIM_KIND_CARCS = {
+    "auth": {"197", "198", "15", "39", "210", "243"},
+    "note": {"50", "B12", "B22", "167", "56", "A1", "B5", "272", "58", "216", "150", "186", "151", "119", "222", "273", "B14", "35"},
+    "rule": {"97", "B10", "236", "234", "231", "M15"},
+}
+WORK_SIGNALS = set(SIGNAL_WORK) | {CLAIM_DENIAL}
 
 # What each finding is, in plain words, and the next step. Reason codes stay on the finding as detail.
 SIGNAL_LABELS: dict[str, tuple[str, str]] = {
@@ -91,10 +101,65 @@ SIGNAL_LABELS: dict[str, tuple[str, str]] = {
 STATUS_LABELS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
 
 
-def work_type(signal: str | None, actionable: str | None) -> str:
+def work_type(signal: str | None, actionable: str | None, carc: str | None = None) -> str:
+    if signal == CLAIM_DENIAL:
+        if actionable == "correct_and_resubmit":
+            return "fix"
+        return next((k for k, carcs in CLAIM_KIND_CARCS.items() if (carc or "") in carcs), "check")
     if signal in SIGNAL_WORK:
         return SIGNAL_WORK[signal]
     return {"correct_and_resubmit": "fix", "appeal": "rule"}.get(actionable or "", "check")
+
+
+def kind_sql(kind: str) -> tuple[str, list]:
+    """work_type as a condition on the findings table, so a list filtered by kind holds what the counts counted."""
+    parts, params = [], []
+    named = sorted(sg for sg, k in SIGNAL_WORK.items() if k == kind)
+    if named:
+        parts.append(f"signal IN ({','.join('?' * len(named))})")
+        params += named
+    whole = f"signal='{CLAIM_DENIAL}'"
+    if kind == "fix":
+        parts.append(f"({whole} AND actionable='correct_and_resubmit')")
+    elif kind in CLAIM_KIND_CARCS:
+        cs = sorted(CLAIM_KIND_CARCS[kind])
+        parts.append(f"({whole} AND COALESCE(actionable,'')!='correct_and_resubmit' AND carc IN ({','.join('?' * len(cs))}))")
+        params += cs
+    elif kind == "check":
+        cs = sorted(set().union(*CLAIM_KIND_CARCS.values()))
+        parts.append(f"({whole} AND COALESCE(actionable,'')!='correct_and_resubmit' AND COALESCE(carc,'') NOT IN ({','.join('?' * len(cs))}))")
+        params += cs
+    fallback = {"fix": "actionable='correct_and_resubmit'", "rule": "actionable='appeal'",
+                "check": "COALESCE(actionable,'') NOT IN ('correct_and_resubmit','appeal')"}.get(kind)
+    if fallback:            # a signal named nowhere goes by its action
+        known = sorted(WORK_SIGNALS)
+        parts.append(f"(COALESCE(signal,'') NOT IN ({','.join('?' * len(known))}) AND {fallback})")
+        params += known
+    return ("(" + " OR ".join(parts) + ")") if parts else "0", params
+
+
+def utc_today() -> str:
+    """Today as the rest of the dashboard and SQL date('now') see it."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def claim_windows(conn: sqlite3.Connection, statuses: tuple) -> dict[str, list[tuple]]:
+    """Each routine-rate finding's claims as (deadline, cents): such a finding stands for many claims with their own
+    filing dates, and every count here takes its claims by their own dates (detect.pattern_windows)."""
+    from .detect import pattern_windows
+    out: dict[str, list[tuple]] = defaultdict(list)
+    try:
+        for fid, _g, _c, d, _n, cents in pattern_windows(conn, statuses):
+            out[fid].append((d, cents or 0))
+    except sqlite3.Error:
+        pass
+    return out
+
+
+def _in(windows: list[tuple], lo: str, hi: str | None = None) -> tuple[int, int]:
+    """How many of a pattern's claims, and their cents, have a deadline from lo up to (not including) hi."""
+    got = [c for d, c in windows if d and d >= lo and (hi is None or d < hi)]
+    return len(got), sum(got)
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
@@ -123,32 +188,53 @@ def newest_payment(conn: sqlite3.Connection) -> str | None:
 
 
 def work(conn: sqlite3.Connection, today: str) -> dict:
-    """Open work still inside its filing window, by the kind of work it takes, with what falls due in 7 and 30 days.
-    A routine-rate pattern counts once, on its own latest date (its claims' dates are on the finding)."""
+    """Work still to do (not yet sent to the payer) inside its filing window, by the kind of work it takes, with what
+    falls due in 7 and 30 days, and what is sent and waiting on the payer. A routine-rate pattern counts its claims by
+    their own dates: it is in window while one claim is, with the cents of those claims."""
     soon7 = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
     soon30 = (date.fromisoformat(today) + timedelta(days=30)).isoformat()
+    wins = claim_windows(conn, TODO)
     out = {t["key"]: dict(t, n=0, cents=0, due7_n=0, due7_cents=0, due30_n=0, due30_cents=0, working_n=0) for t in WORK_TYPES}
-    for r in conn.execute(f"""SELECT signal, actionable, status, appeal_deadline, COALESCE(shortfall_cents,0) FROM findings
-                              WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0 AND appeal_deadline >= ?
-                                AND category IN ('denial','bundling','downcoding','underpayment')""", OPEN + (today,)):
-        sig, act, status, dl, cents = r
-        w = out[work_type(sig, act)]
+    expired_n = expired_cents = 0
+    for fid, sig, act, carc, status, dl, cents in conn.execute(
+            f"""SELECT finding_id, signal, actionable, carc, status, appeal_deadline, COALESCE(shortfall_cents,0) FROM findings
+                WHERE status IN ({','.join('?' * len(TODO))}) AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL
+                  AND category IN ('denial','bundling','downcoding','underpayment')""", TODO):
+        if fid in wins:
+            n_in, c_in = _in(wins[fid], today)
+            n7, c7 = _in(wins[fid], today, soon7)
+            n30, c30 = _in(wins[fid], today, soon30)
+            gone = [c for d, c in wins[fid] if d and d < today]
+            if gone:
+                expired_n += 1
+                expired_cents += sum(gone)
+            if not n_in:
+                continue
+            cents, d7, d30 = c_in, (1, c7) if n7 else (0, 0), (1, c30) if n30 else (0, 0)
+        elif dl < today:
+            expired_n += 1
+            expired_cents += cents
+            continue
+        else:
+            d7 = (1, cents) if dl < soon7 else (0, 0)
+            d30 = (1, cents) if dl < soon30 else (0, 0)
+        w = out[work_type(sig, act, carc)]
         w["n"] += 1
         w["cents"] += cents
-        if status != "open":
-            w["working_n"] += 1
-        if dl < soon7:
-            w["due7_n"] += 1
-            w["due7_cents"] += cents
-        if dl < soon30:
-            w["due30_n"] += 1
-            w["due30_cents"] += cents
+        w["working_n"] += status != "open"
+        w["due7_n"] += d7[0]
+        w["due7_cents"] += d7[1]
+        w["due30_n"] += d30[0]
+        w["due30_cents"] += d30[1]
     types = [out[t["key"]] for t in WORK_TYPES if out[t["key"]]["n"]]
     total = {k: sum(t[k] for t in types) for k in ("n", "cents", "due7_n", "due7_cents", "due30_n", "due30_cents", "working_n")}
-    expired = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status IN ({','.join('?' * len(OPEN))})
-                               AND COALESCE(stale,0)=0 AND appeal_deadline < ? AND category IN ('denial','bundling','downcoding','underpayment')""",
-                           OPEN + (today,)).fetchone()
-    return {"types": types, "total": total, "expired_n": expired[0], "expired_cents": expired[1]}
+    sent = conn.execute("""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status='appealed' AND COALESCE(stale,0)=0
+                           AND category IN ('denial','bundling','downcoding','underpayment')""").fetchone()
+    undated = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status IN ({','.join('?' * len(TODO))})
+                               AND COALESCE(stale,0)=0 AND appeal_deadline IS NULL
+                               AND category IN ('denial','bundling','downcoding','underpayment')""", TODO).fetchone()
+    return {"types": types, "total": total, "expired_n": expired_n, "expired_cents": expired_cents, "sent_n": sent[0], "sent_cents": sent[1],
+            "undated_n": undated[0], "undated_cents": undated[1]}
 
 
 def recovered(conn: sqlite3.Connection, today: str) -> dict:
@@ -158,7 +244,8 @@ def recovered(conn: sqlite3.Connection, today: str) -> dict:
     r = conn.execute("""SELECT COALESCE(SUM(CASE WHEN COALESCE(recovered_date, status_changed_at, last_seen) >= ? THEN recovered_cents END),0),
                                COALESCE(SUM(CASE WHEN COALESCE(recovered_date, status_changed_at, last_seen) >= ? THEN 1 END),0),
                                COALESCE(SUM(CASE WHEN substr(COALESCE(recovered_date, status_changed_at, last_seen),1,4) = ? THEN recovered_cents END),0)
-                        FROM findings WHERE status='resolved' AND COALESCE(recovered_cents,0) > 0""", (d30, d30, year)).fetchone()
+                        FROM findings WHERE status='resolved' AND COALESCE(recovered_cents,0) > 0 AND COALESCE(stale,0)=0
+                          AND category IN ('denial','bundling','downcoding','underpayment')""", (d30, d30, year)).fetchone()
     return {"last30_cents": r[0], "last30_n": r[1], "year_cents": r[2], "year": year}
 
 
@@ -168,7 +255,7 @@ def contract_levers(conn: sqlite3.Connection, newest: str | None) -> dict:
     codes with at least 20 clean lines carry a rate. A payer below Medicare is a contract question, not an appeal."""
     if not newest or not {"payer_rates", "exposure"} <= _tables(conn):
         return {"year": None, "payers": []}
-    year = str(int(newest[:4]) - 1) if newest[5:7] < "12" else newest[:4]
+    year = str(int(newest[:4]) - 1)        # payments for December's visits arrive into the next year: the newest year is never full
     rates = {}
     for r in conn.execute("""SELECT payer_group, code, tier, mode_cents, medicare_cents FROM payer_rates
                              WHERE year=? AND pos_class='office' AND n >= 20 AND medicare_cents > 0 AND mode_cents > 0""", (year,)):
@@ -200,13 +287,37 @@ def contract_levers(conn: sqlite3.Connection, newest: str | None) -> dict:
 
 
 def fee_levers(conn: sqlite3.Connection) -> dict:
-    """Fees set below what a payer allows (CHARGE_BELOW_RATE) and payment-vendor fees (FEE_SKIM), last two years."""
-    caps = _rows(conn, """SELECT procedure_code code, payer_group, year, shortfall_cents cents, title FROM findings
-                          WHERE signal='CHARGE_BELOW_RATE' AND COALESCE(stale,0)=0 ORDER BY year DESC, shortfall_cents DESC""")
-    fees = _rows(conn, """SELECT payer_group, SUM(shortfall_cents) cents, COUNT(*) months, MAX(month) last_month FROM findings
-                          WHERE signal='FEE_SKIM' AND COALESCE(stale,0)=0 AND status IN ('open','in_progress') GROUP BY payer_group ORDER BY cents DESC""")
-    return {"charge_caps": caps, "charge_cap_cents": sum(c["cents"] or 0 for c in caps), "payment_fees": fees,
-            "payment_fee_cents": sum(f["cents"] or 0 for f in fees)}
+    """Fees set below what a payer allows (CHARGE_BELOW_RATE), one row per code: what it left unpaid in all, the fee in
+    the newest year and the highest amount a capped payer allowed that year (raise the fee above it). And payment-vendor
+    fees (FEE_SKIM) still open, by payer, with the months they cover."""
+    by: dict[str, dict] = {}
+    for r in _rows(conn, """SELECT procedure_code code, payer_group, year, COALESCE(shortfall_cents,0) cents, evidence FROM findings
+                            WHERE signal='CHARGE_BELOW_RATE' AND COALESCE(stale,0)=0 AND procedure_code IS NOT NULL
+                              AND status IN ('open','in_progress')"""):
+        try:
+            ev = json.loads(r["evidence"] or "{}")
+        except (TypeError, ValueError):
+            ev = {}
+        c = by.setdefault(r["code"], {"code": r["code"], "cents": 0, "lines": 0, "payers": set(), "first_year": r["year"], "year": r["year"],
+                                      "charge_cents": None, "top_rate_cents": None})
+        c["cents"] += r["cents"]
+        c["lines"] += int(ev.get("lines") or 0)
+        c["payers"].add(r["payer_group"])
+        c["first_year"] = min(c["first_year"] or r["year"], r["year"] or c["first_year"])
+        if (r["year"] or "") > (c["year"] or ""):
+            c["year"], c["charge_cents"], c["top_rate_cents"] = r["year"], None, None
+        if r["year"] == c["year"]:
+            if ev.get("charge_cents"):
+                c["charge_cents"] = max(c["charge_cents"] or 0, int(ev["charge_cents"]))
+            if ev.get("payer_rate_cents"):
+                c["top_rate_cents"] = max(c["top_rate_cents"] or 0, int(ev["payer_rate_cents"]))
+    caps = sorted((dict(c, payers=sorted(p for p in c["payers"] if p)) for c in by.values()), key=lambda c: -c["cents"])
+    fees = _rows(conn, """SELECT payer_group, SUM(shortfall_cents) cents, COUNT(DISTINCT month) months, MIN(month) first_month, MAX(month) last_month
+                          FROM findings WHERE signal='FEE_SKIM' AND COALESCE(stale,0)=0 AND status IN ('open','in_progress')
+                          GROUP BY payer_group ORDER BY cents DESC""")
+    return {"charge_caps": caps, "charge_cap_cents": sum(c["cents"] for c in caps), "payment_fees": fees,
+            "payment_fee_cents": sum(f["cents"] or 0 for f in fees),
+            "payment_fee_since": min((f["first_month"] for f in fees if f.get("first_month")), default=None)}
 
 
 CAUSES = {
@@ -268,16 +379,18 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
                       "title": f"EMA charge exports miss {len(thin)} {'week' if len(thin) == 1 else 'weeks'} of visits",
                       "detail": "What was billed cannot be checked against what was paid for those visits.",
                       "who": "Practice administrator: pull Encounter & Charge Lines again for those dates of service."})
-    r = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0
-                         AND appeal_deadline >= ? AND deadline_basis LIKE '%not confirmed%'""", OPEN + (today,)).fetchone()
+    r = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0), SUM(actionable='correct_and_resubmit') FROM findings
+                         WHERE status IN ({','.join('?' * len(TODO))}) AND COALESCE(stale,0)=0 AND appeal_deadline >= ? AND deadline_basis LIKE '%not confirmed%'
+                           AND category IN ('denial','bundling','downcoding','underpayment')""", TODO + (today,)).fetchone()
     if r[0]:
-        items.append({"key": "deadlines", "ok": False, "n": r[0], "cents": r[1],
+        items.append({"key": "deadlines", "ok": False, "n": r[0], "cents": r[1], "fixes": r[2] or 0,
                       "title": f"{r[0]:,} open items rest on a filing window not yet confirmed",
-                      "detail": "The date shown is a conservative default for that payer type; the contract or the payer's manual decides.",
-                      "who": "Practice administrator: check the window in the payer's agreement."})
-    h = conn.execute(f"""SELECT COUNT(*), SUM(ema_handling IS NOT NULL) FROM findings WHERE status IN ({','.join('?' * len(OPEN))})
+                      "detail": "The date shown is a default for that payer type, or the appeal window where a corrected claim's limit is "
+                                "set by the payer agreement (often 90 days from the date of service, so it can be earlier).",
+                      "who": "Practice administrator: check the windows in the payer agreements, Anthem and UnitedHealthcare first."})
+    h = conn.execute(f"""SELECT COUNT(*), SUM(ema_handling IS NOT NULL) FROM findings WHERE status IN ({','.join('?' * len(TODO))})
                          AND COALESCE(stale,0)=0 AND appeal_deadline >= ? AND category IN ('denial','bundling','downcoding','underpayment')""",
-                     OPEN + (today,)).fetchone()
+                     TODO + (today,)).fetchone()
     if h[0]:
         share = (h[1] or 0) / h[0]
         if share < 0.5:
@@ -292,34 +405,50 @@ MONEY_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
 
 
 def batches(conn: sqlite3.Connection, today: str, limit: int = 200) -> list[dict]:
-    """Open work still inside its window, as batches: one kind of work for one payer, so one person can clear a pile
+    """Work still to do inside its window, as batches: one kind of work for one payer, so one person can clear a pile
     of the same thing in one sitting (one portal, one kind of letter). Each batch carries its first deadline, what
-    closes within 7 and 14 days, how many items someone has started or sent, and its commonest code."""
+    closes within 7 and 14 days, how many of its items someone has started, how many are already sent (those have left
+    the pile), and its commonest code. A routine-rate pattern counts its claims in window, by their own dates."""
     d7 = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
     d14 = (date.fromisoformat(today) + timedelta(days=14)).isoformat()
+    wins = claim_windows(conn, OPEN)
     out: dict[tuple, dict] = {}
-    for sig, act, status, dl, cents, payer, claim, code in conn.execute(
-            f"""SELECT signal, actionable, status, appeal_deadline, COALESCE(shortfall_cents,0), COALESCE(payer_group,'Unknown'), claim_key, procedure_code
+    for fid, sig, act, carc, status, dl, cents, payer, claim, code in conn.execute(
+            f"""SELECT finding_id, signal, actionable, carc, status, appeal_deadline, COALESCE(shortfall_cents,0), COALESCE(payer_group,'Unknown'),
+                       claim_key, procedure_code
                 FROM findings WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0 AND appeal_deadline >= ?
                   AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""", OPEN + (today,) + MONEY_CATEGORIES):
-        kind = work_type(sig, act)
-        b = out.setdefault((kind, payer), {"kind": kind, "payer_group": payer, "n": 0, "cents": 0, "claims": set(), "first_deadline": dl,
-                                           "due7_n": 0, "due14_n": 0, "started_n": 0, "sent_n": 0, "codes": {}})
+        kind = work_type(sig, act, carc)
+        b = out.setdefault((kind, payer), {"kind": kind, "payer_group": payer, "n": 0, "cents": 0, "claims": set(), "pattern_claims": 0,
+                                           "first_deadline": None, "due7_n": 0, "due14_n": 0, "started_n": 0, "sent_n": 0, "codes": {}})
+        if status == "appealed":
+            b["sent_n"] += 1
+            continue
+        if fid in wins:
+            mine = [(d, c) for d, c in wins[fid] if d and d >= today]
+            if not mine:
+                continue
+            cents, first = sum(c for _d, c in mine), min(d for d, _c in mine)
+            b["pattern_claims"] += len(mine)
+        else:
+            first = dl
+            if claim:
+                b["claims"].add(claim)
         b["n"] += 1
         b["cents"] += cents
-        if claim:
-            b["claims"].add(claim)
-        b["first_deadline"] = min(b["first_deadline"], dl)
-        b["due7_n"] += dl < d7
-        b["due14_n"] += dl < d14
+        b["first_deadline"] = min(b["first_deadline"] or first, first)
+        b["due7_n"] += first < d7
+        b["due14_n"] += first < d14
         b["started_n"] += status == "in_progress"
-        b["sent_n"] += status == "appealed"
         if code:
             b["codes"][code] = b["codes"].get(code, 0) + cents
     rows = []
     for b in out.values():
+        if not b["n"]:
+            continue
         top = max(b["codes"].items(), key=lambda kv: kv[1])[0] if b["codes"] else None
-        rows.append(dict({k: v for k, v in b.items() if k not in ("claims", "codes")}, claims=len(b["claims"]), top_code=top))
+        rows.append(dict({k: v for k, v in b.items() if k not in ("claims", "codes", "pattern_claims")},
+                         claims=len(b["claims"]) + b["pattern_claims"], top_code=top))
     rows.sort(key=lambda r: -r["cents"])
     return rows[:limit]
 
@@ -332,10 +461,10 @@ def to_decide(conn: sqlite3.Connection, newest: str | None, days: int = 120) -> 
     since = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
     groups = _rows(conn, f"""SELECT signal, COALESCE(payer_group,'Unknown') payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents,
                                     MAX(payment_date) last_paid
-                             FROM findings WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0 AND appeal_deadline IS NULL
+                             FROM findings WHERE status IN ({','.join('?' * len(TODO))}) AND COALESCE(stale,0)=0 AND appeal_deadline IS NULL
                                AND actionable='review' AND category IN ({','.join('?' * len(MONEY_CATEGORIES))}) AND payment_date >= ?
-                             GROUP BY 1,2 ORDER BY cents DESC""", OPEN + MONEY_CATEGORIES + (since,))
-    return {"n": sum(g["n"] for g in groups), "cents": sum(g["cents"] for g in groups), "since": since, "groups": groups[:30]}
+                             GROUP BY 1,2 ORDER BY cents DESC""", TODO + MONEY_CATEGORIES + (since,))
+    return {"n": sum(g["n"] for g in groups), "cents": sum(g["cents"] for g in groups), "since": since, "days": days, "groups": groups[:30]}
 
 
 def missed(conn: sqlite3.Connection, today: str, days: int = 30) -> dict:
@@ -363,14 +492,15 @@ def follow_ups(conn: sqlite3.Connection, newest: str | None, days: int = 30) -> 
     if not newest:
         return {"n": 0, "cents": 0}
     cut = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
-    r = conn.execute("""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status='appealed' AND COALESCE(stale,0)=0
-                        AND COALESCE(appealed_at, status_changed_at) < ?""", (cut,)).fetchone()
+    r = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status='appealed' AND COALESCE(stale,0)=0
+                         AND COALESCE(appealed_at, status_changed_at) < ? AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""",
+                     (cut,) + MONEY_CATEGORIES).fetchone()
     return {"n": r[0], "cents": r[1], "days": days}
 
 
 def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
     """Everything the home screen shows, in one call."""
-    today = today or date.today().isoformat()
+    today = today or utc_today()
     tables = _tables(conn)
     if "findings" not in tables:
         return {"ready": False}
@@ -379,4 +509,5 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
             "batches": batches(conn, today), "decide": to_decide(conn, newest), "missed": missed(conn, today), "done": done(conn, today),
             "follow_ups": follow_ups(conn, newest), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn),
             "causes": denial_causes(conn, newest), "health": data_health(conn, newest, today), "work_types": WORK_TYPES,
-            "labels": {k: {"label": v[0], "next": v[1], "work": SIGNAL_WORK.get(k)} for k, v in SIGNAL_LABELS.items()}, "statuses": STATUS_LABELS}
+            "labels": {k: {"label": v[0], "next": v[1], "work": SIGNAL_WORK.get(k)} for k, v in SIGNAL_LABELS.items()}, "statuses": STATUS_LABELS,
+            "claim_kinds": {k: sorted(v) for k, v in CLAIM_KIND_CARCS.items()}}

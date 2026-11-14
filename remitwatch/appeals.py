@@ -88,6 +88,18 @@ def _evidence_block(d: dict) -> str:
     return "\n".join(out)
 
 
+def _medicare_route(f: dict) -> str:
+    """How a Medicare Part B finding is worked, as its filing date was set (detect, codes.CORRECTED_RULES): a new claim
+    for one returned as unprocessable (MA130), a reopening for a clerical error, else a redetermination."""
+    if f.get("actionable") == "correct_and_resubmit":
+        basis = f.get("deadline_basis") or ""
+        if "MA130" in basis:
+            return "new_claim"
+        if "reopening" in basis and "takes no documents" not in basis:
+            return "reopening"
+    return "redetermination"
+
+
 def _process(f: dict) -> str:
     """Name the payer's own first-level process so the request lands in the right queue."""
     grp, kind = f.get("payer_group") or "", f.get("payer_kind")
@@ -95,6 +107,13 @@ def _process(f: dict) -> str:
         return ("This is a Claim Payment Reconsideration, the first step of the Claim Payment Dispute process in the Anthem provider manual, "
                 "filed within the two years the manual allows from the issue date of the Explanation of Payment.")
     if kind == "medicare":
+        route = _medicare_route(f)
+        if route == "reopening":
+            return ("This is a request to reopen the initial determination shown on the remittance advice to correct a clerical error, "
+                    "made within one year of that determination (42 CFR 405.980(b)(1)).")
+        if route == "new_claim":
+            return ("The claim was returned as unprocessable (remark code MA130), which carries no appeal rights; "
+                    "it is being sent again as a new claim with the error corrected.")
         return "This is a request for redetermination of the initial determination shown on the remittance advice."
     if kind == "medicare_advantage":
         return "This is a contracted provider payment dispute filed under the plan's provider manual."
@@ -143,7 +162,7 @@ def _closing(d: dict, ask: str) -> str:
         legal.append(LEGAL["ERISA"])
     elif kind == "medicare_advantage":
         legal.append(LEGAL["MA"])
-    elif kind == "medicare":
+    elif kind == "medicare" and _medicare_route(f) == "redetermination":
         legal.append(LEGAL["MEDICARE"])
     return "\n".join([
         "",
@@ -368,6 +387,28 @@ def build_packet(d: dict, show_phi: bool = False, clinical: list[str] | None = N
             "CLAIM_DENIED_UNPAID": "Correct the error named by the reason and remark codes and resubmit the claim.",
         }
         corrected_claim = fixes.get(sig, "Correct the claim and resubmit.")
+        if f.get("payer_kind") == "medicare":
+            # Medicare Part B takes no corrected claims (frequency code 7): a clerical error is fixed by a reopening, a claim
+            # returned as unprocessable by a new claim, and anything that needs records by a redetermination
+            route = _medicare_route(f)
+            what = {
+                "EM_BUNDLED_NO_MODIFIER": f"Add modifier 25 to {code} (if the visit was significant and separately identifiable from the same-day procedure).",
+                "EM_BUNDLED_MOD57_MINOR": f"Change modifier 57 to 25 on {code}: the same-day procedure has a 0- or 10-day global period.",
+                "DENIED_MISSING_MODIFIER": f"Add or correct the modifier on {code} that the remark code names ({f.get('rarc') or 'see the remittance'}).",
+                "DENIED_CODING": f"Correct the code or modifier combination on {code} ({f.get('carc') or ''} {f.get('rarc') or ''}).".replace("( ", "(").replace(" )", ")"),
+            }.get(sig, "Correct the error the reason and remark codes name.")
+            if route == "new_claim":
+                corrected_claim = (f"Medicare returned this claim as unprocessable (MA130), so it has no appeal rights. Fix what the remark codes name "
+                                   f"({f.get('rarc') or 'see the remittance'}) and send it as a new claim (frequency code 1, not a corrected claim) "
+                                   "within 1 calendar year of the date of service.")
+            elif route == "reopening":
+                corrected_claim = (f"{what} Medicare Part B does not take corrected claims, so do not send one: ask the Medicare contractor for a "
+                                   "reopening to correct the clerical error, through its provider portal, by phone or in writing, within 1 year of "
+                                   "the initial determination.")
+            else:
+                corrected_claim = (f"Send a redetermination request with the information or records the remark code asks for "
+                                   f"({f.get('rarc') or f.get('carc') or 'see the remittance'}) within 120 days of receiving the remittance. "
+                                   "A reopening takes no documents, and Medicare Part B does not accept corrected claims.")
 
     letter = _header(d, subject, show_phi) + body + _closing(d, ask)
     rule = appeal_rule(f.get("payer_group"), f.get("payer_kind"), f.get("plan"))

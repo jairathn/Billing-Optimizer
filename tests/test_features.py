@@ -945,7 +945,13 @@ def test_a_fixed_claim_runs_on_the_corrected_claim_clock_where_the_payer_publish
     assert {k: corrected_rule("Humana Medicare Advantage", "medicare_advantage")[k] for k in ("days", "clock")} == {"days": 365, "clock": "dos"}
     assert corrected_rule("Humana Medicaid", "medicaid")["clock"] == "dos"
     assert corrected_rule("Anthem / BCBS Medicare Advantage", "medicare_advantage")["clock"] == "dos"
-    assert corrected_rule("Medicare KY (CGS J15)", "medicare")["clock"] == "remit" and "reopening" in corrected_rule("Medicare IN (WPS J8)", "medicare")["label"]
+    # Medicare Part B: a clerical error is a reopening (a year); anything that needs records is a redetermination (120 days)
+    clerical = corrected_rule("Medicare IN (WPS J8)", "medicare", "N822", "DENIED_MISSING_MODIFIER", "16")
+    assert (clerical["clock"], clerical["days"]) == ("remit", 365) and clerical["label"].startswith("Medicare Part B takes no corrected claims: ask for a reopening")
+    assert corrected_rule("Medicare KY (CGS J15)", "medicare", None, "CLAIM_DENIED_UNPAID", "4")["days"] == 365
+    for sig, carc in (("DENIED_MISSING_INFO", "250"), ("CLAIM_DENIED_UNPAID", "16"), (None, None)):
+        records = corrected_rule("Medicare KY (CGS J15)", "medicare", "N463", sig, carc)
+        assert (records["clock"], records["days"]) == ("remit", 120) and "redetermination" in records["label"], sig
     assert corrected_rule("Medicare KY (CGS J15)", "medicare", "N822,MA130")["clock"] == "dos"
     assert corrected_rule("Anthem / BCBS", "commercial") is None and corrected_rule("UnitedHealthcare", "commercial") is None
     denied = "CAS*CO*16*150.00~LQ*HE*N822~"

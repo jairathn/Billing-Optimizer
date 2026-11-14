@@ -386,6 +386,34 @@ def _day(offset: int) -> str:
     return (datetime.now(timezone.utc).date() + timedelta(days=offset)).isoformat()
 
 
+DEADLINE_RANGES = {"valid": None, "week": 7, "month": 30}       # filters that count a routine-rate finding's claims by their own dates
+
+
+def _range(deadline: str) -> tuple[str, str | None]:
+    days = DEADLINE_RANGES[deadline]
+    return _day(0), (_day(days) if days else None)
+
+
+def _pattern_cents(w: str, params: list, deadline: str | None) -> tuple[int, dict]:
+    """The routine-rate findings a filter holds, by their claims: how much their claims outside the date range take off
+    the total, and for each the cents and the first deadline of its claims in range (in window, without a range)."""
+    found = rows(f"SELECT finding_id, COALESCE(shortfall_cents,0) c FROM findings{w}{' AND' if w else ' WHERE'} signal='SECOND_RATE'", tuple(params))
+    if not found:
+        return 0, {}
+    lo, hi = _range(deadline) if deadline in DEADLINE_RANGES else (_day(0), None)
+    wins: dict[str, list] = defaultdict(list)
+    for fid, _g, _c, d, _n, cents in _windows(STATUSES):
+        wins[fid].append((d, cents or 0))
+    delta, each = 0, {}
+    for r in found:
+        mine = [(d, c) for d, c in wins.get(r["finding_id"], []) if d and d >= lo and (hi is None or d < hi)]
+        cents = sum(c for _d, c in mine)
+        if deadline in DEADLINE_RANGES:
+            delta += cents - r["c"]
+        each[r["finding_id"]] = (cents, min((d for d, _c in mine), default=None), len(mine))
+    return delta, each
+
+
 def _windows(statuses: tuple = ("open",)) -> list[tuple]:
     conn = db()
     try:
@@ -431,8 +459,14 @@ def _search_text(request: Request | None, q: str | None) -> str | None:
 
 
 def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None,
-             patient_of: str | None = None, kind: str | None = None):
+             patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0):
     where, params = [], []
+    if live:
+        where.append("COALESCE(stale,0)=0")     # what the current rules still find, as the home screen counts it
+    if paid_days:
+        # paid in the last N days to the newest payment, as the home screen's denial causes count them
+        where.append("payment_date > (SELECT date(MAX(payment_date), ?) FROM transactions WHERE COALESCE(superseded,0)=0)")
+        params.append(f"-{int(paid_days)} days")
     if patient_of:
         if SHOW_PHI:
             # everything for the patient on this claim: same name and same member number, exactly. A search on the number
@@ -454,14 +488,10 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         where.append("signal IN (%s)" % ",".join("?" * len(sigs)))
         params += sigs
     if kind:
-        from .insights import SIGNAL_WORK
-        sigs = sorted(sg for sg, k in SIGNAL_WORK.items() if k == kind)
-        if kind == "review":
-            where.append("signal NOT IN (%s)" % ",".join("?" * len(SIGNAL_WORK)))
-            params += sorted(SIGNAL_WORK)
-        else:
-            where.append("signal IN (%s)" % ",".join("?" * len(sigs)) if sigs else "0")
-            params += sigs
+        from .insights import kind_sql
+        clause, kparams = kind_sql(kind)
+        where.append(clause)
+        params += kparams
     if category:
         cats = [c for c in category.split(",") if c]
         where.append("category IN (%s)" % ",".join("?" * len(cats)))
@@ -498,12 +528,26 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         params.extend(ids)
     elif deadline == "expired":
         where.append("appeal_deadline < date('now')")
-    elif deadline == "valid":
-        where.append("appeal_deadline >= date('now')")
-    elif deadline in ("week", "month"):
-        where.append(f"appeal_deadline >= date('now') AND appeal_deadline < date('now','+{7 if deadline == 'week' else 30} days')")
+    elif deadline in DEADLINE_RANGES:
+        # a routine-rate finding is in range when one of its claims is, by that claim's own date
+        lo, hi = _range(deadline)
+        ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and d >= lo and (hi is None or d < hi)})
+        dated = "appeal_deadline >= date('now')" + ("" if hi is None else f" AND appeal_deadline < date('now','+{DEADLINE_RANGES[deadline]} days')")
+        where.append(f"((COALESCE(signal,'') != 'SECOND_RATE' AND {dated})" + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
+        params.extend(ids)
     elif deadline == "none":
         where.append("appeal_deadline IS NULL")
+    elif deadline == "missed":
+        # the home screen's "missed": windows that closed in the last 30 days
+        where.append("appeal_deadline >= date('now','-30 days') AND appeal_deadline < date('now')")
+    elif deadline == "followup":
+        # the home screen's follow-ups: sent more than 30 days before the newest payment and still not paid
+        where.append("status='appealed' AND COALESCE(appealed_at, status_changed_at) < "
+                     "(SELECT date(MAX(payment_date),'-30 days') FROM transactions WHERE COALESCE(superseded,0)=0)")
+    elif deadline == "decide":
+        # the home screen's "decide": no filing date until a person says what the item is, paid in the 120 days to the newest payment
+        where.append("appeal_deadline IS NULL AND actionable='review' AND payment_date >= "
+                     "(SELECT date(MAX(payment_date),'-120 days') FROM transactions WHERE COALESCE(superseded,0)=0)")
     q = (q or "").strip()[:200]
     if q:
         clause = "patient_control_number LIKE ? OR title LIKE ? OR payer_name LIKE ? OR procedure_code LIKE ? OR carc LIKE ? OR rarc LIKE ?"
@@ -571,15 +615,30 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
              status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
              provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
              patient_of: Optional[str] = Query(None, max_length=200), sort: str = "shortfall", limit: int = Query(100, ge=1, le=2000),
-             offset: int = Query(0, ge=0, le=10**9), kind: Optional[str] = Query(None, max_length=20), request: Request = None,
-             _: str = Depends(require_auth)):
+             offset: int = Query(0, ge=0, le=10**9), kind: Optional[str] = Query(None, max_length=20), live: int = Query(0, ge=0, le=1),
+             paid: int = Query(0, ge=0, le=3650), request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind)
-    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": "appeal_deadline ASC, shortfall_cents DESC",
-             "payer": "payer_group, appeal_deadline ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
+                         _extra(request), patient_of, kind, bool(live), paid)
+    delta, each = _pattern_cents(w, params, deadline)
+    due, order_params = "appeal_deadline", []
+    if each and sort in ("deadline", "payer"):
+        # a routine-rate finding sorts by the first of its claims still in range, not by the last
+        nxt = [(fid, d) for fid, (_c, d, _n) in each.items() if d]
+        if nxt:
+            due = "COALESCE(CASE finding_id " + " ".join("WHEN ? THEN ?" for _ in nxt) + " END, appeal_deadline)"
+            order_params = [x for pair in nxt for x in pair]
+    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": f"{due} ASC, shortfall_cents DESC",
+             "payer": f"payer_group, {due} ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
+    if sort not in ("deadline", "payer"):
+        order_params = []
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
-    data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?", tuple(params) + (limit, offset)))
-    return {"total": total["n"], "shortfall_cents": total["shortfall_cents"], "items": data}
+    data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
+                              tuple(params) + tuple(order_params) + (limit, offset)))
+    for r in data:
+        if r.get("finding_id") in each:
+            r["window_cents"], r["next_deadline"], r["window_claims"] = each[r["finding_id"]]
+    cents = (total["shortfall_cents"] or 0) + delta if total["n"] else total["shortfall_cents"]
+    return {"total": total["n"], "shortfall_cents": cents, "items": data}
 
 
 def _csv_cell(v: Any) -> Any:
@@ -596,10 +655,11 @@ def _csv_cell(v: Any) -> Any:
 def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, payer: Optional[str] = None, year: Optional[str] = None,
                  status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
-                 patient_of: Optional[str] = Query(None, max_length=200), kind: Optional[str] = Query(None, max_length=20), request: Request = None,
+                 patient_of: Optional[str] = Query(None, max_length=200), kind: Optional[str] = Query(None, max_length=20),
+                 live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650), request: Request = None,
                  _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind)
+                         _extra(request), patient_of, kind, bool(live), paid)
     data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
     # a routine-rate finding is about many claims: list them, each with its own filing deadline
     pattern = {r["finding_id"]: r["evidence"] for r in rows("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'")} \
@@ -1090,6 +1150,26 @@ def brief(_: str = Depends(require_auth)):
         return insights.brief(conn)
     finally:
         conn.close()
+
+
+@app.get("/api/worklist/counts")
+def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None, status: str = "open", deadline: Optional[str] = None,
+                    q: Optional[str] = None, signal: Optional[str] = None, live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650),
+                    request: Request = None, _: str = Depends(require_auth)):
+    """Items and dollars for each kind of work under the worklist's other filters, so each tab counts what a click on it
+    opens. Counts only: no patient, claim or date."""
+    from .insights import WORK_TYPES, work_type
+    w, params = _filters(signal, category, payer, None, status, None, None, _search_text(request, q), None, None, deadline, None, None,
+                         None, None, bool(live), paid)
+    out = {t["key"]: {"key": t["key"], "n": 0, "cents": 0} for t in WORK_TYPES}
+    for r in rows(f"SELECT signal, actionable, carc, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w} GROUP BY 1,2,3", tuple(params)):
+        k = out[work_type(r["signal"], r["actionable"], r["carc"])]
+        k["n"] += r["n"]
+        k["cents"] += r["cents"]
+    delta, _each = _pattern_cents(w, params, deadline)
+    out[work_type("SECOND_RATE", "appeal")]["cents"] += delta
+    kinds = list(out.values())
+    return {"kinds": kinds, "n": sum(k["n"] for k in kinds), "cents": sum(k["cents"] for k in kinds)}
 
 
 @app.get("/api/coverage")

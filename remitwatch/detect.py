@@ -1350,10 +1350,14 @@ class Detector:
         plan = base.get("plan") or (base.get("contract_class") or "").strip() or None
         rule = appeal_rule(grp, kind, plan)
         deadline, deadline_basis = None, None
-        fix = corrected_rule(grp, kind, rarc) if actionable == "correct_and_resubmit" else None
+        fix = None
+        if actionable == "correct_and_resubmit":
+            # MA130 and other remarks can sit on the claim (MOA) as well as on the line
+            rems = ",".join(x for x in [rarc or ""] + list(self.claim_rem.get(base.get("claim_key"), [])) if x)
+            fix = corrected_rule(grp, kind, rems, signal, carc)
         if fix:
             # a corrected claim (a reopening for Medicare Part B) runs on its own clock, from the remittance or the date of service
-            start = pay_date if fix["clock"] == "remit" else (base.get("service_date") or base.get("statement_from") or pay_date)
+            start = pay_date if fix["clock"] == "remit" else (self._first_service_day(base) or pay_date)
             deadline = _add_days(start, fix["days"])
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
         elif actionable in ("appeal", "correct_and_resubmit"):
@@ -1667,6 +1671,8 @@ class Detector:
                     # worked as part of a routine-rate finding: it stays there whatever the baseline now says
                     self.pattern_lines[worked_in].append(l)
                     continue
+                if allowed == (l.get("charge_cents") or 0):
+                    continue        # paid exactly the charge: the fee is below the rate (CHARGE_BELOW_RATE), nothing to appeal
                 rate, basis, r = self.usual_rate(l, code)
                 if not rate or not r or r["share"] < 0.4 or r["n"] < 20:
                     continue
@@ -2054,6 +2060,41 @@ class Detector:
                            key_parts=(grp, year, code, tier), claim=base)
         self.emit_charge_caps()
 
+    def _newest_fees(self) -> tuple[str | None, dict]:
+        """The practice's fee now: the commonest one-unit charge on lines with a date of service in the newest 90 days of
+        the archive, for each (payer group, code, provider type, place of service) and for each code. Returns the first
+        day of those 90 days and the fees."""
+        days = [l["service_date"] for l in self.lines if l.get("service_date")]
+        if not days:
+            return None, {}
+        since = _add_days(max(days), -90)
+        seen: dict[tuple, Counter] = defaultdict(Counter)
+        for l in self.lines:
+            if (l.get("service_date") or "") >= since and (l.get("charge_cents") or 0) > 0 and l.get("procedure_code") \
+                    and l.get("paid_units") in (None, 1, 1.0) and not l.get("pricing_mod") and l.get("claim_status_code") != "22":
+                code = l["procedure_code"]
+                seen[(l["payer_group"], code, l.get("provider_tier") or "unknown", l.get("pos_class") or "office")][l["charge_cents"]] += 1
+                seen[(code,)][l["charge_cents"]] += 1
+        return since, {k: cnt.most_common(1)[0][0] for k, cnt in seen.items()}
+
+    def _first_service_day(self, base: dict) -> str | None:
+        """The first date of service a finding covers, for clocks that count from it: the line's own date or its claim's
+        statement date, else the start of the line's service period, else the claim's earliest line."""
+        day = base.get("service_date") or base.get("statement_from")
+        if day or not base.get("claim_key"):
+            return day
+        try:
+            if base.get("line_key"):
+                r = self.conn.execute("""SELECT COALESCE(l.service_date, l.service_period_start, cl.statement_from) FROM lines l
+                                         JOIN claims cl ON cl.claim_key = l.claim_key WHERE l.line_key=?""", (base["line_key"],)).fetchone()
+            else:
+                r = self.conn.execute("""SELECT COALESCE(MIN(COALESCE(l.service_date, l.service_period_start)), cl.statement_from)
+                                         FROM claims cl LEFT JOIN lines l ON l.claim_key = cl.claim_key WHERE cl.claim_key=?""",
+                                      (base["claim_key"],)).fetchone()
+        except sqlite3.Error:
+            return None
+        return r[0] if r and r[0] else None
+
     def emit_charge_caps(self) -> None:
         """The practice's own charge below what a payer allows. Payers pay the lesser of the charge and their rate, so
         on such a line the payer paid exactly the charge and the rest is lost, on every line, until the fee is raised.
@@ -2064,9 +2105,12 @@ class Detector:
         Nothing here can be appealed: the payer paid what was billed."""
         capped: dict[tuple, list] = defaultdict(list)
         uncapped: dict[tuple, Counter] = defaultdict(Counter)
+        since, newest_fee = self._newest_fees()
         for l in self.lines:
             if l.get("claim_status_code") not in ("1", "19") or (l.get("paid_cents") or 0) <= 0:
                 continue
+            if self.standing.get(l["line_key"]) != l.get("paid_cents"):
+                continue        # a payment taken back (or reversed and made again) counts once, on the payment that stands
             allowed, charge = l.get("allowed_cents") or 0, l.get("charge_cents") or 0
             if allowed <= 0 or charge <= 0 or l.get("original_procedure_code") or l.get("paid_units") not in (None, 1, 1.0) \
                     or l.get("pricing_mod") or l.get("surg_rank", 0) > 1 or not l.get("procedure_code"):
@@ -2087,6 +2131,11 @@ class Detector:
             if len(short) < 5 or gap < 10000:
                 continue
             grp, year, code, tier, pos = key
+            if since and not any((l.get("service_date") or "") >= since for l in short):
+                # nothing charged below the rate lately: if the fee is now above this payer's rate it was raised, and nothing is left to change
+                now = newest_fee.get((grp, code, tier, pos)) or newest_fee.get((code,))
+                if now and now >= rate:
+                    continue
             charges = Counter(l["charge_cents"] for l in short)
             charge = charges.most_common(1)[0][0]
             base = {"payer_group": grp, "payer_kind": self.kinds.get(grp), "payer_name": grp, "year": year, "procedure_code": code,
@@ -2280,7 +2329,20 @@ class Detector:
                 from .link import build_links
                 build_links(self.store, log=lambda *_a: None)
         except Exception:
-            pass
+            # the links could not be built: the weeks the exports miss are still measured (they need no links), and if
+            # even that fails the old list is dropped rather than served as today's
+            from .link import EMA_COVERAGE_KEY, save_ema_coverage
+            try:
+                self.conn.rollback()
+                save_ema_coverage(self.conn)
+                self.conn.commit()
+            except Exception:
+                try:
+                    self.conn.rollback()
+                    self.conn.execute("DELETE FROM meta WHERE key=?", (EMA_COVERAGE_KEY,))
+                    self.conn.commit()
+                except Exception:
+                    pass
         self.load()
         self.build_baselines()
         self.run_line_rules()

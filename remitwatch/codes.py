@@ -273,10 +273,10 @@ APPEAL_RULES: list[dict] = [
     {"match": r"^Anthem", "kinds": {"medicaid"}, "days": 90, "verified": True,
      "label": "Anthem Kentucky Medicaid: payment appeal within 90 calendar days of the remittance date",
      "source": "Anthem Kentucky Medicaid Provider Manual, payment appeals"},
-    {"match": r"^(UnitedHealthcare|UHC)", "kinds": None, "days": 365, "verified": True,
+    {"match": r"^(UnitedHealthcare|UHC)(?! Integrated)", "kinds": None, "days": 365, "verified": True,
      "label": "UnitedHealthcare: reconsideration and appeal together within 12 months of the original EOB or PRA (one window for both steps)",
      "source": "UnitedHealthcare Administrative Guide 2026, chapter 10 (revised May 13, 2026); uhcprovider.com appeals page"},
-    {"match": r"^(UMR|Optum|Surest)", "kinds": None, "days": 365, "verified": False,
+    {"match": r"^(UMR|Optum|Surest|UHC Integrated)", "kinds": None, "days": 365, "verified": False,
      "label": "UnitedHealthcare-administered plan: 12 months from the original EOB or PRA, as for UnitedHealthcare",
      "source": "UnitedHealthcare Administrative Guide 2026 (the plan's own rules not checked)"},
     {"match": r"^Humana", "kinds": {"medicaid"}, "days": 540, "verified": False,
@@ -312,30 +312,45 @@ CORRECTED_RULES: list[dict] = [
     {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "rarc": "MA130", "days": 365, "clock": "dos", "verified": True,
      "label": "Medicare Part B: a claim returned as unprocessable (MA130) is fixed by sending a new claim within 1 calendar year of the date of service (42 CFR 424.44)",
      "source": "42 CFR 424.44; WPS, How to correct a rejected claim"},
-    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 365, "clock": "remit", "verified": True,
+    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "clerical": True, "days": 365, "clock": "remit", "verified": True,
      "label": "Medicare Part B takes no corrected claims: ask for a reopening (a clerical error, including a wrong or missing modifier) within 1 year of the initial determination (42 CFR 405.980)",
      "source": "42 CFR 405.980(b); CMS Claims Processing Manual ch. 34 sec. 10.4; CGS reopening and redetermination job aid, December 2025"},
+    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 120, "clock": "remit", "verified": True,
+     "label": "Medicare Part B: information or records the claim lacked go in a redetermination within 120 days of receipt of the remittance "
+              "(42 CFR 405.942); a reopening takes no documents",
+     "source": "42 CFR 405.942; CGS reopening and redetermination job aid, December 2025 (documentation is not reviewed in a reopening)"},
     {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "clock": "dos", "verified": True,
      "label": "Humana Medicare Advantage: corrected claim within 1 year. Humana's tip sheet counts the year from the original determination, "
               "but its manual limits claims to 1 year from the date of service, so the earlier date is shown",
      "source": "Humana, Claim Disputes and Corrected Claims tip sheet, August 2026; Humana Provider Manual 2026, claims submission"},
-    {"match": r"^Humana", "kinds": {"medicaid"}, "days": 365, "clock": "dos", "verified": True,
-     "label": "Humana Healthy Horizons in Kentucky: corrected claim within 365 days of the date of service",
+    {"match": r"^Humana", "kinds": {"medicaid"}, "days": 365, "clock": "dos", "verified": False,
+     "label": "Humana Medicaid: corrected claim within 365 days of the date of service, the Kentucky plan's rule; the remittance does not say "
+              "whether the member is in the Kentucky or the Indiana plan, and the Indiana plan's limit is not checked",
      "source": "Humana Healthy Horizons in Kentucky provider manual, 2025"},
     {"match": r"^Anthem", "kinds": {"medicare_advantage"}, "days": 365, "clock": "dos", "verified": True,
      "label": "Anthem Medicare Advantage: corrected claim within 365 days of the date of service, if the original claim was sent on time",
      "source": "Anthem Medicare Advantage provider guidebook (effective January 1, 2027); Anthem corrected claims reimbursement policy"},
 ]
 AGREEMENT_FILING_NOTE = (" For a corrected claim the filing limit in the participation agreement applies instead, counted from the date of "
-                         "service, and it can be much shorter (often 90 days).")
+                         "service; it can be much shorter (often 90 days) and is not confirmed here.")
+
+# What a Medicare Part B reopening can fix: a clerical error, such as a wrong or missing modifier or code. Information or
+# records the claim lacked go in a redetermination, because a reopening takes no documents.
+MEDICARE_CLERICAL_SIGNALS = {"EM_BUNDLED_NO_MODIFIER", "EM_BUNDLED_MOD57_MINOR", "DENIED_MISSING_MODIFIER", "DENIED_CODING"}
+MEDICARE_CLERICAL_CARCS = {"4", "5", "6", "11", "146", "181", "182", "199"}         # a whole claim denied for its codes or modifiers
 
 
-def corrected_rule(payer_group: str | None, payer_kind: str | None, rarcs: str | None = None) -> dict | None:
+def corrected_rule(payer_group: str | None, payer_kind: str | None, rarcs: str | None = None, signal: str | None = None,
+                   carc: str | None = None) -> dict | None:
     """The clock for fixing and resending a claim to this payer: {'days', 'clock' ('dos' or 'remit'), 'label', 'source',
-    'verified'}, or None when only the participation agreement says."""
+    'verified'}, or None when only the participation agreement says. `rarcs` are the remarks on the line and its claim;
+    `signal` and `carc` say whether a Medicare fix is clerical (a reopening) or needs records (a redetermination)."""
     grp, kind = payer_group or "", payer_kind or "other"
+    clerical = signal in MEDICARE_CLERICAL_SIGNALS or (signal == "CLAIM_DENIED_UNPAID" and (carc or "") in MEDICARE_CLERICAL_CARCS)
     for r in CORRECTED_RULES:
         if r.get("rarc") and r["rarc"] not in (rarcs or ""):
+            continue
+        if r.get("clerical") and not clerical:
             continue
         if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
             return {k: r[k] for k in ("days", "clock", "label", "source", "verified")}

@@ -53,7 +53,9 @@ def test_weeks_the_exports_miss_are_measured_on_the_full_store_and_served_from_t
                             {"week": "2026-03-09", "claims": 41, "in_ema": 10},
                             {"week": "2026-03-16", "claims": 40, "in_ema": 0},
                             {"week": "2026-03-23", "claims": 10, "in_ema": 0}]
+    measured = cov.pop("measured_at")
     assert link.ema_coverage(store.conn) == cov                        # what the run saved is what the store holds
+    assert measured[:2] == "20" and "T" in measured                      # and says when it was measured
     store.close()
 
     from fastapi.testclient import TestClient
