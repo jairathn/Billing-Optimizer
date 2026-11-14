@@ -418,13 +418,14 @@ def test_visit_shares_on_medicare_days(db, monkeypatch):
         n += 1
         rows += [(n, "2026-03-20", "17311", [], "PLAN A HEALTH", "CI"), (n, "2026-03-20", "99213", ["57"], "PLAN A HEALTH", "CI")]
     _remits(db, rows)
-    # the fixture holds far fewer lines than services, like the dashboard's copy: nothing is measured
+    # the fixture holds far fewer lines than services, like the dashboard's copy: the counts kept in provider_days are
+    # read instead, and this fixture's days carry none
     s = _calc(db, DOC)["strategy"]
-    assert s["mohs_visit57_share"] is None and s["bx_visit_share"] is None and s["visit_shares_payer"] is None
+    assert s["visit_shares_from"] == "provider_days" and s["mohs_visit57_share"] is None and s["bx_visit_share"] is None
     monkeypatch.setattr(calculator, "LINES_COMPLETE", 0.0)
     s = _calc(db, DOC)["strategy"]
     assert s["mohs_visit57_share"] == 0.4 and s["mohs_visit25_share"] == 0.08 and s["bx_visit_share"] == 0.9
-    assert s["visit_shares_days"] == {"mohs": 25, "biopsy": 30} and s["visit_shares_payer"] == "medicare"
+    assert s["visit_shares_days"] == {"mohs": 25, "biopsy": 30} and s["visit_shares_payer"] == "medicare" and s["visit_shares_from"] == "lines"
     assert _calc(db, "mohs")["strategy"]["mohs_visit57_share"] == 0.4          # the average of its one member
     assert _calc(db, PA)["strategy"]["bx_visit_share"] is None                  # no days of their own
 
@@ -490,9 +491,32 @@ def test_pathology_read_under_the_takers_own_number(db, monkeypatch):
         ("P2", "PTB000004", "ZZPATIENTB", reader, "88305", "2026-03-02", 4000, "2026-03-15"),    # read by someone else
         ("P3", "PTC000005", "ZZPATIENTC", DOC, "88305", "2026-03-02", 7000, "2026-03-15"),       # not their biopsy patient
     ])
-    d = _calc(db, DOC)                                    # the fixture holds few lines, like the dashboard's copy
+    d = _calc(db, DOC)                                    # few lines, like the dashboard's copy, and days that carry no count
     assert d["pathology"]["own_read_cents"] is None and d["pathology"]["own_read_share"] is None
     monkeypatch.setattr(calculator, "LINES_COMPLETE", 0.0)
     P = _calc(db, DOC)["pathology"]
-    assert P["own_read_share"] == 0.6 and P["own_read_cents"] == round(0.6 * P["generated_cents"])
+    assert P["own_read_share"] == 0.6 and P["own_read_cents"] == round(0.6 * P["generated_cents"]) and P["own_read_from"] == "lines"
     assert _calc(db, PA)["pathology"]["own_read_share"] is None          # no biopsies of theirs among these claims
+
+
+def test_the_counts_the_activity_build_keeps_are_read_where_the_lines_are_not(db):
+    """The dashboard's copy: the shares and the own-read pathology come from provider_days. A copy made before the build
+    kept those columns gives None, not an error."""
+    c = sqlite3.connect(db)
+    c.execute("""UPDATE provider_days SET mcare_mohs_patients = 5, mcare_mohs_e57 = 2, mcare_mohs_e25 = 1, mcare_bx_patients = 4, mcare_bx_e25 = 3,
+                 path_generated_own_cents = 3000 WHERE provider_id = ?""", (DOC,))
+    c.commit()
+    c.close()
+    d = _calc(db, DOC)
+    s, P = d["strategy"], d["pathology"]
+    assert s["visit_shares_from"] == "provider_days" and s["visit_shares_days"] == {"mohs": 5 * 96, "biopsy": 4 * 96}
+    assert (s["mohs_visit57_share"], s["mohs_visit25_share"], s["bx_visit_share"]) == (0.4, 0.2, 0.75)
+    assert P["own_read_from"] == "provider_days" and P["own_read_share"] == 0.5 and P["own_read_cents"] == P["generated_cents"] // 2
+    assert _calc(db, "mohs")["strategy"]["mohs_visit57_share"] == 0.4
+    c = sqlite3.connect(db)
+    for col in ("mcare_mohs_patients", "mcare_mohs_e57", "mcare_mohs_e25", "mcare_bx_patients", "mcare_bx_e25", "path_generated_own_cents"):
+        c.execute(f"ALTER TABLE provider_days DROP COLUMN {col}")
+    c.commit()
+    c.close()
+    d = _calc(db, DOC)
+    assert d["strategy"]["mohs_visit57_share"] is None and d["strategy"]["visit_shares_from"] is None and d["pathology"]["own_read_cents"] is None

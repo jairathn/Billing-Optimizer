@@ -613,7 +613,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
     path = conn.execute(
         f"SELECT COALESCE(SUM(path_generated_cents),0), COALESCE(SUM(biopsy_lesions),0) FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?",
         (*ids, d0, d1)).fetchone() if ids else (0, 0)
-    own_read = _own_read_share(conn, ids, d0, d1) if ids else None
+    own_read, own_read_from = _own_read_share(conn, ids, d0, d1) if ids else (None, None)
     totals = {"allowed_cents": sum(s["allowed"] for s in svc.values()), "paid_cents": sum(s["paid"] for s in svc.values())}
     by_family: dict[str, list] = defaultdict(lambda: [0, 0])
     for s in svc.values():
@@ -637,10 +637,11 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         "payers": groups, "paid_share": paid_share, "paid_share_fallback": fallback_paid,
         "paid_share_class": paid_share_class, "paid_share_all": round(tot_pd / tot_al, 4) if tot_al else None,
         # own_read_cents: the part of generated_cents the biopsy-taker read and billed under their own number, already in
-        # their 'path' line (None where the database holds only some claims' lines, as the dashboard's copy does)
+        # their 'path' line (None in a copy made before the activity build kept it)
         "pathology": {"generated_cents": path[0], "biopsy_lesions": path[1],
                       "per_lesion_cents": round(path[0] / path[1]) if path[1] else None,
-                      "own_read_share": own_read, "own_read_cents": round(path[0] * own_read) if own_read is not None else None},
+                      "own_read_share": own_read, "own_read_cents": round(path[0] * own_read) if own_read is not None else None,
+                      "own_read_from": own_read_from},
         "actual": {**totals, "families": {f: {"allowed_cents": v[0], "paid_cents": v[1]} for f, v in by_family.items()}},
         "constants": {"ak_lesions_15_plus": AK_LESIONS_15_PLUS, "correctable_kinds": list(CORRECTABLE_KINDS), "k_range": list(K_RANGE),
                       "min_k_units": MIN_K_UNITS, "mppr_share": MPPR_SHARE, "app_medicare_share": APP_MEDICARE_SHARE},
@@ -731,18 +732,29 @@ def _lines_complete(conn, d0: str, d1: str) -> bool:
     return bool(folded) and held >= LINES_COMPLETE * folded
 
 
-def _own_read_share(conn, ids: list[str], d0: str, d1: str) -> float | None:
+def _own_read_share(conn, ids: list[str], d0: str, d1: str, route: str | None = None) -> tuple[float | None, str | None]:
     """Of the pathology read for the clinicians' own biopsies (the specimen taken from a patient on a day, the slide
     billed for the same patient and day), the share that the biopsy-taker read and billed under their own NPI. That part
-    is in their own 'path' line already, so it must not be counted again as pathology their biopsies generate.
+    is in their own 'path' line already, so it must not be counted again as pathology their biopsies generate. Returns
+    (share, where it was read). Pooled over the clinicians of a role.
 
-    The serving tables cannot say it: provider_days credits the reads to the taker without saying who read them, and the
-    pairing is by patient, which is never stored. So it is read from the remittance lines, as remitwatch.activity pairs
-    them (the patient's name on the claim, kept in memory only), and only where the database holds the window's lines;
-    otherwise None. Pooled over the clinicians of a role."""
+    Where the database holds the window's remittance lines (the full store) it is read from them, pairing as
+    remitwatch.activity does (the patient's name on the claim, kept in memory only). Elsewhere (the dashboard's copy)
+    from provider_days.path_generated_own_cents, which the activity build keeps beside path_generated_cents. `route`
+    ('lines' or 'provider_days') forces one, for comparing them."""
     try:
-        if not _lines_complete(conn, d0, d1):
-            return None
+        lines = _lines_complete(conn, d0, d1) if route is None else route == "lines"
+    except sqlite3.Error:
+        lines = False
+    if not lines:
+        try:
+            gen, own = conn.execute(
+                f"""SELECT SUM(path_generated_cents), SUM(path_generated_own_cents) FROM provider_days
+                    WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?""", (*ids, d0, d1)).fetchone()
+        except sqlite3.Error:               # a copy made before the build kept the column
+            return None, None
+        return (round((own or 0) / gen, 4), "provider_days") if gen and own is not None else (None, None)
+    try:
         rows = conn.execute(
             f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi), substr(l.patient_control_number, 1, 9),
                        cl.patient_last, cl.patient_first, l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code),
@@ -752,7 +764,7 @@ def _own_read_share(conn, ids: list[str], d0: str, d1: str) -> float | None:
                   AND (substr(l.procedure_code, 1, 1) = '8' OR substr(l.procedure_code, 1, 5) IN ({_in(activity.BIOPSY)}))""",
             (d0, d1, *activity.BIOPSY)).fetchall()
     except sqlite3.Error:
-        return None
+        return None, None
     mine = set(ids)
     took: dict[tuple, str] = {}
     reads: dict[tuple, list] = {}                     # (bill, date, code, claim) -> [payment date, allowed, reader, patient]
@@ -777,46 +789,32 @@ def _own_read_share(conn, ids: list[str], d0: str, d1: str) -> float | None:
         if who:
             every += allowed
             own += allowed if reader == who else 0
-    return round(own / every, 4) if every > 0 else None
+    return (round(own / every, 4), "lines") if every > 0 else (None, None)
 
 
-def _visit_shares(conn, ids: list[str], d0: str, d1: str) -> dict:
-    """On Medicare fee-for-service patient-days in the window: the share of Mohs patient-days (a first stage billed) on
-    which the clinician also billed an E/M with modifier 57 (mohs_visit57_share) or 25 (mohs_visit25_share), and the
-    share of biopsy patient-days (a first biopsy code) with an E/M with modifier 25 (bx_visit_share). A role average
-    gives the mean of its members' own shares (members with VISIT_SHARE_MIN_DAYS such days).
-
-    Read from the remittance lines (a line's rendering NPI, else its claim's; the patient-day is the bill, the first
-    nine characters of the patient control number, and the date), so only where the database holds the window's lines:
-    otherwise each share is None and the page keeps its default. Counts only, nothing about a patient leaves here."""
-    keys = ("mohs_visit57_share", "mohs_visit25_share", "bx_visit_share")
-    out: dict = {k: None for k in keys}
-    out["visit_shares_days"] = {"mohs": 0, "biopsy": 0}
-    out["visit_shares_payer"] = "medicare"
-    if not ids:
-        return out
-    try:
-        if not _lines_complete(conn, d0, d1):
-            out["visit_shares_payer"] = None
-            return out
-        rows = conn.execute(
-            f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) npi, substr(l.patient_control_number, 1, 9),
-                       l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code), l.modifiers, cl.payer_name,
-                       cl.claim_filing_indicator
-                FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
-                WHERE l.service_date BETWEEN ? AND ? AND cl.claim_status_code IN ('1', '19')
-                  AND (substr(l.procedure_code, 1, 3) IN ('992', '173') OR substr(l.original_procedure_code, 1, 3) IN ('992', '173')
-                       OR substr(l.procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}) OR substr(l.original_procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}))
-                  AND COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) IN ({_in(ids)})""",
-            (d0, d1, *BIOPSY_FIRST, *BIOPSY_FIRST, *ids)).fetchall()
-    except sqlite3.Error:
-        out["visit_shares_payer"] = None
-        return out
+def _visit_counts_lines(conn, ids: list[str], d0: str, d1: str) -> dict[str, Counter]:
+    """Per clinician: Medicare fee-for-service patient-days with a Mohs first stage (mohs) and of those with an E/M billed
+    with modifier 57 (m57) or 25 (m25); with a first biopsy (bx) and of those with an E/M-25 (b25). From the remittance
+    lines: a line's rendering NPI, else its claim's; the patient-day is the patient's name on the claim (kept in memory
+    only; the bill, the first nine characters of the patient control number, where there is no name) and the date, so a
+    visit billed apart from the procedure the same day still counts; the modifiers as billed where the payer reported a
+    change."""
+    rows = conn.execute(
+        f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) npi, substr(l.patient_control_number, 1, 9),
+                   l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code),
+                   COALESCE(NULLIF(NULLIF(l.original_modifiers, ''), '[]'), l.modifiers), cl.payer_name, cl.claim_filing_indicator,
+                   cl.patient_last, cl.patient_first
+            FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
+            WHERE l.service_date BETWEEN ? AND ? AND cl.claim_status_code IN ('1', '19')
+              AND (substr(l.procedure_code, 1, 3) IN ('992', '173') OR substr(l.original_procedure_code, 1, 3) IN ('992', '173')
+                   OR substr(l.procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}) OR substr(l.original_procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}))
+              AND COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) IN ({_in(ids)})""",
+        (d0, d1, *BIOPSY_FIRST, *BIOPSY_FIRST, *ids)).fetchall()
     em = set(EM_NEW) | set(EM_EST)
     kinds: dict[tuple, str] = {}
     day: dict[tuple, list] = defaultdict(lambda: [False, False, False, False])      # Mohs, biopsy, E/M-57, E/M-25
-    for npi, bill, sd, raw, mods, payer, cfi in rows:
-        if not bill or not sd:
+    for npi, bill, sd, raw, mods, payer, cfi, last, first in rows:
+        if not sd:
             continue
         k = (payer, cfi)
         if k not in kinds:
@@ -827,7 +825,8 @@ def _visit_shares(conn, ids: list[str], d0: str, d1: str) -> dict:
         if code not in em and code not in ("17311", "17313") and code not in BIOPSY_FIRST:
             continue
         m = set(re.findall(r"[0-9A-Z]{2}", (mods or "") + " " + " ".join((raw or "").upper().split()[1:])))
-        f = day[(npi, bill, sd)]
+        patient = (re.sub(r"[^A-Z0-9]", "", last.upper()), re.sub(r"[^A-Z0-9]", "", (first or "").upper())) if (last or "").strip() else ("#", bill)
+        f = day[(npi, patient, sd)]
         f[0] = f[0] or code in ("17311", "17313")
         f[1] = f[1] or code in BIOPSY_FIRST
         if code in em:
@@ -843,6 +842,44 @@ def _visit_shares(conn, ids: list[str], d0: str, d1: str) -> dict:
         if bx:
             c["bx"] += 1
             c["b25"] += e25
+    return per
+
+
+def _visit_counts_stored(conn, ids: list[str], d0: str, d1: str) -> dict[str, Counter]:
+    """The same counts as _visit_counts_lines, as the activity build keeps them in provider_days (its own attribution of
+    each encounter to a clinician and its own patient-days)."""
+    per: dict[str, Counter] = {}
+    for pid, mohs, m57, m25, bx, b25 in conn.execute(
+            f"""SELECT provider_id, SUM(mcare_mohs_patients), SUM(mcare_mohs_e57), SUM(mcare_mohs_e25), SUM(mcare_bx_patients), SUM(mcare_bx_e25)
+                FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? GROUP BY 1""", (*ids, d0, d1)):
+        per[pid] = Counter({"mohs": mohs or 0, "m57": m57 or 0, "m25": m25 or 0, "bx": bx or 0, "b25": b25 or 0})
+    return per
+
+
+def _visit_shares(conn, ids: list[str], d0: str, d1: str, route: str | None = None) -> dict:
+    """On Medicare fee-for-service patient-days in the window: the share of Mohs patient-days (a first stage billed) on
+    which the clinician also billed an E/M with modifier 57 (mohs_visit57_share) or 25 (mohs_visit25_share), and the
+    share of biopsy patient-days (a first biopsy code) with an E/M with modifier 25 (bx_visit_share). A role average
+    gives the mean of its members' own shares (members with VISIT_SHARE_MIN_DAYS such days).
+
+    Read from the remittance lines where the database holds the window's (the full store), else from the counts the
+    activity build keeps in provider_days (the dashboard's copy); visit_shares_from says which. `route` ('lines' or
+    'provider_days') forces one, for comparing them. Each share is None where neither can say, and the page keeps its
+    default. Counts only: nothing about a patient leaves here."""
+    keys = ("mohs_visit57_share", "mohs_visit25_share", "bx_visit_share")
+    out: dict = {k: None for k in keys}
+    out.update({"visit_shares_days": {"mohs": 0, "biopsy": 0}, "visit_shares_payer": None, "visit_shares_from": None})
+    if not ids:
+        return out
+    try:
+        lines = _lines_complete(conn, d0, d1) if route is None else route == "lines"
+    except sqlite3.Error:                    # no remittance lines at all
+        lines = False
+    try:
+        per = _visit_counts_lines(conn, ids, d0, d1) if lines else _visit_counts_stored(conn, ids, d0, d1)
+    except sqlite3.Error:                    # a copy made before the build kept the counts
+        return out
+    out.update({"visit_shares_payer": "medicare", "visit_shares_from": "lines" if lines else "provider_days"})
     out["visit_shares_days"] = {"mohs": sum(c["mohs"] for c in per.values()), "biopsy": sum(c["bx"] for c in per.values())}
     for key, num, den in (("mohs_visit57_share", "m57", "mohs"), ("mohs_visit25_share", "m25", "mohs"), ("bx_visit_share", "b25", "bx")):
         own = [c[num] / c[den] for c in per.values() if c[den] >= VISIT_SHARE_MIN_DAYS]
