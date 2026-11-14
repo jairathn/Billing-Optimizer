@@ -301,11 +301,13 @@
     for (const c of fromLevers) done.add(c);
     // closures past what the levers carry (more than two on a case: calculator.py leaves them under 'everything else',
     // under the lever's own code) are later procedures of the day: each payer's rate, the multiple-procedure share where
-    // the code takes it, moved by the slider of their group
+    // the code takes it, moved by the slider of their group. Closures billed on a day with none of the clinician's cases
+    // to pair with (levers.other.unpaired) are that day's own procedure: full rate.
     for (const [c, v] of Object.entries(L.other.codes || {})) {
       if (!fromLevers.has(c) || !(v > 0)) continue;
-      const n = v * otherScale(d, x, c);
-      if (n > 0) for (const [g, s, p] of priced(c, mixOf(d, c))) put(c, g, n * s * p * (mppr.has(c) ? rho : 1));
+      const sc = otherScale(d, x, c), n = v * sc;
+      const un = Math.min(v, +((L.other.unpaired || {})[c]) || 0) * sc;
+      if (n > 0) for (const [g, s, p] of priced(c, mixOf(d, c))) put(c, g, (un + (n - un) * (mppr.has(c) ? rho : 1)) * s * p);
     }
     // 2027: G2211 is gone at Medicare and the plans that follow it; modifier B1 pays 16% of the visit instead. Every
     // other payer keeps its own share of the code (no renormalising Medicare's share onto them).

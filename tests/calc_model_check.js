@@ -562,4 +562,15 @@ const LM = require('../remitwatch/static/lab_model.js');
   ok('lab_2027_only', r5.steps[0].skipped, '');
 }
 
+// closures billed on a day with none of the clinician's cases to pair with (levers.other.unpaired) are that day's own
+// procedure: full rate, not the multiple-procedure share
+{
+  const d = payload(); d.levers.other.codes['14040'] = 0.5; d.levers.other.groups['14040'] = 'rest';
+  d.levers.other.unpaired = { '14040': 0.2 };
+  const x = Object.assign(M.defaults(d), { mohs_cases: 0, excisions: 0, visits: 0, bx_patients: 0, ak_patients: 0, other_radiation: 0 });
+  const a = M.allowedByCode(d, x, '2026', false)['14040'] || {};
+  const want = (0.2 + 0.3 * 0.5) * 0.6 * 70000;
+  ok('unpaired_closures_full_rate', near(a['Medicare KY'], want), JSON.stringify([a, want]));
+}
+
 process.stdout.write(JSON.stringify(out));

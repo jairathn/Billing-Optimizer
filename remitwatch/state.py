@@ -63,10 +63,10 @@ class LocalState:
         file or the new one, and two writers never share a temporary file."""
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix="." + os.path.basename(p) + ".", suffix=".part")
         try:
-            os.chmod(tmp, 0o666 & ~_UMASK)
             with os.fdopen(fd, "wb") as fh:
                 for c in chunks:
                     fh.write(c)
+            os.chmod(tmp, 0o666 & ~_UMASK)
             os.replace(tmp, p)
         except BaseException:
             try:
