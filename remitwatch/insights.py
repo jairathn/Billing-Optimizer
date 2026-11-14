@@ -21,17 +21,22 @@ SMALL_CENTS = 2000                      # items known to be worth under $20: abo
 # The kind of work each finding takes. A signal not named here falls to its action (fix and resubmit, appeal) and then
 # to "check first".
 WORK_TYPES: list[dict] = [
-    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number",
+    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number", "short": "Correct it in EMA and send a corrected claim.",
      "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send the correction the way the payer takes it before the date shown (a corrected claim for most payers; for Medicare a reopening, a new claim or a redetermination, as the item says), then press Mark sent."},
     {"key": "auth", "label": "Get the authorization", "needs": "The authorization record, or the payer's portal",
+     "short": "Find the authorization and appeal, or ask for a retro-auth.",
      "how": "Denied for a missing prior authorization. Find the authorization in EMA and appeal with it; if there is none, ask the payer for a retro-authorization. Tell the front desk so it does not happen again."},
     {"key": "note", "label": "Appeal with the visit note", "needs": "The visit or procedure note from EMA",
+     "short": "Send the appeal letter with the visit note from EMA.",
      "how": "The payer says the visit or level was not supported, or bundled a separately documented visit. Build the appeal letter, attach the note for that date, send it, then press Mark sent."},
     {"key": "rule", "label": "Appeal on the coding rules", "needs": "Nothing extra: the letter cites the rule",
+     "short": "Send the appeal letter; it cites the coding rule.",
      "how": "The payer bundled a procedure or add-on that the coding rules let you bill. Appeal with the letter; if the rule allows a modifier and the sites were separate, add 59 or XS and resubmit instead."},
     {"key": "rate", "label": "Ask for the usual rate", "needs": "The payer's phone line or portal",
+     "short": "Ask the payer to reprocess at its usual rate.",
      "how": "Paid less than this payer usually pays for the code. Ask it to reprocess at its usual rate; one request can list every claim for the same code."},
     {"key": "check", "label": "Check first", "needs": "A look at the claim",
+     "short": "Decide: other payer, the patient, appeal, or let go.",
      "how": "Something a person has to decide: bill another payer or the patient, fix an enrollment, find an earlier payment, or let it go."},
 ]
 _WORK_OF = {
@@ -100,6 +105,26 @@ SIGNAL_LABELS: dict[str, tuple[str, str]] = {
     "SEQUESTRATION": ("Federal 2 percent Medicare reduction", "For information; not recoverable."),
 }
 STATUS_LABELS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
+# The same findings in six words or fewer, for list rows and the recurring causes; the full label above is the tooltip and
+# the item's title.
+SHORT_LABELS: dict[str, str] = {
+    "DOWNCODE_SVC06": "Paid at a lower level", "DOWNCODE_VS_BILLED": "Paid lower than EMA shows",
+    "DOWNCODE_CHARGE": "Charged a higher level", "DOWNCODE_LEVEL_REDUCED": "Cut for its level", "DOWNCODE_RATE": "Paid a lower level's rate",
+    "DOWNCODE_LINE_SWAP": "Lower level paid instead", "DOWNCODE_LEVEL_DENIED": "Denied for its level", "CODE_CHANGED": "Payer changed the code",
+    "EM_BUNDLED_NO_MODIFIER": "Visit bundled, no modifier 25", "EM_BUNDLED_MOD57_MINOR": "Modifier 57 on a minor procedure",
+    "EM_BUNDLED_MOD57_MAJOR": "Visit with 57 bundled into surgery", "EM_BUNDLED_MOD25": "Visit with modifier 25 not paid",
+    "EM_BUNDLED_MOD24": "Post-op visit denied", "ADDON_BUNDLED": "Add-on code paid $0", "PROCEDURE_BUNDLED": "Procedure bundled into another",
+    "DENIED_MISSING_MODIFIER": "Modifier missing or wrong", "DENIED_CODING": "Code or modifier combination",
+    "DENIED_MISSING_PRIMARY": "Add-on without its main code", "DENIED_MISSING_INFO": "Information missing on the claim",
+    "DENIED_AUTH": "No authorization", "DENIED_LEVEL_OF_SERVICE": "Records do not support it", "DENIED_MEDICAL_NECESSITY": "Medical necessity",
+    "DENIED_FREQUENCY": "Frequency or units", "DENIED_NONCOVERED": "Not covered by the plan", "DENIED_TIMELY_FILING": "Filed too late",
+    "DENIED_PROVIDER": "Clinician not enrolled", "DENIED_DUPLICATE_UNPAID": "Called a duplicate, never paid", "DENIED_OTHER": "Paid $0, other reason",
+    "CLAIM_DENIED_UNPAID": "Whole claim denied", "UNDERPAID_VS_OWN_RATE": "Below the payer's usual rate", "SECOND_RATE": "Payer's second, lower rate",
+    "MPPR_EXCESS": "Multiple-procedure cut too deep", "FEE_SKIM": "Payment fee", "TAKEBACK": "Money taken back",
+    "CONTRACT_RATE_GAP": "Far below Medicare", "MA_BELOW_MEDICARE": "Below Medicare", "MPPR_POLICY": "Later procedures cut below half",
+    "CHARGE_BELOW_RATE": "Your fee below the payer's rate", "G2211_DENIED": "G2211 usually denied", "MIPS_ADJUSTMENT": "MIPS adjustment",
+    "SEQUESTRATION": "Federal 2 percent reduction",
+}
 
 
 def work_type(signal: str | None, actionable: str | None, carc: str | None = None) -> str:
@@ -290,10 +315,20 @@ def contract_levers(conn: sqlite3.Connection, newest: str | None) -> dict:
     return {"year": year, "payers": payers}
 
 
-def fee_levers(conn: sqlite3.Connection) -> dict:
+def fee_months(newest: str | None) -> tuple[str | None, str | None]:
+    """The 12 full months before the newest payment's month (a month that is still being paid is not a full one)."""
+    if not newest:
+        return None, None
+    y, m = int(newest[:4]), int(newest[5:7])
+    end = (y, m - 1) if m > 1 else (y - 1, 12)
+    start = (end[0] - 1, end[1] + 1) if end[1] < 12 else (end[0], 1)
+    return f"{start[0]:04d}-{start[1]:02d}", f"{end[0]:04d}-{end[1]:02d}"
+
+
+def fee_levers(conn: sqlite3.Connection, newest: str | None = None) -> dict:
     """Fees set below what a payer allows (CHARGE_BELOW_RATE), one row per code: what it left unpaid in all, the fee in
     the newest year and the highest amount a capped payer allowed that year (raise the fee above it). And payment-vendor
-    fees (FEE_SKIM) still open, by payer, with the months they cover."""
+    fees (FEE_SKIM) still open, by payer, with the months they cover and the last 12 full months."""
     by: dict[str, dict] = {}
     for r in _rows(conn, """SELECT procedure_code code, payer_group, year, COALESCE(shortfall_cents,0) cents, evidence FROM findings
                             WHERE signal='CHARGE_BELOW_RATE' AND COALESCE(stale,0)=0 AND procedure_code IS NOT NULL
@@ -316,24 +351,24 @@ def fee_levers(conn: sqlite3.Connection) -> dict:
             if ev.get("payer_rate_cents"):
                 c["top_rate_cents"] = max(c["top_rate_cents"] or 0, int(ev["payer_rate_cents"]))
     caps = sorted((dict(c, payers=sorted(p for p in c["payers"] if p)) for c in by.values()), key=lambda c: -c["cents"])
-    fees = _rows(conn, """SELECT payer_group, SUM(shortfall_cents) cents, COUNT(DISTINCT month) months, MIN(month) first_month, MAX(month) last_month
+    lo, hi = fee_months(newest)
+    fees = _rows(conn, """SELECT payer_group, SUM(shortfall_cents) cents, COUNT(DISTINCT month) months, MIN(month) first_month, MAX(month) last_month,
+                                 COALESCE(SUM(CASE WHEN month >= ? AND month <= ? THEN shortfall_cents END),0) cents12
                           FROM findings WHERE signal='FEE_SKIM' AND COALESCE(stale,0)=0 AND status IN ('open','in_progress')
-                          GROUP BY payer_group ORDER BY cents DESC""")
+                          GROUP BY payer_group ORDER BY cents DESC""", (lo or "", hi or ""))
     return {"charge_caps": caps, "charge_cap_cents": sum(c["cents"] for c in caps), "payment_fees": fees,
             "payment_fee_cents": sum(f["cents"] or 0 for f in fees),
-            "payment_fee_since": min((f["first_month"] for f in fees if f.get("first_month")), default=None)}
+            "payment_fee_since": min((f["first_month"] for f in fees if f.get("first_month")), default=None),
+            "payment_fee12_cents": sum(f["cents12"] or 0 for f in fees), "payment_fee12_payers": sum(1 for f in fees if f["cents12"]),
+            "payment_fee12_from": lo, "payment_fee12_to": hi}
 
 
-CAUSES = {
-    "DENIED_AUTH": "No authorization", "DENIED_MISSING_INFO": "Information missing on the claim", "DENIED_MISSING_MODIFIER": "Modifier missing or wrong",
-    "DENIED_CODING": "Code or modifier combination", "DENIED_NONCOVERED": "Not covered by the plan", "DENIED_MEDICAL_NECESSITY": "Medical necessity",
-    "DENIED_FREQUENCY": "Frequency or units", "DENIED_DUPLICATE_UNPAID": "Called a duplicate", "DENIED_TIMELY_FILING": "Filed too late",
-    "DENIED_PROVIDER": "Provider enrollment", "DENIED_MISSING_PRIMARY": "Add-on without its main code", "CLAIM_DENIED_UNPAID": "Whole claim denied",
-    "EM_BUNDLED_MOD25": "Visit with modifier 25 not paid", "EM_BUNDLED_NO_MODIFIER": "Visit billed with a procedure, no modifier",
-    "EM_BUNDLED_MOD57_MINOR": "Modifier 57 on a minor procedure", "PROCEDURE_BUNDLED": "Procedure bundled into another",
-    "EM_BUNDLED_MOD57_MAJOR": "Visit with modifier 57 bundled into a major surgery", "ADDON_BUNDLED": "Add-on code paid $0",
-    "EM_BUNDLED_MOD24": "Visit in a post-op period denied",
-}
+# The causes that keep coming back, in the same short words the list rows use
+CAUSES = {sig: SHORT_LABELS[sig] for sig in (
+    "DENIED_AUTH", "DENIED_MISSING_INFO", "DENIED_MISSING_MODIFIER", "DENIED_CODING", "DENIED_NONCOVERED", "DENIED_MEDICAL_NECESSITY",
+    "DENIED_FREQUENCY", "DENIED_DUPLICATE_UNPAID", "DENIED_TIMELY_FILING", "DENIED_PROVIDER", "DENIED_MISSING_PRIMARY", "CLAIM_DENIED_UNPAID",
+    "EM_BUNDLED_MOD25", "EM_BUNDLED_NO_MODIFIER", "EM_BUNDLED_MOD57_MINOR", "PROCEDURE_BUNDLED", "EM_BUNDLED_MOD57_MAJOR", "ADDON_BUNDLED",
+    "EM_BUNDLED_MOD24")}
 
 
 def denial_causes(conn: sqlite3.Connection, newest: str | None) -> list[dict]:
@@ -533,7 +568,8 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
     newest = newest_payment(conn)
     return {"ready": True, "today": today, "newest_payment": newest, "work": work(conn, today), "recovered": recovered(conn, today),
             "batches": batches(conn, today), "decide": to_decide(conn, newest), "missed": missed(conn, today), "done": done(conn, today),
-            "follow_ups": follow_ups(conn, newest), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn),
+            "follow_ups": follow_ups(conn, newest), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn, newest),
             "causes": denial_causes(conn, newest), "health": data_health(conn, newest, today), "work_types": WORK_TYPES,
-            "labels": {k: {"label": v[0], "next": v[1], "work": SIGNAL_WORK.get(k)} for k, v in SIGNAL_LABELS.items()}, "statuses": STATUS_LABELS,
+            "labels": {k: {"label": v[0], "next": v[1], "work": SIGNAL_WORK.get(k), "short": SHORT_LABELS.get(k, v[0])} for k, v in SIGNAL_LABELS.items()},
+            "statuses": STATUS_LABELS,
             "claim_kinds": {k: sorted(v) for k, v in CLAIM_KIND_CARCS.items()}}

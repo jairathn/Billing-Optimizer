@@ -65,7 +65,7 @@ function alertCard(a){
     <div class="actions" style="margin-top:6px">${can?`<button data-see="${a.alert_id}">See the lines</button>`:''}${a.status==='new'?`<button data-ack="${a.alert_id}">Acknowledge</button>`:''}</div></div>`;
 }
 function seeAlert(a){
-  if(a.kind==='DEADLINE'){ state.tab='appeals'; state.filt.appeals={deadline:'due'}; return render(); }
+  if(a.kind==='DEADLINE') return goWork({deadline:'month', sort:'deadline'});
   const fam = FAMILY_BASE[a.family] ? a.family : 'all';
   state.tab='explorer';
   state.ex = {family:fam, dim: a.kind==='PROVIDER_TARGETED' ? 'code_pair' : 'provider', dim2:'', payer:a.payer_group||'', provider:a.kind==='PROVIDER_TARGETED'?(a.scope||''):'', from:(a.window_start||'').slice(0,7)};
@@ -173,13 +173,13 @@ async function progressTab(v){
   const st = Object.fromEntries(p.pipeline.map(r=>[r.status, r]));
   const g = k => st[k] || {n:0, cents:0, recovered_cents:0};
   const identified = p.pipeline.filter(r=>r.status!=='dismissed').reduce((a,r)=>a+r.cents,0);
-  v.innerHTML = `<div class="grid kpis">
-    ${kpi('Identified', money(identified), 'downcoding, bundling, denials, underpayment', 'progress')}
-    ${kpi('Recovered', money(g('resolved').recovered_cents), g('resolved').n.toLocaleString()+' findings paid after rework', 'progress')}
-    ${kpi('Being worked', money(g('appealed').cents+g('in_progress').cents), (g('appealed').n+g('in_progress').n).toLocaleString()+' appealed or in progress', 'appeals')}
-    ${kpi('Open and still appealable', money(p.live.cents), p.live.n.toLocaleString()+' findings inside the filing window', 'appeals')}
-    ${kpi('Open, window passed', money(p.expired.cents), p.expired.n.toLocaleString()+' findings (deadlines are estimates)', 'appeals')}
-    ${kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' appeals upheld by the payer', 'progress')}</div>
+  v.innerHTML = `<div class="page-head"><h1 class="page-title">Progress</h1><span class="muted small">What came back after a fix or appeal, what is being worked, and what is still open.</span></div>
+    <div class="grid kpis">
+    ${kpi('Paid back', money(g('resolved').recovered_cents), g('resolved').n.toLocaleString()+' items paid after rework', 'progress')}
+    ${kpi('Being worked', money(g('appealed').cents+g('in_progress').cents), (g('appealed').n+g('in_progress').n).toLocaleString()+' sent or started', 'worklist')}
+    ${kpi('Window open', money(p.live.cents), p.live.n.toLocaleString()+' items you can still get back', 'worklist')}
+    ${kpi('Window closed', money(p.expired.cents), p.expired.n.toLocaleString()+' items (filing rules partly estimated)', 'progress')}
+    ${g('lost').n ? kpi('Lost', money(g('lost').cents), g('lost').n.toLocaleString()+' upheld by the payer', 'progress') : ''}</div>
     <div class="grid two">
       <div class="panel"><h2>Recovered by month</h2><div class="note">Money paid on a later remittance for lines that were first denied, bundled or cut. Counted automatically when the payment arrives.</div><canvas id="cRec"></canvas></div>
       <div class="panel"><h2>Share recovered, by month of the first payment</h2><div class="note">Of what went wrong in each month, how much has been won back so far. Recent months are still in play.</div><canvas id="cCoh"></canvas></div>
@@ -189,7 +189,7 @@ async function progressTab(v){
       <tbody>${p.by_payer.map(r=>`<tr class="row" data-p="${esc(r.payer_group)}"><td>${esc(r.payer_group)}</td><td class="num">${r.n.toLocaleString()}</td><td class="num">${money(r.cents)}</td><td class="num">${money(r.recovered_cents)}</td><td class="num">${pct(r.resolved_n/r.n,0)}</td><td class="num">${r.avg_days==null?'–':r.avg_days}</td><td class="num">${r.working_n}</td><td class="num">${r.lost_n}</td><td class="num">${money(r.open_cents)}</td><td class="num">${money(r.live_cents)}</td></tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>Activity</h2><table class="small"><thead><tr><th>When</th><th>What</th><th>Payer</th><th>Finding</th><th class="num">Amount</th><th>By</th></tr></thead>
       <tbody>${p.events.map(e=>`<tr class="row" data-id="${e.finding_id}"><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>${e.kind==='paid_on_later_remit'?' (paid on a later remit)':''}</td><td>${esc(e.payer_group||'')}</td><td>${esc(e.signal||'')} ${esc(e.procedure_code||'')}</td><td class="num">${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No status changes yet. Mark findings appealed, resolved or lost from their detail panel and they show up here.</td></tr>'}</tbody></table></div>`;
-  v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{ if(k.dataset.go!=='progress'){ state.tab=k.dataset.go; render(); } });
+  v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{ if(k.dataset.go!=='progress'){ state.tab=k.dataset.go; location.hash=k.dataset.go; render(); } });
   v.querySelectorAll('tr.row[data-p]').forEach(tr=>tr.onclick=()=>{ state.tab='explorer'; state.ex={family:'all', dim:'signal', dim2:'', payer:tr.dataset.p}; render(); });
   v.querySelectorAll('tr.row[data-id]').forEach(tr=>tr.onclick=()=>openDetail(tr.dataset.id));
   const cats = ['denial','bundling','downcoding','underpayment'];
@@ -260,15 +260,17 @@ function drawerExtras(f, r){
     : ev.ema_shows_paid ? `<div class="note"><b>EMA shows this line paid.</b> ${money2(ev.ema_shows_paid.paid_cents)} from insurance${ev.ema_shows_paid.date?' on '+esc(ev.ema_shows_paid.date):''} (${esc(ev.ema_shows_paid.source||'EMA')}), but no remittance in the files shows that payment. Check the payment in EMA; if it is real, mark this recovered. If the remittance for it is missing, put it in the Dropbox folder.</div>` : '';
   const claims = f.signal==='SECOND_RATE' && (ev.claims||[]).length ? `<h3 class="small">Claims paid at this amount${ev.lines > ev.claims.length ? ' (first '+ev.claims.length+' of '+ev.lines+')' : ''}</h3>
     <table class="small"><thead><tr><th>EMA claim ID</th><th>Date of service</th><th class="num">Allowed</th><th>File by</th></tr></thead><tbody>${ev.claims.map(c=>`<tr><td>${esc(c[0])}</td><td>${esc(c[1])}</td><td class="num">${money2(c[2])}</td><td class="${c[3] && c[3] < today ? 'muted' : ''}">${c[3] ? esc(c[3]) + (c[3] < today ? ' (passed)' : '') : '<span class="muted">unknown</span>'}</td></tr>`).join('')}</tbody></table>` : '';
-  return `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${why}${windows}${later}${claims}
+  // what bears on the next step stays in view; the facts and the note builder go in the drawer's folds
+  const notes = `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${why}${windows}${later}`;
+  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b></td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
+  const factsHtml = `${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
-      <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>
-    ${f.claim_key ? `<div class="panel" style="margin:10px 0"><h2>Build the appeal from the visit note</h2>
-      <div class="note">Attach the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
-      <div class="filters"><input type="file" id="noteFile" accept=".pdf,.docx,.txt,.rtf,.html,.htm"><label class="small"><input type="checkbox" id="noteAi" checked> review with Claude</label><button class="primary" id="noteGo">Build packet</button></div>
+      <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
+  const builder = f.claim_key ? `<div class="note">Attach the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
+      <div class="filters"><input type="file" id="noteFile" accept=".pdf,.docx,.txt,.rtf,.html,.htm"><label class="small"><input type="checkbox" id="noteAi" checked> review with Claude</label><button id="noteGo">Build packet</button></div>
       <textarea id="noteText" rows="4" placeholder="…or paste the note text here" style="width:100%"></textarea>
-      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div></div>` : ''}
-    ${(r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b></td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:''}`;
+      <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
+  return {notes, facts: factsHtml, builder};
 }
 const REC_LABEL = {appeal:['Appeal','ok'], appeal_with_caution:['Appeal with caution','sev-medium'], do_not_appeal:['Do not appeal','sev-high'], correct_and_resubmit:['Correct and resubmit','sev-medium'], review_manually:['Review by hand','muted']};
 function packetHtml(p){

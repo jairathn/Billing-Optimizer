@@ -16,6 +16,8 @@ class FakeDate extends RealDate { constructor(...a) { if (a.length === 0) super(
 const ctx = { Date: FakeDate, String, JSON, Math, Number, Array, Object, console };
 vm.createContext(ctx);
 vm.runInContext(helpers.replace(/^const /gm, 'var ') + fn + '\nthis.drawerExtras = drawerExtras;', ctx);
-const out = cases.map(c => { try { return { ok: true, html: ctx.drawerExtras(c.f, c.r || {}) }; } catch (e) { return { ok: false, error: String(e) }; } });
+// the drawer shows the notes, then folds the facts and the note builder: all of it is the drawer's text
+const whole = x => typeof x === 'string' ? x : [x.notes, x.facts, x.builder].join('');
+const out = cases.map(c => { try { return { ok: true, html: whole(ctx.drawerExtras(c.f, c.r || {})) }; } catch (e) { return { ok: false, error: String(e) }; } });
 const local = new RealDate(instant);
 console.log(JSON.stringify({ local_date: `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`, out }));

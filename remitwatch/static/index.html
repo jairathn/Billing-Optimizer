@@ -146,9 +146,52 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 .fchip{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 10px;border-radius:999px;background:var(--chip);font-size:12px}
 .fchip button{border:0;background:none;padding:0 6px;color:var(--muted)}
 .statusbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+.sigchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.sigchip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;font-size:13px;text-align:left}
+.sigchip.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
+@media(max-width:640px){.sigchips{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}.sigchip{flex:0 0 auto}}
 #drawer td,#drawer .todo-box{overflow-wrap:anywhere}
 .todo-err:empty,.st-err:empty{display:none}
 table.wl input.sel,#selAll{width:20px;height:20px}
+/* category pages: tiles, what to do, the strip, the list head, the Details fold */
+.ph-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.ph-row>div:first-child{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline}
+.ph-go{text-align:right;flex:0 0 auto}
+.allopen{margin:-4px 2px 8px}
+.why-chips{display:flex;flex-wrap:wrap;gap:6px;padding:4px 4px 8px 18px;align-items:center}
+nav a .bdg{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:var(--bad);color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:16px}
+nav a .bdg[hidden]{display:none}
+nav .gap{flex:1 1 12px}nav a.ref{font-size:13px}
+@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]),nav .gap{display:none}nav a{padding:6px 8px}}
+.mid-only{display:none}@media(min-width:641px) and (max-width:1359px){.mid-only{display:flex}}
+a.pile{color:var(--muted);text-decoration:none}a.pile:hover{text-decoration:underline;color:var(--accent)}
+.pile-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;padding:5px 4px 5px 18px;border-top:1px dashed var(--line);font-size:13px;cursor:pointer}.pile-row:hover{background:var(--soft)}
+.oneline{font-size:12px;color:var(--muted);margin:-4px 0 8px}
+.tiles{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:0 0 10px}
+.tile{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px;cursor:pointer;min-width:0}
+.tile:focus-visible,.todo-row:focus-visible,.pile-row:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.tile .t-l{font-size:12px;color:var(--muted)}.tile .t-v{font-size:22px;font-weight:700;line-height:1.15}.tile .t-v small{font-size:13px;font-weight:600;color:var(--muted);margin-left:8px}
+.tile .t-s{font-size:12px;color:var(--muted)}.tile.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
+.tile.t-red .t-v{color:var(--bad)}.tile.t-ok .t-v{color:var(--good)}.tile.t-amber .t-v{color:var(--warn)}.tile.t-grey{background:var(--soft)}.tile.t-grey .t-v{color:var(--muted)}.tile.t-grey.on{background:var(--chip)}
+.desk-mid{display:grid;gap:10px}.desk-mid.has-side{grid-template-columns:minmax(0,1.6fr) minmax(0,1fr)}@media(max-width:900px){.desk-mid.has-side{grid-template-columns:1fr}}
+.todo-list,.fo-side{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 12px}
+.sec{font-size:12px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px}
+.todo-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto minmax(0,19rem);gap:10px;align-items:center;padding:7px 4px;border-top:1px solid var(--line);cursor:pointer}
+.todo-list .sec + .todo-row{border-top:0}.todo-row:hover{background:var(--soft)}.todo-row.on{background:var(--chip)}
+.todo-row .tr-n{white-space:nowrap;font-variant-numeric:tabular-nums}.todo-row .tr-pile{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:700px){.todo-row{grid-template-columns:auto 1fr}.todo-row .tr-do{grid-column:1/-1;grid-row:2}.todo-row .tr-pile{grid-column:1/-1}}
+.fixonce{font-size:13px;margin:8px 2px 0;color:var(--ink)}.fo-tag{display:inline-block;font-size:11px;font-weight:650;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-right:4px}
+table.mini td{padding:4px 6px}
+.list-head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:14px 0 4px}.lh-tools{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}.lh-tools select[data-f=payer]{max-width:15rem}.lh-tools select,.lh-tools input,.more-f select,.more-f input{font-size:13px;padding:4px 6px}
+.more-f{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-end;margin:4px 0}.more-f[hidden]{display:none}.ph-only{display:none}
+div.bulk{display:flex;margin:4px 0}div.bulk[hidden]{display:none}
+details.fold{margin-top:16px}details.fold > summary{padding:10px 0;font-size:13px}
+.todo-chips,.fix-after,.howline{display:none}
+.dr-head{display:flex;justify-content:space-between;align-items:start;gap:8px}
+details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > summary{padding:4px 0;font-size:13px}
+.why-fold{font-size:12px;margin:2px 0 8px}.why-fold .note{margin:4px 0 0}
+@media(max-width:640px){.ph-row{flex-direction:column}.ph-go{text-align:left}.lh-tools{margin-left:0}.tiles{grid-template-columns:1fr 1fr}.tile{padding:7px 10px}.tile .t-v{font-size:19px}
+  .desk-mid .todo-list,.fix-top{display:none}.todo-chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}.todo-chips .seg{flex:0 0 auto}.howline{display:block;font-size:13px;margin:4px 0}
+  .fix-after{display:block;margin-top:12px}.lh-tools select:not([data-f=payer]),.lh-tools input{display:none}.ph-only{display:contents}.more-f{justify-content:flex-start}}
 @media(max-width:640px){
   header{position:static;padding:8px 12px}
   nav{position:sticky;top:0;z-index:5;flex-wrap:nowrap;overflow-x:auto}
@@ -162,10 +205,9 @@ table.wl input.sel,#selAll{width:20px;height:20px}
   table.wl td:first-child{position:absolute;right:10px;bottom:8px}
   table.wl td.day{grid-column:1;grid-row:1}
   table.wl td.num{grid-column:2;grid-row:1;text-align:right}
-  table.wl td:nth-child(5){grid-column:1/-1;grid-row:2;margin-top:4px}
-  table.wl td:nth-child(4){grid-column:1/-1;grid-row:3;color:var(--muted);font-size:13px}
-  table.wl td.who{grid-column:1;grid-row:4}
-  table.wl td:nth-child(7){grid-column:2;grid-row:4;align-self:end;margin-right:30px}
+  table.wl td.what{grid-column:1/-1;grid-row:2;margin-top:4px}
+  table.wl td.payer{grid-column:1/-1;grid-row:3;color:var(--muted);font-size:13px}
+  table.wl td.who{grid-column:1;grid-row:4;margin-right:30px}
   #drawer{padding:12px}
 }
 </style>
@@ -189,12 +231,16 @@ table.wl input.sel,#selAll{width:20px;height:20px}
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
 <script src="/static/today.js"></script>
+<script src="/static/desk.js"></script>
 <script>
-// the daily screens first; the analysis pages are under More (and still open by their address)
-const TABS = [['today','Today'],['worklist','Worklist'],['wins','Bigger wins'],['progress','Results'],['data','Data'],['providers','Providers'],['more','More']];
-const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['downcoding','Downcoding'],['bundling','Bundling & modifiers'],
-  ['denials','Denials'],['contracts','Contracts & underpayment'],['fees','Fees & takebacks'],['appeals','Appeals queue'],['payers','Payers & rates']];
-const NEEDS_SUMMARY = new Set(['overview','explorer','downcoding','bundling','denials','contracts','fees','appeals','payers']);
+// Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
+// right in smaller type. The analysis pages are under More (and open by their address).
+const TABS = [['today','Today'],['denials','Denials'],['bundling','Bundling & modifiers'],['downcoding','Downcoding'],['contracts','Contracts & underpayment'],
+  ['fees','Fees & takebacks'],['worklist','Worklist'],['wins','Bigger wins'],['progress','Progress'],['data','Data'],['providers','Providers'],['more','More']];
+const REF_TABS = new Set(['progress','data','providers','more']);
+const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates']];
+const ALIASES = {appeals:'worklist'};        // the earlier Appeals queue is the Worklist
+const NEEDS_SUMMARY = new Set(['overview','explorer','payers']);
 const SIGNAL_HELP = {
   DOWNCODE_SVC06:'Payer reported the code you billed (835 SVC06) and paid a lower level.',
   DOWNCODE_VS_BILLED:'The claim file or EMA shows a higher level was billed than the code on the remit, and the payer reported no change.',
@@ -258,9 +304,9 @@ function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const 
   state.charts[id]=new Chart(el, cfg); }
 const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8c6d1f','#6c757d'];
 
-function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k); }
+function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || k in ALIASES; }
 function initNav(){
-  $('#nav').innerHTML = TABS.map(([k,l])=>`<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`).join('');
+  $('#nav').innerHTML = TABS.map(([k,l])=>`${k==='progress'?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
@@ -286,17 +332,20 @@ async function loadSummary(){
 async function render(){
   const run = state.run = (state.run||0) + 1;       // a slower, older run must not draw over a newer one
   if(!state.meta){ try { await loadMeta(); } catch(e){} if(run !== state.run) return; }      // a cold start can fail the first call
+  if(ALIASES[state.tab]){ state.tab = ALIASES[state.tab]; history.replaceState(null, '', '#'+state.tab); }
   const classic = CLASSIC.some(t=>t[0]===state.tab);
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
+  const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
-  if(state.tab !== 'worklist') state.worklist = null;      // "item 3 of 50" only means something inside the worklist
+  if(!DESKS[state.tab] && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; }   // "item 3 of 50" means something on a list page only
   if(NEEDS_SUMMARY.has(state.tab)) await loadSummary();
   if(run !== state.run) return;
   const old = $('#view'), v = old.cloneNode(false);      // an older run still holds the old node and can only write into that
   old.replaceWith(v);
   v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
-  const fn = {today: todayTab, worklist: worklistTab, wins: winsTab, more: moreTab, overview, payers, downcoding, bundling, denials, contracts, fees, appeals, data,
+  const fn = {today: todayTab, denials: x=>deskTab(x,'denials'), bundling: x=>deskTab(x,'bundling'), downcoding: x=>deskTab(x,'downcoding'),
+    contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), wins: winsTab, more: moreTab, overview, payers, data,
     alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab}[state.tab] || todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
@@ -414,68 +463,6 @@ async function trendChart(id, params, label){
   chart(id,{type:'line',data:{labels:months,datasets:groups.map((g,i)=>({label:g,borderColor:palette[i],backgroundColor:palette[i],tension:.2,pointRadius:2,data:months.map(m=>{const r=rows.find(x=>x.month===m&&x.grp===g);return r?r.n:0;})}))},
     options:{plugins:{legend:{position:'bottom'},title:{display:true,text:label}},scales:{y:{beginAtZero:true,title:{display:true,text:'lines per month of service'}}}}});
 }
-function legend(sigs){ return `<div class="legend">${sigs.map(s=>`<div><b>${s}</b>: ${esc(SIGNAL_HELP[s]||'')}</div>`).join('')}</div>`; }
-
-async function downcoding(v){
-  const sigs=['DOWNCODE_SVC06','DOWNCODE_VS_BILLED','DOWNCODE_CHARGE','DOWNCODE_LEVEL_REDUCED','DOWNCODE_RATE','DOWNCODE_LINE_SWAP','DOWNCODE_LEVEL_DENIED','CODE_CHANGED'];
-  v.innerHTML = `<div class="panel"><h2>Downcoding: ${money(total(sigRows(sigs)))} across ${count(sigRows(sigs)).toLocaleString()} lines</h2>
-    <div class="note">Six detectors work together: the payer's own SVC06 field, the claim file and EMA, the charge amount, the level-of-care reason code 186 (payment cut with the billed code left in place), the allowed amount matching a lower level's rate, and line swaps. Visit downcoding and procedure code changes are counted here; the panels below cover visits.</div>${legend(sigs)}</div>
-    <div id="dcWho"></div>
-    <div class="panel"><canvas id="cTrend"></canvas></div>
-    <div class="panel" id="tbl"></div>`;
-  await downcodeWho(v.querySelector('#dcWho'));
-  await trendChart('cTrend', {category:'downcoding'}, 'Downcoded and recoded lines per month by payer (all statuses)');
-  await findingsTable(v, v.querySelector('#tbl'), {category:'downcoding'});
-}
-async function bundling(v){
-  const sigs=['EM_BUNDLED_MOD25','EM_BUNDLED_MOD57_MAJOR','EM_BUNDLED_MOD57_MINOR','EM_BUNDLED_NO_MODIFIER','EM_BUNDLED_MOD24','ADDON_BUNDLED','PROCEDURE_BUNDLED'];
-  v.innerHTML = `<div class="panel"><h2>Bundled away: ${money(total(sigRows(sigs)))} across ${count(sigRows(sigs)).toLocaleString()} lines</h2>
-    <div class="note">Lines paid $0 inside otherwise paid claims with CARC 97, B10, 236, 234 or remark M80/N19/M15. These never show up as a denied claim.</div>${legend(sigs)}</div>
-    <div class="panel"><canvas id="cTrend"></canvas></div>
-    <div class="panel" id="tbl"></div>`;
-  await trendChart('cTrend', {category:'bundling'}, 'Bundled lines per month by payer (all statuses)');
-  await findingsTable(v, v.querySelector('#tbl'), {category:'bundling'});
-}
-async function denials(v){
-  const rows = state.summary.by_signal.filter(r=>r.category==='denial');
-  v.innerHTML = `<div class="panel"><h2>Denied and never paid: ${money(total(rows))} across ${count(rows).toLocaleString()} lines and claims</h2>
-    <div class="grid two"><div><canvas id="cDen"></canvas></div><div>${legend(rows.map(r=>r.signal))}</div></div></div>
-    <div class="panel" id="tbl"></div>`;
-  chart('cDen',{type:'bar',data:{labels:rows.map(r=>r.signal.replace('DENIED_','').replace('CLAIM_','')),datasets:[{label:'dollars',backgroundColor:palette[1],data:rows.map(r=>r.shortfall_cents/100)}]},options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>'$'+v.toLocaleString()}}}}});
-  await findingsTable(v, v.querySelector('#tbl'), {category:'denial'});
-}
-async function contracts(v){
-  const c = state.summary.by_signal.filter(r=>r.category==='contract'), u = state.summary.by_signal.filter(r=>r.category==='underpayment');
-  const year = state.year || state.summary.years[state.summary.years.length-1];
-  const mx = await api('/api/rates/matrix?'+qs({year, tier: state.filt.tier||'physician'}));
-  const caps = c.filter(r=>r.signal==='CHARGE_BELOW_RATE');
-  v.innerHTML = `<div class="panel"><h2>Contract rate gaps: ${money(total(c)-total(caps))} at Medicare parity · underpayments: ${money(total(u))}${caps.length?` · fees below a payer's rate: ${money(total(caps))}`:''}</h2>
-    <div class="note">Usual allowed per payer, code and provider type is the most common allowed amount on cleanly paid primary lines (highest-ranked procedure on the claim, one unit, no code change, not capped at your own charge). "% of Medicare" compares it to the same code on this practice's own Medicare remits for the same year and provider type.</div>${legend(['CONTRACT_RATE_GAP','MA_BELOW_MEDICARE','MPPR_POLICY','CHARGE_BELOW_RATE','SECOND_RATE','UNDERPAID_VS_OWN_RATE','MPPR_EXCESS'])}</div>
-    <div class="panel"><h2>Allowed amount as % of Medicare, ${year} <select id="tierSel"><option value="physician" ${(state.filt.tier||'physician')==='physician'?'selected':''}>physicians</option><option value="nonphysician" ${state.filt.tier==='nonphysician'?'selected':''}>PAs / NPs</option></select></h2>
-      <table class="heat"><thead><tr><th>Payer</th><th>Kind</th>${mx.codes.map(c=>`<th class="num">${c}</th>`).join('')}</tr></thead>
-      <tbody>${mx.payers.slice(0,25).map(p=>`<tr><td style="text-align:left">${esc(p.payer_group)}</td><td style="text-align:left" class="small muted">${esc(p.payer_kind)}</td>${mx.codes.map(c=>{const x=p.codes[c]; if(!x) return '<td class="muted">·</td>'; const pct=x.pct; const col = pct==null?'':(pct<0.8?'var(--bad)':(pct<0.95?'var(--warn)':'var(--good)')); return `<td title="${money2(x.cents)}${x.n==null?'':' on '+x.n+' lines'}; Medicare ${money2(x.medicare_cents)}" style="color:${col}">${money2(x.cents)}<div class="small">${pct==null?'':Math.round(pct*100)+'%'}</div></td>`;}).join('')}</tr>`).join('')}</tbody></table></div>
-    <div class="panel"><h2>Contract-level findings</h2><div id="tblC"></div></div>
-    <div class="panel"><h2>Underpayments</h2><div class="note">A payer's routine lower rate with a reason the remittances support is one finding for all its claims. Every other line below the payer's usual rate is its own finding.</div><div id="tblU"></div></div>`;
-  v.querySelector('#tierSel').onchange=e=>{state.filt.tier=e.target.value; render();};
-  const saveTab = state.tab;        // the two tables keep their filters under their own keys
-  try {
-    state.tab='contractsC'; await findingsTable(v, v.querySelector('#tblC'), {category:'contract'});
-    if(state.tab!=='contractsC') return;        // the reader went to another tab while this one loaded: leave their tab alone
-    state.tab='contractsU'; await findingsTable(v, v.querySelector('#tblU'), {category:'underpayment'}, {noStale:true});
-  } finally { if(state.tab==='contractsC' || state.tab==='contractsU') state.tab=saveTab; }
-}
-async function fees(v){
-  const vol = await api('/api/volume');
-  const months=[...new Set(vol.plb.map(r=>r.month))].sort();
-  const fee = state.summary.by_signal.find(r=>r.signal==='FEE_SKIM')||{}, tb = state.summary.by_signal.find(r=>r.signal==='TAKEBACK')||{};
-  v.innerHTML = `<div class="grid kpis">${kpi('Payment fees withheld', money(fee.shortfall_cents), (fee.n||0)+' payer-months (Zelis, origination fees)','fees')}${kpi('Takebacks ≥ $500', money(tb.shortfall_cents), (tb.n||0)+' recoupments','fees')}
-    ${state.summary.info.filter(r=>r.signal==='MIPS_ADJUSTMENT').map(r=>kpi('MIPS '+r.year, money(r.shortfall_cents), 'net adjustment (positive = bonus)','fees')).join('')}</div>
-    <div class="panel"><h2>Provider-level adjustments (PLB) by month</h2><div class="note">WO = overpayment recovery, FB = forwarding balance, CS = adjustment (Zelis transaction fees appear here), AH = origination fee, L6 = interest.</div><canvas id="cPlb"></canvas></div>
-    <div class="panel" id="tbl"></div>`;
-  const codes=['WO','CS','AH','FB','L6','72','J1'];
-  chart('cPlb',{type:'bar',data:{labels:months,datasets:codes.map((c,i)=>({label:c,backgroundColor:palette[i],data:months.map(m=>{const r=vol.plb.find(x=>x.month===m&&x.reason_code===c);return r?r.cents/100:0;})}))},options:{scales:{x:{stacked:true},y:{stacked:true,ticks:{callback:v=>'$'+v.toLocaleString()}}},plugins:{legend:{position:'bottom'}}}});
-  await findingsTable(v, v.querySelector('#tbl'), {category:'fees'}, {sort:'date'});
-}
 async function payers(v){
   const ps = await api('/api/payers');
   const prov = await api('/api/providers');
@@ -483,14 +470,7 @@ async function payers(v){
     <tbody>${ps.map(r=>`<tr class="row" data-p="${esc(r.payer_group)}"><td>${esc(r.payer_group)}</td><td class="small muted">${esc(r.payer_kind)}</td><td class="num">${r.findings.toLocaleString()}</td><td class="num">${money(r.open_cents)}</td><td class="num">${money(r.shortfall_cents)}</td></tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>By rendering provider</h2><table><thead><tr><th>Provider</th><th>NPI</th><th>Type</th><th class="num">Findings</th><th class="num">Dollars</th></tr></thead>
     <tbody>${prov.map(r=>`<tr><td>${esc(r.name||'')}</td><td class="small muted">${esc(r.npi)}</td><td class="small">${esc(r.tier)}</td><td class="num">${r.findings.toLocaleString()}</td><td class="num">${money(r.shortfall_cents)}</td></tr>`).join('')}</tbody></table></div></div>`;
-  v.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>{ state.tab='denials'; state.filt.denials={payer:tr.dataset.p}; render(); });
-}
-async function appeals(v){
-  const dl = Object.fromEntries(state.summary.deadlines.map(d=>[d.bucket,d]));
-  v.innerHTML = `<div class="grid kpis">${kpi('Due within 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' findings','appeals')}${kpi('Due within 90 days', money((dl.due_90d||{}).shortfall_cents), ((dl.due_90d||{}).n||0)+' findings','appeals')}${kpi('Later', money((dl.later||{}).shortfall_cents), ((dl.later||{}).n||0)+' findings','appeals')}${kpi('Expired', money((dl.expired||{}).shortfall_cents), ((dl.expired||{}).n||0)+' findings (deadlines are estimates)','appeals')}</div>
-    <div class="panel"><h2>Work queue</h2><div class="note">Everything open that is either appealable or a correctable billing error, soonest deadline first. Open a row for the evidence and a ready-to-send letter. Deadlines come from each payer's published provider manual where we have it (Anthem commercial allows two years from the remittance) and from the payer type otherwise; each finding shows its basis. A contract can set a different period. ${showPhi()?'Search by patient name, member ID or claim ID; click a name for everything in the queue for that patient. The claim ID under each name is the Claim ID in EMA.':'Patients show as initials because names are switched off on this site (the owner can switch them on in the site settings). The claim ID under the initials is the Claim ID in EMA.'}</div><div id="tbl"></div></div>`;
-  if(!state.filt.appeals) state.filt.appeals={deadline:'valid'};
-  await findingsTable(v, v.querySelector('#tbl'), {category:'downcoding,bundling,denial,underpayment'}, {sort:'deadline', bulk:true});
+  v.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>goWork({payer:tr.dataset.p}));
 }
 async function data(v){
   const m = state.meta;
@@ -542,7 +522,7 @@ function closeDetail(){
   const d = $('#drawer'); if(!d.classList.contains('open')) return;
   d.classList.remove('open'); d.inert = true;
   const back = state.detailFrom; state.detailFrom = null;
-  if(state.dirty){ state.dirty = false; if(['today','worklist'].includes(state.tab)){       // statuses changed: redraw the list behind
+  if(state.dirty){ state.dirty = false; if(state.tab==='today' || state.tab==='fees' || DESKS[state.tab]){       // statuses changed: redraw the list behind
     render().then(()=>{ const r = document.querySelector('#view tr.row') || document.querySelector('#view button'); if(r) r.focus(); }); return; } }
   if(back && back.isConnected) back.focus();
 }
@@ -554,13 +534,15 @@ async function openDetail(id){
   if(!state.brief){ try { await brief(); } catch(e){} }        // the plain labels and the kinds of work
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
-  d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:start;gap:8px"><h2>${esc(f.title)}</h2><button id="closeD" aria-label="Close">✕</button></div>
-    ${whatToDoHtml(f)}
-    <div class="actions">${f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal)?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>`:''}</div>
+  const ex = drawerExtras(f, r), plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : f.title;
+  const letter = f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal) ? `<button id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>` : '';
+  const noteWork = !!state.brief && kindFor(state.brief, f) === 'note';
+  d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')}</div></div><button id="closeD" aria-label="Close">✕</button></div>
+    ${whatToDoHtml(f, letter) || (letter ? `<div class="actions">${letter}</div>` : '')}
     <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
-    <details class="small"><summary>Technical details</summary><div class="muted">${esc(f.signal)} · ${esc(f.severity)} · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
-    <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div></details>
+    ${ex.notes}
+    <details class="dfold"><summary>Claim details</summary>
     <table class="small">
       ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
       <tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)}</td></tr>`:''}
@@ -572,7 +554,7 @@ async function openDetail(id){
       <tr><td>Money</td><td>charge ${money2(f.charge_cents)} · allowed ${money2(f.allowed_cents)} · paid ${money2(f.paid_cents)} · expected ${money2(f.expected_cents)} · <b>shortfall ${money2(f.shortfall_cents)}</b></td></tr>
       <tr><td>Codes</td><td>${f.carc?esc(f.carc)+': '+esc(f.carc_text):''} ${f.rarc?'<br>'+esc(f.rarc)+': '+esc(f.rarc_text):''}</td></tr>
     </table>
-    ${drawerExtras(f, r)}
+    ${ex.facts}
     ${f.claim_key?`<h3 class="small">Claim lines on this remit</h3>
     <table class="small"><thead><tr><th>#</th><th>Code</th><th>Submitted</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Paid</th><th>Adjustments</th></tr></thead>
     <tbody>${(r.lines||[]).map(l=>`<tr ${l.line_key===f.line_key?'style="background:var(--chip)"':''}><td>${esc(l.line_seq)}</td><td>${esc(l.procedure_code)}${mods(l.modifiers)}</td><td>${esc(l.original_procedure_code)}</td><td class="num">${money2(l.charge_cents)}</td><td class="num">${money2(l.allowed_cents)}</td><td class="num">${money2(l.paid_cents)}</td>
@@ -583,7 +565,10 @@ async function openDetail(id){
     ${r.link?`<div class="small"><b>EMA charge link:</b> ${esc(r.link.state)}${r.link.ema_cpt?' · billed '+esc(r.link.ema_cpt)+mods(r.link.ema_modifiers)+' x'+esc(r.link.ema_units)+' '+money2(r.link.ema_charges_cents)+' (bill item '+esc(r.link.bill_item_id)+', status '+esc(r.link.ema_claim_status||'')+')':''} ${r.link.cause?'· '+esc(r.link.cause):''}</div>`:''}
     ${(r.handling||[]).length?`<div class="small"><b>How EMA handled it:</b> ${r.handling.map(x=>esc((x.carc||'')+' '+(x.adjustment_status||'')+' '+money2(x.adjustments_cents)+' on '+(x.transaction_date||''))).join(' · ')}</div>`:''}
     ${(r.ema||[]).length?`<h3 class="small">ModMed EMA rows for this claim</h3><table class="small"><thead><tr><th>Family</th><th>DOS</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adj</th><th>Status / handling</th></tr></thead><tbody>${r.ema.slice(0,40).map(e=>`<tr><td>${esc(e.family)}${e.activity_type?' · '+esc(e.activity_type):''}</td><td>${esc(e.service_date)}</td><td>${esc(e.cpt)}${mods(e.modifiers)}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc(e.claim_status||'')} ${e.carc?'· '+esc(e.carc):''} ${e.adjustment_status?'· '+esc(e.adjustment_status):''} ${e.denial_category?'· '+esc(e.denial_category):''}</td></tr>`).join('')}</tbody></table>`:'<div class="small muted">No EMA export rows for this claim (annual exports not loaded).</div>'}`:''}
-    <h3 class="small">Evidence</h3><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre>`;
+    </details>
+    ${ex.builder ? `<details class="dfold" ${noteWork?'open':''}><summary>Build the appeal from the visit note</summary>${ex.builder}</details>` : ''}
+    <details class="dfold"><summary>Technical details</summary><div class="small muted">${esc(f.title)} · ${esc(f.signal)} · ${esc(f.severity)} · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
+    <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre></details>`;
   d.querySelector('#closeD').onclick=closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
   d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{
@@ -617,6 +602,7 @@ window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
   if(location.hash && tabOpen(location.hash.slice(1))) state.tab=location.hash.slice(1);
   initNav();
   try { await loadMeta(); } catch(e){ if(!state.meta) $('#fresh').textContent='no data loaded yet'; }
+  brief().catch(()=>{});        // the 7-day badges on the category tabs
   await refreshHeader();
   if(!state.run) render();       // a click while the first answer was slow has drawn the page already
   setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);

@@ -1,6 +1,7 @@
-// RemitWatch daily screens: Today (what to do now), Worklist (every item, in plain words), Bigger wins (money fixed once,
-// collected on every future claim), More (the analysis pages), and the first-visit guide. Loaded after features.js and
-// before the page's own script; uses its helpers (api, esc, money, money2, state, render, openDetail, setFindingStatus).
+// RemitWatch daily screens: Today (what to do now), Bigger wins (money fixed once, collected on every future claim), More
+// (the analysis pages), the first-visit guide and the What to do box of an item. The category pages and the Worklist are in
+// desk.js. Loaded after features.js and before the page's own script; uses its helpers (api, esc, money, money2, state,
+// render, openDetail, setFindingStatus).
 
 const KIND_STYLE = {fix:'k-fix', auth:'k-auth', note:'k-note', rule:'k-rule', rate:'k-rate', check:'k-check'};
 const STATUS_WORDS = {open:'To do', in_progress:'Started', appealed:'Sent', resolved:'Paid', lost:'Lost', dismissed:'Let go'};
@@ -12,7 +13,10 @@ function guideDone(){ try { localStorage.setItem(GUIDE_KEY, '1'); } catch(e){} }
 function guideReset(){ try { localStorage.removeItem(GUIDE_KEY); } catch(e){} }
 
 async function brief(force){
-  if(force || !state.brief || Date.now() - state.briefAt > 60000){ state.brief = await api('/api/brief'); state.briefAt = Date.now(); }
+  if(force || !state.brief || Date.now() - state.briefAt > 60000){
+    state.brief = await api('/api/brief'); state.briefAt = Date.now();
+    if(typeof updateBadges === 'function') updateBadges(state.brief);
+  }
   return state.brief;
 }
 function kindOf(b, k){ return (b.work_types||[]).find(t=>t.key===k) || {key:k, label:k, how:'', needs:''}; }
@@ -28,7 +32,7 @@ function closesText(d){
 }
 function rwMonth(m){ const x = new Date((m||'')+'-15T00:00:00Z'); return isNaN(x) ? esc(m||'') : x.toLocaleDateString('en-US', {month:'long', year:'numeric', timeZone:'UTC'}); }
 function longDate(d){ const x = new Date((d||'')+'T00:00:00Z'); return isNaN(x) ? esc(d||'') : x.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}); }
-function goWork(filt){ state.tab = 'worklist'; location.hash = 'worklist'; state.filt.worklist = Object.assign({status:'open,in_progress', deadline:'valid'}, filt||{}); state.page.worklist = 0; render(); }
+function goWork(filt){ state.tab = 'worklist'; location.hash = 'worklist'; state.filt.worklist = Object.assign({status:'open,in_progress', deadline:'valid'}, filt||{}); state.page.worklist = 0; if(state.lim) state.lim.worklist = 0; render(); }
 // the kind of work an item takes, as insights.work_type decides it: a whole claim denied goes by its action and reason
 function kindFor(b, r){
   if(r.signal === 'CLAIM_DENIED_UNPAID'){
@@ -137,90 +141,9 @@ function winsTeaser(b){
 const WL_DEADLINES = [['valid','Window still open'],['week','Closes within 7 days'],['month','Closes within 30 days'],['decide','To decide (no filing date, paid in the last 120 days)'],['older','No filing date, paid before that'],
   ['followup','Sent over 30 days ago, not paid'],['missed','Window closed in the last 30 days'],['none','No filing date'],['expired','Window closed'],['','Any date']];
 const WL_STATUSES = [['open,in_progress','To do and started'],['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go'],['all','Everything']];
-async function worklistTab(v){
-  const b = await brief();
-  const key = 'worklist';
-  const f = Object.assign({kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:'', min:''}, state.filt[key]||{});
-  const page = state.page[key]||0, limit = 50;
-  const typed = String(f.q||'').slice(0,200);
-  let sent = ''; try { sent = encodeURIComponent(typed); } catch(e){ sent = encodeURIComponent(typed.replace(/[\uD800-\uDFFF]/g,'')); }
-  const find = Object.assign({cache:'no-store'}, sent ? {headers:{'X-Search':sent}} : {});
-  const scope = {category:'denial,bundling,downcoding,underpayment', live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min};
-  const [res, cnt] = await Promise.all([api('/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit, offset:page*limit})), find),
-                                        api('/api/worklist/counts?'+qs(scope), find)]);
-  state.worklist = res.items.map(r=>r.finding_id);
-  const byKind = Object.fromEntries((cnt.kinds||[]).map(k=>[k.key,k]));
-  const payers = [...new Set((b.batches||[]).map(x=>x.payer_group).concat(f.payer?[f.payer]:[]))].sort();
-  const tab = (k, label, c) => `<button class="seg ${f.kind===k?'on':''}" data-kind="${k}" ${c && !c.n && f.kind!==k ? 'disabled' : ''}><span>${label} <span class="cnt">${Number((c||{}).n||0).toLocaleString()}</span></span><span class="seg-sub">${money((c||{}).cents||0)}</span></button>`;
-  const sel = (name, label, opts, cur) => `<select data-f="${name}" aria-label="${label}">${opts.map(([val,l])=>`<option value="${esc(val)}" ${String(cur)===val?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
-  const chips = [];
-  if(f.signal) chips.push(`<span class="fchip">Only: ${esc(labelOf(b, f.signal).label)} <button data-clear="signal" aria-label="Remove this filter">✕</button></span>`);
-  if(f.paid) chips.push(`<span class="fchip">Paid in the last ${esc(f.paid)} days <button data-clear="paid" aria-label="Remove this filter">✕</button></span>`);
-  v.innerHTML = `<div class="page-head"><h1 class="page-title">Worklist</h1><span class="muted small">Every item that needs a person, in plain words. Open one to see what to do; it tells you the next step and the date it must be done by.</span></div>
-    <div class="segs" role="tablist" aria-label="Kind of work">${tab('', 'All', {n:cnt.n, cents:cnt.cents})}${(b.work_types||[]).map(t=>tab(t.key, esc(t.label), byKind[t.key])).join('')}</div>
-    ${f.kind ? `<div class="howbox"><b>${esc(kindOf(b,f.kind).label)}.</b> ${esc(kindOf(b,f.kind).how)} <span class="muted">You need: ${esc(kindOf(b,f.kind).needs)}.</span></div>` : ''}
-    <div class="filters">
-      ${sel('payer', 'Payer', [['','Any payer'], ...payers.map(p=>[p,p])], f.payer)}
-      ${sel('deadline', 'Filing date', WL_DEADLINES, f.deadline)}
-      ${sel('status', 'Status', WL_STATUSES, f.status)}
-      ${sel('min', 'Amount', [['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']], f.min)}
-      ${sel('sort', 'Order', [['deadline','Soonest deadline first'],['shortfall','Largest amount first'],['payer','By payer']], f.sort)}
-      <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, member ID, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}">
-      ${chips.join('')}
-      <button class="ghost" id="wlClear">Reset</button>
-    </div>
-    <div class="wl-bar"><span><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>
-      <span class="bulk" id="bulk" hidden><span id="bulkN"></span><button data-bulk="in_progress">Mark started</button><button data-bulk="appealed">Mark sent</button><button data-bulk="dismissed">Let go</button><button data-bulk="open">Back to To do</button></span>
-      <button class="ghost" id="wlCsv">Export CSV</button></div>
-    <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item on this page"></th><th>Closes</th><th>${showPhi()?'Patient':'Patient'}</th><th>Payer</th><th>What happened</th><th class="num">Amount</th><th>Status</th></tr></thead>
-    <tbody>${res.items.map(r=>{ const due = r.next_deadline || r.appeal_deadline, c = closesText(due), lb = labelOf(b, r.signal), est = /not confirmed/.test(r.deadline_basis||'');
-      const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${pl(r.window_lines, 'line')} in range, of ${money2(r.shortfall_cents)}</div>` : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
-      return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}"><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
-        <td class="day"><span class="${c.cls}" title="${esc(due?('File by '+due+(est?' (estimated rule)':'')):'No filing date')}">${esc(c.text)}${est&&due?'<sup class="muted">*</sup>':''}</span><div class="small muted">${esc(due||'')}${r.next_deadline&&r.next_deadline!==r.appeal_deadline?' (first claim)':''}</div></td>
-        <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
-        <td>${esc(r.payer_group)}</td>
-        <td>${kindBadge(b, kindFor(b, r))} ${esc(lb.label)}<div class="small muted">${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.service_date?' · seen '+esc(r.service_date):''}${r.carc?' · '+esc(r.carc):''}${r.rarc?' '+esc(r.rarc):''}</div>${r.hint?`<div class="small"><span class="chip hint">${esc(r.hint)}</span></div>`:''}</td>
-        <td class="num">${amt}</td><td><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></td></tr>`; }).join('')}</tbody></table></div>
-    ${res.items.length ? '<div class="small muted" style="margin-top:6px">* The filing window for this payer is a conservative default until someone confirms it in the payer agreement.</div>' : '<div class="empty">Nothing here. Pick another kind of work, or widen the filing date or status.</div>'}
-    <div class="pager"><button class="prev" ${page===0?'disabled':''}>‹ Previous</button><span>Page ${page+1} of ${Math.max(1,Math.ceil(res.total/limit))}</span><button class="next" ${(page+1)*limit>=res.total?'disabled':''}>Next ›</button></div>`;
-  const set = (patch) => { state.filt[key] = Object.assign({}, f, patch); state.page[key] = 0; render(); };
-  v.querySelectorAll('[data-kind]').forEach(bt=>bt.onclick=()=>set({kind: bt.dataset.kind}));
-  v.querySelectorAll('select[data-f]').forEach(el=>el.onchange=()=>{
-    const patch = {[el.dataset.f]: el.value};
-    if(el.dataset.f === 'deadline'){            // these two lists are about one status each
-      if(el.value === 'followup') patch.status = 'appealed';
-      else if(el.value === 'missed') patch.status = 'open';
-      else if(['followup','missed'].includes(f.deadline)) patch.status = 'open,in_progress';
-    }
-    set(patch); });
-  v.querySelectorAll('[data-clear]').forEach(bt=>bt.onclick=()=>set({[bt.dataset.clear]: ''}));
-  const q = v.querySelector('input[data-f="q"]'); q.onkeydown = e => { if(e.key==='Enter') set({q: q.value}); };
-  if(state.focusQ){ q.focus(); state.focusQ = false; }
-  v.querySelector('#wlClear').onclick = () => { state.filt[key] = {}; state.page[key] = 0; render(); };
-  v.querySelector('.prev').onclick = () => { state.page[key] = page-1; render(); };
-  v.querySelector('.next').onclick = () => { state.page[key] = page+1; render(); };
-  v.querySelectorAll('tr.row').forEach(tr=>{ tr.onclick = e => { if(e.target.closest('input')) return; openDetail(tr.dataset.id); };
-    tr.onkeydown = e => { if((e.key==='Enter'||e.key===' ') && e.target===tr){ e.preventDefault(); openDetail(tr.dataset.id); } }; });
-  const bulk = v.querySelector('#bulk'), bulkN = v.querySelector('#bulkN');
-  const picked = () => [...v.querySelectorAll('.sel:checked')].map(x=>x.value);
-  const sync = () => { const n = picked().length; bulk.hidden = !n; bulkN.textContent = n + ' selected'; };
-  v.querySelectorAll('.sel').forEach(cb=>cb.onchange=sync);
-  v.querySelector('#selAll').onchange = e => { v.querySelectorAll('.sel').forEach(cb=>cb.checked = e.target.checked); sync(); };
-  v.querySelectorAll('[data-bulk]').forEach(bt=>bt.onclick=async()=>{ const ids = picked(); if(!ids.length) return;
-    if(bt.dataset.bulk==='dismissed' && !confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.`)) return;
-    if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
-    bt.disabled = true;
-    try { await post('/api/findings/bulk-status', {ids, status: bt.dataset.bulk}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
-    state.brief = null; render(); });
-  v.querySelector('#wlCsv').onclick = async () => { let r;
-    try { r = await fetch('/api/findings.csv?'+qs(Object.assign({}, scope, {kind:f.kind, view:'worklist'})), find); } catch(e){ alert('The export did not come back (no connection).'); return; }
-    if(!r.ok){ alert('The export did not come back ('+r.status+').'); return; }
-    const url = URL.createObjectURL(await r.blob()), a = document.createElement('a'); a.href = url; a.download = 'remitwatch-worklist.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000); };
-  if(f.first === '1' && res.items.length){ state.filt[key] = Object.assign({}, f, {first:''}); openDetail(res.items[0].finding_id); }
-}
-
+const MONEY_CATS = 'denial,bundling,downcoding,underpayment';
 // the "What to do" box at the top of an item, and stepping through the list
-function whatToDoHtml(f){
+function whatToDoHtml(f, letter){
   const b = state.brief; if(!b || !b.labels) return '';
   const lb = labelOf(b, f.signal), kk = kindFor(b, f), k = kindOf(b, kk), est = /not confirmed/.test(f.deadline_basis||'');
   const ev = (f.evidence && typeof f.evidence === 'object') ? f.evidence : {}, today = new Date().toISOString().slice(0,10);
@@ -231,79 +154,89 @@ function whatToDoHtml(f){
   const stake = (ev.deadlines||[]).length ? `${money2(openCents)} at stake on the claims still inside their windows (of ${money2(f.shortfall_cents)} in all).`
     : (f.shortfall_cents ? money2(f.shortfall_cents)+' at stake.' : 'The amount is not known: this payer has no usual rate for the code to compare with.');
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
-  const more = i>=0 && i < ids.length-1, check = kk === 'check' || !due;
+  const more = i>=0 && (i < ids.length-1 || (!!state.wlNext && (state.wlTotal||0) > ids.length)), check = kk === 'check' || !due;
   const waiting = {appealed:`Sent${f.appealed_at?' on '+longDate(String(f.appealed_at).slice(0,10)):''}. It waits on the payer: if it is still unpaid 30 days after sending, follow up by portal or phone.`,
     resolved:'Paid. Nothing more to do.', lost:'Lost: the payer upheld its decision.', dismissed:'Let go.'}[f.status];
+  const shut = !waiting && !!due && due < today;        // a closed window: nothing to send, so no send button and no letter
   return `<div class="todo-box"><div class="todo-top">${kindBadge(b, kk)}<span class="${c.cls}">${due ? `File by ${longDate(due)} (${esc(c.text)})${est?', estimated rule':''}${open.length>1?`; its last claim by ${longDate(f.appeal_deadline)}`:''}` : 'No filing date'}</span>
-      ${i>=0 ? `<span class="muted small">Item ${i+1} of ${ids.length} on this page</span>` : ''}</div>
-    <div class="todo-what"><b>${esc(lb.label)}.</b> ${stake}</div>
+      ${i>=0 ? `<span class="muted small">Item ${i+1} of ${Number(Math.max(state.wlTotal||0, ids.length)).toLocaleString()}</span>` : ''}</div>
+    <div class="todo-what">${stake}</div>
     ${f.carc_text ? `<div class="small muted">Payer's reason: ${esc(f.carc)} ${esc(f.carc_text)}${f.rarc_text?' · '+esc(f.rarc)+' '+esc(f.rarc_text):''}</div>` : ''}
-    ${waiting ? `<div class="todo-next"><b>Status:</b> ${esc(waiting)}</div>` : `<div class="todo-next"><b>What to do:</b> ${esc(next)}</div>
+    ${shut ? `<div class="todo-next">The filing window closed on ${longDate(due)}. Nothing to send: keep it for the record, or mark it Lost or Let go.</div>` : waiting ? `<div class="todo-next"><b>Status:</b> ${esc(waiting)}</div>` : `<div class="todo-next"><b>What to do:</b> ${esc(next)}</div>
     <div class="small muted">You need: ${esc(k.needs||'')}</div>`}
     <div class="todo-err sev-high small" id="todoErr" role="alert"></div>
-    <div class="actions todo-actions">${more && !waiting ? `<button class="primary" id="sentNext" data-to="${check ? 'in_progress' : 'appealed'}">${check ? 'Mark started and open the next' : 'Mark sent and open the next'}</button>` : ''}
-      ${i>0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div></div>`;
+    <div class="actions todo-actions">${more && !waiting && !shut ? `<button class="primary" id="sentNext" data-to="${check ? 'in_progress' : 'appealed'}">${check ? 'Mark started and open the next' : 'Mark sent and open the next'}</button>` : ''}
+      ${shut ? '' : (letter||'')}${i>0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div></div>`;
 }
 function bindWhatToDo(f, d){
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
+  // the next item: from the rows shown, or the next rows of the same list, fetched at the end of them
+  const next = async () => {
+    if(i >= 0 && i < (state.worklist||[]).length - 1) return state.worklist[i+1];
+    if(state.wlNext){ try { await state.wlNext(); } catch(e){ return null; } }
+    return (state.worklist||[])[i+1] || null;
+  };
+  const go = async () => { const id = await next(); if(id) openDetail(id); else closeDetail(); };
   const sn = d.querySelector('#sentNext'); if(sn) sn.onclick = async () => {
     sn.disabled = true;
     try { await post('/api/findings/'+f.finding_id+'/status', {status: sn.dataset.to || 'appealed'}); }
     catch(e){ sn.disabled = false; const er = d.querySelector('#todoErr'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; return; }
-    state.brief = null; state.dirty = true; openDetail(ids[i+1]); };
+    state.brief = null; state.dirty = true; go(); };
   const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => openDetail(ids[i-1]);
-  const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => openDetail(ids[i+1]);
+  const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => go();
 }
 
 // ---------------------------------------------------------------- Bigger wins
 async function winsTab(v){
   const b = await brief();
   const c = b.contracts || {payers:[]}, f = b.fees || {}, causes = (b.causes||[]).slice(0, 10);
-  const changes = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED'].includes(a.kind)).slice(0, 6);
   const trend = x => !x.n_prev ? '' : (x.cents90 > x.cents_prev * 1.15 ? '<span class="sev-high">rising</span>' : (x.cents90 < x.cents_prev * 0.85 ? '<span class="ok">falling</span>' : '<span class="muted">steady</span>'));
+  const why = text => `<details class="why-fold"><summary>Why</summary><div class="note">${text}</div></details>`;
   v.innerHTML = `<div class="page-head"><h1 class="page-title">Bigger wins</h1><span class="muted small">Money you fix once and collect on every future claim. None of it is appealed claim by claim, so it never shows up on Today.</span></div>
     <div class="grid two">
-      <div class="panel"><h2>Raise the rates</h2><div class="note">What each commercial and Medicare Advantage payer allowed for office services in ${esc(c.year||'the last full year')}, as a share of what Medicare paid you for the same codes and volume (100% is Medicare's rate; "office visits" is the 99202 to 99215 codes alone). Below Medicare is a contract question, not an error the site can appeal. <b>Next step:</b> get the signed fee schedule for the payers at the top and bring this to the contract talk.</div>
+      <div class="panel" id="wins-rates"><h2>Raise the rates</h2><div class="small"><b>Next step:</b> get the signed fee schedule for the payers at the top and bring this to the contract talk.</div>
+        ${why(`What each commercial and Medicare Advantage payer allowed for office services in ${esc(c.year||'the last full year')}, as a share of what Medicare paid you for the same codes and volume (100% is Medicare's rate; "office visits" is the 99202 to 99215 codes alone). Below Medicare is a contract question, not an error the site can appeal.`)}
         <table><thead><tr><th>Payer</th><th class="num">All office services</th><th class="num">Office visits</th><th class="num">A year below Medicare</th></tr></thead>
         <tbody>${(c.payers||[]).slice(0,8).map(p=>`<tr><td>${esc(p.payer_group)}<div class="small muted">${esc(p.payer_kind==='medicare_advantage'?'Medicare Advantage':'commercial')} · ${Number(p.lines).toLocaleString()} lines</div></td><td class="num ${p.pct_of_medicare<0.9?'sev-high':(p.pct_of_medicare<1?'sev-medium':'ok')}">${Math.round(p.pct_of_medicare*100)}%</td><td class="num">${p.visit_pct_of_medicare!=null?Math.round(p.visit_pct_of_medicare*100)+'%':'–'}</td><td class="num"><b>${p.gap_cents>0?money(p.gap_cents):'–'}</b></td></tr>`).join('')}</tbody></table>
-        <a href="#contracts" class="small">Rates by code and payer</a></div>
-      <div class="panel"><h2>What changes on January 1, 2027</h2><div class="note">From Medicare's 2027 physician fee schedule (final rule, November 2026).</div>
-        <ul class="wins-list"><li><b>Same-day visits:</b> when a modifier-25 visit and a 0-day procedure (biopsy, shave, injection, Mohs) are done the same day, the most expensive service is paid in full and every other service that day at 80%, a destruction or excision on the same claim included. A visit with only a destruction (17000, 17110) or an excision, which have 10- or 90-day globals, does not bring the rule in.</li>
-          <li><b>G2211 ends:</b> it becomes modifier B1 on the visit itself. Change the charge setup in EMA before January, or those add-on payments will be denied.</li>
-          <li><b>Rates fall:</b> the conversion factor drops 2.3% and Kentucky's and Indiana's work adjustment loses its floor, so common dermatology codes pay about 4 to 6% less (99213 in Kentucky goes from $89.52 to $85.54).</li>
+        <a href="#contracts" class="small" id="ratesLink">Rates by code and payer</a></div>
+      <div class="panel" id="wins-2027"><h2>What changes on January 1, 2027</h2>
+        <ul class="wins-list"><li><b>Same-day visits:</b> a modifier-25 visit with a 0-day procedure: the most expensive service is paid in full, every other service that day at 80%.</li>
+          <li><b>G2211 ends:</b> it becomes modifier B1 on the visit itself. Change the charge setup in EMA before January.</li>
+          <li><b>Rates fall</b> about 4 to 6% on common dermatology codes (99213 in Kentucky goes from $89.52 to $85.54).</li>
           <li><b>Indiana Medicaid</b> moves to 100% of the January 2026 Medicare rates, and its managed-care plans must match.</li></ul>
-        <div class="small muted">The site already expects the 80% on those lines from January, for Medicare and for Medicare Advantage plans that follow it, so they are not shown as underpaid. How it combines with the multiple-procedure cut on a second procedure awaits CMS's instructions, so those lines are not flagged meanwhile.</div></div>
+        ${why(`From Medicare's 2027 physician fee schedule (final rule, November 2026). Same-day visits: biopsy, shave, injection and Mohs are 0-day procedures. When one is done with a modifier-25 visit, every other service that day is paid at 80%, a destruction or excision on the same claim included; a visit with only a destruction (17000, 17110) or an excision, which have 10- or 90-day globals, does not bring the rule in. G2211: without the change, those add-on payments will be denied. Rates: the conversion factor drops 2.3% and Kentucky's and Indiana's work adjustment loses its floor. The site already expects the 80% on those lines from January, for Medicare and for Medicare Advantage plans that follow it, so they are not shown as underpaid. How it combines with the multiple-procedure cut on a second procedure awaits CMS's instructions, so those lines are not flagged meanwhile.`)}</div>
     </div>
-    <div class="panel"><h2>Stop the leaks</h2><div class="note">Denial causes in the last 90 days of payments against the 90 days before. Each one is a habit or a front-desk step to change; appealing them one by one never ends.</div>
+    <div class="panel" id="wins-leaks"><h2>Stop the leaks</h2><div class="small"><b>Next step:</b> give each cause to the person named; it is a habit or a front-desk step to change.</div>
+      ${why('Denial causes in the last 90 days of payments against the 90 days before. Appealing them one by one never ends; fixing the cause stops the next ones.')}
       <table><thead><tr><th>Cause</th><th>Who fixes it</th><th class="num">Last 90 days</th><th class="num">Items</th><th>Trend</th><th></th></tr></thead>
       <tbody>${causes.map(x=>`<tr><td>${esc(x.label)}</td><td class="small">${esc(OWNER_OF[x.work]||'Billing')}</td><td class="num"><b>${money(x.cents90)}</b></td><td class="num">${Number(x.n90).toLocaleString()}</td><td class="small">${trend(x)}</td><td><button class="ghost" data-cause="${esc(x.signal)}">See them</button></td></tr>`).join('')}</tbody></table></div>
     <div class="grid two">
-      <div class="panel"><h2>Your fees</h2><div class="note">Codes billed below what a payer allows: payers pay the lesser of your charge and their rate, so they paid exactly your charge. Nothing to appeal. <b>Next step:</b> set each fee above the amount shown and every later claim is paid at the payer's rate.</div>
+      <div class="panel" id="wins-fees"><h2>Your fees</h2><div class="small"><b>Next step:</b> set each fee above the amount a payer allows; every later claim is then paid at the payer's rate.</div>
+        ${why('Codes billed below what a payer allows: payers pay the lesser of your charge and their rate, so they paid exactly your charge. Nothing to appeal.')}
         ${(f.charge_caps||[]).length ? `<table><thead><tr><th>Code</th><th class="num">Your fee</th><th class="num">A payer allows</th><th class="num">Left unpaid</th><th>Payers</th></tr></thead><tbody>${f.charge_caps.slice(0,10).map(x=>`<tr><td><b>${esc(x.code)}</b><div class="small muted">${esc(x.first_year===x.year?x.year:x.first_year+' to '+x.year)}</div></td><td class="num">${money2(x.charge_cents)}</td><td class="num">${money2(x.top_rate_cents)}</td><td class="num">${money(x.cents)}<div class="small muted">${Number(x.lines).toLocaleString()} lines</div></td><td class="small">${x.payers.map(esc).join(', ')}</td></tr>`).join('')}</tbody></table><div class="small muted">Fee and allowed amount are from ${esc((f.charge_caps[0]||{}).year||'the newest year')} or the code's newest year.</div>` : '<div class="muted small">No code is capped by your charge.</div>'}</div>
-      <div class="panel"><h2>Payment fees</h2><div class="note">Fees payment vendors (Zelis and others) took out of payments${f.payment_fee_since?' since '+rwMonth(f.payment_fee_since):''}: ${money(f.payment_fee_cents||0)} in all. <b>Next step:</b> ask each payer or its vendor for standard direct deposit (ACH) with no fee.</div>
-        ${(f.payment_fees||[]).length ? `<table><thead><tr><th>Payer</th><th class="num">Months with a fee</th><th class="num">Fees</th></tr></thead><tbody>${f.payment_fees.slice(0,8).map(x=>`<tr><td>${esc(x.payer_group)}<div class="small muted">${rwMonth(x.first_month)} to ${rwMonth(x.last_month)}</div></td><td class="num">${x.months}</td><td class="num">${money(x.cents)}</td></tr>`).join('')}</tbody></table>${f.payment_fees.length>8?`<div class="small muted">and ${f.payment_fees.length-8} smaller payers; <a href="#fees">all fees by month</a></div>`:''}` : '<div class="muted small">No payment fees found.</div>'}</div>
-    </div>
-    ${changes.length ? `<div class="panel"><h2>Payer changes</h2><div class="note">Payers behaving differently from their own past. Work the claims as usual; if it continues, it is a contract or policy question.</div>${changes.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">Look into it</button></div>`).join('')}</div>` : ''}`;
+      <div class="panel" id="wins-payfees"><h2>Payment fees</h2><div class="small"><b>Next step:</b> ask each payer or its vendor for standard direct deposit (ACH) with no fee.</div>
+        ${why(`Fees payment vendors (Zelis and others) took out of payments${f.payment_fee_since?' since '+rwMonth(f.payment_fee_since):''}: ${money(f.payment_fee_cents||0)} in all.`)}
+        ${(f.payment_fees||[]).length ? `<table><thead><tr><th>Payer</th><th class="num">Months with a fee</th><th class="num">Fees</th></tr></thead><tbody>${f.payment_fees.slice(0,8).map(x=>`<tr><td>${esc(x.payer_group)}<div class="small muted">${rwMonth(x.first_month)} to ${rwMonth(x.last_month)}</div></td><td class="num">${x.months}</td><td class="num">${money(x.cents)}</td></tr>`).join('')}</tbody></table>${f.payment_fees.length>8?`<div class="small muted">and ${f.payment_fees.length-8} smaller payers; <a href="#fees" id="feesLink">all of them on Fees & takebacks</a></div>`:''}` : '<div class="muted small">No payment fees found.</div>'}</div>
+    </div>`;
   v.querySelectorAll('[data-cause]').forEach(bt=>bt.onclick=()=>goWork({signal: bt.dataset.cause, paid:'90', status:'all', deadline:'', sort:'shortfall'}));
-  v.querySelectorAll('.seeA').forEach(bt=>bt.onclick=()=>{ const a = changes.find(x=>x.alert_id===bt.dataset.id); if(a && typeof seeAlert==='function') seeAlert(a); });
+  const rl = v.querySelector('#ratesLink'); if(rl) rl.onclick = e => { e.preventDefault(); goDetails('contracts'); };
+  const fl = v.querySelector('#feesLink'); if(fl) fl.onclick = e => { e.preventDefault(); state.filt.feesDesk = {list:'fees'}; state.tab = 'fees'; location.hash = 'fees'; render(); };
+  if(state.winsAnchor){ const el = v.querySelector('#'+state.winsAnchor); state.winsAnchor = null; if(el) el.scrollIntoView({block:'start'}); }
 }
 
 // ---------------------------------------------------------------- More: the analysis pages
 const MORE_PAGES = [
-  ['overview','Totals','Every finding by category, month, payer and signal.'],
-  ['explorer','Who and what','Pivot any finding by payer, clinician, code, plan or month.'],
-  ['downcoding','Downcoding','Visits and procedures paid at a lower level, by payer and clinician.'],
-  ['bundling','Bundling and modifiers','Visits and procedures bundled into another service.'],
-  ['denials','Denials','Every denial by reason, including those past their window.'],
-  ['contracts','Contracts and underpayment','Rates against Medicare by code, and every underpayment.'],
-  ['fees','Fees and takebacks','Payment fees and money taken back, by month.'],
-  ['payers','Payers and rates','Findings and dollars by payer and by clinician.'],
-  ['alerts','Alerts','Every alert, new and acknowledged.'],
-  ['appeals','Appeals queue (classic)','The earlier work queue with every column.'],
+  ['overview','Overview','Every finding by category, month and payer, including money past its filing window.'],
+  ['explorer','Who & what','Count any finding by payer, clinician, code, plan or month.'],
+  ['payers','Payers & rates','Findings and dollars by payer and by clinician.'],
+  ['alerts','Alerts','Payers behaving differently from their own past, new and acknowledged.'],
+  ['progress','Progress','What came back after a fix or appeal, and what is being worked.', 'mid-only'],
+  ['data','Data','Whether the numbers can be trusted, and who fixes what.', 'mid-only'],
+  ['providers','Providers','What each clinician is doing, behind the owner\'s password where one is set.', 'mid-only'],
 ];
 async function moreTab(v){
-  v.innerHTML = `<div class="page-head"><h1 class="page-title">More</h1><span class="muted small">Analysis pages. Useful for questions and for the owner; the daily work is on Today and Worklist.</span></div>
-    <div class="more-grid">${MORE_PAGES.map(([k,t,d])=>`<a class="more-card" href="#${k}" data-go="${k}"><b>${esc(t)}</b><span class="small muted">${esc(d)}</span></a>`).join('')}</div>`;
+  v.innerHTML = `<div class="page-head"><h1 class="page-title">More</h1><span class="muted small">Pages for questions and for the owner. The daily work is on Today, the category pages and the Worklist.</span></div>
+    <div class="more-grid">${MORE_PAGES.map(([k,t,d,cls])=>`<a class="more-card ${cls||''}" href="#${k}" data-go="${k}"><b>${esc(t)}</b><span class="small muted">${esc(d)}</span></a>`).join('')}</div>`;
   v.querySelectorAll('[data-go]').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab=a.dataset.go; location.hash=a.dataset.go; render(); });
 }
 

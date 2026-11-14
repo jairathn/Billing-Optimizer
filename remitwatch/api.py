@@ -35,6 +35,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 import asyncio
+from contextvars import ContextVar
 
 from . import __version__, runtime
 from .actions import STATUSES, apply_alert_ack, apply_status
@@ -416,12 +417,22 @@ def _pattern_cents(w: str, params: list, deadline: str | None) -> tuple[int, dic
     return delta, each
 
 
+# A page that counts several lists in one call reads the routine-rate claims once (see desk() and brief()).
+_WINDOWS_MEMO: ContextVar[dict | None] = ContextVar("_WINDOWS_MEMO", default=None)
+
+
 def _windows(statuses: tuple = ("open",)) -> list[tuple]:
+    memo = _WINDOWS_MEMO.get()
+    if memo is not None and statuses in memo:
+        return memo[statuses]
     conn = db()
     try:
-        return pattern_windows(conn, statuses)
+        out = list(pattern_windows(conn, statuses))
     finally:
         conn.close()
+    if memo is not None:
+        memo[statuses] = out
+    return out
 
 
 def _finding_cols() -> str:
@@ -639,7 +650,8 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
             order_params = [x for pair in nxt for x in pair] * 3
     by_due = f"({due}) IS NULL, ({due}) < date('now'), {due} ASC"
     order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": f"{by_due}, shortfall_cents DESC",
-             "payer": f"payer_group, {by_due}, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
+             "payer": f"payer_group, {by_due}, shortfall_cents DESC", "paid": "payment_date DESC, shortfall_cents DESC",
+             "sent": "COALESCE(appealed_at, status_changed_at) ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
     if sort not in ("deadline", "payer"):
         order_params = []
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
@@ -1198,29 +1210,126 @@ def brief(_: str = Depends(require_auth)):
     from . import insights
     conn = db()
     try:
-        return insights.brief(conn)
+        out = insights.brief(conn)
     finally:
         conn.close()
+    if out.get("ready"):
+        # the red number on each category tab: what closes within 7 days, counted as that page's first tile and its list
+        token = _WINDOWS_MEMO.set({})
+        try:
+            out["badges"] = {c: _bucket(c, None, TODO_STATUSES, "week") for c in BADGE_CATEGORIES}
+        finally:
+            _WINDOWS_MEMO.reset(token)
+    return out
 
 
 @app.get("/api/worklist/counts")
 def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None, status: str = "open", deadline: Optional[str] = None,
                     q: Optional[str] = None, signal: Optional[str] = None, live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650),
-                    min: int = Query(0, ge=0, le=10**6), request: Request = None, _: str = Depends(require_auth)):
+                    min: int = Query(0, ge=0, le=10**6), kind: Optional[str] = Query(None, max_length=20), request: Request = None,
+                    _: str = Depends(require_auth)):
     """Items and dollars for each kind of work under the worklist's other filters, so each tab counts what a click on it
-    opens. Counts only: no patient, claim or date."""
+    opens, and for each reason (signal), so a reason chip counts what it opens too. Counts only: no patient, claim or date."""
     from .insights import WORK_TYPES, work_type
     w, params = _filters(signal, category, payer, None, status, None, None, _search_text(request, q), None, None, deadline, None, None,
-                         None, None, bool(live), paid, min)
+                         None, kind, bool(live), paid, min)
     out = {t["key"]: {"key": t["key"], "n": 0, "cents": 0} for t in WORK_TYPES}
+    by_signal: dict[str, dict] = {}
     for r in rows(f"SELECT signal, actionable, carc, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w} GROUP BY 1,2,3", tuple(params)):
         k = out[work_type(r["signal"], r["actionable"], r["carc"])]
         k["n"] += r["n"]
         k["cents"] += r["cents"]
+        sg = by_signal.setdefault(r["signal"] or "", {"signal": r["signal"], "n": 0, "cents": 0})
+        sg["n"] += r["n"]
+        sg["cents"] += r["cents"]
     delta, _each = _pattern_cents(w, params, deadline)
     out[work_type("SECOND_RATE", "appeal")]["cents"] += delta
+    if "SECOND_RATE" in by_signal:
+        by_signal["SECOND_RATE"]["cents"] += delta
     kinds = list(out.values())
-    return {"kinds": kinds, "n": sum(k["n"] for k in kinds), "cents": sum(k["cents"] for k in kinds)}
+    return {"kinds": kinds, "n": sum(k["n"] for k in kinds), "cents": sum(k["cents"] for k in kinds),
+            "signals": sorted(by_signal.values(), key=lambda x: -x["cents"])}
+
+
+# ---------------------------------------------------------------- the category pages
+TODO_STATUSES = "open,in_progress"
+# A category page's tiles: each is exactly what the list holds under that status and filing date
+DESK_TILES = (
+    ("week", TODO_STATUSES, "week"),            # closes within 7 days
+    ("month", TODO_STATUSES, "month"),          # closes within 30 days
+    ("valid", TODO_STATUSES, "valid"),          # the filing window is open: you can still get it back
+    ("decide", TODO_STATUSES, "decide"),        # no filing date, paid in the last 120 days: a person decides
+    ("older", TODO_STATUSES, "older"),          # no filing date, paid before that
+    ("expired", TODO_STATUSES, "expired"),      # the window closed
+    ("all", TODO_STATUSES, None),               # every item to do, any window: the earlier page header
+    ("sent", "appealed", None),                 # sent to the payer, waiting
+    ("followup", "appealed", "followup"),       # sent over 30 days ago and still unpaid
+    ("missed", "open", "missed"),               # windows that closed in the last 30 days with nobody on it
+)
+BADGE_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
+
+
+def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None) -> dict:
+    """Items and dollars under exactly the filter /api/findings uses for the same choices (live findings only): the
+    count line of the list a click opens. A routine-rate pattern counts its claims in range, as the list does."""
+    w, params = _filters(signal, category, payer, None, status, None, None, None, None, None, deadline, None, None, None, kind, True, 0, min_dollars)
+    r = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}", tuple(params))
+    delta, _each = _pattern_cents(w, params, deadline)
+    return {"n": r["n"], "cents": (r["cents"] or 0) + (delta if r["n"] else 0)}
+
+
+def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0) -> dict:
+    """The kinds of work under one filter, largest dollars first, each with its three biggest payer piles; a pile's count
+    and dollars are what the list shows for that kind and payer."""
+    from .insights import WORK_TYPES, work_type
+    w, params = _filters(signal, category, payer, None, status, None, None, None, None, None, deadline, None, None, None, None, True, paid_days, min_dollars)
+    kinds = {t["key"]: {"key": t["key"], "n": 0, "cents": 0, "payers": {}} for t in WORK_TYPES}
+    for r in rows(f"""SELECT signal, actionable, carc, payer_group pg, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}
+                      GROUP BY 1,2,3,4""", tuple(params)):
+        k = kinds[work_type(r["signal"], r["actionable"], r["carc"])]
+        k["n"] += r["n"]
+        k["cents"] += r["cents"]
+        p = k["payers"].setdefault(r["pg"], [0, 0])
+        p[0] += r["n"]
+        p[1] += r["cents"]
+    delta, each = _pattern_cents(w, params, deadline)
+    if each and deadline in DEADLINE_RANGES:
+        # a routine-rate pattern counts the cents of its claims in range, in its kind and in its payer's pile
+        full = {r["finding_id"]: (r["pg"], r["c"]) for r in rows(
+            f"SELECT finding_id, payer_group pg, COALESCE(shortfall_cents,0) c FROM findings{w}{' AND' if w else ' WHERE'} signal='SECOND_RATE'", tuple(params))}
+        rk = kinds[work_type("SECOND_RATE", "appeal")]
+        for fid, (cents, _d, _n) in each.items():
+            if fid in full:
+                g, c = full[fid]
+                rk["cents"] += cents - c
+                rk["payers"].setdefault(g, [0, 0])[1] += cents - c
+    out = []
+    for k in kinds.values():
+        if not k["n"]:
+            continue
+        piles = sorted(((g, v) for g, v in k["payers"].items() if g), key=lambda kv: (-kv[1][1], -kv[1][0]))[:3]
+        out.append({"key": k["key"], "n": k["n"], "cents": k["cents"], "piles": [{"payer": g, "n": v[0], "cents": v[1]} for g, v in piles]})
+    out.sort(key=lambda k: (-k["cents"], -k["n"]))
+    return {"n": sum(k["n"] for k in out), "cents": sum(k["cents"] for k in out), "kinds": out}
+
+
+@app.get("/api/desk")
+def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query(None, max_length=200), min: int = Query(0, ge=0, le=10**6),
+         status: str = Query(TODO_STATUSES, max_length=80), deadline: Optional[str] = Query(None, max_length=20),
+         signal: Optional[str] = Query(None, max_length=400), paid: int = Query(0, ge=0, le=3650), tiles: int = Query(1, ge=0, le=1),
+         _: str = Depends(require_auth)):
+    """A category page in one call: its tiles (closes in 7 and 30 days, window open, to decide, older with no date, window
+    closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), and the kinds of work under
+    the chosen status, filing date and payment window with their payer piles. Every number is the count line of the list
+    it opens. Counts only: no patient, claim or date."""
+    token = _WINDOWS_MEMO.set({})
+    try:
+        out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid)}
+        if tiles:
+            out["tiles"] = {name: _bucket(category, payer, st, dl, min, signal) for name, st, dl in DESK_TILES}
+        return out
+    finally:
+        _WINDOWS_MEMO.reset(token)
 
 
 @app.get("/api/coverage")

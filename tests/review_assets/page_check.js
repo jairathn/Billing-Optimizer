@@ -26,12 +26,15 @@ const port = process.argv[2], OUT = process.argv[3] + '/';
   await page.goto(base + '#contracts'); await settle();
   out.injected.contracts = await injected();
   out.contracts_warnboxes = await page.evaluate(() => document.querySelectorAll('#view .warnbox').length);
-  out.underpaid_rows = await page.evaluate(() => [...document.querySelectorAll('#tblU tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 220)));
+  out.underpaid_rows = await page.evaluate(() => [...document.querySelectorAll('#view table.wl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 220)));
   out.hint_chips = await page.evaluate(() => [...document.querySelectorAll('#view .chip.hint')].map(c => c.innerText));
 
-  const drawerFor = async (text, tbl = '#tblU') => {
-    const row = page.locator(tbl + ' tbody tr', { hasText: text }).first();
-    await row.click(); await page.waitForSelector('#drawer.open h2'); await page.waitForTimeout(500);
+  // the category page lists short labels, so the item is found by its title through the list's own call and opened as a row opens it
+  const drawerFor = async (text, category = 'underpayment') => {
+    const id = await page.evaluate(async ([t, cat]) => { const r = await (await fetch('/api/findings?status=all&limit=2000&category=' + cat)).json();
+      const hit = r.items.find(x => (x.title || '').includes(t)); return hit ? hit.finding_id : null; }, [text, category]);
+    if (!id) throw new Error('no finding titled ' + text);
+    await page.evaluate(i => openDetail(i), id); await page.waitForSelector('#drawer.open h2'); await page.waitForTimeout(500);
     const r = await page.evaluate(() => ({
       title: document.querySelector('#drawer h2').innerText,
       notes: [...document.querySelectorAll('#drawer .note')].map(n => n.innerText.replace(/\s+/g, ' ')),
@@ -45,7 +48,7 @@ const port = process.argv[2], OUT = process.argv[3] + '/';
   };
   out.plan_pattern = await drawerFor('99214 at $90.00');
   out.aetna_pattern = await drawerFor('Aetna allowed 17311');
-  out.legacy_pattern = await drawerFor('(earlier release)', '#tblC');
+  out.legacy_pattern = await drawerFor('(earlier release)', 'contract');
   await page.screenshot({ path: OUT + 'contracts.png', fullPage: true });
 
   await page.goto(base + '#denials'); await settle();
@@ -53,14 +56,16 @@ const port = process.argv[2], OUT = process.argv[3] + '/';
   out.denial_hints = await page.evaluate(() => [...document.querySelectorAll('#view .chip.hint')].map(c => c.innerText));
   await page.goto(base + '#appeals'); await settle();
   out.injected.appeals = await injected();
-  out.appeals_rows = await page.evaluate(() => [...document.querySelectorAll('#tbl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 160)));
+  out.appeals_rows = await page.evaluate(() => [...document.querySelectorAll('#view table.wl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 160)));
   // Fees & takebacks: the recoupment dispute and the fee opt-out letters
   await page.goto(base + '#fees'); await settle();
   out.injected.fees = await injected();
-  out.fees_rows = await page.evaluate(() => [...document.querySelectorAll('#tbl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 140)));
+  out.fees_rows = await page.evaluate(() => [...document.querySelectorAll('#view table.wl tbody tr')].map(t => t.innerText.replace(/\s+/g, ' ').slice(0, 140)));
   out.fees_drawers = {};
-  for (const [label, text] of [['TAKEBACK', 'Overpayment recovery'], ['FEE_SKIM', 'payment fees withheld']]) {
-    const row = page.locator('#tbl tbody tr', { hasText: text }).first();
+  // a takeback is a row of the Takebacks list; a payer's payment fees open from the Payment fees by payer list
+  for (const [label, list, sel] of [['TAKEBACK', 'Takebacks', '#view table.wl tbody tr.row'], ['FEE_SKIM', 'Payment fees by payer', '#view tr.fee-row']]) {
+    await page.locator('#view .seg', { hasText: list }).first().click(); await settle();
+    const row = page.locator(sel).first();
     if (!(await row.count())) { out.fees_drawers[label] = 'row not found'; continue; }
     await row.click(); await page.waitForSelector('#drawer.open h2'); await page.waitForTimeout(500);
     const fid = await page.evaluate(() => document.querySelector('#drawer [data-st]') && [...document.querySelectorAll('tr.row')].length);

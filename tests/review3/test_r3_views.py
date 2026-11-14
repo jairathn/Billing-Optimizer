@@ -163,7 +163,7 @@ def test_the_drawer_offers_an_appeal_packet_for_sequestration(tmp_path, monkeypa
     seq = rows["SEQUESTRATION"]
     page = open(os.path.join(REPO, "remitwatch", "static", "index.html")).read()
     # the drawer offers the letter only where one exists: a claim, a takeback or a payment fee
-    assert "${f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal)?`<button class=\"primary\" id=\"btnAppeal\">" in page
+    assert "const letter = f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal) ? `<button id=\"btnAppeal\">" in page
     c = api_client(tmp_path, monkeypatch)
     pkt = c.get(f"/api/appeal/{seq['finding_id']}")
     print(pkt.status_code, pkt.json().get("subject"), "|", (pkt.json().get("letter") or "")[-260:])
