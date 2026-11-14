@@ -243,8 +243,8 @@ function labUpdate(v){
   const pm = r.perMinute.filter(m => m.value != null);
   body.querySelector('#labMinutes').innerHTML = `<h2>What a clinician minute brings in</h2>
     <div class="small muted">Collections per hands-on minute, at this plan's prices and the minutes in Practice figures. The same day spent on the top rows brings in more; clinical need decides what is done.</div>
-    <table><thead><tr><th>Work</th><th class="num">Collections each</th><th class="num">Minutes</th><th class="num">Per minute</th></tr></thead><tbody>
-    ${pm.sort((a, b) => (b.perMinute || 0) - (a.perMinute || 0)).map(m => `<tr><td>${esc(m.label)}</td><td class="num">${money(m.value)}</td><td class="num">${m.minutes == null ? '<span class="muted">not entered</span>' : m.minutes.toFixed(0)}</td><td class="num">${m.perMinute == null ? '–' : money(m.perMinute)}</td></tr>`).join('')}
+    <table class="calc-cards"><thead><tr><th>Work</th><th class="num">Collections each</th><th class="num">Minutes</th><th class="num">Per minute</th></tr></thead><tbody>
+    ${pm.sort((a, b) => (b.perMinute || 0) - (a.perMinute || 0)).map(m => `<tr><td data-label="Work">${esc(m.label)}</td><td class="num" data-label="Collections each">${money(m.value)}</td><td class="num" data-label="Minutes">${m.minutes == null ? '<span class="muted">not entered</span>' : m.minutes.toFixed(0)}</td><td class="num" data-label="Per minute">${m.perMinute == null ? '–' : money(m.perMinute)}</td></tr>`).join('')}
     </tbody></table>`;
   labScenarioRows(v);
 }
@@ -516,7 +516,7 @@ async function sheetDraw(v){
     const missing = has ? LabModel.planMissing(plan, t) : null;
     const need = has && !missing && plan.type !== 'wrvu' ? LabModel.collectionsFor(plan, t) : null;
     const needW = has && !missing && plan.type === 'wrvu' ? t / 100 / plan.per_wrvu : null;
-    const days = planned.daysYear || 1, dist = d.schedule.clinic_day_allowed || {};
+    const days = planned.daysYear || 1;
     body.querySelector('#sheetNote').textContent = String(cs.sheetTarget || '').trim() && !(isFinite(t) && t > 0) ? 'Type the target as a number of dollars, such as 650000 or 650k.'
       : missing ? `Enter ${missing} for ${d.who.name}'s plan under Practice figures to see what the target needs.` : '';
     let goal = '';
@@ -524,8 +524,11 @@ async function sheetDraw(v){
       goal = `<h3>To be paid ${moneyK(t)}</h3><p>Your base pay covers this target.</p>`;
     } else if(need){
       const dpw = Math.max(0.5, x.days_per_week);
-      // like with like: the collections a day needs, as allowed amounts at this plan's collected share
-      const ratio = planned.allowed > 0 ? planned.collections / planned.allowed : null;
+      // like with like, as the Calculator reads a target (calc.js calcDayNeed): the allowed amounts a clinic day needs,
+      // against this plan's average day and the clinician's own past days scaled to this plan's prices
+      const ratio = planned.production.allowed > 0 ? planned.collections / planned.production.allowed : 1;
+      const w = typeof calcDayNeed === 'function' ? calcDayNeed(cs, planned, need)
+        : {need: need / days / Math.max(0.01, ratio), planDay: planned.production.allowed / days};
       const ids = ['visits', 'new_visits', 'days_per_week', 'weeks_per_year', 'mohs_cases'].filter(k => CalcModel.MOVES.some(m => m[0] === k));
       const seek = CalcModel.goalSeek(d, xp, need, cs.cal, {moves: ids, production: true});
       const gap = seek.gap != null ? seek.gap : need - planned.collections;      // on own production
@@ -540,8 +543,9 @@ async function sheetDraw(v){
         : `${(m.needed / dpw).toFixed(1)} more a clinic day${m.key === 'mohs_cases' ? ' (depends on referrals)' : ''}`;
       const notEnough = tooMuch.length ? `<p class="small muted">Not enough on its own: ${tooMuch.map(m => m.key === 'days_per_week'
         ? `more clinic days (it would take more than ${cap.days_per_week} a week)` : `more weeks of clinic (it would take more than ${cap.weeks_per_year} a year)`).join('; ')}.</p>` : '';
-      goal = `<h3>To be paid ${moneyK(t)}</h3><p>Collections of ${moneyK(need)} a year for your own production: ${money(need / days)} a clinic day over ${days.toFixed(0)} days${ratio ? `, about ${money(need / days / ratio)} allowed` : ''}.
-        ${dist.p50 && ratio ? `Your median clinic day has brought ${money(dist.p50)} allowed, your best tenth ${money(dist.p90)}.` : ''}</p>
+      goal = `<h3>To be paid ${moneyK(t)}</h3><p>Collections of ${moneyK(need)} a year for your own production: ${money(need / days)} a clinic day over ${days.toFixed(0)} days, about ${money(w.need)} allowed.
+        ${w.planDay > 0 ? `This plan's average clinic day brings ${money(w.planDay)} allowed${w.need > w.planDay ? `: the target needs ${w.need > w.planDay * 1.01 ? Math.round(100 * (w.need / w.planDay - 1)) + '%' : 'under 1%'} more` : ''}.` : ''}
+        ${w.p50 ? `At this plan's prices your own clinic days so far would have brought about ${money(w.p50)} allowed at the median and ${money(w.p90)} at the 90th percentile: the target is ${esc(w.where)}.` : ''}</p>
         ${gap > 0 ? `<p>${moneyK(gap)} more than this plan.${res.length ? ' Any one of these closes it:' : tooMuch.length ? '' : ' None of the patient-volume levers moves this plan\'s collections.'}</p>${res.length ? `<table><tbody>${res.map(m =>
           `<tr><td>${esc(m.name)}</td><td class="num">${how(m)}</td></tr>`).join('')}</tbody></table>` : ''}${notEnough}` : `<p class="ok">This plan reaches it.</p>`}`;
     } else if(needW){

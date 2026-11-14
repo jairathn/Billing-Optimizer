@@ -930,26 +930,31 @@ def _own_read_share(conn, ids: list[str], d0: str, d1: str, route: str | None = 
 
 def _visit_counts_lines(conn, ids: list[str], d0: str, d1: str) -> dict[str, Counter]:
     """Per clinician: Medicare fee-for-service patient-days with a Mohs first stage (mohs) and of those with an E/M billed
-    with modifier 57 (m57) or 25 (m25); with a first biopsy (bx) and of those with an E/M-25 (b25). From the remittance
-    lines: a line's rendering NPI, else its claim's; the patient-day is the patient's name on the claim (kept in memory
-    only; the bill, the first nine characters of the patient control number, where there is no name) and the date, so a
-    visit billed apart from the procedure the same day still counts; the modifiers as billed where the payer reported a
+    with modifier 57 (m57) or 25 (m25); with a first biopsy (bx) and of those with an E/M-25 (b25), and of those, the days
+    that also carry 17000 or 17004 (b25ak) and the allowed cents of 17110, shaves (11300-11313) and 11900/11901 billed
+    those days (b25other: each bill, code and day once, at the newest Medicare decision). From the remittance lines: a
+    line's rendering NPI, else its claim's; the patient-day is the patient's name on the claim (kept in memory only; the
+    bill, the first nine characters of the patient control number, where there is no name) and the date, so a visit
+    billed apart from the procedure the same day still counts; the modifiers as billed where the payer reported a
     change."""
+    extra = tuple(activity.AK_FIRST) + tuple(sorted(activity.BX_DAY_OTHER))
     rows = conn.execute(
         f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) npi, substr(l.patient_control_number, 1, 9),
                    l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code),
                    COALESCE(NULLIF(NULLIF(l.original_modifiers, ''), '[]'), l.modifiers), cl.payer_name, cl.claim_filing_indicator,
-                   cl.patient_last, cl.patient_first
-            FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key
-            WHERE l.service_date BETWEEN ? AND ? AND cl.claim_status_code IN ('1', '19')
+                   cl.patient_last, cl.patient_first, l.allowed_cents, l.paid_cents, l.payment_date, cl.claim_key
+            FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key LEFT JOIN transactions t ON t.transaction_key = l.transaction_key
+            WHERE l.service_date BETWEEN ? AND ? AND cl.claim_status_code IN ('1', '19') AND COALESCE(t.superseded, 0) = 0
               AND (substr(l.procedure_code, 1, 3) IN ('992', '173') OR substr(l.original_procedure_code, 1, 3) IN ('992', '173')
-                   OR substr(l.procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}) OR substr(l.original_procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}))
+                   OR substr(l.procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)}) OR substr(l.original_procedure_code, 1, 5) IN ({_in(BIOPSY_FIRST)})
+                   OR substr(l.procedure_code, 1, 5) IN ({_in(extra)}) OR substr(l.original_procedure_code, 1, 5) IN ({_in(extra)}))
               AND COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) IN ({_in(ids)})""",
-        (d0, d1, *BIOPSY_FIRST, *BIOPSY_FIRST, *ids)).fetchall()
+        (d0, d1, *BIOPSY_FIRST, *BIOPSY_FIRST, *extra, *extra, *ids)).fetchall()
     em = set(EM_NEW) | set(EM_EST)
     kinds: dict[tuple, str] = {}
-    day: dict[tuple, list] = defaultdict(lambda: [False, False, False, False])      # Mohs, biopsy, E/M-57, E/M-25
-    for npi, bill, sd, raw, mods, payer, cfi, last, first in rows:
+    day: dict[tuple, list] = defaultdict(lambda: [False, False, False, False, False])      # Mohs, biopsy, E/M-57, E/M-25, 17000/17004
+    other: dict[tuple, dict] = defaultdict(dict)        # patient-day -> (bill, code) -> claim -> [paid on, allowed]
+    for npi, bill, sd, raw, mods, payer, cfi, last, first, allowed, paid, paid_on, claim in rows:
         if not sd:
             continue
         k = (payer, cfi)
@@ -958,19 +963,26 @@ def _visit_counts_lines(conn, ids: list[str], d0: str, d1: str) -> dict[str, Cou
         if kinds[k] != "medicare":
             continue
         code = activity.clean_code(raw)
-        if code not in em and code not in ("17311", "17313") and code not in BIOPSY_FIRST:
+        patient = (re.sub(r"[^A-Z0-9]", "", last.upper()), re.sub(r"[^A-Z0-9]", "", (first or "").upper())) if (last or "").strip() else ("#", bill)
+        key = (npi, patient, sd)
+        if code in activity.BX_DAY_OTHER:
+            c = other[key].setdefault((bill, code), {}).setdefault(claim, [paid_on or "", 0])
+            c[1] += (allowed or 0) if (allowed or 0) > 0 else max(paid or 0, 0)
+            continue
+        if code not in em and code not in ("17311", "17313") and code not in BIOPSY_FIRST and code not in activity.AK_FIRST:
             continue
         m = set(re.findall(r"[0-9A-Z]{2}", (mods or "") + " " + " ".join((raw or "").upper().split()[1:])))
-        patient = (re.sub(r"[^A-Z0-9]", "", last.upper()), re.sub(r"[^A-Z0-9]", "", (first or "").upper())) if (last or "").strip() else ("#", bill)
-        f = day[(npi, patient, sd)]
+        f = day[key]
         f[0] = f[0] or code in ("17311", "17313")
         f[1] = f[1] or code in BIOPSY_FIRST
+        f[4] = f[4] or code in activity.AK_FIRST
         if code in em:
             f[2] = f[2] or "57" in m
             f[3] = f[3] or "25" in m
     per: dict[str, Counter] = defaultdict(Counter)
-    for (npi, _, _), (mohs, bx, e57, e25) in day.items():
-        c = per[npi]
+    for key, (mohs, bx, e57, e25, ak) in day.items():
+        c = per[key[0]]
+        c["ak_measured"] = 1
         if mohs:
             c["mohs"] += 1
             c["m57"] += e57
@@ -978,31 +990,48 @@ def _visit_counts_lines(conn, ids: list[str], d0: str, d1: str) -> dict[str, Cou
         if bx:
             c["bx"] += 1
             c["b25"] += e25
+            if e25:
+                c["b25ak"] += ak
+                # each bill and code once, at its newest Medicare decision (a reprocessed claim replaces the first)
+                c["b25other"] += sum(max(by_claim.values())[1] for by_claim in (other.get(key) or {}).values())
     return per
 
 
 def _visit_counts_stored(conn, ids: list[str], d0: str, d1: str) -> dict[str, Counter]:
     """The same counts as _visit_counts_lines, as the activity build keeps them in provider_days (its own attribution of
-    each encounter to a clinician and its own patient-days)."""
+    each encounter to a clinician and its own patient-days). b25ak and b25other only where the build kept them (version
+    6 on): ak_measured says so."""
     per: dict[str, Counter] = {}
-    for pid, mohs, m57, m25, bx, b25 in conn.execute(
+    try:
+        rows = conn.execute(
+            f"""SELECT provider_id, SUM(mcare_mohs_patients), SUM(mcare_mohs_e57), SUM(mcare_mohs_e25), SUM(mcare_bx_patients), SUM(mcare_bx_e25),
+                       SUM(mcare_bx25_ak), SUM(mcare_bx25_other_cents), COUNT(mcare_bx25_ak)
+                FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? GROUP BY 1""", (*ids, d0, d1)).fetchall()
+    except sqlite3.Error:                     # tables built before the build kept the biopsy days' destructions
+        rows = [tuple(r) + (None, None, 0) for r in conn.execute(
             f"""SELECT provider_id, SUM(mcare_mohs_patients), SUM(mcare_mohs_e57), SUM(mcare_mohs_e25), SUM(mcare_bx_patients), SUM(mcare_bx_e25)
-                FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? GROUP BY 1""", (*ids, d0, d1)):
-        per[pid] = Counter({"mohs": mohs or 0, "m57": m57 or 0, "m25": m25 or 0, "bx": bx or 0, "b25": b25 or 0})
+                FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? GROUP BY 1""", (*ids, d0, d1))]
+    for pid, mohs, m57, m25, bx, b25, ak, oth, kept in rows:
+        per[pid] = Counter({"mohs": mohs or 0, "m57": m57 or 0, "m25": m25 or 0, "bx": bx or 0, "b25": b25 or 0,
+                            "b25ak": ak or 0, "b25other": oth or 0, "ak_measured": 1 if kept else 0})
     return per
 
 
 def _visit_shares(conn, ids: list[str], d0: str, d1: str, route: str | None = None) -> dict:
     """On Medicare fee-for-service patient-days in the window: the share of Mohs patient-days (a first stage billed) on
     which the clinician also billed an E/M with modifier 57 (mohs_visit57_share) or 25 (mohs_visit25_share), and the
-    share of biopsy patient-days (a first biopsy code) with an E/M with modifier 25 (bx_visit_share). A role average
-    gives the mean of its members' own shares (members with VISIT_SHARE_MIN_DAYS such days).
+    share of biopsy patient-days (a first biopsy code) with an E/M with modifier 25 (bx_visit_share). Of those biopsy
+    days with an E/M-25, the share that also carry a destruction of premalignant lesions, 17000 or 17004 (bx_ak_share),
+    and the mean allowed cents a day, as allowed in the window, of 17110, shaves (11300-11313) and 11900/11901 billed on
+    them (bx_day_other_cents). A role average gives the mean of its members' own figures (members with
+    VISIT_SHARE_MIN_DAYS such days).
 
     Read from the remittance lines where the database holds the window's (the full store), else from the counts the
     activity build keeps in provider_days (the dashboard's copy); visit_shares_from says which. `route` ('lines' or
-    'provider_days') forces one, for comparing them. Each share is None where neither can say, and the page keeps its
-    default. Counts only: nothing about a patient leaves here."""
-    keys = ("mohs_visit57_share", "mohs_visit25_share", "bx_visit_share")
+    'provider_days') forces one, for comparing them. Each figure is None where neither can say (bx_ak_share and
+    bx_day_other_cents in a copy built before the build kept them), and the page keeps its default. Counts only: nothing
+    about a patient leaves here."""
+    keys = ("mohs_visit57_share", "mohs_visit25_share", "bx_visit_share", "bx_ak_share", "bx_day_other_cents")
     out: dict = {k: None for k in keys}
     out.update({"visit_shares_days": {"mohs": 0, "biopsy": 0}, "visit_shares_payer": None, "visit_shares_from": None})
     if not ids:
@@ -1021,6 +1050,10 @@ def _visit_shares(conn, ids: list[str], d0: str, d1: str, route: str | None = No
         own = [c[num] / c[den] for c in per.values() if c[den] >= VISIT_SHARE_MIN_DAYS]
         if own:
             out[key] = round(sum(own) / len(own), 4)
+    kept = [c for c in per.values() if c["ak_measured"] and c["b25"] >= VISIT_SHARE_MIN_DAYS]
+    if kept:
+        out["bx_ak_share"] = round(sum(c["b25ak"] / c["b25"] for c in kept) / len(kept), 4)
+        out["bx_day_other_cents"] = round(sum(c["b25other"] / c["b25"] for c in kept) / len(kept))
     return out
 
 

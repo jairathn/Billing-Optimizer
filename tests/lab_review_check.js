@@ -764,6 +764,26 @@ async function pageChecks() {
      && !/more clinic days a week</.test(big) && !/more weeks of clinic a year</.test(big) && /more clinic days a week</.test(fits) && /more weeks of clinic a year</.test(fits)
      && !/Not enough on its own/.test(fits), text(big).slice(-400));
   ok('page_i3_sheet_text', /Slides you read \(pathology billed under your number\), staff services such as light treatments and injections, and drugs are not counted here/.test(fits), '');
+
+  // the sheet reads a target as the Calculator does (calc.js calcDayNeed, loaded from calc.js): the clinician's past clinic
+  // days scaled to this plan's prices (Medicare's 2027 amounts here), against the plan's own average day
+  const calcSrc = fs.readFileSync(path.join(__dirname, '..', 'remitwatch', 'static', 'calc.js'), 'utf8');
+  const fnSrc = (calcSrc.match(/function calcDayNeed\(cs, plan, T\)\{[\s\S]*?\n\}\n/) || [''])[0];
+  if (fnSrc) vm.runInContext(fnSrc, ctx);
+  cs.x = Object.assign({}, x0, { year: '2027' }); cs.base = Object.assign({}, x0);
+  const allowedAt = y => M.evaluate(d, Object.assign({}, x0, { year: y }), cal).production.allowed;
+  const scale = allowedAt('2027') / allowedAt('2026');
+  const own27 = M.evaluate(d, Object.assign({}, cs.x, { include_ancillary: false, include_path: false }), cal);
+  const s27 = await sheetFor(String(Math.round(own27.collections * 0.35 * 1.05 / 100)));
+  const p50 = ctx.money(900000 * scale), p90 = ctx.money(1200000 * scale);
+  ok('page_sheet_day_need', !!fnSrc && Math.abs(scale - 1) > 0.01 && s27.includes(`about ${p50} allowed at the median and ${p90} at the 90th percentile`)
+     && /This plan's average clinic day brings \$[\d,]+ allowed: the target needs \d+% more/.test(s27) && !/Your median clinic day has brought/.test(s27)
+     && !s27.includes(ctx.money(900000)), text(s27).slice(0, 700));
+
+  // the minutes table stacks into cards on a phone: the calculator's card table, a label on every cell
+  pg = await labOn({}, AfDoc, d);
+  const mins = pg.q('#labMinutes').innerHTML, tds = mins.match(/<td\b[^>]*>/g) || [];
+  ok('page_minutes_table_stacks', /<table class="calc-cards">/.test(mins) && tds.length >= 4 && tds.every(t => /data-label="[^"]+"/.test(t)), mins.slice(0, 300));
 }
 
 pageChecks().catch(e => ok('page_checks_ran', false, e.stack)).then(() => process.stdout.write(JSON.stringify(out)));

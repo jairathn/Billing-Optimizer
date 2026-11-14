@@ -51,7 +51,8 @@ ACTIVITY_VERSION = "6"      # bump when the tables or the way they are filled ch
 # Tables built by these versions stay readable until the next run rebuilds them: versions 4 to 6 only added columns
 # (4: Medicare visit counts, pathology read by the biopsy's own clinician; 5: the closures and excisions a clinician did
 # in the clinic or the ASC, provider_payers.asc_cases; 6: each code's services by the payer that decided them,
-# provider_services.payers), which the readers treat as not measured when absent.
+# provider_services.payers, and what a Medicare biopsy day with a visit billed -25 also held, provider_days.mcare_bx25_*),
+# which the readers treat as not measured when absent.
 READABLE_VERSIONS = {"3", "4", "5", ACTIVITY_VERSION}
 CLINIC_DAY_MIN = 5          # a day counts as a clinic day when the clinician saw at least this many patients
 COMPLETE_SHARE = 0.97       # a month of service is treated as complete when this share of its visits has been paid
@@ -70,7 +71,7 @@ CREATE TABLE IF NOT EXISTS provider_days (
     charge_cents INTEGER, allowed_cents INTEGER, paid_cents INTEGER, clinic_allowed_cents INTEGER, path_generated_cents INTEGER,
     place TEXT,
     mcare_mohs_patients INTEGER, mcare_mohs_e57 INTEGER, mcare_mohs_e25 INTEGER, mcare_bx_patients INTEGER, mcare_bx_e25 INTEGER,
-    path_generated_own_cents INTEGER,
+    path_generated_own_cents INTEGER, mcare_bx25_ak INTEGER, mcare_bx25_other_cents INTEGER,
     PRIMARY KEY (provider_id, service_date)
 );
 CREATE TABLE IF NOT EXISTS provider_services (
@@ -142,6 +143,12 @@ EM_ALL = frozenset(EM_NEW + EM_EST)
 # what a Medicare fee-for-service patient-day held (provider_days.mcare_*): a Mohs first stage, a first biopsy, an E/M
 # billed with modifier 25, one billed with modifier 57
 DAY_MOHS, DAY_BX, DAY_E25, DAY_E57 = 1, 2, 4, 8
+# ...and, of a Medicare biopsy patient-day with a visit billed -25 (provider_days.mcare_bx25_*): a destruction of
+# premalignant lesions (17000 or 17004), and the allowed amount of the other small procedures billed that day (benign
+# destruction 17110, shaves 11300-11313, lesion injections 11900 and 11901)
+DAY_AK = 16
+AK_FIRST = ("17000", "17004")
+BX_DAY_OTHER = frozenset(("17110", "11900", "11901") + tuple(str(n) for n in range(11300, 11314)))
 _MODIFIER = re.compile(r"[0-9A-Z]{2}")
 # procedures with a 0-day or 90-day global period (Mohs, biopsies, shaves, flaps and grafts...): an E/M billed with
 # modifier 25 or 57 on the same patient-day is a visit on a procedure day (provider_services.payers keeps those apart)
@@ -704,6 +711,7 @@ def build_activity(store, log=print) -> dict:
                                     state_of(enc_group)))
             # a Medicare fee-for-service encounter: what the visit-beside-a-procedure shares count
             mflags = 0
+            m_other = 0                 # allowed for BX_DAY_OTHER on a Medicare encounter
             if enc_kind == "medicare" and seen_today:
                 for it in its:
                     c = it[I_CODE]
@@ -711,8 +719,12 @@ def build_activity(store, log=print) -> dict:
                         mflags |= DAY_MOHS
                     elif c in BIOPSY_FIRST:
                         mflags |= DAY_BX
+                    elif c in AK_FIRST:
+                        mflags |= DAY_AK
                     elif it[I_MODS]:
                         mflags |= it[I_MODS]
+                    if c in BX_DAY_OTHER:
+                        m_other += it[I_ALLOWED]
             if kind == "path":
                 n[0] += 1
                 read.append((patient, d, enc[1], provider))
@@ -724,7 +736,7 @@ def build_activity(store, log=print) -> dict:
                 seen = days[(provider, d)].get(patient)
                 proc = any(f in PROCEDURE for f in fams)
                 if seen is None:
-                    days[(provider, d)][patient] = [kind == "visit", new, est, lesions, high, proc, mflags, cut, em_mod or None, global_0_90]
+                    days[(provider, d)][patient] = [kind == "visit", new, est, lesions, high, proc, mflags, cut, em_mod or None, global_0_90, m_other]
                 else:
                     seen[0] = seen[0] or kind == "visit"
                     seen[1] = seen[1] or new
@@ -738,6 +750,7 @@ def build_activity(store, log=print) -> dict:
                     if em_mod:
                         seen[8] = (seen[8] or []) + em_mod
                     seen[9] = seen[9] or global_0_90
+                    seen[10] += m_other
             if first_paid and ref_from and ref_from <= d <= ref_to:
                 lag = _days(d, first_paid)
                 if lag is not None and lag >= 0:
@@ -807,6 +820,7 @@ def build_activity(store, log=print) -> dict:
         alone = [v for v in vals if v[2] and not v[1] and not v[5]]
         mohs = [v for v in vals if v[6] & DAY_MOHS]
         bx = [v for v in vals if v[6] & DAY_BX]
+        bx25 = [v for v in bx if v[6] & DAY_E25]
         states = place_n.get(key)
         place = None
         if states:
@@ -831,7 +845,7 @@ def build_activity(store, log=print) -> dict:
                          sum(1 for v in vals if v[3]), sum(v[3] for v in vals), len(read_here.get(key, ())), n[2], n[3], n[4], n[5], n[6],
                          generated.get(key, 0), place,
                          len(mohs), sum(1 for v in mohs if v[6] & DAY_E57), sum(1 for v in mohs if v[6] & DAY_E25),
-                         len(bx), sum(1 for v in bx if v[6] & DAY_E25), generated_own.get(key, 0)))
+                         len(bx), len(bx25), generated_own.get(key, 0), sum(1 for v in bx25 if v[6] & DAY_AK), sum(v[10] for v in bx25)))
         sp = span.setdefault(provider, [None, None, d, d, 0])     # first and last clinic day, first and last day with anyone, patients
         sp[2], sp[3], sp[4] = min(sp[2], d), max(sp[3], d), sp[4] + pts
         if pts >= CLINIC_DAY_MIN:
@@ -839,7 +853,7 @@ def build_activity(store, log=print) -> dict:
             sp[1] = d if sp[1] is None else max(sp[1], d)
     for t in ("provider_days", "provider_services", "provider_payers"):
         conn.execute(f"DELETE FROM {t}")
-    conn.executemany(f"INSERT INTO provider_days VALUES ({','.join('?' * 28)})", day_rows)
+    conn.executemany(f"INSERT INTO provider_days VALUES ({','.join('?' * 30)})", day_rows)
     conn.executemany("INSERT INTO provider_services VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                      [(k[0], k[1], k[2], service_family(k[2]), v[0], v[1], v[2], v[3], v[4], v[5], code_payers_json(code_payers.get(k), k[2]))
                       for k, v in sorted(services.items())])

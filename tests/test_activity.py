@@ -1214,3 +1214,49 @@ def test_the_lines_route_decides_a_case_as_the_build_does_and_kentucky_cases_kee
     assert A["medicare_ky"]["14040"] == {y: list(MPFS[y]["KY"]["14040"]) for y in MPFS_YEARS if MPFS[y].get("KY", {}).get("14040")}
     assert A["medicare_ky"]["17311"]["2027"] == list(MPFS["2027"]["KY"]["17311"]) and A["medicare"]["17311"]["2027"] == list(MPFS["2027"]["IN"]["17311"])
     store.close()
+
+
+def _biopsy_day_files():
+    """Ann's 2 March, Medicare of Kentucky unless said: biopsy days with a visit billed -25: with 17000 and 17110; with a
+    shave; with nothing else; with 17110 paid, taken back and paid again for less. A Medicare biopsy day with 17004 and no
+    -25 visit, and an Anthem one with everything: neither counted."""
+    m = lambda n, lines, pt, **kw: clp(n, lines, patient=(pt, "PAT"), cfi="MB", **kw)       # noqa: E731
+    bx = lambda n: svc("11102", "180.00", "80.00", "100.00", D, lcn=f"B{n}")                 # noqa: E731
+    em = lambda n: svc("99213:25", "150.00", "72.00", "90.00", D, lcn=f"E{n}")               # noqa: E731
+    one = lambda code, allowed, n, charge="120.00": svc(code, charge, f"{float(allowed) * 0.8:.2f}" if float(allowed) > 0 else allowed, allowed if float(allowed) > 0 else None, D, lcn=f"X{n}")  # noqa: E731
+    first = [m(701, bx(701) + em(701) + one("17000", "60.00", 701) + svc("17110", "120.00", "56.00", "70.00", D, lcn="Y701"), "BXDAYA"),
+             m(702, bx(702) + em(702) + one("11300", "50.00", 702), "BXDAYB"),
+             m(703, bx(703) + em(703), "BXDAYC"),
+             m(704, bx(704) + one("17004", "140.00", 704), "BXDAYD"),
+             m(706, bx(706) + em(706) + one("17110", "55.00", 706), "BXDAYF")]
+    anthem = [clp(705, bx(705) + em(705) + one("17000", "60.00", 705) + one("17110", "70.00", 7051), patient=("BXDAYE", "PAT"))]
+    again = [m(706, one("17110", "-55.00", 706, "-120.00"), "BXDAYF", status="22"), m(706, one("17110", "40.00", 706), "BXDAYF")]
+    return [SEED, ("20260320", "KY MEDICARE", first), ("20260322", "ANTHEM", anthem), ("20260415", "KY MEDICARE", again)]
+
+
+def test_what_else_a_medicare_biopsy_day_with_a_visit_holds_by_both_routes(tmp_path, monkeypatch):
+    from remitwatch import calculator, cloud
+    from remitwatch.detect import ensure_schema
+    store = Store(str(tmp_path / "s.sqlite"))
+    assert store.ingest_835_paths(write_files(tmp_path, _biopsy_day_files()))["errors"] == 0
+    ensure_schema(store.conn)
+    activity.build_activity(store, log=lambda *a: None)
+    ann = day(store.conn, ANN, "2026-03-02")
+    # four Medicare biopsy days with a -25 visit; one of them with 17000; 17110, the shave and the 17110 paid again for less
+    assert (ann["mcare_bx_patients"], ann["mcare_bx_e25"], ann["mcare_bx25_ak"], ann["mcare_bx25_other_cents"]) == (5, 4, 1, 7000 + 5000 + 4000)
+    monkeypatch.setattr(calculator, "VISIT_SHARE_MIN_DAYS", 1)
+    d0, d1 = "2026-03-01", "2026-03-31"
+    full = calculator._visit_shares(store.conn, [ANN], d0, d1, route="lines")
+    path = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(store.conn, path)
+    copy = sqlite3.connect(path)
+    served = calculator._visit_shares(copy, [ANN], d0, d1)
+    assert served["visit_shares_from"] == "provider_days" and full["visit_shares_from"] == "lines"
+    for s in (full, served):
+        assert (s["bx_visit_share"], s["bx_ak_share"], s["bx_day_other_cents"]) == (0.8, 0.25, 4000)
+    # a copy built before the build kept them: the visit share still, these two not measured
+    copy.execute("ALTER TABLE provider_days DROP COLUMN mcare_bx25_ak")
+    old = calculator._visit_shares(copy, [ANN], d0, d1)
+    assert old["bx_visit_share"] == 0.8 and old["bx_ak_share"] is None and old["bx_day_other_cents"] is None
+    copy.close()
+    store.close()
