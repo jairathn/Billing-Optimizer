@@ -6,11 +6,13 @@ Everything comes from tables the dashboard's copy already holds (remitwatch.clou
 needs no extra analysis run:
 
     provider_services   what each clinician billed, by code and month of service, folded (one service per billed line
-                        across payers, reversals and second payers): units, and what was finally allowed and paid
+                        across payers, reversals and second payers): units, and what was finally allowed and paid; and
+                        the same services by the payer that decided them (payers), for the payer mix of each code
     provider_days       one row per clinician and day: patients seen, biopsy lesions, pathology the biopsies brought in
     provider_payers     allowed and paid (second payers included) by kind of payer: the share a patient is left to pay;
                         and the Mohs closures and excisions done in the clinic or at the ASC (asc_cases), for the strategy lab
-    exposure            primary-claim lines by payer, clinician and code: which payers a service line is billed to
+    exposure            primary-claim lines by payer, clinician and code, by payment month: the payer mix where the
+                        dashboard's copy was built before provider_services kept its payers
     payer_rates         each payer's usual allowed amount per code, year and tier (physician or not), and Medicare's
 
 The page does the arithmetic as the sliders move. This module hands it, for one clinician (or the average physician or
@@ -60,10 +62,12 @@ CORRECTABLE_KINDS = ("commercial", "medicare_advantage")     # contracts the pag
                                                              # negotiable, though not impossible (payers[g].negotiable is
                                                              # 'rarely'); the state's own Medicaid program is not, nor is
                                                              # 'other': workers' comp, auto and unknown payers
-LAYERED_WEIGHT = (0.22, 0.77)   # layered (intermediate and complex) repairs per Mohs case and per excision on the same patient-
-                                 # day, practice-wide over the latest twelve complete months (the Mohs rate moves from year to
-                                 # year): used only to share a clinician's layered repairs between the two (their own total is
-                                 # kept)
+LAYERED_WEIGHT = (0.30, 0.79)   # layered (intermediate and complex) repairs per Mohs case and per excision (no Mohs that
+                                 # day) on the same patient-day, across the clinic's and the ASC's claims, practice-wide over
+                                 # the twelve months to September 2026 (the Mohs rate moves from year to year; a per-bill count
+                                 # misses the closures billed on the ASC's own claim). Used only where the database cannot pair
+                                 # a clinician's closures with their own Mohs cases and excisions (_paired_closures), to share
+                                 # their layered repairs between the two (their own total is kept)
 APP_MEDICARE_SHARE = 0.85   # Medicare pays an NP or PA 85% of the physician amount when the service is billed under their own number
 MPPR_SHARE = 0.5            # second to fifth procedures of the same day: 50% of the usual rate (Medicare's standard rule;
                             # the sixth and later are paid 'by report', priced by the contractor, and taken at 50% here too)
@@ -330,14 +334,25 @@ def _run_window(conn, month_from: str | None, month_to: str | None, months: int)
     """The months of service the calculator reads: what was asked for, or the last `months` complete months (the run-rate
     now; a longer window reaches back past changes such as January 2026, when skin-substitute payment collapsed)."""
     if month_from or month_to:
-        return activity._window(conn, month_from, month_to)
-    cov = activity.coverage(conn)
-    b = cov.get("default_to") or cov.get("last_month")
-    if not b:
-        return activity._window(conn, None, None)
-    a = _month_plus(b, -(max(1, months) - 1))
-    if cov.get("first_month") and a < cov["first_month"]:
-        a = cov["first_month"]
+        cov, a, b = activity._window(conn, month_from, month_to)
+    else:
+        cov = activity.coverage(conn)
+        b = cov.get("default_to") or cov.get("last_month")
+        if b:
+            a = _month_plus(b, -(max(1, months) - 1))
+            if cov.get("first_month") and a < cov["first_month"]:
+                a = cov["first_month"]
+            return cov, a, b
+        a, b = "0000-01", "9999-12"
+    if a == "0000-01" or b == "9999-12":
+        # no remittance months to go by (the build has no payment dates yet): the months the clinic days cover
+        r = conn.execute("SELECT MIN(service_date), MAX(service_date) FROM provider_days WHERE patients > 0").fetchone()
+        if r and r[0] and r[1]:
+            if b == "9999-12":
+                b = r[1][:7]
+            if a == "0000-01":
+                a = max(r[0][:7], _month_plus(b, -(max(1, months) - 1)))
+            a, b = min(a, b), max(a, b)
     return cov, a, b
 
 
@@ -364,6 +379,13 @@ def _month_end(month: str) -> date:
     return date(y, m, calendar.monthrange(y, m)[1])
 
 
+def _real_date(s: str | None) -> date | None:
+    try:
+        return date.fromisoformat((s or "")[:10])
+    except ValueError:
+        return None
+
+
 def _schedule(conn, ids: list[str], d0: str, d1: str, full_days: int = 60, pace_from: str | None = None,
               data_from: str | None = None) -> dict:
     """Clinic days in the window, and the pace of the year: days a week and weeks a year over the twelve months ending
@@ -378,9 +400,10 @@ def _schedule(conn, ids: list[str], d0: str, d1: str, full_days: int = 60, pace_
         f"SELECT provider_id, service_date FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
         (*ids, d0, d1, CLINIC_DAY_MIN))]
     end = _month_end(d1[:7])
-    p0 = date.fromisoformat(pace_from or d0)
-    if data_from and date.fromisoformat(data_from) > p0:
-        p0 = date.fromisoformat(data_from)
+    # the later of the pace window's start and the archive's first covered day, of those that are real dates (a window
+    # with nothing to bound it starts at '0000-01'): else the clinicians' first clinic day in the window
+    starts = [x for x in (_real_date(pace_from or d0), _real_date(data_from)) if x]
+    p0 = max(starts) if starts else min((x for x in (_real_date(d) for _, d in days) if x), default=None) or min(end, date.today())
     gap = timedelta(days=PACE_GAP_DAYS)
     per: dict[str, list] = defaultdict(list)
     before: set[str] = set()
@@ -430,35 +453,97 @@ def _schedule(conn, ids: list[str], d0: str, d1: str, full_days: int = 60, pace_
             "allowed_per_patient": round(al / pts) if pts else None, "patients_per_day": round(pts / len(days), 1) if days else None}
 
 
+def _services_by_payer(conn, a: str, b: str) -> list | None:
+    """(clinician, code, {payer group: [kind, services, units, allowed, ...]}) for the months of service a to b, as the
+    activity build keeps them (provider_services.payers: each service at the payer that decided it), or None where the
+    tables were built before the column was kept."""
+    try:
+        rows = conn.execute("SELECT provider_id, code, payers FROM provider_services WHERE month BETWEEN ? AND ?", (a, b)).fetchall()
+    except sqlite3.Error:                     # tables built before the column was kept
+        return None
+    if not any(r[2] is not None for r in rows):
+        return None
+    out = []
+    for pid, code, js in rows:
+        try:
+            v = json.loads(js) if js else {}
+        except ValueError:
+            v = {}
+        out.append((pid, activity.clean_code(code), v if isinstance(v, dict) else {}))
+    return out
+
+
 def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, dict]:
-    """Share of primary-claim lines by payer, per service family, for the clinicians; a family with few lines takes the
-    mix of every clinician of the tier, then of the practice. Payment months run a month behind the months of service.
+    """Share of services by payer, per service family, for the clinicians; a family with few services takes the mix of
+    every clinician of the tier, then of the practice.
 
-    Also, per code (mix_info['code']), the clinicians' own line shares for a code billed on at least MIN_CODE_MIX_LINES
-    lines, outside the Mohs case and its closures (the page bills a case's closures to the payer of its first stage, so
+    The services are those the units come from: the activity build's fold of the window's months of service, each
+    service once (reversals and reprocessed claims netted), at the payer that decided it (provider_services.payers). A
+    copy built before the build kept them falls back on the exposure table: primary-claim lines by payment month, a+1 to
+    b+2, every status 1 or 19 line (a reprocessed claim counts twice, and slow payers' services fall out of the window).
+    mix_info['from'] says which ('services' or 'exposure').
+
+    Also, per code (mix_info['code']), the clinicians' own shares for a code billed on at least MIN_CODE_MIX_LINES
+    services, outside the Mohs case and its closures (the page bills a case's closures to the payer of its first stage, so
     those keep the family's mix). Visits, biopsies and destructions are not billed to the same payers in the same
-    proportions, and a family's pooled mix misstates each payer's share of them."""
-    pa, pb = _month_plus(a, 1), _month_plus(b, 2)
+    proportions, and a family's pooled mix misstates each payer's share of them. And per code and payer group, for
+    _by_kind: services (code_lines), units (code_units), allowed (code_allowed) and, for a visit code, the services billed
+    with modifier 25 or 57 beside a 0- or 90-day procedure (code_visit: [services, units, allowed])."""
     by_code: dict[str, Counter] = defaultdict(Counter)
+    units_code: dict[str, Counter] = defaultdict(Counter)
     allowed_code: dict[str, Counter] = defaultdict(Counter)
-
-    def mix(where: str, args: tuple, keep: bool = False) -> dict[str, Counter]:
-        out: dict[str, Counter] = defaultdict(Counter)
-        for code, g, n, al in conn.execute(
-                f"SELECT code, payer_group, SUM(lines), SUM(allowed_cents) FROM exposure WHERE month BETWEEN ? AND ? {where} GROUP BY 1, 2",
-                (pa, pb, *args)):
-            c = activity.clean_code(code)
-            out[activity.service_family(c)][g] += n or 0
-            if keep:
-                by_code[c][g] += n or 0
-                allowed_code[c][g] += al or 0
-        return out
-
-    own = mix(f"AND npi IN ({_in(ids)})", tuple(ids), keep=True) if ids else {}
+    visit_code: dict[str, dict] = defaultdict(dict)
     tier_ids = [r[0] for r in conn.execute("SELECT provider_id FROM provider_roster WHERE kind='person' AND tier=?", (tier,))]
-    peers = mix(f"AND npi IN ({_in(tier_ids)})", tuple(tier_ids)) if tier_ids else {}
-    practice = mix("", ())
-    kinds = {g: k for g, k in conn.execute(f"SELECT DISTINCT payer_group, payer_kind FROM exposure WHERE month BETWEEN ? AND ?", (pa, pb))}
+    kinds: dict[str, str] = {}
+    folded = _services_by_payer(conn, a, b)
+    own: dict[str, Counter] = defaultdict(Counter)
+    peers: dict[str, Counter] = defaultdict(Counter)
+    practice: dict[str, Counter] = defaultdict(Counter)
+    if folded is not None:
+        mine, tier_set = set(ids), set(tier_ids)
+        for pid, c, by_g in folded:
+            fam = activity.service_family(c)
+            for g, v in by_g.items():
+                if not isinstance(v, list) or len(v) < 4:
+                    continue
+                kinds.setdefault(g, v[0])
+                n = v[1] or 0
+                practice[fam][g] += n
+                if pid in tier_set:
+                    peers[fam][g] += n
+                if pid in mine:
+                    own[fam][g] += n
+                    by_code[c][g] += n
+                    units_code[c][g] += v[2] or 0
+                    allowed_code[c][g] += v[3] or 0
+                    if len(v) >= 7:
+                        w = visit_code[c].setdefault(g, [0, 0.0, 0])
+                        w[0] += v[4] or 0
+                        w[1] += v[5] or 0
+                        w[2] += v[6] or 0
+        source_from = "services"
+    else:
+        pa, pb = _month_plus(a, 1), _month_plus(b, 2)
+
+        def mix(where: str, args: tuple, keep: bool = False) -> dict[str, Counter]:
+            out: dict[str, Counter] = defaultdict(Counter)
+            for code, g, n, al in conn.execute(
+                    f"SELECT code, payer_group, SUM(lines), SUM(allowed_cents) FROM exposure WHERE month BETWEEN ? AND ? {where} GROUP BY 1, 2",
+                    (pa, pb, *args)):
+                c = activity.clean_code(code)
+                out[activity.service_family(c)][g] += n or 0
+                if keep:
+                    by_code[c][g] += n or 0
+                    allowed_code[c][g] += al or 0
+            return out
+
+        own = mix(f"AND npi IN ({_in(ids)})", tuple(ids), keep=True) if ids else {}
+        peers = mix(f"AND npi IN ({_in(tier_ids)})", tuple(tier_ids)) if tier_ids else {}
+        practice = mix("", ())
+        kinds = {g: k for g, k in conn.execute("SELECT DISTINCT payer_group, payer_kind FROM exposure WHERE month BETWEEN ? AND ?", (pa, pb))}
+        units_code = by_code             # units shared out by lines
+        visit_code = {}
+        source_from = "exposure"
     out, source = {}, {}
     overall: Counter = Counter()
     for fam_counts in own.values():
@@ -475,14 +560,16 @@ def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, d
     out["_overall"] = {g: v / n_all for g, v in overall.items()} if n_all else {}
     code_mix = {c: {g: v / sum(cnt.values()) for g, v in cnt.items() if v > 0} for c, cnt in by_code.items()
                 if sum(cnt.values()) >= MIN_CODE_MIX_LINES and lever_of(c) not in CASE_LEVERS}
-    return out, {"source": source, "kinds": kinds, "code": code_mix, "code_lines": by_code, "code_allowed": allowed_code}
+    return out, {"source": source, "kinds": kinds, "code": code_mix, "code_lines": by_code, "code_units": units_code,
+                 "code_allowed": allowed_code, "code_visit": visit_code if source_from == "services" else None, "from": source_from}
 
 
 def _by_kind(units: float, allowed: int, lines: Counter, al: Counter, kinds: dict) -> dict:
-    """A code's units and allowed amount shared out by kind of payer, in proportion to its primary-claim lines and their
-    allowed amounts at each kind (the exposure table, payment months a+1 to b+2), and scaled so the kinds add up to the
-    code's own totals: the kind with the most lines takes the rounding. Allowed is shared by lines where the primary
-    payers allowed nothing. Empty when the code has no lines there."""
+    """A code's units and allowed amount shared out by kind of payer, in proportion to its units (or, from the exposure
+    table, its primary-claim lines) and allowed amounts at each kind, and scaled so the kinds add up to the code's own
+    totals: the kind with the most units takes the rounding. Allowed is shared by units where the payers allowed
+    nothing. Empty when the code has none there. From the activity build's services the kinds are the code's own (a
+    service only a second payer reported is the only part shared out); from the exposure table, an estimate."""
     ln: Counter = Counter()
     aw: Counter = Counter()
     for g, n in lines.items():
@@ -500,6 +587,34 @@ def _by_kind(units: float, allowed: int, lines: Counter, al: Counter, kinds: dic
     out[top] = {"units": round(units - sum(v["units"] for v in out.values()), 4),
                 "allowed_cents": int(allowed - sum(v["allowed_cents"] for v in out.values()))}
     return dict(sorted(out.items()))
+
+
+def _by_kind_visit(by_kind: dict, units: Counter, allowed: Counter, visit: dict, kinds: dict) -> dict | None:
+    """A visit code's by_kind split in two: 'procedure_day', the services billed with modifier 25 or 57 on the
+    patient-day of a 0- or 90-day procedure (where a plan's denials of the visit beside a Mohs case sit), and 'other',
+    every other service of the code. Each kind's two parts add up exactly to by_kind[kind] (units to rounding, allowed
+    to the cent); each part is that kind's units and allowed shared out as the build counted them. None when the
+    database cannot say (tables built before the build kept them) or the code has no split by kind."""
+    if visit is None or not by_kind:
+        return None
+    u: Counter = Counter()
+    al: Counter = Counter()
+    pu: Counter = Counter()
+    pal: Counter = Counter()
+    for g, n in units.items():
+        u[kinds.get(g) or "other"] += max(0, n or 0)
+    for g, v in allowed.items():
+        al[kinds.get(g) or "other"] += max(0, v or 0)
+    for g, (_, n, v) in visit.items():
+        pu[kinds.get(g) or "other"] += max(0, n or 0)
+        pal[kinds.get(g) or "other"] += max(0, v or 0)
+    out: dict = {"procedure_day": {}, "other": {}}
+    for k, v in by_kind.items():
+        p_units = round(v["units"] * min(1.0, pu[k] / u[k]), 4) if u[k] > 0 else 0.0
+        p_allowed = int(round(v["allowed_cents"] * min(1.0, pal[k] / al[k]))) if al[k] > 0 else 0
+        out["procedure_day"][k] = {"units": p_units, "allowed_cents": p_allowed}
+        out["other"][k] = {"units": round(v["units"] - p_units, 4), "allowed_cents": v["allowed_cents"] - p_allowed}
+    return out
 
 
 def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str | None = None, month_to: str | None = None,
@@ -546,12 +661,19 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
     # what was billed and allowed per code. The page compares it with what the payers' usual rates predict for the same
     # schedule (k), so it can reproduce what happened before it changes anything.
     # by_kind: the same units and allowed by kind of payer, so one payer's denials can stay with that payer
+    # by_kind_visit (visit codes): the same split again, the visits billed -25 or -57 beside a 0- or 90-day procedure apart
+    # from every other visit, so the denials of the first stay off the visits a plan adds or corrects (None where the
+    # database cannot say)
     codes = {}
     for code, s_ in svc.items():
+        units_g, allowed_g = mix_info["code_units"].get(code) or Counter(), mix_info["code_allowed"].get(code) or Counter()
         codes[code] = {"family": s_["family"], "lever": lever_of(code), "units": round(s_["units"], 2), "items": s_["items"],
                        "denied": s_["denied"], "allowed_cents": s_["allowed"], "paid_cents": s_["paid"],
-                       "by_kind": _by_kind(round(s_["units"], 2), s_["allowed"], mix_info["code_lines"].get(code) or Counter(),
-                                           mix_info["code_allowed"].get(code) or Counter(), kinds)}
+                       "by_kind": _by_kind(round(s_["units"], 2), s_["allowed"], units_g, allowed_g, kinds)}
+        if code in EM_NEW or code in EM_EST:
+            visit = mix_info["code_visit"]
+            codes[code]["by_kind_visit"] = _by_kind_visit(codes[code]["by_kind"], units_g, allowed_g,
+                                                          visit.get(code) or {} if visit is not None else None, kinds)
     # the codes of every lever the tier bills, so a clinician can plan a service not billed today
     for code in _lever_codes(conn, tier, a, b):
         codes.setdefault(code, {"family": activity.service_family(code), "lever": lever_of(code), "units": 0, "items": 0, "denied": 0,
@@ -618,7 +740,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         tot_a = sum(1 for _ in paid_share)
         fallback_paid = round(sum(paid_share.values()) / tot_a, 4)
 
-    levers = _levers(svc, sched.get("clinic_days") or 0)
+    levers = _levers(svc, sched.get("clinic_days") or 0, _paired_closures(asc_in))
     extras = _strategy_inputs(conn, ids, d0, d1, window_months)
     extras.update(_visit_shares(conn, ids, d0, d1))
     path = conn.execute(
@@ -643,7 +765,10 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         "mix": {f: [[g, round(v, 5)] for g, v in sorted(m.items(), key=lambda kv: -kv[1])] for f, m in mix.items()},
         # a code's own payer mix where it has enough lines (the page prefers it to its family's)
         "mix_code": {c: [[g, round(v, 5)] for g, v in sorted(m.items(), key=lambda kv: -kv[1])] for c, m in mix_info["code"].items() if c in codes},
-        "mix_source": mix_info["source"], "rates": rate_card, "medicare": medicare, "medicare_fac": medicare_fac, "asc": asc,
+        "mix_source": mix_info["source"],
+        # where the payer mix and by_kind come from: 'services' (the activity build's services, by month of service) or
+        # 'exposure' (primary-claim lines by payment month, in a copy built before the build kept them)
+        "mix_from": mix_info["from"], "rates": rate_card, "medicare": medicare, "medicare_fac": medicare_fac, "asc": asc,
         "rate_sources": dict(sources),
         "payers": groups, "paid_share": paid_share, "paid_share_fallback": fallback_paid,
         "paid_share_class": paid_share_class, "paid_share_all": round(tot_pd / tot_al, 4) if tot_al else None,
@@ -900,24 +1025,31 @@ def _visit_shares(conn, ids: list[str], d0: str, d1: str, route: str | None = No
 
 
 def _asc_items_lines(conn, ids: list[str], d0: str, d1: str) -> dict[tuple, list]:
-    """The lines asc_case reads, per clinician, patient and day, from the remittance lines: for each bill, day and code
-    the newest primary claim's lines that allowed something (units and allowed added up), its place of service and its
-    payer. The patient is the
+    """The lines asc_case reads, per clinician, patient and day, from the remittance lines, decided as the activity build
+    decides a service (remitwatch.activity._fold and _settle): for each bill, day and code, the first payer to decide it as
+    primary that still has a decision allowing something, and that decision (the newest still standing: a reversal takes
+    back the decision of its own payer it matches), with its units and its payer's kind and state; the place of service
+    of any claim of the line that states one, an ambulatory surgical center's (24) wherever one says so. A Mohs line
+    nobody paid comes as '1731x' (the day is still a Mohs day); another code nobody paid is left out. The patient is the
     name on the claim (kept in memory only; the bill where there is no name), so a closure billed on an ASC claim joins
     the Mohs billed on the clinic's claim the same day, as in remitwatch.activity."""
     rows = conn.execute(
         f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi), substr(l.patient_control_number, 1, 9),
                    l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code),
                    COALESCE(NULLIF(l.original_units, 0), l.paid_units), l.allowed_cents, l.paid_cents, cl.facility_type_code,
-                   cl.payer_name, cl.claim_filing_indicator, cl.patient_last, cl.patient_first, l.payment_date, cl.claim_key
+                   l.payer_name, cl.claim_filing_indicator, cl.patient_last, cl.patient_first, l.payment_date, cl.claim_key,
+                   l.claim_status_code, NULLIF(l.payer_id, '')
             FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
-            WHERE t.superseded = 0 AND cl.claim_status_code IN ('1', '19') AND l.service_date BETWEEN ? AND ?
+            WHERE t.superseded = 0 AND l.service_date BETWEEN ? AND ?
               AND (substr(COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code), 1, 2) IN ('11', '12', '13', '14', '15', '17'))
-              AND COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) IN ({_in(ids)})""",
+              AND COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi) IN ({_in(ids)})
+            ORDER BY l.payment_date, CASE WHEN l.claim_status_code = '22' THEN 0 ELSE 1 END, l.transaction_key, cl.claim_seq, l.line_seq""",
         (d0, d1, *ids)).fetchall()
     kinds: dict[tuple, tuple] = {}
-    claims: dict[tuple, dict] = defaultdict(dict)       # (npi, bill, day, code) -> claim -> [paid on, units, allowed, pos, payer, patient]
-    for npi, bill, day, raw, units, allowed, paid, pos, payer, cfi, last, first, paid_on, claim in rows:
+    # (npi, bill, day, code) -> claim -> [status, units, allowed, paid, place of service, payer, (group, kind), patient],
+    # claims in the order their lines arrive (payment date, a reversal before anything else paid that day)
+    claims: dict[tuple, dict] = defaultdict(dict)
+    for npi, bill, day, raw, units, allowed, paid, pos, payer, cfi, last, first, _paid_on, claim, status, payer_id in rows:
         code = activity.clean_code(raw)
         if not day or not (activity.asc_code(code) or code[:4] == "1731"):
             continue
@@ -925,16 +1057,41 @@ def _asc_items_lines(conn, ids: list[str], d0: str, d1: str) -> dict[tuple, list
         if k not in kinds:
             kinds[k] = payer_group_kind(payer, cfi)
         patient = (re.sub(r"[^A-Z0-9]", "", last.upper()), re.sub(r"[^A-Z0-9]", "", (first or "").upper())) if (last or "").strip() else ("#", bill)
-        c = claims[(npi, bill, day[:10], code)].setdefault(claim, [paid_on or "", 0.0, 0, pos, kinds[k], patient])
+        c = claims[(npi, bill, day[:10], code)].setdefault(claim, [status, 0.0, 0, 0, pos, payer_id or kinds[k][0], kinds[k], patient])
         c[1] += abs(units or 1)
-        c[2] += max(allowed or 0, 0) or max(paid or 0, 0)
+        c[2] += allowed or 0
+        c[3] += paid or 0
     out: dict[tuple, list] = defaultdict(list)
     for (npi, _, day, code), by_claim in claims.items():
-        # the newest claim that allowed something, as the build keeps the newest decision still standing
-        _, units, allowed, pos, (group, kind), patient = max(by_claim.values(), key=lambda v: (v[2] > 0, v[0]))
+        decisions: dict = {}                 # payer -> [(group, kind), [[allowed, paid, units] per decision still standing]]
+        pos_any = None
+        patient = None
+        for status, units, allowed, paid, pos, who, gk, pt in by_claim.values():
+            if patient is None or patient[0] == "#":
+                patient = pt                 # the name on any claim of the bill, as the build takes it
+            if status == "22":
+                slot = decisions.get(who)
+                if slot and slot[1]:
+                    activity._take_back(slot[1], abs(allowed), abs(paid))
+                continue
+            if pos and (pos_any is None or pos == activity.ASC_POS):
+                pos_any = pos
+            if status in activity.PRIMARY or status == "4":
+                slot = decisions.setdefault(who, [gk, []])
+                if status in activity.PRIMARY:
+                    slot[1].append([allowed if allowed > 0 else max(paid, 0), paid, units])
+        pick = None
+        for gk, open_ in decisions.values():
+            dec = next((x for x in reversed(open_) if x[0] > 0), None)
+            if dec:
+                pick = (gk, dec)
+                break
+        if pick is None and code[:4] != "1731":
+            continue                         # nobody paid it: not part of a case
+        (group, kind), units = (pick[0], pick[1][2]) if pick else (next(iter(decisions.values()))[0] if decisions else (None, None), 0.0)
         m = activity._STATE.match(group or "")
-        paid_line = allowed > 0 and activity.asc_code(code)
-        out[(npi, patient, day)].append((code if paid_line else "1731x", units or 1.0, pos == activity.ASC_POS, kind, m.group(1) if m else None))
+        paid_line = pick is not None and activity.asc_code(code)
+        out[(npi, patient, day)].append((code if paid_line else "1731x", units or 1.0, pos_any == activity.ASC_POS, kind, m.group(1) if m else None))
     return out
 
 
@@ -1003,13 +1160,17 @@ def _asc_cases(conn, ids: list[str], d0: str, d1: str, route: str | None = None)
 
 def _asc_payload(codes: set, cases: dict, clinic_days: int) -> dict:
     """What the strategy lab's ASC comparison reads besides the ASC's rates by year (asc[year]): where the ASC is, Medicare's
-    Indiana amounts (office and facility, physician) of every code it may price, which of them the multiple-procedure
-    rule ranks and which are add-ons, the factor for an ASC failing quality reporting, and the cases (_asc_cases) with
-    the clinic days they were counted over."""
+    Indiana amounts (office and facility, physician) of every code it may price, and its Kentucky amounts (medicare_ky,
+    for a Kentucky clinic's case whose closure is sent to the ASC), which of them the multiple-procedure rule ranks and
+    which are add-ons, the factor for an ASC failing quality reporting, and the cases (_asc_cases) with the clinic days
+    they were counted over: a Kentucky clinic's same-day closures are the mohs rows with state 'KY' and site 'clinic'."""
     st = ASC_SITE["state"]
     return {
         "site": dict(ASC_SITE),
         "medicare": {c: {y: list(MPFS[y][st][c]) for y in MPFS_YEARS if MPFS.get(y, {}).get(st, {}).get(c)} for c in sorted(codes)},
+        # Medicare's Kentucky amounts, [office, facility] by code and year, for Kentucky clinic cases (the Mohs stays in the
+        # Kentucky clinic when the closure is sent to the ASC)
+        "medicare_ky": {c: {y: list(MPFS[y]["KY"][c]) for y in MPFS_YEARS if MPFS.get(y, {}).get("KY", {}).get(c)} for c in sorted(codes)},
         "mppr": sorted(c for c in codes if (PFS_INDICATORS.get(c) or ("", ""))[1] == "2"),
         "add_on": sorted(c for c in codes if _add_on(c)),
         "ascqr": dict(ASCQR_FACTOR),
@@ -1029,14 +1190,37 @@ def _lever_codes(conn, tier: str, a: str, b: str) -> list[str]:
     return sorted(set(out))
 
 
-def _levers(svc: dict, clinic_days: int) -> dict:
+def _paired_closures(cases: dict) -> dict | None:
+    """The closure units (flaps and grafts, layered repairs) the clinicians billed on the patient-day of one of their own
+    Mohs cases ('mohs') or of an excision with no Mohs that day ('excision'), per code, from the cases _asc_cases counted
+    (across the clinic's and the ASC's claims). None where the database cannot pair them (a copy built before the build
+    kept the cases) or found no case at all."""
+    if not cases.get("from") or not (cases.get("mohs") or cases.get("excision")):
+        return None
+    out = {"mohs": Counter(), "excision": Counter()}
+    for what in ("mohs", "excision"):
+        for row in cases.get(what) or []:
+            n = row[4] or 0
+            for tok in (row[0] or "").split():
+                c, _, k = tok.partition("x")
+                if lever_of(c) in ("flap_graft", "layered"):
+                    out[what][c] += n * (float(k) if k else 1.0)
+    return out
+
+
+def _levers(svc: dict, clinic_days: int, paired: dict | None = None) -> dict:
     """The schedule now, per clinic day, in the page's terms, and how each lever turns into billed codes. The page turns
     the levers back into units with the same rules, so the levers as they come here give back, code for code, the units
     billed in the window.
 
-    Layered closures (intermediate and complex repairs) follow Mohs cases and excisions alike, and a month's totals do
-    not say which. They are shared out with the rates at which each kind of case is closed in layers across the archive
-    (LAYERED_WEIGHT), scaled so the clinician's own total comes back exactly.
+    Closures follow the cases they were billed with. Where the database pairs them (`paired`, _paired_closures: the
+    clinician's own closures on the patient-day of their Mohs cases and of their excisions), flaps and grafts per Mohs
+    case, and layered repairs (intermediate and complex) per Mohs case and per excision, are those billed with them, and
+    closures billed on any other day stay under 'everything else' (a flap after an excision, a repair on a day with no
+    Mohs or excision of that patient). Elsewhere every flap and graft follows a Mohs case, and the layered repairs, which a
+    month's totals do not tie to either, are shared out with the rates at which each kind of case is closed in layers
+    across the archive (LAYERED_WEIGHT), scaled so the clinician's own total comes back exactly. layered.from and
+    flap_graft.from say which ('same_day' or 'shared').
 
     Units a lever cannot carry stay under 'everything else' (other.codes, which a code can share with its lever): an
     add-on billed without the code it adds to (17003 past 13 for each 17000, or with no 17000; an extra Mohs stage at a
@@ -1045,6 +1229,7 @@ def _levers(svc: dict, clinic_days: int) -> dict:
     u = {c: s["units"] for c, s in svc.items() if s["units"] > 0}
     cd = clinic_days or 0
     spill: Counter = Counter()            # units of a lever's code that its lever cannot give back
+    unpaired: Counter = Counter()         # ...of them, closures billed on a day with no case of the clinician's to pair with
 
     def per_day(x: float) -> float:
         return x / cd if cd else 0.0
@@ -1057,11 +1242,12 @@ def _levers(svc: dict, clinic_days: int) -> dict:
     for c in u:
         by[lever_of(c)].append(c)
 
-    def primary_mix(codes) -> tuple[float, dict, dict]:
-        """(primary units, share of each primary code, add-on units per primary)."""
-        prim = [c for c in codes if not _add_on(c)]
-        n = sum(u[c] for c in prim)
-        return n, ({c: u[c] / n for c in prim} if n else {}), ({c: u[c] / n for c in codes if _add_on(c)} if n else {})
+    def primary_mix(codes, of: dict | None = None) -> tuple[float, dict, dict]:
+        """(primary units, share of each primary code, add-on units per primary), of the units billed or of `of`."""
+        of = u if of is None else of
+        prim = [c for c in codes if not _add_on(c) and of.get(c)]
+        n = sum(of[c] for c in prim)
+        return n, ({c: of[c] / n for c in prim} if n else {}), ({c: of[c] / n for c in codes if _add_on(c) and of.get(c)} if n else {})
 
     def carry(codes, n: float, room: float) -> None:
         """A closure lever gives back `room` primary closures and their add-ons; the rest of these codes' units spill."""
@@ -1085,23 +1271,70 @@ def _levers(svc: dict, clinic_days: int) -> dict:
     e_hn = u.get("17312", 0) / hn if hn else None
     e_tr = u.get("17314", 0) / tr if tr else None
     fg_n, fg_mix, fg_add = primary_mix(by["flap_graft"])
-    fg = min(fg_n / cases, 2.0) if cases else 0.40
-    if cases:
-        carry(by["flap_graft"], fg_n, fg * cases)
     lay_n, lay_mix, lay_add = primary_mix(by["layered"])
     exc_n = sum(u[c] for c in by["excision"])
     wm, we = LAYERED_WEIGHT
-    scale = lay_n / (wm * cases + we * exc_n) if (wm * cases + we * exc_n) else 0.0
-    lm, le = wm * scale, we * scale
-    # the page carries at most two layered closures per Mohs case and per excision: past that on one side, the rest go to
-    # the other side, and past both, to 'everything else'
-    if le > 2.0 and cases:
-        lm, le = (lay_n - 2.0 * exc_n) / cases, 2.0
-    if lm > 2.0 and exc_n:
-        lm, le = 2.0, min(2.0, (lay_n - 2.0 * cases) / exc_n)
-    lm, le = min(lm, 2.0), min(le, 2.0)
-    if cases or exc_n:
-        carry(by["layered"], lay_n, lm * cases + le * exc_n)
+    if paired is not None:
+        # each closure code's units billed with a Mohs case (pm) and with an excision (pe), never more than were billed;
+        # the page carries at most two flaps or grafts, and two layered closures, per Mohs case and per excision: past that
+        # they stay under 'everything else'
+        pm: Counter = Counter()
+        pe: Counter = Counter()
+        for c in by["flap_graft"]:
+            pm[c] = min(paired["mohs"].get(c, 0.0), u[c]) if cases else 0.0
+        for c in by["layered"]:
+            m_, e_ = (paired["mohs"].get(c, 0.0) if cases else 0.0), (paired["excision"].get(c, 0.0) if exc_n else 0.0)
+            if m_ + e_ > u[c]:
+                m_, e_ = m_ * u[c] / (m_ + e_), e_ * u[c] / (m_ + e_)
+            pm[c], pe[c] = m_, e_
+        # billed on a day with no Mohs case or excision of that patient (or a flap after an excision): the day's own
+        # procedure, not a later one on a case's day
+        for c in by["flap_graft"] + by["layered"]:
+            if u[c] - pm[c] - pe[c] > 1e-9:
+                unpaired[c] = u[c] - pm[c] - pe[c]
+
+        def cap(side: Counter, codes, n_cases: float) -> None:
+            n = sum(side[c] for c in codes if not _add_on(c))
+            if n_cases and n > 2.0 * n_cases:
+                for c in codes:
+                    side[c] *= 2.0 * n_cases / n
+        cap(pm, by["flap_graft"], cases)
+        cap(pm, by["layered"], cases)
+        cap(pe, by["layered"], exc_n)
+        n_fg, mix_fg, add_fg = primary_mix(by["flap_graft"], pm)
+        fg = n_fg / cases if cases else 0.40
+        if n_fg:
+            fg_mix, fg_add = mix_fg, add_fg
+        both = {c: pm[c] + pe[c] for c in by["layered"]}
+        n_lay, mix_lay, add_lay = primary_mix(by["layered"], both)
+        lm = sum(pm[c] for c in by["layered"] if not _add_on(c)) / cases if cases else wm
+        le = sum(pe[c] for c in by["layered"] if not _add_on(c)) / exc_n if exc_n else we
+        if n_lay:
+            lay_mix, lay_add = mix_lay, add_lay
+        # what each lever gives back is what was paired (an add-on with no paired first closure is not); the rest spills
+        for c in by["flap_graft"]:
+            back = pm[c] if n_fg else 0.0
+            if u[c] - back > 1e-9:
+                spill[c] += u[c] - back
+        for c in by["layered"]:
+            back = both[c] if n_lay else 0.0
+            if u[c] - back > 1e-9:
+                spill[c] += u[c] - back
+    else:
+        fg = min(fg_n / cases, 2.0) if cases else 0.40
+        if cases:
+            carry(by["flap_graft"], fg_n, fg * cases)
+        scale = lay_n / (wm * cases + we * exc_n) if (wm * cases + we * exc_n) else 0.0
+        lm, le = wm * scale, we * scale
+        # the page carries at most two layered closures per Mohs case and per excision: past that on one side, the rest go
+        # to the other side, and past both, to 'everything else'
+        if le > 2.0 and cases:
+            lm, le = (lay_n - 2.0 * exc_n) / cases, 2.0
+        if lm > 2.0 and exc_n:
+            lm, le = 2.0, min(2.0, (lay_n - 2.0 * cases) / exc_n)
+        lm, le = min(lm, 2.0), min(le, 2.0)
+        if cases or exc_n:
+            carry(by["layered"], lay_n, lm * cases + le * exc_n)
     new = {c: u.get(c, 0) for c in EM_NEW}
     est = {c: u.get(c, 0) for c in EM_EST}
     n_new, n_est = sum(new.values()), sum(est.values())
@@ -1133,9 +1366,10 @@ def _levers(svc: dict, clinic_days: int) -> dict:
                  "stages": 1 + (x12 + x14) / cases if cases else 1.47,
                  # extra stages per case at each site, relative to the average: kept as the slider moves the average
                  "extra_head_neck": e_hn, "extra_trunk": e_tr, "blocks": u.get("17315", 0) / cases if cases else 0.0},
-        "flap_graft": {"share": fg, "mix": fg_mix, "add_ons": fg_add, "billed_without_mohs": fg_n if not cases else 0},
+        "flap_graft": {"share": fg, "mix": fg_mix, "add_ons": fg_add, "billed_without_mohs": fg_n if not cases else 0,
+                       "from": "same_day" if paired is not None else "shared"},
         "layered": {"mohs_share": lm if cases else wm, "excision_share": le if exc_n else we,
-                    "mix": lay_mix, "add_ons": lay_add, "weights": [wm, we]},
+                    "mix": lay_mix, "add_ons": lay_add, "weights": [wm, we], "from": "same_day" if paired is not None else "shared"},
         "excision": {"per_day": per_day(exc_n), "mix": shares(by["excision"])},
         "visits": {"per_day": per_day(visits), "new_share": n_new / visits if visits else 0.15,
                    "new_mix": {c: v / n_new for c, v in new.items() if v} if n_new else {"99203": 0.75, "99204": 0.25},
@@ -1145,7 +1379,11 @@ def _levers(svc: dict, clinic_days: int) -> dict:
                    "first_mix": shares(by["biopsy_first"]) or {"11102": 1.0}, "add_mix": shares(by["biopsy_add"]) or {"11103": 1.0}},
         "ak": {"lesions": per_day(ak_pat * (ak_f * AK_LESIONS_15_PLUS + (1 - ak_f) * ak_n)), "per_patient": ak_n, "share_15_plus": ak_f},
         "benign": {"patients": per_day(ben), "share_15_plus": u.get("17111", 0) / ben if ben else 0.02},
-        "other": {"codes": other, "groups": {c: other_group(c) for c in other}},
+        # unpaired: the part of other.codes[c] that is closures billed on a day with no Mohs case or excision of the
+        # clinician's for that patient (the day's own procedure, at each payer's full rate); the rest of a closure code's
+        # units there are closures past what the levers carry (later procedures of a case's day)
+        "other": {"codes": other, "groups": {c: other_group(c) for c in other},
+                  "unpaired": {c: per_day(min(v, spill[c])) for c, v in sorted(unpaired.items()) if min(v, spill[c]) > 1e-9}},
     }
 
 

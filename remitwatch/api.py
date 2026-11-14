@@ -1731,7 +1731,12 @@ def activity_calculator(provider: str = Query("mohs", pattern=r"^[A-Za-z0-9:_-]{
 
 ASSUMPTIONS = "calculator/assumptions.json"     # in the state folder (cloud) or the meta table (server)
 ASSUMPTIONS_KEY = "calculator:assumptions"
-MAX_ASSUMPTIONS_BYTES = 256 * 1024
+# A hard cap on the saved figures, scenarios included. A scenario carries the whole calculator plan (contracts corrected,
+# targets and indexing per payer) and every strategy's settings: about 2.7 KB, 4.1 KB with every contract ticked and
+# every strategy set (24 payers). 2 MiB holds MAX_SCENARIOS of those (about 0.8 MB) with the figures and pay plans and
+# room for a practice with twice the payers, so the page's own limit of 200 is the one the owner meets; it stays well
+# under the 4.5 MB a serverless request or answer may be.
+MAX_ASSUMPTIONS_BYTES = 2 * 1024 * 1024
 MAX_SCENARIOS = 200                 # as the page's LabModel.MAX_SCENARIOS
 MAX_FIGURE = 1e9
 FIGURES_VERSION_HEADER = "x-figures-version"
@@ -1763,22 +1768,35 @@ def _figures_problem(data: Any) -> str | None:
     import math
 
     def number(v: Any) -> bool:
-        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return False
+        try:          # an integer past a float's range (1 followed by 400 zeros) is not a number the page can hold
+            return math.isfinite(v)
+        except OverflowError:
+            return False
 
     def fig(v: Any, top: float = MAX_FIGURE) -> bool:
         return v is None or (number(v) and 0 <= v <= top)
+
+    def text(v: Any, top: int) -> bool:
+        """Text the page can hold and the server can send back: no lone UTF-16 surrogate (which no UTF-8 answer can
+        carry), and at most `top` UTF-16 code units, as the page counts (String.length, .slice, maxlength), so the page
+        never cuts a stored name in the middle of a character."""
+        if not isinstance(v, str) or any("\ud800" <= ch <= "\udfff" for ch in v):
+            return False
+        return len(v.encode("utf-16-le")) // 2 <= top
 
     def plain(v: Any, depth: int) -> bool:
         if v is None or isinstance(v, (bool, int, float)):
             return v is None or isinstance(v, bool) or number(v)
         if isinstance(v, str):
-            return len(v) <= 200
+            return text(v, 200)
         if depth <= 0:
             return False
         if isinstance(v, list):
             return len(v) <= 100 and all(plain(w, depth - 1) for w in v)
         if isinstance(v, dict):
-            return len(v) <= 500 and all(isinstance(k, str) and len(k) <= 120 and plain(w, depth - 1) for k, w in v.items())
+            return len(v) <= 500 and all(text(k, 120) and plain(w, depth - 1) for k, w in v.items())
         return False
 
     if not isinstance(data, dict):
@@ -1812,11 +1830,11 @@ def _figures_problem(data: Any) -> str | None:
         if not isinstance(sc, dict) or set(sc) - {"name", "who", "x", "chosen", "saved_at"}:
             return "a scenario has an unknown field"
         name = sc.get("name")
-        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+        if not isinstance(name, str) or not name.strip() or not text(name, 100):
             return "each scenario needs a name of up to 100 characters"
         if not isinstance(sc.get("who"), str) or not _FIG_ID.fullmatch(sc["who"]):
             return "each scenario needs a clinician"
-        if "saved_at" in sc and not (isinstance(sc["saved_at"], str) and len(sc["saved_at"]) <= 40):
+        if "saved_at" in sc and not text(sc["saved_at"], 40):
             return "a scenario's date must be short text"
         x = sc.get("x", {})
         if not isinstance(x, dict) or not plain(x, 3):
@@ -1838,6 +1856,8 @@ def activity_assumptions(_: str = Depends(require_owner_password)):
     """The practice's own figures the strategy lab works with (minutes per service, costs, pay plans, saved
     scenarios), as the owner last saved them, with their version. Owner only: it holds what each clinician is paid."""
     import math
+
+    from fastapi.responses import Response
     raw = None
     if runtime.serverless():
         _, st = _cloud_state()
@@ -1859,7 +1879,10 @@ def activity_assumptions(_: str = Depends(require_owner_password)):
         data = None
     if not isinstance(data, dict):
         return {"assumptions": None, "error": "the saved figures could not be read", "version": version}
-    return {"assumptions": data, "version": version}
+    # escaped as ASCII, so text saved before the checks below existed (a lone UTF-16 surrogate, which UTF-8 cannot carry)
+    # still reads, and the owner can delete it from the page
+    return Response(json.dumps({"assumptions": data, "version": version}, separators=(",", ":"), allow_nan=False),
+                    media_type="application/json")
 
 
 @app.post("/api/activity/assumptions")

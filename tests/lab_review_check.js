@@ -368,6 +368,172 @@ function ascPayload() {
   ok('asc_all_on_finite', !bad.length, bad.join());
 }
 
+// ------------------------------------------------------------------ re-check fixes (items numbered as in the review)
+// every practice figure entered, so only what a strategy needs can leave a cost open
+const Af = LM.filled(A);
+Object.assign(Af.costs, { per_clinic_day: 2000, per_encounter: 20, per_mohs_case: 100, per_stage: 50, per_closure: 50, per_excision: 40, per_biopsy: 10, app_per_visit: 40 });
+{
+  // 1: a strategy's own cost not entered leaves the year's costs open (no 'left after costs'), as a missing figure does
+  const base = LM.run(d, x0, Af, {}, cal);
+  const noCost = LM.run(d, x0, Af, { other_surgeon: { on: true } }, cal), withCost = LM.run(d, x0, Af, { other_surgeon: { on: true, params: { cost: 250000 } } }, cal);
+  ok('i1_strategy_cost_open', !LM.costsOpen(base.result, base.needs) && noCost.needs.includes('param.cost') && LM.costsOpen(noCost.result, noCost.needs)
+     && !LM.costsOpen(withCost.result, withCost.needs), JSON.stringify([base.result.costs.missing, noCost.needs, withCost.needs]));
+  const Ano = LM.filled(Af); Ano.costs.app_per_visit = null;
+  const app = LM.run(d, x0, Ano, { app_shift: { on: true, params: { fill: 0 } } }, cal);
+  ok('i1_app_cost_open', LM.costsOpen(app.result, app.needs) && app.needs.includes('costs.app_per_visit'), app.needs.join());
+  const e = ascPayload(), asc = LM.run(e, x0, Af, { asc: { on: true, params: { to_asc: 1, own: 1 } } }, cal);
+  ok('i1_asc_cost_open', asc.needs.includes('costs.asc_per_case') && LM.costsOpen(asc.result, asc.needs), asc.needs.join());
+  // the what-ifs' own needs are kept apart from the plan's
+  const st = LM.run(d, x0, LM.filled(A), { stage: { on: true, params: { share: 0.5 } } }, cal);
+  ok('i1_whatif_needs_apart', !st.needs.length && Array.isArray(st.whatifNeeds), JSON.stringify([st.needs, st.whatifNeeds]));
+}
+{
+  // 2: the practice's share of the ASC's fee not entered: the year takes the lower view. Closures brought back to the
+  // clinic lose the whole fee; moved in, they bring none of it. The surgeon's own fees count either way.
+  const e = ascPayload(), step = params => stepOf(LM.run(e, x0, A, { asc: { on: true, params } }, cal), 'asc');
+  const back = step({ to_clinic: 1 }), backAll = step({ to_clinic: 1, own: 1 }), into = step({ to_asc: 1 });
+  ok('i2_asc_back_lower_view', back.detail.fees < 0 && near(back.collections, back.detail.withFee, 1e-9) && near(back.collections, backAll.collections, 1e-9)
+     && near(back.practiceOnly, back.detail.fees, 1e-9) && near(back.ownProduction, back.detail.pro, 1e-9) && /lower of the two views \(the whole fee lost\)/.test(back.notes.join(' ')),
+     JSON.stringify([back.collections, back.detail.withFee, back.detail.withoutFee, back.practiceOnly]));
+  ok('i2_asc_into_lower_view', near(into.collections, into.detail.withoutFee, 1e-9) && into.practiceOnly === 0 && /none of the fee/.test(into.notes.join(' ')), into.collections);
+}
+{
+  // 5: the cut falls on the Mohs first stage when the closure's facility amount is the higher
+  const S = LM.STRATEGIES.find(z => z.id === 'asc');
+  ok('i5_asc_cut_wording', /to the closure, or to the Mohs first stage when the closure's facility amount is the higher/.test(S.why) && !/is still cut 50% against the clinic Mohs/.test(S.why), S.why);
+}
+{
+  // 6: the visit add-on is raised at Medicare (and the Medicare Advantage plans following it) only. Here half the visits
+  // and half the add-ons are Medicare's: 10 add-ons per 100 visits now, 5 at Medicare; the target 0.5 x 0.6 x 0.5 = 15 per
+  // 100 visits there, so Medicare's add-ons triple and Plan A's stay as they are
+  const r = LM.run(d, x0, A, { b1: { on: true } }, cal), s = stepOf(r, 'b1');
+  const e1 = M.evaluate(d, x0, cal), e3 = M.evaluate(d, Object.assign({}, x0, { g2211_scale: 3 }), cal);
+  const want = e3.byPayer['Medicare KY'].collections - e1.byPayer['Medicare KY'].collections;
+  ok('i6_b1_medicare_only', want > 0 && near(s.collections, want, 1e-9) && r.x.g2211_scale == null && /Commercial and other plans are left as they are/.test(s.notes[0]),
+     `${s.collections} ${want} ${s.notes[0]}`);
+  const S = LM.STRATEGIES.find(z => z.id === 'b1');
+  ok('i6_b1_wording', /the Medicare Advantage plans the Calculator has following Medicare/.test(S.compliance), S.compliance);
+  // a clinician whose add-ons are all at commercial plans: nothing to raise at Medicare from history
+  const dc = payload(); dc.mix.visit_addon = [['Plan A', 1]];
+  ok('i6_b1_no_medicare_history', stepOf(LM.run(dc, x0, A, { b1: { on: true } }, cal), 'b1').collections === 0, '');
+}
+{
+  // 14: added clinic days never take the plan past the Calculator's 6 days a week
+  const x5 = Object.assign({}, x0, { days_per_week: 5 });
+  const r = LM.run(d, x5, A, { add_session: { on: true, params: { days: 3 } } }, cal), r2 = LM.run(d, x5, A, { add_session: { on: true, params: { days: 0.5 } } }, cal);
+  ok('i14_add_session_capped', r.x.days_per_week === 6 && /Capped at 6 clinic days a week/.test(stepOf(r, 'add_session').notes[0])
+     && r2.x.days_per_week === 5.5 && !stepOf(r2, 'add_session').notes.length && LM.CAP.days_per_week === 6, JSON.stringify([r.x.days_per_week, stepOf(r, 'add_session').notes]));
+}
+{
+  // 20, 21 and change A: the stage what-if stages the clinic's closures only (the routing from the payload's cases, then the
+  // ASC strategy's moves); the closures done in the ASC belong to the later-day ASC what-if, so no delay is counted twice
+  const e = ascPayload(), all = { share: 1, all: 1, full: 0 };
+  const r = LM.run(e, x0, A, { stage: { on: true, params: all } }, cal), s = stepOf(r, 'stage');
+  // in the ASC now, a clinic day: 14040 on 6 cases and 15260 on 2, over 10 clinic days; every flap and graft is paired here
+  const U = M.units(e, x0), inAsc = { '14040': 0.6, '15260': 0.2 }, e0 = M.evaluate(e, x0, cal).totalCollections;
+  let want = 0, moved = 0;
+  for (const c of ['14040', '14021', '15260']) {
+    const g = M.evaluate(e, Object.assign({}, x0, { stage: { codes: [c], share: 1 } }), cal).totalCollections - e0;
+    const f = (inAsc[c] || 0) / U[c];
+    want += (1 - f) * g; moved += U[c] * (1 - f);
+  }
+  ok('i20_stage_clinic_closures_only', near(s.collections, want, 1e-9) && near(s.encountersDay, moved, 1e-9) && /left to the later-day ASC what-if/.test(s.notes[0]),
+     `${s.collections} ${want} ${s.encountersDay} ${moved}`);
+  // one owner for each closure: stage's closures and the later-day ASC what-if's add up to every paired flap and graft
+  const plan = LM.ascPlan(LM.paramDefaults(LM.STRATEGIES.find(z => z.id === 'asc'))), days = x0.days_per_week * x0.weeks_per_year;
+  const later = LM.ascBook(e, x0, plan).rows.reduce((t, row) => t + (row.what === 'mohs' && row.priced ? row.perYear * LM.ascOnPlan(plan, row) : 0), 0) / days;
+  ok('i20_single_owner', near(s.encountersDay + later, U['14040'] + U['14021'] + U['15260'], 1e-9), `${s.encountersDay} ${later}`);
+  const L1 = LM.run(e, x0, A, { asc_later: { on: true, params: { share: 1 } } }, cal);
+  const both = LM.run(e, x0, A, { stage: { on: true, params: all }, asc_later: { on: true, params: { share: 1 } } }, cal);
+  ok('i20_both_ticked', near(stepOf(both, 'stage').collections, s.collections, 1e-9) && near(stepOf(both, 'asc_later').collections, stepOf(L1, 'asc_later').collections, 1e-9)
+     && near(both.whatif.collections - both.result.collections, s.collections + stepOf(L1, 'asc_later').collections, 1e-9), '');
+  // the routing: the ASC's flaps and grafts brought back to the clinic become stage's; moved into the ASC, they leave it
+  const noAsc = payload(); noAsc.mix = e.mix; noAsc.payers = e.payers;
+  const plain = stepOf(LM.run(noAsc, x0, A, { stage: { on: true, params: all } }, cal), 'stage');
+  const back = stepOf(LM.run(e, x0, A, { asc: { on: true, params: { to_clinic: 1, own: 0 } }, stage: { on: true, params: all } }, cal), 'stage');
+  const into = stepOf(LM.run(e, x0, A, { asc: { on: true, params: { to_asc: 1, own: 0 } }, stage: { on: true, params: all } }, cal), 'stage');
+  ok('i21_stage_follows_routing', near(back.collections, plain.collections, 1e-9) && near(back.encountersDay, plain.encountersDay, 1e-9)
+     && into.encountersDay < s.encountersDay - 0.39 && into.collections < s.collections, JSON.stringify([back.collections, plain.collections, into.encountersDay, s.encountersDay]));
+  // the later-day ASC what-if: patients who do not come back heal open (the Mohs alone, in full; the closure and the ASC's
+  // fee lost); the surgeon's rooming time for the second visit, no clinic slot. Per case (with half a stage): 14040 C - B
+  // = 240.00, M - B = -240.00; 15260 C - B = 300.00, M - B = -350.00; the ASC's fee 1,000.00 each
+  const per = 4 * 46 / 10, coll = c => M.collectShare(e, x0, 'Medicare KY', c);
+  const lr = stepOf(LM.run(e, x0, A, { asc_later: { on: true, params: { share: 1, return_rate: 0.5 } } }, cal), 'asc_later');
+  const half = 0.5 * per, gain = half * (6 * (24000 - 24000) * coll('14040') + 2 * (30000 - 35000) * coll('15260'));
+  const feeLost = half * (6 * 100000 * coll('14040') + 2 * 100000 * coll('15260'));
+  ok('i20_asc_later_return_rate', near(lr.collections, gain - feeLost, 1e-9) && near(lr.practiceOnly, -feeLost, 1e-9) && near(lr.minutesDay, (8 * half * 5 - 8 * half * 30) / days, 1e-9)
+     && lr.encountersDay === 0 && /do not come back/.test(lr.notes[0]) && /no clinic slot/.test(lr.notes[0]), JSON.stringify([lr.collections, gain - feeLost, lr.minutesDay]));
+  const LS = LM.STRATEGIES.find(z => z.id === 'asc_later');
+  ok('i20_asc_later_defaults', LM.paramDefaults(LS).return_rate === 1 && /no delay is counted twice/.test(LS.why), '');
+}
+{
+  // 36: plain words: one clinician is not an average; minus signs, not hyphens, before money
+  const d1 = payload(); d1.strategy.open_findings = { denial: { n: 10, cents: 100000 } }; d1.strategy.open_findings_clinicians = 1;
+  const a = stepOf(LM.run(d1, x0, A, { appeals: { on: true } }, cal), 'appeals');
+  ok('i36_one_clinician', !/clinicians\)/.test(a.notes[0]) && !/on average/.test(a.notes[0]), a.notes[0]);
+  const e = ascPayload(), b = stepOf(LM.run(e, x0, A, { asc: { on: true, params: { to_clinic: 1 } } }, cal), 'asc');
+  ok('i36_minus_sign', /−\$\d/.test(b.notes.join(' ')) && !/-\$\d/.test(b.notes.join(' ')), b.notes.join(' '));
+}
+
+// ------------------------------------------------------------------ Kentucky closures to the Newburgh ASC
+// Medicare's Kentucky amounts (invented), a Kentucky complex repair and a Kentucky Medicare Advantage flap besides the
+// Kentucky Medicare flap of ascPayload ('14040 17311', 5 cases)
+function kyPayload() {
+  const e = ascPayload();
+  const ky = { '17311': [59000, 24000], '17312': [34000, 14000], '14040': [65000, 47000], '15260': [87000, 64000], '13132': [39000, 21000], '13133': [14500, 8800] };
+  e.asc.medicare_ky = Object.fromEntries(Object.entries(ky).map(([c, v]) => [c, { '2026': v, '2027': v }]));
+  e.asc.cases.mohs.push(['13132 13133 17311', 'clinic', 'medicare', 'KY', 3, 0], ['14040 17311', 'clinic', 'medicare_advantage', 'KY', 4, 0]);
+  return e;
+}
+{
+  const per = 4 * 46 / 10, coll = c => M.collectShare(ascPayload(), x0, 'Medicare KY', c);
+  const S = LM.STRATEGIES.find(z => z.id === 'asc');
+  const stepIn = (e, params) => stepOf(LM.run(e, x0, A, { asc: { on: true, params } }, cal), 'asc');
+  // not in the payload: the option is shown as not available and counts nothing
+  const e0 = ascPayload(), na = stepIn(e0, { ky_share: 1, own: 1 }), none = stepIn(e0, { own: 1 });
+  ok('B_ky_not_available', near(na.collections, none.collections, 1e-9) && na.detail.ky.available === false && na.detail.ky.here === true
+     && /Kentucky closures to the Newburgh ASC: not available/.test(na.notes.join(' ')), na.notes.join(' '));
+  // one Kentucky flap: in the clinic, Kentucky's office amounts, 650.00 + half of 590.00 = 945.00; sent to Newburgh, the Mohs
+  // at Kentucky's office amount (590.00) outranks the flap at Indiana's facility amount (480.00): 590.00 + 240.00 = 830.00;
+  // the ASC's fee 1,000.00
+  const e = kyPayload(), on = stepIn(e, { ky_share: 1, own: 1 }), off = stepIn(e, { own: 1 });
+  const n = 5 * per, A1 = 65000 + 29500, B1 = 59000 + 24000;
+  ok('B_ky_flap_priced', near(on.collections - off.collections, n * (B1 - A1 + 100000) * coll('14040'), 1e-9) && near(on.practiceOnly - off.practiceOnly, n * 100000 * coll('14040'), 1e-9)
+     && near(on.ownProduction - off.ownProduction, n * (B1 - A1) * coll('14040'), 1e-9) && near(on.detail.ky.moved, n, 1e-9), `${on.collections - off.collections}`);
+  // the cut across the two contractors switched off: each claim on its own (590.00 + 480.00)
+  const nc = stepIn(e, { ky_share: 1, own: 1, ky_cross: 0 });
+  ok('B_ky_cross_switch', near(nc.collections - on.collections, n * (107000 - B1) * coll('14040'), 1e-9) && /billing must still apply it/.test(nc.notes.join(' '))
+     && /billing must apply it/.test(on.notes.join(' ')), `${nc.collections - on.collections}`);
+  // flaps and grafts by default; the complex repair (13132 + 13133) only when ticked: clinic 590.00 + 195.00 + 145.00,
+  // the ASC 590.00 + 110.00 + 90.00 and its fee 200.00 (the add-on packaged)
+  const cx = stepIn(e, { ky_share: 1, own: 1, ky_complex: 1 });
+  ok('B_ky_types', near(cx.collections - on.collections, 3 * per * (79000 + 20000 - 93000) * coll('13132'), 1e-9), `${cx.collections - on.collections}`);
+  // Medicare Advantage in Kentucky waits for its facility fee, as at Newburgh
+  const ma = stepIn(e, { ky_share: 1, own: 1, commercial_pct: 0.9 });
+  ok('B_ky_ma_needs_fee', near(ma.detail.ky.moved, 9 * per, 1e-9) && near(on.detail.ky.moved, 5 * per, 1e-9) && on.needs.includes('param.commercial_pct'), JSON.stringify([ma.detail.ky.moved, on.detail.ky.moved]));
+  // per closure type, and what the patient pays more: 20% of (830.00 + 1,000.00 - 945.00)
+  const flap = on.detail.ky.types.find(t => t.type === 'flap'), comp = on.detail.ky.types.find(t => t.type === 'complex');
+  ok('B_ky_per_case', near(flap.owner, B1 + 100000 - A1) && near(flap.nonOwner, B1 - A1) && near(flap.coins, 0.2 * (B1 + 100000 - A1)) && flap.sent && !comp.sent && comp.lowMargin
+     && /pays about \$177 more per case/.test(on.notes.join(' ')) && /45 minutes/.test(on.notes.join(' ')), JSON.stringify(flap) + on.notes.join(' '));
+  // the Kentucky flaps sent to Newburgh leave the stage what-if and join the later-day ASC what-if (nothing there when the
+  // cut is not applied across the contractors: the same-day and later-day amounts are then the same)
+  const all = { share: 1, all: 1, full: 0 }, later = { share: 1 };
+  const runK = p => LM.run(e, x0, A, { asc: { on: true, params: Object.assign({ own: 1 }, p) }, stage: { on: true, params: all }, asc_later: { on: true, params: later } }, cal);
+  const k0 = runK({}), k1 = runK({ ky_share: 1 }), k2 = runK({ ky_share: 1, ky_cross: 0 });
+  ok('B_ky_stage_and_later', near(stepOf(k0, 'stage').encountersDay - stepOf(k1, 'stage').encountersDay, 0.5, 1e-9)
+     && near(stepOf(k1, 'asc_later').collections - stepOf(k0, 'asc_later').collections, n * (107000 - B1) * coll('14040'), 1e-9)
+     && near(stepOf(k2, 'asc_later').collections, stepOf(k0, 'asc_later').collections, 1e-9), JSON.stringify([stepOf(k0, 'stage').encountersDay, stepOf(k1, 'stage').encountersDay]));
+  // defaults, the tier, the switch's note and the compliance points
+  const P = LM.paramDefaults(S), ks = S.params.filter(q => /^ky_/.test(q[0]));
+  ok('B_ky_defaults', P.ky_share === 0 && P.ky_flap === 1 && P.ky_graft === 1 && P.ky_complex === 0 && P.ky_intermediate === 0 && P.ky_cross === 1
+     && ks.every(q => q[7] === 'Kentucky closures to the Newburgh ASC') && ks[0][8] === 'medium' && /billing must apply it/.test(ks.find(q => q[0] === 'ky_cross')[1])
+     && /may not cover the ASC's cost/.test(ks.find(q => q[0] === 'ky_complex')[1]), '');
+  ok('B_ky_compliance', ['14 sec. 20.1', '45 minutes', 'safe harbor', 'capacity', 'CGS', 'WPS'].every(t => S.compliance.includes(t)), '');
+  const words = [...ks.map(q => q[1]), ...on.notes, ...nc.notes, ...na.notes];
+  ok('B_ky_no_em_dash', words.every(w => !/[—–]/.test(w)), words.find(w => /[—–]/.test(w)));
+  ok('B_ky_finite', finiteDeep({ k0: k0.steps, k1: k1.steps, k2: k2.steps }), '');
+}
+
 // ------------------------------------------------------------------ everything on: no number that is not finite
 {
   const all = Object.fromEntries(LM.STRATEGIES.map(s => [s.id, { on: true }]));
@@ -439,6 +605,165 @@ async function pageChecks() {
     && !('extra_key' in p), JSON.stringify(p));
   ok('page_target_amounts', ctx.sheetAmount('650k') === 65000000 && ctx.sheetAmount('1.6m') === 160000000 && ctx.sheetAmount('$650,000') === 65000000
     && isNaN(ctx.sheetAmount('abc')), '');
+
+  // ---------------------------------------------------------------- the views drawn, on a small stand-in for the page
+  // An element: what is written to it is kept; querySelector gives one element per selector (made on first use);
+  // querySelectorAll gives the elements a check put there (inputs, table rows).
+  const fakeEl = all => { const kids = {};
+    return { innerHTML: '', textContent: '', className: '', value: '', placeholder: '', disabled: false, dataset: {}, style: {}, validity: {}, focus() {},
+             querySelector(sel) { return (kids[sel] = kids[sel] || fakeEl(all)); }, querySelectorAll(sel) { return all[sel] || []; } }; };
+  const page = all => { const v = fakeEl(all || {}); return { v, body: v.querySelector('#calcBody'), q: sel => v.querySelector('#calcBody').querySelector(sel) }; };
+  const text = h => String(h).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  const amount = s => { const t = text(s).trim(); if (t === '–' || !t) return 0; const m = t.match(/([+−-]?)\$([\d,]+)/); return m ? (m[1] === '−' || m[1] === '-' ? -1 : 1) * +m[2].replace(/,/g, '') : NaN; };
+  const input = (labP, value, type) => ({ type: type || 'number', value: String(value), placeholder: '', dataset: { labP }, validity: { badInput: false } });
+  ctx.money = c => (c == null ? '–' : (c < 0 ? '-' : '') + '$' + Math.round(Math.abs(c) / 100).toLocaleString());
+  ctx.moneyK = c => { const v = Math.round((c || 0) / 100000) * 100000; return v < 0 ? '−' + ctx.money(-v) : ctx.money(v); };
+  ctx.calcFmt = { n1: v => (Math.round(v * 10) / 10).toLocaleString() };
+  ctx.calcWith = (base, x, over) => Object.assign({}, base, { q: x.q, include_ancillary: x.include_ancillary, include_path: x.include_path, corrected: {} }, over || {});
+  // the lab on the ASC payload, every practice figure but the ASC's in
+  const e = kyPayload(), labOn = async (chosen, Ax, dd) => {
+    server.doc = Object.assign({ comp: {}, scenarios: [] }, Ax); server.version = ver(); server.failRead = false;
+    cs.A = null; cs.Aok = false;
+    Object.assign(cs, { data: dd || e, x: Object.assign({}, x0), cal, view: 'lab', lab: { chosen }, base: Object.assign({}, x0) });
+    const pg = page({ '[data-lab-p]': [] });
+    await ctx.labDraw(pg.v);
+    return pg;
+  };
+  const AfDoc = LM.clean(Af);
+
+  // 1: a strategy's cost not entered: the costs are marked, nothing is shown after costs, and the need is listed
+  let pg = await labOn({ other_surgeon: { on: true } }, AfDoc, d);
+  let sum = pg.q('#labSummary').innerHTML;
+  ok('page_i1_costs_open', /Costs a year <span class="small sev-medium">\(some not entered\)/.test(sum) && /not shown until every cost is entered/.test(sum)
+     && /Not entered yet for the strategies above: what the surgeon costs a year/.test(sum), text(sum));
+  pg = await labOn({ other_surgeon: { on: true, params: { cost: 1000 } } }, AfDoc, d);
+  sum = pg.q('#labSummary').innerHTML;
+  ok('page_i1_costs_known', /<b>Left after costs<\/b>/.test(sum) && !/some not entered/.test(sum), text(sum));
+  // ...and in the scenario table
+  pg = await labOn({}, Object.assign({}, AfDoc, { scenarios: [{ name: 'No cost', who: d.who.id, x: { year: '2026' }, chosen: { other_surgeon: { on: true } }, saved_at: '2026-07-01' }] }), d);
+  const scen = pg.v.querySelector('#labScenTable').innerHTML;
+  ok('page_i1_scenario_costs_open', /No cost/.test(scen) && /some not entered/.test(scen) && /data-label="After costs">–</.test(scen.split('No cost')[1]), text(scen));
+
+  // 31: each line of the summary is the difference of the rounded running totals, so the lines add up to the total shown
+  // (vendor fees of a few hundred to a few thousand dollars a year, stacked on other steps, would not add up rounded alone)
+  const d31 = payload(); d31.strategy.vendor_fees = { 'Plan A': 280000 }; d31.strategy.vendor_fees_months = 12;
+  const bad31 = [];
+  let lines = [];
+  for (const [vs, pts, vis] of [[0.25, 0.01, 0.5], [0.5, 0.02, 1], [0.75, 0.03, 1.5], [1, 0.04, 2], [0.35, 0.05, 2.5], [0.6, 0.06, 3], [0.9, 0.07, 0.5], [0.45, 0.08, 1]]) {
+    pg = await labOn({ app_shift: { on: true, params: { visits: vis, fill: 0 } }, vendor_fees: { on: true, params: { share: vs } }, collect: { on: true, params: { points: pts } },
+                       b1: { on: true }, add_session: { on: true, params: { days: 0.5 } } }, AfDoc, d31);
+    sum = pg.q('#labSummary').innerHTML;
+    const rows = sum.split('<tr').map(r => r.split('</td>').map(c => c.replace(/^[\s\S]*<td[^>]*>/, '')));
+    const at = rows.findIndex(r => /Collections a year with these strategies/.test(r[0]));
+    const total = amount(rows[at][1]);
+    lines = rows.slice(1, at).map(r => amount(r[1]));
+    if (!(lines.length === 6 && lines.every(isFinite) && lines.reduce((t, v) => t + v, 0) === total)) bad31.push(JSON.stringify([lines, total]));
+  }
+  ok('page_i31_lines_add_up', !bad31.length, bad31.join(' '));
+
+  // 36: a step that removes visits says so with a minus sign
+  const appImpact = pg.q('[data-lab-impact="app_shift"]').innerHTML;
+  ok('page_i36_minus_sign', /−\d\.\d\d visits a clinic day/.test(appImpact) && /−\d+ clinician minutes a day/.test(appImpact) && !/-\d/.test(text(appImpact)), text(appImpact));
+
+  // 32: the ASC's cost per case not entered: its cost is marked and no net is worked out
+  const Ac = LM.clean(Object.assign({}, Af, { costs: Object.assign({}, Af.costs, { office_per_case_saved: 50 }) }));
+  pg = await labOn({ asc: { on: true, params: { to_asc: 1, own: 1 } } }, Ac);
+  const ascOpen = pg.q('[data-lab-impact="asc"]').innerHTML;
+  pg = await labOn({ asc: { on: true, params: { to_asc: 1, own: 1 } } }, LM.clean(Object.assign({}, Ac, { costs: Object.assign({}, Ac.costs, { asc_per_case: 300 }) })));
+  const ascKnown = pg.q('[data-lab-impact="asc"]').innerHTML;
+  ok('page_i32_no_net_without_asc_cost', /costs [−+]\$[\d,]+ \(some not entered\)/.test(ascOpen) && !/ net /.test(text(ascOpen)) && / net /.test(text(ascKnown)), text(ascOpen).slice(0, 300));
+
+  // B: the Kentucky table on the ASC card, and 'not available' while the payload has no Kentucky amounts
+  pg = await labOn({ asc: { on: true, params: { ky_share: 1, own: 1 } } }, AfDoc);
+  const kyCard = pg.q('[data-lab-impact="asc"]').innerHTML;
+  pg = await labOn({ asc: { on: true, params: { ky_share: 1, own: 1 } } }, AfDoc, ascPayload());
+  const kyNA = pg.q('[data-lab-impact="asc"]').innerHTML;
+  // the practice's share not entered and only Kentucky cases moving: both views are shown
+  pg = await labOn({ asc: { on: true, params: { ky_share: 1 } } }, AfDoc);
+  ok('page_B_ky_views', /class="lab-views"/.test(pg.q('[data-lab-impact="asc"]').innerHTML), '');
+  ok('page_B_ky_table', /Kentucky closure, after a Kentucky clinic Mohs/.test(kyCard) && /Patient pays more/.test(kyCard) && /\(not sent\)/.test(kyCard)
+     && !/class="lab-views"/.test(kyCard)
+     && /Kentucky closures to the Newburgh ASC:<\/b> not available yet/.test(kyNA) && !/Kentucky closure, after/.test(kyNA), text(kyNA).slice(-400));
+  const kyHead = ctx.labCard(LM.STRATEGIES.find(s => s.id === 'asc'));
+  ok('page_B_ky_section', /<b>Kentucky closures to the Newburgh ASC<\/b> <span class="chip sev-medium">check first<\/span>/.test(kyHead) && kyHead.split('Kentucky closures to the Newburgh ASC</b>').length === 2, '');
+
+  // 26: an emptied box clears the setting: back to not entered when it has no default, else to its default
+  server.doc = { comp: {}, scenarios: [] }; server.version = ver(); cs.A = null; cs.Aok = false;
+  Object.assign(cs, { data: e, x: Object.assign({}, x0), lab: { chosen: { asc: { on: true, params: { to_asc: 0.5 } }, appeals: { on: true } } } });
+  const own = input('asc|own|pct', ''), share = input('appeals|share|pct', '40');
+  const pg26 = page({ '[data-lab-p]': [own, share] });
+  await ctx.labDraw(pg26.v);
+  own.value = '40'; own.onchange({ type: 'change' });
+  const typed = cs.lab.chosen.asc.params.own;
+  own.value = ''; own.onchange({ type: 'change' });
+  const r26 = LM.run(e, cs.x, cs.A, cs.lab.chosen, cal);
+  share.value = '100'; share.onchange({ type: 'change' });
+  const full = cs.lab.chosen.appeals.params.share;
+  share.value = ''; share.onchange({ type: 'change' });
+  ok('page_i26_empty_box', typed === 0.4 && cs.lab.chosen.asc.params.own === null && own.placeholder === 'not entered' && stepOf(r26, 'asc').needs.includes('param.own')
+     && full === 1 && cs.lab.chosen.appeals.params.share === 0.4 && String(share.value) === '40', JSON.stringify(cs.lab.chosen));
+
+  // 27: two windows change different boxes of one pay plan: each box is kept
+  const plan0 = { type: 'base', pct: null, per_wrvu: null, base: 400000, threshold: 1000000, above_pct: 0.3 };
+  server.doc = { comp: { '1000000003': Object.assign({}, plan0), '1000000005': { type: 'pct', pct: 0.3 } }, scenarios: [] }; server.version = ver(); server.failRead = false;
+  cs.A = null; cs.Aok = false; cs.data = d;
+  await ctx.labAssumptions();
+  server.doc.comp['1000000003'].base = 450000; server.version = ver();            // another window raises the base
+  const box = (c, orig, value) => ({ value: String(value), dataset: { c, orig: String(orig) }, validity: { badInput: false } });
+  const row = (id, cells) => ({ dataset: { comp: id, name: 'Clinician ' + id.slice(-1) },
+    querySelectorAll: () => cells, querySelector: sel => cells.find(i => sel === `[data-c="${i.dataset.c}"]`) });
+  const rowB = row('1000000003', [box('type', 'base', 'base'), box('pct', '', ''), box('per_wrvu', '', ''), box('base', '400000', '400000'), box('threshold', '1000000', '900000'), box('above_pct', '30', '30')]);
+  const pg27 = page({ '[data-fig]': [], 'tr[data-comp]': [rowB] });
+  await ctx.figuresDraw(pg27.v);
+  await pg27.q('#figSave').onclick();
+  const p3 = server.doc.comp['1000000003'];
+  ok('page_i27_plan_boxes_merged', p3.base === 450000 && p3.threshold === 900000 && p3.above_pct === 0.3 && /were kept/.test(pg27.q('#figMsg').textContent), JSON.stringify(p3));
+  // figures typed into a row with no plan: not saved, and the page says to pick a plan first
+  const posts27 = server.posts;
+  const rowN = row('1000000004', [box('type', '', ''), box('pct', '', '30'), box('per_wrvu', '', ''), box('base', '', ''), box('threshold', '', ''), box('above_pct', '', '')]);
+  const pgN = page({ '[data-fig]': [], 'tr[data-comp]': [rowN] });
+  await ctx.figuresDraw(pgN.v);
+  await pgN.q('#figSave').onclick();
+  ok('page_i27_no_plan_kind', server.posts === posts27 && /Pick a kind of plan for Clinician 4/.test(pgN.q('#figMsg').textContent) && !server.doc.comp['1000000004'], pgN.q('#figMsg').textContent);
+  // a plan is removed only when its kind is set to no plan here
+  const rowD = row('1000000005', [box('type', 'pct', ''), box('pct', '30', '30'), box('per_wrvu', '', ''), box('base', '', ''), box('threshold', '', ''), box('above_pct', '', '')]);
+  const pgD = page({ '[data-fig]': [], 'tr[data-comp]': [rowD] });
+  await ctx.figuresDraw(pgD.v);
+  await pgD.q('#figSave').onclick();
+  ok('page_i27_plan_removed', !server.doc.comp['1000000005'] && server.doc.comp['1000000003'].base === 450000, JSON.stringify(server.doc.comp));
+
+  // 3: the pay plans' text says what own production holds
+  const figText = pgD.v.querySelector('#calcBody').innerHTML;
+  ok('page_i3_own_production_text', /Slides they read \(pathology billed under their number\), staff services such as light treatments and injections, and drugs are not counted in it/.test(figText)
+     && !/slides they read themselves included/.test(figText), '');
+
+  // 29: a save whose fresh read fails locks the Save button and the boxes
+  server.doc.comp['1000000003'].base = 460000; server.version = ver(); server.failRead = true;
+  const fig = { value: '12', dataset: { fig: 'costs.per_encounter', orig: '', label: 'Each patient seen' }, validity: { badInput: false }, disabled: false };
+  const pg29 = page({ '[data-fig]': [fig], 'tr[data-comp]': [], '[data-fig], [data-c]': [fig] });
+  cs.Aok = true;
+  await ctx.figuresDraw(pg29.v);
+  await pg29.q('#figSave').onclick();
+  ok('page_i29_save_locked', pg29.q('#figSave').disabled === true && fig.disabled === true && /could not be read/.test(pg29.q('#figMsg').textContent), pg29.q('#figMsg').textContent);
+
+  // 29: the provider sheet after a failed read: the read problem, no 'no pay plan', no pay row and no goal
+  // (the figures read before, with this clinician's plan, are still in memory)
+  server.doc.comp['1000000001'] = { type: 'pct', pct: 0.35 };
+  Object.assign(cs, { data: d, x: Object.assign({}, x0), base: Object.assign({}, x0), sheetTarget: '1m', Aok: false, A: LM.filled({ comp: { '1000000001': { type: 'pct', pct: 0.35 } } }) });
+  const pgS = page();
+  await ctx.sheetDraw(pgS.v);
+  const sheetTop = pgS.v.querySelector('#calcBody').innerHTML, sheetBody = pgS.q('#sheetBody').innerHTML;
+  ok('page_i29_sheet_read_failed', /could not be read/.test(sheetTop) && !/No pay plan entered/.test(sheetTop) && !/Pay under your plan/.test(sheetBody) && !/To be paid/.test(sheetBody), text(sheetTop).slice(0, 300));
+
+  // 10, 28: the sheet never offers more clinic days or weeks than a schedule holds; within the limits it does
+  server.failRead = false; cs.Aok = false; cs.A = null;
+  const own0 = M.evaluate(d, Object.assign({}, x0, { include_ancillary: false, include_path: false }), cal).collections;
+  const sheetFor = async target => { cs.sheetTarget = target; const p = page(); await ctx.sheetDraw(p.v); return p.q('#sheetBody').innerHTML; };
+  const big = await sheetFor(String(Math.round(own0 * 0.35 * 3 / 100))), fits = await sheetFor(String(Math.round(own0 * 0.35 * 1.05 / 100)));
+  ok('page_i28_sheet_caps', /Not enough on its own: more clinic days \(it would take more than 6 a week\); more weeks of clinic \(it would take more than 52 a year\)/.test(big)
+     && !/more clinic days a week</.test(big) && !/more weeks of clinic a year</.test(big) && /more clinic days a week</.test(fits) && /more weeks of clinic a year</.test(fits)
+     && !/Not enough on its own/.test(fits), text(big).slice(-400));
+  ok('page_i3_sheet_text', /Slides you read \(pathology billed under your number\), staff services such as light treatments and injections, and drugs are not counted here/.test(fits), '');
 }
 
 pageChecks().catch(e => ok('page_checks_ran', false, e.stack)).then(() => process.stdout.write(JSON.stringify(out)));

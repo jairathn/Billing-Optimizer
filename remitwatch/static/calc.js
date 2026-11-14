@@ -48,6 +48,9 @@ const CALC_2027 = [
   ['bx_visit_share', 'Biopsied Medicare patients also billed a visit with modifier 25', 0, 1, 0.01, 'pct'],
   ['mohs_visit_share', 'Mohs cases with a visit billed with modifier 25 the same day', 0, 1, 0.01, 'pct'],
 ];
+// what a target may move: clinic time, visits and Mohs cases, as on the provider sheet. Biopsies, frozen lesions,
+// excisions, stages, closures and visit levels follow each patient's needs: their value is shown, never as a way to a target.
+const CALC_GOAL_MOVES = ['visits', 'new_visits', 'days_per_week', 'weeks_per_year', 'mohs_cases'];
 const calcFmt = {n0: v => Math.round(v).toLocaleString(), n1: v => (Math.round(v * 10) / 10).toLocaleString(), n2: v => (Math.round(v * 100) / 100).toFixed(2),
                  pct: v => Math.round(v * 100) + '%', per100: v => Math.round(v * 100) + ' per 100'};
 const KIND_LABEL = {medicare: 'Medicare', medicare_advantage: 'Medicare Advantage', commercial: 'Commercial', medicaid: 'Medicaid', supplement: 'Supplement', other: 'Other'};
@@ -107,6 +110,20 @@ function calcFocusKeep(root){
   };
 }
 function calcRedraw(box, html){ const back = calcFocusKeep(box); box.innerHTML = html; calcFoldWire(box); back(); }
+// another window or clinician is fetched and the tab drawn from scratch: the control that had the focus (or the one named)
+// gets it back once the new figures are drawn
+function calcRender(sel){
+  const a = document.activeElement;
+  state.calc.refocus = sel || (a && a !== document.body ? calcKeyOf(a) : null);
+  render();
+}
+function calcRefocus(v){
+  const cs = state.calc, sel = cs.refocus;
+  if(!sel) return;
+  cs.refocus = null;
+  const el = v.querySelector(sel);
+  if(el && el !== document.activeElement) el.focus({preventScroll: true});
+}
 
 // rows rounded to $1,000 so that they add up to the rounded total (largest remainders)
 function calcRoundRows(values, total){
@@ -178,6 +195,9 @@ function calcStyle(){
   table.calc-cards td{display:block;border:0;padding:0;min-width:0;text-align:left;white-space:normal}
   table.calc-cards td:first-child{grid-column:1 / -1;font-weight:600}
   table.calc-cards td[data-label]::before{content:attr(data-label);display:block;font-size:11px;font-weight:400;color:var(--muted)}
+  #labMinutes table th,#labMinutes table td{padding:5px 4px}
+  #labMinutes table th,#labMinutes table td.num{white-space:normal;vertical-align:bottom}
+  #labMinutes table td:first-child{font-size:12px}
 }`;
   document.head.appendChild(s);
 }
@@ -230,14 +250,15 @@ function calcDraw(v){
   if(ROLE_LABEL[d.who.id] && !d.who.clinicians){
     v.innerHTML = `<div class="panel"><h2>Collections calculator</h2><div class="note">No ${esc(ROLE_LABEL[d.who.id].toLowerCase())} held clinic on enough days in ${esc(d.from)} to ${esc(d.to)} to make an average. Pick another.</div>
       <div class="segs">${roles.map(([r]) => `<button class="seg" data-calc-who="${r}">${esc(ROLE_LABEL[r])} (average)</button>`).join('')}</div></div>`;
-    v.querySelectorAll('[data-calc-who]').forEach(b => b.onclick = () => { cs.provider = b.dataset.calcWho; render(); });
+    v.querySelectorAll('[data-calc-who]').forEach(b => b.onclick = () => { cs.provider = b.dataset.calcWho; calcRender(); });
+    calcRefocus(v);
     return;
   }
   // the provider sheet is for one clinician: no other clinician's name on screen while it shows
   const sheet = cs.view === 'sheet';
   const pick = sheet
     ? `<span class="small"><b>${esc(d.who.name || 'Clinician')}</b></span> <button id="calcPick" class="ghost">Pick another clinician</button>`
-    : `<div class="segs" role="group" aria-label="whose year">
+    : `<div class="segs wrap" role="group" aria-label="whose year">
         ${roles.map(([r]) => `<button class="seg ${cs.provider===r?'on':''}" data-calc-who="${r}">${esc(ROLE_LABEL[r])} (average)</button>`).join('')}
       </div>
       <select id="calcWho" aria-label="clinician">
@@ -255,7 +276,7 @@ function calcDraw(v){
         <option value="6" ${cs.months==6?'selected':''}>Last 6 months (run-rate now)</option>
         <option value="12" ${cs.months==12?'selected':''}>Last 12 months</option>
       </select>
-      ${y27 ? `<div class="segs" role="group" aria-label="year planned">
+      ${y27 ? `<div class="segs wrap" role="group" aria-label="year planned">
         <button class="seg ${x.year===y27?'on':''}" data-calc-year="${esc(y27)}">Plan ${esc(y27)}</button>
         <button class="seg ${x.year===d.rate_year?'on':''}" data-calc-year="${esc(d.rate_year)}">${esc(d.rate_year)} rates</button></div>` : ''}
       <button id="calcReset" class="ghost">Back to the schedule now</button>
@@ -273,20 +294,22 @@ function calcDraw(v){
       <div class="panel" id="calcPayers"></div>
       <div class="panel" id="calcMoves"></div>
       <div class="panel" id="calcGoal"></div>
+      <div class="panel" id="calcCoding" hidden></div>
       <details class="panel" id="calcHow" data-fold="how" ${calcFold('how', false)}><summary><b>How this is worked out</b></summary><div id="calcHowBody" class="small"></div></details>
     </div>
   </div>
   </div>`;
   calcFoldWire(v);
-  v.querySelectorAll('[data-calc-who]').forEach(b => b.onclick = () => { cs.provider = b.dataset.calcWho; render(); });
-  const who = v.querySelector('#calcWho'); if(who) who.onchange = e => { if(e.target.value){ cs.provider = e.target.value; render(); } };
-  const pk = v.querySelector('#calcPick'); if(pk) pk.onclick = () => { cs.view = 'calc'; calcDraw(v); };
-  v.querySelector('#calcMonths').onchange = e => { cs.months = +e.target.value; render(); };
+  v.querySelectorAll('[data-calc-who]').forEach(b => b.onclick = () => { cs.provider = b.dataset.calcWho; calcRender(); });
+  const who = v.querySelector('#calcWho'); if(who) who.onchange = e => { if(e.target.value){ cs.provider = e.target.value; calcRender('#calcWho'); } };
+  const pk = v.querySelector('#calcPick'); if(pk) pk.onclick = () => { cs.view = 'calc'; cs.refocus = '#calcWho'; calcDraw(v); };
+  v.querySelector('#calcMonths').onchange = e => { cs.months = +e.target.value; calcRender('#calcMonths'); };
   v.querySelectorAll('[data-calc-year]').forEach(b => b.onclick = () => { x.year = b.dataset.calcYear; calcLabFit(cs); calcDraw(v); });
   // the levers go back to the schedule as it is; the year and the assumptions stay
   v.querySelector('#calcReset').onclick = () => { cs.x = Object.assign(JSON.parse(JSON.stringify(cs.base)), calcKeep(x, d, cs.base)); calcLabFit(cs); calcDraw(v); };
   v.querySelectorAll('[data-calc-view]').forEach(b => b.onclick = () => { cs.view = b.dataset.calcView; calcDraw(v); });
   back();
+  calcRefocus(v);
   if(cs.view && cs.view !== 'calc'){
     const run = {lab: labDraw, figures: figuresDraw, sheet: sheetDraw}[cs.view];
     if(run) run(v).catch(e => { const b = v.querySelector('#calcBody'); if(b) b.innerHTML = `<div class="panel"><div class="note">${esc(e.message)}</div></div>`; });
@@ -294,6 +317,7 @@ function calcDraw(v){
   }
   calcInputs(v);
   calcUpdate();
+  calcCoding(v);
   v.querySelector('#calcHowBody').innerHTML = calcHow(d);
   back();
 }
@@ -334,13 +358,13 @@ function calcInputs(v){
   const s57 = CalcModel.visit57Share(d);
   const box = v.querySelector('#calcInputs');
   calcRedraw(box, `<h2>The schedule</h2>
-    <div class="small muted" style="margin-bottom:6px">"Now" is ${esc(ROLE_LABEL[d.who.id] ? 'the average' : 'this clinician')}'s own figure over the months read. These are the levers a schedule controls; goal seeking moves only these.</div>
+    <div class="small muted" style="margin-bottom:6px">"Now" is ${esc(ROLE_LABEL[d.who.id] ? 'the average' : 'this clinician')}'s own figure over the months read. These are the levers a schedule controls. A target is planned with clinic time, visits and Mohs cases only: biopsies, frozen lesions and excisions follow what patients need.</div>
     ${block(CALC_VOLUME)}
     <details style="margin-top:10px" data-fold="cases" ${calcFold('cases', false)}><summary><b>How cases go</b> <span class="small muted">clinical outcomes, not targets</span></summary>
       <div class="small muted" style="margin:4px 0">Stages, closures, visit levels and lesions per patient follow what each patient needs and what the note supports, and payers audit them. Use these to see what a change in case mix would do, not as goals.</div>
       ${block(CALC_CLINICAL)}</details>
     <details style="margin-top:6px" data-fold="balances" ${calcFold('balances', false)}><summary><b>Patient balances</b> <span class="small muted">share collected, by kind of payer</span></summary>
-      <div class="small muted" style="margin:4px 0">The remittances show what a patient was left to owe, not what the patient paid. These shares are assumptions until the practice's patient-payment figures are loaded; the defaults are the floor the practice's early ledger exports showed. Nothing is counted from Medicaid patients. Medicare cost-sharing cannot be billed to qualified Medicare beneficiaries (dual eligibles), even when Medicaid pays nothing.</div>
+      <div class="small muted" style="margin:4px 0">The remittances show what a patient was left to owe, not what the patient paid. These shares are assumptions until the practice's patient-payment figures are loaded. Commercial and Medicare Advantage start at the share paid within 2 to 5 weeks on the practice's early ledger exports (a floor). Medicare and other payers start at placeholders: by then only about 6% and 4% had been paid, mostly because statements go out after the second payer has paid. Nothing is counted from Medicaid patients. Medicare cost-sharing cannot be billed to qualified Medicare beneficiaries (dual eligibles), even when Medicaid pays nothing.</div>
       ${CALC_Q.map(([k, label]) => `<div class="calc-row" data-q="${k}"><label for="cq_${k}">${esc(label)}</label>
         <div class="calc-ctl"><input type="range" id="cq_${k}" min="0" max="1" step="0.01" value="${x.q[k]}"><input type="number" class="calc-num" data-qnum="${k}" aria-label="${esc(label)}, share collected" min="0" max="100" step="1" value="${Math.round(x.q[k]*100)}"><span class="small">%</span></div></div>`).join('')}
     </details>
@@ -437,11 +461,12 @@ function calcUpdate(){
   if(fixed.sameDay.collections || nowNext.sameDay.collections) extra.push([`Medicare's ${d.next_year} same-day rule`, -nowNext.sameDay.collections, -fixed.sameDay.collections]);
   if(x.include_ancillary && x.include_path) extra.push(['Pathology the biopsies bring the practice', nowNext.pathCollections, fixed.pathCollections]);
   const all = lines.map(([, label, a, b]) => [label, a, b]).concat(extra);
+  // rows that round to $0 in both columns are left out (they add nothing to the totals)
   const ra = calcRoundRows(all.map(r => r[1]), nowNext.totalCollections), rb = calcRoundRows(all.map(r => r[2]), fixed.totalCollections);
   const colA = `Now${x.year===d.next_year?', '+esc(d.next_year)+' rules':''}`, colB = `Plan${nCorr?' + contracts':''}`;
   v.querySelector('#calcLines').innerHTML = `<h2>Where it comes from, a year</h2>
     <table class="calc-lines"><thead><tr><th>Service line</th><th class="num">${colA}</th><th class="num">${colB}</th><th class="num">Change</th></tr></thead><tbody>
-    ${all.map(([label], i) => `<tr><td>${esc(label)}</td><td class="num">${moneyK(ra[i])}</td><td class="num">${moneyK(rb[i])}</td><td class="num">${sign(rb[i] - ra[i])}</td></tr>`).join('')}
+    ${all.map(([label], i) => ra[i] || rb[i] ? `<tr><td>${esc(label)}</td><td class="num">${moneyK(ra[i])}</td><td class="num">${moneyK(rb[i])}</td><td class="num">${sign(rb[i] - ra[i])}</td></tr>` : '').join('')}
     <tr><td><b>Collections</b></td><td class="num"><b>${moneyK(R[1])}</b></td><td class="num"><b>${moneyK(R[3])}</b></td><td class="num">${sign(R[3] - R[1])}</td></tr>
     </tbody></table>`;
   calcPayers(v, calcWith(x, x, {year: x.year}));
@@ -517,56 +542,113 @@ function calcMoves(v){
   const moves = CalcModel.marginal(d, x, cs.cal);
   const val = m => Math.abs(m.value) < 50000 ? '<span class="muted">–</span>' : `${m.value > 0 ? '+' : '−'}${moneyK(Math.abs(m.value))}`;
   const tbl = list => `<table class="calc-goal"><tbody>${list.map(m => `<tr><td>${esc(m.label)}</td><td class="num">${val(m)}</td></tr>`).join('')}</tbody></table>`;
-  const clinical = moves.filter(m => m.kind === 'clinical');
+  // clinic time, visits and Mohs cases first; what follows the patient (lesion procedures, excisions, the case mix) apart
+  const sched = moves.filter(m => CALC_GOAL_MOVES.includes(m.key)), clinical = moves.filter(m => !CALC_GOAL_MOVES.includes(m.key));
   calcRedraw(v.querySelector('#calcMoves'), `<h2>What one more is worth</h2>
     <div class="small muted">Collections a year, with the rest of the plan as it stands and the contracts as ticked.</div>
-    ${tbl(moves.filter(m => m.kind === 'volume'))}
-    ${clinical.length ? `<details style="margin-top:6px" data-fold="moves-mix" ${calcFold('moves-mix', false)}><summary class="small">And what the case mix moves (clinical outcomes, not targets)</summary>${tbl(clinical)}</details>` : ''}`);
+    ${tbl(sched)}
+    ${clinical.length ? `<details style="margin-top:6px" data-fold="moves-mix" ${calcFold('moves-mix', false)}><summary class="small">And what lesion procedures, excisions and the case mix move (clinical outcomes, not targets)</summary>${tbl(clinical)}</details>` : ''}`);
   const box = v.querySelector('#calcGoal');
   if(!box.dataset.ready){
     box.dataset.ready = '1';
     box.innerHTML = `<h2>What a target takes</h2>
       <div class="filters"><label class="small" for="calcTargetY">Collections a year</label> <input id="calcTargetY" type="text" autocomplete="off" placeholder="1,600,000 or 1.6m" value="${esc(cs.target)}" style="width:150px"></div>
       <div id="calcGoalOut" class="small" aria-live="polite"></div>`;
-    box.querySelector('#calcTargetY').oninput = e => { cs.target = e.target.value; calcGoal(); };
+    box.querySelector('#calcTargetY').oninput = e => { cs.target = e.target.value; calcGoalSoon(); };
   }
-  calcGoal();
+  calcGoalSoon();
 }
 
+// the target is worked out a moment after the typing or the sliders stop (each lever is checked on the model)
+let calcGoalTimer = null;
+function calcGoalSoon(){ clearTimeout(calcGoalTimer); calcGoalTimer = setTimeout(() => { calcGoalTimer = null; calcGoal(); }, 120); }
+
 function calcGoal(){
-  const cs = state.calc, d = cs.data, x = cs.x, out = cs.el.querySelector('#calcGoalOut');
+  const cs = state.calc; if(!cs || !cs.data || !cs.el) return;
+  const d = cs.data, x = cs.x, out = cs.el.querySelector('#calcGoalOut');
   if(!out) return;
   const raw = String(cs.target || '').trim();
-  if(!raw){ out.innerHTML = '<span class="muted">Type a yearly figure to see what a clinic day has to bring in, and how much more of each thing it takes with everything else held where the plan has it.</span>'; return; }
+  if(!raw){ out.innerHTML = '<span class="muted">Type a yearly figure to see what a clinic day has to bring in, and how much more clinic time, visits or Mohs cases it takes with everything else held where the plan has it.</span>'; return; }
   const dollars = calcMoney(raw);
   if(!isFinite(dollars) || dollars <= 0){ out.innerHTML = '<span class="sev-medium">That is not a yearly dollar figure. Type one above zero, such as 1,600,000, 1.6m or 950k.</span>'; return; }
   if(dollars > 1e9){ out.innerHTML = '<span class="sev-medium">That is more than a billion dollars a year. Type one clinician\'s yearly figure, such as 1,600,000 or 1.6m.</span>'; return; }
   const T = dollars * 100;
   const plan = CalcModel.evaluate(d, x, cs.cal);
-  const res = CalcModel.goalSeek(d, x, T, cs.cal);
+  const res = CalcModel.goalSeek(d, x, T, cs.cal, {moves: CALC_GOAL_MOVES});
   const days = Math.max(1, plan.daysYear), perDay = T / days;
-  const ratio = plan.allowed > 0 ? plan.totalCollections / plan.allowed : 1;
-  const dist = d.schedule.clinic_day_allowed || {};
-  const needAllowed = perDay / Math.max(0.01, ratio);
-  const where = dist.p50 ? (needAllowed <= dist.p50 ? 'at or below your median clinic day' : needAllowed <= (dist.p75 || 0) ? 'between your median and your busier days' :
-    needAllowed <= (dist.p90 || 0) ? 'near your busiest tenth of days' : 'above your busiest tenth of days: every day would have to beat your best days so far') : '';
-  const head = `<p>${T < 10000000 ? money(T) : moneyK(T)} over ${days.toFixed(0)} clinic days is ${money(perDay)} collected a clinic day (about ${money(needAllowed)} allowed).
-    ${dist.p50 ? `Your clinic days have brought ${money(dist.p50)} allowed at the median and ${money(dist.p90)} at the 90th percentile: this is ${where}.` : ''}</p>`;
+  const w = calcDayNeed(cs, plan, T);
+  const head = `<p>${T < 10000000 ? money(T) : moneyK(T)} over ${days.toFixed(0)} clinic days is ${money(perDay)} collected a clinic day, about ${money(w.need)} allowed for your own services.
+    ${w.planDay > 0 ? `This plan's average clinic day brings ${money(w.planDay)} allowed${w.need > w.planDay ? `: the target needs ${w.need > w.planDay * 1.01 ? Math.round(100 * (w.need / w.planDay - 1)) + '%' : 'under 1%'} more` : ''}.` : ''}
+    ${w.p50 ? `At this plan's prices your own clinic days so far would have brought about ${money(w.p50)} allowed at the median and ${money(w.p90)} at the 90th percentile: the target is ${esc(w.where)}.` : ''}</p>`;
   // the gap is the target less the plan, whichever levers are worth something for this clinician
   const gap = res.gap != null ? res.gap : T - plan.totalCollections;
   if(gap <= 0){ out.innerHTML = head + `<p class="ok">The plan already reaches it, with ${moneyK(-gap)} to spare.</p>`; return; }
   const ways = res.filter(m => m.needed != null && m.needed > 0);
-  if(!ways.length){ out.innerHTML = head + `<p>${moneyK(gap)} a year short. None of the schedule's levers adds collections for this clinician on its own.</p>`; return; }
+  if(!ways.length){ out.innerHTML = head + `<p>${moneyK(gap)} a year short. More clinic time, visits or Mohs cases add nothing for this clinician on their own.</p>`; return; }
   const dpw = Math.max(0.5, x.days_per_week);
+  const n1 = v => (v < 0.05 ? 'under 0.1' : v.toFixed(1));
   const say = m => {
     const n = m.needed;
-    if(m.key === 'days_per_week') return x.days_per_week + n * 0.5 > 6 ? 'not enough on its own (more than 6 days a week)' : `${(n * 0.5).toFixed(1)} more clinic days a week`;
-    if(m.key === 'weeks_per_year') return x.weeks_per_year + n > 52 ? 'not enough on its own (more than 52 weeks)' : `${n.toFixed(1)} more weeks a year`;
-    return `${n.toFixed(1)} more a week (${(n / dpw).toFixed(1)} a clinic day)`;
+    if(m.key === 'days_per_week') return x.days_per_week + n * 0.5 > 6 ? 'not enough on its own (more than 6 days a week)' : `${n1(n * 0.5)} more clinic days a week`;
+    if(m.key === 'weeks_per_year') return x.weeks_per_year + n > 52 ? 'not enough on its own (more than 52 weeks)' : `${n1(n)} more weeks a year`;
+    return `${n1(n)} more a week (${n1(n / dpw)} a clinic day)${m.key === 'mohs_cases' ? ', as referrals allow' : ''}`;
   };
   out.innerHTML = head + `<p>${moneyK(gap)} a year short. Any one of these closes it on its own:</p>
     <table class="calc-goal"><tbody>${ways.map(m => `<tr><td>${esc(m.name)}</td><td class="num">${esc(say(m))}</td></tr>`).join('')}</tbody></table>
-    <div class="muted" style="margin-top:4px">Stages, closures, visit levels and lesions per patient are left out on purpose: they follow the patient.</div>`;
+    <div class="muted" style="margin-top:4px">Biopsies, frozen lesions, excisions, stages, closures and visit levels are left out on purpose: they follow the patient.</div>`;
+}
+
+// what a clinic day has to bring for a target, like with like: allowed for the clinician's own services at this plan's
+// prices (ancillary revenue counted in the target is held where the plan has it). The clinician's own days so far are at
+// the prices of their time, so their percentiles are moved to this plan's prices first: by what the schedule as it is
+// brings at this plan's year and contracts over what it brings at the window's own rates.
+function calcDayNeed(cs, plan, T){
+  const d = cs.data, x = cs.x, days = Math.max(1, plan.daysYear);
+  const anc = plan.totalCollections - plan.collections;
+  const ratio = plan.production.allowed > 0 ? plan.collections / plan.production.allowed : 1;
+  const need = Math.max(0, T - anc) / days / Math.max(0.01, ratio);
+  const planDay = plan.production.allowed / days;
+  const dist = d.schedule.clinic_day_allowed || {};
+  if(!dist.p50) return {need, planDay};
+  const atPlan = CalcModel.evaluate(d, calcWith(cs.base, x, {year: x.year, corrected: x.corrected}), cs.cal);
+  const atThen = CalcModel.evaluate(d, calcWith(cs.base, x, {year: d.rate_year}), cs.cal);
+  const scale = atThen.production.allowed > 0 ? atPlan.production.allowed / atThen.production.allowed : 1;
+  const p50 = dist.p50 * scale, p75 = (dist.p75 || dist.p50) * scale, p90 = (dist.p90 || dist.p75 || dist.p50) * scale;
+  const where = need <= p50 ? 'at or below your median clinic day' : need <= p75 ? 'between your median and your busier days'
+    : need <= p90 ? 'near your busiest tenth of days' : 'above your busiest tenth of days: every day would have to beat your best days so far';
+  return {need, planDay, p50, p75, p90, scale, where};
+}
+
+// owner only, on both years: how often this clinician bills a visit beside a Mohs case or a biopsy for Medicare patients,
+// and with which modifier (counts of patient-days from the payload; nothing about a patient)
+function calcCoding(v){
+  const cs = state.calc, d = cs.data, box = v.querySelector('#calcCoding');
+  if(!box) return;
+  const St = d.strategy || {}, num = k => (St[k] != null && isFinite(St[k]) ? +St[k] : null);
+  const m57 = num('mohs_visit57_share'), m25 = num('mohs_visit25_share'), b25 = num('bx_visit_share');
+  if(m57 == null && m25 == null && b25 == null){ box.hidden = true; return; }
+  const per100 = s => `${Math.round(s * 100)} of every 100`;
+  const days = St.visit_shares_days || {}, avg = !!ROLE_LABEL[d.who.id];
+  const role = {mohs: 'Mohs surgeon', general: 'general dermatologist', apps: 'APP'}[d.who.id];
+  const rows = [
+    m57 != null ? ['Mohs days with a visit billed with modifier 57', m57, days.mohs] : null,
+    m25 != null ? ['Mohs days with a visit billed with modifier 25', m25, days.mohs] : null,
+    b25 != null ? ['Biopsy days with a visit billed with modifier 25', b25, days.biopsy] : null,
+  ].filter(Boolean);
+  // visits billed with modifier 25 or 57 beside a procedure, where the figures split them from the other visits: what
+  // payers allowed for them, and what the same codes at the same kinds of payer bring on this clinician's other visits
+  let n = 0, got = 0, usual = 0;
+  for(const v of Object.values((cs.cal || {}).visit || {})) for(const kd of Object.keys(v.mp || {})){ n += v.up[kd] || 0; got += v.proc[kd] * v.mp[kd]; usual += v.other[kd] * v.mp[kd]; }
+  const B = cs.base || {}, yr = ((B.days_per_week || 0) * (B.weeks_per_year || 0)) / Math.max(1, (d.schedule || {}).clinic_days || 0);
+  const lost = (usual - got) * yr;
+  box.hidden = false;
+  box.innerHTML = `<h2>Coding exposure</h2>
+    <div class="small muted">Medicare patients, ${esc(d.from)} to ${esc(d.to)}: ${esc(avg ? `the mean of each ${role}'s own share; pick one clinician to see theirs` : (d.who.name || 'this clinician'))}. Only the owner sees this.</div>
+    <table class="calc-goal"><tbody>${rows.map(([label, s, n]) => `<tr><td>${esc(label)}${n ? `<div class="small muted">of ${Number(n).toLocaleString()} patient-days</div>` : ''}</td><td class="num">${per100(s)}</td></tr>`).join('')}</tbody></table>
+    ${m57 != null ? `<p class="small">Modifier 57 is only for the visit that decides on a 90-day (major) procedure. A visit beside a Mohs case or a biopsy, which are 0-day procedures, takes modifier 25, and only when the note shows a significant, separately identifiable service. WPS, Medicare's contractor in Indiana, denies most visits billed with modifier 57 beside a Mohs case or its closure, and some Medicare Advantage plans deny nearly all of them.${m57 >= 0.05 ? ' At this rate it is an audit risk.' : ''}</p>` : ''}
+    ${b25 != null && b25 >= 0.5 ? `<p class="small">A visit with modifier 25 on most biopsy days is a pattern payers look for: the decision to biopsy is paid as part of the biopsy itself.</p>` : ''}
+    ${lost >= 100000 ? `<p class="small">Visits billed with modifier 25 or 57 beside a procedure, all payers: about ${Math.round(n * yr).toLocaleString()} a year at this pace, allowed ${moneyK(got * yr)}. At the rate the same codes are allowed on ${avg ? 'these clinicians\'' : 'this clinician\'s'} other visits they would bring ${moneyK(usual * yr)}: payers denied or cut about ${moneyK(lost)} a year of them. Only visits whose notes show a separate service can be corrected and billed again, with modifier 25.</p>` : ''}
+    <p class="small"><b>Recommended:</b> an internal coding review of a sample of these visits against their notes.</p>`;
 }
 
 function calcHow(d){
@@ -575,8 +657,8 @@ function calcHow(d){
   return `<p>The schedule is turned into billed codes with this clinician's own mix: which Mohs codes, which flaps and grafts, which excision sizes, which visit levels. Each code is priced at every payer's own usual allowed amount in the payer mix of that service line, as the remittances show it.</p>
   <p>The months read are the last six complete ones by default: the run-rate now. A longer window reaches back past changes that are not coming back, such as January 2026, when skin-substitute payment collapsed. Days a week and weeks a year come from the last twelve months, so holidays count.</p>
   <p>Where a payer's rate for a code is not in the remittances, the code is priced at that payer's own percentage of Medicare for the same kind of service times Medicare's published amount (${pct('payer_pct_of_medicare')}% of payer-and-code pairs, mostly rare codes); Medicare itself is priced from CMS's fee schedule for Kentucky and Indiana, weighted by where the clinic days were.</p>
-  <p>When a Mohs first stage and a flap, graft or layered closure are billed together, Medicare's multiple-procedure rule pays the lower of the two at half: with a flap or graft that is the Mohs first stage, with a layered closure it is the closure. The same for an excision and its layered closure. That pairing is worked out case by case, so a change in how cases are closed moves it. Extra stages and add-on codes are paid in full.</p>
-  <p>What the usual rates do not see (denials that stayed denied, later procedures of a day, units, underpayments) is carried code by code by comparing what payers actually allowed in the window with what this model says the same schedule was worth then. Where the figures split a code by kind of payer, each kind with enough lines has its own comparison, so one plan's denials stay with that plan.</p>
+  <p>When a Mohs first stage and a flap, graft or layered closure are billed together, Medicare's multiple-procedure rule pays the lower of the two at half: with a flap or graft that is the Mohs first stage, with a layered closure it is the closure. Payers rank the two by Medicare's amounts, not their own fees, so the same line is halved at every payer, each at its own rate. The same for an excision and its layered closure. That pairing is worked out case by case, so a change in how cases are closed moves it. Extra stages and add-on codes are paid in full.</p>
+  <p>What the usual rates do not see (denials that stayed denied, later procedures of a day, units, underpayments) is carried code by code by comparing what payers actually allowed in the window with what this model says the same schedule was worth then. Where the figures split a code by kind of payer, each kind with enough lines has its own comparison, so one plan's denials stay with that plan. Visits billed with modifier 25 or 57 beside a procedure keep a comparison of their own: their denials stay on them, and the visits a plan adds, moves to another level or corrects are valued as the clinician's other visits are.</p>
   <p>Collections are what the payers paid (second payers included, from the remittances) plus the share of patient balances you set as collected, by kind of payer; nothing is counted from Medicaid patients' balances. The payers' share is this clinician's own for each kind of payer, moved by how much more patients owe on a visit (copayments) than on a procedure.</p>
   <p>Contracts: "whole contract" sets every code at one share of Medicare, as a renegotiated schedule would, so codes now paid above it come down; "visit codes only" is the common carve-out ask; "every code raised" is an upper bound no payer signs.</p>
   ${d.next_year ? `<p>${esc(d.next_year)}: CMS's ${esc(d.next_year)} relative values, conversion factor and geographic indices for Kentucky and Indiana. The ${esc(d.rate_year)} amounts include a 1.0 floor on the work index that the ${esc(d.next_year)} file does not, so these assume Congress lets it lapse. Payers ticked as moving with Medicare follow its amounts; the rest keep their ${esc(d.rate_year)} rates. G2211 is replaced by modifier B1 (16% of the visit). The same-day rule (CMS-1848-F, 91 FR 71121) takes 20% off every service except the highest when an office visit billed with modifier 25 shares the day with a 0-day procedure. Only biopsy days and Mohs days are modelled here; other 0-day services (shaves, intralesional injections, simple repairs, PDT) are not, so the loss is a little larger for schedules with many of them. A visit with only frozen lesions, excisions or layered repairs (10-day codes) does not bring it in. It binds traditional Medicare; Medicare Advantage plans apply it only by contract, and one switch covers both B1 and this rule for the plans that move with Medicare. A visit with modifier 57 is not counted unless the sensitivity for it is ticked. How it meets the 50% multiple-procedure cut is not settled: the page applies the 20% to what is left after it.</p>` : ''}

@@ -40,6 +40,8 @@
 
   const MAX_SCENARIOS = 200;
   const ID = /^[A-Za-z0-9:_-]{1,60}$/;
+  // the Calculator's own limits on a schedule (calc.js CALC_CAP): no plan here goes past them
+  const CAP = { days_per_week: 6, weeks_per_year: 52 };
 
   function blankAssumptions() {
     return { minutes: Object.fromEntries(MINUTES.map(([k]) => [k, null])), costs: Object.fromEntries(COSTS.map(([k]) => [k, null])),
@@ -199,17 +201,6 @@
   // the share of the flaps and grafts paired with a Mohs first stage (one closure a case at most, as the calculator pairs them)
   function pairedShare(x) { const R = clamp(x.fg_share, 0, 2), T = R + clamp(x.lay_mohs, 0, 2); return T > 0 ? Math.min(1, T) / T : 0; }
   const COINSURANCE = 0.2;           // Medicare Part B
-  // what a Medicare patient pays more, each, when the plan moves from x to y: 20% of the higher allowed amount
-  function medicareCoinsurance(d, x, y, cal, patientsYear) {
-    if (!(patientsYear > 0)) return null;
-    const a = CM.evaluate(d, x, cal), b = CM.evaluate(d, y, cal);
-    if (!a.byPayer || !b.byPayer) return null;
-    let gain = 0;
-    for (const g of new Set([...Object.keys(a.byPayer), ...Object.keys(b.byPayer)])) {
-      if (CM.payerKind(d, g) === 'medicare') gain += ((b.byPayer[g] || {}).allowed || 0) - ((a.byPayer[g] || {}).allowed || 0);
-    }
-    return COINSURANCE * gain / patientsYear;
-  }
 
   // ------------------------------------------------------------------ the ASC (an ambulatory surgery center at Newburgh)
   // Mohs (17311-17315) is billed in the clinic only, at the office amount: it is never on an ASC claim and never earns an
@@ -217,7 +208,9 @@
   // and a physician's excision with its repair. The payload (calculator.py) gives the ASC's rates by year (d.asc[year]:
   // [payment indicator, subject to discounting, {office: wage-adjusted cents}]), and in d.asc: the site, Medicare's Indiana
   // amounts [office, facility] (medicare), the codes the multiple-procedure rule ranks (mppr) and the add-ons (add_on),
-  // the ASCQR factor, and the cases counted over the window (cases).
+  // the ASCQR factor, and the cases counted over the window (cases). For the Kentucky option (Kentucky clinic closures
+  // sent to the Newburgh ASC) it also reads Medicare's Kentucky amounts, [office, facility] by code and year
+  // (medicare_ky); until the payload carries them that option is shown as not available.
   const ASC_MOHS = ['17311', '17312', '17313', '17314', '17315'];
   const ASC_TYPES = [['flap', 'Flap'], ['graft', 'Full-thickness graft'], ['complex', 'Complex repair'], ['intermediate', 'Intermediate repair'],
                      ['other', 'Other closure (split graft, skin substitute, simple repair)']];
@@ -242,8 +235,16 @@
     const types = new Set(caseCodes(codes).map(([c]) => closureType(c)));
     return ['graft', 'flap', 'complex', 'intermediate', 'other'].find(t => types.has(t)) || 'other';
   }
-  // Medicare's amount for one unit in Indiana, [office, facility], physician (only a physician operates in an ASC)
-  function ascMedicare(d, c, Y) { const r = (((d.asc || {}).medicare || {})[c] || {})[Y]; return r && r[0] != null ? r : null; }
+  // Medicare's amount for one unit, [office, facility], physician (only a physician operates in an ASC): in the ASC's
+  // state (Indiana), or in Kentucky for the Kentucky option
+  function ascMedicare(d, c, Y, state) {
+    const S = d.asc || {}, home = (S.site || {}).state || 'IN';
+    const tab = !state || state === home ? S.medicare : state === 'KY' ? S.medicare_ky : null;
+    const r = ((tab || {})[c] || {})[Y];
+    return r && r[0] != null ? r : null;
+  }
+  // the payload carries Medicare's Kentucky amounts for this year (the Kentucky option can be priced)
+  const kyAmounts = (d, Y) => !!ascMedicare(d, '17311', Y, 'KY');
 
   // One physician, one patient, one day (Claims Processing Manual ch. 12 sec. 40.6): each line at its own setting's
   // amount (the clinic's Mohs at the office amount, the ASC's closure at the facility amount, on separate claims); the
@@ -329,7 +330,9 @@
     const B = sum(pB) - em * cut(moved, pB, opts.emAsc ? (() => true) : (l => l.mohs));
     const pC = apart(moved);
     const C = sum(pC) - em * cut(moved, pC, l => l.mohs);       // the closure's own day has no 0-day procedure
-    return { ok: true, A, B, C, fee };
+    // M: the Mohs day alone (no closure that day, nothing cut 50%): what is left when the closure is never done
+    const M = C - moved.reduce((t, l, i) => t + (l.mohs ? 0 : pC[i]), 0);
+    return { ok: true, A, B, C, M, fee };
   }
 
   // the ASC settings the strategies share (the 'asc' strategy's, else its defaults)
@@ -338,14 +341,49 @@
     return { to_asc: clamp(p.to_asc, 0, 1), to_clinic: clamp(p.to_clinic, 0, 1), flap_graft: !!p.flap_graft, layered: !!p.layered,
              excisions: clamp(p.excisions, 0, 1), own: n(p.own) == null ? null : clamp(p.own, 0, 1),
              commercial_pct: n(p.commercial_pct) == null ? null : clamp(p.commercial_pct, 0, 3),
-             ma_cross: p.ma_cross == null ? true : !!p.ma_cross, ascqr: !!p.ascqr, em_rule: !!p.em_rule };
+             ma_cross: p.ma_cross == null ? true : !!p.ma_cross, ascqr: !!p.ascqr, em_rule: !!p.em_rule,
+             // Kentucky clinic closures sent to the Newburgh ASC the same day: the share, the closure types, and whether
+             // the 50% cut is applied across the clinic's contractor (CGS) and the ASC's (WPS)
+             ky_share: clamp(p.ky_share, 0, 1),
+             ky_types: { flap: !!p.ky_flap, graft: !!p.ky_graft, complex: !!p.ky_complex, intermediate: !!p.ky_intermediate, other: !!p.ky_other },
+             ky_cross: p.ky_cross == null ? true : !!p.ky_cross };
   }
   // cases counted at the ASC's office (an ASC strategy has something to work on)
   function ascHere(d, whats) {
     const S = d.asc || {}, C = S.cases || {}, st = (S.site || {}).state || 'IN';
     return whats.some(w => (C[w] || []).some(r => r[3] === st && r[4] > 0));
   }
+  // Mohs cases closed the same day in a Kentucky clinic (the Kentucky option has something to work on)
+  function kyHere(d) {
+    const S = d.asc || {}, st = (S.site || {}).state || 'IN';
+    return st !== 'KY' && ((S.cases || {}).mohs || []).some(r => r[3] === 'KY' && r[1] === 'clinic' && r[4] > 0);
+  }
   const ascInScope = (plan, type) => (['flap', 'graft', 'other'].includes(type) ? plan.flap_graft : plan.layered);
+  // The share of a counted Mohs case's closures done in the ASC the same day on this plan: Newburgh's ASC cases unless
+  // brought back, Newburgh's clinic cases moved there, Kentucky's clinic cases sent to Newburgh. A case the plan cannot
+  // price (no ASC rate, a payer not moved, a fee share not entered) stays where it is, as ascTotals leaves it.
+  function ascOnPlan(plan, r) {
+    if (r.what !== 'mohs' || r.perYear == null) return 0;
+    const movable = r.priced && r.feeShare != null;
+    if (r.ky) return movable && plan.ky_types[r.type] ? plan.ky_share : 0;
+    if (r.site === 'asc') return movable && ascInScope(plan, r.type) ? 1 - plan.to_clinic : 1;
+    if (r.site === 'clinic') return movable && ascInScope(plan, r.type) ? plan.to_asc : 0;
+    return 0;          // part in the clinic, part in the ASC: left as they are, with the clinic's closures
+  }
+  // Closures of the given codes done in the ASC the same day on this plan, a clinic day, by code (x.asc_plan when the ASC
+  // strategy is ticked, else the routing found). The stage what-if leaves these to the later-day ASC what-if.
+  function ascClosedPerDay(d, x, codes) {
+    const out = {};
+    const plan = x.asc_plan || ascPlan(paramDefaults(STRATEGIES.find(S => S.id === 'asc')));
+    const Bk = ascBook(d, x, plan), days = Math.max(0, x.days_per_week) * Math.max(0, x.weeks_per_year);
+    if (!Bk.ok || !(days > 0)) return out;
+    for (const r of Bk.rows) {
+      const m = ascOnPlan(plan, r);
+      if (!(m > 0)) continue;
+      for (const [c, u] of caseCodes(r.codes)) if (codes.includes(c)) out[c] = (out[c] || 0) + r.perYear * m * u / days;
+    }
+    return out;
+  }
 
   // Every case the payload counted at the ASC's office, a year on this plan, each priced (ascCase) at its payer:
   // Medicare at Indiana's amounts; Medicare Advantage and commercial plans at their own share of Medicare (their usual
@@ -390,18 +428,29 @@
     };
     const follows = k => k === 'medicare' || (k === 'medicare_advantage' && kindGroups[k].gs.some(([g]) => CM.followsMedicare(d, x, g)));
     const emShare = next ? clamp(CM.mohsVisitShare(d, x), 0, 1) : 0;
+    const kyOK = kyAmounts(d, Y);
+    out.ky = kyOK;
     const book = (what, codes, site, kind, state, n, tail) => {
       const type = what === 'mohs' ? caseLabel(codes) : 'excision';
-      if (state !== st || !(n > 0)) return { what, site, kind, n, type, priced: false };          // seen in another state
+      // a Kentucky clinic's same-day closure, for the option of sending it to the Newburgh ASC
+      const ky = what === 'mohs' && state === 'KY' && st !== 'KY' && site === 'clinic';
+      if ((state !== st && !ky) || !(n > 0)) return { what, codes, site, kind, n, type, priced: false };          // seen in another state
       const perYear = n / cd * days * (scale[type] != null ? scale[type] : 1);
-      if (!ASC_KINDS.includes(kind)) return { what, site, kind, n, type, perYear, priced: false };  // Medicaid, other payers: not moved
+      if (!ASC_KINDS.includes(kind)) return { what, codes, site, kind, n, type, perYear, ky, priced: false };  // Medicaid, other payers: not moved
+      if (ky && !kyOK) return { what, codes, site, kind, n, type, perYear, ky, priced: false };     // no Kentucky amounts in the payload
       const med = kind === 'medicare';
-      const price = med ? null : (c, where) => { const m = ascMedicare(d, c, Y); return m ? m[where === 'asc' ? 1 : 0] * ratio(kind, c) : null; };
+      // Medicare's amounts: in the clinic (the Mohs, and the closure where it is now) the clinic's state's office amount;
+      // in the ASC the closure at Indiana's facility amount. Other plans: their usual rate over Medicare's
+      const at = (c, where) => { const m = ascMedicare(d, c, Y, where === 'asc' ? st : (ky ? 'KY' : st)); return m ? m[where === 'asc' ? 1 : 0] : null; };
+      const price = med ? at : (c, where) => { const a = at(c, where); return a == null ? null : a * ratio(kind, c); };
       const lead = caseCodes(codes).find(([c]) => closureType(c)) || ['17311'];
-      const v = ascCase(d, Y, what, codes, { stages: what === 'mohs' ? (+tail || 0) / n : 0, cross: med ? true : plan.ma_cross,
+      // Medicare cuts the second procedure across the two claims; for a Kentucky case the two claims go to two
+      // contractors (CGS, WPS), and the plan's switch says whether the cut is applied across them
+      const cross = med ? (ky ? plan.ky_cross : true) : plan.ma_cross;
+      const v = ascCase(d, Y, what, codes, { stages: what === 'mohs' ? (+tail || 0) / n : 0, cross,
                                              em: follows(kind) ? emShare : 0, emAsc: plan.em_rule, cutAddOns: x.cut_add_ons !== false,
                                              ascqr: plan.ascqr, price });
-      return { what, codes, site, kind, n, type, perYear, v, priced: v.ok,
+      return { what, codes, site, kind, n, type, perYear, v, priced: v.ok, ky,
                physician: what === 'excision' ? !!tail : d.tier !== 'nonphysician', coll: coll(kind, lead[0]),
                feeShare: med ? 1 : plan.commercial_pct, medicare: med };
     };
@@ -419,9 +468,27 @@
     const B = ascBook(d, x, plan);
     const T = { book: B, dPro: 0, dFee: 0, moved: 0, back: 0, exc: 0, coins: 0, coinsN: 0, coinsBack: 0,
                 current: { n: 0, pro: 0, fee: 0, allowed: { n: 0, A: 0, B: 0, fee: 0 } },
-                pool: { n: 0, priced: 0, medicare: 0, asc: 0, clinic: 0 }, split: 0, types: {} };
+                pool: { n: 0, priced: 0, medicare: 0, asc: 0, clinic: 0 }, split: 0, types: {},
+                // the Kentucky option: the Kentucky clinics' same-day closures, those of the types ticked that can be
+                // priced, those this plan sends to Newburgh and what that is worth (in dPro and dFee too)
+                ky: { available: !!B.ky, n: 0, inScope: 0, moved: 0, dPro: 0, dFee: 0, coins: 0, coinsN: 0, types: {} } };
     if (!B.ok) return T;
     for (const r of B.rows) {
+      if (r.ky) {
+        if (r.perYear == null) continue;
+        const K = T.ky, v = r.v;
+        const t = K.types[r.type] = K.types[r.type] || { n: 0, med: 0, A: 0, B: 0, C: 0, fee: 0 };
+        K.n += r.perYear; t.n += r.perYear;
+        if (!r.priced) continue;
+        if (r.medicare) { t.med += r.perYear; t.A += r.perYear * v.A; t.B += r.perYear * v.B; t.C += r.perYear * v.C; t.fee += r.perYear * v.fee; }
+        if (r.feeShare == null || !plan.ky_types[r.type]) continue;
+        K.inScope += r.perYear;
+        const k = r.perYear * plan.ky_share;
+        if (!(k > 0)) continue;
+        K.moved += k; K.dPro += k * (v.B - v.A) * r.coll; K.dFee += k * v.fee * r.feeShare * r.coll;
+        if (r.medicare) { K.coins += k * COINSURANCE * (v.B + v.fee - v.A); K.coinsN += k; }
+        continue;
+      }
       if (r.what === 'mohs' && r.perYear != null) {
         T.pool.n += r.perYear;
         if (r.site === 'asc') T.pool.asc += r.perYear; else if (r.site === 'clinic') T.pool.clinic += r.perYear;
@@ -463,6 +530,7 @@
         if (r.medicare) { T.coins += k * COINSURANCE * (v.B + v.fee - v.A); T.coinsN += k; }
       }
     }
+    T.dPro += T.ky.dPro; T.dFee += T.ky.dFee;
     return T;
   }
 
@@ -473,7 +541,7 @@
     {
       id: 'stage', title: 'Stage the bigger closures to a later day', tier: 'high', whatif: true,
       applies: (d, x) => x.mohs_cases > 0 && Object.keys(d.levers.flap_graft.mix).length > 0,
-      why: "When a flap or graft is done the same day as the Mohs first stage, Medicare's multiple-procedure rule pays the first stage at half. Done on another day, both are paid in full, at the cost of a second visit. A what-if: it is shown apart and never added to the plan's total.",
+      why: "When a flap or graft is done the same day as the Mohs first stage, Medicare's multiple-procedure rule pays the first stage at half. Done on another day, both are paid in full, at the cost of a second visit. It counts the closures done in the clinic: those done in the ASC belong to the later-day ASC what-if below. A what-if: it is shown apart and never added to the plan's total.",
       compliance: "Stage a closure only when a clinical reason exists at the time (margins still pending, the reconstructive surgeon's availability, the patient's condition), written in the note when the decision is made. NCCI policy manual, ch. I: \"Physicians shall not inconvenience beneficiaries nor increase risks to beneficiaries by performing services on different dates of service to avoid MUE or NCCI PTP edits.\" Medicare counts as abuse practices that \"may directly or indirectly result in unnecessary Medicare Program costs\". CMS, in the 2027 final rule: \"we do not find it appropriate to schedule medical services for patients to maximize payment, which would create undue burden and potential medical risk for beneficiaries\"; it will look for the pattern with claims edits, comparative billing reports and medical review. A visit on the Mohs day before a next-day flap falls in the flap's 90-day global.",
       params: [['share', 'Share of the bigger closures done on a later day', 0, 1, 0.01, 'pct', 0.01],
                ['all', 'Count every flap and graft, not only the bigger ones (grafts, interpolation flaps, flaps over 10 sq cm)', 0, 1, 1, 'bool', 0],
@@ -483,9 +551,15 @@
         const L = d.levers, codes = Object.keys(L.flap_graft.mix).filter(c => p.all ? true : BIGGER(c));
         const share = clamp(p.share, 0, 1), back = clamp(p.return_rate, 0, 1);
         const U = CM.units(d, x), pair = pairedShare(x);
+        // Only the closures done in the clinic: those done in the ASC on this plan (the routing found, and the ASC
+        // strategy's moves when it is ticked) belong to the later-day ASC what-if, so no delay is counted twice. f: each
+        // code's share of its paired closures that are done in the ASC
+        const inAsc = ascClosedPerDay(d, x, codes), f = {};
+        for (const c of codes) { const all = (U[c] || 0) * pair; f[c] = all > 0 ? Math.min(1, (inAsc[c] || 0) / all) : 0; }
         // closures a clinic day moved off the first stage's day. On every one of those cases the first stage is paid in
         // full; the closure is billed in full on the later day when the patient comes back, and never done when not
-        const moved = codes.reduce((t, c) => t + (U[c] || 0), 0) * pair * share;
+        const moved = codes.reduce((t, c) => t + (U[c] || 0) * (1 - f[c]), 0) * pair * share;
+        const leftAsc = codes.reduce((t, c) => t + (U[c] || 0) * f[c], 0) * pair * share;
         const returned = moved * back, lost = moved - returned;
         const y = Object.assign({}, x, { stage: { codes, share } });
         const days = x.days_per_week * x.weeks_per_year, m = A.minutes, c = A.costs;
@@ -493,29 +567,44 @@
         const needs = [];
         if (moved > 0 && turn == null) needs.push('minutes.turnover');
         if (moved > 0 && perEnc == null) needs.push('costs.per_encounter');
+        // The calculator stages every unit of these codes (x.stage). What it adds for the ASC's units is taken back out:
+        // staging is linear in each code's units, so that part is the same plan priced with each code's weight in the
+        // closure mix scaled by its ASC share
+        let ascColl = 0, ascMed = 0;
+        const medAllowed = ev => Object.entries(ev.byPayer || {}).reduce((t, [g, v]) => t + (CM.payerKind(d, g) === 'medicare' ? v.allowed || 0 : 0), 0);
+        if (leftAsc > 0) {
+          const mix = Object.fromEntries(Object.entries(L.flap_graft.mix).map(([k, s]) => [k, s * (f[k] || 0)]));
+          const dA = Object.assign({}, d, { levers: Object.assign({}, L, { flap_graft: Object.assign({}, L.flap_graft, { mix }) }) });
+          const a0 = CM.evaluate(dA, x, cal), a1 = CM.evaluate(dA, y, cal);
+          ascColl = a1.totalCollections - a0.totalCollections;
+          ascMed = medAllowed(a1) - medAllowed(a0);
+        }
         let lostColl = 0, lostW = 0, lostMin = 0, lostCost = 0;
         if (lost > 0) {
           // the lost closures at what the plan above bills for them once staged: in full
           const full = CM.evaluate(d, Object.assign({}, x, { fg_share: clamp(x.fg_share, 0, 2) * pair, lay_mohs: 0, stage: { codes, share: 1 } }), cal);
-          const f = share * (1 - back), table = wrvuTable(d, x);
+          const s = share * (1 - back), table = wrvuTable(d, x);
           for (const code of codes) {
-            lostColl += ((full.byCode[code] || {}).collections || 0) * f;
-            lostW += (U[code] || 0) * pair * f * (table[code] || 0) * days;
+            lostColl += ((full.byCode[code] || {}).collections || 0) * s * (1 - f[code]);
+            lostW += (U[code] || 0) * pair * s * (1 - f[code]) * (table[code] || 0) * days;
           }
           lostMin = lost * (num(m.flap_graft) || 0);
           lostCost = lost * (num(c.per_closure) || 0) * days * 100;
         }
         // every moved patient comes back once: for the closure, or for wound care
         const slot = p.full ? moved * days * slotValue(d, x, cal) : 0;
-        const coins = moved > 0 ? medicareCoinsurance(d, x, y, cal, moved * days * kindShare(d, 'mohs', ['medicare'])) : null;
+        // what a Medicare patient pays more: 20% of what Medicare allows more for the clinic's staged cases
+        const patients = moved * days * kindShare(d, 'mohs', ['medicare']);
+        const coins = patients > 0 ? COINSURANCE * (medAllowed(CM.evaluate(d, y, cal)) - medAllowed(CM.evaluate(d, x, cal)) - ascMed) / patients : null;
         const dollars = v => Math.round(v / 100).toLocaleString();
-        return { x: y, extra: { collections: -slot - lostColl, wrvu: -lostW, minutes: moved * (turn || 0) - lostMin, encounters: moved,
+        return { x: y, extra: { collections: -slot - lostColl - ascColl, wrvu: -lostW, minutes: moved * (turn || 0) - lostMin, encounters: moved,
                                 cost: moved * (perEnc || 0) * days * 100 - lostCost },
                  notes: [`${returned.toFixed(2)} closures a clinic day move to a later visit (${codes.length} closure codes in scope)`
                    + (lost > 0 ? `; ${lost.toFixed(2)} are never done because the patient does not come back, about ${dollars(lostColl)} dollars a year of closures lost` : '')
                    + (slot ? `; the second visits take slots that would have brought about ${dollars(slot)} dollars a year` : '') + '.'
                    + (coins != null && coins > 0 ? ` A Medicare patient pays about ${dollars(coins)} dollars more in coinsurance (20% of the higher amount)` : ' Medicare patients pay 20% of what the first stage gains, as coinsurance')
-                   + ', and makes a second trip with an open wound.'], needs };
+                   + ', and makes a second trip with an open wound.'
+                   + (leftAsc >= 0.005 ? ` Clinic closures only: ${leftAsc.toFixed(2)} closures a clinic day in scope are done in the ASC on this plan and are left to the later-day ASC what-if.` : '')], needs };
       },
     },
     {
@@ -584,9 +673,9 @@
     },
     {
       id: 'asc', title: 'Close Mohs wounds, and do excisions, in the ASC', tier: 'medium',
-      applies: d => d.tier !== 'nonphysician' && ascHere(d, ['mohs', 'excision']),
-      why: "Mohs stays in the clinic, billed there at the office amount. What can move to the ASC at Newburgh is the closure after a clinic Mohs, the same day, and a physician's excision with its repair. In the ASC the surgeon is paid Medicare's lower facility amount, and a same-day closure is still cut 50% against the clinic Mohs; the ASC is paid a facility fee, which the practice keeps only in proportion to its share of the ASC. The plan starts from where each closure is done now and counts only the change set here.",
-      compliance: "Choose the site for each patient: Medicare leaves the setting to the physician's clinical judgment for that patient (Claims Processing Manual ch. 14 sec. 20.1). A routing that follows the office rather than the patient is an exposure: the same surgeons close these wounds in the clinic in Kentucky. Mohs is never billed on the ASC claim. Only a physician may operate in an ASC (42 CFR 416.42), so an APP's excision cannot move as the APP's case. The ASC must be a distinct entity: where it shares space with the clinic, the clinic must be closed while the ASC is open, so a time-shared procedure room supports only later-day cases. It needs Medicare certification and an Indiana license, and must tell patients in writing who owns it. For a physician-owned ASC, the anti-kickback safe harbor (42 CFR 1001.952(r)) is voluntary; it asks for returns in proportion to capital invested and operating space dedicated to the ASC. The facility fee is the practice's revenue, never a surgeon's own production. A visit billed with modifier 57 on the ASC claim on a Mohs and closure day is mostly denied by WPS (CO-97, M144) and is not counted here as revenue: have coding review it. Commercial and Medicare Advantage plans may need the site approved first.",
+      applies: d => d.tier !== 'nonphysician' && (ascHere(d, ['mohs', 'excision']) || kyHere(d)),
+      why: "Mohs stays in the clinic, billed there at the office amount. What can move to the ASC at Newburgh is the closure after a clinic Mohs, the same day, and a physician's excision with its repair. In the ASC the surgeon is paid Medicare's lower facility amount, and the 50% same-day cut still applies across the two claims: to the closure, or to the Mohs first stage when the closure's facility amount is the higher (most grafts, 14061, 14301). The ASC is paid a facility fee, which the practice keeps only in proportion to its share of the ASC. The plan starts from where each closure is done now and counts only the change set here.",
+      compliance: "Choose the site for each patient: Medicare leaves the setting to the physician's clinical judgment for that patient (Claims Processing Manual ch. 14 sec. 20.1). A routing that follows the office rather than the patient is an exposure: the same surgeons close these wounds in the clinic in Kentucky. Mohs is never billed on the ASC claim. Only a physician may operate in an ASC (42 CFR 416.42), so an APP's excision cannot move as the APP's case. The ASC must be a distinct entity: where it shares space with the clinic, the clinic must be closed while the ASC is open, so a time-shared procedure room supports only later-day cases. It needs Medicare certification and an Indiana license, and must tell patients in writing who owns it. For a physician-owned ASC, the anti-kickback safe harbor (42 CFR 1001.952(r)) is voluntary; it asks for returns in proportion to capital invested and operating space dedicated to the ASC. The facility fee is the practice's revenue, never a surgeon's own production. A visit billed with modifier 57 on the ASC claim on a Mohs and closure day is mostly denied by WPS (CO-97, M144) and is not counted here as revenue: have coding review it. Commercial and Medicare Advantage plans may need the site approved first. Kentucky closures to the Newburgh ASC: the setting must follow each patient's needs (Claims Processing Manual ch. 14 sec. 20.1), never the office or the fee; the patient travels about 45 minutes with an open wound between the Kentucky clinic and Newburgh; the practice owns the Newburgh ASC, so confirm the anti-kickback ASC safe harbor tests with counsel before sending more of the owners' own cases there; and check the ASC's capacity (rooms, staff and hours) for them. The 50% cut is set by physician, patient and day, so billing must apply it across the Kentucky clinic's claim (CGS) and the ASC's claim (WPS), though each contractor sees only its own.",
       params: [['to_asc', 'Of the same-day closures now done in the Newburgh clinic, the share moved to the ASC', 0, 1, 0.05, 'pct', 0],
                ['to_clinic', 'Of the same-day closures now done in the ASC, the share brought back to the clinic', 0, 1, 0.05, 'pct', 0],
                ['flap_graft', 'Move flaps, grafts and other closures', 0, 1, 1, 'bool', 1],
@@ -596,20 +685,28 @@
                ['commercial_pct', "Facility fees of Medicare Advantage and commercial plans at the ASC, as a share of Medicare's ASC rates", 0, 3, 0.05, 'pct', null],
                ['ma_cross', 'Medicare Advantage and commercial plans cut the second procedure across the clinic and ASC claims, as Medicare does', 0, 1, 1, 'bool', 1],
                ['ascqr', 'The ASC does not meet quality reporting (ASCQR): about 2% less on A2, G2 and P2 codes', 0, 1, 1, 'bool', 0],
-               ['em_rule', "Open question: the 2027 same-day visit rule (20% off all but the highest service) also cuts the ASC claim's lines", 0, 1, 1, 'bool', 0]],
+               ['em_rule', "Open question: the 2027 same-day visit rule (20% off all but the highest service) also cuts the ASC claim's lines", 0, 1, 1, 'bool', 0],
+               // the Kentucky option: [key, label, min, max, step, format, default, section heading, section tier]
+               ['ky_share', 'Of the same-day closures now done in the Kentucky clinics, the share sent to the Newburgh ASC the same day (the Mohs stays in the Kentucky clinic)', 0, 1, 0.05, 'pct', 0, 'Kentucky closures to the Newburgh ASC', 'medium'],
+               ['ky_flap', 'Send flaps', 0, 1, 1, 'bool', 1, 'Kentucky closures to the Newburgh ASC'],
+               ['ky_graft', 'Send full-thickness grafts', 0, 1, 1, 'bool', 1, 'Kentucky closures to the Newburgh ASC'],
+               ['ky_complex', "Send complex repairs (their small facility fee may not cover the ASC's cost)", 0, 1, 1, 'bool', 0, 'Kentucky closures to the Newburgh ASC'],
+               ['ky_intermediate', "Send intermediate repairs (their small facility fee may not cover the ASC's cost)", 0, 1, 1, 'bool', 0, 'Kentucky closures to the Newburgh ASC'],
+               ['ky_other', 'Send other closures (split grafts, skin substitutes, simple repairs)', 0, 1, 1, 'bool', 0, 'Kentucky closures to the Newburgh ASC'],
+               ['ky_cross', 'Cut applied across the two contractors: the 50% cut is set by physician, patient and day, so billing must apply it across the Kentucky clinic claim (CGS) and the ASC claim (WPS)', 0, 1, 1, 'bool', 1, 'Kentucky closures to the Newburgh ASC']],
       apply(d, x, A, p) {
         const plan = ascPlan(p), y = Object.assign({}, x, { asc_plan: plan });
-        const T = ascTotals(d, x, plan), Bk = T.book;
+        const T = ascTotals(d, x, plan), Bk = T.book, K = T.ky;
         if (!Bk.ok) return { x: y, extra: {}, notes: [`No ASC rates or counted cases for ${Bk.Y}.`], needs: [] };
         const own = plan.own, ownV = own == null ? 0 : own;
-        const dollars = v => `${v < 0 ? '-' : ''}$${Math.round(Math.abs(v) / 100).toLocaleString()}`;
+        const dollars = v => `${v < 0 ? '−' : ''}$${Math.round(Math.abs(v) / 100).toLocaleString()}`;
         const signed = v => (v > 0 ? '+' : '') + dollars(v);
         const asc = num(A.costs.asc_per_case), saved = num(A.costs.office_per_case_saved);
-        const net = T.moved + T.exc - T.back;            // cases a year into the ASC, less those brought back
+        const net = T.moved + T.exc - T.back + K.moved;  // cases a year into the ASC, less those brought back
         const needs = [];
         if (own == null) needs.push('param.own');
         const other = T.pool.n - T.pool.medicare;
-        if (plan.commercial_pct == null && Bk.rows.some(r => r.perYear != null && r.kind !== 'medicare' && ASC_KINDS.includes(r.kind))) needs.push('param.commercial_pct');
+        if (plan.commercial_pct == null && Bk.rows.some(r => r.perYear != null && r.kind !== 'medicare' && ASC_KINDS.includes(r.kind) && (!r.ky || plan.ky_share > 0))) needs.push('param.commercial_pct');
         const costMissing = asc == null && (own == null || own > 0) && Math.abs(net) > 1e-9;
         if (costMissing) needs.push('costs.asc_per_case');
         const cost = net * (ownV * (asc || 0) - (saved || 0)) * 100;
@@ -622,9 +719,20 @@
           : 'No same-day Mohs closures at the Newburgh office in this window: the ASC is at Newburgh.');
         if (plan.commercial_pct == null && other > 0.5)
           notes.push(`Priced: Medicare fee-for-service cases only, ${pct(T.pool.medicare / T.pool.n)} of these closures. Enter the facility fee of Medicare Advantage and commercial plans, as a share of Medicare's, to price the other ${pct(other / T.pool.n)}.`);
-        if (T.moved || T.back || T.exc) {
+        // the Kentucky option
+        if (plan.ky_share > 0 && !K.available)
+          notes.push('Kentucky closures to the Newburgh ASC: not available yet. The page does not have Medicare\'s Kentucky amounts for these codes, so nothing is counted for it.');
+        else if (plan.ky_share > 0 || K.moved) {
+          const kinds = ASC_TYPES.filter(([k]) => plan.ky_types[k]).map(([, l]) => l.toLowerCase().replace(/ \(.*\)$/, ''));
+          notes.push(`Kentucky clinics: ${Math.round(K.n)} same-day Mohs closures a year on this plan, ${Math.round(K.inScope)} of them of the types sent (${kinds.length ? kinds.join(', ') : 'none ticked'}) and priced.`
+            + (K.moved ? ` This plan sends ${Math.round(K.moved)} a year to the Newburgh ASC: the surgeon's own fees change by ${signed(K.dPro)} a year (the Mohs at Kentucky's office amounts, the closure at Indiana's facility amounts), and the ASC's facility fees by ${signed(K.dFee)} before the practice's share.` : '')
+            + (K.coinsN > 0 ? ` A Medicare patient pays about ${dollars(K.coins / K.coinsN)} more per case (20% of each allowed amount; the ASC's coinsurance is not capped), and travels about 45 minutes with an open wound.` : '')
+            + (plan.ky_cross ? ' Counted with the 50% cut across the two claims, ranked at each line\'s own amount: billing must apply it, though CGS and WPS each see one claim.'
+                             : ' Counted without the 50% cut across the two contractors. The rule is by physician, patient and day, so billing must still apply it: this view overstates what may be kept.'));
+        }
+        if (T.moved || T.back || T.exc || K.moved) {
           notes.push(own == null
-            ? `The share of the facility fee the practice keeps is not entered, so the year above counts none of it. With the whole fee: ${signed(T.dPro + T.dFee)} a year; without it: ${signed(T.dPro)}.`
+            ? `The share of the facility fee the practice keeps is not entered, so the year above counts the lower of the two views (${T.dFee < 0 ? 'the whole fee lost' : 'none of the fee'}). With the whole fee: ${signed(T.dPro + T.dFee)} a year; without it: ${signed(T.dPro)}.`
             : own === 0 ? `The practice keeps none of the ASC's fee: only the surgeon's own professional fees change, by ${signed(T.dPro)} a year.`
             : `Facility fees kept by the practice (${pct(own)} of the ASC's): ${signed(ownV * T.dFee)} a year, the practice's revenue, not the surgeon's production. The surgeon's own professional fees change by ${signed(T.dPro)}.`);
           notes.push(costMissing ? "Gross only: the ASC's cost per case is not entered (CMS publishes no ASC cost data), so nothing is taken off for it." : '');
@@ -642,36 +750,67 @@
                    owner: per(t.B + t.fee - t.A), nonOwner: per(t.B - t.A), coins: COINSURANCE * per(t.B + t.fee - t.A), delay: per(t.C - t.B),
                    lowMargin: ASC_LOW_MARGIN.includes(k) };
         }).filter(Boolean);
-        return { x: y, extra: { collections: T.dPro + ownV * T.dFee, practice_only: ownV * T.dFee, cost },
+        // per Kentucky closure type: what one case sent to Newburgh the same day is worth, at Medicare's amounts
+        const kyTypes = ASC_TYPES.map(([k, label]) => {
+          const t = K.types[k];
+          if (!t || !(t.n > 0)) return null;
+          const per = v => (t.med > 0 ? v / t.med : null);
+          return { type: k, label, perYear: t.n, sent: !!plan.ky_types[k], fee: per(t.fee), owner: per(t.B + t.fee - t.A), nonOwner: per(t.B - t.A),
+                   coins: t.med > 0 ? COINSURANCE * per(t.B + t.fee - t.A) : null, lowMargin: ASC_LOW_MARGIN.includes(k) };
+        }).filter(Boolean);
+        // The practice's share of the fee not entered: the year takes the lower of the two views (no fee when cases move
+        // in, the whole fee lost when they come back). The surgeon's own fees (dPro) count either way.
+        const feeKept = own == null ? Math.min(0, T.dFee) : own * T.dFee;
+        return { x: y, extra: { collections: T.dPro + feeKept, practice_only: feeKept, cost },
                  notes: notes.filter(Boolean), needs,
                  detail: { year: Bk.Y, own, withFee: T.dPro + T.dFee, withoutFee: T.dPro, fees: T.dFee, pro: T.dPro, moved: T.moved, back: T.back,
-                           excisions: T.exc, current: T.current, pool: T.pool, types, from: Bk.from, costKnown: asc != null } };
+                           excisions: T.exc, current: T.current, pool: T.pool, types, from: Bk.from, costKnown: asc != null,
+                           ky: { available: K.available, here: kyHere(d), n: K.n, inScope: K.inScope, moved: K.moved, pro: K.dPro, fees: K.dFee,
+                                 cross: plan.ky_cross, share: plan.ky_share, types: kyTypes } } };
       },
     },
     {
       id: 'asc_later', title: 'Close in the ASC on a later day, not the Mohs day', tier: 'high', whatif: true,
-      applies: d => d.tier !== 'nonphysician' && ascHere(d, ['mohs']),
-      why: "A closure done on another day than the Mohs is not cut 50% against it, and Mohs has a 0-day global, so the later closure needs no modifier. All of the gain comes from the delay: the ASC's fee is the same either day. A what-if: it is shown apart and never added to the plan's total.",
+      applies: d => d.tier !== 'nonphysician' && (ascHere(d, ['mohs']) || kyHere(d)),
+      why: "A closure done on another day than the Mohs is not cut 50% against it, and Mohs has a 0-day global, so the later closure needs no modifier. All of the gain comes from the delay: the ASC's fee is the same either day. This what-if covers the closures done in the ASC on this plan; the staging what-if above covers the clinic's, so no delay is counted twice. A what-if: it is shown apart and never added to the plan's total.",
       compliance: "Stage a closure only for a clinical reason that exists at the time, written in the note when the decision is made. CMS, in the 2027 final rule: \"we find the possible practice of scheduling medical services to maximize payment highly problematic\" and \"we do not find it appropriate to schedule medical services for patients to maximize payment\"; it will look for the pattern with claims edits, comparative billing reports and medical review. NCCI policy manual, ch. I: \"Physicians shall not inconvenience beneficiaries nor increase risks to beneficiaries by performing services on different dates of service to avoid MUE or NCCI PTP edits.\" The patient makes a second trip with an open wound and pays more coinsurance. Use modifier 58 or 79 only when the later day falls inside another global period of the same surgeon or group.",
-      params: [['share', 'Of the same-day closures in the ASC on this plan, the share done on a later day instead', 0, 1, 0.01, 'pct', 0]],
+      params: [['share', 'Of the same-day closures in the ASC on this plan, the share done on a later day instead', 0, 1, 0.01, 'pct', 0],
+               ['return_rate', 'Patients who come back for the closure (the rest heal open: the Mohs is paid in full, the closure and its ASC fee are lost)', 0, 1, 0.01, 'pct', 1]],
       apply(d, x, A, p) {
         const plan = x.asc_plan || ascPlan(paramDefaults(STRATEGIES.find(S => S.id === 'asc')));
-        const Bk = ascBook(d, x, plan), share = clamp(p.share, 0, 1);
+        const Bk = ascBook(d, x, plan), share = clamp(p.share, 0, 1), back = clamp(p.return_rate, 0, 1);
         if (!Bk.ok) return { x, extra: {}, notes: [`No ASC rates or counted cases for ${Bk.Y}.`], needs: [] };
-        let n = 0, gain = 0, coins = 0, cn = 0;
+        // the practice's share of the ASC's fee, for the closures never done (not entered: the whole fee, the lower view)
+        const ownLost = plan.own == null ? 1 : plan.own;
+        const minKey = t => (t === 'complex' || t === 'intermediate' ? 'layered' : 'flap_graft'), missMin = new Set();
+        let n = 0, gain = 0, feeLost = 0, coins = 0, cn = 0, lostN = 0, lostMin = 0;
         for (const r of Bk.rows) {
           if (r.what !== 'mohs' || !r.priced) continue;
-          const moved = ascInScope(plan, r.type) ? (r.site === 'clinic' ? plan.to_asc : r.site === 'asc' ? 1 - plan.to_clinic : 0) : (r.site === 'asc' ? 1 : 0);
-          if (r.site === 'clinic' && !(r.kind === 'medicare' || plan.commercial_pct != null)) continue;
-          const k = r.perYear * moved * share;
+          // the closures done in the ASC on this plan, wherever they come from; the clinic's belong to the staging what-if
+          const k = r.perYear * ascOnPlan(plan, r) * share;
           if (!(k > 0)) continue;
-          n += k; gain += k * (r.v.C - r.v.B) * r.coll;
-          if (r.medicare) { coins += k * COINSURANCE * (r.v.C - r.v.B); cn += k; }
+          const v = r.v, kb = k * back, kl = k - kb;
+          n += k; gain += (kb * (v.C - v.B) + kl * (v.M - v.B)) * r.coll;
+          if (kl > 0) {
+            lostN += kl;
+            if (r.feeShare != null) feeLost += kl * v.fee * r.feeShare * r.coll * ownLost;
+            const cm = num(A.minutes[minKey(r.type)]);
+            if (cm == null) missMin.add('minutes.' + minKey(r.type)); else lostMin += kl * cm;
+          }
+          if (r.medicare && kb > 0) { coins += kb * COINSURANCE * (v.C - v.B); cn += kb; }
         }
-        const dollars = v => `$${Math.round(Math.abs(v) / 100).toLocaleString()}`;
-        return { x, extra: { collections: gain },
-                 notes: [`${Math.round(n)} closures a year done in the ASC on a later day instead of the Mohs day, about ${dollars(gain)} a year more in the surgeon's professional fees: the 50% same-day cut no longer applies. The ASC's fee does not change.`
-                   + (cn > 0 ? ` A Medicare patient pays about ${dollars(coins / cn)} more in coinsurance, and makes a second trip with an open wound.` : '')], needs: [] };
+        // the second visit is in the ASC: the surgeon's rooming time for it, and no clinic slot or clinic visit cost
+        const days = Math.max(0, x.days_per_week) * Math.max(0, x.weeks_per_year), turn = num(A.minutes.turnover);
+        const needs = [];
+        if (n * back > 0 && turn == null) needs.push('minutes.turnover');
+        if (lostN > 0) needs.push(...missMin);
+        const minutes = days > 0 ? (n * back * (turn || 0) - lostMin) / days : 0;
+        const dollars = v => `${v < 0 ? '−' : ''}$${Math.round(Math.abs(v) / 100).toLocaleString()}`;
+        return { x, extra: { collections: gain - feeLost, practice_only: -feeLost, minutes },
+                 notes: [`${Math.round(n * back)} closures a year done in the ASC on a later day instead of the Mohs day, about ${dollars(gain)} a year in the surgeon's professional fees: the 50% same-day cut no longer applies. The ASC's fee does not change for those done.`
+                   + (lostN >= 0.5 ? ` ${Math.round(lostN)} patients a year do not come back and heal open: their closures and about ${dollars(feeLost)} a year of the ASC's fees (the practice's share) are lost.` : '')
+                   + (cn > 0 ? ` A Medicare patient pays about ${dollars(coins / cn)} more in coinsurance, and makes a second trip with an open wound.` : '')
+                   + ' The later visit is in the ASC: no clinic slot is taken and no clinic visit cost is counted; the surgeon\'s rooming time for it is.'], needs };
       },
     },
     {
@@ -716,16 +855,32 @@
     {
       id: 'b1', title: 'Bill the visit complexity add-on wherever it applies', tier: 'medium',
       why: "G2211 (from 2027, modifier B1 at 16% of the visit) pays Medicare visits that are part of ongoing care for a serious or complex condition. It is not paid on a visit billed with modifier 25.",
-      compliance: "Only where the note shows the ongoing relationship for a serious or complex condition; CMS's own example of a visit that does not qualify is a mole removal. Not with modifier 25, except preventive services, a wellness visit or a vaccine. Appended to every visit by default it invites review. Medicare only: commercial payers are not expected to pay it.",
-      params: [['capture', 'Share of Medicare visits without a same-day procedure billed with it', 0, 1, 0.05, 'pct', 0.5],
-               ['eligible', 'Share of Medicare visits with no same-day procedure', 0, 1, 0.05, 'pct', 0.6]],
-      apply(d, x, A, p) {
-        const med = kindShare(d, 'est_visit', ['medicare']);
-        const per = med * clamp(p.eligible, 0, 1) * clamp(p.capture, 0, 1);
-        const cur = (d.levers.visits.g2211_per_visit || 0);
-        if (per <= cur) return { x, extra: {}, notes: [`Already billed on ${(cur * 100).toFixed(1)} of every 100 visits, at or above this target: check that the notes support that rate.`], needs: [] };
-        return { x: Object.assign({}, x, { g2211_scale: cur > 0 ? per / cur : 0 }), extra: {},
-                 notes: [cur > 0 ? `From ${(cur * 100).toFixed(1)} to ${(per * 100).toFixed(1)} add-ons per 100 visits.` : 'This clinician has not billed it: the page cannot price it from history.'], needs: [] };
+      compliance: "Only where the note shows the ongoing relationship for a serious or complex condition; CMS's own example of a visit that does not qualify is a mole removal. Not with modifier 25, except preventive services, a wellness visit or a vaccine. Appended to every visit by default it invites review. Counted for Medicare, and the Medicare Advantage plans the Calculator has following Medicare, only: commercial payers are not expected to pay it, so their visits are left as they are.",
+      params: [['capture', 'Share of the visits without a same-day procedure billed with it (Medicare, and the Medicare Advantage plans following it)', 0, 1, 0.05, 'pct', 0.5],
+               ['eligible', 'Share of those visits with no same-day procedure', 0, 1, 0.05, 'pct', 0.6]],
+      apply(d, x, A, p, cal) {
+        // Medicare, and the Medicare Advantage plans the Calculator has following Medicare: their share of the visits,
+        // and of the add-ons billed now
+        const follows = g => CM.followsMedicare(d, x, g);
+        const fv = (d.mix.est_visit || d.mix._overall || []).reduce((t, [g, s]) => t + (follows(g) ? s : 0), 0);
+        const gm = CM.mixOf(d, 'G2211'), gw = gm.reduce((t, [, s]) => t + s, 0);
+        const gF = gw > 0 ? gm.reduce((t, [g, s]) => t + (follows(g) ? s : 0), 0) / gw : 0;
+        const s0 = x.g2211_scale == null ? 1 : Math.max(0, x.g2211_scale);
+        const cur = (d.levers.visits.g2211_per_visit || 0) * s0, curF = cur * gF;      // add-ons per visit: every payer, those plans
+        const per = fv * clamp(p.eligible, 0, 1) * clamp(p.capture, 0, 1);              // the target at those plans, per visit
+        const where = 'at Medicare and the Medicare Advantage plans following it';
+        if (per <= curF) return { x, extra: {}, notes: [`Already billed on ${(curF * 100).toFixed(1)} of every 100 visits ${where}, at or above this target: check that the notes support that rate.`], needs: [] };
+        if (!(curF > 0)) return { x, extra: {}, notes: [`This clinician has not billed it ${where}: the page cannot price it from history.`], needs: [] };
+        // one more of today's add-ons at every payer, priced by the calculator, kept at those plans only (the price is
+        // linear in the units, so the target is that times the add-ons it needs)
+        const days = Math.max(0, x.days_per_week) * Math.max(0, x.weeks_per_year);
+        const e0 = CM.evaluate(d, x, cal), e1 = CM.evaluate(d, Object.assign({}, x, { g2211_scale: s0 + (d.levers.visits.g2211_per_visit > 0 ? 1 : 0) }), cal);
+        let one = 0;
+        for (const g of Object.keys(e1.byPayer || {})) if (follows(g)) one += (e1.byPayer[g].collections || 0) - (((e0.byPayer || {})[g] || {}).collections || 0);
+        const f = (per - curF) / ((d.levers.visits.g2211_per_visit || 0) * gF);
+        const added = Math.max(0, x.visits) * (per - curF) * days;                      // add-ons a year
+        return { x, extra: { collections: one * f, wrvu: added * (wrvuTable(d, x).G2211 || 0) },
+                 notes: [`From ${(curF * 100).toFixed(1)} to ${(per * 100).toFixed(1)} add-ons per 100 visits ${where}, about ${Math.round(added).toLocaleString()} more a year. Commercial and other plans are left as they are (${((cur - curF) * 100).toFixed(1)} per 100 visits now).`], needs: [] };
       },
     },
     {
@@ -734,9 +889,13 @@
       compliance: '',
       params: [['days', 'Clinic days a week added', 0, 3, 0.5, 'n1', 0.5]],
       apply(d, x, A, p) {
-        const add = Math.max(0, p.days), fixed = num(A.costs.per_clinic_day);
+        // never past the Calculator's own limit of clinic days a week
+        const want = Math.max(0, +p.days || 0), room = Math.max(0, CAP.days_per_week - Math.max(0, +x.days_per_week || 0));
+        const add = Math.min(want, room), fixed = num(A.costs.per_clinic_day);
+        const n1 = v => (Math.round(v * 10) / 10).toString();
         return { x: Object.assign({}, x, { days_per_week: x.days_per_week + add }), extra: {},
-                 notes: [], needs: fixed == null ? ['costs.per_clinic_day'] : [] };
+                 notes: add < want - 1e-9 ? [`Capped at ${CAP.days_per_week} clinic days a week, the Calculator's limit: ${n1(add)} added, not ${n1(want)}.`] : [],
+                 needs: fixed == null ? ['costs.per_clinic_day'] : [] };
       },
     },
     {
@@ -758,9 +917,9 @@
         const St = d.strategy || {}, open = St.open_findings || {};
         const cents = Object.values(open).reduce((t, v) => t + (v.cents || 0), 0), n = Object.values(open).reduce((t, v) => t + (v.n || 0), 0);
         // for a role, the payload gives each category per clinician on average (the group's totals apart)
-        const avg = St.open_findings_clinicians != null;
+        const nC = St.open_findings_clinicians, avg = nC != null && nC > 1;
         return { x, extra: { one_time: cents * clamp(p.share, 0, 1) },
-                 notes: [`${Math.round(n).toLocaleString()} open findings, ${Math.round(cents / 100).toLocaleString()} dollars${avg ? ` per clinician on average (${St.open_findings_clinicians} clinicians)` : ''}.`], needs: [] };
+                 notes: [`${Math.round(n).toLocaleString()} open findings, ${Math.round(cents / 100).toLocaleString()} dollars${avg ? ` per clinician on average (${nC} clinicians)` : ''}.`], needs: [] };
       },
     },
     {
@@ -879,7 +1038,9 @@
     if (!result) { result = prev; headlineX = cur; }
     const whatif = prev !== result ? prev : null;
     const session = num(A.session_minutes);
-    return { base, steps, result, whatif, x: headlineX, whatifX: whatif ? cur : null,
+    // what the strategies still need (a figure, a setting of their own): the plan's, and the what-ifs'
+    const needsOf = w => [...new Set(steps.filter(s => !s.skipped && !!s.whatif === w).flatMap(s => s.needs || []))];
+    return { base, steps, result, whatif, x: headlineX, whatifX: whatif ? cur : null, needs: needsOf(false), whatifNeeds: needsOf(true),
              capacity: session ? { available: session, used: result.minutesDay, share: result.minutesDay / session } : null,
              perMinute: minutesValue(d, headlineX, A, cal), daysYear: result.ev.daysYear };
   }
@@ -900,9 +1061,17 @@
     return rows.map(([label, value, mins]) => ({ label, value, minutes: mins, perMinute: value != null && mins ? value / mins : null }));
   }
 
-  const api = { MINUTES, COSTS, COMP_TYPES, STRATEGIES, MAX_SCENARIOS, blankAssumptions, clean, filled, activity, minutes, costs, wrvus, pay,
-                collectionsFor, planMissing, run, minutesValue, paramDefaults, BIGGER,
-                ascCase, ascFee, dayPro, ascBook, ascTotals, ascPlan, caseLabel, closureType, ASC_TYPES };
+  // A year's costs are not all known: a cost in Practice figures not entered, or a strategy still needing one of its
+  // costs (what another surgeon costs, the ASC's cost per case, an APP visit...). R: a run's result (or whatif); needs: the
+  // run's needs (or whatifNeeds). Its 'left after costs' is then not shown.
+  function costsOpen(R, needs) {
+    return !!(R && ((R.costs && R.costs.missing.length) || (needs || []).some(n => n.startsWith('costs.') || n === 'param.cost')));
+  }
+  const minutesOpen = (R, needs) => !!(R && ((R.minutes && R.minutes.missing.length) || (needs || []).some(n => n.startsWith('minutes.'))));
+
+  const api = { MINUTES, COSTS, COMP_TYPES, STRATEGIES, MAX_SCENARIOS, CAP, blankAssumptions, clean, filled, activity, minutes, costs, wrvus, pay,
+                collectionsFor, planMissing, run, minutesValue, paramDefaults, BIGGER, costsOpen, minutesOpen,
+                ascCase, ascFee, dayPro, ascBook, ascTotals, ascPlan, ascOnPlan, caseLabel, closureType, ASC_TYPES };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.LabModel = api;
 })(typeof window !== 'undefined' ? window : globalThis);

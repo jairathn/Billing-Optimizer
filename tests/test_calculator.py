@@ -67,7 +67,10 @@ def _db(tmp_path) -> str:
         for m in MONTHS:
             for code, (u, per) in plan.items():
                 rows.append((who, m, code, activity.service_family(code), u, u, 0, u * per * 2, u * per, int(u * per * 0.85)))
-    c.executemany("INSERT INTO provider_services VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    # provider_services.payers left empty: the payer mix comes from the exposure table, as in a copy built before the
+    # build kept it (the tests of the build's own payer split fill it in)
+    c.executemany("INSERT INTO provider_services (provider_id, month, code, family, items, units, denied, charge_cents, allowed_cents, paid_cents) "
+                  "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
     c.executemany("INSERT INTO provider_payers (provider_id, month, payer_kind, encounters, charge_cents, allowed_cents, paid_cents) VALUES (?,?,?,?,?,?,?)",
                   [(who, m, k, 50, 0, al, pd) for who in (DOC, PA) for m in MONTHS
                    for k, al, pd in (("medicare", 1_000_000, 940_000), ("commercial", 1_000_000, 650_000))])
@@ -247,7 +250,7 @@ def test_assumptions_are_saved_for_the_owner(db, monkeypatch):
     got = tc.get("/api/activity/assumptions", auth=auth, headers=owner).json()["assumptions"]
     assert got["minutes"] == {"mohs_case": 20} and got["comp"][DOC]["pct"] == 0.35
     assert tc.post("/api/activity/assumptions", auth=auth, headers=xhr, content=b"[1,2]").status_code == 400
-    assert tc.post("/api/activity/assumptions", auth=auth, headers=xhr, content=b"x" * (300 * 1024)).status_code == 413
+    assert tc.post("/api/activity/assumptions", auth=auth, headers=xhr, content=b"x" * (api.MAX_ASSUMPTIONS_BYTES + 1)).status_code == 413
 
 
 def test_asc_table_matches_cms():
@@ -306,7 +309,7 @@ def _clone(db, src, new, months=MONTHS, days=range(1, 17), dates=None):
     c.execute("INSERT INTO provider_roster (provider_id, name, kind, tier, role) SELECT ?, 'FOXTROT FAY', kind, tier, role FROM provider_roster WHERE provider_id=?", (new, src))
     c.executemany("INSERT INTO provider_days (provider_id, service_date, patients, biopsy_lesions, path_generated_cents, place) VALUES (?,?,?,?,?,?)",
                   [(new, d, 20, 2.0, 0, "KY") for d in dates])
-    c.execute("""INSERT INTO provider_services SELECT ?, month, code, family, items, units, denied, charge_cents, allowed_cents, paid_cents
+    c.execute("""INSERT INTO provider_services SELECT ?, month, code, family, items, units, denied, charge_cents, allowed_cents, paid_cents, payers
                  FROM provider_services WHERE provider_id=? AND month IN (%s)""" % ",".join("?" * len(months)), (new, src, *months))
     c.commit()
     c.close()
@@ -556,3 +559,87 @@ def test_the_counts_the_activity_build_keeps_are_read_where_the_lines_are_not(db
     c.close()
     d = _calc(db, DOC)
     assert d["strategy"]["mohs_visit57_share"] is None and d["strategy"]["visit_shares_from"] is None and d["pathology"]["own_read_cents"] is None
+
+
+# --------------------------------------------------------------------------- re-check fixes (invented data only)
+
+def _pair(db, who=DOC, mohs=None, excision=None):
+    """The closures the activity build paired with the clinician's cases (provider_payers.asc_cases), the same each month."""
+    cases = json.dumps({"mohs": mohs or [], "excision": excision or []})
+    c = sqlite3.connect(db)
+    c.execute("UPDATE provider_payers SET asc_cases=? WHERE provider_id=? AND payer_kind='medicare'", (cases, who))
+    c.commit()
+    c.close()
+
+
+def test_closures_follow_the_cases_they_were_billed_with(db):
+    """Where the build pairs a clinician's closures with their own Mohs cases and excisions (the same patient-day, across
+    the clinic's and the ASC's claims), flaps per case and layered repairs per case and per excision are those billed
+    with them; closures billed on other days stay under 'everything else', priced as the day's own procedure."""
+    d = _calc(db, DOC)                                        # nothing paired in this copy: the practice's rates share them
+    assert d["levers"]["layered"]["from"] == d["levers"]["flap_graft"]["from"] == "shared"
+    assert calculator.LAYERED_WEIGHT == (0.30, 0.79) and d["levers"]["layered"]["weights"] == [0.30, 0.79]
+    assert d["levers"]["flap_graft"]["share"] == pytest.approx(10 / 30) and d["levers"]["other"]["unpaired"] == {}
+    # each month: 30 Mohs cases, 8 14040s and 2 15260s, 5 13132s, 3 12032s and 4 excisions (11642). Paired: five 14040s
+    # and three 13132s with Mohs cases, two 12032s with excisions; the rest were billed on other days
+    _pair(db, mohs=[["KY", "clinic", "14040 17311", 5, 0], ["KY", "clinic", "13132 17313", 3, 0], ["KY", "clinic", "17311", 2, 0]],
+          excision=[["KY", "clinic", "11642 12032", 2]])
+    d = _calc(db, DOC)
+    L, days = d["levers"], d["schedule"]["clinic_days"]
+    assert L["layered"]["from"] == L["flap_graft"]["from"] == "same_day"
+    assert L["flap_graft"]["share"] == pytest.approx(5 / 30) and L["flap_graft"]["mix"] == {"14040": pytest.approx(1.0)}
+    assert L["layered"]["mohs_share"] == pytest.approx(3 / 30) and L["layered"]["excision_share"] == pytest.approx(2 / 4)
+    assert L["layered"]["mix"] == {"13132": pytest.approx(0.6), "12032": pytest.approx(0.4)}
+    want = {"14040": 3 * 6, "15260": 2 * 6, "13132": 2 * 6, "12032": 1 * 6}
+    assert {c: round(v * days, 6) for c, v in L["other"]["unpaired"].items()} == want
+    assert all(L["other"]["codes"][c] * days == pytest.approx(n) for c, n in want.items())
+    # more paired than billed (two routes count units apart) never gives back more than was billed
+    svc = {c: {"family": activity.service_family(c), "units": float(u)} for c, u in {"17311": 10, "14040": 3, "12032": 2, "11602": 4}.items()}
+    paired = {"mohs": {"14040": 5.0, "12032": 3.0}, "excision": {"12032": 3.0}}
+    lv = calculator._levers(svc, 10, paired)
+    assert lv["flap_graft"]["share"] == pytest.approx(0.3) and lv["other"]["unpaired"] == {}
+    assert lv["layered"]["mohs_share"] * 10 + lv["layered"]["excision_share"] * 4 == pytest.approx(2.0)
+    # ...nor carries more than two closures a case: past that, 'everything else', and not as unpaired
+    lv = calculator._levers({c: {"family": "repair", "units": u} for c, u in {"17311": 1.0, "14040": 3.0}.items()}, 10, {"mohs": {"14040": 3.0}, "excision": {}})
+    assert lv["flap_graft"]["share"] == pytest.approx(2.0) and lv["other"]["codes"]["14040"] * 10 == pytest.approx(1.0) and lv["other"]["unpaired"] == {}
+    if NODE is None:
+        return
+    # the page's levers give back every code billed, code for code
+    got = _give_back(L)
+    for code, cc in d["codes"].items():
+        if cc["units"]:
+            assert (got.get(code) or 0) * days == pytest.approx(cc["units"], abs=1e-6), code
+
+
+def test_the_default_window_with_no_remittance_months(db, monkeypatch):
+    """Tables built before any payment date is known (coverage has no months): the calculator reads the months the clinic
+    days cover, and answers rather than failing on a window from year 0."""
+    from fastapi.testclient import TestClient
+    from remitwatch import api
+    c = sqlite3.connect(db)
+    assert activity.coverage(c)["last_month"] is None
+    cov, a, b = calculator._run_window(c, None, None, 6)
+    assert (a, b) == ("2026-01", "2026-06") and calculator._run_window(c, "2026-03", None, 6)[1:] == ("2026-03", "2026-06")
+    c.close()
+    # and the pace of the year never parses a date that is not one
+    c = sqlite3.connect(db)
+    s = calculator._schedule(c, [DOC], "0000-01-01", "2026-06-31", data_from=None)
+    assert s["clinic_days"] == 96 and s["pace_from"] == "2026-01-01"
+    c.close()
+    monkeypatch.setattr(api, "DB_PATH", db)
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "OWNER_PASSWORD", OWNER)
+    monkeypatch.delenv("REMITWATCH_MODE", raising=False)
+    tc = TestClient(api.app, raise_server_exceptions=False)
+    for who in (DOC, "mohs"):
+        r = tc.get("/api/activity/calculator", params={"provider": who}, auth=("oda", PW), headers={"X-Owner-Password": OWNER})
+        assert r.status_code == 200 and (r.json()["from"], r.json()["to"]) == ("2026-01", "2026-06"), (who, r.text[:300])
+
+
+def test_a_copy_without_the_builds_payer_split_reads_the_exposure_table(db):
+    """This fixture's provider_services carries no payers: the mix and by_kind come from the exposure table, and the visit
+    codes' split by the day they were billed is None (not measured), never an error."""
+    d = _calc(db, DOC)
+    assert d["mix_from"] == "exposure" and d["codes"]["99214"]["by_kind"] and d["codes"]["99214"]["by_kind_visit"] is None
+    assert "by_kind_visit" not in d["codes"]["17311"]

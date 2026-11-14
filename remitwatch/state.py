@@ -16,8 +16,19 @@ Both raise Conflict otherwise. That is all the locking the cycle needs.
 from __future__ import annotations
 
 import os
+import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterable, Iterator
+
+try:
+    import fcntl
+except ImportError:              # Windows: the writes of one process still take turns (threading lock below)
+    fcntl = None
+
+_UMASK = os.umask(0o022)         # read once (setting it back at once): a temporary file gets the mode open() would give
+os.umask(_UMASK)
 
 
 class Conflict(Exception):
@@ -25,9 +36,44 @@ class Conflict(Exception):
 
 
 class LocalState:
+    LOCK_FILE = ".state.lock"       # held while a write checks and replaces a file, by every process using the folder
+    _thread_lock = threading.Lock()
+
     def __init__(self, root: str):
         self.root = os.path.abspath(root)
         os.makedirs(self.root, exist_ok=True)
+
+    @contextmanager
+    def _locked(self):
+        """One writer at a time in this folder, across threads and processes: a conditional write's check, its write
+        and its rename happen as one step."""
+        with LocalState._thread_lock:
+            if fcntl is None:
+                yield
+                return
+            with open(os.path.join(self.root, self.LOCK_FILE), "a+b") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def _replace(self, p: str, chunks: Iterable[bytes]) -> None:
+        """Write to a temporary file of its own beside the target, then rename it over the target: a reader sees the old
+        file or the new one, and two writers never share a temporary file."""
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix="." + os.path.basename(p) + ".", suffix=".part")
+        try:
+            os.chmod(tmp, 0o666 & ~_UMASK)
+            with os.fdopen(fd, "wb") as fh:
+                for c in chunks:
+                    fh.write(c)
+            os.replace(tmp, p)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def _p(self, name: str) -> str:
         p = os.path.abspath(os.path.join(self.root, name))
@@ -40,7 +86,9 @@ class LocalState:
             st = os.stat(self._p(name))
         except OSError:
             return None
-        return {"rev": f"{st.st_mtime_ns}-{st.st_size}", "size": st.st_size,
+        # the inode changes with every write (each is a new file renamed into place), so the revision does even where the
+        # file system's clock is coarse and two writes have the same size
+        return {"rev": f"{st.st_mtime_ns}-{st.st_size}-{st.st_ino}", "size": st.st_size,
                 "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="seconds")}
 
     def get(self, name: str) -> bytes | None:
@@ -67,22 +115,15 @@ class LocalState:
     def put(self, name: str, data: bytes, mode: str = "overwrite", rev: str | None = None) -> dict:
         p = self._p(name)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        if mode == "add":
-            try:
-                with open(p, "xb") as fh:
-                    fh.write(data)
-            except FileExistsError as exc:
-                raise Conflict(name) from exc
-            return self.meta(name)
-        if mode == "update":
-            cur = self.meta(name)
-            if not cur or cur["rev"] != rev:
+        with self._locked():          # the check and the write as one step: two saves from one revision, one wins
+            if mode == "add" and os.path.exists(p):
                 raise Conflict(name)
-        tmp = p + ".part"
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, p)
-        return self.meta(name)
+            if mode == "update":
+                cur = self.meta(name)
+                if not cur or cur["rev"] != rev:
+                    raise Conflict(name)
+            self._replace(p, [data])
+            return self.meta(name)
 
     def put_chunks(self, name: str, chunks: Iterable[bytes]) -> dict:
         p = self._p(name)
@@ -99,18 +140,20 @@ class LocalState:
         out = []
         for dp, _dirs, files in os.walk(base):
             for f in files:
-                if f.endswith(".part"):
+                if f.endswith(".part") or (dp == self.root and f == self.LOCK_FILE):
                     continue
                 name = os.path.relpath(os.path.join(dp, f), self.root).replace(os.sep, "/")
                 out.append(dict(self.meta(name) or {}, name=name))
         return sorted(out, key=lambda m: m["name"])
 
     def delete(self, name: str) -> bool:
-        try:
-            os.remove(self._p(name))
-            return True
-        except OSError:
-            return False
+        p = self._p(name)
+        with self._locked():          # not between a conditional write's check and its rename
+            try:
+                os.remove(p)
+                return True
+            except OSError:
+                return False
 
     def delete_many(self, names: list[str]) -> int:
         return sum(1 for n in names if self.delete(n))

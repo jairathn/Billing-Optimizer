@@ -20,9 +20,11 @@
   const ANCILLARY = ['radiation', 'skin', 'path', 'drug', 'nurse'];    // the practice's, not the clinician's own production
   const EM = ['99202', '99203', '99204', '99205', '99211', '99212', '99213', '99214', '99215'];
   // patient balances collected, by kind of payer: assumptions until the practice's patient payments are loaded. Early
-  // ledger exports showed about 59% commercial and 54% Medicare Advantage collected within 2-5 weeks (a floor, used as the
-  // default), and little of what Medicare leaves after a supplement. Medicare cost-sharing of qualified Medicare
-  // beneficiaries (dual eligibles) may not be billed at all.
+  // ledger exports showed about 59% of commercial and 54% of Medicare Advantage balances paid within 2-5 weeks: a floor,
+  // used as those two defaults. The Medicare, supplement and other defaults are placeholders, not measurements: by then
+  // only about 6% of Medicare and 4% of other balances had been paid, mostly because statements go out after the second
+  // payer has paid. Medicare cost-sharing of qualified Medicare beneficiaries (dual eligibles) may not be billed at all;
+  // no class of its own here (a small share of Medicare's patient balances).
   const Q_DEFAULT = { commercial: 0.59, medicare: 0.50, medicare_advantage: 0.54, supplement: 0.50, other: 0.30, medicaid: 0 };
 
   // ------------------------------------------------------------------ inputs
@@ -50,6 +52,9 @@
       mohs_visit_share: own(St.mohs_visit25_share, 0.045),  // Mohs cases with a visit billed with modifier 25 the same day (57,
                                       // decision for major surgery, is left out: the rule is identified on the claim by
                                       // modifier 25; see mohs_57)
+      // of those biopsy-and-visit days, the share that also had AKs destroyed (17000 or 17004), where the payload counts
+      // it (strategy.bx_ak_share); else the clinician's AK patients per visit (sameDayCut)
+      bx_ak_share: own(St.bx_ak_share, null),
       ma_same_day: true,              // Medicare Advantage plans that move with Medicare take on its 2027 changes too: modifier B1
                                       // in place of G2211 and the same-day rule (the rule governs Part B; a plan follows it by
                                       // contract). One switch for both, so the plans are not favoured one way or the other.
@@ -118,9 +123,14 @@
     // benign lesions: 17110 once per patient for up to 14, 17111 for 15 or more
     const Bn = Math.max(0, x.benign), b15 = clamp(x.benign_15, 0, 1);
     add('17110', Bn * (1 - b15)); add('17111', Bn * b15);
-    const groups = L.other.groups || {};
-    for (const [c, v] of Object.entries(L.other.codes)) add(c, v * Math.max(0, x[OTHER_INPUT[groups[c] || 'rest']] == null ? 1 : x[OTHER_INPUT[groups[c] || 'rest']]));
+    for (const [c, v] of Object.entries(L.other.codes)) add(c, v * otherScale(d, x, c));
     return u;
+  }
+
+  // the slider of the group a code of 'everything else' belongs to (1 = as billed now)
+  function otherScale(d, x, c) {
+    const v = x[OTHER_INPUT[(((d.levers || {}).other || {}).groups || {})[c] || 'rest']];
+    return v == null ? 1 : Math.max(0, v);
   }
 
   function akPatients(d, x) {
@@ -194,6 +204,15 @@
     return p;
   }
 
+  // two procedures of a day under the multiple-procedure rule: true when `a` is the one paid in full beside `b`. Payers
+  // rank the pair as Medicare does, by Medicare's amounts for the year, not by their own fees (a plan pays a flap in full
+  // and halves the Mohs first stage beside it even where its own fee for the flap is the lower); each payer's own price
+  // then applies to the line this ranking halves. Where Medicare has no amount for one of them, the payer's own prices.
+  function ranksFirst(d, year, a, b, pa, pb) {
+    const M = d.medicare || {}, ma = (M[a] || {})[year], mb = (M[b] || {})[year];
+    return ma > 0 && mb > 0 ? ma >= mb : pa >= pb;
+  }
+
   // ------------------------------------------------------------------ allowed per clinic day, by code and payer, before k
   function allowedByCode(d, x, year, corrected) {
     const U = units(d, x), L = d.levers, rho = d.constants.mppr_share;
@@ -215,6 +234,13 @@
       return avgCache[code];
     };
     const pairShare = (anchor, other) => mppr.has(anchor) && mppr.has(other);
+    // of a pair, the line paid in full is the one Medicare's amounts rank first, at every payer (see ranksFirst)
+    const rank = {};
+    const full = (a, b, pa, pb) => {
+      const key = a + ' ' + b;
+      if (!(key in rank)) { const M = d.medicare || {}, ma = (M[a] || {})[year], mb = (M[b] || {})[year]; rank[key] = ma > 0 && mb > 0 ? ma >= mb : null; }
+      return rank[key] == null ? ranksFirst(d, year, a, b, pa, pb) : rank[key];
+    };
 
     // Mohs cases, each billed to the payer of its first stage, with its closure paired against the first stage
     const C = Math.max(0, x.mohs_cases), h = clamp(x.mohs_hn, 0, 1);
@@ -232,14 +258,14 @@
       for (const [g, s, pf] of priced(f, mixOf(d, f))) {
         let firstFactor = 1 - a;
         for (const [j, phi] of fg) {
-          const pj = priceAt(j, g), paired = pairShare(f, j) , st = staged(j);
-          firstFactor += fgPair * phi * ((1 - st) * (paired && pf < pj ? rho : 1) + st);
-          put(j, g, Cs * s * phi * pj * (fgPair * ((1 - st) * (paired && pf >= pj ? rho : 1) + st) + fgExtra * (mppr.has(j) ? rho : 1)));
+          const pj = priceAt(j, g), paired = pairShare(f, j), st = staged(j), fFirst = full(f, j, pf, pj);
+          firstFactor += fgPair * phi * ((1 - st) * (paired && !fFirst ? rho : 1) + st);
+          put(j, g, Cs * s * phi * pj * (fgPair * ((1 - st) * (paired && fFirst ? rho : 1) + st) + fgExtra * (mppr.has(j) ? rho : 1)));
         }
         for (const [l, psi] of lay) {
-          const pl = priceAt(l, g), paired = pairShare(f, l);
-          firstFactor += lmPair * psi * (paired && pf < pl ? rho : 1);
-          put(l, g, Cs * s * psi * pl * (lmPair * (paired && pf >= pl ? rho : 1) + lmExtra * (mppr.has(l) ? rho : 1)));
+          const pl = priceAt(l, g), paired = pairShare(f, l), fFirst = full(f, l, pf, pl);
+          firstFactor += lmPair * psi * (paired && !fFirst ? rho : 1);
+          put(l, g, Cs * s * psi * pl * (lmPair * (paired && fFirst ? rho : 1) + lmExtra * (mppr.has(l) ? rho : 1)));
         }
         if (!fg.length) firstFactor += fgPair;     // no closure codes to pair with: the first stage is paid in full
         if (!lay.length) firstFactor += lmPair;
@@ -261,17 +287,26 @@
       for (const [g, s, pi] of priced(i, mixOf(d, i))) {
         let f = 1 - LePair;
         for (const [l, psi] of lay) {
-          const pl = priceAt(l, g), paired = pairShare(i, l);
-          f += LePair * psi * (paired && pi < pl ? rho : 1);
-          put(l, g, E * eps * s * psi * pl * (LePair * (paired && pi >= pl ? rho : 1) + LeExtra * (mppr.has(l) ? rho : 1)));
+          const pl = priceAt(l, g), paired = pairShare(i, l), iFirst = full(i, l, pi, pl);
+          f += LePair * psi * (paired && !iFirst ? rho : 1);
+          put(l, g, E * eps * s * psi * pl * (LePair * (paired && iFirst ? rho : 1) + LeExtra * (mppr.has(l) ? rho : 1)));
         }
         if (!lay.length) f += LePair;
         put(i, g, E * eps * s * pi * f);
         for (const [a, per] of Object.entries(L.layered.add_ons)) put(a, g, E * eps * s * Le * per * priceAt(a, g));
       }
     }
-    for (const c of ['17311', '17313', ...fg.map(e => e[0]), ...lay.map(e => e[0]), ...Object.keys(L.flap_graft.add_ons),
-                     ...Object.keys(L.layered.add_ons), ...Object.keys(L.excision.mix)]) done.add(c);
+    const fromLevers = new Set(['17311', '17313', ...fg.map(e => e[0]), ...lay.map(e => e[0]), ...Object.keys(L.flap_graft.add_ons),
+                                ...Object.keys(L.layered.add_ons), ...Object.keys(L.excision.mix)]);
+    for (const c of fromLevers) done.add(c);
+    // closures past what the levers carry (more than two on a case: calculator.py leaves them under 'everything else',
+    // under the lever's own code) are later procedures of the day: each payer's rate, the multiple-procedure share where
+    // the code takes it, moved by the slider of their group
+    for (const [c, v] of Object.entries(L.other.codes || {})) {
+      if (!fromLevers.has(c) || !(v > 0)) continue;
+      const n = v * otherScale(d, x, c);
+      if (n > 0) for (const [g, s, p] of priced(c, mixOf(d, c))) put(c, g, n * s * p * (mppr.has(c) ? rho : 1));
+    }
     // 2027: G2211 is gone at Medicare and the plans that follow it; modifier B1 pays 16% of the visit instead. Every
     // other payer keeps its own share of the code (no renormalising Medicare's share onto them).
     const next = d.next_year && year === d.next_year;
@@ -313,17 +348,25 @@
     const x0 = defaults(d);
     const days = (d.schedule || {}).clinic_days || 0;
     const modeled = {}, modeledKind = {};
+    const one = { k: {}, info: {}, kind: {} };
     for (const y of d.years) {
       // months of the year CMS calls next (the window reaches past the newest rates on file) are priced at that year's
-      // amounts, as a plan for that year would be, rather than left out of what the model predicts
+      // amounts, as a plan for that year would be, rather than left out of what the model predicts. What was allowed in
+      // those months already carries that year's same-day cut: it comes off the codes it falls on here, so evaluate()
+      // does not take it a second time.
       const a = allowedByCode(d, x0, y, false);
+      const cutBy = d.next_year && y === d.next_year ? sameDayCut(d, x0, one, y, 1).byCode : {};
       for (const [c, byPayer] of Object.entries(a)) {
         const cc = d.codes[c] || {};
         const uy = (cc.units_by_year || {})[y] || 0;
         const share = cc.units > 0 ? uy / cc.units : 0;
-        modeled[c] = (modeled[c] || 0) + share * sum(byPayer) * days;
+        const less = cutBy[c] || {};
         const mk = modeledKind[c] = modeledKind[c] || {};
-        for (const [g, v] of Object.entries(byPayer)) { const kd = kindOf(d, g); mk[kd] = (mk[kd] || 0) + share * v * days; }
+        for (const [g, v0] of Object.entries(byPayer)) {
+          const v = Math.max(0, v0 - (less[g] || 0)), kd = kindOf(d, g);
+          modeled[c] = (modeled[c] || 0) + share * v * days;
+          mk[kd] = (mk[kd] || 0) + share * v * days;
+        }
       }
     }
     const k = {}, info = {};
@@ -367,15 +410,72 @@
       kind[c] = Object.assign(own, rest == null ? {} : { _rest: rest });
       i.byKind = kind[c];
     }
-    return { k, info, kind };
+    // visit codes whose lines the payload splits by the day they were billed (codes[c].by_kind_visit: procedure_day, the
+    // visits billed with modifier 25 or 57 on the day of a 0- or 90-day procedure, and other, every other visit; each
+    // kind's two parts add up to by_kind[kind]). A plan's denials of the visit beside a Mohs case then stay on those
+    // visits: they keep their own k (proc), the visits a scenario adds, moves to another level or corrects take the k of the
+    // other visits (other; visitK), and at the visits billed now the two blend back to the kind's k, so history still
+    // comes back. pi is the procedure-day share of the kind's units, u0 the code's units a clinic day in the window; mp
+    // and up, what the procedure-day visits were worth at the usual rates and how many there were, over the window.
+    const visit = {}, cal0 = { k, kind };
+    for (const c of EM) {
+      const cc = d.codes[c], sp = cc && cc.by_kind_visit, mk = modeledKind[c], split = cc && cc.by_kind;
+      if (!sp || !sp.procedure_day || !sp.other || !split || !mk || !(cc.units > 0) || !(days > 0)) continue;
+      let tu = 0;
+      for (const v of Object.values(split)) tu += Math.max(0, +v.units || 0);
+      if (!(tu > 0)) continue;
+      const v = { u0: cc.units / days, pi: {}, proc: {}, other: {}, mp: {}, up: {} }, parts = [];
+      for (const [kd, m] of Object.entries(mk)) {
+        const P = sp.procedure_day[kd] || {}, O = sp.other[kd] || {};
+        const pu = Math.max(0, +P.units || 0), ou = Math.max(0, +O.units || 0), pa = Math.max(0, +P.allowed_cents || 0), oa = Math.max(0, +O.allowed_cents || 0);
+        if (m > 0 && pu + ou > 0 && pa + oa > 0) parts.push({ kd, m, pa, oa, ou, pu, pi: pu / (pu + ou), kAll: kKind(cal0, c, kd) });
+      }
+      // the code's other visits pooled over the kinds: the k for a kind with too few other visits of its own
+      let num = 0, den = 0;
+      for (const q of parts) { num += q.kAll * q.m * q.oa / (q.pa + q.oa); den += (1 - q.pi) * q.m; }
+      const pool = den > 0 ? num / den : null, fits = k => k != null && k >= lo && k <= hi;
+      for (const q of parts) {
+        if (!(q.pi > 0)) continue;                      // no visits beside a procedure at this kind: its k as it is
+        let ko = q.pi < 1 && q.ou * cc.units / tu >= minUnits ? q.kAll * q.oa / (q.pa + q.oa) / (1 - q.pi) : pool, kp;
+        if (!fits(ko)) ko = pool;
+        if (!fits(ko)) continue;                        // the kind's own k for all of its visits
+        if (q.pi >= 1) kp = q.kAll;
+        else {
+          kp = (q.kAll - (1 - q.pi) * ko) / q.pi;
+          if (kp > hi) { kp = hi; ko = (q.kAll - q.pi * kp) / (1 - q.pi); }
+          if (kp < 0) { kp = 0; ko = q.kAll / (1 - q.pi); }
+          if (!fits(ko)) continue;
+        }
+        v.pi[q.kd] = q.pi; v.proc[q.kd] = kp; v.other[q.kd] = ko;
+        v.mp[q.kd] = q.pi * q.m; v.up[q.kd] = q.pu * cc.units / tu;     // the procedure-day visits: modeled cents, units
+      }
+      if (Object.keys(v.other).length) { visit[c] = v; info[c].visit = v; }
+    }
+    return { k, info, kind, visit };
   }
 
   function kindOf(d, g) { return g === '_flat' ? '_flat' : payerKind(d, g); }
   // k for one code at one payer: the code and kind's own where it has one, the rest of the code's otherwise
-  function kAt(d, cal, c, g) {
+  function kAt(d, cal, c, g) { return kKind(cal, c, kindOf(d, g)); }
+  function kKind(cal, c, kd) {
     const kk = cal && cal.kind && cal.kind[c];
-    if (kk) { const v = kk[kindOf(d, g)]; if (v != null) return v; if (kk._rest != null) return kk._rest; }
+    if (kk) { const v = kk[kd]; if (v != null) return v; if (kk._rest != null) return kk._rest; }
     return cal && cal.k && cal.k[c] != null ? cal.k[c] : 1;
+  }
+  // k for a visit code at one payer when the schedule bills U units of it a clinic day: the visits billed beside a
+  // procedure in the window (pi of the kind's units now) keep their k, every other visit takes the other visits' k
+  function visitKAt(d, cal, c, g, U) {
+    const v = cal && cal.visit && cal.visit[c], kd = kindOf(d, g);
+    if (!v || v.other[kd] == null) return kAt(d, cal, c, g);
+    const r = v.u0 > 0 ? Math.max(0, U || 0) / v.u0 : 0, f = r > 0 ? Math.min(1, v.pi[kd] / r) : 1;
+    return f * v.proc[kd] + (1 - f) * v.other[kd];
+  }
+
+  // k for a visit code at one payer, for the visits a scenario adds, moves to another level or corrects: the k of the
+  // code's lines on days without a procedure where the payload splits them (cal.visit), else kAt
+  function visitK(d, cal, c, g) {
+    const v = cal && cal.visit && cal.visit[c], o = v ? v.other[kindOf(d, g)] : null;
+    return o != null ? o : kAt(d, cal, c, g);
   }
 
   function sum(o) { let t = 0; for (const v of Object.values(o)) t += v; return t; }
@@ -432,14 +532,16 @@
     cal = cal || calibrate(d);
     const year = x.year || d.rate_year;
     const daysYear = Math.max(0, x.days_per_week) * Math.max(0, x.weeks_per_year);
-    const a = allowedByCode(d, x, year, true);
+    const a = allowedByCode(d, x, year, true), U = units(d, x);
     const byLine = {}, byPayer = {}, byCode = {};
     const blk = { production: { allowed: 0, collections: 0, payers: 0 }, ancillary: { allowed: 0, collections: 0, payers: 0 } };
+    const shares = {};       // the collected and the payers' shares depend on the payer and the code's family only
     for (const [c, rows] of Object.entries(a)) {
-      const line = lineOf(d, c), block = ANCILLARY_LINES.includes(line) ? 'ancillary' : 'production';
+      const line = lineOf(d, c), block = ANCILLARY_LINES.includes(line) ? 'ancillary' : 'production', fam = (d.codes[c] || {}).family;
       for (const [g, v] of Object.entries(rows)) {
-        const al = v * kAt(d, cal, c, g) * daysYear, share = collectShare(d, x, g, c), co = al * share;
-        const paid = al * payersShare(d, g, c);
+        const key = g + ' ' + fam, sh = shares[key] = shares[key] || [collectShare(d, x, g, c), payersShare(d, g, c)];
+        const al = v * visitKAt(d, cal, c, g, U[c]) * daysYear, share = sh[0], co = al * share;
+        const paid = al * sh[1];
         blk[block].allowed += al; blk[block].collections += co; blk[block].payers += paid;
         const L = byLine[line] = byLine[line] || { allowed: 0, collections: 0 };
         L.allowed += al; L.collections += co;
@@ -469,7 +571,7 @@
       patientBalances,
       sameDay, path, pathCollections: pathColl, ancillaryCollections: anc,
       totalCollections: prod + (x.include_ancillary ? anc : 0),
-      daysYear, byLine, byPayer, byCode, units: units(d, x),
+      daysYear, byLine, byPayer, byCode, units: U,
     };
   }
 
@@ -496,64 +598,95 @@
   }
 
   // 20% off every service but the highest when a visit shares the day with a 0-day procedure (biopsies, Mohs first
-  // stages), Medicare and the Medicare Advantage plans that follow it
+  // stages), Medicare and the Medicare Advantage plans that follow it. Each kind of day is priced line by line: the
+  // highest service keeps its amount, every other line (add-on codes too, while cut_add_ons is on) loses 20%. Also says
+  // where the cut falls (byCode: code -> payer -> allowed a year), so calibrate() can take it off months of the window that
+  // already carry it.
   function sameDayCut(d, x, cal, year, daysYear) {
-    const k = (c, g) => kAt(d, cal, c, g);
-    const L = d.levers;
+    const L = d.levers, rho = d.constants.mppr_share, mppr = new Set(d.mppr || []);
     const follows = g => followsMedicare(d, x, g);
-    const addOn = c => (d.add_on || []).includes(c);
-    const cutAdd = v => (x.cut_add_ons ? v : 0);       // an add-on line counted among the lines the rule cuts, or not
-    const pr = (c, g) => { const p = price(d, x, c, g, year, true); return p == null ? null : p * k(c, g); };
+    const addOns = !!x.cut_add_ons;          // add-on lines counted among the lines the rule cuts, or not
+    const raw = (c, g) => price(d, x, c, g, year, true);
+    const pr = (c, g) => { const p = raw(c, g); return p == null ? null : p * kAt(d, cal, c, g); };
+    const byCode = {};
     let cut = 0, cutColl = 0;
-    // visits with a biopsy
+    const amount = rows => rows.reduce((t, r) => t + r[1], 0);
+    // `n` days a year of one kind at payer g: each line is [[code, allowed]] (the average visit and the average first
+    // biopsy are mixes of codes); `services` are the lines that can be the highest (one service each: not add-ons, not
+    // the other services of the day taken together)
+    const take = (g, lines, services, n, collCode) => {
+      if (!(n > 0)) return;
+      let top = null;
+      for (const l of services) if (l.length && (!top || amount(l) > amount(top))) top = l;
+      let c = 0;
+      const add = (rows, f) => { for (const [code, v] of rows) { const a = f * v * n; if (!a) continue; const o = byCode[code] = byCode[code] || {}; o[g] = (o[g] || 0) + a; c += a; } };
+      for (const l of lines) add(l, SAME_DAY_CUT);
+      if (top) add(top, -SAME_DAY_CUT);
+      cut += c; cutColl += c * collectShare(d, x, g, collCode);
+    };
+    // the average established visit at payer g, at the levels set, as lines of its codes; a visit billed beside a
+    // procedure is valued with the k of visits on other days where the payload splits it (visitK)
+    const visit = g => {
+      const est = shiftLevels(L.visits.est_mix, clamp(x.est_high, 0, 1), ['99214', '99215'], '99214', '99213');
+      const rows = []; let w = 0;
+      for (const [c, s] of Object.entries(est)) { const p = raw(c, g); if (p != null && s > 0) { rows.push([c, s * p * visitK(d, cal, c, g)]); w += s; } }
+      return w ? rows.map(([c, v]) => [c, v / w]) : [];
+    };
+    const line = (c, g, f) => { const p = pr(c, g); return p ? [[c, p * (f == null ? 1 : f)]] : []; };
+    // visits with a biopsy; of them, a share with AKs destroyed too: the payload's own count of such days where it has
+    // one (moved with the AK patients a visit as the slider moves them), else the clinician's AK patients a visit
     const bp = Math.max(1, x.bx_per_patient || 1), bxPatients = Math.max(0, x.bx_patients);
     const withVisit = Math.min(bxPatients * clamp(x.bx_visit_share, 0, 1), Math.max(0, x.visits));
-    const ak = akPatients(d, x);
-    const akWithVisit = x.visits > 0 ? Math.min(1, ak.patients / x.visits) : 0;
+    const ak = akPatients(d, x), akRate = x.visits > 0 ? ak.patients / x.visits : 0;
+    let akW = Math.min(1, akRate);
+    if (x.bx_ak_share != null && isFinite(x.bx_ak_share)) {
+      const v0 = L.visits.per_day, a0 = v0 > 0 ? akPatientsFromLesions(d, L.ak.lesions, L.ak.per_patient, L.ak.share_15_plus) / v0 : 0;
+      akW = clamp(a0 > 0 ? x.bx_ak_share * akRate / a0 : (akRate > 0 ? x.bx_ak_share : 0), 0, 1);
+    }
+    const f15 = clamp(x.ak_15, 0, 1);
+    const other = Math.max(0, +((d.strategy || {}).bx_day_other_cents) || 0);   // other services on those days, where counted
     for (const [g, s] of mixOf(d, '11102')) {
       if (!follows(g)) continue;
-      const e = visitPrice(d, x, g, year, true) * k('99213', g);
-      const firstCodes = Object.entries(L.biopsy.first_mix), addCodes = Object.entries(L.biopsy.add_mix);
-      const b1 = firstCodes.reduce((t, [c, w]) => t + w * (pr(c, g) || 0), 0);
-      const b2 = addCodes.reduce((t, [c, w]) => t + w * (pr(c, g) || 0), 0) * (bp - 1);
-      const a0 = (pr('17000', g) || 0) + cutAdd(Math.max(0, ak.n - 1) * (pr('17003', g) || 0));
-      const lines = e + b1 + cutAdd(b2) + akWithVisit * a0;
-      const top = Math.max(e, b1, akWithVisit > 0 ? (pr('17000', g) || 0) : 0);
-      const c = SAME_DAY_CUT * Math.max(0, lines - top) * withVisit * s * daysYear;
-      cut += c; cutColl += c * collectShare(d, x, g, '11102');
+      const E = visit(g);
+      const B1 = Object.entries(L.biopsy.first_mix).flatMap(([c, w]) => line(c, g, w));
+      const B2 = addOns ? Object.entries(L.biopsy.add_mix).flatMap(([c, w]) => line(c, g, w * (bp - 1))) : [];
+      const O = other > 0 ? [['_other', other]] : [];
+      const A0 = line('17000', g), A3 = addOns ? line('17003', g, Math.max(0, ak.n - 1)) : [], A4 = line('17004', g);
+      for (const [w, akLines, akTop] of [[1 - akW, [], []], [akW * (1 - f15), [A0, A3], A0], [akW * f15, [A4], A4]])
+        take(g, [E, B1, B2, O, ...akLines], [E, B1, akTop], withVisit * s * daysYear * w, '11102');
     }
-    // Mohs cases with a visit the same day
+    // Mohs cases with a visit the same day: the first stage, the closure paired with it (the lower of the two, by
+    // Medicare's ranking, at half), the extra stages
     const C = Math.max(0, x.mohs_cases), h = clamp(x.mohs_hn, 0, 1);
     const R0 = clamp(x.fg_share, 0, 2), L0 = clamp(x.lay_mohs, 0, 2), T = R0 + L0;
     const R = T > 1 ? R0 / T : R0, Lm = T > 1 ? L0 / T : L0;       // the closure paired with the first stage
-    const rho = d.constants.mppr_share;
+    const u = units(d, x), share = clamp(mohsVisitShare(d, x), 0, 1);
     for (const [f, site, addc] of [['17311', h, '17312'], ['17313', 1 - h, '17314']]) {
-      const cases = C * site * clamp(mohsVisitShare(d, x), 0, 1);
+      const cases = C * site * share;
       if (!(cases > 0)) continue;
-      const u = units(d, x), extraPerCase = C * site > 0 ? (u[addc] || 0) / (C * site) : 0;
+      const extraPerCase = (u[addc] || 0) / (C * site);
       for (const [g, s] of mixOf(d, f)) {
         if (!follows(g)) continue;
-        const pf = pr(f, g);
+        const pf = raw(f, g);
         if (pf == null) continue;           // no price for the first stage at this payer: no Mohs case is billed to it
-        const e = visitPrice(d, x, g, year, true) * k('99213', g);
-        let total = e + cutAdd(extraPerCase * (pr(addc, g) || 0)), top = 0;
-        const closures = [[R, L.flap_graft.mix], [Lm, L.layered.mix]];
+        const kf = kAt(d, cal, f, g), E = visit(g), X = addOns ? line(addc, g, extraPerCase) : [];
         let none = 1;
-        for (const [share, mix] of closures) {
+        for (const [sh, mix] of [[R, L.flap_graft.mix], [Lm, L.layered.mix]]) {
           for (const [j, w] of Object.entries(mix)) {
-            const pj = pr(j, g) || 0, p = share * w;
+            const p = sh * w, pj = raw(j, g);
             none -= p;
-            total += p * (Math.max(pf, pj) + rho * Math.min(pf, pj));
-            top += p * Math.max(pf, pj);
+            if (!(p > 0)) continue;
+            const paired = pj != null && mppr.has(f) && mppr.has(j), fFirst = ranksFirst(d, year, f, j, pf, pj || 0);
+            const F = [[f, pf * kf * (paired && !fFirst ? rho : 1)]];
+            const J = pj ? [[j, pj * kAt(d, cal, j, g) * (paired && fFirst ? rho : 1)]] : [];
+            take(g, [E, X, F, J], [E, F, J], cases * s * daysYear * p, f);
           }
         }
-        total += Math.max(0, none) * pf; top += Math.max(0, none) * pf;
-        top = Math.max(top, e);
-        const c = SAME_DAY_CUT * Math.max(0, total - top) * cases * s * daysYear;
-        cut += c; cutColl += c * collectShare(d, x, g, f);
+        const F = [[f, pf * kf]];
+        take(g, [E, X, F], [E, F], cases * s * daysYear * Math.max(0, none), f);
       }
     }
-    return { allowed: cut, collections: cutColl };
+    return { allowed: cut, collections: cutColl, byCode };
   }
 
   // ------------------------------------------------------------------ what one more of each lever is worth, and what a target takes
@@ -610,23 +743,46 @@
     });
   }
 
-  // how much of one lever reaches a yearly target, the others held (collections are linear in each count lever). The gap
-  // is the same for every lever and is on every row and on the list itself (res.gap); a lever worth nothing for this
-  // clinician (under a dollar a year) gets no count (needed: null). Called goalSeek(d, x, target, cal, opts); an opts
-  // object in cal's place is taken as opts (with opts.cal, if given, as the calibration).
+  // how much of one lever reaches a yearly target, the others held. The gap is the same for every lever and is on every row
+  // and on the list itself (res.gap); a lever worth nothing for this clinician (under a dollar a year) gets no count
+  // (needed: null). Called goalSeek(d, x, target, cal, opts); an opts object in cal's place is taken as opts (with
+  // opts.cal, if given, as the calibration).
   function goalSeek(d, x, target, cal, opts) {
     if (cal && !cal.k && (cal.moves || cal.production != null || cal.cal)) { opts = cal; cal = opts.cal; }
     cal = cal || calibrate(d);
     const base = measure(evaluate(d, x, cal), opts), gap = target - base;
     const res = marginal(d, x, cal, opts).filter(m => m.kind === 'volume').map(m =>
-      Object.assign(m, { gap, needed: m.value >= 100 ? gap / m.value : null }));     // number of steps
+      Object.assign(m, { gap, needed: m.value >= 100 ? (gap > 0 ? stepsTo(d, x, cal, opts, m, target, gap) : gap / m.value) : null }));     // number of steps
     res.gap = gap; res.base = base;
     return res;
   }
 
+  // the number of steps of one move that brings the measure to the target. Collections are linear in most levers, and the
+  // count is then the gap over one step's value; next year's same-day rule bends them in visits, biopsied and AK patients
+  // (only so many biopsies have a visit beside them, and AKs on those days follow the AK patients a visit), so the count is
+  // checked on the model and, where it misses, found between a count that falls short and one that reaches the target
+  // (regula falsi). null when no count up to 256 times the first guess reaches it.
+  function stepsTo(d, x, cal, opts, m, target, gap) {
+    const f = n => measure(evaluate(d, moved(x, m.key, n * m.step), cal), opts) - target;
+    const tol = Math.max(100, 1e-4 * gap);
+    let lo = 0, flo = -gap, hi = gap / m.value, fhi = f(hi);
+    if (Math.abs(fhi) <= tol) return hi;
+    for (let i = 0; fhi < 0 && i < 8; i++) { lo = hi; flo = fhi; hi *= 2; fhi = f(hi); }
+    if (fhi < 0) return null;
+    let side = 0;
+    for (let i = 0; i < 12; i++) {
+      const n = hi - fhi * (hi - lo) / (fhi - flo), fn = f(n);
+      if (Math.abs(fn) <= tol) return n;
+      if (fn > 0) { hi = n; fhi = fn; if (side > 0) flo /= 2; side = 1; }
+      else { lo = n; flo = fn; if (side < 0) fhi /= 2; side = -1; }
+    }
+    return hi;              // reaches the target, if by a little more than the tolerance
+  }
+
   const api = { defaults, units, allowedByCode, calibrate, evaluate, marginal, goalSeek, price, shiftLevels, LINES, MOVES, ANCILLARY, Q_DEFAULT, EM, isIndexed, payersShare,
                 MEDICARE_KINDS, SAME_DAY_CUT, B1_SHARE, collectShare, payerKind, correctable, mixOf, akPatients, visitPrice,
-                kAt, hasMohs, MOHS_MOVES, paidShare, pathPerLesion, followsMedicare, visit57Share, mohsVisitShare };
+                kAt, hasMohs, MOHS_MOVES, paidShare, pathPerLesion, followsMedicare, visit57Share, mohsVisitShare,
+                sameDayCut, ranksFirst, visitK, visitKAt };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CalcModel = api;
 })(typeof window !== 'undefined' ? window : globalThis);

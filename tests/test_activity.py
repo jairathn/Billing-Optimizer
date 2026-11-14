@@ -1093,7 +1093,7 @@ def test_closures_billed_at_an_asc_join_the_mohs_of_the_day_and_the_routes_agree
 
 
 def test_asc_cases_are_codes_and_counts_and_version_four_stays_readable():
-    assert activity.ACTIVITY_VERSION == "5" and {"3", "4", "5"} <= activity.READABLE_VERSIONS
+    assert activity.ACTIVITY_VERSION == "6" and {"3", "4", "5", "6"} <= activity.READABLE_VERSIONS
     items = [("17311", 1.0, False, "medicare", "IN"), ("17312", 1.0, False, "medicare", "IN"), ("15260", 1.0, True, "medicare", "IN"),
              ("15261", 2.0, True, "medicare", "IN")]
     assert activity.asc_case(items) == ("mohs", "medicare", "IN", "asc", "15260 15261x2 17311", 1.0)
@@ -1103,3 +1103,114 @@ def test_asc_cases_are_codes_and_counts_and_version_four_stays_readable():
     assert activity.asc_case([("11643", 1.0, True, "commercial", None)]) is None
     assert [activity.closure_type(c) for c in ("12032", "13153", "14301", "15240", "15271", "13160", "11643", "17311")] == \
         ["intermediate", "complex", "flap", "graft", "other", "other", None, None]
+
+
+# --------------------------------------------------------------------------- each code by the payer that decided it
+
+def _payer_split_files():
+    """Bob's 2 March, Medicare of Kentucky and Anthem. 99214: with Mohs, billed -57 (a procedure day); alone; billed -25
+    beside a destruction (a 10-day procedure: not a procedure day here); billed -25 on a bill of its own beside a biopsy
+    the same patient had on another bill (a procedure day); Anthem's, billed -25 beside a biopsy. And a 99213 that Anthem
+    paid in April, took back in May, and Medicare paid as primary in June: one service, Medicare's."""
+    m = lambda n, lines, pt: clp(n, lines, who="bob", patient=(pt, "PAT"), cfi="MB")         # noqa: E731
+    em = lambda mod, allowed, n: svc(f"99214{':' + mod if mod else ''}", "200.00", f"{float(allowed) * 0.8:.2f}", allowed, D, lcn=f"E{n}")  # noqa: E731
+    medicare = [m(501, svc("17311", "900.00", "480.00", "600.00", D, lcn="M501") + em("57", "30.00", 501), "SPLITA"),
+                m(502, em("", "100.00", 502), "SPLITB"),
+                m(503, svc("17000", "110.00", "48.00", "60.00", D, lcn="M503") + em("25", "110.00", 503), "SPLITD"),
+                m(504, em("25", "40.00", 504), "SPLITE"), m(505, svc("11102", "180.00", "80.00", "100.00", D, lcn="M505"), "SPLITE")]
+    anthem = [clp(506, svc("11102", "180.00", "80.00", "100.00", D, lcn="M506") + em("25", "90.00", 506), who="bob", patient=("SPLITF", "PAT"))]
+    late = lambda status, amounts: clp(507, svc("99213", *amounts, D, lcn="L507"), status=status, who="bob", patient=("SPLITG", "PAT"))    # noqa: E731
+    return [SEED, ("20260320", "KY MEDICARE", medicare), ("20260322", "ANTHEM", anthem),
+            ("20260415", "ANTHEM", [late("1", ("150.00", "60.00", "80.00"))]),
+            ("20260512", "ANTHEM", [late("22", ("-150.00", "-60.00", None))]),
+            ("20260610", "KY MEDICARE", [clp(507, svc("99213", "150.00", "72.00", "90.00", D, lcn="L507"), who="bob", patient=("SPLITG", "PAT"), cfi="MB")])]
+
+
+def test_each_code_is_split_by_the_payer_that_decided_it_and_visits_beside_a_procedure_apart(tmp_path):
+    from remitwatch import calculator, cloud
+    from remitwatch.codes import payer_group_kind
+    db = str(tmp_path / "s.sqlite")
+    store = Store(db)
+    assert store.ingest_835_paths(write_files(tmp_path, _payer_split_files()))["errors"] == 0
+    store.close()
+    run_detection(db)                         # the exposure table (by payment month) and the provider tables
+    conn = sqlite3.connect(db)
+    medicare, anthem = payer_group_kind("KY MEDICARE", "MB")[0], payer_group_kind("ANTHEM", "12")[0]
+    payers = {code: json.loads(js) for code, js in conn.execute("SELECT code, payers FROM provider_services WHERE provider_id=? AND month='2026-03'", (BOB,))}
+    # the 99213 Anthem paid and took back is one service, at Medicare, the payer whose decision stands
+    assert payers["99213"] == {medicare: ["medicare", 1, 1.0, 9000, 0, 0.0, 0]}
+    # 99214: [kind, services, units, allowed, and of those billed -25 or -57 beside a 0- or 90-day procedure the same three]
+    assert payers["99214"] == {medicare: ["medicare", 4, 4.0, 28000, 2, 2.0, 7000], anthem: ["commercial", 1, 1.0, 9000, 1, 1.0, 9000]}
+    assert payers["17311"] == {medicare: ["medicare", 1, 1.0, 60000]}           # not a visit code: no split
+    # the payer mix of a code is read from those services, by month of service: the exposure table, by payment month (April
+    # and May for March's services), still has Anthem's line and not Medicare's
+    mix, info = calculator._payer_mix(conn, [BOB], "physician", "2026-03", "2026-03")
+    assert info["from"] == "services" and info["code_lines"]["99213"] == {medicare: 1}
+    conn.execute("UPDATE provider_services SET payers = NULL")                 # as a copy built before the column was kept
+    _, old = calculator._payer_mix(conn, [BOB], "physician", "2026-03", "2026-03")
+    assert old["from"] == "exposure" and old["code_lines"]["99213"] == {anthem: 1} and old["code_visit"] is None
+    conn.rollback()
+    d = calculator.calculator(conn, BOB, "2026-03", "2026-03")
+    v = d["codes"]["99214"]
+    assert d["mix_from"] == "services" and v["by_kind"] == {"commercial": {"units": 1.0, "allowed_cents": 9000}, "medicare": {"units": 4.0, "allowed_cents": 28000}}
+    assert v["by_kind_visit"] == {"procedure_day": {"commercial": {"units": 1.0, "allowed_cents": 9000}, "medicare": {"units": 2.0, "allowed_cents": 7000}},
+                                  "other": {"commercial": {"units": 0.0, "allowed_cents": 0}, "medicare": {"units": 2.0, "allowed_cents": 21000}}}
+    assert "by_kind_visit" not in d["codes"]["17311"] and d["codes"]["99213"]["by_kind_visit"]["other"]["medicare"] == {"units": 1.0, "allowed_cents": 9000}
+    # the dashboard's copy holds none of these lines: it carries the column and gives the same split
+    path = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(conn, path)
+    copy = sqlite3.connect(path)
+    served = calculator.calculator(copy, BOB, "2026-03", "2026-03")
+    assert served["mix_from"] == "services" and served["codes"]["99214"]["by_kind_visit"] == v["by_kind_visit"]
+    # a copy built before the column was kept: the exposure table, and no split of the visits (None, not an error)
+    copy.execute("ALTER TABLE provider_services DROP COLUMN payers")
+    old = calculator.calculator(copy, BOB, "2026-03", "2026-03")
+    assert old["mix_from"] == "exposure" and old["codes"]["99214"]["by_kind_visit"] is None
+    copy.close()
+    conn.close()
+
+
+def _asc_route_files():
+    """Bob, Indiana and Kentucky. 2 March: a Mohs and a layered repair Medicare decided, the Mohs then paid again by Anthem
+    as primary (Medicare's case still); an Anthem Mohs in the clinic with the flap on a bill of its own, at the ASC on
+    Medicare's claim as second payer; an excision with its repair paid and a second repair denied (an excision case
+    still). 3 March: a Kentucky clinic's Mohs with a flap."""
+    D2 = "20260303"
+    asc = lambda s: s.replace("*11~NM1*QC", "*24~NM1*QC", 1)                                # noqa: E731
+    line = lambda code, allowed="600.00", day=D, n="": svc(code, "900.00", "480.00" if float(allowed) else "0.00", allowed, day, lcn=f"{code}{n}",  # noqa: E731
+                                                          cas="" if float(allowed) else "CAS*CO*97*900.00~")
+    indiana = [clp(601, line("17311", n="a") + line("13132", n="a"), who="bob", patient=("ROUTEA", "PAT"), cfi="MB"),
+               asc(clp(603, line("14040", n="c"), status="2", who="bob", patient=("ROUTEB", "PAT"), cfi="MB")),
+               clp(605, line("11643", n="e") + line("13132", n="e") + line("12032", "0.00", n="e"), who="bob", patient=("ROUTEC", "PAT"), cfi="MB")]
+    anthem = [clp(601, line("17311", n="a"), who="bob", patient=("ROUTEA", "PAT")),
+              clp(602, line("17311", n="b"), who="bob", patient=("ROUTEB", "PAT")), clp(603, line("14040", n="c"), who="bob", patient=("ROUTEB", "PAT"))]
+    kentucky = [clp(604, line("17311", day=D2, n="d") + line("14040", day=D2, n="d"), who="bob", patient=("ROUTED", "PAT"), cfi="MB")]
+    return [SEED, ("20260318", "ANTHEM", anthem[1:]), ("20260320", "IN MEDICARE", indiana), ("20260325", "ANTHEM", anthem[:1]),
+            ("20260326", "KY MEDICARE", kentucky)]
+
+
+def test_the_lines_route_decides_a_case_as_the_build_does_and_kentucky_cases_keep_their_state(tmp_path):
+    from remitwatch import calculator
+    from remitwatch.detect import ensure_schema
+    store = Store(str(tmp_path / "s.sqlite"))
+    assert store.ingest_835_paths(write_files(tmp_path, _asc_route_files()))["errors"] == 0
+    ensure_schema(store.conn)
+    activity.build_activity(store, log=lambda *a: None)
+    d0, d1 = "2026-03-01", "2026-03-31"
+    full = calculator._asc_cases(store.conn, [BOB], d0, d1, route="lines")
+    built = calculator._asc_cases(store.conn, [BOB], d0, d1, route="provider_payers")
+    # the first payer to decide each line as primary gives the case its kind (Medicare, not the plan that paid the Mohs
+    # again later); the ASC's place of service on any claim of the closure, a second payer's included, makes it an ASC case
+    assert full["mohs"] == built["mohs"] == [["13132 17311", "clinic", "medicare", "IN", 1, 0.0], ["14040 17311", "asc", "commercial", "IN", 1, 0.0],
+                                             ["14040 17311", "clinic", "medicare", "KY", 1, 0.0]]
+    # a denied second repair does not make an excision day a Mohs day
+    assert full["excision"] == built["excision"] == [["11643 13132", "clinic", "medicare", "IN", 1, 1]]
+    # the strategy lab's Kentucky option: a Kentucky clinic's same-day closures (state 'KY', site 'clinic', by codes, kind and
+    # extra stages) and Medicare's Kentucky amounts beside Indiana's
+    d = calculator.calculator(store.conn, BOB, "2026-03", "2026-03")
+    A = d["asc"]
+    assert [r for r in A["cases"]["mohs"] if r[3] == "KY" and r[1] == "clinic"] == [["14040 17311", "clinic", "medicare", "KY", 1, 0.0]]
+    from remitwatch.mpfs import MPFS, MPFS_YEARS
+    assert A["medicare_ky"]["14040"] == {y: list(MPFS[y]["KY"]["14040"]) for y in MPFS_YEARS if MPFS[y].get("KY", {}).get("14040")}
+    assert A["medicare_ky"]["17311"]["2027"] == list(MPFS["2027"]["KY"]["17311"]) and A["medicare"]["17311"]["2027"] == list(MPFS["2027"]["IN"]["17311"])
+    store.close()

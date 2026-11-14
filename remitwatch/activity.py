@@ -45,12 +45,14 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import DRUG_RE, RADIATION_CODES, SKIN_SUBSTITUTE_RE, payer_group_kind
+from .pfs import PFS_INDICATORS
 
-ACTIVITY_VERSION = "5"      # bump when the tables or the way they are filled change; they are then rebuilt
-# Tables built by these versions stay readable until the next run rebuilds them: versions 4 and 5 only added columns
+ACTIVITY_VERSION = "6"      # bump when the tables or the way they are filled change; they are then rebuilt
+# Tables built by these versions stay readable until the next run rebuilds them: versions 4 to 6 only added columns
 # (4: Medicare visit counts, pathology read by the biopsy's own clinician; 5: the closures and excisions a clinician did
-# in the clinic or the ASC, provider_payers.asc_cases), which the readers treat as not measured when absent.
-READABLE_VERSIONS = {"3", "4", ACTIVITY_VERSION}
+# in the clinic or the ASC, provider_payers.asc_cases; 6: each code's services by the payer that decided them,
+# provider_services.payers), which the readers treat as not measured when absent.
+READABLE_VERSIONS = {"3", "4", "5", ACTIVITY_VERSION}
 CLINIC_DAY_MIN = 5          # a day counts as a clinic day when the clinician saw at least this many patients
 COMPLETE_SHARE = 0.97       # a month of service is treated as complete when this share of its visits has been paid
 LAG_DAYS = 150              # how far the service-to-payment curve is kept
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS provider_days (
 CREATE TABLE IF NOT EXISTS provider_services (
     provider_id TEXT, month TEXT, code TEXT, family TEXT,
     items INTEGER, units REAL, denied INTEGER, charge_cents INTEGER, allowed_cents INTEGER, paid_cents INTEGER,
+    payers TEXT,
     PRIMARY KEY (provider_id, month, code)
 );
 CREATE TABLE IF NOT EXISTS provider_payers (
@@ -140,6 +143,9 @@ EM_ALL = frozenset(EM_NEW + EM_EST)
 # billed with modifier 25, one billed with modifier 57
 DAY_MOHS, DAY_BX, DAY_E25, DAY_E57 = 1, 2, 4, 8
 _MODIFIER = re.compile(r"[0-9A-Z]{2}")
+# procedures with a 0-day or 90-day global period (Mohs, biopsies, shaves, flaps and grafts...): an E/M billed with
+# modifier 25 or 57 on the same patient-day is a visit on a procedure day (provider_services.payers keeps those apart)
+GLOBAL_0_90 = frozenset(c for c, (days, _) in PFS_INDICATORS.items() if days in ("000", "090"))
 
 # columns of the remittance stream read by build_activity
 (C_CLAIM, C_STATUS, C_CODE, C_ORIG, C_PUNITS, C_OUNITS, C_CHARGE, C_PAID, C_ALLOWED, C_DATE, C_LCN, C_PAYDATE,
@@ -148,7 +154,8 @@ C_LINEKEY = C_PATIENT_OWES      # the stream brings the line's key in this place
 # one service while its remittance lines are folded in
 (I_DATE, I_CODE, I_UNITS, I_CHARGE, I_ALLOWED, I_PAID, I_LIVE, I_DECIDED, I_DENIED, I_KIND, I_FIRSTPAID, I_DECISIONS, I_GROUP, I_LAST,
  I_MODS, I_POS) = range(16)      # I_MODS: an E/M billed with modifier 25 (DAY_E25) or 57 (DAY_E57) on any of its lines;
-                                 # I_POS: the place of service of its claim (CLP08), '24' for an ambulatory surgical center
+                                 # I_POS: the place of service of its claims (CLP08): '24', an ambulatory surgical center,
+                                 # where any of them says so, else the first stated
 
 
 def clean_code(code: str | None) -> str:
@@ -448,6 +455,9 @@ def build_activity(store, log=print) -> dict:
     day_n: dict[tuple, list] = defaultdict(lambda: [0] * 8)           # path, radiation, items, charge, allowed, paid, clinic allowed, other contacts
     place_n: dict[tuple, Counter] = defaultdict(Counter)             # (provider, date) -> state of the Medicare contractor -> encounters
     services: dict[tuple, list] = defaultdict(lambda: [0, 0.0, 0, 0, 0, 0])
+    # (provider, month, code) -> payer group that decided the service -> [kind, services, units, allowed, and of those,
+    # for a visit code, the ones billed with modifier 25 or 57 beside a 0- or 90-day procedure: services, units, allowed]
+    code_payers: dict[tuple, dict] = defaultdict(dict)
     payers: dict[tuple, list] = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
     journeys: dict[tuple, list] = {}                                 # patient -> [(date, clinician, new patient visit, biopsied)]; never stored
     treated: dict[tuple, list] = {}                                  # patient -> dates a skin cancer was treated, by anyone
@@ -620,6 +630,8 @@ def build_activity(store, log=print) -> dict:
             enc_kind = enc_group = None
             enc = [0, 0, 0]
             first_paid = None
+            em_mod = []                 # visit services billed with modifier 25 or 57: (month, code, payer group, units, allowed)
+            global_0_90 = False
             for it, fam in zip(its, fams):
                 n[2] += 1
                 n[3] += it[I_CHARGE]
@@ -634,6 +646,16 @@ def build_activity(store, log=print) -> dict:
                 s[3] += it[I_CHARGE]
                 s[4] += it[I_ALLOWED]
                 s[5] += it[I_PAID]
+                if it[I_KIND]:          # the payer that decided it (none when only a second payer reported it)
+                    cp = code_payers[(provider, month, it[I_CODE])].get(it[I_GROUP])
+                    if cp is None:
+                        cp = code_payers[(provider, month, it[I_CODE])][it[I_GROUP]] = [it[I_KIND], 0, 0.0, 0, 0, 0.0, 0]
+                    cp[1] += 1
+                    cp[2] += it[I_UNITS] or 1.0
+                    cp[3] += it[I_ALLOWED]
+                    if it[I_MODS] and it[I_CODE] in EM_ALL:
+                        em_mod.append((month, it[I_CODE], it[I_GROUP], it[I_UNITS] or 1.0, it[I_ALLOWED]))
+                global_0_90 = global_0_90 or it[I_CODE] in GLOBAL_0_90
                 enc[0] += it[I_CHARGE]
                 enc[1] += it[I_ALLOWED]
                 enc[2] += it[I_PAID]
@@ -698,7 +720,7 @@ def build_activity(store, log=print) -> dict:
                 seen = days[(provider, d)].get(patient)
                 proc = any(f in PROCEDURE for f in fams)
                 if seen is None:
-                    days[(provider, d)][patient] = [kind == "visit", new, est, lesions, high, proc, mflags, cut]
+                    days[(provider, d)][patient] = [kind == "visit", new, est, lesions, high, proc, mflags, cut, em_mod or None, global_0_90]
                 else:
                     seen[0] = seen[0] or kind == "visit"
                     seen[1] = seen[1] or new
@@ -709,6 +731,9 @@ def build_activity(store, log=print) -> dict:
                     seen[6] |= mflags
                     if cut is not None:
                         seen[7] = (seen[7] or []) + cut
+                    if em_mod:
+                        seen[8] = (seen[8] or []) + em_mod
+                    seen[9] = seen[9] or global_0_90
             if first_paid and ref_from and ref_from <= d <= ref_to:
                 lag = _days(d, first_paid)
                 if lag is not None and lag >= 0:
@@ -792,6 +817,12 @@ def build_activity(store, log=print) -> dict:
                     ck = (what, state or place or "", site, codes)
                     cases[(provider, d[:7], kind_)][ck] += 1
                     stages[(provider, d[:7], kind_)][ck] += extra
+            if v[8] and v[9]:           # visits billed -25 or -57 the day of a 0- or 90-day procedure (any bill of the patient's)
+                for month_, code_, group_, units_, allowed_ in v[8]:
+                    cp = code_payers[(provider, month_, code_)][group_]
+                    cp[4] += 1
+                    cp[5] += units_
+                    cp[6] += allowed_
         day_rows.append((provider, d, pts, visits, new, est, pts - visits, len(alone), sum(1 for v in alone if v[4]), n[7], n[0], n[1],
                          sum(1 for v in vals if v[3]), sum(v[3] for v in vals), len(read_here.get(key, ())), n[2], n[3], n[4], n[5], n[6],
                          generated.get(key, 0), place,
@@ -805,14 +836,15 @@ def build_activity(store, log=print) -> dict:
     for t in ("provider_days", "provider_services", "provider_payers"):
         conn.execute(f"DELETE FROM {t}")
     conn.executemany(f"INSERT INTO provider_days VALUES ({','.join('?' * 28)})", day_rows)
-    conn.executemany("INSERT INTO provider_services VALUES (?,?,?,?,?,?,?,?,?,?)",
-                     [(k[0], k[1], k[2], service_family(k[2]), v[0], v[1], v[2], v[3], v[4], v[5]) for k, v in sorted(services.items())])
+    conn.executemany("INSERT INTO provider_services VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     [(k[0], k[1], k[2], service_family(k[2]), v[0], v[1], v[2], v[3], v[4], v[5], code_payers_json(code_payers.get(k), k[2]))
+                      for k, v in sorted(services.items())])
     for k in cases:                           # a case's kind of payer is its encounter's, which has its row already
         payers.setdefault(k, [0, 0, 0, 0, 0, 0])
     conn.executemany("INSERT INTO provider_payers VALUES (?,?,?,?,?,?,?,?,?,?)",
                      [k + tuple(v) + (asc_cases_json(cases.get(k), stages.get(k)),) for k, v in sorted(payers.items())])
     checks = _checks(services, day_rows, over)
-    for done in (days, day_n, services, payers, place_n, cases, stages):     # give the memory back before following patients through time
+    for done in (days, day_n, services, code_payers, payers, place_n, cases, stages):     # give the memory back before following patients through time
         done.clear()
     build_panels(conn, journeys, treated, first_payment, last_payment)
     build_recall(conn, treated, last_visit, last_payment)
@@ -969,6 +1001,22 @@ def asc_cases_json(cases: Counter | None, stages: Counter | None) -> str | None:
     return json.dumps(out, separators=(",", ":"))
 
 
+def code_payers_json(by_group: dict | None, code: str) -> str:
+    """A clinician's services of one code in a month by the payer that decided them (the first payer to decide each as
+    primary, as its allowed amount is), as provider_services.payers keeps them: {payer group: [kind of payer, services,
+    units, allowed cents]}, and for a visit code (99202-99215) three more: the services, units and allowed of those billed
+    with modifier 25 or 57 on the patient-day of a 0- or 90-day procedure. '{}' when no payer decided any (only a second
+    payer reported them); NULL only in tables built before the column was kept."""
+    em = code in EM_ALL
+    out = {}
+    for g, v in sorted((by_group or {}).items()):
+        row = [v[0], v[1], round(v[2], 4), v[3]]
+        if em:
+            row += [v[4], round(v[5], 4), v[6]]
+        out[g] = row
+    return json.dumps(out, separators=(",", ":"))
+
+
 def _em_modifiers(mods: str | None, raw_code: str | None) -> int:
     """DAY_E25 and DAY_E57 for a visit line billed with modifier 25 or 57 (the modifiers as billed where the payer
     reported a change, else as paid; a few payers put them in the code field)."""
@@ -994,8 +1042,8 @@ def _fold(it: list, r, payer) -> None:
     it[I_LIVE] = True
     if it[I_DATE] is None:
         it[I_DATE] = r[C_DATE]
-    if it[I_POS] is None and r[C_POS]:
-        it[I_POS] = r[C_POS]
+    if r[C_POS] and (it[I_POS] is None or r[C_POS] == ASC_POS):
+        it[I_POS] = r[C_POS]            # any claim's place of service; an ambulatory surgical center's wherever one says so
     units = r[C_OUNITS] if r[C_OUNITS] else r[C_PUNITS]       # some payers send "0" for the units billed beside the units they paid
     if units and abs(units) > it[I_UNITS]:
         it[I_UNITS] = float(abs(units))

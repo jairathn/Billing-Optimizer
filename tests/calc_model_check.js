@@ -255,8 +255,9 @@ function payload() {
   for (const cc of Object.values(d.codes)) cc.units_by_year = { '2026': cc.units / 2, '2027': cc.units / 2 };
   const x0 = M.defaults(d);
   const a6 = M.allowedByCode(d, x0, '2026', false), a7 = M.allowedByCode(d, x0, '2027', false);
+  const cut7 = M.sameDayCut(d, x0, { k: {}, info: {}, kind: {} }, '2027', 1).byCode;    // those months carry 2027's same-day cut
   const tot = (a, c) => Object.values(a[c] || {}).reduce((t, v) => t + v, 0);
-  for (const [c, cc] of Object.entries(d.codes)) cc.allowed_cents = 0.9 * 0.5 * (tot(a6, c) + tot(a7, c)) * d.schedule.clinic_days;
+  for (const [c, cc] of Object.entries(d.codes)) cc.allowed_cents = 0.9 * 0.5 * (tot(a6, c) + tot(a7, c) - tot(cut7, c)) * d.schedule.clinic_days;
   const ks = Object.values(M.calibrate(d).info).filter(i => i.from === 'own').map(i => i.k);
   ok('calibrate_next_year_months', ks.length > 5 && ks.every(k => near(k, 0.9, 1e-9)), JSON.stringify(ks));
 }
@@ -335,6 +336,182 @@ const page = (() => {
   const a = M.allowedByCode(e, M.defaults(e), '2026', false)['99214'];
   ok('code_mix_used', a['Plan A'] > 0 && !a['Medicare KY'], JSON.stringify(a));
 }
+
+// ------------------------------------------------------------------ fixes after the re-check (one check each, by item)
+const calcSrc = fs.readFileSync(require('path').join(__dirname, '../remitwatch/static/calc.js'), 'utf8');
+const htmlSrc = fs.readFileSync(require('path').join(__dirname, '../remitwatch/static/index.html'), 'utf8');
+const grabFrom = (src, head) => { const i = src.indexOf(head); if (i < 0) throw new Error('missing ' + head); let j = src.indexOf('{', i), n = 0;
+  for (; j < src.length; j++) { if (src[j] === '{') n++; else if (src[j] === '}' && --n === 0) break; }
+  return src.slice(i, j + 1) + (head.startsWith('const') ? ';' : ''); };
+const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+
+// item 4: the Medicare and other defaults are called placeholders, not the measured floor
+ok('r4_q_defaults_placeholders', M.Q_DEFAULT.medicare === 0.5 && M.Q_DEFAULT.commercial === 0.59 && /Medicare and other payers start at placeholders/.test(calcSrc)
+   && !/the defaults are the floor/.test(calcSrc), '');
+
+// item 7: the owner's coding exposure panel: each share of Medicare Mohs and biopsy days, the modifier 57 rule, a review
+{
+  const ROLE = new Function(grabFrom(calcSrc, 'const ROLE_LABEL') + '\nreturn ROLE_LABEL;')();
+  const coding = new Function('esc', 'ROLE_LABEL', 'state', grabFrom(calcSrc, 'function calcCoding(') + '\nreturn calcCoding;');
+  const box = { hidden: true, innerHTML: '' }, v = { querySelector: () => box };
+  const data = { who: { id: 'C9', name: 'Clinician' }, from: '2026-02', to: '2026-07',
+                 strategy: { mohs_visit57_share: 0.42, mohs_visit25_share: 0.05, bx_visit_share: 0.9, visit_shares_days: { mohs: 900, biopsy: 1200 } } };
+  coding(escHtml, ROLE, { calc: { data } })(v);
+  const html = box.innerHTML;
+  const shown = !box.hidden && /Coding exposure/.test(html) && /42 of every 100/.test(html) && /5 of every 100/.test(html) && /90 of every 100/.test(html)
+    && /Modifier 57 is only for the visit that decides on a 90-day/.test(html) && /WPS/.test(html) && /internal coding review/.test(html) && !/\$/.test(html);
+  const box2 = { hidden: false, innerHTML: '' };
+  coding(escHtml, ROLE, { calc: { data: Object.assign({}, data, { strategy: {} }) } })({ querySelector: () => box2 });
+  // where the figures split the visits beside a procedure from the others: what payers denied or cut on them, a year
+  const withMoney = new Function('esc', 'ROLE_LABEL', 'state', 'moneyK', grabFrom(calcSrc, 'function calcCoding(') + '\nreturn calcCoding;');
+  const box3 = { hidden: true, innerHTML: '' }, k$ = c => '$' + Math.round(c / 100000) + 'k';
+  const cal = { visit: { '99214': { mp: { medicare_advantage: 1000000 }, up: { medicare_advantage: 80 }, proc: { medicare_advantage: 0.4 }, other: { medicare_advantage: 0.95 } } } };
+  withMoney(escHtml, ROLE, { calc: { data: Object.assign({ schedule: { clinic_days: 100 } }, data), cal, base: { days_per_week: 4, weeks_per_year: 50 } } }, k$)({ querySelector: () => box3 });
+  ok('r7_coding_exposure_panel', shown && box2.hidden && /calcCoding\(v\)/.test(calcSrc) && /about 160 a year/.test(box3.innerHTML) && /denied or cut about \$11k a year/.test(box3.innerHTML),
+     html.slice(0, 200) + ' | ' + box3.innerHTML.slice(-400));
+}
+
+// item 11: visits billed beside a procedure keep their own k; the visits a scenario adds or moves take the other visits' k,
+//          and history still comes back
+{
+  const d = payload(), days = d.schedule.clinic_days;
+  d.constants.min_k_units = 10;
+  d.payers['Plan M'] = { kind: 'medicare_advantage', correctable: true, indexed: false };
+  d.mix.est_visit = [['Medicare KY', 0.4], ['Plan A', 0.3], ['Plan M', 0.3]];
+  for (const c of ['99213', '99214']) d.rates[c]['Plan M'] = { '2026': d.rates[c]['Medicare KY']['2026'], how: 'own' };
+  const x0 = M.defaults(d), a = M.allowedByCode(d, x0, '2026', false);
+  const kinds = { 'Medicare KY': 'medicare', 'Plan A': 'commercial', 'Plan M': 'medicare_advantage' };
+  // the plan pays its other 99214 visits at 0.95 and denies most of the ones beside a procedure (40% of its 99214s): 0.2
+  for (const c of ['99213', '99214']) {
+    const cc = d.codes[c], bk = {}, proc = {}, other = {};
+    let tot = 0;
+    for (const [g, v] of Object.entries(a[c])) {
+      const kd = kinds[g], m = v * days, u = cc.units * v / Object.values(a[c]).reduce((t, w) => t + w, 0);
+      const pi = c === '99214' && kd === 'medicare_advantage' ? 0.4 : 0.1;
+      const kp = c === '99214' && kd === 'medicare_advantage' ? 0.2 : 1, ko = c === '99214' && kd === 'medicare_advantage' ? 0.95 : 1;
+      const pa = pi * m * kp, oa = (1 - pi) * m * ko;
+      bk[kd] = { units: u, allowed_cents: pa + oa }; proc[kd] = { units: pi * u, allowed_cents: pa }; other[kd] = { units: (1 - pi) * u, allowed_cents: oa };
+      tot += pa + oa;
+    }
+    cc.allowed_cents = tot; cc.by_kind = bk; cc.by_kind_visit = { procedure_day: proc, other };
+  }
+  for (const [c, cc] of Object.entries(d.codes)) if (!cc.by_kind) cc.allowed_cents = Object.values(a[c] || {}).reduce((t, v) => t + v, 0) * days;
+  const cal = M.calibrate(d), x = Object.assign({}, x0, { year: '2026' });
+  const e0 = M.evaluate(d, x, cal), yr = e0.daysYear / days;
+  const hist = Object.values(d.codes).reduce((t, cc) => t + cc.allowed_cents, 0) * yr;
+  const v = cal.visit['99214'];
+  const shiftMA = c => { const e1 = M.evaluate(d, Object.assign({}, x, { est_high: x.est_high + 0.1 }), c); return e1.byPayer['Plan M'].allowed - M.evaluate(d, x, c).byPayer['Plan M'].allowed; };
+  const pooled = Object.assign({}, cal, { visit: {} });
+  ok('r11_visit_k_split', near(e0.production.allowed + e0.ancillary.allowed, hist, 1e-9) && near(v.other.medicare_advantage, 0.95, 1e-9) && near(v.proc.medicare_advantage, 0.2, 1e-9)
+     && near(M.visitK(d, cal, '99214', 'Plan M'), 0.95, 1e-9) && shiftMA(cal) > 0 && shiftMA(pooled) < 0
+     && M.visitK(d, cal, '99214', 'Plan M') * 12800 > M.visitK(d, cal, '99213', 'Plan M') * 9000,
+     JSON.stringify([v, shiftMA(cal), shiftMA(pooled)]));
+}
+
+// item 12: of a Mohs first stage and a flap, the line halved is the one Medicare's amounts rank lower, at every payer
+{
+  const d = payload(); d.rates['17311']['Plan A']['2026'] = 80000;      // Plan A's own 17311 fee is above its 14040 fee
+  const x = Object.assign(M.defaults(d), { mohs_cases: 1, mohs_hn: 1, mohs_stages: 1, fg_share: 1, lay_mohs: 0, visits: 0, bx_patients: 0, other_radiation: 0 });
+  const a = M.allowedByCode(d, x, '2026', false);
+  ok('r12_mppr_ranked_by_medicare', near(a['17311']['Plan A'], 0.4 * 0.5 * 80000) && near(a['14040']['Plan A'], 0.4 * 63000)
+     && near(a['17311']['Medicare KY'], 0.6 * 0.5 * 60000) && M.ranksFirst(d, '2026', '14040', '17311', 0, 1), JSON.stringify([a['17311'], a['14040']]));
+}
+
+// item 22: a window of next-year months already carries the same-day cut: the model gives the history back, not less
+{
+  const d = payload(); d.years = ['2027'];
+  for (const cc of Object.values(d.codes)) cc.units_by_year = { '2027': cc.units };
+  const one = { k: {}, info: {}, kind: {} }, days = d.schedule.clinic_days;
+  const x = Object.assign(M.defaults(d), { year: '2027', days_per_week: days, weeks_per_year: 1 });
+  const ev = M.evaluate(d, x, one), cut = M.sameDayCut(d, x, one, '2027', days).byCode;
+  for (const [c, cc] of Object.entries(d.codes)) cc.allowed_cents = ((ev.byCode[c] || {}).allowed || 0) - Object.values(cut[c] || {}).reduce((t, v) => t + v, 0);
+  const hist = Object.values(d.codes).reduce((t, cc) => t + cc.allowed_cents, 0);
+  const back = M.evaluate(d, x, M.calibrate(d)), got = back.production.allowed + back.ancillary.allowed;
+  ok('r22_next_year_months_cut_once', ev.sameDay.allowed > 0 && near(got, hist, 1e-4), got + ' vs ' + hist);
+}
+
+// item 23: closures past the two a case carries (left under 'everything else' under their own code) are priced, and move
+//          with the 'Other procedures' slider
+{
+  const d = payload(); d.levers.other.codes['14040'] = 0.5; d.levers.other.groups['14040'] = 'rest';
+  const x = Object.assign(M.defaults(d), { mohs_cases: 0, excisions: 0, visits: 0, bx_patients: 0, ak_patients: 0, other_radiation: 0 });
+  const a = M.allowedByCode(d, x, '2026', false)['14040'] || {};
+  const z = M.allowedByCode(d, Object.assign({}, x, { other_rest: 0 }), '2026', false)['14040'];
+  ok('r23_spilled_closures_priced', near(a['Medicare KY'], 0.5 * 0.6 * 70000 * 0.5) && near(a['Plan A'], 0.5 * 0.4 * 63000 * 0.5) && !z, JSON.stringify([a, z]));
+}
+
+// item 25: next year, biopsied patients past the visits there are bend collections: the count goal seek gives reaches it
+{
+  const d = payload(), cal = { k: {}, info: {}, kind: {} };
+  const x = Object.assign(M.defaults(d), { year: '2027', bx_visit_share: 1, ak_patients: 0 });
+  const base = M.evaluate(d, x, cal).totalCollections, m = M.marginal(d, x, cal, { moves: ['bx_patients'] })[0];
+  const T = base + 200 * m.value, g = M.goalSeek(d, x, T, cal, { moves: ['bx_patients'] })[0];
+  const at = n => M.evaluate(d, Object.assign({}, x, { bx_patients: x.bx_patients + n * m.step }), cal).totalCollections;
+  ok('r25_goal_seek_nonlinear', Math.abs(at(200) - T) > 0.01 * (T - base) && Math.abs(at(g.needed) - T) <= 1e-3 * (T - base), [g.needed, at(200) - T, at(g.needed) - T].join(' '));
+}
+
+// item 30: what a target needs a clinic day is compared with the clinician's own days moved to this plan's prices
+{
+  const page30 = new Function('CalcModel', grabFrom(calcSrc, 'function calcWith(') + '\n' + grabFrom(calcSrc, 'function calcDayNeed(') + '\nreturn {calcWith, calcDayNeed};')(M);
+  const d = payload(), cal = { k: {}, info: {}, kind: {} }, base = M.defaults(d);
+  const x = Object.assign({}, base, { year: '2027' }), cs = { data: d, x, base, cal };
+  const plan = M.evaluate(d, x, cal), now = M.evaluate(d, Object.assign({}, base, { year: '2026' }), cal);
+  const day26 = now.production.allowed / now.daysYear;
+  d.schedule.clinic_day_allowed = { p50: day26, p75: day26 * 1.2, p90: day26 * 1.4, n: 10 };
+  const w = page30.calcDayNeed(cs, plan, plan.totalCollections * 1.01);
+  const scale = plan.production.allowed / now.production.allowed;
+  // a target 1% above this 2027 plan: above the median day once the median is read at 2027's (lower) prices
+  ok('r30_day_need_at_plan_prices', scale < 1 && near(w.p50, day26 * scale, 1e-9) && w.need > w.p50 && w.need < day26 && /between your median/.test(w.where)
+     && near(page30.calcDayNeed(cs, plan, plan.totalCollections).need, w.planDay, 1e-9), JSON.stringify([w.need, w.p50, day26, scale]));
+}
+
+// item 33: the calculator's goal seek plans a target with clinic time, visits and Mohs cases only, as the sheet does
+{
+  const moves = new Function(grabFrom(calcSrc, "const CALC_GOAL_MOVES").replace(/;$/, '') + ';\nreturn CALC_GOAL_MOVES;');
+  let list = null; try { list = moves(); } catch (e) { list = null; }
+  const d = payload(), r = M.goalSeek(d, M.defaults(d), 1e10, M.calibrate(d), { moves: list || [] }).map(m => m.key);
+  ok('r33_goal_moves_volume_only', /goalSeek\(d, x, T, cs\.cal, \{moves: CALC_GOAL_MOVES\}\)/.test(calcSrc) && list && list.join() === 'visits,new_visits,days_per_week,weeks_per_year,mohs_cases'
+     && !r.some(k => ['bx_patients', 'ak_patients', 'benign', 'excisions'].includes(k)), JSON.stringify(r));
+}
+
+// item 34: at 640px and below the view tabs wrap instead of scrolling sideways; the per-minute table fits its panel
+{
+  const narrow = htmlSrc.slice(htmlSrc.indexOf('@media(max-width:640px){\n  header{'));
+  ok('r34_narrow_tabs_wrap', /\.segs\[role=tablist\][^{]*\{flex-wrap:wrap;overflow-x:visible\}/.test(narrow.slice(0, narrow.indexOf('\n}')))
+     && /#labMinutes table th,#labMinutes table td\{padding:5px 4px\}/.test(calcSrc), '');
+}
+
+// item 35: a new window or clinician, or 'Pick another clinician': the focus goes back to the control once drawn
+{
+  const keys = calcSrc.slice(calcSrc.indexOf('const CALC_KEYS'), calcSrc.indexOf('];', calcSrc.indexOf('const CALC_KEYS')) + 2);
+  const st = { calc: {} }, doc = { body: {}, activeElement: { id: 'calcMonths', tagName: 'SELECT', hasAttribute: () => false } };
+  let drawn = 0, focused = null;
+  const f = new Function('state', 'document', 'render', 'CSS', keys + '\n' + grabFrom(calcSrc, 'function calcKeyOf(') + '\n' + grabFrom(calcSrc, 'function calcRender(')
+    + '\n' + grabFrom(calcSrc, 'function calcRefocus(') + '\nreturn {calcRender, calcRefocus};')(st, doc, () => { drawn++; }, { escape: s => s });
+  f.calcRender();
+  const kept = st.calc.refocus;
+  const el = { focus: () => { focused = 'calcMonths'; } };
+  f.calcRefocus({ querySelector: sel => (sel === '#calcMonths' ? el : null) });
+  ok('r35_focus_after_fetch', drawn === 1 && kept === '#calcMonths' && focused === 'calcMonths' && st.calc.refocus === null
+     && /calcRender\('#calcMonths'\)/.test(calcSrc) && /cs\.refocus = '#calcWho'/.test(calcSrc), kept);
+}
+
+// item 38: AKs on the biopsy-and-visit days: the payload's own share of such days where it has one, the clinician's AK
+//          patients a visit otherwise; other services on those days where the payload counts them
+{
+  const d = payload(); d.strategy = { bx_ak_share: 0.5, bx_day_other_cents: 1000 };
+  const x = Object.assign(M.defaults(d), { year: '2027', mohs_cases: 0, visits: 10, bx_patients: 2, bx_per_patient: 1, bx_visit_share: 1, ak_patients: 1,
+                                           ak_per_patient: 1, ak_15: 0, est_high: 0, ma_same_day: false, cut_add_ons: true, other_radiation: 0, days_per_week: 1, weeks_per_year: 1 });
+  const cal = { k: {}, info: {}, kind: {} }, b1 = 8265, a0 = 5795;        // 2027 Medicare amounts of 11102 and 17000; the visit (8,550) is the highest
+  const withShare = M.evaluate(d, x, cal).sameDay.allowed;
+  const without = M.evaluate(d, Object.assign({}, x, { bx_ak_share: null }), cal).sameDay.allowed;
+  const want = s => 0.2 * 2 * 0.5 * (b1 + s * a0 + 1000);
+  ok('r38_ak_on_biopsy_days', x.bx_ak_share === 0.5 && near(withShare, want(0.5), 1e-9) && near(without, want(0.1), 1e-9), [withShare, want(0.5), without, want(0.1)].join(' '));
+}
+
+// item 36 (from the lab review): a service line that rounds to $0 in both columns is not listed
+ok('r36_zero_rows_dropped', /all\.map\(\(\[label\], i\) => ra\[i\] \|\| rb\[i\] \?/.test(calcSrc)
+   && page.calcRoundRows([4000, 12345678, 30000], 12381678).filter(v => v).length === 1, JSON.stringify(page.calcRoundRows([4000, 12345678, 30000], 12381678)));
 
 // ------------------------------------------------------------------ the strategy lab (lab_model.js)
 const LM = require('../remitwatch/static/lab_model.js');
