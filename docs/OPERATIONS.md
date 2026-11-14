@@ -8,7 +8,7 @@ Recommended: one small virtual machine in AWS, Google Cloud or Azure. All three 
 
 Alternatives that cost more and need less administration: Fly.io with its compliance package, or Render on its HIPAA plan. Check current pricing; in November 2026 they were about $99 and $499 a month.
 
-Vercel also works, and a push to `main` deploys there: the app keeps its store in a private Dropbox folder because Vercel has no disk. Setup and limits are in `VERCEL_SETUP.md`. Two things to weigh: a run needs about 1.5 GB of the 2 GB a standard Vercel function has, and Vercel signs a BAA only on its Pro plan (a paid add-on) or Enterprise.
+Vercel also works, and a push to `main` deploys there: the app keeps its store in a private Dropbox folder because Vercel has no disk. Setup and limits are in `VERCEL_SETUP.md`. Two things to weigh: a run needs about 1.4 GB of the 2 GB a standard Vercel function has (the archive adds about 3 KB per service line, so this lasts to around early 2028), and Vercel signs a BAA only on its Pro plan (a paid add-on) or Enterprise.
 
 Not suitable: GitHub Actions for the scheduled job (no BAA), or a workstation that sleeps.
 

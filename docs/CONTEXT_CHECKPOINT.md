@@ -385,4 +385,22 @@ Built (owner only, Calculator tab): see ARCHITECTURE.md, Calculator. Key decisio
 
 Measured on the archive (practice level; shapes the defaults): most biopsied Medicare encounters carry an E/M with modifier 25, so the 2027 same-day rule bites mainly on visit + biopsy days; ASC vs office for Medicare at Newburgh favours only cases closed with a flap or graft, and only with the facility fee. The figures are in the session's scratch notes, not in this public repository.
 
-Open: practice minutes, costs and pay plans to be entered by the owner; the daily run on Vercel was failing (out of memory) when this was written, so the live serving copy is from 2026-11-13.
+Open: practice minutes, costs and pay plans to be entered by the owner. The live serving copy was from 2026-11-13 until the daily run was fixed (below).
+
+
+## Daily run fixed (November 14, 2026)
+
+The Vercel daily run of 2026-11-14 died with its lock written and no status. Cause: time, not memory. Two queries added in
+the third review (`detect.py`, the takeback list and the whole-claim payment check) ask per claim whether it has lines or a
+later reversal; the compact cloud store had no secondary indexes, so each question scanned a whole table. Replayed on the
+live image it ran past 10 minutes, against a 300-second function.
+
+Fix: the compact store keeps two indexes (`store.COMPACT_INDEXES`, 19 MB). Full re-analysis of the live image: 56 s, peak
+1.37 GB (load 1.03, detection 1.37, save 1.36). Detection's own memory cut by about 150 MB by sharing repeated per-line
+values (no change to any output: every table compared row by row on the live image). `cloud.deadline_guard` stops a
+statement at the run budget so a run that cannot finish says so. `tests/test_efficiency.py` fails if any statement the
+analysis runs rescans a table per row on a compact store.
+
+Headroom: about 3 KB per line, 13K lines a month; the 2 GB limit is near 640K lines (early 2028). Next lever: a rolling
+analysis window, or a 4 GB function (Vercel Pro).
+

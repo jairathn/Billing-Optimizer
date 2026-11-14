@@ -186,12 +186,23 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Kept even in a compact store. A few rules ask, for each claim, whether it has service lines or whether the payer
+# later reversed it; without these two each question scans a whole table, and on the full archive that took longer than
+# a function may run. Together about 4% of the store.
+COMPACT_INDEXES = ("ix_lines_claim", "ix_claims_pcn")
+
+
 def ddl(compact: bool = False) -> str:
-    """The schema. A compact store leaves out the secondary indexes: it is scanned whole by detection and never queried
-    row by row, and the indexes are a third of its size. The dashboard's copy (remitwatch.cloud) builds its own."""
+    """The schema. A compact store leaves out most secondary indexes: it is scanned whole by detection, and the indexes
+    are a third of its size. The dashboard's copy (remitwatch.cloud) builds its own."""
     if not compact:
         return DDL
-    return "\n".join(ln for ln in DDL.splitlines() if not ln.lstrip().upper().startswith(("CREATE INDEX", "PRAGMA JOURNAL_MODE")))
+    def keep(ln: str) -> bool:
+        s = ln.lstrip().upper()
+        if s.startswith("PRAGMA JOURNAL_MODE"):
+            return False
+        return not s.startswith("CREATE INDEX") or any(f" {ix.upper()} " in s for ix in COMPACT_INDEXES)
+    return "\n".join(ln for ln in DDL.splitlines() if keep(ln))
 
 
 def connect(db_path: str, compact: bool = False) -> sqlite3.Connection:
