@@ -240,7 +240,7 @@ function calcUpdate(){
   const plan = ev(calcWith(x, x, {year: x.year}));
   const fixed = ev(Object.assign({}, x));
   const nCorr = Object.values(x.corrected).filter(Boolean).length;
-  const sign = dv => Math.abs(dv) < 500 ? '' : `<span class="${dv>0?'ok':'sev-high'}">${dv>0?'+':'−'}${moneyK(Math.abs(dv))}</span>`;
+  const sign = dv => Math.abs(dv) < 50000 ? '' : `<span class="${dv>0?'ok':'sev-high'}">${dv>0?'+':'−'}${moneyK(Math.abs(dv))}</span>`;
   // the band: patient balances and the open 2027 readings
   const qShift = s => Object.fromEntries(Object.entries(x.q).map(([k, q]) => [k, Math.min(1, Math.max(0, q + s))]));
   const lo = ev(Object.assign({}, x, {q: qShift(-0.15), cut_add_ons: true, ma_same_day: true})).totalCollections;
@@ -314,7 +314,7 @@ function calcPayers(v, plain){
       <td class="num">${r.allowed / total >= 0.005 ? Math.round(100 * r.allowed / total) + '%' : '<1%'}</td>
       <td class="num ${r.pct!=null && r.pct < x.target_pct - 0.005 ? 'sev-high' : ''}">${r.pct==null?'–':Math.round(r.pct*100)+'%'}${r.est?' <span class="muted">est.</span>':''}</td>
       <td class="num">${r.correctable && x.corrected[r.g] ? `<input type="number" class="calc-num" data-calc-t="${esc(r.g)}" min="50" max="200" step="5" value="${Math.round(100*(x.targets[r.g] != null ? x.targets[r.g] : x.target_pct))}" aria-label="target for ${esc(r.g)}">%` : ''}</td>
-      <td class="num">${r.correctable ? (Math.abs(r.up) > 500 ? (r.up > 0 ? '+' : '−') + moneyK(Math.abs(r.up)) : '–') : ''}</td></tr>`;
+      <td class="num">${r.correctable ? (Math.abs(r.up) >= 50000 ? (r.up > 0 ? '+' : '−') + moneyK(Math.abs(r.up)) : '–') : ''}</td></tr>`;
   const box = v.querySelector('#calcPayers');
   box.innerHTML = `<h2>Contracts</h2>
     <div class="small muted">What each payer pays for this schedule as a share of Medicare's ${esc(Y)} amount for the same codes. Tick a contract to see it renegotiated.</div>

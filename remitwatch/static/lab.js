@@ -36,7 +36,7 @@ async function labSave(){
 }
 
 const labMoney = c => c == null ? '–' : moneyK(c);
-const labSigned = c => !c || Math.abs(c) < 500 ? '<span class="muted">–</span>' : `<span class="${c>0?'ok':'sev-high'}">${c>0?'+':'−'}${moneyK(Math.abs(c))}</span>`;
+const labSigned = c => !c || Math.abs(c) < 50000 ? '<span class="muted">–</span>' : `<span class="${c>0?'ok':'sev-high'}">${c>0?'+':'−'}${moneyK(Math.abs(c))}</span>`;
 const LAB_NEED_LABEL = Object.fromEntries([...LabModel.MINUTES.map(([k, l]) => ['minutes.' + k, 'minutes: ' + l.toLowerCase()]),
                                            ...LabModel.COSTS.map(([k, l]) => ['costs.' + k, 'cost: ' + l.toLowerCase()])]);
 
@@ -110,8 +110,8 @@ function labUpdate(v){
     if(!st){ el.innerHTML = ''; continue; }
     if(st.skipped){ el.innerHTML = `<span class="muted">${esc(st.skipped)}</span>`; continue; }
     const bits = [`collections ${labSigned(st.collections)} a year`];
-    if(Math.abs(st.cost) >= 500) bits.push(`costs ${st.cost > 0 ? '+' : '−'}${moneyK(Math.abs(st.cost))}`);
-    if(Math.abs(st.collections - st.cost) >= 500 && Math.abs(st.cost) >= 500) bits.push(`net ${labSigned(st.collections - st.cost)}`);
+    if(Math.abs(st.cost) >= 50000) bits.push(`costs ${st.cost > 0 ? '+' : '−'}${moneyK(Math.abs(st.cost))}`);
+    if(Math.abs(st.cost) >= 50000) bits.push(`net ${labSigned(st.collections - st.cost)}`);
     if(Math.abs(st.encountersDay) >= 0.01) bits.push(`${st.encountersDay > 0 ? '+' : ''}${st.encountersDay.toFixed(2)} visits a clinic day`);
     if(Math.abs(st.minutesDay) >= 0.5) bits.push(`${st.minutesDay > 0 ? '+' : ''}${st.minutesDay.toFixed(0)} clinician minutes a day`);
     if(st.oneTime) bits.push(`one-time ${moneyK(st.oneTime)}`);
