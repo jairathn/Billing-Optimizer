@@ -48,7 +48,8 @@
   // The saved figures as the page may use and save them, whatever came back from the store: each figure a number of 0 or
   // more (else not entered), pay plans of a known kind, scenarios with a name, a clinician and plain settings. Anything
   // else is dropped, so a value that is not a number can never reach the page as one. The server checks the same.
-  const fig = v => (typeof v === 'number' && isFinite(v) && v >= 0) ? v : null;
+  const MAX_FIGURE = 1e9;             // as the server's
+  const fig = v => (typeof v === 'number' && isFinite(v) && v >= 0 && v <= MAX_FIGURE) ? v : null;
   const share01 = v => (fig(v) != null && v <= 1) ? v : null;
   const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
   function cleanPlan(p) {
@@ -425,9 +426,9 @@
         const appColl = n * days * perVisitColl * clamp(p.app_rate, 0, 1);
         const appCost = num(A.costs.app_per_visit);
         if (appCost == null) needs.push('costs.app_per_visit');
-        return { x: y, extra: { collections: appColl, cost: n * days * (appCost || 0) * 100, minutes: 0 },
+        return { x: y, extra: { collections: appColl, practice_only: appColl, cost: n * days * (appCost || 0) * 100, minutes: 0 },
                  notes: [`${n.toFixed(1)} visits a day move to an APP${y.mohs_cases !== x.mohs_cases ? `; the physician takes ${(y.mohs_cases - x.mohs_cases).toFixed(2)} more Mohs cases a day in the freed time` : (perVisit != null && n > 0 ? `, freeing about ${Math.round(n * perVisit)} physician minutes a day` : '')}. The APP's visits are counted as the practice's, not this clinician's.${why}`],
-                 needs, practice_only: appColl };
+                 needs };
       },
     },
     {
@@ -472,9 +473,12 @@
       compliance: '',
       params: [['share', 'Share of the open, still-appealable dollars recovered', 0, 1, 0.05, 'pct', 0.4]],
       apply(d, x, A, p) {
-        const open = (d.strategy || {}).open_findings || {};
-        const cents = Object.values(open).reduce((t, v) => t + (v.cents || 0), 0);
-        return { x, extra: { one_time: cents * clamp(p.share, 0, 1) }, notes: [`${Object.values(open).reduce((t, v) => t + (v.n || 0), 0)} open findings, ${Math.round(cents / 100).toLocaleString()} dollars.`], needs: [] };
+        const St = d.strategy || {}, open = St.open_findings || {};
+        const cents = Object.values(open).reduce((t, v) => t + (v.cents || 0), 0), n = Object.values(open).reduce((t, v) => t + (v.n || 0), 0);
+        // for a role, the payload gives each category per clinician on average (the group's totals apart)
+        const avg = St.open_findings_clinicians != null;
+        return { x, extra: { one_time: cents * clamp(p.share, 0, 1) },
+                 notes: [`${Math.round(n).toLocaleString()} open findings, ${Math.round(cents / 100).toLocaleString()} dollars${avg ? ` per clinician on average (${St.open_findings_clinicians} clinicians)` : ''}.`], needs: [] };
       },
     },
     {
@@ -483,10 +487,11 @@
       compliance: '',
       params: [['share', 'Share of the fees stopped', 0, 1, 0.05, 'pct', 0.8]],
       apply(d, x, A, p) {
-        const fees = Object.values((d.strategy || {}).vendor_fees || {}).reduce((t, v) => t + v, 0);
-        const months = Math.max(1, monthsBetween(d.from, d.to));
+        const St = d.strategy || {}, fees = Object.values(St.vendor_fees || {}).reduce((t, v) => t + v, 0);
+        // summed over the window's months (vendor_fees_months, from the payload), made a year
+        const months = Math.max(1, St.vendor_fees_months > 0 ? St.vendor_fees_months : monthsBetween(d.from, d.to));
         const year = fees * 12 / months * clamp(p.share, 0, 1);
-        return { x, extra: { collections: year }, notes: ['Practice-wide, not this clinician\'s.'], needs: [], practice_only: year };
+        return { x, extra: { collections: year, practice_only: year }, notes: ['Practice-wide, not this clinician\'s.'], needs: [] };
       },
     },
     {

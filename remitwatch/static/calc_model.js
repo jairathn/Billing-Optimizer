@@ -6,8 +6,9 @@
    mix of its service line. Where two procedures share a day and both carry Medicare's multiple-procedure indicator, the
    lower one is paid at half (a Mohs first stage beside a flap, an excision beside a layered closure): that pairing is
    modelled case by case, because it moves when the mix of closures moves. Everything else a usual rate does not see
-   (denials that stayed denied, later procedures of a day, units, underpayments) is carried by k, per code: what was
-   allowed in the window over what this model says the same schedule was worth at that time's rates. With the levers
+   (denials that stayed denied, later procedures of a day, units, underpayments) is carried by k, per code and, where the
+   payload splits a code by kind of payer, per kind: what was allowed in the window over what this model says the same
+   schedule was worth at that time's rates. With the levers
    as they come and no contract corrected, the model gives back what was allowed. */
 (function (root) {
   'use strict';

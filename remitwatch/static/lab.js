@@ -333,7 +333,7 @@ async function figuresDraw(v, note){
       const s = String(inp.value).trim();
       if(s === '') return inp.validity && inp.validity.badInput ? undefined : null;
       const n = Number(s);
-      return isFinite(n) && n >= 0 && (!maxPct || n <= 100) ? n : undefined;
+      return isFinite(n) && n >= 0 && n <= 1e9 && (!maxPct || n <= 100) ? n : undefined;
     };
     body.querySelectorAll('[data-fig]').forEach(inp => {
       if(inp.value === inp.dataset.orig && !(inp.validity && inp.validity.badInput)) return;
