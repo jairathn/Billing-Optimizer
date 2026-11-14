@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 
 OPEN = ("open", "in_progress", "appealed")
 TODO = ("open", "in_progress")          # still to do: an item sent to the payer waits on the payer, not on a person
+SMALL_CENTS = 2000                      # items known to be worth under $20: about a third of the list and a few percent of the money
 
 # The kind of work each finding takes. A signal not named here falls to its action (fix and resubmit, appeal) and then
 # to "check first".
@@ -195,7 +196,7 @@ def work(conn: sqlite3.Connection, today: str) -> dict:
     soon30 = (date.fromisoformat(today) + timedelta(days=30)).isoformat()
     wins = claim_windows(conn, TODO)
     out = {t["key"]: dict(t, n=0, cents=0, due7_n=0, due7_cents=0, due30_n=0, due30_cents=0, working_n=0) for t in WORK_TYPES}
-    expired_n = expired_cents = 0
+    expired_n = expired_cents = small_n = small_cents = 0
     for fid, sig, act, carc, status, dl, cents in conn.execute(
             f"""SELECT finding_id, signal, actionable, carc, status, appeal_deadline, COALESCE(shortfall_cents,0) FROM findings
                 WHERE status IN ({','.join('?' * len(TODO))}) AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL
@@ -222,6 +223,9 @@ def work(conn: sqlite3.Connection, today: str) -> dict:
         w["n"] += 1
         w["cents"] += cents
         w["working_n"] += status != "open"
+        if fid not in wins and 0 < cents < SMALL_CENTS:
+            small_n += 1
+            small_cents += cents
         w["due7_n"] += d7[0]
         w["due7_cents"] += d7[1]
         w["due30_n"] += d30[0]
@@ -234,7 +238,7 @@ def work(conn: sqlite3.Connection, today: str) -> dict:
                                AND COALESCE(stale,0)=0 AND appeal_deadline IS NULL
                                AND category IN ('denial','bundling','downcoding','underpayment')""", TODO).fetchone()
     return {"types": types, "total": total, "expired_n": expired_n, "expired_cents": expired_cents, "sent_n": sent[0], "sent_cents": sent[1],
-            "undated_n": undated[0], "undated_cents": undated[1]}
+            "undated_n": undated[0], "undated_cents": undated[1], "small_n": small_n, "small_cents": small_cents, "small_under": SMALL_CENTS}
 
 
 def recovered(conn: sqlite3.Connection, today: str) -> dict:

@@ -230,3 +230,29 @@ def test_patterns_and_whole_claim_denials_count_the_same_on_the_home_screen_and_
     rows = tc.get("/api/findings", params={"category": money, "live": 1, "status": "open,in_progress", "deadline": "week", "kind": "rate"},
                   auth=auth).json()["items"]
     assert rows and rows[0]["window_cents"] == 180000 and rows[0]["next_deadline"] < rows[0]["appeal_deadline"]
+
+
+def test_the_amount_filter_leaves_out_exactly_the_small_items_the_home_screen_counts(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from remitwatch import api
+    st = store_with_work(tmp_path)
+    fid = st.query("SELECT finding_id FROM findings WHERE signal='DENIED_AUTH' ORDER BY finding_id")[0][0]
+    st.conn.execute("UPDATE findings SET shortfall_cents=1500 WHERE finding_id=?", (fid,))          # one item worth $15
+    st.conn.commit()
+    st.close()
+    monkeypatch.setattr(api, "DB_PATH", str(tmp_path / "s.sqlite"))
+    monkeypatch.setattr(api, "PASSWORD", PW)
+    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.delenv("REMITWATCH_MODE", raising=False)
+    tc, auth = TestClient(api.app), ("oda", PW)
+    w = tc.get("/api/brief", auth=auth).json()["work"]
+    assert (w["small_n"], w["small_cents"], w["small_under"]) == (1, 1500, 2000)
+    p = {"category": "denial,bundling,downcoding,underpayment", "live": 1, "status": "open,in_progress", "deadline": "valid"}
+    every = tc.get("/api/findings", params=p, auth=auth).json()
+    big = tc.get("/api/findings", params=dict(p, min=20), auth=auth).json()
+    assert big["total"] == every["total"] - w["small_n"] and big["shortfall_cents"] == every["shortfall_cents"] - w["small_cents"]
+    assert all(not (0 < (r["shortfall_cents"] or 0) < 2000) for r in big["items"])
+    assert any(not r["shortfall_cents"] for r in big["items"])          # an item whose value is not known is not hidden
+    counts = tc.get("/api/worklist/counts", params=dict(p, min=20), auth=auth).json()
+    assert counts["n"] == big["total"]

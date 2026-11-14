@@ -90,7 +90,7 @@ async function todayTab(v){
     <div class="today-head"><div><div class="muted small">${esc(day)}</div><h1 class="page-title">Today's plan</h1></div>
       <div class="donebox"><span>Done today <b>${done.today_n||0}</b></span><span>This week <b>${done.week_n||0}</b> items, <b>${money(done.week_cents||0)}</b></span></div></div>
     <div class="plan">${steps.map(s=>`<div class="step ${s.done?'is-done':''}"><div class="num">${s.done?'✓':s.n}</div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div>${s.chips?`<div class="chips">${s.chips}</div>`:''}</div>${s.btn?`<button class="${s.done?'':'primary'}" data-step="${s.n}">${esc(s.btn)}</button>`:''}</div>`).join('')}</div>
-    <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.</span></div>
+    <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.${smallLine(b)}</span></div>
       <div class="batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>
       ${b.batches.length > 8 ? `<button class="ghost" id="allBatches">Show all ${b.batches.length} batches</button>` : ''}</div>
     ${alerts.length ? `<div class="panel"><div class="panel-head"><h2>What changed</h2><span class="muted small">Payer behaviour that moved recently.</span></div>${alerts.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">See the claims</button></div>`).join('')}<a href="#alerts" class="small">All alerts</a></div>` : ''}
@@ -105,6 +105,11 @@ async function todayTab(v){
   const gw = v.querySelector('#goWins'); if(gw) gw.onclick = () => { state.tab='wins'; location.hash='wins'; render(); };
   const sm = v.querySelector('#seeMissed'); if(sm) sm.onclick = e => { e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
   v.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'none', status:'open,in_progress', sort:'shortfall'}); });
+}
+function smallLine(b){
+  const w = b.work || {}, n = w.small_n || 0; if(!n) return '';
+  const pct = Math.round(100 * (w.small_cents || 0) / Math.max(1, (w.total || {}).cents || 0));
+  return ` ${Number(n).toLocaleString()} of the items are worth less than ${money(w.small_under || 2000)} each (${money(w.small_cents)} together, ${pct}% of the money): the Worklist's amount filter hides them.`;
 }
 function batchRows(b, rows){
   if(!rows.length) return '<div class="muted">No open work inside a filing window.</div>';
@@ -134,12 +139,12 @@ const WL_STATUSES = [['open,in_progress','To do and started'],['open','To do'],[
 async function worklistTab(v){
   const b = await brief();
   const key = 'worklist';
-  const f = Object.assign({kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:''}, state.filt[key]||{});
+  const f = Object.assign({kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:'', min:''}, state.filt[key]||{});
   const page = state.page[key]||0, limit = 50;
   const typed = String(f.q||'').slice(0,200);
   let sent = ''; try { sent = encodeURIComponent(typed); } catch(e){ sent = encodeURIComponent(typed.replace(/[\uD800-\uDFFF]/g,'')); }
   const find = Object.assign({cache:'no-store'}, sent ? {headers:{'X-Search':sent}} : {});
-  const scope = {category:'denial,bundling,downcoding,underpayment', live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid};
+  const scope = {category:'denial,bundling,downcoding,underpayment', live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min};
   const [res, cnt] = await Promise.all([api('/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit, offset:page*limit})), find),
                                         api('/api/worklist/counts?'+qs(scope), find)]);
   state.worklist = res.items.map(r=>r.finding_id);
@@ -157,6 +162,7 @@ async function worklistTab(v){
       ${sel('payer', 'Payer', [['','Any payer'], ...payers.map(p=>[p,p])], f.payer)}
       ${sel('deadline', 'Filing date', WL_DEADLINES, f.deadline)}
       ${sel('status', 'Status', WL_STATUSES, f.status)}
+      ${sel('min', 'Amount', [['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']], f.min)}
       ${sel('sort', 'Order', [['deadline','Soonest deadline first'],['shortfall','Largest amount first'],['payer','By payer']], f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, member ID, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}">
       ${chips.join('')}
@@ -167,7 +173,7 @@ async function worklistTab(v){
       <button class="ghost" id="wlCsv">Export CSV</button></div>
     <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item on this page"></th><th>Closes</th><th>${showPhi()?'Patient':'Patient'}</th><th>Payer</th><th>What happened</th><th class="num">Amount</th><th>Status</th></tr></thead>
     <tbody>${res.items.map(r=>{ const due = r.next_deadline || r.appeal_deadline, c = closesText(due), lb = labelOf(b, r.signal), est = /not confirmed/.test(r.deadline_basis||'');
-      const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${r.window_claims} ${r.window_claims===1?'claim':'claims'} in range, of ${money2(r.shortfall_cents)}</div>` : `<b>${money2(r.shortfall_cents)}</b>`;
+      const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${r.window_claims} ${r.window_claims===1?'claim':'claims'} in range, of ${money2(r.shortfall_cents)}</div>` : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
       return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}"><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
         <td class="day"><span class="${c.cls}" title="${esc(due?('File by '+due+(est?' (estimated rule)':'')):'No filing date')}">${esc(c.text)}${est&&due?'<sup class="muted">*</sup>':''}</span><div class="small muted">${esc(due||'')}${r.next_deadline&&r.next_deadline!==r.appeal_deadline?' (first claim)':''}</div></td>
         <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
@@ -215,7 +221,7 @@ function whatToDoHtml(f){
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
   return `<div class="todo-box"><div class="todo-top">${kindBadge(b, kk)}<span class="${c.cls}">${due ? `File by ${longDate(due)} (${esc(c.text)})${est?', estimated rule':''}${open.length>1?`; its last claim by ${longDate(f.appeal_deadline)}`:''}` : 'No filing date'}</span>
       ${i>=0 ? `<span class="muted small">Item ${i+1} of ${ids.length} on this page</span>` : ''}</div>
-    <div class="todo-what"><b>${esc(lb.label)}.</b> ${money2(f.shortfall_cents)} at stake.</div>
+    <div class="todo-what"><b>${esc(lb.label)}.</b> ${f.shortfall_cents ? money2(f.shortfall_cents)+' at stake.' : 'The amount is not known: this payer has no usual rate for the code to compare with.'}</div>
     ${f.carc_text ? `<div class="small muted">Payer's reason: ${esc(f.carc)} ${esc(f.carc_text)}${f.rarc_text?' · '+esc(f.rarc)+' '+esc(f.rarc_text):''}</div>` : ''}
     <div class="todo-next"><b>What to do:</b> ${esc(next)}</div>
     <div class="small muted">You need: ${esc(k.needs||'')}</div>

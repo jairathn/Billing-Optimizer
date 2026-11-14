@@ -459,8 +459,13 @@ def _search_text(request: Request | None, q: str | None) -> str | None:
 
 
 def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None,
-             patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0):
+             patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0, min_dollars: int = 0):
     where, params = [], []
+    if min_dollars:
+        # the worklist's amount filter hides items known to be worth less (small items are a third of the list and little of the
+        # money); an item whose value is not known stays, since it may be large
+        where.append("NOT (COALESCE(shortfall_cents,0) > 0 AND shortfall_cents < ?)")
+        params.append(int(min_dollars) * 100)
     if live:
         where.append("COALESCE(stale,0)=0")     # what the current rules still find, as the home screen counts it
     if paid_days:
@@ -616,9 +621,9 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
              provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
              patient_of: Optional[str] = Query(None, max_length=200), sort: str = "shortfall", limit: int = Query(100, ge=1, le=2000),
              offset: int = Query(0, ge=0, le=10**9), kind: Optional[str] = Query(None, max_length=20), live: int = Query(0, ge=0, le=1),
-             paid: int = Query(0, ge=0, le=3650), request: Request = None, _: str = Depends(require_auth)):
+             paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind, bool(live), paid)
+                         _extra(request), patient_of, kind, bool(live), paid, min)
     delta, each = _pattern_cents(w, params, deadline)
     due, order_params = "appeal_deadline", []
     if each and sort in ("deadline", "payer"):
@@ -656,10 +661,10 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                  status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
                  patient_of: Optional[str] = Query(None, max_length=200), kind: Optional[str] = Query(None, max_length=20),
-                 live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650), request: Request = None,
+                 live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), request: Request = None,
                  _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind, bool(live), paid)
+                         _extra(request), patient_of, kind, bool(live), paid, min)
     data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
     # a routine-rate finding is about many claims: list them, each with its own filing deadline
     pattern = {r["finding_id"]: r["evidence"] for r in rows("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'")} \
@@ -1155,12 +1160,12 @@ def brief(_: str = Depends(require_auth)):
 @app.get("/api/worklist/counts")
 def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None, status: str = "open", deadline: Optional[str] = None,
                     q: Optional[str] = None, signal: Optional[str] = None, live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650),
-                    request: Request = None, _: str = Depends(require_auth)):
+                    min: int = Query(0, ge=0, le=10**6), request: Request = None, _: str = Depends(require_auth)):
     """Items and dollars for each kind of work under the worklist's other filters, so each tab counts what a click on it
     opens. Counts only: no patient, claim or date."""
     from .insights import WORK_TYPES, work_type
     w, params = _filters(signal, category, payer, None, status, None, None, _search_text(request, q), None, None, deadline, None, None,
-                         None, None, bool(live), paid)
+                         None, None, bool(live), paid, min)
     out = {t["key"]: {"key": t["key"], "n": 0, "cents": 0} for t in WORK_TYPES}
     for r in rows(f"SELECT signal, actionable, carc, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w} GROUP BY 1,2,3", tuple(params)):
         k = out[work_type(r["signal"], r["actionable"], r["carc"])]
