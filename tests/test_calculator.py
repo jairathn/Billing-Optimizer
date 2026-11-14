@@ -21,7 +21,7 @@ from remitwatch import activity, calculator  # noqa: E402
 from remitwatch.detect import ensure_schema  # noqa: E402
 from remitwatch.mpfs import CONVERSION_FACTOR, MPFS, medicare_amount  # noqa: E402
 
-DOC, PA, IDLE = "1000000001", "1000000002", "1000000003"
+DOC, PA, IDLE, GEN, RAD = "1000000001", "1000000002", "1000000003", "1000000004", "1000000005"
 PW, OWNER = "correct-horse-battery-7", "owner-staple-orbit-42"
 NODE = shutil.which("node")
 MONTHS = ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06"]
@@ -44,7 +44,8 @@ def _db(tmp_path) -> str:
     c.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (activity.INFO_KEY, json.dumps({"version": activity.ACTIVITY_VERSION, "built_at": "2026-07-01T00:00:00+00:00"})))
     c.executemany("INSERT INTO provider_roster (provider_id, name, kind, tier, role) VALUES (?,?,?,?,?)",
                   [(DOC, "BRAVO BOB", "person", "physician", "Doctor"), (PA, "ALPHA ANN", "person", "nonphysician", "Physician Assistant"),
-                   (IDLE, "CHARLIE CAL", "person", "physician", "Doctor")])
+                   (IDLE, "CHARLIE CAL", "person", "physician", "Doctor"), (GEN, "DELTA DEE", "person", "physician", "Doctor"),
+                   (RAD, "ECHO ED", "person", "physician", "Doctor")])
     # clinic days: the physician 16 days a month in KY, the PA 18 days (4 of them in IN); the third clinician two days
     days = []
     for m in MONTHS:
@@ -53,10 +54,16 @@ def _db(tmp_path) -> str:
         for dd in range(1, 19):
             days.append((PA, f"{m}-{dd:02d}", 22, "IN" if dd <= 4 else "KY"))
     days += [(IDLE, "2026-03-02", 6, "KY"), (IDLE, "2026-03-03", 6, "KY")]
+    # a general dermatologist (no Mohs) and a physician whose work is nearly all radiation, both with plenty of days
+    for m in MONTHS:
+        for dd in range(1, 13):
+            days.append((GEN, f"{m}-{dd:02d}", 25, "KY"))
+            days.append((RAD, f"{m}-{dd:02d}", 8, "KY"))
     c.executemany("INSERT INTO provider_days (provider_id, service_date, patients, biopsy_lesions, path_generated_cents, place) VALUES (?,?,?,?,?,?)",
                   [(p, d, n, 2.0 if p == DOC else 1.0, 6000 if p == DOC else 0, pl) for p, d, n, pl in days])
     rows = []
-    for who, plan in ((DOC, DOC_MONTH), (PA, PA_MONTH)):
+    for who, plan in ((DOC, DOC_MONTH), (PA, PA_MONTH), (GEN, {"99213": (200, 8500), "11102": (30, 8000)}),
+                      (RAD, {"77600": (100, 40000), "99213": (5, 8500)})):
         for m in MONTHS:
             for code, (u, per) in plan.items():
                 rows.append((who, m, code, activity.service_family(code), u, u, 0, u * per * 2, u * per, int(u * per * 0.85)))
@@ -143,11 +150,16 @@ def test_medicare_reference_follows_the_states_and_the_tier(db):
     assert doc["medicare"]["17311"]["2027"] == MPFS["2027"]["KY"]["17311"][0]
 
 
-def test_tier_average_and_clinician_list(db):
-    d = _calc(db, "physicians")
-    assert d["who"]["clinicians"] == 2 and d["schedule"]["clinicians_with_days"] == 2
-    # the pace is the full-time clinician's, not pulled down by two days of the third
+def test_role_averages_and_clinician_list(db):
+    d = _calc(db, "mohs")
+    # the Mohs surgeons' average: only the physician with Mohs on most days; not the one with two clinic days, not the
+    # general dermatologist, not the physician whose work is nearly all radiation
+    assert d["who"]["clinicians"] == 1 and d["who"]["members"] == ["BRAVO BOB"]
     assert d["schedule"]["days_per_week"] == _calc(db, DOC)["schedule"]["days_per_week"]
+    g = _calc(db, "general")
+    assert g["who"]["members"] == ["DELTA DEE"]
+    assert d["roles"] == {"mohs": 1, "general": 1, "apps": 1}
+    assert _calc(db, "physicians")["who"]["id"] == "mohs"          # the earlier name still works
     ids = {c["provider_id"] for c in d["clinicians"]}
     assert DOC in ids and PA in ids and IDLE not in ids
     assert _calc(db, "nobody") is None

@@ -47,7 +47,8 @@ K_RANGE = (0.25, 2.0)       # k outside this means the rates do not describe the
 MIN_CLINIC_DAYS = 10        # clinicians with fewer clinic days in the window are not offered on their own
 FULL_TIME_DAYS = 60         # clinic days in the window for a clinician to set the pace of a tier's average year
 AK_LESIONS_15_PLUS = 20     # lesions assumed for a patient billed 17004 (15 or more); used only to turn lesions into patients
-CORRECTABLE_KINDS = ("commercial", "medicare_advantage", "medicaid", "other")
+CORRECTABLE_KINDS = ("commercial", "medicare_advantage")     # Medicaid plans follow the state's schedule; 'other' is
+                                                             # workers' comp, auto and unknown payers
 LAYERED_WEIGHT = (0.21, 0.75)   # share of Mohs cases and of excisions closed in layers, practice-wide: used only to share a
                                  # clinician's layered repairs between the two (their own total is kept)
 APP_MEDICARE_SHARE = 0.85   # Medicare pays an NP or PA 85% of the physician amount when the service is billed under their own number
@@ -197,6 +198,19 @@ class Rates:
         self._pct[key] = out
         return out
 
+    def indexed(self, g: str, year: str) -> bool:
+        """Does this payer's schedule look like a flat percentage of Medicare (so next year it moves with Medicare's
+        amounts)? Medicare itself and Medicare Advantage plans: yes; others when their own rates sit within a narrow band
+        of Medicare across at least five codes."""
+        kind = self.kind.get(g)
+        if kind in ("medicare", "medicare_advantage"):
+            return True
+        ratios = sorted(v / m for (t, gg, code, y), v in self.r.items() if t == self.tier and gg == g and y == year
+                        for m in [self.medicare(code, year)] if m)
+        if len(ratios) < 5:
+            return False
+        return ratios[int(0.9 * (len(ratios) - 1))] - ratios[int(0.1 * (len(ratios) - 1))] <= 0.04
+
     def rate(self, g: str, code: str, year: str) -> tuple[int | None, str]:
         """(cents, how it was found): this payer's own usual rate; for Medicare, the published amount; the payer's own
         percentage of Medicare times Medicare's amount; last year's own rate; a physician's rate at the payer scaled to
@@ -230,20 +244,78 @@ class Rates:
 
 # --------------------------------------------------------------------------- the clinician's history
 
-def _group(conn, provider: str) -> tuple[list[str], str, dict]:
-    """The clinicians a request covers, their tier, and how to name them. 'physicians' and 'apps' are the practice's
-    average physician or APP: their days pooled, so a lever per clinic day is the average clinic day of that tier."""
+ROLES = {"mohs": ("physician", "Mohs surgeon"), "general": ("physician", "General dermatologist"), "apps": ("nonphysician", "APP")}
+ANCILLARY_SHARE_MAX = 0.8   # a clinician whose allowed is mostly pathology or radiation is left out of an average
+MOHS_PER_DAY_MIN = 1.0      # Mohs cases per clinic day that make a physician a Mohs surgeon for the averages
+
+
+def _profiles(conn, d0: str, d1: str, a: str, b: str) -> dict[str, dict]:
+    """Per clinician in the window: clinic days, Mohs cases, and the share of allowed in pathology and radiation."""
+    out: dict[str, dict] = defaultdict(lambda: {"days": 0, "mohs": 0.0, "allowed": 0, "ancillary": 0})
+    for pid, n in conn.execute("SELECT provider_id, COUNT(*) FROM provider_days WHERE service_date BETWEEN ? AND ? AND patients >= ? GROUP BY 1",
+                               (d0, d1, CLINIC_DAY_MIN)):
+        out[pid]["days"] = n
+    for pid, code, fam, units, items, al in conn.execute(
+            "SELECT provider_id, code, family, SUM(units), SUM(items), SUM(allowed_cents) FROM provider_services WHERE month BETWEEN ? AND ? GROUP BY 1, 2, 3",
+            (a, b)):
+        o = out[pid]
+        o["allowed"] += al or 0
+        if fam in ("pathology", "radiation"):
+            o["ancillary"] += al or 0
+        if activity.clean_code(code) in ("17311", "17313"):
+            o["mohs"] += units or items or 0
+    return out
+
+
+def _group(conn, provider: str, d0: str, d1: str, a: str, b: str, window_months: int) -> tuple[list[str], str, dict]:
+    """The clinicians a request covers, their tier, and how to name them. 'mohs', 'general' and 'apps' are the practice's
+    average Mohs surgeon, general dermatologist or APP: only clinicians of that role who held clinic on a fair number of
+    days in the window and whose work is not mostly pathology or radiation, their clinic days pooled."""
     roster = {r["provider_id"]: dict(r) for r in conn.execute("SELECT * FROM provider_roster WHERE kind='person'")}
-    if provider in ("physicians", "apps"):
-        tier = "physician" if provider == "physicians" else "nonphysician"
-        ids = [p for p, r in roster.items() if r.get("tier") == tier]
-        return ids, tier, {"id": provider, "name": "Average physician" if tier == "physician" else "Average APP", "tier": tier,
-                           "role": None, "clinicians": len(ids)}
+    if provider == "physicians":
+        provider = "mohs"
+    if provider in ROLES:
+        tier, label = ROLES[provider]
+        prof = _profiles(conn, d0, d1, a, b)
+        need = full_time_days(window_months)
+        ids = []
+        for pid, r in roster.items():
+            p = prof.get(pid)
+            if r.get("tier") != tier or not p or p["days"] < need:
+                continue
+            if p["allowed"] and p["ancillary"] / p["allowed"] > ANCILLARY_SHARE_MAX:
+                continue
+            mohs_day = p["mohs"] / p["days"] if p["days"] else 0
+            if provider == "mohs" and mohs_day < MOHS_PER_DAY_MIN or provider == "general" and mohs_day >= MOHS_PER_DAY_MIN:
+                continue
+            ids.append(pid)
+        names = sorted(roster[i].get("name") or i for i in ids)
+        return ids, tier, {"id": provider, "name": f"{label} (average)", "tier": tier, "role": label, "clinicians": len(ids), "members": names}
     r = roster.get(provider)
     if not r:
         return [], "physician", {}
     tier = r.get("tier") if r.get("tier") in ("physician", "nonphysician") else "physician"
     return [provider], tier, {"id": provider, "name": r.get("name"), "tier": tier, "role": r.get("role"), "clinicians": 1}
+
+
+def full_time_days(window_months: int) -> int:
+    """Clinic days in the window for a clinician to count as working there regularly: 60 a year, pro rata."""
+    return max(20, round(FULL_TIME_DAYS * window_months / 12))
+
+
+def _run_window(conn, month_from: str | None, month_to: str | None, months: int) -> tuple[dict, str, str]:
+    """The months of service the calculator reads: what was asked for, or the last `months` complete months (the run-rate
+    now; a longer window reaches back past changes such as January 2026, when skin-substitute payment collapsed)."""
+    if month_from or month_to:
+        return activity._window(conn, month_from, month_to)
+    cov = activity.coverage(conn)
+    b = cov.get("default_to") or cov.get("last_month")
+    if not b:
+        return activity._window(conn, None, None)
+    a = _month_plus(b, -(max(1, months) - 1))
+    if cov.get("first_month") and a < cov["first_month"]:
+        a = cov["first_month"]
+    return cov, a, b
 
 
 def _in(ids: list[str]) -> str:
@@ -255,14 +327,21 @@ def _month_plus(month: str, k: int) -> str:
     return f"{y + m // 12:04d}-{m % 12 + 1:02d}"
 
 
-def _schedule(conn, ids: list[str], d0: str, d1: str, window_weeks: float) -> dict:
-    """Clinic days in the window and how they spread over weeks, pooled over the clinicians."""
+def _schedule(conn, ids: list[str], d0: str, d1: str, window_weeks: float, full_days: int = 60, pace_from: str | None = None) -> dict:
+    """Clinic days in the window, and the pace of the year: days a week and weeks a year over the twelve months ending
+    with the window (a shorter window would miss the holiday weeks), pooled over the clinicians."""
     days = [(r[0], r[1]) for r in conn.execute(
         f"SELECT provider_id, service_date FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
         (*ids, d0, d1, CLINIC_DAY_MIN))]
+    p0 = pace_from or d0
+    pace_weeks = (date.fromisoformat(d1[:8] + "28") - date.fromisoformat(p0)).days / 7.0 + 0.6 if pace_from else window_weeks
     per: dict[str, list] = defaultdict(list)
-    for p, d in days:
+    for p, d in conn.execute(
+            f"SELECT provider_id, service_date FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
+            (*ids, p0, d1, CLINIC_DAY_MIN)):
         per[p].append(d)
+    window_weeks = pace_weeks
+    full_days = round(full_days * pace_weeks / max(1.0, activity._weeks(d0[:7], d1[:7]))) if pace_from else full_days
 
     def pace(ds: list) -> tuple[float, float]:
         wk = len({date.fromisoformat(d).isocalendar()[:2] for d in ds})
@@ -270,11 +349,18 @@ def _schedule(conn, ids: list[str], d0: str, d1: str, window_weeks: float) -> di
 
     # one clinician: their own pace. A tier: the median of the clinicians who held a fair number of clinic days, so a
     # part-timer or someone who joined late does not shorten the average year
-    full = [pace(ds) for ds in per.values() if len(ds) >= FULL_TIME_DAYS] or [pace(ds) for ds in per.values()]
+    full = [pace(ds) for ds in per.values() if len(ds) >= full_days] or [pace(ds) for ds in per.values()]
     dpw = statistics.median(x[0] for x in full) if full else 0.0
     wpy = statistics.median(x[1] for x in full) if full else 0.0
+    # what a clinic day brought in (allowed for the clinician's own services seen in clinic, before pathology, radiation and
+    # products): where a target per day sits against this clinician's own days
+    vals = sorted(r[0] for r in conn.execute(
+        f"SELECT clinic_allowed_cents FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
+        (*ids, d0, d1, CLINIC_DAY_MIN)) if r[0] is not None)
+    q = (lambda f: vals[min(len(vals) - 1, int(f * (len(vals) - 1) + 0.5))] if vals else None)
     return {"clinic_days": len(days), "clinicians_with_days": len(per),
-            "days_per_week": round(dpw, 2), "weeks_per_year": round(wpy, 1), "clinic_days_per_year": round(dpw * wpy, 1)}
+            "days_per_week": round(dpw, 2), "weeks_per_year": round(wpy, 1), "clinic_days_per_year": round(dpw * wpy, 1),
+            "clinic_day_allowed": {"p25": q(0.25), "p50": q(0.5), "p75": q(0.75), "p90": q(0.9), "n": len(vals)}}
 
 
 def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, dict]:
@@ -311,15 +397,18 @@ def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, d
     return out, {"source": source, "kinds": kinds}
 
 
-def calculator(conn: sqlite3.Connection, provider: str = "physicians", month_from: str | None = None, month_to: str | None = None) -> dict | None:
+def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str | None = None, month_to: str | None = None,
+               months: int = 6) -> dict | None:
     conn.row_factory = sqlite3.Row
-    ids, tier, who = _group(conn, provider)
+    cov, a, b = _run_window(conn, month_from, month_to, months)
+    d0, d1 = f"{a}-01", f"{b}-31"
+    window_months = (int(b[:4]) - int(a[:4])) * 12 + int(b[5:7]) - int(a[5:7]) + 1
+    ids, tier, who = _group(conn, provider, d0, d1, a, b, window_months)
     if not who:
         return None
-    cov, a, b = activity._window(conn, month_from, month_to)
-    d0, d1 = f"{a}-01", f"{b}-31"
     window_weeks = activity._weeks(a, b)
-    sched = _schedule(conn, ids, d0, d1, window_weeks) if ids else {"clinic_days": 0}
+    pace_from = f"{_month_plus(b, -11)}-01" if window_months < 12 else None
+    sched = _schedule(conn, ids, d0, d1, window_weeks, full_time_days(window_months), pace_from) if ids else {"clinic_days": 0}
     states = _states(conn, ids, d0, d1)
     rates = Rates(conn, tier, states)
     year = rates.year
@@ -408,7 +497,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "physicians", month_fro
     for g in sorted(groups_used):
         kind = kinds.get(g) or "other"
         groups[g] = {"kind": kind, "paid_share": paid_share.get(kind), "correctable": kind in CORRECTABLE_KINDS,
-                     "share": round(mix.get("_overall", {}).get(g, 0.0), 4)}
+                     "share": round(mix.get("_overall", {}).get(g, 0.0), 4), "indexed": rates.indexed(g, year)}
     fallback_paid = None
     if paid_share:
         tot_a = sum(1 for _ in paid_share)
@@ -424,6 +513,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "physicians", month_fro
         by_family[s["family"]][0] += s["allowed"]
         by_family[s["family"]][1] += s["paid"]
     return {
+        "roles": {role: len(_group(conn, role, d0, d1, a, b, window_months)[0]) for role in ROLES},
         "who": who, "tier": tier, "from": a, "to": b, "window_weeks": round(window_weeks, 1), "rate_year": year, "years": years,
         "next_year": MPFS_YEARS[-1] if MPFS_YEARS[-1] > year else None, "states": states,
         "clinicians": [dict(r) for r in conn.execute(
@@ -558,15 +648,19 @@ def paid_class(family: str | None) -> str:
 
 
 def other_group(code: str) -> str:
-    """Where a code the levers do not describe belongs on the page: radiation, skin substitutes (the product and its
-    application), pathology, drugs, or the rest."""
+    """Where a code the levers do not describe belongs. The clinician's own other procedures ('rest': shaves, ED&C,
+    injections, skin-substitute application...) count as their production; radiation, skin-substitute products,
+    pathology, drugs and staff services ('nurse': light treatments, injections given by staff) are the practice's
+    ancillary and product revenue, shown apart."""
     fam = activity.service_family(code)
     if fam == "radiation":
         return "radiation"
-    if fam == "skin_substitute" or (len(code) == 5 and code.isdigit() and (15271 <= int(code) <= 15278 or 15002 <= int(code) <= 15005)):
+    if fam == "skin_substitute":
         return "skin"
     if fam == "pathology":
         return "path"
     if fam == "drug":
         return "drug"
+    if fam in ("phototherapy", "therapy_injection"):
+        return "nurse"
     return "rest"

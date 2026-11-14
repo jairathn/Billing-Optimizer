@@ -81,7 +81,7 @@ function payload() {
 //    below it: the closure is halved
 {
   const d = payload();
-  const x = Object.assign(M.defaults(d), { mohs_cases: 1, mohs_hn: 1, mohs_stages: 1, fg_share: 1, lay_mohs: 0, visits: 0, bx_lesions: 0, other_radiation: 0 });
+  const x = Object.assign(M.defaults(d), { mohs_cases: 1, mohs_hn: 1, mohs_stages: 1, fg_share: 1, lay_mohs: 0, visits: 0, bx_patients: 0, other_radiation: 0 });
   const a = M.allowedByCode(d, x, '2026', false);
   ok('mohs_with_flap_halves_first_stage', near(a['17311']['Medicare KY'], 0.6 * 30000) && near(a['14040']['Medicare KY'], 0.6 * 70000),
      JSON.stringify([a['17311'], a['14040']]));
@@ -103,10 +103,10 @@ function payload() {
 // 3. AK coding: 17000 + 17003 for each lesion after the first, 17004 alone at 15 or more
 {
   const d = payload();
-  const x = Object.assign(M.defaults(d), { ak_lesions: 10, ak_per_patient: 5, ak_15: 0 });
+  const x = Object.assign(M.defaults(d), { ak_patients: 2, ak_per_patient: 5, ak_15: 0 });
   const u = M.units(d, x);
   ok('ak_under_15', near(u['17000'], 2) && near(u['17003'], 8) && !u['17004'], JSON.stringify([u['17000'], u['17003'], u['17004']]));
-  const y = Object.assign({}, x, { ak_lesions: 40, ak_15: 1 });
+  const y = Object.assign({}, x, { ak_patients: 2, ak_15: 1 });
   const v = M.units(d, y);
   ok('ak_15_plus', near(v['17004'], 2) && !v['17000'] && !v['17003'], JSON.stringify([v['17000'], v['17003'], v['17004']]));
 }
@@ -119,34 +119,44 @@ function payload() {
   const cal = M.calibrate(d);
   const ks = Object.entries(cal.info).filter(([c, i]) => i.from === 'own').map(([c, i]) => i.k);
   ok('k_recovers_history', ks.length > 5 && ks.every(k => near(k, 0.9, 1e-9)), JSON.stringify(ks));
-  const r = M.evaluate(d, x0, cal);
+  const r = M.evaluate(d, Object.assign({}, x0, { year: '2026' }), cal);
   const sumActual = Object.values(d.codes).reduce((t, cc) => t + cc.allowed_cents, 0);
-  ok('now_equals_history_scaled', near(r.allowed, sumActual * x0.days_per_week * x0.weeks_per_year / d.schedule.clinic_days, 1e-6), r.allowed + ' vs ' + sumActual);
+  const got = r.production.allowed + r.ancillary.allowed;
+  ok('now_equals_history_scaled', near(got, sumActual * x0.days_per_week * x0.weeks_per_year / d.schedule.clinic_days, 1e-6), got + ' vs ' + sumActual);
 }
 
 // 5. a corrected contract is raised to the target share of Medicare on the codes it pays below it, and only those
 {
   const d = payload(), x = M.defaults(d);
-  ok('correct_raises_below', M.price(d, Object.assign({}, x, { corrected: { 'Plan A': true } }), '17311', 'Plan A', '2026', true) === 60000, '');
-  ok('correct_leaves_above', M.price(d, Object.assign({}, x, { corrected: { 'Plan A': true } }), '99214', 'Plan A', '2026', true) === 14000, '');
-  ok('correct_target_share', M.price(d, Object.assign({}, x, { corrected: { 'Plan A': true }, target_pct: 1.1 }), '17311', 'Plan A', '2026', true) === 66000, '');
+  const fx = (o) => Object.assign({}, x, { corrected: { 'Plan A': true } }, o);
+  // whole contract at one share of Medicare: codes below go up, codes above come down
+  ok('contract_mode_rebases', M.price(d, fx({ fix_mode: 'contract' }), '17311', 'Plan A', '2026', true) === 60000
+     && M.price(d, fx({ fix_mode: 'contract' }), '99214', 'Plan A', '2026', true) === 12800, '');
+  // a floor only raises
+  ok('floor_mode_raises_only', M.price(d, fx({ fix_mode: 'floor' }), '17311', 'Plan A', '2026', true) === 60000
+     && M.price(d, fx({ fix_mode: 'floor' }), '99214', 'Plan A', '2026', true) === 14000, '');
+  // the visit schedule only: E/M to the target, procedures untouched
+  ok('visits_mode_em_only', M.price(d, fx({ fix_mode: 'visits' }), '99213', 'Plan A', '2026', true) === 9000
+     && M.price(d, fx({ fix_mode: 'visits' }), '17311', 'Plan A', '2026', true) === 54000, '');
+  ok('per_payer_target', M.price(d, fx({ fix_mode: 'floor', targets: { 'Plan A': 1.1 } }), '17311', 'Plan A', '2026', true) === 66000, '');
   ok('medicare_not_correctable', M.price(d, Object.assign({}, x, { corrected: { 'Medicare KY': true }, target_pct: 1.5 }), '17311', 'Medicare KY', '2026', true) === 60000, '');
 }
 
 // 6. collections: payers' share plus the collected share of the patient's; Medicaid balances count for nothing
 {
-  const d = payload(); d.payers['State Plan'] = { kind: 'medicaid', correctable: true }; d.paid_share.medicaid = 0.4;
-  const x = Object.assign(M.defaults(d), { patient_collect: 0.5 });
+  const d = payload(); d.payers['State Plan'] = { kind: 'medicaid', correctable: false }; d.paid_share.medicaid = 0.4;
+  const x = Object.assign(M.defaults(d), { q: { commercial: 0.5, medicaid: 0.9 } });
   ok('collect_commercial', near(M.collectShare(d, x, 'Plan A', '99213'), 0.7 + 0.3 * 0.5), '');
   ok('collect_medicaid_no_balance', near(M.collectShare(d, x, 'State Plan', '99213'), 0.4), '');
 }
 
 // 7. 2027: Medicare moves with its amounts; G2211 becomes 16% of the visit at Medicare and keeps its own share elsewhere
 {
-  const d = payload(), x = Object.assign(M.defaults(d), { year: '2027' });
+  const d = payload(), x = Object.assign(M.defaults(d), { year: '2027', indexed: { 'Plan A': false } });
+  ok('plan_a_indexed_follows', near(M.price(d, Object.assign({}, x, { indexed: { 'Plan A': true } }), '17311', 'Plan A', '2027', false), 54000 * 0.95, 1e-3), '');
   ok('medicare_2027_amount', near(M.price(d, x, '17311', 'Medicare KY', '2027', false), 57000), M.price(d, x, '17311', 'Medicare KY', '2027', false));
   ok('commercial_2027_unchanged', M.price(d, x, '17311', 'Plan A', '2027', false) === 54000, '');
-  const a = M.allowedByCode(d, Object.assign({}, x, { mohs_cases: 0, bx_lesions: 0, other_radiation: 0 }), '2027', false);
+  const a = M.allowedByCode(d, Object.assign({}, x, { mohs_cases: 0, bx_patients: 0, other_radiation: 0 }), '2027', false);
   const visit = M.visitPrice(d, x, 'Medicare KY', '2027', false);
   ok('g2211_b1_at_medicare', near(a['G2211']['Medicare KY'], 3 * 0.5 * 0.16 * visit), JSON.stringify(a['G2211']) + ' visit ' + visit);
   ok('g2211_commercial_share_kept', near(a['G2211']['Plan A'], 3 * 0.5 * 1500), JSON.stringify(a['G2211']));
@@ -155,8 +165,8 @@ function payload() {
 // 8. Medicare's 2027 same-day rule on a visit with biopsies: 20% off every line but the highest
 {
   const d = payload();
-  const x = Object.assign(M.defaults(d), { year: '2027', mohs_cases: 0, visits: 10, bx_lesions: 3, bx_per_patient: 1.5, bx_visit_share: 1,
-                                           ak_lesions: 0, est_high: 0, ma_same_day: false, cut_add_ons: true, other_radiation: 0, days_per_week: 1, weeks_per_year: 1 });
+  const x = Object.assign(M.defaults(d), { year: '2027', mohs_cases: 0, visits: 10, bx_patients: 2, bx_per_patient: 1.5, bx_visit_share: 1,
+                                           ak_patients: 0, est_high: 0, ma_same_day: false, cut_add_ons: true, other_radiation: 0, days_per_week: 1, weeks_per_year: 1 });
   const cal = { k: {}, info: {} };
   const r = M.evaluate(d, x, cal);
   const e = 9000 * 0.95, b1 = 8700 * 0.95, b2 = 4500 * 0.95 * 0.5;    // 2027 Medicare amounts; half an add-on per patient
@@ -177,6 +187,14 @@ function payload() {
   const base = M.evaluate(d, x, cal).totalCollections;
   const g = M.goalSeek(d, x, base + 3 * m.value, cal).find(r => r.key === 'mohs_cases');
   ok('goal_seek_counts_steps', near(g.needed, 3, 1e-6), g.needed);
+}
+
+// 10. radiation is the practice's ancillary revenue: apart from the clinician's production, counted only when asked
+{
+  const d = payload(), x = M.defaults(d), cal = M.calibrate(d);
+  const r = M.evaluate(d, x, cal), r2 = M.evaluate(d, Object.assign({}, x, { include_ancillary: true }), cal);
+  ok('ancillary_apart', r.ancillary.allowed > 0 && near(r.totalCollections, r.collections) && near(r2.totalCollections, r.collections + r.ancillaryCollections), '');
+  ok('goal_seek_volume_only', M.goalSeek(d, x, 1e9, cal).every(m => m.kind === 'volume'), '');
 }
 
 process.stdout.write(JSON.stringify(out));
