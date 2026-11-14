@@ -118,7 +118,7 @@ function batchRows(b, rows){
     return `<div class="batch"><div class="b-main">${kindBadge(b, x.kind)} <b>${esc(x.payer_group)}</b>
         <div class="small muted">You need: ${esc(k.needs||'')}${x.top_code?` · mostly ${esc(x.top_code)}`:''}</div></div>
       <div class="b-num"><b>${money(x.cents)}</b><div class="small muted">${pl(x.n, 'item')} · ${pl(x.claims, 'claim')}</div></div>
-      <div class="b-due"><span class="${c.cls}">${esc(c.text === 'closes today' ? 'first one closes today' : 'first one closes ' + c.text)}</span><div class="small muted">${x.due14_n} close within 14 days</div></div>
+      <div class="b-due"><span class="${c.cls}">${esc(c.text === 'closes today' ? 'first one closes today' : 'first one closes ' + c.text)}</span><div class="small muted">${x.due14_n} ${x.due14_n===1?'closes':'close'} within 14 days</div></div>
       <div class="b-prog small muted">${done ? [x.started_n ? `${x.started_n} started` : '', x.sent_n ? `${x.sent_n} sent` : ''].filter(Boolean).join(' · ') : 'not started'}</div>
       <button data-batch="${i}">Start</button></div>`; }).join('');
 }

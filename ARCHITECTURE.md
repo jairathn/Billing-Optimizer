@@ -95,7 +95,9 @@ Every number on Today is a link to a worklist filter that lists exactly the item
 - The kind of work comes from `insights.work_type`, and `insights.kind_sql` is the same rule as SQL for the `kind` filter: by signal, a whole claim denied by its action and reason code (fix and resend, authorization, records, coding rules, else check first), any other signal by its action.
 - A routine-rate pattern (SECOND_RATE) stands for many claims with their own filing dates (`evidence.deadlines`). It is in a date range when one of its claims is, with the cents of those claims only; the list shows the first such claim's date and sorts by it (`api._pattern_cents`).
 - Items with no filing date are a person's decision: those paid in the last 120 days are "to decide" (`deadline=decide`), the rest are counted as undated (`deadline=none`). Missed means a window that closed in the last 30 days with the item still to do (`deadline=missed`). Denial causes count findings by payment date over the last 90 days (`paid=90`).
-- `/api/worklist/counts` gives each kind's count and dollars under the worklist's other filters, so a tab counts what a click on it opens.
+- Items with no filing date older than the ones to decide open with `deadline=older`. The amount filter (`min`, in dollars) hides items known to be worth less; an item whose value is not known (no usual rate to compare with) stays, since it may be large. Soonest first lists items still inside their window by date, then closed windows, then undated items.
+- `/api/worklist/counts` gives each kind's count and dollars under the worklist's other filters, so a tab counts what a click on it opens. `/api/findings.csv?view=worklist` is the same list in the page's words.
+- A Medicare Part B fix carries `next_step` in the finding detail (`appeals.next_step`): a reopening, a new claim or a redetermination, read from the filing basis the detector wrote, so the What to do box, the instructions and the letter say the same thing.
 
 ## Scheduling
 
