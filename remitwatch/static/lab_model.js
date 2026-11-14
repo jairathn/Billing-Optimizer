@@ -156,7 +156,7 @@
   // cost, one_time}, notes[], needs[]} where minutes and encounters are per clinic day and money is a year, in cents
   const STRATEGIES = [
     {
-      id: 'stage', title: 'Stage the bigger closures to a later day', tier: 'high',
+      id: 'stage', title: 'Stage the bigger closures to a later day', tier: 'high', applies: (d, x) => x.mohs_cases > 0 && Object.keys(d.levers.flap_graft.mix).length > 0,
       why: "When a flap or graft is done the same day as the Mohs first stage, Medicare's multiple-procedure rule pays the first stage at half. Done on another day, both are paid in full, at the cost of a second visit.",
       compliance: "CMS, in the 2027 final rule: \"we do not find it appropriate to schedule medical services for patients to maximize payment, which would create undue burden and potential medical risk for beneficiaries.\" Stage a closure when the wound or the patient calls for it, and say why in the note. Staging for the fee is a pattern payers and auditors look for.",
       params: [['share', 'Share of the bigger closures done on a later day', 0, 1, 0.05, 'pct', 0.2],
@@ -200,7 +200,7 @@
       },
     },
     {
-      id: 'asc', title: 'Do Mohs cases with a flap or graft in the ASC', tier: 'medium',
+      id: 'asc', title: 'Do Mohs cases with a flap or graft in the ASC', tier: 'medium', applies: (d, x) => x.mohs_cases > 0,
       why: "In an ASC the surgeon is paid Medicare's facility amount, lower than the office, and the ASC is paid a facility fee. For a case closed with a flap or graft the facility fee is large (the closure is a full surgical procedure there); for a Mohs case alone or with a layered repair it is small, and the office pays more.",
       compliance: "Choose the site for the patient. A physician-owned ASC needs its ownership to meet the anti-kickback safe harbor for ASCs, and commercial payers may need the site approved first.",
       params: [['cases', 'Mohs cases a week moved to the ASC', 0, 40, 0.5, 'n1', 2],
@@ -239,7 +239,7 @@
       },
     },
     {
-      id: 'app_shift', title: 'Hand routine follow-up visits to an APP', tier: 'low',
+      id: 'app_shift', title: 'Hand routine follow-up visits to an APP', tier: 'low', applies: d => d.tier === 'physician',
       why: "Each established visit the physician hands to an APP frees physician minutes for work only the physician can do, such as Mohs. The APP's visit is paid at the APP's rate (Medicare: 85%).",
       compliance: "Billed under the APP's own number it is ordinary practice. Billing it under the physician (incident to) needs the physician's plan of care, an established problem and the physician in the office suite.",
       params: [['visits', 'Established visits a day handed to an APP', 0, 20, 0.5, 'n1', 3],
@@ -281,6 +281,7 @@
         const med = kindShare(d, 'est_visit', ['medicare']);
         const per = med * clamp(p.eligible, 0, 1) * clamp(p.capture, 0, 1);
         const cur = (d.levers.visits.g2211_per_visit || 0);
+        if (per <= cur) return { x, extra: {}, notes: [`Already billed on ${(cur * 100).toFixed(1)} of every 100 visits, at or above this target.`], needs: [] };
         return { x: Object.assign({}, x, { g2211_scale: cur > 0 ? per / cur : 0 }), extra: {},
                  notes: [cur > 0 ? `From ${(cur * 100).toFixed(1)} to ${(per * 100).toFixed(1)} add-ons per 100 visits.` : 'This clinician has not billed it: the page cannot price it from history.'], needs: [] };
       },
@@ -372,6 +373,7 @@
       const c = chosen && chosen[S.id];
       if (!c || !c.on) continue;
       if (S.only === 'next' && !next) { steps.push({ id: S.id, title: S.title, skipped: 'Medicare\'s 2027 rules are not on: switch the calculator to Plan 2027.' }); continue; }
+      if (S.applies && !S.applies(d, cur)) { steps.push({ id: S.id, title: S.title, skipped: 'Does not apply to this clinician\'s work.' }); continue; }
       const params = Object.assign(paramDefaults(S), c.params || {});
       const r = S.apply(d, cur, A, params, cal) || { x: cur, extra: {} };
       const e = Object.assign({}, zero, r.extra || {});

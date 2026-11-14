@@ -76,7 +76,7 @@ async function labDraw(v){
 function labCard(S){
   const cs = state.calc, d = cs.data, c = (cs.lab.chosen || {})[S.id] || {}, p = Object.assign(LabModel.paramDefaults(S), c.params || {});
   const [tier, cls] = LAB_TIER[S.tier] || ['', ''];
-  const off = S.only === 'next' && cs.x.year !== d.next_year;
+  const off = (S.only === 'next' && cs.x.year !== d.next_year) || (S.applies && !S.applies(d, cs.x));
   const ctl = ([key, label, mn, mx, st, fmt]) => {
     const val = p[key];
     if(fmt === 'bool') return `<label class="small" style="display:block"><input type="checkbox" data-lab-p="${S.id}|${key}|bool" ${val?'checked':''}> ${esc(label)}</label>`;
@@ -88,7 +88,7 @@ function labCard(S){
   return `<div class="lab-card" data-lab-card="${S.id}">
     <label class="lab-head"><input type="checkbox" data-lab-on="${S.id}" ${c.on?'checked':''} ${off?'disabled':''}> <b>${esc(S.title)}</b>
       <span class="chip ${cls}">${esc(tier)}</span></label>
-    <div class="small muted">${esc(S.why)}${off ? ' Switch the Calculator to Plan ' + esc(d.next_year) + ' to use it.' : ''}</div>
+    <div class="small muted">${esc(S.why)}${off ? (S.applies && !S.applies(d, cs.x) ? ' Not for this clinician\'s work.' : ' Switch the Calculator to Plan ' + esc(d.next_year) + ' to use it.') : ''}</div>
     <div class="lab-impact small" data-lab-impact="${S.id}"></div>
     <details><summary class="small">Settings${S.compliance ? ' and compliance' : ''}</summary>
       ${S.params.map(ctl).join('')}
