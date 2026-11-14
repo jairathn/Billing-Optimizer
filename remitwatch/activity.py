@@ -47,6 +47,9 @@ from datetime import date, datetime, timedelta, timezone
 from .codes import DRUG_RE, RADIATION_CODES, SKIN_SUBSTITUTE_RE, payer_group_kind
 
 ACTIVITY_VERSION = "4"      # bump when the tables or the way they are filled change; they are then rebuilt
+# Tables built by these versions stay readable until the next run rebuilds them: version 4 only added columns (Medicare
+# visit counts, pathology read by the biopsy's own clinician), which the readers treat as not measured when absent.
+READABLE_VERSIONS = {"3", ACTIVITY_VERSION}
 CLINIC_DAY_MIN = 5          # a day counts as a clinic day when the clinician saw at least this many patients
 COMPLETE_SHARE = 0.97       # a month of service is treated as complete when this share of its visits has been paid
 LAG_DAYS = 150              # how far the service-to-payment curve is kept
@@ -362,7 +365,8 @@ def status(conn: sqlite3.Connection) -> dict:
         err = conn.execute("SELECT value FROM meta WHERE key=?", (ERROR_KEY,)).fetchone()
     except sqlite3.Error:
         err = None
-    return {"ready": meta.get("version") == ACTIVITY_VERSION, "built_at": meta.get("built_at"), "error": err[0] if err else None}
+    return {"ready": meta.get("version") in READABLE_VERSIONS, "built_at": meta.get("built_at"), "error": err[0] if err else None,
+            "current": meta.get("version") == ACTIVITY_VERSION}
 
 
 def refresh(store, log=print) -> dict:

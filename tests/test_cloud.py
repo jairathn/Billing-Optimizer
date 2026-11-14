@@ -395,6 +395,7 @@ def test_provider_tables_are_built_by_the_run_served_from_the_copy_and_rebuilt_a
     assert "activity" not in idle and idle["changed"] is False
     # a release that changes how the tables are built: the next run rebuilds them and saves, with no new file and no detection
     monkeypatch.setattr(activity, "ACTIVITY_VERSION", "next")
+    monkeypatch.setattr(activity, "READABLE_VERSIONS", {"next"})       # an upgrade whose old tables cannot be read
     assert tc.get("/api/activity/overview", headers=auth).json()["ready"] is False          # the old layout is not read as if it were the new
     rev = state.meta(cloud.SERVING)["rev"]
     time.sleep(0.01)
