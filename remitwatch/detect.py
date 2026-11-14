@@ -722,18 +722,18 @@ class Detector:
         self.conn.commit()
 
     def _same_day_policy_claim(self, l: dict) -> bool:
-        """Medicare's same-day rule from 2027 (CY 2027 physician fee schedule final rule): when an office visit with
-        modifier 25 is billed on the same day as a 0-day global procedure, the most expensive service is paid at 100
-        percent and the other visits and 0-day procedures at 80 percent. Applied to Medicare Advantage too: a plan that
-        follows Medicare's payment rules pays the same way, and one that pays in full is not shown as underpaying. Such
-        lines are kept out of the 2027 baselines."""
+        """Medicare's same-day rule from 2027 (CY 2027 physician fee schedule final rule, Federal Register November 9,
+        2026): when an office visit with modifier 25 is billed on the same day as a 0-day global procedure, the most
+        expensive service is paid at 100 percent and every other service that day at 80 percent, a 10- or 90-day
+        procedure on the claim included; a 10- or 90-day procedure alone does not bring the rule in. True for every line
+        of such a claim. Applied to Medicare Advantage too: a plan that follows Medicare's payment rules pays the same
+        way, and one that pays in full is not shown as underpaying. Such lines are kept out of the 2027 baselines."""
         if l.get("payer_kind") not in ("medicare", "medicare_advantage") or (l.get("service_date") or "") < MEDICARE_SAME_DAY_EM["effective"]:
             return False
         claim_lines = self.lines_by_claim.get(l["claim_key"], [])
         has_em25 = any(o.get("procedure_code") in EM_CODES and "25" in o["modifiers_list"] for o in claim_lines)
         has_zero_day = any(GLOBAL_DAYS.get(o.get("procedure_code") or "") == 0 and o.get("procedure_code") not in EM_CODES for o in claim_lines)
-        code = l.get("procedure_code")
-        return has_em25 and has_zero_day and (code in EM_CODES or GLOBAL_DAYS.get(code or "") == 0)
+        return has_em25 and has_zero_day
 
     def _rate_lookup(self, l: dict, code: str, pos: str) -> tuple[int | None, str, dict | None]:
         grp, year, tier = l["payer_group"], l["year"], l.get("provider_tier", "unknown")
@@ -1678,6 +1678,8 @@ class Detector:
                     continue
                 rank = l.get("surg_rank", 0)
                 if rank >= 2 and is_surgical(code) and code not in ADD_ON_CODES:
+                    if self._same_day_policy_claim(l):
+                        continue        # how the 2027 same-day cut and the multiple-procedure cut combine awaits CMS's instructions
                     pct_paid = allowed / rate
                     policy, learned = self.mppr_pct(l)
                     if pct_paid < policy - 0.07:

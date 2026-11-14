@@ -24,7 +24,7 @@ function closesText(d){
   if(n < 0) return {text: n===-1 ? 'passed yesterday' : `passed ${-n} days ago`, cls:'muted'};
   if(n === 0) return {text:'closes today', cls:'due-now'};
   if(n === 1) return {text:'tomorrow', cls:'due-now'};
-  return {text:`in ${n} days`, cls: n <= 7 ? 'due-now' : (n <= 30 ? 'due-soon' : '')};
+  return {text:`in ${n} days`, cls: n < 7 ? 'due-now' : (n < 30 ? 'due-soon' : '')};
 }
 function rwMonth(m){ const x = new Date((m||'')+'-15T00:00:00Z'); return isNaN(x) ? esc(m||'') : x.toLocaleDateString('en-US', {month:'long', year:'numeric', timeZone:'UTC'}); }
 function longDate(d){ const x = new Date((d||'')+'T00:00:00Z'); return isNaN(x) ? esc(d||'') : x.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'}); }
@@ -129,7 +129,7 @@ function winsTeaser(b){
   if(c.length) parts.push(`<li><b>Contracts:</b> ${esc(c[0].payer_group)} paid about ${Math.round(c[0].pct_of_medicare*100)}% of Medicare in ${esc(b.contracts.year)}, ${money(c[0].gap_cents)} a year below Medicare${c.length>1?`, and ${c.length-1} more ${c.length-1===1?'payer':'payers'}`:''}.</li>`);
   if(f.payment_fee_cents) parts.push(`<li><b>Payment fees:</b> ${money(f.payment_fee_cents)} taken out of payments by payment vendors${f.payment_fee_since?' since '+rwMonth(f.payment_fee_since):''}.</li>`);
   if(f.charge_cap_cents) parts.push(`<li><b>Your fees:</b> ${f.charge_caps.length} ${f.charge_caps.length===1?'code is':'codes are'} billed below what a payer allows, ${money(f.charge_cap_cents)} left unpaid so far${f.charge_caps[0]&&f.charge_caps[0].top_rate_cents?` (${esc(f.charge_caps[0].code)}: your fee ${money2(f.charge_caps[0].charge_cents)}, a payer allows ${money2(f.charge_caps[0].top_rate_cents)})`:''}.</li>`);
-  parts.push(`<li><b>January 1, 2027:</b> Medicare pays the lower-valued of a modifier-25 visit and a same-day 0-day procedure at 80%, and G2211 becomes modifier B1.</li>`);
+  parts.push(`<li><b>January 1, 2027:</b> when a modifier-25 visit and a 0-day procedure fall on the same day, Medicare pays the most expensive service in full and every other service that day at 80%; G2211 becomes modifier B1.</li>`);
   return `<ul class="wins-list">${parts.join('')}</ul>`;
 }
 
@@ -268,11 +268,11 @@ async function winsTab(v){
         <tbody>${(c.payers||[]).slice(0,8).map(p=>`<tr><td>${esc(p.payer_group)}<div class="small muted">${esc(p.payer_kind==='medicare_advantage'?'Medicare Advantage':'commercial')} · ${Number(p.lines).toLocaleString()} lines</div></td><td class="num ${p.pct_of_medicare<0.9?'sev-high':(p.pct_of_medicare<1?'sev-medium':'ok')}">${Math.round(p.pct_of_medicare*100)}%</td><td class="num">${p.visit_pct_of_medicare!=null?Math.round(p.visit_pct_of_medicare*100)+'%':'–'}</td><td class="num"><b>${p.gap_cents>0?money(p.gap_cents):'–'}</b></td></tr>`).join('')}</tbody></table>
         <a href="#contracts" class="small">Rates by code and payer</a></div>
       <div class="panel"><h2>What changes on January 1, 2027</h2><div class="note">From Medicare's 2027 physician fee schedule (final rule, November 2026).</div>
-        <ul class="wins-list"><li><b>Same-day visits:</b> when a modifier-25 visit and a 0-day procedure (biopsy, shave, injection, Mohs) are done the same day, the most expensive service is paid in full and the others at 80%. Destructions such as 17000 and 17110 are not included.</li>
+        <ul class="wins-list"><li><b>Same-day visits:</b> when a modifier-25 visit and a 0-day procedure (biopsy, shave, injection, Mohs) are done the same day, the most expensive service is paid in full and every other service that day at 80%, a destruction or excision on the same claim included. A visit with only a destruction (17000, 17110) or an excision, which have 10- or 90-day globals, does not bring the rule in.</li>
           <li><b>G2211 ends:</b> it becomes modifier B1 on the visit itself. Change the charge setup in EMA before January, or those add-on payments will be denied.</li>
           <li><b>Rates fall:</b> the conversion factor drops 2.3% and Kentucky's and Indiana's work adjustment loses its floor, so common dermatology codes pay about 4 to 6% less (99213 in Kentucky goes from $89.52 to $85.54).</li>
           <li><b>Indiana Medicaid</b> moves to 100% of the January 2026 Medicare rates, and its managed-care plans must match.</li></ul>
-        <div class="small muted">The site already expects the 80% on those lines from January, for Medicare and for Medicare Advantage plans that follow it, so they are not shown as underpaid.</div></div>
+        <div class="small muted">The site already expects the 80% on those lines from January, for Medicare and for Medicare Advantage plans that follow it, so they are not shown as underpaid. How it combines with the multiple-procedure cut on a second procedure awaits CMS's instructions, so those lines are not flagged meanwhile.</div></div>
     </div>
     <div class="panel"><h2>Stop the leaks</h2><div class="note">Denial causes in the last 90 days of payments against the 90 days before. Each one is a habit or a front-desk step to change; appealing them one by one never ends.</div>
       <table><thead><tr><th>Cause</th><th>Who fixes it</th><th class="num">Last 90 days</th><th class="num">Items</th><th>Trend</th><th></th></tr></thead>

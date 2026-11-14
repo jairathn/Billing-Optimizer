@@ -984,12 +984,20 @@ def test_code_tables_come_from_cms_and_the_2027_same_day_rule_spares_10_day_proc
     em25 = lambda: svc("99213", "200.00", "85.00", "85.00", "CAS*CO*45*115.00~", dos="20270115", mods="25")     # noqa: E731
     base = [claim(i, svc("99213", "200.00", "85.00", "85.00", "CAS*CO*45*115.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(1, 26)] \
         + [claim(i, svc("11102", "180.00", "82.00", "82.00", "CAS*CO*45*98.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(100, 125)] \
-        + [claim(i, svc("17000", "120.00", "57.00", "57.00", "CAS*CO*45*63.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(200, 225)]
+        + [claim(i, svc("17000", "120.00", "57.00", "57.00", "CAS*CO*45*63.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(200, 225)] \
+        + [claim(i, svc("11900", "90.00", "40.00", "40.00", "CAS*CO*45*50.00~", dos="20270108"), dos="20270108", cfi="16") for i in range(400, 425)]
     biopsy_day = claim(300, em25() + svc("11102", "180.00", "65.60", "65.60", "CAS*CO*45*114.40~", dos="20270115"), dos="20270115", cfi="16")
     destruction_day = claim(301, em25() + svc("17000", "120.00", "45.60", "45.60", "CAS*CO*45*74.40~", dos="20270115"), dos="20270115", cfi="16")
-    st = build_store(tmp_path, base + [biopsy_day, destruction_day], payer="HUMANA", pay_date="20270201")
+    # a 0-day injection brings the rule in, and then the destruction on the same claim (the lead procedure, but not the
+    # most expensive service of the day: the visit is) is paid at 80 percent too
+    both = claim(302, em25() + svc("11900", "90.00", "32.00", "32.00", "CAS*CO*45*58.00~", dos="20270115")
+                 + svc("17000", "120.00", "45.60", "45.60", "CAS*CO*45*74.40~", dos="20270115"), dos="20270115", cfi="16")
+    st = build_store(tmp_path, base + [biopsy_day, destruction_day, both], payer="HUMANA", pay_date="20270201")
     Detector(st, run_id="same-day").run()
-    under = {r[0]: r[1] for r in st.query("SELECT procedure_code, signal FROM findings WHERE category='underpayment'")}
-    assert "11102" not in under, under          # a 0-day biopsy beside a visit-25 is paid at 80 percent by rule
-    assert under.get("17000") == "UNDERPAID_VS_OWN_RATE", under     # a 10-day destruction is not in the rule: 80 percent is short
+    under = {(r[0], r[1]): r[2] for r in st.query("""SELECT patient_control_number, procedure_code, signal FROM findings WHERE category='underpayment'""")}
+    codes = {code for _p, code in under}
+    assert "11102" not in codes, under          # a 0-day biopsy beside a visit-25 is paid at 80 percent by rule
+    # a 10-day destruction alone does not bring the rule in: 80 percent there is short
+    assert [s for (p, code), s in under.items() if code == "17000"] == ["UNDERPAID_VS_OWN_RATE"], under
+    assert not any(p == "CB0000302C017" for p, _c in under), under       # with a biopsy on the claim it is the rule, not a shortfall
     st.close()

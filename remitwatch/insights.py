@@ -331,6 +331,8 @@ CAUSES = {
     "DENIED_PROVIDER": "Provider enrollment", "DENIED_MISSING_PRIMARY": "Add-on without its main code", "CLAIM_DENIED_UNPAID": "Whole claim denied",
     "EM_BUNDLED_MOD25": "Visit with modifier 25 not paid", "EM_BUNDLED_NO_MODIFIER": "Visit billed with a procedure, no modifier",
     "EM_BUNDLED_MOD57_MINOR": "Modifier 57 on a minor procedure", "PROCEDURE_BUNDLED": "Procedure bundled into another",
+    "EM_BUNDLED_MOD57_MAJOR": "Visit with modifier 57 bundled into a major surgery", "ADDON_BUNDLED": "Add-on code paid $0",
+    "EM_BUNDLED_MOD24": "Visit in a post-op period denied",
 }
 
 
@@ -480,12 +482,21 @@ def to_decide(conn: sqlite3.Connection, newest: str | None, days: int = 120) -> 
 
 
 def missed(conn: sqlite3.Connection, today: str, days: int = 30) -> dict:
-    """Open items whose filing window closed in the last `days` days without anyone working them."""
+    """Open items whose filing window closed in the last `days` days without anyone working them. A routine-rate pattern
+    counts when one of its claims closed then, with those claims' cents."""
     since = (date.fromisoformat(today) - timedelta(days=days)).isoformat()
-    r = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status='open' AND COALESCE(stale,0)=0
-                         AND appeal_deadline >= ? AND appeal_deadline < ? AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""",
-                     (since, today) + MONEY_CATEGORIES).fetchone()
-    return {"n": r[0], "cents": r[1], "days": days}
+    wins = claim_windows(conn, ("open",))
+    n = cents = 0
+    for fid, dl, c in conn.execute(f"""SELECT finding_id, appeal_deadline, COALESCE(shortfall_cents,0) FROM findings WHERE status='open'
+                                       AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""",
+                                   MONEY_CATEGORIES):
+        if fid in wins:
+            got = [x for d, x, _l in wins[fid] if d and since <= d < today]
+            if got:
+                n, cents = n + 1, cents + sum(got)
+        elif since <= dl < today:
+            n, cents = n + 1, cents + c
+    return {"n": n, "cents": cents, "days": days}
 
 
 def done(conn: sqlite3.Connection, today: str) -> dict:

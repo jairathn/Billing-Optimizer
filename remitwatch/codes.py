@@ -397,8 +397,9 @@ LEGAL = {
 
 # Medicare same-day visit policy, CY 2027 physician fee schedule final rule (CMS-1848-F; CMS fact sheet November 4, 2026;
 # Federal Register November 9, 2026): when a separately identifiable office visit is furnished on the same day as a 0-day
-# global procedure, the most expensive service (procedure or visit) is paid at 100 percent and the other same-day
-# procedures and visits at 80 percent. The proposed 50 percent and the 10- and 90-day globals were not finalized.
+# global procedure, the most expensive service (procedure or visit) is paid at 100 percent and every other service that
+# day at 80 percent ("all services except the highest value service", a 10- or 90-day procedure on the claim included).
+# Only a 0-day procedure brings the rule in: the proposed 50 percent and the 10- and 90-day triggers were not finalized.
 MEDICARE_SAME_DAY_EM = {"effective": "2027-01-01", "pct": 0.80, "confirmed": True}
 
 

@@ -386,11 +386,13 @@ def _day(offset: int) -> str:
     return (datetime.now(timezone.utc).date() + timedelta(days=offset)).isoformat()
 
 
-DEADLINE_RANGES = {"valid": None, "week": 7, "month": 30}       # filters that count a routine-rate finding's claims by their own dates
+DEADLINE_RANGES = {"valid": None, "week": 7, "month": 30, "missed": -30}   # filters that count a routine-rate finding's claims by their own dates
 
 
 def _range(deadline: str) -> tuple[str, str | None]:
     days = DEADLINE_RANGES[deadline]
+    if days is not None and days < 0:
+        return _day(days), _day(0)              # windows that closed in the last N days
     return _day(0), (_day(days) if days else None)
 
 
@@ -537,14 +539,13 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         # a routine-rate finding is in range when one of its claims is, by that claim's own date
         lo, hi = _range(deadline)
         ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and d >= lo and (hi is None or d < hi)})
-        dated = "appeal_deadline >= date('now')" + ("" if hi is None else f" AND appeal_deadline < date('now','+{DEADLINE_RANGES[deadline]} days')")
+        days = DEADLINE_RANGES[deadline]
+        dated = ("appeal_deadline >= date('now')" + ("" if hi is None else f" AND appeal_deadline < date('now','+{days} days')")) if not (days and days < 0) \
+            else f"appeal_deadline >= date('now','{days} days') AND appeal_deadline < date('now')"
         where.append(f"((COALESCE(signal,'') != 'SECOND_RATE' AND {dated})" + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
         params.extend(ids)
     elif deadline == "none":
         where.append("appeal_deadline IS NULL")
-    elif deadline == "missed":
-        # the home screen's "missed": windows that closed in the last 30 days
-        where.append("appeal_deadline >= date('now','-30 days') AND appeal_deadline < date('now')")
     elif deadline == "followup":
         # the home screen's follow-ups: sent more than 30 days before the newest payment and still not paid
         where.append("status='appealed' AND COALESCE(appealed_at, status_changed_at) < "

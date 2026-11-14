@@ -227,6 +227,9 @@ def test_patterns_and_whole_claim_denials_count_the_same_on_the_home_screen_and_
             assert (got["shortfall_cents"] or 0) == want and cnt[key]["cents"] == want, (rng, key, got["shortfall_cents"], cnt[key], want)
             if rng == "valid":
                 assert got["total"] == t["n"] == cnt[key]["n"], (key, got["total"], t["n"], cnt[key])
+    # missed: the pattern's claims that closed in the last 30 days, by their own dates
+    missed = tc.get("/api/findings", params={"category": money, "live": 1, "status": "open", "deadline": "missed", "limit": 500}, auth=auth).json()
+    assert (missed["total"], missed["shortfall_cents"]) == (b["missed"]["n"], b["missed"]["cents"]) and b["missed"]["cents"] >= 180000
     rows = tc.get("/api/findings", params={"category": money, "live": 1, "status": "open,in_progress", "deadline": "week", "kind": "rate"},
                   auth=auth).json()["items"]
     assert rows and rows[0]["window_cents"] == 180000 and rows[0]["next_deadline"] < rows[0]["appeal_deadline"]
