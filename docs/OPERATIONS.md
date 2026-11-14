@@ -75,6 +75,12 @@ What the files cannot show: whether a light day was an empty schedule or patient
 - What it is not: encryption. It keeps the figures off the dashboard for people who have only the dashboard login. Anyone who can open the site's state folder in Dropbox, the remittance files themselves, or the host's settings is outside it. Keep the state folder where staff cannot open it, and have the owner enter the password in the host's settings personally.
 - A weak owner password is not ignored: the figures stay closed to everyone until it is fixed, and `/setup` says why.
 
+### The Calculator tab (owner only)
+
+Opens with the owner's password, like Providers. Pick the Mohs surgeon, general dermatologist or APP average, or one clinician. "Plan 2027" is the default: the waterfall shows the collections now at the current year's rates, what Medicare's 2027 amounts and rules take from the same schedule, what your schedule changes, and what corrected contracts add. Move the levers under "The schedule"; the clinical outcomes (stages, closures, visit levels, lesions per patient) are under "How cases go" and are not targets. Under Contracts, choose how a contract is corrected and tick payers to see them renegotiated. "What a target takes" turns a yearly figure into what a clinic day has to bring in and how much more of each volume lever closes the gap.
+
+The other views: Strategy lab (tick strategies; each line shows its collections, costs, visits and minutes; staging closures and bringing biopsies back are marked as audit exposure), Practice figures (enter minutes, costs and pay plans and press Save; anything left empty is shown as not entered), Provider sheet (one clinician, a pay target, printable).
+
 ## 5. Alerts
 
 After each cycle the last four weeks of payments are compared with the six months before them, per payer:

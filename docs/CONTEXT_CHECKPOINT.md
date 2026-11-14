@@ -366,3 +366,23 @@ Later the same day (Find a claim, two more independent reviews):
 - Overview's signal table is one row per signal; category pages take a year; tiles follow the chosen kind and reason; the
   kinds follow the search; a tab's red number opens its 7-day list. The page uses the site's date (UTC, as the lists do):
   windows roll over at midnight UTC, about 7 to 8 pm in Kentucky and Indiana.
+
+
+## Collections calculator and strategy lab (November 14, 2026)
+
+What was asked: a per-clinician collections calculator (physician or APP), sliders for Mohs stages, 99214, biopsies, LN2 and so on, the practice's payer mix, "correctable" contracts brought to Medicare parity, where a clinician is against where they could be, the value of one more Mohs case or more flaps, and a schedule that reaches a collections target. Then a Strategy lab for super-users: stage closures to avoid the multiple-procedure reduction, bring biopsies back to avoid Medicare's 2027 same-day rule, Newburgh cases in the ASC, APP leverage, time and cost inputs, salary targets for providers.
+
+Built (owner only, Calculator tab): see ARCHITECTURE.md, Calculator. Key decisions, each from a review:
+- No new pipeline table: everything comes from the serving copy, so it works while the daily run is down. Checked on a copy of the live serving file (built 2026-11-13): it runs and gives back history.
+- Default window = last 6 complete months (skin-substitute payment collapsed in January 2026; radiation fell); pace from the last 12 months. Averages by role over clinicians with regular clinic days, without pathology/radiation-dominant clinicians.
+- The clinician's own production is apart from ancillary and product revenue (Stark: no productivity credit for DHS referrals).
+- Medicare multiple-procedure pairing is modelled per case: with a flap or graft the Mohs first stage is paid at 50%, with a layered closure the closure is (confirmed on the archive: 99% of Medicare Mohs+flap claims). k carries the rest per code.
+- Medicare fee table for KY/IN 2025-2027 from CMS files; 2027 assumes the 1.0 work GPCI floor lapses; CF 32.6286.
+- 2027 same-day rule: Medicare FFS only by default (MA by contract), trigger E/M with modifier 25 + 0-day code; add-on treatment and MPPR stacking are open (switches).
+- Contracts corrected as a whole contract at T% of Medicare (default), visits only, or a floor (upper bound); Medicaid and 'other' not correctable.
+- Goal seek moves only volume and calendar levers; intensity levers are what-ifs.
+- Strategy lab, Practice figures (saved via /api/activity/assumptions), Provider sheet. Compliance tiers: staging closures and biopsy return visits are 'audit exposure' (CMS CY2027 rule: scheduling to maximize payment is not appropriate).
+
+Measured on the archive (practice level; shapes the defaults): most biopsied Medicare encounters carry an E/M with modifier 25, so the 2027 same-day rule bites mainly on visit + biopsy days; ASC vs office for Medicare at Newburgh favours only cases closed with a flap or graft, and only with the facility fee. The figures are in the session's scratch notes, not in this public repository.
+
+Open: practice minutes, costs and pay plans to be entered by the owner; the daily run on Vercel was failing (out of memory) when this was written, so the live serving copy is from 2026-11-13.
