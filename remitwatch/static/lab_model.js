@@ -214,7 +214,7 @@
   // one Mohs case at one payer, in the office or in an ASC: the professional fee (and the ASC's facility fee), with the
   // multiple-procedure rules of each, before collections. cases[] = [[probability, closure code or null]]
   function caseValue(d, x, cal, g, f, closure, year, site, office) {
-    const k = c => (cal.k[c] != null ? cal.k[c] : 1);
+    const k = c => (CM.kAt ? CM.kAt(d, cal, c, g) : (cal.k[c] != null ? cal.k[c] : 1));
     const rho = d.constants.mppr_share;
     const M = c => ((d.medicare[c] || {})[year]), MF = c => ((d.medicare_fac || {})[c] || {})[year];
     const pro = c => {         // the payer's rate in that setting: its office rate times Medicare's facility-to-office ratio
@@ -326,7 +326,10 @@
                ['return_rate', 'Of those, the share who come back', 0, 1, 0.01, 'pct', 0.9],
                ['full', 'The schedule is full: each return visit takes a slot another patient would have had', 0, 1, 1, 'bool', 1]],
       apply(d, x, A, p, cal) {
-        const med = kindShare(d, 'biopsy', x.ma_same_day ? ['medicare', 'medicare_advantage'] : ['medicare']);
+        // the biopsied patients whose plan takes Medicare's 2027 rules: Medicare, and the Medicare Advantage plans the
+        // Calculator has following it
+        const follows = g => CM.followsMedicare ? CM.followsMedicare(d, x, g) : CM.payerKind(d, g) === 'medicare';
+        const med = (d.mix.biopsy || d.mix._overall || []).reduce((t, [g, s]) => t + (follows(g) ? s : 0), 0);
         const bx = Math.max(0, x.bx_patients), vs0 = clamp(x.bx_visit_share, 0, 1), share = clamp(p.share, 0, 1);
         const moved = bx * med * vs0 * share;
         const lost = moved * (1 - clamp(p.return_rate, 0, 1));
@@ -350,7 +353,7 @@
         return { x: y, extra: { minutes: back * (turn || 0), encounters: back, cost: back * (perEnc || 0) * days * 100, collections: -slot },
                  notes: [`${back.toFixed(2)} extra procedure-only visits a clinic day; ${lost.toFixed(2)} biopsies a day not done because the patient did not return${slot ? `; the slots the return visits take would have brought about ${Math.round(slot / 100).toLocaleString()} dollars a year` : ''}.`
                    + (moved > 0 ? ` Each patient brought back pays${coins > 0 ? ` about ${Math.round(coins / 100).toLocaleString()} dollars` : ''} more in coinsurance, makes a second trip, and waits longer for the diagnosis.` : '')
-                   + ` Not counted: the multiple-procedure reduction also avoided on other procedures of the visit day (about $16 a moved patient on the archive), and a second copayment for many patients.${x.ma_same_day ? '' : ' Medicare Advantage patients gain nothing unless their plan applies the rule.'}`], needs };
+                   + ` Not counted: the multiple-procedure reduction also avoided on other procedures of the visit day (about $16 a moved patient on the archive), and a second copayment for many patients. ${x.ma_same_day === false ? 'Medicare Advantage patients are left out: the Calculator has their plans not following Medicare\'s 2027 rules.' : 'Medicare Advantage patients are counted where the Calculator has their plan following Medicare\'s 2027 rules.'}`], needs };
       },
     },
     {

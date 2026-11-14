@@ -432,15 +432,18 @@ def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, d
     proportions, and a family's pooled mix misstates each payer's share of them."""
     pa, pb = _month_plus(a, 1), _month_plus(b, 2)
     by_code: dict[str, Counter] = defaultdict(Counter)
+    allowed_code: dict[str, Counter] = defaultdict(Counter)
 
     def mix(where: str, args: tuple, keep: bool = False) -> dict[str, Counter]:
         out: dict[str, Counter] = defaultdict(Counter)
-        for code, g, n in conn.execute(
-                f"SELECT code, payer_group, SUM(lines) FROM exposure WHERE month BETWEEN ? AND ? {where} GROUP BY 1, 2", (pa, pb, *args)):
+        for code, g, n, al in conn.execute(
+                f"SELECT code, payer_group, SUM(lines), SUM(allowed_cents) FROM exposure WHERE month BETWEEN ? AND ? {where} GROUP BY 1, 2",
+                (pa, pb, *args)):
             c = activity.clean_code(code)
             out[activity.service_family(c)][g] += n or 0
             if keep:
                 by_code[c][g] += n or 0
+                allowed_code[c][g] += al or 0
         return out
 
     own = mix(f"AND npi IN ({_in(ids)})", tuple(ids), keep=True) if ids else {}
@@ -464,7 +467,31 @@ def _payer_mix(conn, ids: list[str], tier: str, a: str, b: str) -> tuple[dict, d
     out["_overall"] = {g: v / n_all for g, v in overall.items()} if n_all else {}
     code_mix = {c: {g: v / sum(cnt.values()) for g, v in cnt.items() if v > 0} for c, cnt in by_code.items()
                 if sum(cnt.values()) >= MIN_CODE_MIX_LINES and lever_of(c) not in CASE_LEVERS}
-    return out, {"source": source, "kinds": kinds, "code": code_mix}
+    return out, {"source": source, "kinds": kinds, "code": code_mix, "code_lines": by_code, "code_allowed": allowed_code}
+
+
+def _by_kind(units: float, allowed: int, lines: Counter, al: Counter, kinds: dict) -> dict:
+    """A code's units and allowed amount shared out by kind of payer, in proportion to its primary-claim lines and their
+    allowed amounts at each kind (the exposure table, payment months a+1 to b+2), and scaled so the kinds add up to the
+    code's own totals: the kind with the most lines takes the rounding. Allowed is shared by lines where the primary
+    payers allowed nothing. Empty when the code has no lines there."""
+    ln: Counter = Counter()
+    aw: Counter = Counter()
+    for g, n in lines.items():
+        ln[kinds.get(g) or "other"] += max(0, n or 0)
+    for g, v in al.items():
+        aw[kinds.get(g) or "other"] += max(0, v or 0)
+    n_all = sum(ln.values())
+    if n_all <= 0:
+        return {}
+    weight = aw if sum(aw.values()) > 0 else ln
+    w_all = sum(weight.values())
+    ks = sorted(k for k in set(ln) | set(aw) if ln[k] > 0 or aw[k] > 0)
+    top = max(ks, key=lambda k: (ln[k], k))
+    out = {k: {"units": round(units * ln[k] / n_all, 4), "allowed_cents": int(round(allowed * weight[k] / w_all))} for k in ks if k != top}
+    out[top] = {"units": round(units - sum(v["units"] for v in out.values()), 4),
+                "allowed_cents": int(allowed - sum(v["allowed_cents"] for v in out.values()))}
+    return dict(sorted(out.items()))
 
 
 def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str | None = None, month_to: str | None = None,
@@ -510,10 +537,13 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
 
     # what was billed and allowed per code. The page compares it with what the payers' usual rates predict for the same
     # schedule (k), so it can reproduce what happened before it changes anything.
+    # by_kind: the same units and allowed by kind of payer, so one payer's denials can stay with that payer
     codes = {}
     for code, s_ in svc.items():
         codes[code] = {"family": s_["family"], "lever": lever_of(code), "units": round(s_["units"], 2), "items": s_["items"],
-                       "denied": s_["denied"], "allowed_cents": s_["allowed"], "paid_cents": s_["paid"]}
+                       "denied": s_["denied"], "allowed_cents": s_["allowed"], "paid_cents": s_["paid"],
+                       "by_kind": _by_kind(round(s_["units"], 2), s_["allowed"], mix_info["code_lines"].get(code) or Counter(),
+                                           mix_info["code_allowed"].get(code) or Counter(), kinds)}
     # the codes of every lever the tier bills, so a clinician can plan a service not billed today
     for code in _lever_codes(conn, tier, a, b):
         codes.setdefault(code, {"family": activity.service_family(code), "lever": lever_of(code), "units": 0, "items": 0, "denied": 0,

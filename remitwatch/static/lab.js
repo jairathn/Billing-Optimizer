@@ -100,15 +100,13 @@ async function labDraw(v){
       let val = inp.type === 'checkbox' ? (inp.checked ? 1 : 0) : parseFloat(inp.value);
       if(!isFinite(val)) return;
       if(fmt === 'pct' && inp.type !== 'range') val = val / 100;
-      if(def){
-        const lim = Math.min(def[3], Math.max(def[2], val));
-        if(lim !== val && e && e.type === 'change' && inp.type !== 'range') inp.value = fmt === 'pct' ? Math.round(lim * 100) : lim;
-        val = lim;
-      }
+      if(def) val = Math.min(def[3], Math.max(def[2], val));
+      // when typing ends, the box shows the value used
+      if(e && e.type === 'change' && inp.type === 'number') inp.value = fmt === 'pct' ? Math.round(val * 1000) / 10 : val;
       const c = lab.chosen[id] = lab.chosen[id] || {on: false};
       c.params = Object.assign(c.params || {}, {[key]: val});
       const twin = body.querySelector(`[data-lab-twin="${id}|${key}"]`);
-      if(twin && inp.type === 'range') twin.value = fmt === 'pct' ? Math.round(val * 100) : val;
+      if(twin && inp.type === 'range') twin.value = fmt === 'pct' ? Math.round(val * 1000) / 10 : val;
       if(twin && inp.type !== 'range'){ const r = body.querySelector(`input[type=range][data-lab-p="${id}|${key}|${fmt}"]`); if(r) r.value = val; }
       labSoon(v);
     };
@@ -125,7 +123,7 @@ function labCard(S){
   const ctl = ([key, label, mn, mx, st, fmt]) => {
     const val = labNum(p[key]);
     if(fmt === 'bool') return `<label class="small" style="display:block"><input type="checkbox" data-lab-p="${esc(S.id)}|${esc(key)}|bool" ${val?'checked':''}> ${esc(label)}</label>`;
-    const shown = val == null ? '' : fmt === 'pct' ? Math.round(val * 100) : val;
+    const shown = val == null ? '' : fmt === 'pct' ? Math.round(val * 1000) / 10 : val;
     const k = fmt === 'pct' ? 100 : 1;
     return `<div class="calc-row"><label>${esc(label)}</label><div class="calc-ctl">
       <input type="range" min="${mn}" max="${mx}" step="${st}" value="${val == null ? mn : val}" data-lab-p="${esc(S.id)}|${esc(key)}|${esc(fmt)}" aria-label="${esc(label)}">
@@ -274,11 +272,11 @@ function labScenarioRows(v){
     return {s, r: cache[key]};
   });
   const cur = cs.lab.last;
-  const cells = R => `<td class="num">${moneyK(R.collections)}</td><td class="num">${R.cost ? moneyK(R.cost) : '–'}</td><td class="num">${R.cost ? moneyK(R.collections - R.cost) : '–'}</td><td class="num">${R.minutesDay ? R.minutesDay.toFixed(0) : '–'}</td>`;
-  box.innerHTML = rows.length ? `<table><thead><tr><th>Scenario</th><th class="num">Collections</th><th class="num">Costs</th><th class="num">After costs</th><th class="num">Minutes a day</th><th></th></tr></thead><tbody>
-      ${cur ? `<tr><td><i>Now on screen</i></td>${cells(cur.result)}<td></td></tr>` : ''}
+  const cells = R => `<td class="num" data-label="Collections">${moneyK(R.collections)}</td><td class="num" data-label="Costs">${R.cost ? moneyK(R.cost) : '–'}</td><td class="num" data-label="After costs">${R.cost ? moneyK(R.collections - R.cost) : '–'}</td><td class="num" data-label="Minutes a day">${R.minutesDay ? R.minutesDay.toFixed(0) : '–'}</td>`;
+  box.innerHTML = rows.length ? `<table class="calc-cards"><thead><tr><th>Scenario</th><th class="num">Collections</th><th class="num">Costs</th><th class="num">After costs</th><th class="num">Minutes a day</th><th></th></tr></thead><tbody>
+      ${cur ? `<tr><td><i>Now on screen</i></td>${cells(cur.result)}</tr>` : ''}
       ${rows.map(({s, r}, i) => `<tr><td>${esc(s.name)}<div class="small muted">${esc((s.saved_at || '').slice(0, 10))} · ${esc((s.x || {}).year || '')}</div></td>${cells(r.result)}
-        <td class="num"><button data-lab-load="${i}">Open</button> <button class="ghost" data-lab-del="${i}" ${cs.Aok ? '' : 'disabled'}>Delete</button></td></tr>`).join('')}
+        <td class="num" style="grid-column:1 / -1"><button data-lab-load="${i}">Open</button> <button class="ghost" data-lab-del="${i}" ${cs.Aok ? '' : 'disabled'}>Delete</button></td></tr>`).join('')}
       </tbody></table>` : '';
   const say = (text, cls) => { const m = v.querySelector('#labSaved'); if(m){ m.textContent = text; m.className = 'small ' + (cls || ''); } };
   box.querySelectorAll('[data-lab-load]').forEach(b => b.onclick = () => { const s = mine[+b.dataset.labLoad];
@@ -305,9 +303,9 @@ async function figuresDraw(v, note){
   const people = (d.clinicians || []).map(c => [c.provider_id, c.name]).concat(Object.entries(ROLE_LABEL).map(([k, l]) => [k, l + ' (average)']));
   const comp = A.comp || {};
   const compRow = ([id, name]) => { const p = comp[id] || {};
-    const inp = (k, val, ph, w, title) => `<td><input type="number" data-c="${k}" data-orig="${esc(val)}" min="0" step="any" placeholder="${esc(ph)}" value="${esc(val)}" style="width:${w}px"${title ? ` title="${esc(title)}"` : ''} aria-label="${esc(name)}: ${esc(ph)}" ${cs.Aok ? '' : 'disabled'}></td>`;
-    return `<tr data-comp="${esc(id)}" data-name="${esc(name)}"><td>${esc(name)}</td><td><select data-c="type" data-orig="${esc(p.type || '')}" aria-label="${esc(name)}: plan" ${cs.Aok ? '' : 'disabled'}><option value="">no plan entered</option>${LabModel.COMP_TYPES.map(([k, l]) => `<option value="${k}" ${p.type===k?'selected':''}>${esc(l)}</option>`).join('')}</select></td>
-      ${inp('pct', pctShow(p.pct), 'share, %', 90, 'share of collections, %')}${inp('per_wrvu', show(p.per_wrvu), '$ per wRVU', 90)}${inp('base', show(p.base), 'base $', 100)}${inp('threshold', show(p.threshold), 'threshold $', 110)}${inp('above_pct', pctShow(p.above_pct), 'above, %', 80)}</tr>`; };
+    const inp = (k, val, ph, w, title, label) => `<td data-label="${esc(label)}"><input type="number" data-c="${k}" data-orig="${esc(val)}" min="0" step="any" placeholder="${esc(ph)}" value="${esc(val)}" style="width:${w}px"${title ? ` title="${esc(title)}"` : ''} aria-label="${esc(name)}: ${esc(ph)}" ${cs.Aok ? '' : 'disabled'}></td>`;
+    return `<tr data-comp="${esc(id)}" data-name="${esc(name)}"><td>${esc(name)}</td><td data-label="Plan" style="grid-column:1 / -1"><select data-c="type" data-orig="${esc(p.type || '')}" aria-label="${esc(name)}: plan" ${cs.Aok ? '' : 'disabled'}><option value="">no plan entered</option>${LabModel.COMP_TYPES.map(([k, l]) => `<option value="${k}" ${p.type===k?'selected':''}>${esc(l)}</option>`).join('')}</select></td>
+      ${inp('pct', pctShow(p.pct), 'share, %', 90, 'share of collections, %', 'Share of collections')}${inp('per_wrvu', show(p.per_wrvu), '$ per wRVU', 90, '', 'Per wRVU')}${inp('base', show(p.base), 'base $', 100, '', 'Base')}${inp('threshold', show(p.threshold), 'threshold $', 110, '', 'Threshold')}${inp('above_pct', pctShow(p.above_pct), 'above, %', 80, '', 'Share above')}</tr>`; };
   v.querySelector('#calcBody').innerHTML = `
     <div class="panel"><h2>Practice figures</h2>
       <div class="small muted">The practice's own numbers, used by the Strategy lab and the Provider sheet. Leave a box empty until you have the figure: anything that depends on it is shown as not entered, never guessed. Saved to the site for the owner only${cs.Asaved ? `; last saved ${esc(cs.Asaved.replace('T', ' ').slice(0, 16))}` : ''}. Only the boxes you change are saved, so figures saved in another window are kept.</div>
@@ -321,7 +319,7 @@ async function figuresDraw(v, note){
         ${LabModel.COSTS.map(([k, l]) => field('costs', k, l, 'dollars')).join('')}</div>
     </div>
     <div class="panel"><h2>Pay plans</h2><div class="small muted">How each clinician is paid on their own production: services they perform personally (slides they read themselves included) and services given incident to their own. Pathology, lab, radiation and drugs they order are designated health services: under the Stark law a physician's productivity pay may not credit them. An APP's pay is kept to their own services under the anti-kickback safe harbor for employees. Have counsel review each plan. Plans of clinicians not listed here are kept.</div>
-      <div style="overflow-x:auto"><table><thead><tr><th>Clinician</th><th>Plan</th><th>Share of collections</th><th>Per wRVU</th><th>Base</th><th>Threshold</th><th>Share above</th></tr></thead><tbody>${people.map(compRow).join('')}</tbody></table></div></div>`;
+      <div><table class="calc-cards"><thead><tr><th>Clinician</th><th>Plan</th><th>Share of collections</th><th>Per wRVU</th><th>Base</th><th>Threshold</th><th>Share above</th></tr></thead><tbody>${people.map(compRow).join('')}</tbody></table></div></div>`;
   const body = v.querySelector('#calcBody'), msg = body.querySelector('#figMsg');
   const say = (text, cls) => { msg.textContent = text; msg.className = 'small ' + (cls || ''); };
   if(note) say(note[0], note[1]);
@@ -364,6 +362,7 @@ async function figuresDraw(v, note){
 // ------------------------------------------------------------------ provider sheet
 // a pay target as typed: 650000, $650,000, 650k, 0.65m
 function sheetAmount(s){
+  if(typeof calcMoney === 'function'){ const v = calcMoney(s); return isFinite(v) ? v * 100 : NaN; }    // the calculator's own reading
   const m = String(s || '').replace(/[$,\s]/g, '').match(/^(\d+(?:\.\d+)?|\.\d+)([km])?$/i);
   if(!m) return NaN;
   return parseFloat(m[1]) * ({k: 1e3, m: 1e6}[(m[2] || '').toLowerCase()] || 1) * 100;
@@ -406,18 +405,19 @@ async function sheetDraw(v){
     if(need === 0){
       goal = `<h3>To be paid ${moneyK(t)}</h3><p>Your base pay covers this target.</p>`;
     } else if(need){
-      const gap = need - planned.collections, dpw = Math.max(0.5, x.days_per_week);
+      const dpw = Math.max(0.5, x.days_per_week);
       // like with like: the collections a day needs, as allowed amounts at this plan's collected share
       const ratio = planned.allowed > 0 ? planned.collections / planned.allowed : null;
       const ids = ['visits', 'new_visits', 'days_per_week', 'weeks_per_year', 'mohs_cases'].filter(k => CalcModel.MOVES.some(m => m[0] === k));
-      const res = gap > 0 ? CalcModel.goalSeek(d, xp, need, cs.cal, {moves: ids, production: true})
-        .filter(m => ids.includes(m.key) && m.needed != null && isFinite(m.needed) && m.needed > 0) : [];
+      const seek = CalcModel.goalSeek(d, xp, need, cs.cal, {moves: ids, production: true});
+      const gap = seek.gap != null ? seek.gap : need - planned.collections;      // on own production
+      const res = gap > 0 ? seek.filter(m => ids.includes(m.key) && m.needed != null && isFinite(m.needed) && m.needed > 0) : [];
       const how = m => m.key === 'days_per_week' ? `${(m.needed * m.step).toFixed(1)} more clinic days a week`
         : m.key === 'weeks_per_year' ? `${(m.needed * m.step).toFixed(1)} more weeks of clinic a year`
         : `${(m.needed / dpw).toFixed(1)} more a clinic day${m.key === 'mohs_cases' ? ' (depends on referrals)' : ''}`;
       goal = `<h3>To be paid ${moneyK(t)}</h3><p>Collections of ${moneyK(need)} a year for your own production: ${money(need / days)} a clinic day over ${days.toFixed(0)} days${ratio ? `, about ${money(need / days / ratio)} allowed` : ''}.
         ${dist.p50 && ratio ? `Your median clinic day has brought ${money(dist.p50)} allowed, your best tenth ${money(dist.p90)}.` : ''}</p>
-        ${gap > 0 ? `<p>${moneyK(gap)} more than this plan.${res.length ? ' Any one of these closes it:' : ''}</p>${res.length ? `<table><tbody>${res.map(m =>
+        ${gap > 0 ? `<p>${moneyK(gap)} more than this plan.${res.length ? ' Any one of these closes it:' : ' None of the patient-volume levers moves this plan\'s collections.'}</p>${res.length ? `<table><tbody>${res.map(m =>
           `<tr><td>${esc(m.name)}</td><td class="num">${how(m)}</td></tr>`).join('')}</tbody></table>` : ''}` : `<p class="ok">This plan reaches it.</p>`}`;
     } else if(needW){
       goal = `<h3>To be paid ${moneyK(t)}</h3><p>${Math.round(needW).toLocaleString()} work RVUs a year: ${(needW / days).toFixed(1)} a clinic day over ${days.toFixed(0)} days. This plan holds ${Math.round(wPlan).toLocaleString()}.</p>`;
