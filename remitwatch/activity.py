@@ -639,7 +639,9 @@ def build_activity(store, log=print) -> dict:
                 n[5] += it[I_PAID]
                 if fam not in NOT_PER_PATIENT:
                     n[6] += it[I_ALLOWED]
-                s = services[(provider, month, it[I_CODE])]
+                code = it[I_CODE]
+                sk = (provider, month, code)
+                s = services[sk]
                 s[0] += 1
                 s[1] += it[I_UNITS] or 1.0
                 s[2] += 1 if it[I_DENIED] else 0
@@ -647,15 +649,17 @@ def build_activity(store, log=print) -> dict:
                 s[4] += it[I_ALLOWED]
                 s[5] += it[I_PAID]
                 if it[I_KIND]:          # the payer that decided it (none when only a second payer reported it)
-                    cp = code_payers[(provider, month, it[I_CODE])].get(it[I_GROUP])
+                    by_group = code_payers[sk]
+                    cp = by_group.get(it[I_GROUP])
                     if cp is None:
-                        cp = code_payers[(provider, month, it[I_CODE])][it[I_GROUP]] = [it[I_KIND], 0, 0.0, 0, 0, 0.0, 0]
+                        cp = by_group[it[I_GROUP]] = [it[I_KIND], 0, 0.0, 0, 0, 0.0, 0] if code in EM_ALL else [it[I_KIND], 0, 0.0, 0]
                     cp[1] += 1
                     cp[2] += it[I_UNITS] or 1.0
                     cp[3] += it[I_ALLOWED]
-                    if it[I_MODS] and it[I_CODE] in EM_ALL:
-                        em_mod.append((month, it[I_CODE], it[I_GROUP], it[I_UNITS] or 1.0, it[I_ALLOWED]))
-                global_0_90 = global_0_90 or it[I_CODE] in GLOBAL_0_90
+                    if it[I_MODS] and code in EM_ALL:
+                        em_mod.append((month, code, it[I_GROUP], it[I_UNITS] or 1.0, it[I_ALLOWED]))
+                if code in GLOBAL_0_90:
+                    global_0_90 = True
                 enc[0] += it[I_CHARGE]
                 enc[1] += it[I_ALLOWED]
                 enc[2] += it[I_PAID]
