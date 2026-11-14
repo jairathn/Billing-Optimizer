@@ -276,18 +276,25 @@
   }
 
   // ------------------------------------------------------------------ k: what happened over what the rates predict
+  // One k per code, and, where the payload splits a code's lines by kind of payer (codes[c].by_kind: {kind: {units,
+  // allowed_cents}}, as shares of the code's own totals), one per code and kind for each kind with enough units: one
+  // payer's denials (an E/M line with modifier 57 denied by one plan) then stay with that payer. The kinds without enough
+  // units share one k for the rest of the code's money, so the code's total still comes back exactly.
   function calibrate(d) {
     const x0 = defaults(d);
     const days = (d.schedule || {}).clinic_days || 0;
-    const modeled = {};
+    const modeled = {}, modeledKind = {};
     for (const y of d.years) {
-      if (y === d.next_year) continue;
+      // months of the year CMS calls next (the window reaches past the newest rates on file) are priced at that year's
+      // amounts, as a plan for that year would be, rather than left out of what the model predicts
       const a = allowedByCode(d, x0, y, false);
       for (const [c, byPayer] of Object.entries(a)) {
         const cc = d.codes[c] || {};
         const uy = (cc.units_by_year || {})[y] || 0;
         const share = cc.units > 0 ? uy / cc.units : 0;
         modeled[c] = (modeled[c] || 0) + share * sum(byPayer) * days;
+        const mk = modeledKind[c] = modeledKind[c] || {};
+        for (const [g, v] of Object.entries(byPayer)) { const kd = kindOf(d, g); mk[kd] = (mk[kd] || 0) + share * v * days; }
       }
     }
     const k = {}, info = {};
@@ -308,7 +315,38 @@
       k[c] = clamp(v, lo, hi);
       info[c] = { k: k[c], from, clamped, modeled: modeled[c] || 0, actual: cc.allowed_cents };
     }
-    return { k, info };
+    const kind = {};
+    for (const [c, cc] of Object.entries(d.codes)) {
+      const split = cc.by_kind, mk = modeledKind[c], i = info[c];
+      if (!split || !mk || !i || i.from !== 'own' || i.clamped) continue;
+      let tu = 0, ta = 0;
+      for (const v of Object.values(split)) { tu += Math.max(0, +v.units || 0); ta += Math.max(0, +v.allowed_cents || 0); }
+      if (!(tu > 0) || !(ta > 0)) continue;
+      const own = {};
+      let aOwn = 0, mOwn = 0;
+      for (const [kd, v] of Object.entries(split)) {
+        const u = cc.units * Math.max(0, +v.units || 0) / tu, A = cc.allowed_cents * Math.max(0, +v.allowed_cents || 0) / ta, m = mk[kd] || 0;
+        if (u >= minUnits && m > 0) { own[kd] = A / m; aOwn += A; mOwn += m; }
+      }
+      if (!Object.keys(own).length) continue;
+      const mAll = modeled[c], aAll = cc.allowed_cents;
+      let rest = null;
+      if (mAll - mOwn > 1e-9 * mAll) rest = (aAll - aOwn) / (mAll - mOwn);
+      else if (aOwn > 0) for (const kd of Object.keys(own)) own[kd] *= aAll / aOwn;     // money at kinds the mix does not price
+      const vals = Object.values(own).concat(rest == null ? [] : [rest]);
+      if (vals.some(v => !(v >= lo && v <= hi))) continue;       // a k out of range: the code's own k for every payer
+      kind[c] = Object.assign(own, rest == null ? {} : { _rest: rest });
+      i.byKind = kind[c];
+    }
+    return { k, info, kind };
+  }
+
+  function kindOf(d, g) { return g === '_flat' ? '_flat' : payerKind(d, g); }
+  // k for one code at one payer: the code and kind's own where it has one, the rest of the code's otherwise
+  function kAt(d, cal, c, g) {
+    const kk = cal && cal.kind && cal.kind[c];
+    if (kk) { const v = kk[kindOf(d, g)]; if (v != null) return v; if (kk._rest != null) return kk._rest; }
+    return cal && cal.k && cal.k[c] != null ? cal.k[c] : 1;
   }
 
   function sum(o) { let t = 0; for (const v of Object.values(o)) t += v; return t; }
@@ -341,14 +379,21 @@
   // collections from allowed: payers' share, plus the patient's share times what is collected of patient balances
   // (Medicaid patients owe almost nothing, so none of a Medicaid balance is counted)
   const PAID_CLASS = { new_visit: 'visit', est_visit: 'visit', visit_addon: 'visit', mohs: 'mohs', pathology: 'pathology' };
-  function collectShare(d, x, g, code) {
+  // what the payers themselves pay of the allowed amount (second payers included), before any patient balance
+  function paidShare(d, g, code) {
     const kind = g === '_flat' ? null : payerKind(d, g);
-    let p = kind && d.paid_share[kind] != null ? d.paid_share[kind] : d.paid_share_fallback;
+    const ps = d.paid_share || {};
+    let p = kind && ps[kind] != null ? ps[kind] : d.paid_share_fallback;
     if (p == null) p = 0.85;
     // patients owe more of a visit than of a Mohs case: the kind's share, moved by how this class compares with the whole
     const fam = code ? (d.codes[code] || {}).family : null, cls = fam ? (PAID_CLASS[fam] || 'procedure') : null;
     const pc = cls && d.paid_share_class ? d.paid_share_class[cls] : null;
     if (pc != null && d.paid_share_all) p = clamp(p * pc / d.paid_share_all, 0, 1);
+    return p;
+  }
+  function collectShare(d, x, g, code) {
+    const kind = g === '_flat' ? null : payerKind(d, g);
+    const p = paidShare(d, g, code);
     const qk = x.q || Q_DEFAULT;
     const q = kind === 'medicaid' ? 0 : clamp(qk[kind] != null ? qk[kind] : (Q_DEFAULT[kind] != null ? Q_DEFAULT[kind] : 0.5), 0, 1);
     return p + (1 - p) * q;
@@ -362,10 +407,9 @@
     const byLine = {}, byPayer = {}, byCode = {};
     const blk = { production: { allowed: 0, collections: 0, payers: 0 }, ancillary: { allowed: 0, collections: 0, payers: 0 } };
     for (const [c, rows] of Object.entries(a)) {
-      const k = cal.k[c] != null ? cal.k[c] : 1;
       const line = lineOf(d, c), block = ANCILLARY_LINES.includes(line) ? 'ancillary' : 'production';
       for (const [g, v] of Object.entries(rows)) {
-        const al = v * k * daysYear, share = collectShare(d, x, g, c), co = al * share;
+        const al = v * kAt(d, cal, c, g) * daysYear, share = collectShare(d, x, g, c), co = al * share;
         const paid = al * payersShare(d, g, c);
         blk[block].allowed += al; blk[block].collections += co; blk[block].payers += paid;
         const L = byLine[line] = byLine[line] || { allowed: 0, collections: 0 };
@@ -383,13 +427,15 @@
     if (d.next_year && year === d.next_year) sameDay = sameDayCut(d, x, cal, year, daysYear);
     const patientBalances = blk.production.collections - blk.production.payers;
     blk.production.allowed -= sameDay.allowed; blk.production.collections -= sameDay.collections;
-    const path = d.pathology && d.pathology.per_lesion_cents
-      ? d.pathology.per_lesion_cents * Math.max(0, x.bx_patients) * Math.max(1, x.bx_per_patient || 1) * daysYear : 0;
+    // the pathology this clinician's biopsies bring the practice: counted only when both boxes ask for it, and without the
+    // reads already billed under the clinician's own number (those are in the 'path' line)
+    const path = pathPerLesion(d) * Math.max(0, x.bx_patients) * Math.max(1, x.bx_per_patient || 1) * daysYear;
     const pathColl = path * meanCollect(d, x, 'biopsy');
-    const anc = blk.ancillary.collections + pathColl;
+    const withPath = !!x.include_path;
+    const anc = blk.ancillary.collections + (withPath ? pathColl : 0);
     const prod = blk.production.collections;
     return {
-      allowed: blk.production.allowed + (x.include_ancillary ? blk.ancillary.allowed + path : 0),
+      allowed: blk.production.allowed + (x.include_ancillary ? blk.ancillary.allowed + (withPath ? path : 0) : 0),
       collections: prod, production: blk.production, ancillary: blk.ancillary,
       patientBalances,
       sameDay, path, pathCollections: pathColl, ancillaryCollections: anc,
@@ -398,11 +444,20 @@
     };
   }
 
-  // what the payers themselves pay of the allowed amount (second payers included), before any patient balance
-  function payersShare(d, g, code) {
-    const x0 = { q: { commercial: 0, medicare: 0, medicare_advantage: 0, supplement: 0, other: 0, medicaid: 0 } };
-    return collectShare(d, x0, g, code);
+  // allowed per biopsied lesion for the pathology read for this clinician's biopsies, less the part this clinician read and
+  // billed under their own number (pathology.own_read_cents; when the payload does not carry it, the 'path' line billed
+  // under this number is taken to be reads of their own biopsies first, up to all of the pathology generated)
+  function pathPerLesion(d) {
+    const P = d.pathology || {}, per = P.per_lesion_cents || 0, gen = P.generated_cents || 0;
+    if (!(per > 0)) return 0;
+    if (!(gen > 0)) return per;
+    let own = P.own_read_cents;
+    if (own == null) { own = 0; for (const [c, cc] of Object.entries(d.codes)) if (otherGroup(d, c) === 'path') own += cc.allowed_cents || 0; }
+    return per * Math.max(0, 1 - Math.min(gen, Math.max(0, own)) / gen);
   }
+
+  // the payers' share alone, for every kind of payer and for codes no payer prices ('_flat'): no patient balance in it
+  function payersShare(d, g, code) { return paidShare(d, g, code); }
 
   function meanCollect(d, x, family) {
     const mix = d.mix[family] || d.mix._overall || [];
@@ -414,12 +469,12 @@
   // 20% off every service but the highest when a visit shares the day with a 0-day procedure (biopsies, Mohs first
   // stages), Medicare and the Medicare Advantage plans that follow it
   function sameDayCut(d, x, cal, year, daysYear) {
-    const k = c => (cal.k[c] != null ? cal.k[c] : 1);
+    const k = (c, g) => kAt(d, cal, c, g);
     const L = d.levers;
     const follows = g => { const kind = payerKind(d, g); return kind === 'medicare' || (kind === 'medicare_advantage' && x.ma_same_day); };
     const addOn = c => (d.add_on || []).includes(c);
     const cutAdd = v => (x.cut_add_ons ? v : 0);       // an add-on line counted among the lines the rule cuts, or not
-    const pr = (c, g) => { const p = price(d, x, c, g, year, true); return p == null ? null : p * k(c); };
+    const pr = (c, g) => { const p = price(d, x, c, g, year, true); return p == null ? null : p * k(c, g); };
     let cut = 0, cutColl = 0;
     // visits with a biopsy
     const bp = Math.max(1, x.bx_per_patient || 1), bxPatients = Math.max(0, x.bx_patients);
@@ -428,7 +483,7 @@
     const akWithVisit = x.visits > 0 ? Math.min(1, ak.patients / x.visits) : 0;
     for (const [g, s] of mixOf(d, '11102')) {
       if (!follows(g)) continue;
-      const e = visitPrice(d, x, g, year, true) * k('99213');
+      const e = visitPrice(d, x, g, year, true) * k('99213', g);
       const firstCodes = Object.entries(L.biopsy.first_mix), addCodes = Object.entries(L.biopsy.add_mix);
       const b1 = firstCodes.reduce((t, [c, w]) => t + w * (pr(c, g) || 0), 0);
       const b2 = addCodes.reduce((t, [c, w]) => t + w * (pr(c, g) || 0), 0) * (bp - 1);
@@ -449,7 +504,9 @@
       const u = units(d, x), extraPerCase = C * site > 0 ? (u[addc] || 0) / (C * site) : 0;
       for (const [g, s] of mixOf(d, f)) {
         if (!follows(g)) continue;
-        const pf = pr(f, g) || 0, e = visitPrice(d, x, g, year, true) * k('99213');
+        const pf = pr(f, g);
+        if (pf == null) continue;           // no price for the first stage at this payer: no Mohs case is billed to it
+        const e = visitPrice(d, x, g, year, true) * k('99213', g);
         let total = e + cutAdd(extraPerCase * (pr(addc, g) || 0)), top = 0;
         const closures = [[R, L.flap_graft.mix], [Lm, L.layered.mix]];
         let none = 1;
@@ -492,10 +549,19 @@
     return how;
   }
 
+  // a clinician who does Mohs: a physician with Mohs cases in the months read and a price for a first stage at some payer.
+  // For anyone else the Mohs moves (more cases, closures per case, stages per case) are not offered.
+  const MOHS_MOVES = ['mohs_cases', 'fg_share', 'mohs_stages'];
+  function hasMohs(d) {
+    if (d.tier === 'nonphysician') return false;
+    if (!(((d.levers || {}).mohs || {}).cases > 0)) return false;
+    return ['17311', '17313'].some(c => Object.keys((d.rates || {})[c] || {}).length > 0);
+  }
+
   function marginal(d, x, cal) {
     cal = cal || calibrate(d);
-    const base = evaluate(d, x, cal).totalCollections;
-    return MOVES.map(([key, label, how, name, kind]) => {
+    const base = evaluate(d, x, cal).totalCollections, mohs = hasMohs(d);
+    return MOVES.filter(([key]) => mohs || !MOHS_MOVES.includes(key)).map(([key, label, how, name, kind]) => {
       const dx = step(x, key, how);
       const y = Object.assign({}, x, { [key]: x[key] + dx });
       const v = evaluate(d, y, cal).totalCollections - base;
@@ -503,19 +569,21 @@
     });
   }
 
-  // how much of one lever reaches a yearly target, the others held (collections are linear in each count lever)
+  // how much of one lever reaches a yearly target, the others held (collections are linear in each count lever). The gap
+  // is the same for every lever and is on every row and on the list itself (res.gap); a lever worth nothing for this
+  // clinician (under a dollar a year) gets no count (needed: null).
   function goalSeek(d, x, target, cal) {
     cal = cal || calibrate(d);
     const base = evaluate(d, x, cal).totalCollections, gap = target - base;
-    return marginal(d, x, cal).filter(m => m.kind === 'volume').map(m => {
-      if (!(m.value > 0)) return Object.assign(m, { needed: null });
-      const n = gap / m.value;                 // number of steps
-      return Object.assign(m, { needed: n, gap });
-    });
+    const res = marginal(d, x, cal).filter(m => m.kind === 'volume').map(m =>
+      Object.assign(m, { gap, needed: m.value >= 100 ? gap / m.value : null }));     // number of steps
+    res.gap = gap; res.base = base;
+    return res;
   }
 
   const api = { defaults, units, allowedByCode, calibrate, evaluate, marginal, goalSeek, price, shiftLevels, LINES, MOVES, ANCILLARY, Q_DEFAULT, EM, isIndexed, payersShare,
-                MEDICARE_KINDS, SAME_DAY_CUT, B1_SHARE, collectShare, payerKind, correctable, mixOf, akPatients, visitPrice };
+                MEDICARE_KINDS, SAME_DAY_CUT, B1_SHARE, collectShare, payerKind, correctable, mixOf, akPatients, visitPrice,
+                kAt, hasMohs, MOHS_MOVES, paidShare, pathPerLesion };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CalcModel = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -31,10 +31,11 @@ the patient was left to pay, not what the patient paid, so that last share is an
 """
 from __future__ import annotations
 
+import calendar
 import sqlite3
 import statistics
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 from . import activity
 from .ascfs import ASC, WAGE_INDEX, asc_amount
@@ -54,6 +55,8 @@ LAYERED_WEIGHT = (0.21, 0.75)   # share of Mohs cases and of excisions closed in
                                  # clinician's layered repairs between the two (their own total is kept)
 APP_MEDICARE_SHARE = 0.85   # Medicare pays an NP or PA 85% of the physician amount when the service is billed under their own number
 MPPR_SHARE = 0.5            # second and later procedures of the same day: 50% of the usual rate (Medicare's standard rule)
+PACE_GAP_DAYS = 42          # no clinic day this long before the pace window starts (or before the window ends): the
+                            # clinician started (or stopped) inside it, longer than any holiday
 
 
 def _add_on(code: str) -> bool:
@@ -320,6 +323,15 @@ def _run_window(conn, month_from: str | None, month_to: str | None, months: int)
     return cov, a, b
 
 
+def _data_from(conn, cov: dict) -> str | None:
+    """The first day the archive covers: the first month whose remittances it holds from its start, else the first
+    clinic day it holds at all."""
+    if cov.get("first_month"):
+        return f"{cov['first_month']}-01"
+    r = conn.execute("SELECT MIN(service_date) FROM provider_days WHERE patients > 0").fetchone()
+    return r[0][:10] if r and r[0] else None
+
+
 def _in(ids: list[str]) -> str:
     return ",".join("?" * len(ids))
 
@@ -329,31 +341,59 @@ def _month_plus(month: str, k: int) -> str:
     return f"{y + m // 12:04d}-{m % 12 + 1:02d}"
 
 
-def _schedule(conn, ids: list[str], d0: str, d1: str, window_weeks: float, full_days: int = 60, pace_from: str | None = None) -> dict:
+def _month_end(month: str) -> date:
+    y, m = int(month[:4]), int(month[5:7])
+    return date(y, m, calendar.monthrange(y, m)[1])
+
+
+def _schedule(conn, ids: list[str], d0: str, d1: str, full_days: int = 60, pace_from: str | None = None,
+              data_from: str | None = None) -> dict:
     """Clinic days in the window, and the pace of the year: days a week and weeks a year over the twelve months ending
-    with the window (a shorter window would miss the holiday weeks), pooled over the clinicians."""
+    with the window (a shorter window would miss the holiday weeks), pooled over the clinicians.
+
+    Each clinician's weeks a year count only the weeks they were working and the archive covers. Their pace runs from the
+    later of the pace window's start and the archive's first covered day (data_from), or from the week of their first
+    clinic day when they held none in the PACE_GAP_DAYS before (they started inside it); and to the window's end, or to
+    the week of their last clinic day when they held none in its last PACE_GAP_DAYS (they left or went on leave). So a
+    new hire, or an archive shorter than a year, is not measured against weeks before there was anything to see."""
     days = [(r[0], r[1]) for r in conn.execute(
         f"SELECT provider_id, service_date FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
         (*ids, d0, d1, CLINIC_DAY_MIN))]
-    p0 = pace_from or d0
-    pace_weeks = (date.fromisoformat(d1[:8] + "28") - date.fromisoformat(p0)).days / 7.0 + 0.6 if pace_from else window_weeks
+    end = _month_end(d1[:7])
+    p0 = date.fromisoformat(pace_from or d0)
+    if data_from and date.fromisoformat(data_from) > p0:
+        p0 = date.fromisoformat(data_from)
+    gap = timedelta(days=PACE_GAP_DAYS)
     per: dict[str, list] = defaultdict(list)
+    before: set[str] = set()
     for p, d in conn.execute(
             f"SELECT provider_id, service_date FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ? AND patients >= ?",
-            (*ids, p0, d1, CLINIC_DAY_MIN)):
-        per[p].append(d)
-    window_weeks = pace_weeks
-    full_days = round(full_days * pace_weeks / max(1.0, activity._weeks(d0[:7], d1[:7]))) if pace_from else full_days
+            (*ids, (p0 - gap).isoformat(), d1, CLINIC_DAY_MIN)):
+        day = date.fromisoformat(d[:10])
+        if day < p0:
+            before.add(p)
+        elif day <= end:
+            per[p].append(day)
+    span_all = ((end - p0).days + 1) / 7.0
+    window_weeks = activity._weeks(d0[:7], d1[:7])
+    # a fair number of clinic days over the months the pace reads: the window's, pro rata
+    full_days = round(full_days * span_all / window_weeks) if window_weeks else full_days
 
-    def pace(ds: list) -> tuple[float, float]:
-        wk = len({date.fromisoformat(d).isocalendar()[:2] for d in ds})
-        return (len(ds) / wk if wk else 0.0), (min(52.0, wk * 52 / window_weeks) if window_weeks else 0.0)
+    def pace(p: str, ds: list) -> tuple[float, float, float]:
+        first, last = min(ds), max(ds)
+        start = p0 if p in before else max(p0, first - timedelta(days=first.weekday()))
+        stop = end if (end - last) < gap else min(end, last + timedelta(days=6 - last.weekday()))
+        weeks = ((stop - start).days + 1) / 7.0
+        wk = len({d.isocalendar()[:2] for d in ds})
+        return (len(ds) / wk if wk else 0.0), (min(52.0, wk * 52 / weeks) if weeks > 0 else 0.0), weeks
 
     # one clinician: their own pace. A tier: the median of the clinicians who held a fair number of clinic days, so a
-    # part-timer or someone who joined late does not shorten the average year
-    full = [pace(ds) for ds in per.values() if len(ds) >= full_days] or [pace(ds) for ds in per.values()]
+    # part-timer, or someone seen only for a few weeks, does not set the average year
+    full = [pace(p, ds) for p, ds in per.items() if len(ds) >= full_days] or [pace(p, ds) for p, ds in per.items()]
     dpw = statistics.median(x[0] for x in full) if full else 0.0
     wpy = statistics.median(x[1] for x in full) if full else 0.0
+    # weeks the pace was read over (under a year, the holiday weeks may not show)
+    pace_weeks = statistics.median(x[2] for x in full) if full else 0.0
     # what a clinic day brought in (allowed for the clinician's own services seen in clinic, before pathology, radiation and
     # products): where a target per day sits against this clinician's own days
     vals = sorted(r[0] for r in conn.execute(
@@ -367,6 +407,7 @@ def _schedule(conn, ids: list[str], d0: str, d1: str, window_weeks: float, full_
         (*ids, d0, d1, CLINIC_DAY_MIN)).fetchone()
     return {"clinic_days": len(days), "clinicians_with_days": len(per),
             "days_per_week": round(dpw, 2), "weeks_per_year": round(wpy, 1), "clinic_days_per_year": round(dpw * wpy, 1),
+            "pace_from": p0.isoformat(), "pace_to": end.isoformat(), "pace_weeks": round(pace_weeks, 1),
             "clinic_day_allowed": {"p25": q(0.25), "p50": q(0.5), "p75": q(0.75), "p90": q(0.9), "n": len(vals)},
             "allowed_per_patient": round(al / pts) if pts else None, "patients_per_day": round(pts / len(days), 1) if days else None}
 
@@ -416,7 +457,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         return None
     window_weeks = activity._weeks(a, b)
     pace_from = f"{_month_plus(b, -11)}-01" if window_months < 12 else None
-    sched = _schedule(conn, ids, d0, d1, window_weeks, full_time_days(window_months), pace_from) if ids else {"clinic_days": 0}
+    sched = _schedule(conn, ids, d0, d1, full_time_days(window_months), pace_from, _data_from(conn, cov)) if ids else {"clinic_days": 0}
     states = _states(conn, ids, d0, d1)
     rates = Rates(conn, tier, states)
     year = rates.year
@@ -515,7 +556,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         fallback_paid = round(sum(paid_share.values()) / tot_a, 4)
 
     levers = _levers(svc, sched.get("clinic_days") or 0)
-    extras = _strategy_inputs(conn, ids, d0, d1)
+    extras = _strategy_inputs(conn, ids, d0, d1, window_months)
     path = conn.execute(
         f"SELECT COALESCE(SUM(path_generated_cents),0), COALESCE(SUM(biopsy_lesions),0) FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?",
         (*ids, d0, d1)).fetchone() if ids else (0, 0)
@@ -566,10 +607,16 @@ def _states(conn, ids: list[str], d0: str, d1: str) -> dict[str, float]:
     return {st: round(v / tot, 4) for st, v in n.items()} if tot else {"KY": 1.0}
 
 
-def _strategy_inputs(conn, ids: list[str], d0: str, d1: str) -> dict:
+def _strategy_inputs(conn, ids: list[str], d0: str, d1: str, months: int = 0) -> dict:
     """What the strategy lab needs beyond the schedule: money still recoverable on open findings this clinician
-    rendered, where the clinic days were (by office, from the EMA charge exports), and the fees payment vendors took."""
-    out: dict = {"open_findings": {}, "offices": {}, "vendor_fees": {}}
+    rendered, where the clinic days were (by office, from the EMA charge exports), and the fees payment vendors took.
+
+    A role average plans one average clinician's year, so its open findings are the members' total divided by the
+    number of members (the total is kept apart). Offices are the pooled clinic days, like schedule.clinic_days. Vendor
+    fees are those taken from payments dated within the window's months, so a year of them is the sum times 12 over
+    vendor_fees_months."""
+    out: dict = {"open_findings": {}, "open_findings_total": {}, "open_findings_clinicians": len(ids), "offices": {},
+                 "vendor_fees": {}, "vendor_fees_from": d0[:7], "vendor_fees_to": d1[:7], "vendor_fees_months": months}
     if not ids:
         return out
     try:
@@ -579,7 +626,8 @@ def _strategy_inputs(conn, ids: list[str], d0: str, d1: str) -> dict:
                     WHERE rendering_provider_npi IN ({_in(ids)}) AND status IN ('open', 'in_progress') AND COALESCE(stale, 0) = 0
                       AND category IN ('denial', 'bundling', 'downcoding', 'underpayment') AND (appeal_deadline IS NULL OR appeal_deadline >= ?)
                     GROUP BY 1""", (*ids, today)):
-            out["open_findings"][cat] = {"n": n, "cents": cents}
+            out["open_findings_total"][cat] = {"n": n, "cents": cents}
+            out["open_findings"][cat] = {"n": round(n / len(ids), 1) if len(ids) > 1 else n, "cents": round(cents / len(ids))}
     except sqlite3.Error:
         pass
     try:
@@ -590,9 +638,10 @@ def _strategy_inputs(conn, ids: list[str], d0: str, d1: str) -> dict:
     except sqlite3.Error:
         pass
     try:
+        # one finding per payer and month of payment, dated with the month's first payment
         for g, cents in conn.execute(
                 """SELECT payer_group, COALESCE(SUM(shortfall_cents), 0) FROM findings WHERE signal = 'FEE_SKIM' AND COALESCE(stale, 0) = 0
-                   AND COALESCE(payment_date, '') >= ? GROUP BY 1""", (d0,)):
+                   AND substr(payment_date, 1, 10) BETWEEN ? AND ? GROUP BY 1""", (d0, d1)):
             out["vendor_fees"][g or "unknown"] = cents
     except sqlite3.Error:
         pass
@@ -618,9 +667,15 @@ def _levers(svc: dict, clinic_days: int) -> dict:
 
     Layered closures (intermediate and complex repairs) follow Mohs cases and excisions alike, and a month's totals do
     not say which. They are shared out with the rates at which each kind of case is closed in layers across the archive
-    (LAYERED_WEIGHT), scaled so the clinician's own total comes back exactly."""
+    (LAYERED_WEIGHT), scaled so the clinician's own total comes back exactly.
+
+    Units a lever cannot carry stay under 'everything else' (other.codes, which a code can share with its lever): an
+    add-on billed without the code it adds to (17003 past 13 for each 17000, or with no 17000; an extra Mohs stage at a
+    site with no first stage; a biopsy or closure add-on with no first one), and closures past the page's limit of two
+    for each Mohs case or excision."""
     u = {c: s["units"] for c, s in svc.items() if s["units"] > 0}
     cd = clinic_days or 0
+    spill: Counter = Counter()            # units of a lever's code that its lever cannot give back
 
     def per_day(x: float) -> float:
         return x / cd if cd else 0.0
@@ -639,8 +694,20 @@ def _levers(svc: dict, clinic_days: int) -> dict:
         n = sum(u[c] for c in prim)
         return n, ({c: u[c] / n for c in prim} if n else {}), ({c: u[c] / n for c in codes if _add_on(c)} if n else {})
 
+    def carry(codes, n: float, room: float) -> None:
+        """A closure lever gives back `room` primary closures and their add-ons; the rest of these codes' units spill."""
+        if n > 0 and n <= room * (1 + 1e-9):
+            return
+        keep = min(1.0, room / n) if n > 0 else 0.0
+        for c in codes:
+            spill[c] += u[c] * (1 - keep)
+
     hn, tr = u.get("17311", 0), u.get("17313", 0)
     cases = hn + tr
+    # extra stages and blocks follow a first stage at the same site
+    for c, first in (("17312", hn), ("17314", tr), ("17315", cases)):
+        if u.get(c) and not first:
+            spill[c] += u[c]
     # closures follow Mohs cases and excisions; a clinician who bills them with neither keeps them under 'everything else'
     if not cases:
         by["other"] += by.pop("flap_graft", [])
@@ -649,29 +716,56 @@ def _levers(svc: dict, clinic_days: int) -> dict:
     e_hn = u.get("17312", 0) / hn if hn else None
     e_tr = u.get("17314", 0) / tr if tr else None
     fg_n, fg_mix, fg_add = primary_mix(by["flap_graft"])
+    fg = min(fg_n / cases, 2.0) if cases else 0.40
+    if cases:
+        carry(by["flap_graft"], fg_n, fg * cases)
     lay_n, lay_mix, lay_add = primary_mix(by["layered"])
     exc_n = sum(u[c] for c in by["excision"])
     wm, we = LAYERED_WEIGHT
     scale = lay_n / (wm * cases + we * exc_n) if (wm * cases + we * exc_n) else 0.0
+    lm, le = wm * scale, we * scale
+    # the page carries at most two layered closures per Mohs case and per excision: past that on one side, the rest go to
+    # the other side, and past both, to 'everything else'
+    if le > 2.0 and cases:
+        lm, le = (lay_n - 2.0 * exc_n) / cases, 2.0
+    if lm > 2.0 and exc_n:
+        lm, le = 2.0, min(2.0, (lay_n - 2.0 * cases) / exc_n)
+    lm, le = min(lm, 2.0), min(le, 2.0)
+    if cases or exc_n:
+        carry(by["layered"], lay_n, lm * cases + le * exc_n)
     new = {c: u.get(c, 0) for c in EM_NEW}
     est = {c: u.get(c, 0) for c in EM_EST}
     n_new, n_est = sum(new.values()), sum(est.values())
     visits = n_new + n_est
+    if u.get("G2211") and not visits:
+        spill["G2211"] += u["G2211"]
     bx_first = sum(u[c] for c in by["biopsy_first"])
     bx_add = sum(u[c] for c in by["biopsy_add"])
+    if bx_add and not bx_first:
+        for c in by["biopsy_add"]:
+            spill[c] += u[c]
+        bx_add = 0
     ak0, ak3, ak4 = u.get("17000", 0), u.get("17003", 0), u.get("17004", 0)
+    # 17003 is each lesion from the second to the fourteenth: at most 13 for each 17000
+    if ak3 > 13 * ak0:
+        spill["17003"] += ak3 - 13 * ak0
+        ak3 = 13 * ak0
     ak_pat = ak0 + ak4
     ak_n = 1 + ak3 / ak0 if ak0 else 4.0
     ak_f = ak4 / ak_pat if ak_pat else 0.07
     ben = u.get("17110", 0) + u.get("17111", 0)
+    x12, x14 = u.get("17312", 0) - spill["17312"], u.get("17314", 0) - spill["17314"]
+    other = {c: per_day(u[c]) for c in by["other"]}
+    for c, v in spill.items():
+        if v > 1e-9:
+            other[c] = other.get(c, 0.0) + per_day(v)
     return {
         "mohs": {"cases": per_day(cases), "head_neck_share": hn / cases if cases else 0.62,
-                 "stages": 1 + (u.get("17312", 0) + u.get("17314", 0)) / cases if cases else 1.47,
+                 "stages": 1 + (x12 + x14) / cases if cases else 1.47,
                  # extra stages per case at each site, relative to the average: kept as the slider moves the average
                  "extra_head_neck": e_hn, "extra_trunk": e_tr, "blocks": u.get("17315", 0) / cases if cases else 0.0},
-        "flap_graft": {"share": min(fg_n / cases, 2.0) if cases else 0.40, "mix": fg_mix, "add_ons": fg_add,
-                       "billed_without_mohs": fg_n if not cases else 0},
-        "layered": {"mohs_share": min(wm * scale, 2.0) if cases else wm, "excision_share": min(we * scale, 2.0) if exc_n else we,
+        "flap_graft": {"share": fg, "mix": fg_mix, "add_ons": fg_add, "billed_without_mohs": fg_n if not cases else 0},
+        "layered": {"mohs_share": lm if cases else wm, "excision_share": le if exc_n else we,
                     "mix": lay_mix, "add_ons": lay_add, "weights": [wm, we]},
         "excision": {"per_day": per_day(exc_n), "mix": shares(by["excision"])},
         "visits": {"per_day": per_day(visits), "new_share": n_new / visits if visits else 0.15,
@@ -682,7 +776,7 @@ def _levers(svc: dict, clinic_days: int) -> dict:
                    "first_mix": shares(by["biopsy_first"]) or {"11102": 1.0}, "add_mix": shares(by["biopsy_add"]) or {"11103": 1.0}},
         "ak": {"lesions": per_day(ak_pat * (ak_f * AK_LESIONS_15_PLUS + (1 - ak_f) * ak_n)), "per_patient": ak_n, "share_15_plus": ak_f},
         "benign": {"patients": per_day(ben), "share_15_plus": u.get("17111", 0) / ben if ben else 0.02},
-        "other": {"codes": {c: per_day(u[c]) for c in by["other"]}, "groups": {c: other_group(c) for c in by["other"]}},
+        "other": {"codes": other, "groups": {c: other_group(c) for c in other}},
     }
 
 
