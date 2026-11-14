@@ -83,6 +83,15 @@ function calcRange(cs, def){
   return [fix(Math.max(0, lo)), fix(hi)];
 }
 
+// a target's levers counted a clinic day (visits, new patients, Mohs cases): the most a clinic day can hold is the top
+// of the slider the lever moves (a new patient is one more visit). {key, max, what}, or null for the other levers. Used
+// by the goal seek here and on the provider sheet.
+const CALC_GOAL_TOP = {visits: ['visits', 'visits'], new_visits: ['visits', 'visits'], mohs_cases: ['mohs_cases', 'Mohs cases']};
+function calcGoalTop(cs, key){
+  const t = CALC_GOAL_TOP[key], def = t && CALC_VOLUME.flatMap(g => g[1]).find(q => q[0] === t[0]);
+  return def ? {key: t[0], max: calcRange(cs, def)[1], what: t[1]} : null;
+}
+
 // folds stay as the reader left them, and the focused control keeps the focus, when a panel is drawn again
 function calcFold(key, dflt){ const f = state.calc.folds = state.calc.folds || {}; return (f[key] == null ? dflt : f[key]) ? 'open' : ''; }
 function calcFoldWire(box){
@@ -324,7 +333,8 @@ function calcDraw(v){
 
 // Mohs sliders are not offered to a clinician who does no Mohs (and has none in the schedule now)
 const CALC_MOHS = ['mohs_cases', 'mohs_stages', 'mohs_hn', 'fg_share', 'lay_mohs', 'mohs_visit_share'];
-const calcMohsOk = cs => CalcModel.hasMohs(cs.data) || cs.base.mohs_cases > 0 || cs.x.mohs_cases > 0;
+// (an APP never: a stray Mohs line billed under an APP's number is not their work to plan)
+const calcMohsOk = cs => cs.data.tier !== 'nonphysician' && (CalcModel.hasMohs(cs.data) || cs.base.mohs_cases > 0 || cs.x.mohs_cases > 0);
 const calcShow = (f, v) => f === 'pct' || f === 'per100' ? Math.round(v * 100) : (+v).toFixed(f === 'n2' ? 2 : f === 'n1' ? 1 : 0);
 
 function calcRow(cs, def, otherNow){
@@ -406,6 +416,9 @@ function calcInputs(v){
 let calcTimer = null;
 function calcSoon(){ if(calcTimer) return; calcTimer = requestAnimationFrame(() => { calcTimer = null; calcUpdate(); }); }
 
+// what moves the band around the year's total
+function calcBandWhy(d, x){ return x.year === d.next_year ? `patient balances and the open ${d.next_year} readings` : 'patient balances'; }
+
 // the same assumptions (collections, 2027 readings, contracts, ancillary) on another schedule or year
 function calcWith(base, x, over){
   return Object.assign({}, base, {q: x.q, ma_same_day: x.ma_same_day, cut_add_ons: x.cut_add_ons, bx_visit_share: x.bx_visit_share,
@@ -424,7 +437,8 @@ function calcUpdate(){
   const fixed = ev(Object.assign({}, x));
   const nCorr = Object.values(x.corrected).filter(Boolean).length;
   const sign = dv => Math.abs(dv) < 50000 ? '' : `<span class="${dv>0?'ok':'sev-high'}">${dv>0?'+':'−'}${moneyK(Math.abs(dv))}</span>`;
-  // the band: patient balances and the open 2027 readings (add-on codes, Medicare Advantage plans, modifier 57)
+  // the band: patient balances, and on next year's rules the open readings (add-on codes, Medicare Advantage plans,
+  // modifier 57); they play no part in a plan at this year's rates
   const qShift = s => Object.fromEntries(Object.entries(x.q).map(([k, q]) => [k, Math.min(1, Math.max(0, q + s))]));
   const s57 = CalcModel.visit57Share(d) != null && CalcModel.hasMohs(d);
   const band = (s, add, m57) => [true, false].map(ma => ev(Object.assign({}, x, {q: qShift(s), cut_add_ons: add, ma_same_day: ma, mohs_57: m57})).totalCollections);
@@ -449,7 +463,7 @@ function calcUpdate(){
     <table class="calc-fall"><tbody>
       ${rows.map(([label, dv, val, note]) => `<tr class="${note==='muted'?'small muted':''}"><td>${esc(label)}${note && note!=='muted' ? `<div class="small muted">${esc(note)}</div>` : ''}</td>
         <td class="num">${val != null ? moneyK(val) : sign(dv) || '<span class="muted">no change</span>'}</td></tr>`).join('')}
-      <tr class="calc-total"><td><b>Estimated collections, a year</b><div class="small muted">likely ${moneyK(lo)} to ${moneyK(hi)}: patient balances and the open ${esc(d.next_year || '')} readings</div></td>
+      <tr class="calc-total"><td><b>Estimated collections, a year</b><div class="small muted">likely ${moneyK(lo)} to ${moneyK(hi)}: ${esc(calcBandWhy(d, x))}</div></td>
         <td class="num"><b style="font-size:22px">${moneyK(R[3])}</b><div class="small muted">${money(fixed.totalCollections / Math.max(1, fixed.daysYear))} a clinic day · ${(fixed.daysYear||0).toFixed(0)} days</div></td></tr>
     </tbody></table>
     <div class="small muted" style="margin-top:6px">Of this, patient balances are about ${moneyK(fixed.patientBalances)} at the shares set under Patient balances.
@@ -574,8 +588,10 @@ function calcGoal(){
   if(dollars > 1e9){ out.innerHTML = '<span class="sev-medium">That is more than a billion dollars a year. Type one clinician\'s yearly figure, such as 1,600,000 or 1.6m.</span>'; return; }
   const T = dollars * 100;
   const plan = CalcModel.evaluate(d, x, cs.cal);
+  // no clinic days (or under one a year): nothing to spread the target over
+  if(!(plan.daysYear >= 1)){ out.innerHTML = `<span class="sev-medium">This plan has ${plan.daysYear > 0 ? 'under one clinic day a year' : 'no clinic days'}: set clinic days a week and weeks a year first.</span>`; return; }
   const res = CalcModel.goalSeek(d, x, T, cs.cal, {moves: CALC_GOAL_MOVES});
-  const days = Math.max(1, plan.daysYear), perDay = T / days;
+  const days = plan.daysYear, perDay = T / days;
   const w = calcDayNeed(cs, plan, T);
   const head = `<p>${T < 10000000 ? money(T) : moneyK(T)} over ${days.toFixed(0)} clinic days is ${money(perDay)} collected a clinic day, about ${money(w.need)} allowed for your own services.
     ${w.planDay > 0 ? `This plan's average clinic day brings ${money(w.planDay)} allowed${w.need > w.planDay ? `: the target needs ${w.need > w.planDay * 1.01 ? Math.round(100 * (w.need / w.planDay - 1)) + '%' : 'under 1%'} more` : ''}.` : ''}
@@ -591,10 +607,15 @@ function calcGoal(){
     const n = m.needed;
     if(m.key === 'days_per_week') return x.days_per_week + n * 0.5 > 6 ? 'not enough on its own (more than 6 days a week)' : `${n1(n * 0.5)} more clinic days a week`;
     if(m.key === 'weeks_per_year') return x.weeks_per_year + n > 52 ? 'not enough on its own (more than 52 weeks)' : `${n1(n)} more weeks a year`;
+    // visits, new patients and Mohs cases: no more than their slider holds a clinic day
+    const top = calcGoalTop(cs, m.key);
+    if(top && x[top.key] + n * m.step > top.max + 1e-9) return `not enough on its own (more than ${calcFmt.n1(top.max)} ${top.what} a clinic day)`;
     return `${n1(n)} more a week (${n1(n / dpw)} a clinic day)${m.key === 'mohs_cases' ? ', as referrals allow' : ''}`;
   };
-  out.innerHTML = head + `<p>${moneyK(gap)} a year short. Any one of these closes it on its own:</p>
-    <table class="calc-goal"><tbody>${ways.map(m => `<tr><td>${esc(m.name)}</td><td class="num">${esc(say(m))}</td></tr>`).join('')}</tbody></table>
+  // the levers that close it first; those past what a schedule or a clinic day holds after them
+  const short = t => /^not enough/.test(t), said = ways.map(m => [m, say(m)]).sort((a, b) => short(a[1]) - short(b[1]));
+  out.innerHTML = head + `<p>${moneyK(gap)} a year short. ${said.some(r => !short(r[1])) ? 'Any one of these closes it on its own:' : 'None of these closes it on its own:'}</p>
+    <table class="calc-goal"><tbody>${said.map(([m, t]) => `<tr><td>${esc(m.name)}</td><td class="num">${esc(t)}</td></tr>`).join('')}</tbody></table>
     <div class="muted" style="margin-top:4px">Biopsies, frozen lesions, excisions, stages, closures and visit levels are left out on purpose: they follow the patient.</div>`;
 }
 

@@ -106,7 +106,9 @@ async function labDraw(v){
       if(inp.type === 'number' && String(inp.value).trim() === '' && !(inp.validity && inp.validity.badInput)){
         const dv = def ? def[6] : null;
         const c = lab.chosen[id] = lab.chosen[id] || {on: false};
-        c.params = Object.assign(c.params || {}, {[key]: dv});
+        // not entered is no setting at all (the card's defaults fill it in): only numbers are kept, as a scenario saves them
+        c.params = c.params || {};
+        if(dv == null) delete c.params[key]; else c.params[key] = dv;
         const r = body.querySelector(`input[type=range][data-lab-p="${id}|${key}|${fmt}"]`);
         if(r) r.value = dv == null ? (def ? def[2] : 0) : dv;
         if(dv == null) inp.placeholder = 'not entered';
@@ -133,10 +135,18 @@ async function labDraw(v){
   labUpdate(v);
 }
 
+// The ASC cards on provider tables built before they kept where each closure is done (the payload's asc.cases.from is
+// not set): the figures cannot say, which is not the same as a physician's work not fitting. An APP never operates in an
+// ASC, so the tier's note stays theirs.
+const LAB_ASC_UNMEASURED = 'Where closures are done is not in these figures yet: it comes with the next rebuild of the provider tables.';
+const labAscUnmeasured = (S, d) => (S.id === 'asc' || S.id === 'asc_later') && d.tier !== 'nonphysician' && ((d.asc || {}).cases || {}).from == null;
+
 function labCard(S){
   const cs = state.calc, d = cs.data, c = (cs.lab.chosen || {})[S.id] || {}, p = Object.assign(LabModel.paramDefaults(S), c.params || {});
   const [tier, cls] = LAB_TIER[S.tier] || ['', ''];
-  const off = (S.only === 'next' && cs.x.year !== d.next_year) || (S.applies && !S.applies(d, cs.x));
+  const notHere = S.applies && !S.applies(d, cs.x), off = (S.only === 'next' && cs.x.year !== d.next_year) || notHere;
+  const offWhy = !off ? '' : notHere ? ' ' + (labAscUnmeasured(S, d) ? LAB_ASC_UNMEASURED : 'Not for this clinician\'s work.')
+    : ' Switch the Calculator to Plan ' + d.next_year + ' to use it.';
   const ctl = ([key, label, mn, mx, st, fmt]) => {
     const val = labNum(p[key]);
     if(fmt === 'bool') return `<label class="small" style="display:block"><input type="checkbox" data-lab-p="${esc(S.id)}|${esc(key)}|bool" ${val?'checked':''}> ${esc(label)}</label>`;
@@ -160,7 +170,7 @@ function labCard(S){
   return `<div class="lab-card" data-lab-card="${esc(S.id)}">
     <label class="lab-head"><input type="checkbox" data-lab-on="${esc(S.id)}" ${c.on?'checked':''} ${off?'disabled':''}> <b>${esc(S.title)}</b>
       <span class="chip ${cls}">${esc(tier)}</span>${S.whatif ? ' <span class="chip">what-if</span>' : ''}</label>
-    <div class="small muted">${esc(S.why)}${off ? (S.applies && !S.applies(d, cs.x) ? ' Not for this clinician\'s work.' : ' Switch the Calculator to Plan ' + esc(d.next_year) + ' to use it.') : ''}</div>
+    <div class="small muted">${esc(S.why)}${esc(offWhy)}</div>
     <div class="lab-impact small" data-lab-impact="${esc(S.id)}"></div>
     <details><summary class="small">Settings${S.compliance ? ' and compliance' : ''}</summary>
       ${ctls}
@@ -186,7 +196,7 @@ function labUpdate(v){
     const el = body.querySelector(`[data-lab-impact="${S.id}"]`); if(!el) continue;
     const st = r.steps.find(s => s.id === S.id);
     if(!st){ el.innerHTML = S.id === 'asc' ? labAscNow(d, x) : ''; continue; }
-    if(st.skipped){ el.innerHTML = `<span class="muted">${esc(st.skipped)}</span>`; continue; }
+    if(st.skipped){ el.innerHTML = `<span class="muted">${esc(labAscUnmeasured(S, d) ? LAB_ASC_UNMEASURED : st.skipped)}</span>`; continue; }
     const bits = [`${st.whatif ? 'what-if: ' : ''}collections ${labSigned(st.collections)} a year`];
     if(S.id === 'asc' && st.detail && Math.abs(st.practiceOnly) >= 50000){
       bits.push(`of which ASC facility fees ${labSigned(st.practiceOnly)} (the practice's)`);
@@ -236,7 +246,7 @@ function labUpdate(v){
       ${ifRows.map(([s, dv]) => `<tr><td>${esc(s.title)}</td><td class="num">${labSigned(dv)}</td></tr>`).join('')}
       ${W ? `<tr><td>Collections a year with the what-ifs</td><td class="num">${moneyK(W.collections)}${W.cost && !ifCostOpen ? ` <span class="small muted">(after costs ${moneyK(W.collections - W.cost)})</span>` : ''}</td></tr>` : ''}` : ''}
     </tbody></table>
-    ${r.needs.length ? `<div class="small sev-medium" style="margin-top:4px">Not entered yet for the strategies above: ${r.needs.map(n => esc(needLabel(n))).join('; ')}. ${costOpen ? 'Costs a year leave out what is not entered, so nothing is shown after costs. ' : ''}${params.includes('param.own') ? 'The ASC counts the lower of its two views (with and without the facility fee) until the practice\'s share is entered. ' : ''}${params.includes('param.commercial_pct') ? 'Medicare Advantage and commercial cases are not moved until their facility fee is entered.' : ''}</div>` : ''}
+    ${r.needs.length ? `<div class="small sev-medium" style="margin-top:4px">Not entered yet for the strategies above: ${r.needs.map(n => esc(needLabel(n))).join('; ')}. ${costOpen ? 'Costs a year leave out what is not entered, so nothing is shown after costs. ' : ''}${params.includes('param.own') ? 'The ASC counts the lower of its two views (with and without the facility fee, after costs once the ASC\'s cost per case is entered) until the practice\'s share is entered. ' : ''}${params.includes('param.commercial_pct') ? 'Medicare Advantage and commercial cases are not moved until their facility fee is entered.' : ''}</div>` : ''}
     ${r.capacity && r.capacity.share > 1 ? `<div class="small sev-high">The plan needs more clinician minutes than a clinic day holds. Either the minutes entered are hands-on minutes the clinician can overlap across rooms (then raise the day's minutes), or the plan does not fit.</div>` : ''}`;
   body.querySelectorAll('[data-goto-figures]').forEach(a => a.onclick = e => { e.preventDefault(); cs.view = 'figures'; calcDraw(cs.el); });
   // what earns the most per minute
@@ -254,8 +264,10 @@ const labCase = c => `<span class="${c > 0 ? 'ok' : c < 0 ? 'sev-high' : 'muted'
 // the practice's share of the ASC's fee not entered: the year with all of the fee and with none of it, side by side
 function labAscViews(D){
   if(D.own != null || !(D.moved || D.back || D.excisions || (D.ky && D.ky.moved))) return '';
-  return `<div class="lab-views" style="display:flex;flex-wrap:wrap;gap:6px 24px;margin:6px 0"><div><div class="small muted">With the whole facility fee</div><b>${labSigned(D.withFee)}</b> <span class="small">a year</span></div>
-    <div><div class="small muted">Without the fee (the practice owns none of the ASC)</div><b>${labSigned(D.withoutFee)}</b> <span class="small">a year</span></div></div>
+  // with the ASC's cost per case entered, each view after costs too: the year counts the one that leaves less
+  const after = v => v == null ? '' : ` <span class="small muted">(${labSigned(v)} after costs)</span>`;
+  return `<div class="lab-views" style="display:flex;flex-wrap:wrap;gap:6px 24px;margin:6px 0"><div><div class="small muted">With the whole facility fee</div><b>${labSigned(D.withFee)}</b> <span class="small">a year</span>${after(D.withFeeNet)}</div>
+    <div><div class="small muted">Without the fee (the practice owns none of the ASC)</div><b>${labSigned(D.withoutFee)}</b> <span class="small">a year</span>${after(D.withoutFeeNet)}</div></div>
     <div class="small muted">Enter the share of the ASC's facility fee the practice keeps (by capital) in this card's settings to count it.${D.costKnown ? '' : ' Before costs: the ASC\'s cost per case is not entered.'}</div>`;
 }
 // per closure: the cases a year at Newburgh and what one case moved to the ASC the same day is worth, at Medicare's amounts
@@ -346,7 +358,10 @@ function labScenariosInit(v){
     const all = (cs.Adoc || {}).scenarios || [];
     if(all.length >= LabModel.MAX_SCENARIOS && !all.some(s => s.who === d.who.id && s.name === name)){
       say(`There are already ${LabModel.MAX_SCENARIOS} saved scenarios: delete some first.`, 'sev-high'); return; }
-    const item = {name, who: d.who.id, x: JSON.parse(JSON.stringify(cs.x)), chosen: JSON.parse(JSON.stringify(cs.lab.chosen || {})), saved_at: new Date().toISOString()};
+    // saved as the server takes it: plain settings, and only numbers for a strategy's settings (a box left not entered
+    // is no setting)
+    const item = LabModel.cleanScenario({name, who: d.who.id, x: JSON.parse(JSON.stringify(cs.x)), chosen: JSON.parse(JSON.stringify(cs.lab.chosen || {})), saved_at: new Date().toISOString()});
+    if(!item){ say('This scenario could not be saved: pick a clinician again and retry.', 'sev-high'); return; }
     say('Saving…', 'muted');
     try {
       const r = await labSave(doc => { doc.scenarios = doc.scenarios.filter(s => !(s.who === item.who && s.name === item.name)); doc.scenarios.push(item); });
@@ -390,6 +405,8 @@ function labScenarioRows(v){
 }
 
 // ------------------------------------------------------------------ practice figures
+// a pay plan's boxes, as their columns are headed (and as a bad figure is named)
+const LAB_PLAN_LABEL = {pct: 'Share of collections', per_wrvu: 'Per wRVU', base: 'Base', threshold: 'Threshold', above_pct: 'Share above'};
 async function figuresDraw(v, note){
   const cs = state.calc, d = cs.data;
   const A = await labAssumptions();
@@ -403,7 +420,7 @@ async function figuresDraw(v, note){
   const compRow = ([id, name]) => { const p = comp[id] || {};
     const inp = (k, val, ph, w, title, label) => `<td data-label="${esc(label)}"><input type="number" data-c="${k}" data-orig="${esc(val)}" min="0" step="any" placeholder="${esc(ph)}" value="${esc(val)}" style="width:${w}px"${title ? ` title="${esc(title)}"` : ''} aria-label="${esc(name)}: ${esc(ph)}" ${cs.Aok ? '' : 'disabled'}></td>`;
     return `<tr data-comp="${esc(id)}" data-name="${esc(name)}"><td>${esc(name)}</td><td data-label="Plan" style="grid-column:1 / -1"><select data-c="type" data-orig="${esc(p.type || '')}" aria-label="${esc(name)}: plan" ${cs.Aok ? '' : 'disabled'}><option value="">no plan entered</option>${LabModel.COMP_TYPES.map(([k, l]) => `<option value="${k}" ${p.type===k?'selected':''}>${esc(l)}</option>`).join('')}</select></td>
-      ${inp('pct', pctShow(p.pct), 'share, %', 90, 'share of collections, %', 'Share of collections')}${inp('per_wrvu', show(p.per_wrvu), '$ per wRVU', 90, '', 'Per wRVU')}${inp('base', show(p.base), 'base $', 100, '', 'Base')}${inp('threshold', show(p.threshold), 'threshold $', 110, '', 'Threshold')}${inp('above_pct', pctShow(p.above_pct), 'above, %', 80, '', 'Share above')}</tr>`; };
+      ${inp('pct', pctShow(p.pct), 'share, %', 90, 'share of collections, %', LAB_PLAN_LABEL.pct)}${inp('per_wrvu', show(p.per_wrvu), '$ per wRVU', 90, '', LAB_PLAN_LABEL.per_wrvu)}${inp('base', show(p.base), 'base $', 100, '', LAB_PLAN_LABEL.base)}${inp('threshold', show(p.threshold), 'threshold $', 110, '', LAB_PLAN_LABEL.threshold)}${inp('above_pct', pctShow(p.above_pct), 'above, %', 80, '', LAB_PLAN_LABEL.above_pct)}</tr>`; };
   v.querySelector('#calcBody').innerHTML = `
     <div class="panel"><h2>Practice figures</h2>
       <div class="small muted">The practice's own numbers, used by the Strategy lab and the Provider sheet. Leave a box empty until you have the figure: anything that depends on it is shown as not entered, never guessed. Saved to the site for the owner only${cs.Asaved ? `; last saved ${esc(cs.Asaved.replace('T', ' ').slice(0, 16))}` : ''}. Only the boxes you change are saved, so figures saved in another window are kept.</div>
@@ -417,7 +434,7 @@ async function figuresDraw(v, note){
         ${LabModel.COSTS.map(([k, l]) => field('costs', k, l, 'dollars')).join('')}</div>
     </div>
     <div class="panel"><h2>Pay plans</h2><div class="small muted">How each clinician is paid on their own production. Here that is the services they perform and bill themselves, visits billed incident to them included. Slides they read (pathology billed under their number), staff services such as light treatments and injections, and drugs are not counted in it. A plan may credit the professional part of slides a physician reads, or incident-to staff services and drugs: decide that with counsel. Pathology, lab, radiation and drugs they order are designated health services: under the Stark law a physician's productivity pay may not credit them. An APP's pay is kept to their own services under the anti-kickback safe harbor for employees. Have counsel review each plan. Plans of clinicians not listed here are kept.</div>
-      <div><table class="calc-cards"><thead><tr><th>Clinician</th><th>Plan</th><th>Share of collections</th><th>Per wRVU</th><th>Base</th><th>Threshold</th><th>Share above</th></tr></thead><tbody>${people.map(compRow).join('')}</tbody></table></div></div>`;
+      <div><table class="calc-cards"><thead><tr><th>Clinician</th><th>Plan</th>${Object.values(LAB_PLAN_LABEL).map(l => `<th>${esc(l)}</th>`).join('')}</tr></thead><tbody>${people.map(compRow).join('')}</tbody></table></div></div>`;
   const body = v.querySelector('#calcBody'), msg = body.querySelector('#figMsg');
   const say = (text, cls) => { msg.textContent = text; msg.className = 'small ' + (cls || ''); };
   if(note) say(note[0], note[1]);
@@ -444,7 +461,7 @@ async function figuresDraw(v, note){
       if(!changed.length) return;
       const type = tr.querySelector('[data-c="type"]').value;
       if(!type && !changed.includes('type')){ noType.push(tr.dataset.name); return; }    // figures typed into a row with no plan
-      const val = (k, pct) => { const n = read(tr.querySelector(`[data-c="${k}"]`), pct); if(n === undefined) bad.push(tr.dataset.name + ': ' + k.replace('_', ' ')); return n == null ? null : (pct ? n / 100 : n); };
+      const val = (k, pct) => { const n = read(tr.querySelector(`[data-c="${k}"]`), pct); if(n === undefined) bad.push(tr.dataset.name + ': ' + labLower(LAB_PLAN_LABEL[k])); return n == null ? null : (pct ? n / 100 : n); };
       const plan = {type, pct: val('pct', true), per_wrvu: val('per_wrvu'), base: val('base'), threshold: val('threshold'), above_pct: val('above_pct', true)};
       plans.push([tr.dataset.comp, type ? plan : null, changed]);
     });
@@ -522,6 +539,9 @@ async function sheetDraw(v){
     let goal = '';
     if(need === 0){
       goal = `<h3>To be paid ${moneyK(t)}</h3><p>Your base pay covers this target.</p>`;
+    } else if((need || needW) && !(planned.daysYear >= 1)){
+      // no clinic days (or under one a year): nothing to spread the target over
+      goal = `<h3>To be paid ${moneyK(t)}</h3><p>This plan has ${planned.daysYear > 0 ? 'under one clinic day a year' : 'no clinic days'}: set clinic days a week and weeks a year on the Calculator first.</p>`;
     } else if(need){
       const dpw = Math.max(0.5, x.days_per_week);
       // like with like, as the Calculator reads a target (calc.js calcDayNeed): the allowed amounts a clinic day needs,
@@ -533,16 +553,22 @@ async function sheetDraw(v){
       const seek = CalcModel.goalSeek(d, xp, need, cs.cal, {moves: ids, production: true});
       const gap = seek.gap != null ? seek.gap : need - planned.collections;      // on own production
       const all = gap > 0 ? seek.filter(m => ids.includes(m.key) && m.needed != null && isFinite(m.needed) && m.needed > 0) : [];
-      // the Calculator's limits: more clinic days or weeks than a schedule can hold do not close the gap on their own
+      // the Calculator's limits: more clinic days or weeks than a schedule can hold, or more visits, new patients or Mohs
+      // cases than a clinic day holds (their slider's top, calc.js calcGoalTop), do not close the gap on their own
       const cap = (typeof CALC_CAP !== 'undefined' && CALC_CAP) || LabModel.CAP;
-      const over = m => (m.key === 'days_per_week' && x.days_per_week + m.needed * m.step > cap.days_per_week)
-        || (m.key === 'weeks_per_year' && x.weeks_per_year + m.needed * m.step > cap.weeks_per_year);
+      const top = m => typeof calcGoalTop === 'function' ? calcGoalTop(cs, m.key) : null;
+      const over = m => { const tp = top(m);
+        return (m.key === 'days_per_week' && x.days_per_week + m.needed * m.step > cap.days_per_week)
+          || (m.key === 'weeks_per_year' && x.weeks_per_year + m.needed * m.step > cap.weeks_per_year)
+          || (!!tp && x[tp.key] + m.needed * m.step > tp.max + 1e-9); };
       const res = all.filter(m => !over(m)), tooMuch = all.filter(over);
       const how = m => m.key === 'days_per_week' ? `${(m.needed * m.step).toFixed(1)} more clinic days a week`
         : m.key === 'weeks_per_year' ? `${(m.needed * m.step).toFixed(1)} more weeks of clinic a year`
         : `${(m.needed / dpw).toFixed(1)} more a clinic day${m.key === 'mohs_cases' ? ' (depends on referrals)' : ''}`;
-      const notEnough = tooMuch.length ? `<p class="small muted">Not enough on its own: ${tooMuch.map(m => m.key === 'days_per_week'
-        ? `more clinic days (it would take more than ${cap.days_per_week} a week)` : `more weeks of clinic (it would take more than ${cap.weeks_per_year} a year)`).join('; ')}.</p>` : '';
+      const tooMuchWords = m => m.key === 'days_per_week' ? `more clinic days (it would take more than ${cap.days_per_week} a week)`
+        : m.key === 'weeks_per_year' ? `more weeks of clinic (it would take more than ${cap.weeks_per_year} a year)`
+        : `more ${labLower(m.name)} (it would take more than ${calcFmt.n1(top(m).max)} ${top(m).what} a clinic day)`;
+      const notEnough = tooMuch.length ? `<p class="small muted">Not enough on its own: ${esc(tooMuch.map(tooMuchWords).join('; '))}.</p>` : '';
       goal = `<h3>To be paid ${moneyK(t)}</h3><p>Collections of ${moneyK(need)} a year for your own production: ${money(need / days)} a clinic day over ${days.toFixed(0)} days, about ${money(w.need)} allowed.
         ${w.planDay > 0 ? `This plan's average clinic day brings ${money(w.planDay)} allowed${w.need > w.planDay ? `: the target needs ${w.need > w.planDay * 1.01 ? Math.round(100 * (w.need / w.planDay - 1)) + '%' : 'under 1%'} more` : ''}.` : ''}
         ${w.p50 ? `At this plan's prices your own clinic days so far would have brought about ${money(w.p50)} allowed at the median and ${money(w.p90)} at the 90th percentile: the target is ${esc(w.where)}.` : ''}</p>
@@ -555,7 +581,7 @@ async function sheetDraw(v){
       <h2>${esc(d.who.name)}: ${esc(x.year)}</h2>
       <table><thead><tr><th></th><th class="num">At today's pace</th><th class="num">The plan</th></tr></thead><tbody>
         <tr><td>Clinic days a year</td><td class="num">${(now.daysYear||0).toFixed(0)}</td><td class="num">${(planned.daysYear||0).toFixed(0)}</td></tr>
-        <tr><td>Mohs cases a clinic day</td><td class="num">${calcFmt.n1(cs.base.mohs_cases)}</td><td class="num">${calcFmt.n1(x.mohs_cases)}</td></tr>
+        ${app ? '' : `<tr><td>Mohs cases a clinic day</td><td class="num">${calcFmt.n1(cs.base.mohs_cases)}</td><td class="num">${calcFmt.n1(x.mohs_cases)}</td></tr>`}
         <tr><td>Visits a clinic day</td><td class="num">${calcFmt.n1(cs.base.visits)}</td><td class="num">${calcFmt.n1(x.visits)}</td></tr>
         <tr><td>Patients biopsied a clinic day</td><td class="num">${calcFmt.n1(cs.base.bx_patients)}</td><td class="num">${calcFmt.n1(x.bx_patients)}</td></tr>
         <tr><td>Excisions a clinic day</td><td class="num">${calcFmt.n1(cs.base.excisions)}</td><td class="num">${calcFmt.n1(x.excisions)}</td></tr>

@@ -227,6 +227,25 @@ def test_what_the_page_saves_the_server_takes(client):
     assert [s["name"] for s in got["scenarios"]] == ["Keep"] and got["scenarios"][0]["chosen"]["stage"]["params"] == {"share": 0.2}
 
 
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_a_scenario_saved_after_a_box_is_emptied_is_taken(client):
+    """A box with no default, emptied, is no setting: the page sends a new scenario through LabModel.cleanScenario, so a
+    setting left not entered never reaches the server, which takes only numbers."""
+    tc, _ = client
+    raw = {"name": "After an emptied box", "who": "mohs", "x": {"year": "2027", "visits": 20},
+           "chosen": {"asc": {"on": True, "params": {"to_asc": 0.5, "own": None}}, "other_surgeon": {"on": False, "params": {"cost": None}}},
+           "saved_at": "2026-07-01T00:00:00Z"}
+    assert post(tc, {"scenarios": [raw]}).status_code == 400
+    js = "const LM=require(process.argv[1]);process.stdout.write(JSON.stringify(LM.cleanScenario(JSON.parse(process.argv[2]))));"
+    out = subprocess.run([NODE, "-e", js, os.path.join(ROOT, "remitwatch", "static", "lab_model.js"), json.dumps(raw)],
+                         capture_output=True, text=True, check=True)
+    cleaned = json.loads(out.stdout)
+    r = post(tc, {"scenarios": [cleaned]})
+    assert r.status_code == 200, r.text
+    got = tc.get(URL, auth=AUTH, headers=OWNER_H).json()["assumptions"]["scenarios"][0]
+    assert got["chosen"] == {"asc": {"on": True, "params": {"to_asc": 0.5}}, "other_surgeon": {"on": False, "params": {}}}
+
+
 def test_state_folder_saves_only_over_the_version_read(client, tmp_path, monkeypatch):
     """Serverless: the figures live in the state folder; a write goes through only if nobody wrote in between."""
     from remitwatch import api

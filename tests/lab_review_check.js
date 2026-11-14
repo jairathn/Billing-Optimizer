@@ -398,6 +398,41 @@ Object.assign(Af.costs, { per_clinic_day: 2000, per_encounter: 20, per_mohs_case
   ok('i2_asc_into_lower_view', near(into.collections, into.detail.withoutFee, 1e-9) && into.practiceOnly === 0 && /none of the fee/.test(into.notes.join(' ')), into.collections);
 }
 {
+  // gate 4: the share not entered and the ASC's cost per case entered: collections and the ASC's cost come from one view,
+  // so what is left after costs is the lower of the two views (all of the fee and all of the ASC's cost, or neither);
+  // own production stays the surgeon's own fees
+  const e = ascPayload(), Ac = LM.filled(A); Ac.costs.office_per_case_saved = 50;
+  const bad = [], seen = { to_clinic: new Set(), to_asc: new Set() };
+  for (const p of [{ to_clinic: 1 }, { to_asc: 1 }, { to_asc: 1, to_clinic: 1 }, { to_asc: 0.5, excisions: 1 }]) {
+    for (const cost of [50, 2000]) {
+      Ac.costs.asc_per_case = cost;
+      const st = own => stepOf(LM.run(e, x0, Ac, { asc: { on: true, params: own == null ? p : Object.assign({ own }, p) } }, cal), 'asc');
+      const b = st(null), z = st(0), o = st(1), left = s => s.collections - s.cost, low = left(o) < left(z) ? o : z;
+      if (p.to_clinic && !p.to_asc) seen.to_clinic.add(low === o ? 1 : 0);
+      if (p.to_asc && !p.to_clinic && !p.excisions) seen.to_asc.add(low === o ? 1 : 0);
+      if (!(near(left(b), Math.min(left(z), left(o)), 1e-9) && near(b.collections, low.collections, 1e-9) && near(b.cost, low.cost, 1e-9)
+            && near(b.ownProduction, b.detail.pro, 1e-9) && near(b.detail.withFeeNet, left(o), 1e-9) && near(b.detail.withoutFeeNet, left(z), 1e-9)
+            && /lower of the two views after costs/.test(b.notes.join(' '))))
+        bad.push(JSON.stringify([p, cost, left(b), left(z), left(o), b.ownProduction, b.detail.pro]));
+    }
+  }
+  ok('g4_asc_after_costs_one_view', !bad.length && seen.to_clinic.size === 2 && seen.to_asc.size === 2, bad.join(' ') + JSON.stringify([...seen.to_clinic, '|', ...seen.to_asc]));
+}
+{
+  // gate 5: the later-day what-if gives the gain from the delay and the fees lost on closures never done apart.
+  // Per case (with half a stage): 14040 C - B = 240.00, M - B = -240.00; 15260 C - B = 300.00, M - B = -350.00
+  const e = ascPayload(), per = 4 * 46 / 10, coll = c => M.collectShare(e, x0, 'Medicare KY', c);
+  const dollars = v => `$${Math.round(Math.abs(v) / 100).toLocaleString()}`;
+  const later = rr => stepOf(LM.run(e, x0, A, { asc_later: { on: true, params: { share: 1, return_rate: rr } } }, cal), 'asc_later');
+  const half = later(0.5), noneBack = later(0), allBack = later(1);
+  const k = 0.5 * per, delay = k * (6 * 24000 * coll('14040') + 2 * 30000 * coll('15260')), lost = k * (6 * 24000 * coll('14040') + 2 * 35000 * coll('15260'));
+  const n0 = half.notes[0];
+  ok('g5_asc_later_delay_and_loss_apart', n0.includes(`${Math.round(8 * k)} closures a year done in the ASC on a later day instead of the Mohs day: about ${dollars(delay)} a year more in the surgeon's professional fees, as the 50% same-day cut no longer applies`)
+     && n0.includes(`${Math.round(8 * k)} patients a year do not come back and heal open. Their closures are never done: about ${dollars(lost)} a year less in the surgeon's professional fees`)
+     && /No closure is done on a later day: no patient comes back for one\./.test(noneBack.notes[0]) && /do not come back/.test(noneBack.notes[0]) && !/a year more in/.test(noneBack.notes[0])
+     && !/do not come back/.test(allBack.notes[0]) && near(half.collections, delay - lost - (-half.practiceOnly), 1e-9), n0 + ' | ' + noneBack.notes[0]);
+}
+{
   // 5: the cut falls on the Mohs first stage when the closure's facility amount is the higher
   const S = LM.STRATEGIES.find(z => z.id === 'asc');
   ok('i5_asc_cut_wording', /to the closure, or to the Mohs first stage when the closure's facility amount is the higher/.test(S.why) && !/is still cut 50% against the clinic Mohs/.test(S.why), S.why);
@@ -561,6 +596,10 @@ async function pageChecks() {
     server.posts++;
     const sent = opts.headers['X-Figures-Version'] || null;
     if (sent !== server.version) { const e = new Error('These figures were changed in another window.'); e.status = 409; throw e; }
+    // as the server checks (api.py): a scenario's strategy settings must be numbers
+    const sc = JSON.parse(opts.body).scenarios || [];
+    if (sc.some(t => Object.values(t.chosen || {}).some(c => Object.values(c.params || {}).some(v => typeof v !== 'number' || !isFinite(v))))) {
+      const e = new Error("a scenario's strategy settings must be numbers"); e.status = 400; throw e; }
     server.doc = Object.assign(JSON.parse(opts.body), { saved_at: '2026-07-01T00:00:00+00:00' }); server.version = ver();
     return { ok: true, saved_at: server.doc.saved_at, version: server.version };
   };
@@ -700,8 +739,17 @@ async function pageChecks() {
   share.value = '100'; share.onchange({ type: 'change' });
   const full = cs.lab.chosen.appeals.params.share;
   share.value = ''; share.onchange({ type: 'change' });
-  ok('page_i26_empty_box', typed === 0.4 && cs.lab.chosen.asc.params.own === null && own.placeholder === 'not entered' && stepOf(r26, 'asc').needs.includes('param.own')
+  ok('page_i26_empty_box', typed === 0.4 && !('own' in cs.lab.chosen.asc.params) && own.placeholder === 'not entered' && stepOf(r26, 'asc').needs.includes('param.own')
      && full === 1 && cs.lab.chosen.appeals.params.share === 0.4 && String(share.value) === '40', JSON.stringify(cs.lab.chosen));
+  // gate 1: after a box with no default is emptied, a scenario still saves: only numbers are sent
+  const scen1 = pg26.v.querySelector('#labScenarios'), saveAs = async name => { scen1.querySelector('#labName').value = name; await scen1.querySelector('#labSaveScen').onclick();
+    return [(server.doc.scenarios || []).find(t => t.name === name), scen1.querySelector('#labSaved').textContent]; };
+  const [g1, g1msg] = await saveAs('After an emptied box');
+  ok('g1_scenario_saves_after_empty_box', !!g1 && /^Saved "After an emptied box"/.test(g1msg) && g1.chosen.asc.params.to_asc === 0.5 && !('own' in g1.chosen.asc.params), g1msg);
+  // ...and a setting left not entered some other way is dropped from the scenario, not sent
+  cs.lab.chosen.other_surgeon = { on: false, params: { cost: null, years: NaN } };
+  const [g1b, g1bmsg] = await saveAs('A stray setting');
+  ok('g1_scenario_cleaned_before_save', !!g1b && /^Saved/.test(g1bmsg) && g1b.chosen.other_surgeon && !Object.keys(g1b.chosen.other_surgeon.params).length, g1bmsg);
 
   // 27: two windows change different boxes of one pay plan: each box is kept
   const plan0 = { type: 'base', pct: null, per_wrvu: null, base: 400000, threshold: 1000000, above_pct: 0.3 };
@@ -731,6 +779,14 @@ async function pageChecks() {
   await ctx.figuresDraw(pgD.v);
   await pgD.q('#figSave').onclick();
   ok('page_i27_plan_removed', !server.doc.comp['1000000005'] && server.doc.comp['1000000003'].base === 450000, JSON.stringify(server.doc.comp));
+  // gate 10: a bad pay-plan figure is named by its column, not by the page's own key
+  const rowP = row('1000000003', [box('type', 'base', 'base'), box('pct', '', '140'), box('per_wrvu', '', ''), box('base', '450000', '450000'), box('threshold', '900000', '900000'), box('above_pct', '30', '130')]);
+  const pgP = page({ '[data-fig]': [], 'tr[data-comp]': [rowP] });
+  await ctx.figuresDraw(pgP.v);
+  await pgP.q('#figSave').onclick();
+  const g10 = pgP.q('#figMsg').textContent;
+  ok('g10_plan_figure_named_by_column', /Check: Clinician 3: share of collections; Clinician 3: share above\./.test(g10) && !/: pct|above pct/.test(g10)
+     && /<th>Share of collections<\/th><th>Per wRVU<\/th><th>Base<\/th><th>Threshold<\/th><th>Share above<\/th>/.test(pgP.v.querySelector('#calcBody').innerHTML), g10);
 
   // 3: the pay plans' text says what own production holds
   const figText = pgD.v.querySelector('#calcBody').innerHTML;
@@ -764,6 +820,25 @@ async function pageChecks() {
      && !/more clinic days a week</.test(big) && !/more weeks of clinic a year</.test(big) && /more clinic days a week</.test(fits) && /more weeks of clinic a year</.test(fits)
      && !/Not enough on its own/.test(fits), text(big).slice(-400));
   ok('page_i3_sheet_text', /Slides you read \(pathology billed under your number\), staff services such as light treatments and injections, and drugs are not counted here/.test(fits), '');
+  // gate 2: an APP's sheet has no Mohs row, a physician's has
+  const dApp = Object.assign(payload(), { tier: 'nonphysician' });
+  cs.data = dApp; const appSheet = await sheetFor('100k'); cs.data = d;
+  ok('g2_sheet_no_mohs_row_for_app', !/Mohs cases a clinic day/.test(appSheet) && /Mohs cases a clinic day/.test(fits) && /Visits a clinic day/.test(appSheet), text(appSheet).slice(0, 200));
+  // gate 7: no clinic days: the sheet says so instead of spreading the target over one day
+  cs.x = Object.assign({}, x0, { days_per_week: 0 });
+  const noDays = await sheetFor('1m');
+  cs.x = Object.assign({}, x0);
+  ok('g7_sheet_no_clinic_days', /This plan has no clinic days: set clinic days a week and weeks a year on the Calculator first/.test(noDays) && !/over \d+ days/.test(noDays), text(noDays).slice(-300));
+  // gate 8: visits, new patients and Mohs cases past their slider's top a clinic day (calc.js calcGoalTop) are not offered
+  // as closing the gap on their own; within it they are
+  const calcSrc8 = fs.readFileSync(path.join(__dirname, '..', 'remitwatch', 'static', 'calc.js'), 'utf8');
+  const take = (head, end) => { const i = calcSrc8.indexOf(head); return i < 0 ? '' : calcSrc8.slice(i, calcSrc8.indexOf(end, i) + end.length); };
+  vm.runInContext([take('const CALC_VOLUME', '\n];\n'), take('const CALC_CAP', ';\n'), take('function calcRange(', '\n}\n'), take('const CALC_GOAL_TOP', ';\n'), take('function calcGoalTop(', '\n}\n')].join('\n'), ctx);
+  const capped = await sheetFor(String(Math.round(own0 * 0.35 * 6 / 100))), within = await sheetFor(String(Math.round(own0 * 0.35 * 1.05 / 100)));
+  const perDay = (h, name) => { const m = h.match(new RegExp(`<td>${name}</td><td class="num">([\\d.]+) more a clinic day`)); return m ? +m[1] : null; };
+  ok('g8_sheet_caps_visits_and_mohs', /more visits \(it would take more than 60 visits a clinic day\)/.test(capped) && /more new patients \(it would take more than 60 visits a clinic day\)/.test(capped)
+     && /more Mohs cases \(it would take more than 30 Mohs cases a clinic day\)/.test(capped) && perDay(capped, 'Visits') == null && perDay(capped, 'Mohs cases') == null
+     && perDay(within, 'Visits') > 0 && x0.visits + perDay(within, 'Visits') <= 60 && perDay(within, 'Mohs cases') > 0, text(capped).slice(-500) + ' | ' + text(within).slice(-300));
 
   // the sheet reads a target as the Calculator does (calc.js calcDayNeed, loaded from calc.js): the clinician's past clinic
   // days scaled to this plan's prices (Medicare's 2027 amounts here), against the plan's own average day
@@ -779,6 +854,19 @@ async function pageChecks() {
   ok('page_sheet_day_need', !!fnSrc && Math.abs(scale - 1) > 0.01 && s27.includes(`about ${p50} allowed at the median and ${p90} at the 90th percentile`)
      && /This plan's average clinic day brings \$[\d,]+ allowed: the target needs \d+% more/.test(s27) && !/Your median clinic day has brought/.test(s27)
      && !s27.includes(ctx.money(900000)), text(s27).slice(0, 700));
+
+  // gate 3: provider tables built before they kept where closures are done (asc.cases.from not set): the ASC cards say so
+  // to a physician; 'Not for this clinician's work.' stays for an APP, and for a physician with nothing at the ASC's office
+  const unm = ascPayload(); unm.asc.cases = { from: null, mohs: [], excision: [], clinic_days: 10 };
+  const none = ascPayload(); none.asc.cases = { from: 'lines', mohs: [], excision: [], clinic_days: 10 };
+  const cardFor = (dd, id) => { cs.data = dd; return ctx.labCard(LM.STRATEGIES.find(z => z.id === id)); };
+  const UNM = "Where closures are done is not in these figures yet: it comes with the next rebuild of the provider tables.";
+  const NOT = "Not for this clinician's work.";
+  const g3 = ['asc', 'asc_later'].map(id => [cardFor(unm, id), cardFor(Object.assign({}, unm, { tier: 'nonphysician' }), id), cardFor(none, id), cardFor(ascPayload(), id)]);
+  pg = await labOn({ asc: { on: true, params: { to_asc: 1 } } }, AfDoc, unm);
+  const g3skip = pg.q('[data-lab-impact="asc"]').innerHTML;
+  ok('g3_asc_cards_not_measured', g3.every(([u, app, no, here]) => u.includes(UNM) && !u.includes(NOT) && /disabled/.test(u) && app.includes(NOT) && !app.includes(UNM)
+     && no.includes(NOT) && !no.includes(UNM) && !here.includes(NOT) && !here.includes(UNM)) && g3skip.includes(UNM), text(g3[0][0]).slice(0, 300) + ' | ' + g3skip);
 
   // the minutes table stacks into cards on a phone: the calculator's card table, a label on every cell
   pg = await labOn({}, AfDoc, d);

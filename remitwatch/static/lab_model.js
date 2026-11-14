@@ -709,7 +709,13 @@
         if (plan.commercial_pct == null && Bk.rows.some(r => r.perYear != null && r.kind !== 'medicare' && ASC_KINDS.includes(r.kind) && (!r.ky || plan.ky_share > 0))) needs.push('param.commercial_pct');
         const costMissing = asc == null && (own == null || own > 0) && Math.abs(net) > 1e-9;
         if (costMissing) needs.push('costs.asc_per_case');
-        const cost = net * (ownV * (asc || 0) - (saved || 0)) * 100;
+        // The practice's share of the fee not entered: the year takes the lower of the two views, the practice keeping all
+        // of the fee or none of it. Collections and the ASC's cost come from the same view, so what is left after costs is
+        // one of the two: the one leaving less once the ASC's cost per case is entered (all of the fee less all of the
+        // ASC's cost, against neither), else the one collecting less. The surgeon's own fees (dPro) count either way.
+        const ownL = own != null ? own : asc != null ? (T.dFee - net * asc * 100 < 0 ? 1 : 0) : (T.dFee < 0 ? 1 : 0);
+        const cost = net * (ownL * (asc || 0) - (saved || 0)) * 100;
+        const netAt = o => T.dPro + o * T.dFee - net * (o * (asc || 0) - (saved || 0)) * 100;
         const notes = [];
         const pct = v => `${Math.round(v * 100)}%`;
         notes.push(T.pool.n > 0
@@ -732,7 +738,7 @@
         }
         if (T.moved || T.back || T.exc || K.moved) {
           notes.push(own == null
-            ? `The share of the facility fee the practice keeps is not entered, so the year above counts the lower of the two views (${T.dFee < 0 ? 'the whole fee lost' : 'none of the fee'}). With the whole fee: ${signed(T.dPro + T.dFee)} a year; without it: ${signed(T.dPro)}.`
+            ? `The share of the facility fee the practice keeps is not entered, so the year above counts the lower of the two views${asc != null ? ' after costs' : ''} (${ownL ? (T.dFee < 0 ? 'the whole fee lost' : "the whole fee, less the ASC's cost") : 'none of the fee'}). With the whole fee: ${signed(T.dPro + T.dFee)} a year${asc != null ? ` (${signed(netAt(1))} after costs)` : ''}; without it: ${signed(T.dPro)}${asc != null ? ` (${signed(netAt(0))} after costs)` : ''}.`
             : own === 0 ? `The practice keeps none of the ASC's fee: only the surgeon's own professional fees change, by ${signed(T.dPro)} a year.`
             : `Facility fees kept by the practice (${pct(own)} of the ASC's): ${signed(ownV * T.dFee)} a year, the practice's revenue, not the surgeon's production. The surgeon's own professional fees change by ${signed(T.dPro)}.`);
           notes.push(costMissing ? "Gross only: the ASC's cost per case is not entered (CMS publishes no ASC cost data), so nothing is taken off for it." : '');
@@ -758,12 +764,12 @@
           return { type: k, label, perYear: t.n, sent: !!plan.ky_types[k], fee: per(t.fee), owner: per(t.B + t.fee - t.A), nonOwner: per(t.B - t.A),
                    coins: t.med > 0 ? COINSURANCE * per(t.B + t.fee - t.A) : null, lowMargin: ASC_LOW_MARGIN.includes(k) };
         }).filter(Boolean);
-        // The practice's share of the fee not entered: the year takes the lower of the two views (no fee when cases move
-        // in, the whole fee lost when they come back). The surgeon's own fees (dPro) count either way.
-        const feeKept = own == null ? Math.min(0, T.dFee) : own * T.dFee;
+        // the fee kept, in the view counted (above): own production stays the surgeon's own fees, the fee the practice's
+        const feeKept = ownL * T.dFee;
         return { x: y, extra: { collections: T.dPro + feeKept, practice_only: feeKept, cost },
                  notes: notes.filter(Boolean), needs,
                  detail: { year: Bk.Y, own, withFee: T.dPro + T.dFee, withoutFee: T.dPro, fees: T.dFee, pro: T.dPro, moved: T.moved, back: T.back,
+                           withFeeNet: asc != null ? netAt(1) : null, withoutFeeNet: asc != null ? netAt(0) : null,
                            excisions: T.exc, current: T.current, pool: T.pool, types, from: Bk.from, costKnown: asc != null,
                            ky: { available: K.available, here: kyHere(d), n: K.n, inScope: K.inScope, moved: K.moved, pro: K.dPro, fees: K.dFee,
                                  cross: plan.ky_cross, share: plan.ky_share, types: kyTypes } } };
@@ -783,14 +789,16 @@
         // the practice's share of the ASC's fee, for the closures never done (not entered: the whole fee, the lower view)
         const ownLost = plan.own == null ? 1 : plan.own;
         const minKey = t => (t === 'complex' || t === 'intermediate' ? 'layered' : 'flap_graft'), missMin = new Set();
-        let n = 0, gain = 0, feeLost = 0, coins = 0, cn = 0, lostN = 0, lostMin = 0;
+        // delay: what the closures done on the later day gain (the 50% same-day cut gone); lostPro: what the surgeon's fees
+        // lose on the closures never done (the Mohs alone, in full, against the same-day case)
+        let n = 0, delay = 0, lostPro = 0, feeLost = 0, coins = 0, cn = 0, lostN = 0, lostMin = 0;
         for (const r of Bk.rows) {
           if (r.what !== 'mohs' || !r.priced) continue;
           // the closures done in the ASC on this plan, wherever they come from; the clinic's belong to the staging what-if
           const k = r.perYear * ascOnPlan(plan, r) * share;
           if (!(k > 0)) continue;
           const v = r.v, kb = k * back, kl = k - kb;
-          n += k; gain += (kb * (v.C - v.B) + kl * (v.M - v.B)) * r.coll;
+          n += k; delay += kb * (v.C - v.B) * r.coll; lostPro += kl * (v.M - v.B) * r.coll;
           if (kl > 0) {
             lostN += kl;
             if (r.feeShare != null) feeLost += kl * v.fee * r.feeShare * r.coll * ownLost;
@@ -806,9 +814,11 @@
         if (lostN > 0) needs.push(...missMin);
         const minutes = days > 0 ? (n * back * (turn || 0) - lostMin) / days : 0;
         const dollars = v => `${v < 0 ? '−' : ''}$${Math.round(Math.abs(v) / 100).toLocaleString()}`;
-        return { x, extra: { collections: gain - feeLost, practice_only: -feeLost, minutes },
-                 notes: [`${Math.round(n * back)} closures a year done in the ASC on a later day instead of the Mohs day, about ${dollars(gain)} a year in the surgeon's professional fees: the 50% same-day cut no longer applies. The ASC's fee does not change for those done.`
-                   + (lostN >= 0.5 ? ` ${Math.round(lostN)} patients a year do not come back and heal open: their closures and about ${dollars(feeLost)} a year of the ASC's fees (the practice's share) are lost.` : '')
+        const later = n * back;
+        return { x, extra: { collections: delay + lostPro - feeLost, practice_only: -feeLost, minutes },
+                 notes: [(later >= 0.5 ? `${Math.round(later)} closures a year done in the ASC on a later day instead of the Mohs day: about ${dollars(delay)} a year more in the surgeon's professional fees, as the 50% same-day cut no longer applies. The ASC's fee does not change for those done.`
+                          : n >= 0.5 ? 'No closure is done on a later day: no patient comes back for one.' : 'No closures are moved to a later day on these settings.')
+                   + (lostN >= 0.5 ? ` ${Math.round(lostN)} patients a year do not come back and heal open. Their closures are never done: about ${dollars(-lostPro)} a year less in the surgeon's professional fees (only the Mohs is paid, in full), and about ${dollars(feeLost)} a year of the ASC's fees (the practice's share) lost.` : '')
                    + (cn > 0 ? ` A Medicare patient pays about ${dollars(coins / cn)} more in coinsurance, and makes a second trip with an open wound.` : '')
                    + ' The later visit is in the ASC: no clinic slot is taken and no clinic visit cost is counted; the surgeon\'s rooming time for it is.'], needs };
       },
@@ -1069,7 +1079,7 @@
   }
   const minutesOpen = (R, needs) => !!(R && ((R.minutes && R.minutes.missing.length) || (needs || []).some(n => n.startsWith('minutes.'))));
 
-  const api = { MINUTES, COSTS, COMP_TYPES, STRATEGIES, MAX_SCENARIOS, CAP, blankAssumptions, clean, filled, activity, minutes, costs, wrvus, pay,
+  const api = { MINUTES, COSTS, COMP_TYPES, STRATEGIES, MAX_SCENARIOS, CAP, blankAssumptions, clean, cleanScenario, filled, activity, minutes, costs, wrvus, pay,
                 collectionsFor, planMissing, run, minutesValue, paramDefaults, BIGGER, costsOpen, minutesOpen,
                 ascCase, ascFee, dayPro, ascBook, ascTotals, ascPlan, ascOnPlan, caseLabel, closureType, ASC_TYPES };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

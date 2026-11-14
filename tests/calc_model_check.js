@@ -513,6 +513,52 @@ ok('r4_q_defaults_placeholders', M.Q_DEFAULT.medicare === 0.5 && M.Q_DEFAULT.com
 ok('r36_zero_rows_dropped', /all\.map\(\(\[label\], i\) => ra\[i\] \|\| rb\[i\] \?/.test(calcSrc)
    && page.calcRoundRows([4000, 12345678, 30000], 12381678).filter(v => v).length === 1, JSON.stringify(page.calcRoundRows([4000, 12345678, 30000], 12381678)));
 
+// ------------------------------------------------------------------ the final gate's findings (one check each, by item)
+{
+  const take = (head, end) => { const i = calcSrc.indexOf(head); if (i < 0) throw new Error('missing ' + head); return calcSrc.slice(i, calcSrc.indexOf(end, i) + end.length); };
+  const src = [take('const CALC_VOLUME', '\n];\n'), take('const CALC_GOAL_MOVES', ';\n'), grabFrom(calcSrc, 'const calcFmt'), take('const CALC_CAP', ';\n'),
+               grabFrom(calcSrc, 'function calcRange('), take('const CALC_GOAL_TOP', ';\n'), grabFrom(calcSrc, 'function calcGoalTop('), grabFrom(calcSrc, 'function calcMoney('),
+               grabFrom(calcSrc, 'function calcWith('), grabFrom(calcSrc, 'function calcDayNeed('), grabFrom(calcSrc, 'function calcGoal('), take('const calcMohsOk', ';\n'),
+               grabFrom(calcSrc, 'function calcBandWhy(')].join('\n');
+  const money = c => (c < 0 ? '-' : '') + '$' + Math.round(Math.abs(c) / 100).toLocaleString(), moneyK = c => money(Math.round((c || 0) / 100000) * 100000);
+  const state = { calc: null };
+  const P = new Function('CalcModel', 'state', 'money', 'moneyK', 'esc', src + '\nreturn {calcGoal, calcGoalTop, calcMohsOk, calcBandWhy};')(M, state, money, moneyK, escHtml);
+  const goal = (d, x, target) => { const box = { innerHTML: '' }; const base = M.defaults(d);
+    state.calc = { data: d, x, base, cal: M.calibrate(d), target, el: { querySelector: s => (s === '#calcGoalOut' ? box : null) } }; P.calcGoal(); return box.innerHTML; };
+
+  // gate 2: an APP is never offered the Mohs sliders, even with a stray Mohs line in the months read
+  const app = Object.assign(payload(), { tier: 'nonphysician' }), doc = payload();
+  ok('g2_no_mohs_sliders_for_app', !P.calcMohsOk({ data: app, base: { mohs_cases: 0.0046 }, x: { mohs_cases: 3 } }) && P.calcMohsOk({ data: doc, base: { mohs_cases: 0.0046 }, x: { mohs_cases: 0 } })
+     && P.calcMohsOk({ data: Object.assign(payload(), { levers: Object.assign({}, doc.levers, { mohs: Object.assign({}, doc.levers.mohs, { cases: 0 }) }) }), base: { mohs_cases: 0.5 }, x: { mohs_cases: 0.5 } }), '');
+
+  // gate 6: on this year's rates the band is the patient balances alone; on next year's rules the open readings too
+  ok('g6_band_words', P.calcBandWhy({ next_year: '2027' }, { year: '2026' }) === 'patient balances'
+     && P.calcBandWhy({ next_year: '2027' }, { year: '2027' }) === 'patient balances and the open 2027 readings'
+     && /likely \$\{moneyK\(lo\)\} to \$\{moneyK\(hi\)\}: \$\{esc\(calcBandWhy\(d, x\)\)\}/.test(calcSrc) && !/patient balances and the open \$\{esc\(d\.next_year/.test(calcSrc), '');
+
+  // gate 7: no clinic days: the goal says so instead of spreading the target over one day
+  const d7 = payload(), x7 = Object.assign(M.defaults(d7), { days_per_week: 0 });
+  const g7 = goal(d7, x7, '1.6m'), g7ok = goal(d7, M.defaults(d7), '1.6m');
+  ok('g7_goal_no_clinic_days', /This plan has no clinic days: set clinic days a week and weeks a year first\./.test(g7) && !/over 1 clinic days/.test(g7) && /clinic days is/.test(g7ok), g7);
+
+  // gate 8: visits, new patients and Mohs cases past the top of their slider a clinic day are not enough on their own;
+  // within it they are counted
+  const d8 = payload(), x8 = M.defaults(d8), cs8 = { base: x8 };
+  const tops = ['visits', 'new_visits', 'mohs_cases'].map(k => P.calcGoalTop(cs8, k));
+  const ev8 = M.evaluate(d8, x8, M.calibrate(d8)).totalCollections;
+  const big = goal(d8, x8, String(Math.round(ev8 * 8 / 100))), small = goal(d8, x8, String(Math.round(ev8 * 1.02 / 100)));
+  const row = (h, name) => (h.match(new RegExp(`<td>${name}</td><td class="num">([^<]*)</td>`)) || [])[1] || '';
+  ok('g8_goal_caps_visits_and_mohs', tops[0].max === 60 && tops[1].key === 'visits' && tops[2].max === 30 && P.calcGoalTop(cs8, 'days_per_week') === null
+     && row(big, 'Visits') === 'not enough on its own (more than 60 visits a clinic day)' && row(big, 'New patients') === 'not enough on its own (more than 60 visits a clinic day)'
+     && row(big, 'Mohs cases') === 'not enough on its own (more than 30 Mohs cases a clinic day)' && /None of these closes it on its own/.test(big)
+     && /more a week \([\d.]+ a clinic day\)$/.test(row(small, 'Visits')) && /more a week/.test(row(small, 'Mohs cases')) && /Any one of these closes it on its own/.test(small),
+     [row(big, 'Visits'), row(big, 'Mohs cases'), row(small, 'Visits')].join(' | '));
+
+  // gate 9: the header's Lock button closes the Calculator too, and says so
+  const lock = (htmlSrc.match(/<button id="lockBtn"[^>]*>[^<]*<\/button>/) || [''])[0];
+  ok('g9_lock_button_names_both_tabs', />Lock<\/button>$/.test(lock) && /title="[^"]*the Providers and Calculator tabs[^"]*"/.test(lock), lock);
+}
+
 // ------------------------------------------------------------------ the strategy lab (lab_model.js)
 const LM = require('../remitwatch/static/lab_model.js');
 {
