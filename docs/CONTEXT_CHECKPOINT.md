@@ -404,3 +404,25 @@ analysis runs rescans a table per row on a compact store.
 Headroom: about 3 KB per line, 13K lines a month; the 2 GB limit is near 640K lines (early 2028). Next lever: a rolling
 analysis window, or a 4 GB function (Vercel Pro).
 
+
+## Calculator review round and the ASC question (November 14, 2026)
+
+- Five-lens review of the calculator and lab found about 66 issues; fixed by three agents (engine, page/model, lab/API),
+  then the ASC strategy was rebuilt. A second independent re-check runs before deploy.
+- Owner's facts: Mohs (17311-17315) is only ever done and billed in the clinic. Newburgh already closes most Mohs wounds the
+  same day in an Indiana ASC (POS 24, EMA location "Skin Cancer and Laser Surgery Center") on a separate claim under the
+  same NPI; the Kentucky offices close in the clinic. Whether the practice receives that ASC's facility fee is unknown (the
+  835s are professional only): it decides whether today's routing gains or loses. Asked the owner.
+- Verified rules (CPM ch.12 §40.6, Addendum AA, the practice's own WPS remittances): the 50% professional cut applies across
+  the clinic and ASC claims, each line ranked at its own setting's amount (grafts and some large flaps flip it onto the
+  Mohs first stage); add-ons never cut; the ASC fee is paid in full for a lone ASC procedure, N1 add-ons pay the ASC
+  nothing; only physicians may operate in an ASC; later-day closures escape the cut but are the staging pattern CMS says
+  it will monitor.
+- Exposures surfaced for the owner: modifier 57 on about 45% of Mohs patient-days (25 on about 4%), and E/M-57 on the ASC
+  claim on most same-day transfers, largely denied by WPS; the site of the closure follows the office rather than the
+  patient. Recommend a coding review.
+- Lab ASC strategy: Mohs in clinic, starts from each surgeon's current routing (activity v5 stores the case counts in
+  provider_payers.asc_cases), required inputs for the facility-fee share and ASC cost per case, MA cross-claim switch,
+  ASCQR, the open 2027 E/M switch, coinsurance shown. Activity v5 also stores Medicare visit counts beside Mohs/biopsies
+  and own-read pathology; versions 3-4 stay readable until the next run rebuilds.
+- Daily run with activity v5 on the live image: about 61 s, peak 1.40 GB.
