@@ -323,3 +323,31 @@ Things a later session should not redo or get wrong:
   counts twice there; the Providers tab counts each service once. Rates by provider on the two tabs differ by a few percent.
 - Known and left: on a VM behind Caddy the brakes now count per visitor (uvicorn trusts the proxy header); on Vercel the
   address is the caller's as Vercel reports it. Someone on the owner's own network can still hold the owner's tab closed.
+
+## Daily screens and category pages (November 13 and 14, 2026)
+
+The owner asked for the site to be used every day, with what is actionable obvious, then said the home page (Today: the
+numbered plan, batches, what changed, the Bigger wins teaser, the missed line, the first-visit guide) is right, that the earlier
+category headers were better for a billing team, and that inside those dashboards there was too much to read. What stands now:
+
+- Tabs: Today (landing page, unchanged) | Denials | Bundling & modifiers | Downcoding | Contracts & underpayment | Fees &
+  takebacks | Worklist | Bigger wins, then Progress | Data | Providers | More in smaller type. Between 641 and 1,359 px only
+  More shows on the right; the More page lists the other three there. `#appeals` opens the Worklist.
+- `static/desk.js` draws the four claim categories and the Worklist on one template (title, one Start button, tiles, What to do
+  by kind of work, at most two fix-once notes, 20 rows with Show 20 more, one Details fold that loads when opened and is
+  remembered per browser) and Fees & takebacks with its own tiles. `/api/desk` gives a page's tiles and kinds of work with payer
+  piles; the brief carries `badges` (closes within 7 days per category).
+- The rule that holds it together: every number you can click opens a list whose count line is that number. Counts go through
+  the list's own `_filters`; `tests/test_desk.py` and `tests/test_insights.py` check it. On the archive copy the badges were
+  19 + 25 + 1 + 36 = 81 (Today's step 1), window open 2,521 items, to decide 268, missed in the last 30 days 240.
+- The drawer leads with the What to do box (one filled button: Mark sent and open the next; the letter button beside it; none of
+  either once a window has closed), then the status row, then three closed folds: Claim details, Build the appeal from the visit
+  note (open for "Appeal with the visit note" items), Technical details.
+- Short labels (six words at most) live in `insights.SHORT_LABELS` and are shared with the recurring causes on Bigger wins; the
+  instruction for each kind of work is `WORK_TYPES[...]["short"]`.
+- Payment fees on Fees & takebacks count the 12 full months before the newest payment's month (`insights.fee_months`).
+- Design work for this ran on a copy of the real archive with names hidden, never on invented data; tests use invented data.
+
+Not done from the merged design, on purpose or for later: folding the Data and Providers pages into one-line summaries, the
+per-category trend table on Progress, rebuilding Payers & rates as one table and moving its clinician table behind the owner's
+password, a by-payer table inside each Details fold.
