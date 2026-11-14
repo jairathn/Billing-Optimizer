@@ -371,7 +371,7 @@ function sheetAmount(s){
 async function sheetDraw(v){
   const cs = state.calc, d = cs.data, x = cs.x;
   if(ROLE_LABEL[d.who.id]){
-    v.querySelector('#calcBody').innerHTML = `<div class="panel"><h2>Provider sheet</h2><div class="note">The provider sheet is for one clinician: it shows their own figures and nothing about anyone else. An average pools several clinicians, so pick one clinician above.</div></div>`;
+    v.querySelector('#calcBody').innerHTML = `<div class="panel"><h2>Provider sheet</h2><div class="note">The provider sheet is for one clinician: it shows their own figures and nothing about anyone else. An average pools several clinicians: use Pick another clinician above to choose one, then open this view again.</div></div>`;
     return;
   }
   const A = await labAssumptions();

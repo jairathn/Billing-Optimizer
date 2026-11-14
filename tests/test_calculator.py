@@ -427,3 +427,72 @@ def test_visit_shares_on_medicare_days(db, monkeypatch):
     assert s["visit_shares_days"] == {"mohs": 25, "biopsy": 30} and s["visit_shares_payer"] == "medicare"
     assert _calc(db, "mohs")["strategy"]["mohs_visit57_share"] == 0.4          # the average of its one member
     assert _calc(db, PA)["strategy"]["bx_visit_share"] is None                  # no days of their own
+
+
+def test_codes_split_by_kind_of_payer(db):
+    """Each code's units and allowed, shared out by kind of payer from the clinician's primary-claim lines (units by
+    lines, allowed by what each kind allowed), add up to the code's own totals; the page then gives a kind with enough
+    units its own k and still gives back what was allowed."""
+    c = sqlite3.connect(db)
+    for m in MONTHS[1:] + ["2026-07", "2026-08"]:          # payment months: a month behind the months of service
+        c.execute("UPDATE exposure SET allowed_cents = 150000 WHERE code = '99214' AND npi = ? AND payer_group = 'Medicare KY (CGS J15)' AND month = ?", (DOC, m))
+        c.execute("UPDATE exposure SET allowed_cents = 50000 WHERE code = '99214' AND npi = ? AND payer_group = 'Plan A' AND month = ?", (DOC, m))
+    c.commit()
+    c.close()
+    d = _calc(db, DOC)
+    for code, cc in d["codes"].items():
+        if cc["by_kind"]:
+            assert sum(v["units"] for v in cc["by_kind"].values()) == pytest.approx(cc["units"], abs=1e-6), code
+            assert sum(v["allowed_cents"] for v in cc["by_kind"].values()) == cc["allowed_cents"], code
+    v = d["codes"]["99214"]
+    assert v["by_kind"]["medicare"]["units"] == pytest.approx(0.6 * v["units"]) and v["by_kind"]["commercial"]["units"] == pytest.approx(0.4 * v["units"])
+    assert v["by_kind"]["medicare"]["allowed_cents"] == round(0.75 * v["allowed_cents"])          # allowed by what each kind allowed
+    v = d["codes"]["99213"]                                                                       # no allowed in exposure: by lines
+    assert v["by_kind"]["commercial"]["allowed_cents"] == round(0.4 * v["allowed_cents"])
+    assert _calc(db, GEN)["codes"]["99213"]["by_kind"] == {}                                      # no lines of their own
+    if NODE is None:
+        return
+    js = ("const M=require(process.argv[1]);const d=JSON.parse(require('fs').readFileSync(0));const cal=M.calibrate(d),x=M.defaults(d),days=d.schedule.clinic_days;"
+          "let m=0,a=0;for(const y of d.years){const al=M.allowedByCode(d,x,y,false);for(const [c,bp] of Object.entries(al)){const cc=d.codes[c]||{};"
+          "const s=cc.units>0?((cc.units_by_year||{})[y]||0)/cc.units:0;for(const [g,v] of Object.entries(bp))m+=s*v*days*M.kAt(d,cal,c,g);}}"
+          "for(const cc of Object.values(d.codes))a+=cc.allowed_cents;process.stdout.write(JSON.stringify({ratio:m/a,kind:cal.kind['99214']||null}));")
+    out = json.loads(subprocess.run([NODE, "-e", js, os.path.join(ROOT, "remitwatch", "static", "calc_model.js")], input=json.dumps(d),
+                                    capture_output=True, text=True, check=True).stdout)
+    assert out["ratio"] == pytest.approx(1.0, abs=0.005)
+    assert out["kind"] and out["kind"]["medicare"] > out["kind"]["commercial"]
+
+
+def _reads(db, rows):
+    """Primary claims with one line each: (claim, bill, patient last name, NPI, code, date, allowed, payment date)."""
+    from remitwatch.store import DDL
+    c = sqlite3.connect(db)
+    c.executescript(DDL)
+    c.execute("INSERT OR IGNORE INTO transactions (transaction_key, superseded) VALUES ('TX1', 0)")
+    for i, (ck, bill, last, npi, code, day, allowed, paid_on) in enumerate(rows):
+        c.execute("INSERT INTO claims (claim_key, transaction_key, patient_control_number, claim_status_code, patient_last, patient_first, rendering_provider_npi, "
+                  "payer_name, claim_filing_indicator, payment_date) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (ck, "TX1", bill + "01", "1", last, "TEST", npi, "MEDICARE", "MB", paid_on))
+        c.execute("INSERT INTO lines (line_key, claim_key, transaction_key, procedure_code, service_date, allowed_cents, payment_date, patient_control_number, "
+                  "rendering_provider_npi) VALUES (?,?,?,?,?,?,?,?,?)", (f"RL{i:05d}", ck, "TX1", code, day, allowed, paid_on, bill + "01", npi))
+    c.commit()
+    c.close()
+
+
+def test_pathology_read_under_the_takers_own_number(db, monkeypatch):
+    """Of the reads of the physician's own biopsies, the part they billed under their own number (here 60%) is already
+    in their 'path' line: pathology.own_read_cents is that share of the pathology their biopsies generated."""
+    reader = "1999999999"
+    _reads(db, [
+        ("B1", "BXA000001", "ZZPATIENTA", DOC, "11102", "2026-03-02", 9000, "2026-03-20"),
+        ("B2", "BXB000002", "ZZPATIENTB", DOC, "11102", "2026-03-02", 9000, "2026-03-20"),
+        ("P1", "PTA000003", "ZZPATIENTA", DOC, "88305", "2026-03-02", 5000, "2026-03-15"),       # read under their own number...
+        ("P1b", "PTA000003", "ZZPATIENTA", DOC, "88305", "2026-03-02", 6000, "2026-04-01"),      # ...reprocessed: the later decision
+        ("P2", "PTB000004", "ZZPATIENTB", reader, "88305", "2026-03-02", 4000, "2026-03-15"),    # read by someone else
+        ("P3", "PTC000005", "ZZPATIENTC", DOC, "88305", "2026-03-02", 7000, "2026-03-15"),       # not their biopsy patient
+    ])
+    d = _calc(db, DOC)                                    # the fixture holds few lines, like the dashboard's copy
+    assert d["pathology"]["own_read_cents"] is None and d["pathology"]["own_read_share"] is None
+    monkeypatch.setattr(calculator, "LINES_COMPLETE", 0.0)
+    P = _calc(db, DOC)["pathology"]
+    assert P["own_read_share"] == 0.6 and P["own_read_cents"] == round(0.6 * P["generated_cents"])
+    assert _calc(db, PA)["pathology"]["own_read_share"] is None          # no biopsies of theirs among these claims

@@ -613,6 +613,7 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
     path = conn.execute(
         f"SELECT COALESCE(SUM(path_generated_cents),0), COALESCE(SUM(biopsy_lesions),0) FROM provider_days WHERE provider_id IN ({_in(ids)}) AND service_date BETWEEN ? AND ?",
         (*ids, d0, d1)).fetchone() if ids else (0, 0)
+    own_read = _own_read_share(conn, ids, d0, d1) if ids else None
     totals = {"allowed_cents": sum(s["allowed"] for s in svc.values()), "paid_cents": sum(s["paid"] for s in svc.values())}
     by_family: dict[str, list] = defaultdict(lambda: [0, 0])
     for s in svc.values():
@@ -635,8 +636,11 @@ def calculator(conn: sqlite3.Connection, provider: str = "mohs", month_from: str
         "rate_sources": dict(sources),
         "payers": groups, "paid_share": paid_share, "paid_share_fallback": fallback_paid,
         "paid_share_class": paid_share_class, "paid_share_all": round(tot_pd / tot_al, 4) if tot_al else None,
+        # own_read_cents: the part of generated_cents the biopsy-taker read and billed under their own number, already in
+        # their 'path' line (None where the database holds only some claims' lines, as the dashboard's copy does)
         "pathology": {"generated_cents": path[0], "biopsy_lesions": path[1],
-                      "per_lesion_cents": round(path[0] / path[1]) if path[1] else None},
+                      "per_lesion_cents": round(path[0] / path[1]) if path[1] else None,
+                      "own_read_share": own_read, "own_read_cents": round(path[0] * own_read) if own_read is not None else None},
         "actual": {**totals, "families": {f: {"allowed_cents": v[0], "paid_cents": v[1]} for f, v in by_family.items()}},
         "constants": {"ak_lesions_15_plus": AK_LESIONS_15_PLUS, "correctable_kinds": list(CORRECTABLE_KINDS), "k_range": list(K_RANGE),
                       "min_k_units": MIN_K_UNITS, "mppr_share": MPPR_SHARE, "app_medicare_share": APP_MEDICARE_SHARE},
@@ -719,6 +723,63 @@ LINES_COMPLETE = 0.8        # remittance lines held for the window against the s
                             # database holds only some claims' lines (the dashboard's copy keeps those with findings)
 
 
+def _lines_complete(conn, d0: str, d1: str) -> bool:
+    """Does the database hold every remittance line of the window (the full store), or only some claims' (the
+    dashboard's copy)?"""
+    held = conn.execute("SELECT COUNT(*) FROM lines WHERE service_date BETWEEN ? AND ?", (d0, d1)).fetchone()[0]
+    folded = conn.execute("SELECT COALESCE(SUM(items), 0) FROM provider_services WHERE month BETWEEN ? AND ?", (d0[:7], d1[:7])).fetchone()[0]
+    return bool(folded) and held >= LINES_COMPLETE * folded
+
+
+def _own_read_share(conn, ids: list[str], d0: str, d1: str) -> float | None:
+    """Of the pathology read for the clinicians' own biopsies (the specimen taken from a patient on a day, the slide
+    billed for the same patient and day), the share that the biopsy-taker read and billed under their own NPI. That part
+    is in their own 'path' line already, so it must not be counted again as pathology their biopsies generate.
+
+    The serving tables cannot say it: provider_days credits the reads to the taker without saying who read them, and the
+    pairing is by patient, which is never stored. So it is read from the remittance lines, as remitwatch.activity pairs
+    them (the patient's name on the claim, kept in memory only), and only where the database holds the window's lines;
+    otherwise None. Pooled over the clinicians of a role."""
+    try:
+        if not _lines_complete(conn, d0, d1):
+            return None
+        rows = conn.execute(
+            f"""SELECT COALESCE(NULLIF(l.rendering_provider_npi, ''), cl.rendering_provider_npi), substr(l.patient_control_number, 1, 9),
+                       cl.patient_last, cl.patient_first, l.service_date, COALESCE(NULLIF(l.original_procedure_code, ''), l.procedure_code),
+                       l.allowed_cents, l.payment_date, cl.claim_key
+                FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
+                WHERE t.superseded = 0 AND cl.claim_status_code IN ('1', '19') AND l.service_date BETWEEN ? AND ?
+                  AND (substr(l.procedure_code, 1, 1) = '8' OR substr(l.procedure_code, 1, 5) IN ({_in(activity.BIOPSY)}))""",
+            (d0, d1, *activity.BIOPSY)).fetchall()
+    except sqlite3.Error:
+        return None
+    mine = set(ids)
+    took: dict[tuple, str] = {}
+    reads: dict[tuple, list] = {}                     # (bill, date, code, claim) -> [payment date, allowed, reader, patient]
+    for npi, bill, last, first, day, raw, allowed, paid_on, claim in rows:
+        code = activity.clean_code(raw)
+        fam = activity.service_family(code)
+        patient = (re.sub(r"[^A-Z0-9]", "", last.upper()), re.sub(r"[^A-Z0-9]", "", (first or "").upper())) if (last or "").strip() else ("#", bill)
+        if fam == "biopsy":
+            if npi in mine:
+                took.setdefault((patient, day), npi)
+        elif fam == "pathology":
+            r = reads.setdefault((bill, day, code, claim), [paid_on or "", 0, npi, patient])
+            r[1] += allowed or 0
+    latest: dict[tuple, list] = {}                    # one decision per bill, date and code: the latest primary claim's
+    for (bill, day, code, _), r in reads.items():
+        k = (bill, day, code)
+        if k not in latest or r[0] > latest[k][0]:
+            latest[k] = r
+    own = every = 0
+    for (_, day, _), (_, allowed, reader, patient) in latest.items():
+        who = took.get((patient, day))
+        if who:
+            every += allowed
+            own += allowed if reader == who else 0
+    return round(own / every, 4) if every > 0 else None
+
+
 def _visit_shares(conn, ids: list[str], d0: str, d1: str) -> dict:
     """On Medicare fee-for-service patient-days in the window: the share of Mohs patient-days (a first stage billed) on
     which the clinician also billed an E/M with modifier 57 (mohs_visit57_share) or 25 (mohs_visit25_share), and the
@@ -735,9 +796,7 @@ def _visit_shares(conn, ids: list[str], d0: str, d1: str) -> dict:
     if not ids:
         return out
     try:
-        held = conn.execute("SELECT COUNT(*) FROM lines WHERE service_date BETWEEN ? AND ?", (d0, d1)).fetchone()[0]
-        folded = conn.execute("SELECT COALESCE(SUM(items), 0) FROM provider_services WHERE month BETWEEN ? AND ?", (d0[:7], d1[:7])).fetchone()[0]
-        if not folded or held < LINES_COMPLETE * folded:
+        if not _lines_complete(conn, d0, d1):
             out["visit_shares_payer"] = None
             return out
         rows = conn.execute(
