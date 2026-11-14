@@ -128,7 +128,7 @@ button:disabled{opacity:.5;cursor:default}
 .seg .cnt{color:var(--muted);font-size:12px;margin-left:2px}.seg-sub{font-size:11px;color:var(--muted)}
 .howbox{background:var(--soft);border-radius:8px;padding:8px 12px;margin:6px 0;font-size:13px}
 .wl-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;margin:6px 0}
-.bulk{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}
+.bulk{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center}.bulk[hidden]{display:none}
 table.wl td{vertical-align:middle} table.wl th{cursor:default}
 .st{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;background:var(--chip);white-space:nowrap}
 .st-in_progress{background:rgba(181,71,8,.13)}.st-appealed{background:rgba(31,95,191,.13)}.st-resolved{background:rgba(14,122,92,.15)}.st-lost,.st-dismissed{background:rgba(71,84,103,.13)}
@@ -149,11 +149,16 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 @media(max-width:640px){
   .segs{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}.seg{flex:0 0 auto}
   table.wl thead{display:none}
-  table.wl,table.wl tbody,table.wl tr,table.wl td{display:block;width:100%}
-  table.wl tr{position:relative;border:1px solid var(--line);border-radius:10px;margin:8px 0;padding:8px 40px 8px 10px;background:var(--panel)}
-  table.wl td{border:0;padding:2px 0}
-  table.wl td:first-child{position:absolute;right:6px;top:8px;width:auto}
-  table.wl td.num{text-align:left}
+  table.wl,table.wl tbody{display:block;width:100%}
+  table.wl tr{position:relative;display:grid;grid-template-columns:1fr auto;gap:2px 10px;border:1px solid var(--line);border-radius:10px;margin:8px 0;padding:10px 12px;background:var(--panel)}
+  table.wl td{display:block;border:0;padding:0;width:auto}
+  table.wl td:first-child{position:absolute;right:10px;bottom:8px}
+  table.wl td.day{grid-column:1;grid-row:1}
+  table.wl td.num{grid-column:2;grid-row:1;text-align:right}
+  table.wl td:nth-child(5){grid-column:1/-1;grid-row:2;margin-top:4px}
+  table.wl td:nth-child(4){grid-column:1/-1;grid-row:3;color:var(--muted);font-size:13px}
+  table.wl td.who{grid-column:1;grid-row:4}
+  table.wl td:nth-child(7){grid-column:2;grid-row:4;align-self:end;margin-right:30px}
   #drawer{padding:12px}
 }
 </style>
