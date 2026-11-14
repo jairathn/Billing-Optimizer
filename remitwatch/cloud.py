@@ -22,8 +22,9 @@ first load of tens of thousands of files completes across several short runs.
 The dashboard never waits on a cycle. Each instance keeps a copy of serving.sqlite.gz in its scratch space, checks for
 a newer one every 45 seconds, and lays the journal over it so a status change shows at once.
 
-Memory is the limit that matters: the whole store is held in memory while a cycle runs (about 0.9 GB for almost three
-years of remittances) and detection needs about half as much again. Each cycle records its peak in status.json.
+Memory is the limit that matters: the whole store is held in memory while a cycle runs (about 0.56 GB for almost three
+years of remittances) and detection or saving needs about as much again (a full re-analysis peaks near 1.4 GB). Each
+cycle records its peak in status.json.
 """
 from __future__ import annotations
 
@@ -835,6 +836,42 @@ def mark_packet_emailed(state, packet_id: str, to: str) -> None:
 
 # --------------------------------------------------------------------------- the cycle
 
+class OutOfTime(Exception):
+    """A step ran past the cycle's deadline and was stopped."""
+
+
+class deadline_guard:
+    """Stop the statement still running at the deadline. The platform ends a function at its maximum duration without a
+    word, leaving no status and a lock behind. Stopped here instead, the cycle ends with an error the status records and
+    the lock is released.
+
+    hard: every statement after the deadline is stopped too and the step ends with OutOfTime, so nothing half-done is
+    saved (detection). Otherwise only the one statement is stopped and the step handles it as any other fault (the
+    provider tables record the error, and the detection that finished before them is still saved)."""
+
+    def __init__(self, conn: sqlite3.Connection, deadline: float, step: str, hard: bool = True):
+        self.conn, self.deadline, self.step, self.hard = conn, deadline, step, hard
+        self.tripped = False
+
+    def _check(self) -> int:
+        if self.tripped and not self.hard:
+            return 0
+        if time.time() > self.deadline:
+            self.tripped = True
+            return 1
+        return 0
+
+    def __enter__(self):
+        self.conn.set_progress_handler(self._check, 200_000)
+        return self
+
+    def __exit__(self, kind, exc, tb):
+        self.conn.set_progress_handler(None, 0)
+        if self.tripped and self.hard:
+            raise OutOfTime(f"{self.step} was still running at the time limit and was stopped; nothing was saved") from exc
+        return False
+
+
 def write_status(state, out: dict) -> None:
     try:
         state.put(STATUS, json.dumps(out, default=str).encode())
@@ -914,7 +951,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             else:
                 t1 = time.time()
                 det = Detector(store)
-                summary = det.run()
+                with deadline_guard(conn, t0 + budget, "Detection"):
+                    summary = det.run()
                 del det
                 gc.collect()
                 conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_seconds', ?)", (str(round(time.time() - t1, 1)),))
@@ -932,7 +970,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         ran_activity = False
         if has_lines and not remaining and "deferred" not in out and activity.stale(conn) and budget - (time.time() - t0) > 45:
             before = activity.status(conn)["error"]
-            out["activity"] = activity.refresh(store, log=log)
+            with deadline_guard(conn, t0 + budget, "The provider tables", hard=False):
+                out["activity"] = activity.refresh(store, log=log)
             # a build that failed is saved once too, so the dashboard can say why the tab is empty
             ran_activity = "error" not in out["activity"] or out["activity"]["error"] != before
             gc.collect()

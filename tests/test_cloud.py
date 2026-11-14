@@ -89,8 +89,9 @@ def test_first_load_then_nothing_new_then_one_new_file(box):
     assert conn.execute("SELECT COUNT(*) FROM dropbox_seen").fetchone()[0] == 6
     # files keep their own names in the store (the link step reads them), not the names of the scratch copies
     assert sorted(r[0] for r in conn.execute("SELECT source_name FROM transactions")) == [f"r{n:03d}.RMT" for n in range(6)]
-    # the compact store carries no secondary indexes: they would double what has to be held in memory
-    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND name LIKE 'ix_%' AND tbl_name='lines'").fetchone()[0] == 0
+    # the compact store carries only the indexes the rules cannot do without (remitwatch.store.COMPACT_INDEXES): the rest
+    # would double what has to be held in memory
+    assert [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND name LIKE 'ix_%' AND tbl_name='lines'")] == ["ix_lines_claim"]
 
     # nothing new: no download of data, no detection, and neither the store nor the dashboard's copy is uploaded again
     revs = (state.meta(cloud.RAW)["rev"], state.meta(cloud.SERVING)["rev"], state.get(cloud.CURSOR))

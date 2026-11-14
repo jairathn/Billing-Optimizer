@@ -112,8 +112,8 @@ and what the runtime offers.
 
 | Limit | Value | What it means here |
 | --- | --- | --- |
-| Memory | 2 GB on Vercel's standard function (the only size on the Hobby plan). 4 GB with Function CPU set to Performance (Pro plan). | A detection run on almost three years of remittances peaks at about 1.5 GB (measured on a run that re-analyses a store already holding findings; a first load peaks lower). It grows with the archive. `/setup` and the Data tab show the last run's peak. |
-| Time | 300 seconds per run | The run budget is 240 seconds and the work is split across runs, so this is not reached in normal use. |
+| Memory | 2 GB on Vercel's standard function (the only size on the Hobby plan). 4 GB with Function CPU set to Performance (Pro plan). | A full re-analysis of the live store (420K service lines, November 2026) peaks at 1.37 GB. It grows with the archive, about 3 KB per line and 13K lines a month: the 2 GB limit is near 640K lines, around early 2028. `/setup` and the Data tab show the last run's peak. |
+| Time | 300 seconds per run | The run budget is 240 seconds and the work is split across runs; a full re-analysis takes about a minute. A statement still running at 240 seconds is stopped and the run ends with an error on `/setup` and the Data tab, rather than being cut off by the platform. |
 | Upload size | 4.5 MB per request | A visit note uploaded for an appeal packet can be 3 MB at most on Vercel (15 MB on a VM). |
 | Scheduler | Once a day on the Hobby plan | The webhook covers the rest of the day. |
 | Store size | 1 GB uncompressed (SQLite's limit for a database held this way) | The store is about 0.5 GB today. |

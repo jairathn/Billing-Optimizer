@@ -474,19 +474,34 @@ class Detector:
                     if v is not None:
                         r[i] = pool.setdefault(v, v)
                 self.lines.append(Line(r))
+        # the derived values repeat across lines too: one object each, shared (the modifier lists are only ever read)
+        mods_of: dict = {}
+        kind_of: dict = {}
         for l in self.lines:
-            l["modifiers_list"] = json.loads(l["modifiers"]) if l.get("modifiers") else []
-            l["year"] = (l.get("service_date") or l.get("payment_date") or "")[:4]
-            grp, kind = payer_group_kind(l.get("payer_name"), l.get("claim_filing_indicator"))
-            l["payer_group"], l["payer_kind"] = grp, kind
+            m = l["modifiers"]
+            if m not in mods_of:
+                mods_of[m] = json.loads(m) if m else []
+            l["modifiers_list"] = mods_of[m]
+            y = (l.get("service_date") or l.get("payment_date") or "")[:4]
+            l["year"] = pool.setdefault(y, y)
+            pk = (l["payer_name"], l["claim_filing_indicator"])
+            if pk not in kind_of:
+                kind_of[pk] = tuple(pool.setdefault(v, v) for v in payer_group_kind(*pk))
+            l["payer_group"], l["payer_kind"] = kind_of[pk]
             l["pricing_mod"] = next((m for m in l["modifiers_list"] if m in PRICING_MODIFIERS), None)
             l["pos"] = l.get("facility_type_code")
             l["pos_class"] = pos_class(l["pos"])
-            l["plan"] = (l.get("contract_class") or "").strip() or None
-            l["month"] = (l.get("payment_date") or l.get("txn_payment_date") or "")[:7]
+            plan = (l.get("contract_class") or "").strip() or None
+            l["plan"] = pool.setdefault(plan, plan) if plan else None
+            mo = (l.get("payment_date") or l.get("txn_payment_date") or "")[:7]
+            l["month"] = pool.setdefault(mo, mo)
+        del mods_of, kind_of
         adj = defaultdict(list)
+        same: dict[tuple, tuple] = {}       # (group, reason, amount) repeats across lines: the same fee-schedule cut
         for r in c.execute("SELECT line_key, group_code, reason_code, amount_cents FROM adjustments WHERE line_key IS NOT NULL"):
-            adj[r[0]].append((pool.setdefault(r[1], r[1]), pool.setdefault(r[2], r[2]), r[3] or 0))
+            t = (r[1], r[2], r[3] or 0)
+            adj[r[0]].append(same.setdefault(t, t))
+        del same
         self.adj = adj
         rem = defaultdict(list)
         for r in c.execute("SELECT line_key, code FROM remarks WHERE line_key IS NOT NULL"):
@@ -1221,17 +1236,24 @@ class Detector:
         # be for another stage or lesion. A code counts as paid once when at least 20 patient-dates had it paid and no more
         # than 1.5 percent had two or more paid lines of it, on one bill or several. Measured for the codes needed.
         codes_needed = sorted({code for _k, code, _d in need if code})
-        seen_lines: dict[tuple, set] = defaultdict(set)     # (code, patient, date) -> distinct (bill, line number) paid
+        # counted one patient-date at a time, in order: holding every patient-date's lines at once is the largest single
+        # block of memory in a run
+        groups, repeats = Counter(), Counter()
+        last, members = None, set()        # (code, patient, date) -> distinct (bill, line number) paid
         for code, pid, dos, pcn, seq in c.execute(f"""SELECT l.procedure_code, cl.patient_id, l.service_date, l.patient_control_number, l.line_seq
                                      FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = l.transaction_key
                                      WHERE t.superseded = 0 AND l.claim_status_code IN ('1','19') AND l.paid_cents > 0 AND COALESCE(cl.patient_id,'') <> ''
-                                       AND l.procedure_code IN ({','.join('?' * len(codes_needed))})""", codes_needed):
-            seen_lines[(code, pid, dos)].add((bill_of(pcn), seq))
-        groups, repeats = Counter(), Counter()
-        for (code, _pid, _dos), paid_lines in seen_lines.items():
-            groups[code] += 1
-            repeats[code] += len(paid_lines) > 1
-        del seen_lines
+                                       AND l.procedure_code IN ({','.join('?' * len(codes_needed))})
+                                     ORDER BY l.procedure_code, cl.patient_id, l.service_date""", codes_needed):
+            if (code, pid, dos) != last:
+                if last is not None:
+                    groups[last[0]] += 1
+                    repeats[last[0]] += len(members) > 1
+                last, members = (code, pid, dos), set()
+            members.add((bill_of(pcn), seq))
+        if last is not None:
+            groups[last[0]] += 1
+            repeats[last[0]] += len(members) > 1
         once = {code for code, g in groups.items() if g >= 20 and repeats[code] <= 0.015 * g}
         for f in todo:
             mine = f.get("payment_date") or ""
