@@ -100,6 +100,23 @@ def _medicare_route(f: dict) -> str:
     return "redetermination"
 
 
+MEDICARE_NEXT = {
+    "reopening": "Medicare Part B takes no corrected claims. Fix it by asking the Medicare contractor for a reopening (a clerical error) "
+                 "through its portal, by phone or in writing, within a year of the remittance.",
+    "new_claim": "Medicare returned the claim as unprocessable (MA130), so it has no appeal rights. Fix what the remark codes name and send "
+                 "it as a new claim, not a corrected claim, within a year of the date of service.",
+    "redetermination": "Send Medicare a redetermination request with the records or information the remark asks for, within 120 days "
+                       "of the remittance. A reopening takes no documents, and Medicare Part B takes no corrected claims.",
+}
+
+
+def next_step(f: dict) -> str | None:
+    """What to do, where the payer's own route differs from the plain label: a Medicare Part B fix goes by its route."""
+    if f.get("payer_kind") == "medicare" and f.get("actionable") == "correct_and_resubmit":
+        return MEDICARE_NEXT[_medicare_route(f)]
+    return None
+
+
 def _process(f: dict) -> str:
     """Name the payer's own first-level process so the request lands in the right queue."""
     grp, kind = f.get("payer_group") or "", f.get("payer_kind")
@@ -120,6 +137,25 @@ def _process(f: dict) -> str:
     return "This is a first-level provider payment dispute (reconsideration) filed under the plan's provider manual."
 
 
+def _desk(f: dict) -> str:
+    """Who at the payer the letter is for: Medicare's first level is a redetermination (or a reopening), not a reconsideration."""
+    if f.get("payer_kind") == "medicare":
+        return {"reopening": "Reopenings", "new_claim": "Claims"}.get(_medicare_route(f), "Redeterminations")
+    return "Provider Appeals / Claim Reconsideration"
+
+
+def _medicare_subject(f: dict, subject: str) -> str:
+    """A Medicare Part B letter names the level it is: a redetermination or a reopening, never a reconsideration (the QIC's)."""
+    if f.get("payer_kind") != "medicare":
+        return subject
+    word = {"reopening": "Request to reopen", "new_claim": "New claim (the original was returned as unprocessable)"}.get(
+        _medicare_route(f), "Request for redetermination")
+    for old in ("Request for reconsideration of denial", "Request for reconsideration of", "Request for reconsideration"):
+        if subject.startswith(old):
+            return word + subject[len(old):]
+    return subject
+
+
 def _header(d: dict, subject: str, show_phi: bool = False) -> str:
     f = d["finding"]
     remit = d.get("remit") or {}
@@ -131,7 +167,7 @@ def _header(d: dict, subject: str, show_phi: bool = False) -> str:
     return "\n".join([
         f"{date.today().isoformat()}",
         "",
-        f"To: {remit.get('payer_name') or f.get('payer_name')}, Provider Appeals / Claim Reconsideration",
+        f"To: {remit.get('payer_name') or f.get('payer_name')}, {_desk(f)}",
         f"From: {PRACTICE['name']}, {PRACTICE['address']}, TIN {PRACTICE['tin']}, Group NPI {PRACTICE['npi']}",
         f"Re: {subject}",
         f"Patient: {patient}",
@@ -410,6 +446,7 @@ def build_packet(d: dict, show_phi: bool = False, clinical: list[str] | None = N
                                    f"({f.get('rarc') or f.get('carc') or 'see the remittance'}) within 120 days of receiving the remittance. "
                                    "A reopening takes no documents, and Medicare Part B does not accept corrected claims.")
 
+    subject = _medicare_subject(f, subject)
     letter = _header(d, subject, show_phi) + body + _closing(d, ask)
     rule = appeal_rule(f.get("payer_group"), f.get("payer_kind"), f.get("plan"))
     if (f.get("payer_group") or "").startswith("Anthem") and f.get("payer_kind") in ("commercial", "supplement", "other"):

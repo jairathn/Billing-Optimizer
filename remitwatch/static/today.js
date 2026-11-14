@@ -39,6 +39,7 @@ function kindFor(b, r){
   const lb = labelOf(b, r.signal);
   return lb.work || ({correct_and_resubmit:'fix', appeal:'rule'}[r.actionable] || 'check');
 }
+const pl = (n, one, many) => `${Number(n||0).toLocaleString()} ${Number(n) === 1 ? one : (many || one + 's')}`;
 function kindBadge(b, k){ return `<span class="kind ${KIND_STYLE[k]||''}">${esc(kindOf(b,k).label)}</span>`; }
 
 // ---------------------------------------------------------------- the first-visit guide
@@ -81,19 +82,19 @@ async function todayTab(v){
   if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}: ${top.n} items on ${top.claims} claims, ${money(top.cents)}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
       chips: kindBadge(b, top.kind), btn:'Open the batch', go:{kind: top.kind, payer: top.payer_group, sort:'deadline'}});
   const older_n = Math.max(0, (b.work.undated_n||0) - (dec ? dec.n : 0)), older_c = Math.max(0, (b.work.undated_cents||0) - (dec ? dec.cents : 0));
-  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`${dec.n} items worth ${money(dec.cents)} paid in the last ${dec.days||120} days need a person to say what they are (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${Number(older_n).toLocaleString()} older ones (${money(older_c)})</a> have no filing date either.`:''}`, btn:`Look at them (${dec.n})`, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
-  else if(older_n) steps.push({n:steps.length+1, title:'Items with no filing date', line:`${Number(older_n).toLocaleString()} items worth ${money(older_c)} have no filing date: a person has to say what they are.`, btn:'Look at them', go:{deadline:'none', status:'open,in_progress', sort:'shortfall'}});
-  const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED'].includes(a.kind) && a.severity!=='info').slice(0,3);
+  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`${dec.n} items worth ${money(dec.cents)} paid in the last ${dec.days||120} days need a person to say what they are (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${pl(older_n, 'older one')} (${money(older_c)})</a> ${older_n===1?'has':'have'} no filing date either.`:''}`, btn:`Look at them (${dec.n})`, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
+  else if(older_n) steps.push({n:steps.length+1, title:'Items with no filing date', line:`${pl(older_n, 'item')} worth ${money(older_c)} ${older_n===1?'has':'have'} no filing date: a person has to say what they are.`, btn:'Look at them', go:{deadline:'older', status:'open,in_progress', sort:'shortfall'}});
+  const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED'].includes(a.kind) && a.severity!=='info').slice(0,3);
   const missed = b.missed || {};
   v.innerHTML = `${guideSeen() ? '' : guideHtml(b)}
     ${bad.length ? `<div class="banner"><b>Before you start:</b> ${esc(bad[0].title)}. ${esc(bad[0].detail||'')} <a href="#data" class="go-data">How to fix</a>${bad.length>1?` · <a href="#data" class="go-data">${bad.length-1} more data ${bad.length-1===1?'check':'checks'}</a>`:''}</div>` : ''}
     <div class="today-head"><div><div class="muted small">${esc(day)}</div><h1 class="page-title">Today's plan</h1></div>
-      <div class="donebox"><span>Done today <b>${done.today_n||0}</b></span><span>This week <b>${done.week_n||0}</b> items, <b>${money(done.week_cents||0)}</b></span></div></div>
+      <div class="donebox"><span>Moved on today <b>${done.today_n||0}</b></span><span>This week <b>${pl(done.week_n, 'item')}</b>, ${money(done.week_cents||0)} sent or paid</span>${(b.recovered||{}).year_cents ? `<span>Paid back in ${esc(b.recovered.year)} <b>${money(b.recovered.year_cents)}</b></span>` : ''}</div></div>
     <div class="plan">${steps.map(s=>`<div class="step ${s.done?'is-done':''}"><div class="num">${s.done?'✓':s.n}</div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div>${s.chips?`<div class="chips">${s.chips}</div>`:''}</div>${s.btn?`<button class="${s.done?'':'primary'}" data-step="${s.n}">${esc(s.btn)}</button>`:''}</div>`).join('')}</div>
     <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.${smallLine(b)}</span></div>
       <div class="batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>
       ${b.batches.length > 8 ? `<button class="ghost" id="allBatches">Show all ${b.batches.length} batches</button>` : ''}</div>
-    ${alerts.length ? `<div class="panel"><div class="panel-head"><h2>What changed</h2><span class="muted small">Payer behaviour that moved recently.</span></div>${alerts.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">See the claims</button></div>`).join('')}<a href="#alerts" class="small">All alerts</a></div>` : ''}
+    ${alerts.length ? `<div class="panel"><div class="panel-head"><h2>What changed</h2><span class="muted small">Payer behaviour that moved recently.</span></div>${alerts.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">Look into it</button></div>`).join('')}<a href="#alerts" class="small">All alerts</a></div>` : ''}
     <div class="panel wins-teaser"><div class="panel-head"><h2>Bigger wins</h2><span class="muted small">Fixed once, collected on every future claim.</span></div>${winsTeaser(b)}<button id="goWins">Open Bigger wins</button></div>
     ${missed.n ? `<div class="missed small muted">Missed in the last ${missed.days} days: ${Number(missed.n).toLocaleString()} items worth ${money(missed.cents)} passed their filing window without anyone working them. <a href="#" id="seeMissed">See them</a></div>` : ''}`;
   bindGuide(v);
@@ -104,7 +105,7 @@ async function todayTab(v){
   v.querySelectorAll('.seeA').forEach(bt=>bt.onclick=()=>{ const a = alerts.find(x=>x.alert_id===bt.dataset.id); if(a && typeof seeAlert==='function') seeAlert(a); });
   const gw = v.querySelector('#goWins'); if(gw) gw.onclick = () => { state.tab='wins'; location.hash='wins'; render(); };
   const sm = v.querySelector('#seeMissed'); if(sm) sm.onclick = e => { e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
-  v.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'none', status:'open,in_progress', sort:'shortfall'}); });
+  v.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'older', status:'open,in_progress', sort:'shortfall'}); });
 }
 function smallLine(b){
   const w = b.work || {}, n = w.small_n || 0; if(!n) return '';
@@ -116,9 +117,9 @@ function batchRows(b, rows){
   return rows.map((x,i)=>{ const k = kindOf(b, x.kind), c = closesText(x.first_deadline), done = x.started_n + x.sent_n;
     return `<div class="batch"><div class="b-main">${kindBadge(b, x.kind)} <b>${esc(x.payer_group)}</b>
         <div class="small muted">You need: ${esc(k.needs||'')}${x.top_code?` · mostly ${esc(x.top_code)}`:''}</div></div>
-      <div class="b-num"><b>${money(x.cents)}</b><div class="small muted">${x.n} items · ${x.claims} claims</div></div>
-      <div class="b-due"><span class="${c.cls}">${esc(c.text === 'closes today' ? 'first closes today' : 'first '+c.text)}</span><div class="small muted">${x.due14_n} within 14 days</div></div>
-      <div class="b-prog small muted">${done ? `${done} of ${x.n} started or sent` : 'not started'}</div>
+      <div class="b-num"><b>${money(x.cents)}</b><div class="small muted">${pl(x.n, 'item')} · ${pl(x.claims, 'claim')}</div></div>
+      <div class="b-due"><span class="${c.cls}">${esc(c.text === 'closes today' ? 'first one closes today' : 'first one closes ' + c.text)}</span><div class="small muted">${x.due14_n} close within 14 days</div></div>
+      <div class="b-prog small muted">${done ? [x.started_n ? `${x.started_n} started` : '', x.sent_n ? `${x.sent_n} sent` : ''].filter(Boolean).join(' · ') : 'not started'}</div>
       <button data-batch="${i}">Start</button></div>`; }).join('');
 }
 function bindBatches(v, b){ v.querySelectorAll('[data-batch]').forEach(bt=>bt.onclick=()=>{ const x = b.batches[Number(bt.dataset.batch)]; if(x) goWork({kind:x.kind, payer:x.payer_group, sort:'deadline'}); }); }
@@ -133,7 +134,7 @@ function winsTeaser(b){
 }
 
 // ---------------------------------------------------------------- Worklist
-const WL_DEADLINES = [['valid','Window still open'],['week','Closes within 7 days'],['month','Closes within 30 days'],['decide','To decide (no filing date, paid in the last 120 days)'],
+const WL_DEADLINES = [['valid','Window still open'],['week','Closes within 7 days'],['month','Closes within 30 days'],['decide','To decide (no filing date, paid in the last 120 days)'],['older','No filing date, paid before that'],
   ['followup','Sent over 30 days ago, not paid'],['missed','Window closed in the last 30 days'],['none','No filing date'],['expired','Window closed'],['','Any date']];
 const WL_STATUSES = [['open,in_progress','To do and started'],['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go'],['all','Everything']];
 async function worklistTab(v){
@@ -168,12 +169,12 @@ async function worklistTab(v){
       ${chips.join('')}
       <button class="ghost" id="wlClear">Reset</button>
     </div>
-    <div class="wl-bar"><span><b>${Number(res.total).toLocaleString()}</b> items · <b>${money(res.shortfall_cents)}</b></span>
-      <span class="bulk" id="bulk" hidden><span id="bulkN"></span><button data-bulk="in_progress">Mark started</button><button data-bulk="appealed">Mark sent</button><button data-bulk="dismissed">Let go</button></span>
+    <div class="wl-bar"><span><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>
+      <span class="bulk" id="bulk" hidden><span id="bulkN"></span><button data-bulk="in_progress">Mark started</button><button data-bulk="appealed">Mark sent</button><button data-bulk="dismissed">Let go</button><button data-bulk="open">Back to To do</button></span>
       <button class="ghost" id="wlCsv">Export CSV</button></div>
     <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item on this page"></th><th>Closes</th><th>${showPhi()?'Patient':'Patient'}</th><th>Payer</th><th>What happened</th><th class="num">Amount</th><th>Status</th></tr></thead>
     <tbody>${res.items.map(r=>{ const due = r.next_deadline || r.appeal_deadline, c = closesText(due), lb = labelOf(b, r.signal), est = /not confirmed/.test(r.deadline_basis||'');
-      const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${r.window_claims} ${r.window_claims===1?'claim':'claims'} in range, of ${money2(r.shortfall_cents)}</div>` : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
+      const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${pl(r.window_lines, 'line')} in range, of ${money2(r.shortfall_cents)}</div>` : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
       return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}"><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
         <td class="day"><span class="${c.cls}" title="${esc(due?('File by '+due+(est?' (estimated rule)':'')):'No filing date')}">${esc(c.text)}${est&&due?'<sup class="muted">*</sup>':''}</span><div class="small muted">${esc(due||'')}${r.next_deadline&&r.next_deadline!==r.appeal_deadline?' (first claim)':''}</div></td>
         <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
@@ -184,7 +185,14 @@ async function worklistTab(v){
     <div class="pager"><button class="prev" ${page===0?'disabled':''}>‹ Previous</button><span>Page ${page+1} of ${Math.max(1,Math.ceil(res.total/limit))}</span><button class="next" ${(page+1)*limit>=res.total?'disabled':''}>Next ›</button></div>`;
   const set = (patch) => { state.filt[key] = Object.assign({}, f, patch); state.page[key] = 0; render(); };
   v.querySelectorAll('[data-kind]').forEach(bt=>bt.onclick=()=>set({kind: bt.dataset.kind}));
-  v.querySelectorAll('select[data-f]').forEach(el=>el.onchange=()=>set({[el.dataset.f]: el.value}));
+  v.querySelectorAll('select[data-f]').forEach(el=>el.onchange=()=>{
+    const patch = {[el.dataset.f]: el.value};
+    if(el.dataset.f === 'deadline'){            // these two lists are about one status each
+      if(el.value === 'followup') patch.status = 'appealed';
+      else if(el.value === 'missed') patch.status = 'open';
+      else if(['followup','missed'].includes(f.deadline)) patch.status = 'open,in_progress';
+    }
+    set(patch); });
   v.querySelectorAll('[data-clear]').forEach(bt=>bt.onclick=()=>set({[bt.dataset.clear]: ''}));
   const q = v.querySelector('input[data-f="q"]'); q.onkeydown = e => { if(e.key==='Enter') set({q: q.value}); };
   if(state.focusQ){ q.focus(); state.focusQ = false; }
@@ -199,12 +207,13 @@ async function worklistTab(v){
   v.querySelectorAll('.sel').forEach(cb=>cb.onchange=sync);
   v.querySelector('#selAll').onchange = e => { v.querySelectorAll('.sel').forEach(cb=>cb.checked = e.target.checked); sync(); };
   v.querySelectorAll('[data-bulk]').forEach(bt=>bt.onclick=async()=>{ const ids = picked(); if(!ids.length) return;
-    if(bt.dataset.bulk==='dismissed' && !confirm(`Let go of ${ids.length} ${ids.length===1?'item':'items'}? They leave the list and count as let go.`)) return;
+    if(bt.dataset.bulk==='dismissed' && !confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.`)) return;
+    if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
     bt.disabled = true;
     try { await post('/api/findings/bulk-status', {ids, status: bt.dataset.bulk}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
     state.brief = null; render(); });
   v.querySelector('#wlCsv').onclick = async () => { let r;
-    try { r = await fetch('/api/findings.csv?'+qs(Object.assign({}, scope, {kind:f.kind})), find); } catch(e){ alert('The export did not come back (no connection).'); return; }
+    try { r = await fetch('/api/findings.csv?'+qs(Object.assign({}, scope, {kind:f.kind, view:'worklist'})), find); } catch(e){ alert('The export did not come back (no connection).'); return; }
     if(!r.ok){ alert('The export did not come back ('+r.status+').'); return; }
     const url = URL.createObjectURL(await r.blob()), a = document.createElement('a'); a.href = url; a.download = 'remitwatch-worklist.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000); };
   if(f.first === '1' && res.items.length){ state.filt[key] = Object.assign({}, f, {first:''}); openDetail(res.items[0].finding_id); }
@@ -217,20 +226,31 @@ function whatToDoHtml(f){
   const ev = (f.evidence && typeof f.evidence === 'object') ? f.evidence : {}, today = new Date().toISOString().slice(0,10);
   const open = (ev.deadlines||[]).filter(x=>Array.isArray(x) && x[0] && x[0] >= today).map(x=>x[0]).sort();
   const due = open[0] || f.appeal_deadline, c = closesText(due);
-  const next = (f.signal === 'CLAIM_DENIED_UNPAID' && kk !== 'check') ? k.how : lb.next;
+  const next = f.next_step || ((f.signal === 'CLAIM_DENIED_UNPAID' && kk !== 'check') ? k.how : lb.next);
+  const openCents = (ev.deadlines||[]).filter(x=>Array.isArray(x) && x[0] && x[0] >= today).reduce((s,x)=>s+(x[2]||0), 0);
+  const stake = (ev.deadlines||[]).length ? `${money2(openCents)} at stake on the claims still inside their windows (of ${money2(f.shortfall_cents)} in all).`
+    : (f.shortfall_cents ? money2(f.shortfall_cents)+' at stake.' : 'The amount is not known: this payer has no usual rate for the code to compare with.');
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
+  const more = i>=0 && i < ids.length-1, check = kk === 'check' || !due;
+  const waiting = {appealed:`Sent${f.appealed_at?' on '+longDate(String(f.appealed_at).slice(0,10)):''}. It waits on the payer: if it is still unpaid 30 days after sending, follow up by portal or phone.`,
+    resolved:'Paid. Nothing more to do.', lost:'Lost: the payer upheld its decision.', dismissed:'Let go.'}[f.status];
   return `<div class="todo-box"><div class="todo-top">${kindBadge(b, kk)}<span class="${c.cls}">${due ? `File by ${longDate(due)} (${esc(c.text)})${est?', estimated rule':''}${open.length>1?`; its last claim by ${longDate(f.appeal_deadline)}`:''}` : 'No filing date'}</span>
       ${i>=0 ? `<span class="muted small">Item ${i+1} of ${ids.length} on this page</span>` : ''}</div>
-    <div class="todo-what"><b>${esc(lb.label)}.</b> ${f.shortfall_cents ? money2(f.shortfall_cents)+' at stake.' : 'The amount is not known: this payer has no usual rate for the code to compare with.'}</div>
+    <div class="todo-what"><b>${esc(lb.label)}.</b> ${stake}</div>
     ${f.carc_text ? `<div class="small muted">Payer's reason: ${esc(f.carc)} ${esc(f.carc_text)}${f.rarc_text?' · '+esc(f.rarc)+' '+esc(f.rarc_text):''}</div>` : ''}
-    <div class="todo-next"><b>What to do:</b> ${esc(next)}</div>
-    <div class="small muted">You need: ${esc(k.needs||'')}</div>
-    <div class="actions todo-actions">${i>=0 && i < ids.length-1 ? '<button class="primary" id="sentNext">Mark sent and open the next</button>' : ''}
-      ${i>0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${i>=0 && i < ids.length-1 ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div></div>`;
+    ${waiting ? `<div class="todo-next"><b>Status:</b> ${esc(waiting)}</div>` : `<div class="todo-next"><b>What to do:</b> ${esc(next)}</div>
+    <div class="small muted">You need: ${esc(k.needs||'')}</div>`}
+    <div class="todo-err sev-high small" id="todoErr" role="alert"></div>
+    <div class="actions todo-actions">${more && !waiting ? `<button class="primary" id="sentNext" data-to="${check ? 'in_progress' : 'appealed'}">${check ? 'Mark started and open the next' : 'Mark sent and open the next'}</button>` : ''}
+      ${i>0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div></div>`;
 }
 function bindWhatToDo(f, d){
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
-  const sn = d.querySelector('#sentNext'); if(sn) sn.onclick = async () => { sn.disabled = true; await post('/api/findings/'+f.finding_id+'/status', {status:'appealed'}); state.brief = null; state.dirty = true; openDetail(ids[i+1]); };
+  const sn = d.querySelector('#sentNext'); if(sn) sn.onclick = async () => {
+    sn.disabled = true;
+    try { await post('/api/findings/'+f.finding_id+'/status', {status: sn.dataset.to || 'appealed'}); }
+    catch(e){ sn.disabled = false; const er = d.querySelector('#todoErr'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; return; }
+    state.brief = null; state.dirty = true; openDetail(ids[i+1]); };
   const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => openDetail(ids[i-1]);
   const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => openDetail(ids[i+1]);
 }
@@ -239,7 +259,7 @@ function bindWhatToDo(f, d){
 async function winsTab(v){
   const b = await brief();
   const c = b.contracts || {payers:[]}, f = b.fees || {}, causes = (b.causes||[]).slice(0, 10);
-  const changes = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED'].includes(a.kind)).slice(0, 6);
+  const changes = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED'].includes(a.kind)).slice(0, 6);
   const trend = x => !x.n_prev ? '' : (x.cents90 > x.cents_prev * 1.15 ? '<span class="sev-high">rising</span>' : (x.cents90 < x.cents_prev * 0.85 ? '<span class="ok">falling</span>' : '<span class="muted">steady</span>'));
   v.innerHTML = `<div class="page-head"><h1 class="page-title">Bigger wins</h1><span class="muted small">Money you fix once and collect on every future claim. None of it is appealed claim by claim, so it never shows up on Today.</span></div>
     <div class="grid two">
@@ -263,7 +283,7 @@ async function winsTab(v){
       <div class="panel"><h2>Payment fees</h2><div class="note">Fees payment vendors (Zelis and others) took out of payments${f.payment_fee_since?' since '+rwMonth(f.payment_fee_since):''}: ${money(f.payment_fee_cents||0)} in all. <b>Next step:</b> ask each payer or its vendor for standard direct deposit (ACH) with no fee.</div>
         ${(f.payment_fees||[]).length ? `<table><thead><tr><th>Payer</th><th class="num">Months with a fee</th><th class="num">Fees</th></tr></thead><tbody>${f.payment_fees.slice(0,8).map(x=>`<tr><td>${esc(x.payer_group)}<div class="small muted">${rwMonth(x.first_month)} to ${rwMonth(x.last_month)}</div></td><td class="num">${x.months}</td><td class="num">${money(x.cents)}</td></tr>`).join('')}</tbody></table>${f.payment_fees.length>8?`<div class="small muted">and ${f.payment_fees.length-8} smaller payers; <a href="#fees">all fees by month</a></div>`:''}` : '<div class="muted small">No payment fees found.</div>'}</div>
     </div>
-    ${changes.length ? `<div class="panel"><h2>Payer changes</h2><div class="note">Payers behaving differently from their own past. Work the claims as usual; if it continues, it is a contract or policy question.</div>${changes.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">See the claims</button></div>`).join('')}</div>` : ''}`;
+    ${changes.length ? `<div class="panel"><h2>Payer changes</h2><div class="note">Payers behaving differently from their own past. Work the claims as usual; if it continues, it is a contract or policy question.</div>${changes.map(a=>`<div class="change"><span class="dot sev-${esc(a.severity)}">●</span><div>${esc(a.title)}</div><button class="ghost seeA" data-id="${esc(a.alert_id)}">Look into it</button></div>`).join('')}</div>` : ''}`;
   v.querySelectorAll('[data-cause]').forEach(bt=>bt.onclick=()=>goWork({signal: bt.dataset.cause, paid:'90', status:'all', deadline:'', sort:'shortfall'}));
   v.querySelectorAll('.seeA').forEach(bt=>bt.onclick=()=>{ const a = changes.find(x=>x.alert_id===bt.dataset.id); if(a && typeof seeAlert==='function') seeAlert(a); });
 }

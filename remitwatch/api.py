@@ -402,15 +402,15 @@ def _pattern_cents(w: str, params: list, deadline: str | None) -> tuple[int, dic
         return 0, {}
     lo, hi = _range(deadline) if deadline in DEADLINE_RANGES else (_day(0), None)
     wins: dict[str, list] = defaultdict(list)
-    for fid, _g, _c, d, _n, cents in _windows(STATUSES):
-        wins[fid].append((d, cents or 0))
+    for fid, _g, _c, d, n, cents in _windows(STATUSES):
+        wins[fid].append((d, cents or 0, n or 0))
     delta, each = 0, {}
     for r in found:
-        mine = [(d, c) for d, c in wins.get(r["finding_id"], []) if d and d >= lo and (hi is None or d < hi)]
-        cents = sum(c for _d, c in mine)
+        mine = [(d, c, n) for d, c, n in wins.get(r["finding_id"], []) if d and d >= lo and (hi is None or d < hi)]
+        cents = sum(c for _d, c, _n in mine)
         if deadline in DEADLINE_RANGES:
             delta += cents - r["c"]
-        each[r["finding_id"]] = (cents, min((d for d, _c in mine), default=None), len(mine))
+        each[r["finding_id"]] = (cents, min((d for d, _c, _n in mine), default=None), sum(n for _d, _c, n in mine))
     return delta, each
 
 
@@ -549,6 +549,10 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
         # the home screen's follow-ups: sent more than 30 days before the newest payment and still not paid
         where.append("status='appealed' AND COALESCE(appealed_at, status_changed_at) < "
                      "(SELECT date(MAX(payment_date),'-30 days') FROM transactions WHERE COALESCE(superseded,0)=0)")
+    elif deadline == "older":
+        # Today's "older ones": no filing date, and not among the items to decide
+        where.append("appeal_deadline IS NULL AND NOT (COALESCE(actionable,'')='review' AND COALESCE(payment_date,'') >= "
+                     "(SELECT date(MAX(payment_date),'-120 days') FROM transactions WHERE COALESCE(superseded,0)=0))")
     elif deadline == "decide":
         # the home screen's "decide": no filing date until a person says what the item is, paid in the 120 days to the newest payment
         where.append("appeal_deadline IS NULL AND actionable='review' AND payment_date >= "
@@ -631,17 +635,18 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
         nxt = [(fid, d) for fid, (_c, d, _n) in each.items() if d]
         if nxt:
             due = "COALESCE(CASE finding_id " + " ".join("WHEN ? THEN ?" for _ in nxt) + " END, appeal_deadline)"
-            order_params = [x for pair in nxt for x in pair]
-    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": f"{due} ASC, shortfall_cents DESC",
-             "payer": f"payer_group, {due} ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
+            order_params = [x for pair in nxt for x in pair] * 3
+    by_due = f"({due}) IS NULL, ({due}) < date('now'), {due} ASC"
+    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": f"{by_due}, shortfall_cents DESC",
+             "payer": f"payer_group, {by_due}, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
     if sort not in ("deadline", "payer"):
         order_params = []
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
                               tuple(params) + tuple(order_params) + (limit, offset)))
     for r in data:
-        if r.get("finding_id") in each:
-            r["window_cents"], r["next_deadline"], r["window_claims"] = each[r["finding_id"]]
+        if r.get("finding_id") in each and deadline in DEADLINE_RANGES:
+            r["window_cents"], r["next_deadline"], r["window_lines"] = each[r["finding_id"]]
     cents = (total["shortfall_cents"] or 0) + delta if total["n"] else total["shortfall_cents"]
     return {"total": total["n"], "shortfall_cents": cents, "items": data}
 
@@ -661,11 +666,13 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                  status: str = "open", severity: Optional[str] = None, actionable: Optional[str] = None, q: Optional[str] = None,
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
                  patient_of: Optional[str] = Query(None, max_length=200), kind: Optional[str] = Query(None, max_length=20),
-                 live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), request: Request = None,
-                 _: str = Depends(require_auth)):
+                 live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6),
+                 view: str = Query("raw", pattern="^(raw|worklist)$"), request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
                          _extra(request), patient_of, kind, bool(live), paid, min)
     data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
+    if view == "worklist":
+        return _worklist_csv(data, deadline, w, params)
     # a routine-rate finding is about many claims: list them, each with its own filing deadline
     pattern = {r["finding_id"]: r["evidence"] for r in rows("SELECT finding_id, evidence FROM findings WHERE signal='SECOND_RATE'")} \
         if any(r.get("signal") == "SECOND_RATE" for r in data) else {}
@@ -696,6 +703,42 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                     buf.truncate()
         yield buf.getvalue()
     return StreamingResponse(chunks(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=remitwatch-findings.csv"})
+
+
+def _worklist_csv(data: list[dict], deadline: str | None, w: str, params: list) -> StreamingResponse:
+    """The worklist as the page shows it: the date it must be done by, the kind of work, what happened and what to do in
+    plain words, the amount (a routine-rate pattern's claims in the date range), the status in the page's words."""
+    from .appeals import next_step
+    from .insights import SIGNAL_LABELS, STATUS_LABELS, WORK_TYPES, work_type
+    kinds = {t["key"]: t["label"] for t in WORK_TYPES}
+    _delta, each = _pattern_cents(w, params, deadline)
+    if SHOW_PHI:
+        _with_patient(data)
+    data.sort(key=lambda r: ((each.get(r["finding_id"], (0, None, 0))[1] or r.get("appeal_deadline")) is None,
+                             each.get(r["finding_id"], (0, None, 0))[1] or r.get("appeal_deadline") or "", -(r.get("shortfall_cents") or 0)))
+    cols = ["File by", "Kind of work", "What happened", "What to do", "Payer", "Code", "Date of service", "Claim ID"] \
+        + (["Patient", "Member ID"] if SHOW_PHI else []) + ["Amount ($)", "Status", "Payer's reason", "Filing window"]
+
+    def chunks():
+        buf = io.StringIO()
+        out = csv.writer(buf)
+        out.writerow(cols)
+        for i, r in enumerate(data):
+            label, nxt = SIGNAL_LABELS.get(r.get("signal") or "", (r.get("title") or "", ""))
+            cents, due, _n = each.get(r["finding_id"], (r.get("shortfall_cents"), None, 0))
+            code = (r.get("original_procedure_code") + " to " if r.get("original_procedure_code") else "") + (r.get("procedure_code") or "")
+            row = [due or r.get("appeal_deadline") or "", kinds.get(work_type(r.get("signal"), r.get("actionable"), r.get("carc")), ""), label,
+                   next_step(r) or nxt, r.get("payer_group"), code, r.get("service_date"), r.get("patient_control_number")] \
+                + ([r.get("patient"), r.get("member_id")] if SHOW_PHI else []) \
+                + [f"{cents / 100:.2f}" if cents else "", STATUS_LABELS.get(r.get("status") or "", r.get("status")),
+                   " ".join(x for x in (r.get("carc"), r.get("carc_text") if "carc_text" in r else None, r.get("rarc")) if x), r.get("deadline_basis")]
+            out.writerow([_csv_cell(x) for x in row])
+            if i % 400 == 399:
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate()
+        yield buf.getvalue()
+    return StreamingResponse(chunks(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=remitwatch-worklist.csv"})
 
 
 def _packets_for(finding_id: str) -> list[dict]:
@@ -729,6 +772,8 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
     if not f:
         raise HTTPException(404, "finding not found")
     f["evidence"] = json.loads(f["evidence"]) if f.get("evidence") else {}
+    from .appeals import next_step
+    f["next_step"] = next_step(f)
     out: dict[str, Any] = {"finding": f}
     claim_key = f.get("claim_key")
     if claim_key:

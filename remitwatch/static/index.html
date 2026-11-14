@@ -146,7 +146,14 @@ table.wl td{vertical-align:middle} table.wl th{cursor:default}
 .fchip{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 10px;border-radius:999px;background:var(--chip);font-size:12px}
 .fchip button{border:0;background:none;padding:0 6px;color:var(--muted)}
 .statusbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+#drawer td,#drawer .todo-box{overflow-wrap:anywhere}
+.todo-err:empty,.st-err:empty{display:none}
+table.wl input.sel,#selAll{width:20px;height:20px}
 @media(max-width:640px){
+  header{position:static;padding:8px 12px}
+  nav{position:sticky;top:0;z-index:5;flex-wrap:nowrap;overflow-x:auto}
+  nav a{flex:0 0 auto}
+  #drawer table{display:block;overflow-x:auto}
   .segs{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}.seg{flex:0 0 auto}
   table.wl thead{display:none}
   table.wl,table.wl tbody{display:block;width:100%}
@@ -253,8 +260,8 @@ const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8
 
 function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k); }
 function initNav(){
-  $('#nav').innerHTML = TABS.map(([k,l])=>`<a data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`).join('');
-  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=()=>{state.tab=a.dataset.tab; location.hash=state.tab; render();});
+  $('#nav').innerHTML = TABS.map(([k,l])=>`<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}">${l}</a>`).join('');
+  $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
   $('#statusSel').onchange = e=>{state.status=e.target.value; render();};
   $('#lockBtn').onclick = ()=>{ pvForget(); render(); };
@@ -533,14 +540,15 @@ async function data(v){
 // ---------------------------------------------------------------- detail drawer and appeal packet
 function closeDetail(){
   const d = $('#drawer'); if(!d.classList.contains('open')) return;
-  d.classList.remove('open');
+  d.classList.remove('open'); d.inert = true;
   const back = state.detailFrom; state.detailFrom = null;
-  if(state.dirty){ state.dirty = false; if(['today','worklist'].includes(state.tab)){ render(); return; } }     // statuses changed: redraw the list behind
+  if(state.dirty){ state.dirty = false; if(['today','worklist'].includes(state.tab)){       // statuses changed: redraw the list behind
+    render().then(()=>{ const r = document.querySelector('#view tr.row') || document.querySelector('#view button'); if(r) r.focus(); }); return; } }
   if(back && back.isConnected) back.focus();
 }
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
 async function openDetail(id){
-  const d = $('#drawer'); d.classList.add('open'); d.innerHTML='<div class="muted">loading…</div>';
+  const d = $('#drawer'); d.classList.add('open'); d.inert = false; d.innerHTML='<div class="muted">loading…</div>';
   const from = document.activeElement; if(from && from.closest && from.closest('tr.row')) state.detailFrom = from.closest('tr.row');
   const r = await api('/api/findings/'+id); const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
   if(!state.brief){ try { await brief(); } catch(e){} }        // the plain labels and the kinds of work
@@ -550,8 +558,9 @@ async function openDetail(id){
     ${whatToDoHtml(f)}
     <div class="actions">${f.claim_key || ['TAKEBACK','FEE_SKIM'].includes(f.signal)?`<button class="primary" id="btnAppeal">${f.actionable==='correct_and_resubmit'?'Correction instructions':'Appeal letter'}</button>`:''}</div>
     <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
-    <div class="small muted">${esc(f.signal)} · <span class="sev-${esc(f.severity)}">${esc(f.severity)}</span> · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
-    <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div>
+    <div class="st-err sev-high small" role="alert"></div>
+    <details class="small"><summary>Technical details</summary><div class="muted">${esc(f.signal)} · ${esc(f.severity)} · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
+    <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div></details>
     <table class="small">
       ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
       <tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)}</td></tr>`:''}
@@ -577,7 +586,10 @@ async function openDetail(id){
     <h3 class="small">Evidence</h3><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre>`;
   d.querySelector('#closeD').onclick=closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
-  d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{ if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)){ state.brief = null; state.dirty = true; openDetail(id); } });
+  d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{
+    if(b.dataset.st === 'dismissed' && !confirm('Let go of this item? It leaves the list and counts as let go.')) return;
+    try { if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)){ state.brief = null; state.dirty = true; openDetail(id); } }
+    catch(e){ const er = d.querySelector('.st-err'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; } });
   bindWhatToDo(f, d);
   bindDrawerExtras(id, d);
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{

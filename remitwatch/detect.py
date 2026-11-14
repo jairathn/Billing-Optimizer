@@ -1893,6 +1893,11 @@ class Detector:
                     if home is not None:
                         home.setdefault("_also", []).append(cl["patient_control_number"])
                     continue
+                unpaid_codes = {code for code, _d in novel if code != "*"}
+                if unpaid_codes and all(code in ("99024", "G2211")
+                                        or sum(ln.get("charge_cents") or 0 for ln in lines if ln.get("procedure_code") == code) <= 100
+                                        for code in unpaid_codes):
+                    continue        # as on a line: a post-op visit, G2211 or a token charge is nothing to appeal
                 if not closed:
                     (repeats if again else reported).update(novel)
                 rarcs = self.claim_rem.get(cl["claim_key"], []) + [x for ln in lines for x in self.rem.get(ln["line_key"], [])]
@@ -2125,16 +2130,19 @@ class Detector:
             if not cnt or sum(cnt.values()) < 5:
                 continue
             rate, _n = usual_amount(cnt)
-            # a charge far below the rate is a billing oddity (a balance or a token amount), not a fee set too low
-            short = [l for l in capped[key] if 0.4 * rate <= l["charge_cents"] < rate and l["charge_cents"] >= 500]
+            # a charge far below the rate is a billing oddity (a balance or a token amount), not a fee set too low; a charge
+            # within 5 percent of it is a payer's rate that changed during the year (Medicare's did on March 9, 2024), not a
+            # fee to raise
+            short = [l for l in capped[key] if 0.4 * rate <= l["charge_cents"] <= 0.95 * rate and l["charge_cents"] >= 500]
             gap = sum(rate - l["charge_cents"] for l in short)
             if len(short) < 5 or gap < 10000:
                 continue
             grp, year, code, tier, pos = key
             if since and not any((l.get("service_date") or "") >= since for l in short):
-                # nothing charged below the rate lately: if the fee is now above this payer's rate it was raised, and nothing is left to change
+                # nothing charged below the rate lately: a code no longer billed, or a fee now above this payer's rate, leaves
+                # nothing to change
                 now = newest_fee.get((grp, code, tier, pos)) or newest_fee.get((code,))
-                if now and now >= rate:
+                if not now or now >= 0.95 * rate:
                     continue
             charges = Counter(l["charge_cents"] for l in short)
             charge = charges.most_common(1)[0][0]

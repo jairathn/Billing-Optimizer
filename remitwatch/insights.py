@@ -22,7 +22,7 @@ SMALL_CENTS = 2000                      # items known to be worth under $20: abo
 # to "check first".
 WORK_TYPES: list[dict] = [
     {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number",
-     "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send it as a corrected claim before the date shown, then press Mark sent."},
+     "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send the correction the way the payer takes it before the date shown (a corrected claim for most payers; for Medicare a reopening, a new claim or a redetermination, as the item says), then press Mark sent."},
     {"key": "auth", "label": "Get the authorization", "needs": "The authorization record, or the payer's portal",
      "how": "Denied for a missing prior authorization. Find the authorization in EMA and appeal with it; if there is none, ask the payer for a retro-authorization. Tell the front desk so it does not happen again."},
     {"key": "note", "label": "Appeal with the visit note", "needs": "The visit or procedure note from EMA",
@@ -150,8 +150,8 @@ def claim_windows(conn: sqlite3.Connection, statuses: tuple) -> dict[str, list[t
     from .detect import pattern_windows
     out: dict[str, list[tuple]] = defaultdict(list)
     try:
-        for fid, _g, _c, d, _n, cents in pattern_windows(conn, statuses):
-            out[fid].append((d, cents or 0))
+        for fid, _g, _c, d, n, cents in pattern_windows(conn, statuses):
+            out[fid].append((d, cents or 0, n or 0))
     except sqlite3.Error:
         pass
     return out
@@ -159,8 +159,8 @@ def claim_windows(conn: sqlite3.Connection, statuses: tuple) -> dict[str, list[t
 
 def _in(windows: list[tuple], lo: str, hi: str | None = None) -> tuple[int, int]:
     """How many of a pattern's claims, and their cents, have a deadline from lo up to (not including) hi."""
-    got = [c for d, c in windows if d and d >= lo and (hi is None or d < hi)]
-    return len(got), sum(got)
+    got = [(c, n) for d, c, n in windows if d and d >= lo and (hi is None or d < hi)]
+    return sum(n for _c, n in got), sum(c for c, _n in got)
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
@@ -205,7 +205,7 @@ def work(conn: sqlite3.Connection, today: str) -> dict:
             n_in, c_in = _in(wins[fid], today)
             n7, c7 = _in(wins[fid], today, soon7)
             n30, c30 = _in(wins[fid], today, soon30)
-            gone = [c for d, c in wins[fid] if d and d < today]
+            gone = [c for d, c, _n in wins[fid] if d and d < today]
             if gone:
                 expired_n += 1
                 expired_cents += sum(gone)
@@ -359,10 +359,18 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
     items = []
     if newest:
         age = (date.fromisoformat(today) - date.fromisoformat(newest[:10])).days
-        items.append({"key": "feed", "ok": age <= 10, "days": age, "newest": newest[:10],
-                      "title": "Remittance files are current" if age <= 10 else f"No new remittance files for {age} days",
-                      "detail": "Payments after the newest file are not in the site, so worked and paid items still show as open." if age > 10 else "",
-                      "who": "Billing lead: put the latest TriZetto downloads in the Dropbox folder."})
+        got = None
+        try:
+            got = conn.execute("SELECT MAX(ingested_at) FROM files WHERE kind IN ('835','remit','rmt')").fetchone()[0]
+        except sqlite3.Error:
+            pass
+        recent = bool(got) and (date.fromisoformat(today) - date.fromisoformat(got[:10])).days <= 10
+        items.append({"key": "feed", "ok": age <= 10, "days": age, "newest": newest[:10], "last_file": (got or "")[:10] or None,
+                      "title": "Payments are current" if age <= 10 else f"No payment newer than {newest[:10]} ({age} days ago)",
+                      "detail": "" if age <= 10 else ("Payments after that date are not in the site, so items worked and paid since then still show as open."
+                                                       + (f" Files did arrive on {got[:10]}, but none holds a later payment." if recent else "")),
+                      "who": ("Billing lead, with TriZetto: ask whether newer remittances exist and why they are not in the downloads." if recent
+                              else "Billing lead: put the latest TriZetto downloads in the Dropbox folder.")})
     info = _meta(conn, "activity:info") or {}
     gaps = info.get("gaps") or []
     if gaps:
@@ -429,11 +437,11 @@ def batches(conn: sqlite3.Connection, today: str, limit: int = 200) -> list[dict
             b["sent_n"] += 1
             continue
         if fid in wins:
-            mine = [(d, c) for d, c in wins[fid] if d and d >= today]
+            mine = [(d, c, n) for d, c, n in wins[fid] if d and d >= today]
             if not mine:
                 continue
-            cents, first = sum(c for _d, c in mine), min(d for d, _c in mine)
-            b["pattern_claims"] += len(mine)
+            cents, first = sum(c for _d, c, _n in mine), min(d for d, _c, _n in mine)
+            b["pattern_claims"] += sum(n for _d, _c, n in mine)
         else:
             first = dl
             if claim:
@@ -485,10 +493,13 @@ def done(conn: sqlite3.Connection, today: str) -> dict:
     week = (date.fromisoformat(today) - timedelta(days=date.fromisoformat(today).weekday())).isoformat()
     if "finding_events" not in _tables(conn):
         return {"today_n": 0, "week_n": 0, "week_cents": 0}
-    r = conn.execute("""SELECT SUM(substr(at,1,10) = ?), SUM(substr(at,1,10) >= ?),
-                               SUM(CASE WHEN substr(at,1,10) >= ? AND to_status IN ('appealed','resolved') THEN COALESCE(amount_cents,0) END)
-                        FROM finding_events WHERE kind='manual' AND substr(at,1,10) >= ?""", (today, week, week, week)).fetchone()
-    return {"today_n": r[0] or 0, "week_n": r[1] or 0, "week_cents": r[2] or 0, "week_start": week}
+    last: dict[str, tuple] = {}          # each item's last change by a person this week: an undo leaves nothing done
+    for fid, at, to, cents in conn.execute("""SELECT finding_id, at, to_status, COALESCE(amount_cents,0) FROM finding_events
+                                              WHERE kind='manual' AND substr(at,1,10) >= ? ORDER BY at, id""", (week,)):
+        last[fid] = (at[:10], to, cents)
+    moved = [v for v in last.values() if v[1] != "open"]
+    return {"today_n": sum(1 for v in moved if v[0] == today), "week_n": len(moved),
+            "week_cents": sum(v[2] for v in moved if v[1] in ("appealed", "resolved")), "week_start": week}
 
 
 def follow_ups(conn: sqlite3.Connection, newest: str | None, days: int = 30) -> dict:
