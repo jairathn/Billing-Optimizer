@@ -1211,6 +1211,104 @@ def _asc_payload(codes: set, cases: dict, clinic_days: int) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- the ASC view: what the coming year does
+ASC_MOHS_CODES = ("17311", "17312", "17313", "17314", "17315")
+ASC_RULE_MIN_LINES = 20     # fewer lines than this on the cases' own codes: a kind of payer's share comes from the codes
+                            # of the same service families
+
+
+def _kind_ratios(conn, codes: set) -> dict:
+    """What each kind of payer pays the practice's physicians for these codes as a share of what Medicare pays it for
+    them: each payer's usual allowed amount per code and setting (payer_rates; office and facility apart, each against
+    Medicare's own usual amount for that code, year and setting), weighted by the lines behind it, in the newest year
+    with a fair number of rates. Codes of the same service families stand in where these codes have too few lines."""
+    try:
+        years = [r[0] for r in conn.execute("SELECT year FROM payer_rates GROUP BY 1 HAVING COUNT(*) >= 100 ORDER BY 1")] \
+            or [r[0] for r in conn.execute("SELECT DISTINCT year FROM payer_rates ORDER BY 1")]
+    except sqlite3.Error:
+        return {}
+    if not years:
+        return {}
+    year = years[-1]
+    rows = [tuple(r) for r in conn.execute(
+        """SELECT payer_kind, code, mode_cents, medicare_cents, n FROM payer_rates
+           WHERE year = ? AND tier = 'physician' AND mode_cents > 0 AND medicare_cents > 0 AND n > 0""", (year,))]
+    fams = {activity.service_family(c) for c in codes}
+    out: dict = {}
+    for kind in sorted({r[0] for r in rows if r[0]}):
+        def tally(keep) -> tuple[int, int, int]:
+            num = den = n = 0
+            for k, code, mode, med, cnt in rows:
+                if k == kind and keep(activity.clean_code(code)):
+                    num += cnt * mode
+                    den += cnt * med
+                    n += cnt
+            return num, den, n
+        num, den, n = tally(lambda c: c in codes)
+        basis = "codes"
+        if n < ASC_RULE_MIN_LINES:
+            num, den, n = tally(lambda c: activity.service_family(c) in fams)
+            basis = "families"
+        if n and den:
+            out[kind] = {"ratio": round(num / den, 4), "lines": n, "year": year, "basis": basis}
+    return out
+
+
+def asc_rule(conn: sqlite3.Connection, months: int = 12, month_from: str | None = None, month_to: str | None = None) -> dict:
+    """The practice's cases at its ASC, for the ASC view (static/asc.js), which prices each case in the year before and in
+    the rule year with the strategy lab's own arithmetic (LabModel.ascCase) to show what the rule year's Medicare rates
+    do to what is paid for them: the ASC's facility fee (the OPPS/ASC final rule) and, beside it, the surgeons' fees
+    (the physician fee schedule).
+
+        cases     every case of a Mohs first stage with its closure the same day, and of an excision with its repair,
+                  over the window, all clinicians pooled (_asc_cases): the codes billed, where the closure was billed (site
+                  'asc': on a claim with the ASC's place of service, 24), the kind of payer and the state
+        asc       the ASC's rates both years, wage-adjusted for the ASC's office (remitwatch.ascfs, from CMS's Addendum
+                  AA), and _asc_payload's Medicare physician amounts, ranked codes and add-ons
+        kinds     what each kind of payer pays the practice for these procedures against Medicare (_kind_ratios): the
+                  page's starting share of Medicare's ASC rates for a plan, and the price of a plan's professional fees
+        codes     per code, both years: the payment indicator, discounting, the national rate and the ASC's
+
+    The ASC's own remittances are not in the store (the 835s are the practice's professional claims), so what the ASC is
+    paid is priced from Medicare's rates, not read. Codes, counts and rates only: nothing about a patient."""
+    from . import ascrates
+    cov, a, b = _run_window(conn, month_from, month_to, months)
+    d0, d1 = f"{a}-01", f"{b}-31"
+    window_months = (int(b[:4]) - int(a[:4])) * 12 + int(b[5:7]) - int(a[5:7]) + 1
+    ids = [r[0] for r in conn.execute("SELECT provider_id FROM provider_roster WHERE kind='person' ORDER BY provider_id")]
+    cases = _asc_cases(conn, ids, d0, d1)
+    codes = {c.split("x")[0] for rows in (cases["mohs"], cases["excision"]) for r in rows for c in r[0].split()} | set(ASC_MOHS_CODES)
+    py, ry = ascrates.prior_year(), ascrates.rule_year()
+    years = [y for y in (py, ry) if y in ASC]
+    asc: dict = {y: {c: [ASC[y][c][0], ASC[y][c][2], {o: asc_amount(y, o, c) for o in WAGE_INDEX.get(y, {})}]
+                     for c in sorted(codes) if c in ASC.get(y, {})} for y in years}
+    asc.update(_asc_payload(codes, cases, 0))
+    office = ASC_SITE["office"]
+    where = ascrates.office_place(office) or {}
+    per_code: dict = {}
+    for c in sorted(codes):
+        row = {}
+        for y in years:
+            r = ASC.get(y, {}).get(c)
+            row[y] = None if r is None else {"pi": r[0], "mpd": r[2], "national": r[1] if r[0] != "N1" else None,
+                                              "local": asc_amount(y, office, c)}
+        per_code[c] = row
+    pis = {r[y]["pi"] for r in per_code.values() for y in years if r.get(y)}
+    meta = ascrates.tables().meta
+    return {
+        "from": a, "to": b, "months": window_months, "per_year": round(12 / window_months, 6),
+        "years": years, "prior_year": py, "rule_year": ry, "labels": meta.get("years", {}), "source": meta.get("source"),
+        "site": {**ASC_SITE, "county": where.get("county"), "fips": where.get("fips"), "cbsa": where.get("cbsa"),
+                 "cbsa_name": where.get("cbsa_name"), "wage_index": {y: WAGE_INDEX.get(y, {}).get(office) for y in years}},
+        "cases": cases, "asc": asc, "kinds": _kind_ratios(conn, codes), "codes": per_code,
+        "pi": {p: t for p, t in ascrates.definitions().items() if p in pis},
+        "constants": {"mppr_share": MPPR_SHARE, "coinsurance": meta.get("coinsurance", 0.2), "sequestration": meta.get("sequestration", 0.02)},
+        "mppr": sorted(c for c in codes if (PFS_INDICATORS.get(c) or ("", ""))[1] == "2"),
+        "add_on": sorted(c for c in codes if _add_on(c)),
+        "coverage": {"last_complete_month": cov.get("last_complete_month"), "last_payment": cov.get("last_payment")},
+    }
+
+
 def _lever_codes(conn, tier: str, a: str, b: str) -> list[str]:
     """Every code of the page's levers that the tier billed in the window, so a lever can be priced for anyone."""
     out = []

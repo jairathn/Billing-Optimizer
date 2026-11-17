@@ -6,8 +6,9 @@ subject to multiple-procedure discounting). Code numbers and amounts only.
 from __future__ import annotations
 
 LABOR_SHARE = 0.5
-SOURCES = {'2026': ['508-Version-Oct-2026-ASC-AA.csv', '508-Version-Oct-2026-ASC-EE.csv'], '2027': ['2027 FR ASC Addenda- CY 2027 ASC AA.csv', '2027 FR ASC Addenda- CY 2027 ASC EE.csv']}
-WAGE_INDEX = {'2026': {'newburgh': 0.9727, 'owensboro': 0.9018, 'henderson': 0.827}, '2027': {'newburgh': 0.9555, 'owensboro': 0.865, 'henderson': 0.8145}}      # by year and office: Newburgh (CBSA 21780 Evansville IN), Owensboro (36980), Henderson
+SOURCES = {'2026': ['medicare-asc-final-rule-rate-calculator-2027-20261110.xlsx (Oct 2026 ASC AA, BB)'], '2027': ['medicare-asc-final-rule-rate-calculator-2027-20261110.xlsx (CY 2027 ASC AA, BB)']}
+WAGE_INDEX = {'2026': {'newburgh': 0.9727, 'owensboro': 0.9018, 'henderson': 0.827}, '2027': {'newburgh': 0.9555, 'owensboro': 0.865, 'henderson': 0.8145}}      # by year and office: Newburgh (Warrick County IN, CBSA 21780 Evansville, IN); Owensboro (Daviess County KY, CBSA 36980 Owensboro, KY); Henderson (Henderson County KY, CBSA 18 RURAL KENTUCKY)
+OFFICE_COUNTY = {'newburgh': '18173', 'owensboro': '21059', 'henderson': '21101'}      # the offices' counties (FIPS), for the wage index of the year to come
 EXCLUDED = {'2026': ['15756', '15757', '15758'], '2027': []}
 ASC: dict[str, dict[str, tuple[str, int | None, bool]]] = {
     '2026': {

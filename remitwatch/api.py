@@ -1729,6 +1729,39 @@ def activity_calculator(provider: str = Query("mohs", pattern=r"^[A-Za-z0-9:_-]{
     return _activity(calculator.calculator, provider, month_from, month_to, months)
 
 
+@app.get("/api/activity/asc_rule")
+def activity_asc_rule(months: int = Query(12, ge=3, le=24),
+                      month_from: Optional[str] = Query(None, alias="from", pattern=MONTH_PATTERN),
+                      month_to: Optional[str] = Query(None, alias="to", pattern=MONTH_PATTERN), _: str = Depends(require_owner)):
+    """The practice's cases at its ASC over a window, with Medicare's ASC and physician rates for the year before and the
+    rule year, and what each kind of payer pays the practice against Medicare (remitwatch.calculator.asc_rule): the page
+    works out what the rule year does to what is paid for them. Owner only, as the rest of the Calculator."""
+    from . import calculator
+    return _activity(calculator.asc_rule, months, month_from, month_to)
+
+
+@app.get("/api/activity/asc_rates")
+def activity_asc_rates(q: str = Query("", max_length=400), state: str = Query("", pattern=r"^[A-Za-z]{0,2}$"),
+                       county: str = Query("", max_length=60), offset: int = Query(0, ge=0, le=20000),
+                       limit: int = Query(100, ge=1, le=500), _: str = Depends(require_owner)):
+    """ASCA's rate calculator: Medicare's ASC amounts for the codes a search names (whole codes, the start of a code, a
+    range), nationally and in a county, in the rule year against the year before (remitwatch.ascrates). CMS's published
+    rates only, no practice figure."""
+    from . import ascrates
+    return ascrates.lookup(q, state or None, county or None, offset, limit)
+
+
+@app.get("/api/activity/asc_places")
+def activity_asc_places(_: str = Depends(require_owner)):
+    """The rate calculator's picker: every state and county with an ASC wage index, the payment indicators' meanings
+    (Addendum DD1), and the county of the practice's ASC to start from."""
+    from . import ascrates
+    from .calculator import ASC_SITE
+    home = ascrates.office_place(ASC_SITE["office"]) or {}
+    return {**ascrates.places(), "pi": ascrates.definitions(), "home": {"state": home.get("state"), "county": home.get("county")},
+            "rule_year": ascrates.rule_year(), "prior_year": ascrates.prior_year()}
+
+
 ASSUMPTIONS = "calculator/assumptions.json"     # in the state folder (cloud) or the meta table (server)
 ASSUMPTIONS_KEY = "calculator:assumptions"
 # A hard cap on the saved figures, scenarios included. A scenario carries the whole calculator plan (contracts corrected,

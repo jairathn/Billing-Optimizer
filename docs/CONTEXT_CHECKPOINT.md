@@ -426,3 +426,55 @@ analysis window, or a 4 GB function (Vercel Pro).
   ASCQR, the open 2027 E/M switch, coinsurance shown. Activity v5 also stores Medicare visit counts beside Mohs/biopsies
   and own-read pathology; versions 3-4 stay readable until the next run rebuilds.
 - Daily run with activity v5 on the live image: about 61 s, peak 1.40 GB.
+
+
+## ASC final rule (November 17, 2026)
+
+Asked: build ASCA's "Medicare ASC final rule rate calculator" for 2027 (version 77, set up 2026-11-06; the file the owner
+uploaded is dated 2026-11-10) into the Calculator, then: "We already know what payers are paying us - use this to estimate
+2027 CMS final rule impact on those payments."
+
+Built (see ARCHITECTURE.md, ASC final rule view):
+- `scripts/build_ascfs.py --asca <workbook> --wage 2026:...` reads the workbook's own CMS columns by header (CY 2027 AA, BB,
+  DD1; Oct 2026 AA, BB; the 2027 ASC wage index and county crosswalk; Addendum B for the APC) and writes `remitwatch/ascfs.py`
+  (unchanged amounts; now with `OFFICE_COUNTY`) and `remitwatch/cms/` (asc_rates.csv: 8,224 codes, both years; asc_counties.csv:
+  3,224 places; asc_meta.json). The older CSV route still works.
+- `remitwatch/ascrates.py`: the rate lookup, worked as the workbook works it. `calculator.asc_rule` and three owner-only routes:
+  `/api/activity/asc_rule`, `/api/activity/asc_rates`, `/api/activity/asc_places`.
+- `static/asc_model.js` (pure, node-tested) and `static/asc.js`: the "ASC final rule" view of the Calculator tab.
+- `tests/test_asc_rates.py` (9 tests).
+
+What was checked:
+- The workbook agrees with what the lab already used: all 205 dermatology codes for 2027 and 202 for October 2026 (indicator,
+  rate, discounting) and the offices' wage indexes (Warrick 0.9555, Daviess 0.8650, Henderson rural Kentucky 0.8145 in 2027).
+- The generated table matches the workbook's cached Pay_Rates results for every one of its 8,186 codes (indicator, rate,
+  copayment, Medicare's part, discounting, comment indicator, APC, New/Revised text). One trap found on the way: '***' marks
+  a non-opioid alternative (CAA 2023 sec. 4135) that keeps its copayment; only an exact '**' waives it.
+- Local amounts: LibreOffice recalculated the workbook's Calculator sheet for six places (Warrick IN, Henderson KY, San
+  Francisco CA, San Juan PR, Guam, the Virgin Islands): 8,186 codes x 12 amounts each, zero differences. LibreOffice 24.2 has
+  no XLOOKUP, so the lookup sheet was frozen to its cached values for that check. The harness lived in the session scratchpad.
+- The view, in Chromium on an invented store (desktop and phone widths): no console errors from it, no sideways page scroll.
+
+What the 2027 rule does to the dermatology codes (CMS's published figures, no practice data): flaps and full-thickness grafts
+(APC 5054) fall 6.4% nationally and 7.2% at Newburgh, where the wage index drops from 0.9727 to 0.9555; the office-based (P3)
+repairs and excisions fall a median 6.6% nationally (7.4% at Newburgh); the larger excisions paid as A2 (11604, 11606) about
+3.5 to 3.8%; 13132 is flat nationally (+0.1%) and -0.8% at Newburgh; 15100 rises 68% (a higher APC); skin-substitute products
+(indicator S2) stay at $127.14 a unit.
+
+Decisions:
+- The tables live in `remitwatch/cms/`: `.gitignore` ignores every `data/` folder because that is where PHI lives, and that
+  rule was left alone.
+- No CPT or CDT descriptions anywhere (the repository is public).
+- The lookup reproduces ASCA to the cent (Medicare's part and the copayment wage-adjusted apart); the lab and the view's
+  estimate keep `ascfs.asc_amount` (the whole rate adjusted first, as Medicare's pricer does). They can differ by a cent a line.
+- The ASC's own remittances are not in the feed, so its fees are priced, never read. Each kind of payer pays the ASC a share of
+  Medicare's rate that starts at what that kind pays the practice's physicians against Medicare for the same codes (payer_rates),
+  or the lab's ASC card figure where entered; Medicare Advantage and commercial follow Medicare's yearly rates by default,
+  Medicaid and other payers do not. Settings last for the visit.
+- Counted: same-day Mohs closures and excisions with a repair billed on the ASC's claim (POS 24). Not counted: later-day
+  closures, excisions without a repair, anything else done at the ASC; cases billed partly at each site are set apart.
+- The view follows the Calculator's window (six months by default), a year at that pace, and covers the whole practice.
+
+Open: the ASC's own 835s, if routed to the same Dropbox folder, would let the view read each payer's real facility payments
+instead of pricing them. The practice-wide professional 2027 change by payer is still per clinician (the Calculator's waterfall).
+In this sandbox three page tests fail because the network policy blocks cdnjs (Chart.js); they are unrelated to this work.

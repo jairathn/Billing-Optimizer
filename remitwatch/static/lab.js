@@ -20,7 +20,7 @@ const LAB_TIER = {low: ['routine', 'ok'], medium: ['check first', 'sev-medium'],
 
 function calcViews(v){
   const cs = state.calc;
-  const views = [['calc', 'Calculator'], ['lab', 'Strategy lab'], ['figures', 'Practice figures'], ['sheet', 'Provider sheet']];
+  const views = [['calc', 'Calculator'], ['lab', 'Strategy lab'], ['figures', 'Practice figures'], ['sheet', 'Provider sheet'], ['asc', 'ASC final rule']];
   return `<div class="segs" role="tablist" aria-label="calculator views" style="margin-top:10px">${views.map(([k, l]) =>
     `<button class="seg ${cs.view===k?'on':''}" data-calc-view="${k}" role="tab" aria-selected="${cs.view===k}">${esc(l)}</button>`).join('')}</div>`;
 }

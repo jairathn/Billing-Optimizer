@@ -1,0 +1,124 @@
+{
+ "coinsurance": 0.2,
+ "labor_share": 0.5,
+ "not_wage_adjusted": [
+  "H2",
+  "J7",
+  "K2",
+  "K5",
+  "K7",
+  "L6"
+ ],
+ "offices": {
+  "henderson": {
+   "fips": "21101",
+   "wage_index": {
+    "2026": 0.827,
+    "2027": 0.8145
+   }
+  },
+  "newburgh": {
+   "fips": "18173",
+   "wage_index": {
+    "2026": 0.9727,
+    "2027": 0.9555
+   }
+  },
+  "owensboro": {
+   "fips": "21059",
+   "wage_index": {
+    "2026": 0.9018,
+    "2027": 0.865
+   }
+  }
+ },
+ "pi": {
+  "A2": "Surgical procedure on ASC list in CY 2007; payment based on OPPS relative payment weight.",
+  "B5": "Alternative code may be available; no payment made",
+  "D1": "Ancillary dental service/item; no separate payment made.",
+  "D2": "Non office-based dental procedure added in CY 2024 or later.",
+  "D5": "Deleted/discontinued code; no payment made.",
+  "F4": "Corneal tissue acquisition, hepatitis B vaccine; paid at reasonable cost.",
+  "G2": "Non office-based surgical procedure added in CY 2008 or later; payment based on OPPS relative payment weight.",
+  "H2": "Brachytherapy source paid separately when provided integral to a surgical procedure on ASC list; payment based on OPPS rate.",
+  "J7": "OPPS pass-through device paid separately when provided integral to a surgical procedure on ASC list; payment contractor-priced.",
+  "J8": "Device-intensive procedure; paid at adjusted rate.",
+  "K2": "Drugs, biologicals, and radiopharmaceuticals paid separately when provided integral to a surgical procedure on ASC list; payment based on OPPS rate.",
+  "K5": "Items, codes, and services for which pricing information and claims data are not available. No payment made.",
+  "K7": "Unclassified drugs and biologicals; payment contractor-priced.",
+  "L1": "Influenza vaccine; pneumococcal vaccine. Packaged item/service; no separate payment made.",
+  "L6": "Special payment; New Technology Intraocular Lens (NTIOL) or qualifying non-opioid devices",
+  "N1": "Packaged service/item; no separate payment made.",
+  "P2": "Office-based surgical procedure added to ASC list in CY 2008 or later with MPFS nonfacility PE RVUs; payment based on OPPS relative payment weight.",
+  "P3": "Office-based surgical procedure added to ASC list in CY 2008 or later with MPFS nonfacility PE RVUs; payment based on MPFS nonfacility PE RVUs.",
+  "R2": "Office-based surgical procedure added to ASC list in CY 2008 or later without MPFS nonfacility PE RVUs; payment based on OPPS relative payment weight.",
+  "S2": "Skin substitute supply group; paid separately when provided integral to a surgical procedure on ASC list; payment based on OPPS rate.",
+  "Z2": "Radiology or diagnostic service paid separately when provided integral to a surgical procedure on ASC list; payment based on OPPS relative payment weight.",
+  "Z3": "Radiology or diagnostic service paid separately when provided integral to a surgical procedure on ASC list; payment based on MPFS nonfacility PE RVUs."
+ },
+ "prior_year": "2026",
+ "rule_year": "2027",
+ "sequestration": 0.02,
+ "source": "medicare-asc-final-rule-rate-calculator-2027-20261110.xlsx",
+ "states": {
+  "AK": "ALASKA",
+  "AL": "ALABAMA",
+  "AR": "ARKANSAS",
+  "AZ": "ARIZONA",
+  "CA": "CALIFORNIA",
+  "CO": "COLORADO",
+  "CT": "CONNECTICUT",
+  "DC": "DISTRICT OF COLUMBIA",
+  "DE": "DELAWARE",
+  "FL": "FLORIDA",
+  "GA": "GEORGIA",
+  "GU": "GUAM",
+  "HI": "HAWAII",
+  "IA": "IOWA",
+  "ID": "IDAHO",
+  "IL": "ILLINOIS",
+  "IN": "INDIANA",
+  "KS": "KANSAS",
+  "KY": "KENTUCKY",
+  "LA": "LOUISIANA",
+  "MA": "MASSACHUSETTS",
+  "MD": "MARYLAND",
+  "ME": "MAINE",
+  "MI": "MICHIGAN",
+  "MN": "MINNESOTA",
+  "MO": "MISSOURI",
+  "MS": "MISSISSIPPI",
+  "MT": "MONTANA",
+  "NC": "NORTH CAROLINA",
+  "ND": "NORTH DAKOTA",
+  "NE": "NEBRASKA",
+  "NH": "NEW HAMPSHIRE",
+  "NJ": "NEW JERSEY",
+  "NM": "NEW MEXICO",
+  "NV": "NEVADA",
+  "NY": "NEW YORK",
+  "OH": "OHIO",
+  "OK": "OKLAHOMA",
+  "OR": "OREGON",
+  "PA": "PENNSYLVANIA",
+  "PR": "PUERTO RICO",
+  "RI": "RHODE ISLAND",
+  "SC": "SOUTH CAROLINA",
+  "SD": "SOUTH DAKOTA",
+  "TN": "TENNESSEE",
+  "TX": "TEXAS",
+  "UT": "UTAH",
+  "VA": "VIRGINIA",
+  "VI": "VIRGIN ISLANDS",
+  "VT": "VERMONT",
+  "WA": "WASHINGTON",
+  "WI": "WISCONSIN",
+  "WV": "WEST VIRGINIA",
+  "WY": "WYOMING"
+ },
+ "wage_year": "2027",
+ "years": {
+  "2026": "October 2026",
+  "2027": "the CY 2027 final rule"
+ }
+}

@@ -320,7 +320,7 @@ function calcDraw(v){
   back();
   calcRefocus(v);
   if(cs.view && cs.view !== 'calc'){
-    const run = {lab: labDraw, figures: figuresDraw, sheet: sheetDraw}[cs.view];
+    const run = {lab: labDraw, figures: figuresDraw, sheet: sheetDraw, asc: ascDraw}[cs.view];
     if(run) run(v).catch(e => { const b = v.querySelector('#calcBody'); if(b) b.innerHTML = `<div class="panel"><div class="note">${esc(e.message)}</div></div>`; });
     return;
   }
