@@ -181,7 +181,8 @@ def test_the_page_puts_the_categories_after_today_and_sends_the_old_queue_to_the
     page = open(os.path.join(static, "index.html"), encoding="utf-8").read()
     tabs = re.search(r"const TABS = \[(.*?)\];", page, flags=re.S).group(1)
     keys = re.findall(r"\['([a-z]+)','", tabs)
-    assert keys[:8] == ["today", "denials", "bundling", "downcoding", "contracts", "fees", "worklist", "wins"], keys
+    # the Faxes page sits after the Worklist it sends from (remitwatch.fax)
+    assert keys[:9] == ["today", "denials", "bundling", "downcoding", "contracts", "fees", "worklist", "faxes", "wins"], keys
     assert "appeals:'worklist'" in page and '<script src="/static/desk.js"></script>' in page
     desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()
     for key in ("denials", "bundling", "downcoding", "contracts", "worklist"):

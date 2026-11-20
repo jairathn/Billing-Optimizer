@@ -13,10 +13,17 @@ remitwatch.codes.appeal_rule.
 from __future__ import annotations
 
 import os
+import re
 from datetime import date
 from typing import Any
 
 from .codes import CARC, LEGAL, RARC, appeal_rule, member_number
+
+def _fax_line(number: str | None) -> str:
+    d = "".join(ch for ch in (number or "") if ch.isdigit())
+    d = d[1:] if len(d) == 11 and d.startswith("1") else d
+    return f"({d[:3]}) {d[3:6]}-{d[6:]}" if len(d) == 10 else ""
+
 
 # Who the letters come from. Set PRACTICE_NAME, PRACTICE_ADDRESS, PRACTICE_TIN and PRACTICE_NPI (and the contact lines)
 # in the host's settings: until then the letters carry the bracketed words, which shows at a glance what is missing.
@@ -26,7 +33,9 @@ PRACTICE = {
     "tin": os.environ.get("PRACTICE_TIN", "[practice tax ID]"),
     "npi": os.environ.get("PRACTICE_NPI", "[group NPI]"),
     "phone": os.environ.get("PRACTICE_PHONE", "[practice phone]"),
-    "fax": os.environ.get("PRACTICE_FAX", "[practice fax]"),
+    # the number payers answer to: RemitWatch's own fax line when one is set up (remitwatch.fax), so their answers are read
+    # and matched to the appeal, else the office's
+    "fax": _fax_line(os.environ.get("SRFAX_CALLER_ID")) or os.environ.get("PRACTICE_FAX", "[practice fax]"),
     "email": os.environ.get("PRACTICE_EMAIL", "[billing email]"),
 }
 
@@ -37,6 +46,15 @@ EM_MDM = {
     "99212": "straightforward", "99213": "low", "99214": "moderate", "99215": "high",
     "99202": "straightforward", "99203": "low", "99204": "moderate", "99205": "high",
 }
+
+
+# the denials whose reason a reviewed note answers: the prompt in brackets gives way to what the records show
+RECORD_REASONS = ("DENIED_MEDICAL_NECESSITY", "DENIED_LEVEL_OF_SERVICE", "DENIED_FREQUENCY", "DENIED_OTHER", "CLAIM_DENIED_UNPAID")
+
+
+def _with_records(reason: str, clinical: list[str]) -> str:
+    head = re.split(r":?\s*\[", reason, maxsplit=1)[0].rstrip(" .")
+    return ((head + ". ") if head else "The attached records support the service billed. ") + "The records show:\n\n" + "\n".join("  " + p for p in clinical)
 
 
 def money(c: int | None) -> str:
@@ -394,6 +412,7 @@ def build_packet(d: dict, show_phi: bool = False, clinical: list[str] | None = N
             "",
             ("This code is an add-on code reported in addition to its primary procedure; add-on codes are not subject to multiple procedure reduction and are payable with the primary service (CPT Appendix D; CMS MPFS status indicator). " if sig == "ADDON_BUNDLED" else
              "There is no National Correct Coding Initiative procedure-to-procedure edit that bundles this service into the other services on this claim, or the edit allows a modifier and the services were distinct (separate lesion, separate site, or separate session) as documented. Mohs micrographic surgery stages (17311 to 17315) and reconstructive repairs or flaps performed by the same surgeon are separately reportable under CPT and NCCI guidance. "),
+            ("The procedure note, attached, documents the following:\n\n" + "\n".join("  " + p for p in clinical)) if clinical else
             "[Describe the lesion(s), site(s), stage(s) and the distinct work performed.]",
             "",
             "We ask that the line be reprocessed and paid.",
@@ -419,8 +438,7 @@ def build_packet(d: dict, show_phi: bool = False, clinical: list[str] | None = N
             f"The service(s) on the date of service above were denied with reason code {f.get('carc')}: {CARC.get(f.get('carc') or '', '')}"
             + (f"; remark {f.get('rarc')}: {RARC.get((f.get('rarc') or '').split(',')[0], '')}" if f.get("rarc") else "") + ".",
             "",
-            (reasons.get(sig, reasons["DENIED_OTHER"]).split(": [summarize]")[0].rstrip(".") + ". The records show:\n\n" + "\n".join("  " + p for p in clinical))
-            if clinical else reasons.get(sig, reasons["DENIED_OTHER"]),
+            _with_records(reasons.get(sig, reasons["DENIED_OTHER"]), clinical) if clinical and sig in RECORD_REASONS else reasons.get(sig, reasons["DENIED_OTHER"]),
             "",
             "We ask that the claim be reprocessed and paid.",
         ])

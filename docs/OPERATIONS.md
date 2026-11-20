@@ -134,6 +134,42 @@ Without a key the packet is still built, with the template letter and the note a
 
 The review is written to be honest. When the note does not support the level billed it says so, recommends against the appeal, and none of its arguments go into the letter. This live call was not exercised during the build because no API key was available; the request shape follows the SDK documentation and is covered by a test with a stand-in client. Check the first few packets by hand.
 
+### Faxing appeals
+
+With a fax line connected, an appeal goes to the payer in one click and is chased until the claim is paid or decided.
+
+**One click.** On any list (the Worklist, a claim page), tick the items, or the box at the top of the list for all of them, and press **Appeal by fax**. Or press **Appeal everything appealable** at the top of the Worklist (or the Faxes page): every open item an appeal letter settles (the visit note, the coding rules, or the payer's own rate), inside its filing window and not faxed yet. For each item the site:
+
+1. reads the visit note from EMA where the appeal rests on it (a medical necessity or level denial, a bundled visit, a bundled procedure);
+2. has Claude review the note and write the paragraphs that justify the claim, quoting the note;
+3. writes the letter (the practice's details, the patient, the member and claim numbers, the reason codes, the rule or the rate), puts a cover sheet with no patient named on it in front, and the note and the remittance evidence behind;
+4. faxes it to the payer's appeal number and marks the item Sent.
+
+An item that cannot go is held, with why: no fax number saved for the payer yet (type it in the box that appears; the held items go as soon as it is saved), more than one note in EMA that day (pick it in the item), no signed note yet, Claude's review says the note does not support it (it is then counted in Suggested templates on Bigger wins), or the letter still has blanks. Items fixed in EMA and sent again as a claim, and items a person has to decide, are never faxed.
+
+**Setting up the line (once).** The service is SRFax (srfax.com): HIPAA plans, a business associate agreement for healthcare accounts, sending and receiving by an API. Sign up for a plan with a fax number, sign its business associate agreement, then set in the host's settings and redeploy:
+
+| Setting | What |
+|---|---|
+| `SRFAX_ACCESS_ID` | the SRFax account number |
+| `SRFAX_ACCESS_PWD` | the SRFax account password |
+| `SRFAX_CALLER_ID` | the fax number SRFax gives the account. Letters give it as the practice's fax, so payers fax their answers to it and the site reads them |
+| `SRFAX_SENDER_EMAIL` | the address SRFax sends its own delivery notices to |
+
+Also set every `PRACTICE_` detail (name, address, tax ID, group NPI, phone, email): no letter is faxed with a bracketed blank in it. On `/setup`, press "Test the fax line".
+
+**Payer fax numbers.** Each payer's appeal fax number is typed once, on the Faxes page or in the box that appears when an item is held for it, from the payer's provider manual, its appeal form or one of its letters. A second-level number can be saved too (Medicare's second level is a different contractor, so for Medicare it must be). The site faxes only to numbers a person saved: a fax with a patient's record sent to a wrong number is a breach.
+
+**What happens next, by itself.** A scheduled run every day (15:43 UTC on Vercel; `python -m remitwatch.cli fax-cycle` from cron on a host with a disk):
+
+- checks each fax still going out; a fax the payer's line did not take (busy, no answer) is sent again, three tries in all; after that the Faxes page asks a person to check the number;
+- reads each fax that came in with Claude (what it is, the decision, claim numbers, patient, dates, any deadline) and ties it to the item it answers, by claim number, else by patient and date of service; a line goes into the item's history. One it cannot tie is listed on the Faxes page: open the item it answers and use "Tie a fax that came in to this item";
+- sends the follow-ups that are due: no decision after the payer's time to answer (60 days for Medicare and Medicare Advantage, 30 for commercial plans) gets a second request, then another every week; a denial upheld goes to the payer's next level with its decision attached; a request for records gets the packet again; an approval not paid within 30 days gets a payment request, then weekly. Twelve unanswered requests at one level, or a second level upheld, go to a person (a call, a complaint to the Department of Insurance, an independent review). A payment closes the item and ends the follow-ups.
+
+The Faxes page shows all of it: the follow-ups due (with a button to send them now), the payer numbers, what came in and what went out, each with its PDF. On a host with a disk, `python -m remitwatch.cli send-appeals` does what Appeal everything appealable does.
+
+**Suggested templates.** Each note Claude's review found short is kept, by code: what the note lacked and what to document next time. Bigger wins lists them, with what the note for that kind of service must carry; "Write the EMA template" has Claude turn them into the fields an EMA template should make required, the prompt each field gives the clinician, and the line the clinician signs. Only the code, the payers and the gaps go to Claude for that, nothing about a patient. Which clinicians' notes fell short is shown only where the Providers tab would show it.
+
 ## 7. Daily and weekly routine
 
 Every day (whoever works the claims):

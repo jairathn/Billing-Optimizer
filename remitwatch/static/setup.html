@@ -75,6 +75,17 @@ a{color:var(--accent)}
     <table id="mmSteps"></table>
   </div>
 
+  <div class="panel" id="faxp" style="display:none"><h2>Fax line</h2>
+    <div class="small">Faxes each appeal to the payer, reads what payers fax back, and follows up every week until each claim is paid or decided. The service is SRFax: pick a plan for healthcare, sign its business associate agreement, then set these in the host's settings and redeploy.</div>
+    <ol class="small">
+      <li><code>SRFAX_ACCESS_ID</code> (the account number) and <code>SRFAX_ACCESS_PWD</code> (the account password).</li>
+      <li><code>SRFAX_CALLER_ID</code>: the fax number SRFax gives the account. Letters give it as the practice's fax, so payers answer to it and their answers are read here.</li>
+      <li><code>SRFAX_SENDER_EMAIL</code>: where SRFax sends its own delivery notices.</li>
+    </ol>
+    <div class="row"><button class="primary" id="fxTest">Test the fax line</button><span id="fxMsg" class="small muted"></span></div>
+    <table id="fxSteps"></table>
+  </div>
+
   <div class="panel" id="load" style="display:none"><h2>First load</h2>
     <div class="small muted">Reads every remittance file in the Dropbox folder. It runs by itself and continues on its own until it is done. You can close this page.</div>
     <div class="row"><button class="primary" id="run">Run the first load now</button><a href="/">Open the dashboard</a></div>
@@ -99,6 +110,16 @@ async function mmTest(){
   } catch(e){ $('#mmMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; }
   b.disabled = false;
 }
+async function fxTest(){
+  const b = $('#fxTest'); b.disabled = true; $('#fxMsg').textContent = 'Testing…'; $('#fxSteps').innerHTML = '';
+  try {
+    const r = await api('/api/faxes/test', {method:'POST', body: '{}'});
+    $('#fxSteps').innerHTML = r.steps.map(x => { const cls = x.ok===true?'ok':(x.ok===false?'no':'opt'); const mark = x.ok===true?'✓':(x.ok===false?'✗':'–');
+      return `<tr><td class="mark ${cls}">${mark}</td><td><b>${esc(x.step)}</b><div class="small muted">${esc(x.detail||'')}</div></td></tr>`; }).join('');
+    $('#fxMsg').innerHTML = r.ok ? '<span class="ok">The fax line works.</span>' : '<span class="no">Not working yet: fix the first ✗.</span>';
+  } catch(e){ $('#fxMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; }
+  b.disabled = false;
+}
 async function check(){
   let s; try { s = await api('/api/setup/status'); } catch(e){ $('#checks').innerHTML = `<tr><td class="no">Could not check: ${esc(e.message)}</td></tr>`; return; }
   $('#checks').innerHTML = s.checks.map(c => { const cls = c.ok===true?'ok':(c.ok===false?'no':'opt'); const mark = c.ok===true?'✓':(c.ok===false?'✗':'–');
@@ -112,6 +133,7 @@ async function check(){
   if(s.webhook_url) $('#hookUrl').textContent = s.webhook_url;
   $('#load').style.display = s.ready ? '' : 'none';
   $('#modmed').style.display = s.locked ? 'none' : '';
+  $('#faxp').style.display = s.locked ? 'none' : '';
   $('#jwksUrl').textContent = location.origin + '/.well-known/jwks.json';
   $('#ready').innerHTML = s.locked ? '<span class="no">This site is locked until a dashboard password is set.</span>' : (s.ready ? '<span class="ok">Required settings are complete.</span>' : '<span class="muted">Fix the items marked ✗ from the top down.</span>');
   if(s.ready) loadStatus(s);
@@ -145,6 +167,7 @@ async function loadStatus(s){
 }
 $('#recheck').onclick = check;
 $('#mmTest').onclick = mmTest;
+$('#fxTest').onclick = fxTest;
 $('#exchange').onclick = async () => { $('#exMsg').textContent = 'Asking Dropbox…';
   try { const r = await api('/api/setup/dropbox-token', {method:'POST', body: JSON.stringify({code: $('#code').value})});
     $('#token').value = r.refresh_token; $('#tokStep').style.display = '';

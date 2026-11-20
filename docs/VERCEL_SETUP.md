@@ -29,6 +29,7 @@ redeploy after every change.
 | `APPEAL_EMAIL_DOMAINS` | The domains appeal packets may be emailed to, comma separated. Until it is set, packets can be downloaded but not emailed. | To email packets |
 | `PRACTICE_NAME`, `PRACTICE_ADDRESS`, `PRACTICE_TIN`, `PRACTICE_NPI`, `PRACTICE_PHONE`, `PRACTICE_FAX`, `PRACTICE_EMAIL` | The practice's legal name, mailing address, tax ID, group NPI and billing contacts, as they should appear at the top of appeal letters. Until they are set the letters show bracketed words in their place. | For appeal letters |
 | `ANTHROPIC_API_KEY` | Turns on the visit-note review for appeal packets. The practice's business associate agreement with Anthropic covers it. | No |
+| `SRFAX_ACCESS_ID`, `SRFAX_ACCESS_PWD`, `SRFAX_CALLER_ID`, `SRFAX_SENDER_EMAIL` | The fax line (SRFax): appeals faxed in one click, payers' answers read and matched, follow-ups every week (OPERATIONS.md, Faxing appeals). `SRFAX_CALLER_ID` is the line's own number; letters give it, so answers come back to it. Faxing also needs every `PRACTICE_` detail. | To fax appeals |
 | `MODMED_CLIENT_ID`, `MODMED_PRIVATE_KEY` | Connect ModMed EMA, so the visit note behind an appeal is read from EMA instead of uploaded (OPERATIONS.md, Connecting ModMed EMA). Make the key with `python -m remitwatch.cli modmed-key`. | To read notes from EMA |
 | `MODMED_CLIENT_SECRET`, `MODMED_API_KEY`, `MODMED_FHIR_BASE`, `MODMED_TOKEN_URL`, `MODMED_SCOPE`, `MODMED_AUDIENCE`, `MODMED_KEY_ID`, `MODMED_GROUP_ID` | Only where ModMed's registration names other values than the defaults. | No |
 
@@ -59,8 +60,9 @@ and what the runtime offers.
 ## How it works
 
 - `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules
-  `/api/cron/cycle` once a day (10:17 UTC; on the Hobby plan Vercel fires it some time in that hour). `public/` exists
-  so that Vercel serves nothing else from the repository.
+  `/api/cron/cycle` once a day (10:17 UTC; on the Hobby plan Vercel fires it some time in that hour) and
+  `/api/cron/faxes` once a day (15:43 UTC: the faxes going out, the payers' faxes in, the follow-ups due; it does
+  nothing until the fax line is set). `public/` exists so that Vercel serves nothing else from the repository.
 - Keep `"framework": null` in `vercel.json`. Under Vercel's FastAPI preset the function is given the rewritten path, so
   every request would arrive as `/api/index`.
 - Vercel refuses to build when `CRON_SECRET` has a space or a line break at either end.

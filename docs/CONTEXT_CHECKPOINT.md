@@ -515,3 +515,34 @@ Next, asked for by the owner:
    ones missing something. It prompts the provider to document what was done, or to change the code; it never writes
    clinical text (padded notes are what payers' auditors claw back). Whether it can run before signing depends on
    whether ModMed's API exposes unsigned notes.
+
+## Appeals by fax, follow-ups and suggested templates (November 20, 2026)
+
+The owner asked: "select all, appeal" on whatever is appealable, with the note and its justification pulled from EMA
+into the fax; a RemitWatch fax number that receives faxes, tracks what comes in and follows up every week on what has
+not closed, escalating until paid; and suggested templates for denials lost because the note was not complete enough.
+
+Built: `remitwatch/fax.py` (SRFax adapter, cover sheet, follow-up letters, `followups`, `classify`, `match_inbound`),
+`remitwatch/lessons.py` (lessons by code, the elements each kind of note must carry, Claude-written EMA templates),
+`notes.build_letter_only` and `notes.lesson`, routes `/api/appeals/send`, `/api/appeals/appealable`, `/api/faxes*`,
+`/api/lessons*`, `/api/cron/faxes` (daily in `vercel.json`), journal kinds fax, payer_fax, lesson, event; the Worklist's
+"Appeal by fax" (ticked items) and "Appeal everything appealable", the Faxes tab, the item's faxes and "Appeal by fax"
+in its panel, "Suggested templates for next time" on Bigger wins, the /setup fax panel, CLI `send-appeals` and
+`fax-cycle`. Letters now use `clinical` paragraphs for bundled procedures and for the medical-necessity, level, frequency
+and whole-claim denials, and give the SRFax number as the practice's fax so answers come back to it. 17 tests in
+`tests/test_fax.py` (fake line, fake SRFax web service, one serverless run through the journal); the flow was driven in
+Chromium on an invented store (ticked, held for a number, number typed, faxed, the payer's answer read and matched, the
+next level queued, the template written).
+
+Not done for the owner, on purpose: signing up for SRFax (it takes a card and a business associate agreement signed by
+the practice), and typing payers' fax numbers (each must come from the payer's own papers: a wrong number with a
+patient's record on it is a breach). Not verified: SRFax's real answers (this sandbox's network blocks srfax.com; the
+adapter follows its published web-service contract: POST action, access_id, access_pwd, JSON {Status, Result}).
+
+Holds that stop a fax, by design: the item is not settled by a letter (fix, auth, check kinds); window closed; practice
+details missing; no fax line; no saved payer number; EMA not connected or no signed note or several notes that day;
+Claude's review says do not appeal or correct and resubmit (counted as a lesson); a bracketed blank left in the letter.
+Two downcode kinds rest on inference (DOWNCODE_CHARGE, and DOWNCODE_VS_BILLED when the higher code comes from EMA's charge
+rather than the 837 claim file): they are held ("check_code") until a person confirms in EMA that the higher level went
+out, then sent with one click ("It went out as billed: fax it"). `letter_blanks` catches prompts of any length (eight
+template prompts are over 80 characters) and ignores the scrub's placeholders ([DATE], [REDACTED]) in quoted paragraphs.

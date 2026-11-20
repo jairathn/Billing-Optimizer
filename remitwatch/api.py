@@ -321,7 +321,9 @@ def meta(_: str = Depends(require_auth)):
                            # whether what each clinician is doing asks for the owner's password first
                            "providers": {"locked": bool(OWNER_PASSWORD)},
                            # whether visit notes can be read from ModMed EMA (remitwatch.modmed)
-                           "modmed": bool(os.environ.get("MODMED_CLIENT_ID") and (os.environ.get("MODMED_PRIVATE_KEY") or os.environ.get("MODMED_CLIENT_SECRET")))}
+                           "modmed": bool(os.environ.get("MODMED_CLIENT_ID") and (os.environ.get("MODMED_PRIVATE_KEY") or os.environ.get("MODMED_CLIENT_SECRET"))),
+                           # whether appeals go out by fax (remitwatch.fax)
+                           "fax": bool(os.environ.get("SRFAX_ACCESS_ID") and os.environ.get("SRFAX_ACCESS_PWD"))}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -837,6 +839,16 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
     # the record of what people did, for every finding (a payer's routine rate belongs to no one claim)
     out["events"] = rows("SELECT at, kind, from_status, to_status, amount_cents, actor, note FROM finding_events WHERE finding_id=? ORDER BY at DESC, id DESC LIMIT 30", (finding_id,)) if has_table("finding_events") else []
     out["packets"] = _packets_for(finding_id)
+    # the faxes sent for it and the payer's faxes tied to it (remitwatch.fax)
+    out["faxes"] = []
+    if has_table("faxes"):
+        for x in rows("""SELECT fax_key, direction, number, purpose, level, status, pages, error, created_at, sent_at, doc FROM faxes
+                         WHERE finding_id=? ORDER BY created_at DESC LIMIT 50""", (finding_id,)):
+            d = json.loads(x.pop("doc") or "{}")
+            x.update(summary=d.get("summary") if x["direction"] == "in" else d.get("subject"), decision=d.get("decision"))
+            out["faxes"].append(x)
+        sent = [x["created_at"] for x in out["faxes"] if x["direction"] == "out" and x["status"] != "failed"]
+        f["faxed_at"] = min(sent) if sent else None      # its follow-ups go by fax by themselves
     return out
 
 
@@ -2257,19 +2269,17 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
     return _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1")
 
 
-def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes | None, text: str | None, use_ai: bool) -> dict:
-    """Build the packet from a note (uploaded, pasted or read from EMA) and keep it: in the store, or on a serverless host
-    as two files in the state folder."""
-    from .notes import build_from_note
+def _keep_packet(build) -> dict:
+    """Run a packet builder from remitwatch.notes and keep what it made: in the store, or on a serverless host (no database
+    to keep it in) built in memory and stored as two files in the state folder."""
     if runtime.serverless():
-        # no database to keep the packet in: build it in memory and store it as two files in the state folder
         from . import cloud
         st = cloud.SERVING_COPY.state()
         if st is None:
             raise HTTPException(503, "Storage is not connected yet. Open /setup.")
         mem = sqlite3.connect(":memory:")
         try:
-            packet = build_from_note(mem, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
+            packet = build(mem)
             row = mem.execute("SELECT letter, letter_redacted, pdf FROM appeal_packets WHERE packet_id=?", (packet["packet_id"],)).fetchone()
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -2281,12 +2291,26 @@ def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes |
         return packet
     conn = db()
     try:
-        # the PDF goes to the payer and carries the real identifiers; the letter text in this response does only when names are switched on
-        return build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
+        return build(conn)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     finally:
         conn.close()
+
+
+def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes | None, text: str | None, use_ai: bool) -> dict:
+    """Build the packet from a note (uploaded, pasted or read from EMA) and keep it. A review that found the note short is
+    also kept as a lesson, for the suggested templates. The PDF goes to the payer and carries the real identifiers; the
+    letter text in the answer does only when names are switched on."""
+    from .notes import build_from_note, lesson
+    packet = _keep_packet(lambda conn: build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai))
+    les = lesson(packet, detail)
+    if les:
+        try:
+            _record_action({"kind": "lesson", "record": les})
+        except Exception:
+            pass        # the packet matters more than the lesson
+    return packet
 
 
 # --------------------------------------------------------------------------- ModMed EMA: the visit note behind an appeal
@@ -2375,6 +2399,608 @@ def jwks_document():
     if not doc:
         raise HTTPException(404, "No key is set (MODMED_PRIVATE_KEY).")
     return JSONResponse(doc, headers={"Cache-Control": "public, max-age=300"})
+
+
+# --------------------------------------------------------------------------- appeals by fax (remitwatch.fax)
+FAX_KEY = r"[A-Za-z0-9:_\-.]{1,160}"
+FAX_PURPOSES = ("appeal", "level_2")
+STATUS_WORDS = {"appealed": "already sent", "resolved": "paid or settled", "lost": "marked lost", "dismissed": "let go"}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _fax_now() -> str:
+    """A fax's time to the microsecond: one daily run can read the payer's answer and send what it calls for in the same
+    second, and the follow-ups go by which came first."""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _record_action(action: dict) -> None:
+    """A fax, a payer's fax number, a lesson or a line in an item's history: into the store, or on a serverless host
+    into the journal (which is what makes it last) and this instance's copy."""
+    action = dict(action, at=action.get("at") or _now_iso())
+    if runtime.serverless():
+        from .cloud import SERVING_COPY
+        SERVING_COPY.record(action)
+        return
+    from . import actions as actions_mod
+    conn = db()
+    try:
+        actions_mod.apply(conn, action)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _appealable_cond() -> tuple[str, list]:
+    """The items an appeal letter settles (remitwatch.fax.APPEALABLE), as a condition on the findings table."""
+    from . import fax
+    from .insights import kind_sql
+    parts, params = [], []
+    for k in fax.APPEALABLE:
+        c, p = kind_sql(k)
+        parts.append(c)
+        params += p
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def _payer_number(payer_group: str | None, purpose: str = "appeal") -> str:
+    if not payer_group or not has_table("payer_fax"):
+        return ""
+    return (one("SELECT number FROM payer_fax WHERE payer_group=? AND purpose=?", (payer_group, purpose)) or {}).get("number") or ""
+
+
+def _practice_missing() -> list[str]:
+    """The practice's details a letter still lacks: no letter is faxed with '[practice name]' on it."""
+    from . import fax
+    from .appeals import PRACTICE
+    names = {"name": "PRACTICE_NAME", "address": "PRACTICE_ADDRESS", "tin": "PRACTICE_TIN", "npi": "PRACTICE_NPI",
+             "phone": "PRACTICE_PHONE", "fax": "SRFAX_CALLER_ID (or PRACTICE_FAX)", "email": "PRACTICE_EMAIL"}
+    return [names[k] for k, v in PRACTICE.items() if k in names and fax.letter_blanks(v)]
+
+
+def _stored_packet(packet_id: str) -> dict | None:
+    """A stored packet with its PDF, and the letter as it went to the payer (with the patient's name)."""
+    if runtime.serverless():
+        cloud, st = _cloud_state()
+        return cloud.get_packet(st, packet_id, with_pdf=True, reveal=True)
+    from .notes import get_packet
+    conn = db()
+    try:
+        return get_packet(conn, packet_id, with_pdf=True, reveal=True)
+    finally:
+        conn.close()
+
+
+def _faxes_out(finding_id: str, live: bool = True) -> list[dict]:
+    """The faxes sent for an item, oldest first; live: leaving out those the payer's line never took."""
+    if not has_table("faxes"):
+        return []
+    return rows("SELECT * FROM faxes WHERE finding_id=? AND direction='out'" + (" AND COALESCE(status,'')!='failed'" if live else "")
+                + " ORDER BY created_at", (finding_id,))
+
+
+def _fax_doc(prov, f: dict, number: str, packet_pdf: bytes, subject: str | None, front: bytes | None = None,
+             extra: bytes | None = None) -> tuple[bytes, int]:
+    """What goes down the line: the cover sheet, a follow-up's letter when there is one, the packet, and anything the
+    payer sent that the next level needs. Returns the PDF and its pages."""
+    from . import fax
+    from .appeals import PRACTICE, _desk
+    body = fax.merge_pdfs(*(p for p in (front, packet_pdf, extra) if p))
+    pages = fax.page_count(body) + 1
+    sheet = fax.cover_sheet(f"{f.get('payer_group') or f.get('payer_name') or ''}, {_desk(f)}", number, PRACTICE, pages, subject)
+    return fax.merge_pdfs(sheet, body), pages
+
+
+def _send_fax(prov, f: dict, number: str, doc: bytes, pages: int, *, packet_id: str, purpose: str, level: int, actor: str,
+              subject: str | None, extra: dict | None = None) -> dict:
+    """Fax a document and record it (the record says how to build it again, for a retry)."""
+    from . import fax
+    pid = prov.send(number, doc, f"{purpose}-{packet_id}"[:60].replace(".", "-") + ".pdf")
+    now = _fax_now()
+    rec = {"fax_key": f"out:{prov.name}:{pid}", "direction": "out", "finding_id": f.get("finding_id"), "packet_id": packet_id,
+           "payer_group": f.get("payer_group"), "number": fax.digits(number), "purpose": purpose, "level": level, "provider": prov.name,
+           "provider_id": pid, "status": "queued", "pages": pages, "error": None, "created_at": now, "updated_at": now,
+           "doc": dict(extra or {}, actor=actor, subject=subject, attempts=(extra or {}).get("attempts", 1), cents=f.get("shortfall_cents"))}
+    _record_action({"kind": "fax", "record": rec})
+    return rec
+
+
+@app.post("/api/appeals/send", dependencies=[Depends(require_xhr)])
+def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """One item all the way to the payer: the visit note from EMA where the appeal rests on it (Claude reviews it and
+    writes the paragraphs that justify the claim), the letter, the fax to the payer's confirmed appeal number, and the
+    item marked Sent. What cannot go comes back held, with why and what to do. A packet built earlier is reused (one
+    built without the review is built again when the review can now run); rebuild: build it again anyway."""
+    from . import fax
+    fid = str(body.get("finding_id") or "")
+    if not re.fullmatch(FAX_KEY, fid):
+        raise HTTPException(400, "finding_id is required")
+    detail = finding_detail(fid, "ok")
+    f = detail["finding"]
+    from .insights import work_type
+    kind = work_type(f.get("signal"), f.get("actionable"), f.get("carc"))
+    out = {"finding_id": fid, "payer_group": f.get("payer_group"), "cents": f.get("shortfall_cents"), "kind": kind}
+
+    def held(code: str, reason: str, **kw) -> dict:
+        return dict(out, status="held", code=code, reason=reason, **kw)
+    if kind not in fax.APPEALABLE:
+        return held("not_appealable", {"fix": "This one is corrected in EMA and sent again as a claim, not appealed.",
+                                       "auth": "This one needs the authorization record, or a retro-authorization, first.",
+                                       "check": "This one needs a person to decide first: another payer, the patient, or let it go."}
+                    .get(kind, "This one is not an appeal."))
+    if f.get("status") not in ("open", "in_progress"):
+        return dict(out, status="skipped", reason=f"It is {STATUS_WORDS.get(f.get('status'), f.get('status'))}.")
+    # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
+    # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
+    ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
+    if (f.get("signal") == "DOWNCODE_CHARGE" or (f.get("signal") == "DOWNCODE_VS_BILLED" and ev.get("billed_source") != "837 claim file")) \
+            and not body.get("confirmed"):
+        billed = ev.get("billed_code") or ev.get("charge_implies") or "the higher level"
+        return held("check_code", f"The remittance does not say the payer changed the code. Check in EMA that {billed} went out on the claim, "
+                                  "then press \"It went out as billed: fax it\" in the item.")
+    if f.get("appeal_deadline") and f["appeal_deadline"] < datetime.now(timezone.utc).date().isoformat():
+        return held("expired", f"Its filing window closed on {f['appeal_deadline']}.")
+    if not f.get("claim_key"):
+        return held("no_claim", "It is not tied to one claim.")
+    missing = _practice_missing()
+    if missing:
+        return held("practice", "The letters still lack the practice's details: set " + ", ".join(missing) + " in the host's settings.")
+    prov = fax.provider()
+    if prov is None:
+        return held("no_fax", "The fax line is not set up yet: SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD in the host's settings.")
+    number = _payer_number(f.get("payer_group"))
+    if not number:
+        return held("no_number", f"No appeal fax number is saved for {f.get('payer_group') or 'this payer'}. Add it on the Faxes page.")
+    if _faxes_out(fid):
+        return dict(out, status="skipped", reason="Its appeal was already faxed.")
+    raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
+    use_ai = body.get("use_ai", True) not in (False, 0, "0")
+    pk = None if body.get("rebuild") else next(iter(_packets_for(fid)), None)
+    if pk and pk.get("mode") == "template" and use_ai and os.environ.get("ANTHROPIC_API_KEY") and kind != "rate":
+        pk = None           # built before the review could run: now it can
+    note = None
+    if pk:
+        packet_id = pk["packet_id"]
+    elif kind == "rate":
+        from .notes import build_letter_only
+        packet_id = _keep_packet(lambda conn: build_letter_only(conn, detail, raw_claim, reveal=SHOW_PHI))["packet_id"]
+    else:
+        from . import modmed
+        key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))
+        pick = body.get("document_id")
+        try:
+            res = modmed.note_for_claim(modmed.client(), key, pick=str(pick) if pick else None, budget=200)
+        except modmed.NotConfigured:
+            return held("no_ema", "EMA is not connected, so the visit note cannot be read: connect it on /setup, or upload the note in the item.")
+        except modmed.ModMedError as exc:
+            return held("ema_error", f"EMA did not give the note: {exc}")
+        if res["status"] == "ambiguous":
+            return held("ambiguous", "EMA has more than one note that day: open the item and pick the right one.",
+                        candidates=res.get("candidates"))
+        if res["status"] != "found":
+            return held("no_note", "EMA has no signed note for this visit: sign it in EMA, or upload the note in the item.")
+        note = {k: v for k, v in res["note"].items() if k != "data"}
+        packet_id = _store_packet(detail, raw_claim, res["note"]["filename"], res["note"]["data"], None, use_ai)["packet_id"]
+    out["packet_id"] = packet_id
+    p = _stored_packet(packet_id)
+    if not p or not p.get("pdf"):
+        return held("no_packet", "The packet could not be read back. Try again.")
+    a = p.get("analysis") or {}
+    if a.get("recommendation") == "do_not_appeal":
+        return held("review_no", "Claude's review says the note does not support it: " + (a.get("recommendation_reason") or "")
+                    + " It is counted in Suggested templates on Bigger wins.")
+    if a.get("recommendation") == "correct_and_resubmit":
+        return held("review_fix", "Claude's review says to correct the claim and send it again instead: " + (a.get("recommendation_reason") or ""))
+    blanks = fax.letter_blanks(p.get("letter"))
+    if blanks:
+        why = a.get("reason") if a.get("mode") == "template" else ""
+        return held("blanks", f"The letter still has blanks ({', '.join(blanks[:4])}). " + (why or "Open the item to finish it."))
+    try:
+        doc, pages = _fax_doc(prov, f, number, p["pdf"], p.get("subject"))
+        sent = _send_fax(prov, f, number, doc, pages, packet_id=packet_id, purpose="appeal", level=1, actor=user, subject=p.get("subject"))
+    except fax.FaxError as exc:
+        return held("fax_error", str(exc))
+    _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages).", None, user)
+    return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), pages=pages, note=note)
+
+
+@app.get("/api/appeals/appealable")
+def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit: int = Query(2000, ge=1, le=5000), _: str = Depends(require_auth)):
+    """What "Appeal everything appealable" sends: every open item an appeal letter settles, inside its filing window,
+    soonest window first; and what stands in the way (payers with no fax number yet, the fax line, the practice's
+    details, EMA)."""
+    from . import fax, modmed
+    from .insights import work_type
+    cond, params = _appealable_cond()
+    where = f"""{cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
+                AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""" + (" AND payer_group=?" if payer else "")
+    items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings WHERE {where}
+                     ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
+                  (*params, *([payer] if payer else []), limit))
+    numbers = {r["payer_group"]: r["number"] for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")} if has_table("payer_fax") else {}
+    sent = {r["finding_id"] for r in rows("SELECT DISTINCT finding_id FROM faxes WHERE direction='out' AND COALESCE(status,'')!='failed'")} if has_table("faxes") else set()
+    by: dict[str, dict] = {}
+    out = []
+    for i in items:
+        if i["finding_id"] in sent:
+            continue
+        k = work_type(i["signal"], i["actionable"], i["carc"])
+        pg = i["payer_group"] or ""
+        b = by.setdefault(pg, {"payer_group": pg, "n": 0, "cents": 0, "number": fax.pretty(numbers.get(pg)) if numbers.get(pg) else "", "kinds": {}})
+        b["n"] += 1
+        b["cents"] += i["shortfall_cents"] or 0
+        b["kinds"][k] = b["kinds"].get(k, 0) + 1
+        out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0, "ready": bool(numbers.get(pg))})
+    return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "practice_missing": _practice_missing(),
+            "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+
+
+@app.get("/api/faxes")
+def faxes_list(_: str = Depends(require_auth)):
+    """The Faxes page: the line, what went out and its state, what came in and what it was matched to, and the follow-ups
+    due. The payer's letters name the patient: those names are shown only where names are switched on."""
+    from . import fax
+    sent = rows("""SELECT x.fax_key, x.finding_id, x.packet_id, x.payer_group, x.number, x.purpose, x.level, x.provider_id, x.status, x.pages,
+                          x.error, x.created_at, x.sent_at, f.title, f.shortfall_cents, f.status item_status
+                   FROM faxes x LEFT JOIN findings f ON f.finding_id = x.finding_id WHERE x.direction='out' ORDER BY x.created_at DESC LIMIT 400""") \
+        if has_table("faxes") else []
+    got = rows("""SELECT x.fax_key, x.finding_id, x.payer_group, x.number, x.purpose, x.status, x.pages, x.created_at, x.doc, f.title, f.status item_status
+                  FROM faxes x LEFT JOIN findings f ON f.finding_id = x.finding_id WHERE x.direction='in' ORDER BY x.created_at DESC LIMIT 400""") \
+        if has_table("faxes") else []
+    for g in got:
+        d = json.loads(g.pop("doc") or "{}")
+        keep = ("document_type", "decision", "payer", "decision_date", "deadline", "amount", "summary", "matches", "error", "received_at")
+        g.update({k: d.get(k) for k in keep})
+        if SHOW_PHI:
+            g["patient"] = _name(d.get("patient_last"), d.get("patient_first"))
+            g["claim_numbers"] = d.get("claim_numbers") or []
+    for s in sent:
+        s["number"] = fax.pretty(s["number"])
+    conn = db()
+    try:
+        due = fax.followups(conn)
+    finally:
+        conn.close()
+    prov = fax.provider()
+    return {"configured": prov is not None, "line": fax.pretty(os.environ.get("SRFAX_CALLER_ID")), "practice_missing": _practice_missing(),
+            "review": bool(os.environ.get("ANTHROPIC_API_KEY")), "sent": sent, "received": got, "due": due}
+
+
+@app.get("/api/faxes/payers")
+def fax_payers(_: str = Depends(require_auth)):
+    """Each payer with items to appeal, with its confirmed fax numbers and the phone and website its remittances give
+    (where to look the numbers up)."""
+    from . import fax
+    cond, params = _appealable_cond()
+    open_ = {r["payer_group"]: r for r in rows(f"""SELECT payer_group, payer_kind, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings
+                                                 WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
+                                                   AND (appeal_deadline IS NULL OR appeal_deadline >= date('now')) AND payer_group IS NOT NULL
+                                                 GROUP BY payer_group""", tuple(params))}
+    contact: dict[str, dict] = {}
+    for r in rows("""SELECT f.payer_group, t.payer_contact_phone phone, t.payer_contact_url url, COUNT(*) n FROM findings f
+                     JOIN transactions t ON t.transaction_key = f.transaction_key
+                     WHERE f.payer_group IS NOT NULL AND (t.payer_contact_phone IS NOT NULL OR t.payer_contact_url IS NOT NULL)
+                     GROUP BY 1, 2, 3 ORDER BY n DESC""") if has_table("transactions") else []:
+        contact.setdefault(r["payer_group"], {"phone": r["phone"], "url": r["url"]})
+    saved: dict[str, dict] = {}
+    for r in rows("SELECT payer_group, purpose, number, confirmed_by, confirmed_at FROM payer_fax") if has_table("payer_fax") else []:
+        saved.setdefault(r["payer_group"], {})[r["purpose"]] = {"number": fax.pretty(r["number"]), "by": r["confirmed_by"], "at": r["confirmed_at"]}
+    out = []
+    for pg in sorted(set(open_) | set(saved), key=lambda g: -((open_.get(g) or {}).get("cents") or 0)):
+        o = open_.get(pg) or {}
+        out.append({"payer_group": pg, "payer_kind": o.get("payer_kind"), "n": o.get("n") or 0, "cents": o.get("cents") or 0,
+                    "numbers": saved.get(pg, {}), **contact.get(pg, {})})
+    return {"payers": out}
+
+
+@app.post("/api/faxes/payer", dependencies=[Depends(require_xhr)])
+def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Save a payer's fax number for appeals ('appeal') or for its second level ('level_2'), as a person confirmed it
+    from the payer's own papers; an empty number removes it."""
+    from . import fax
+    pg = str(body.get("payer_group") or "").strip()
+    purpose = str(body.get("purpose") or "appeal")
+    number = str(body.get("number") or "").strip()
+    if not pg or len(pg) > 200 or purpose not in FAX_PURPOSES:
+        raise HTTPException(400, "payer_group and purpose ('appeal' or 'level_2') are required")
+    if number and not fax.digits(number):
+        raise HTTPException(400, "That is not a US fax number (ten digits).")
+    if not one("SELECT 1 FROM findings WHERE payer_group=? LIMIT 1", (pg,)) and not _payer_number(pg, purpose):
+        raise HTTPException(404, "No payer by that name.")
+    _record_action({"kind": "payer_fax", "payer_group": pg, "purpose": purpose, "number": fax.digits(number), "actor": user})
+    return {"ok": True, "number": fax.pretty(number)}
+
+
+def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 200.0) -> dict:
+    """Bring the faxes up to date: the state of each fax still going out; another try for one the payer's line did not
+    take; and each new fax in, read by Claude and matched to the items it answers (a line in each one's history)."""
+    import time as _time
+    from . import fax
+    t0 = _time.monotonic()
+    out = {"checked": 0, "sent": 0, "failed": 0, "retried": 0, "received": 0, "matched": 0, "more": False, "errors": []}
+    if not has_table("faxes"):
+        conn = db()
+        try:
+            from .actions import ensure_fax_tables
+            ensure_fax_tables(conn)
+            conn.commit()
+        finally:
+            conn.close()
+    for q in rows("SELECT fax_key, provider_id FROM faxes WHERE direction='out' AND status='queued' AND provider=? ORDER BY created_at LIMIT 200", (prov.name,)):
+        try:
+            s = prov.status(q["provider_id"])
+        except fax.FaxError as exc:
+            out["errors"].append(str(exc))
+            break
+        out["checked"] += 1
+        if s["state"] == "queued":
+            continue
+        rec = {"fax_key": q["fax_key"], "status": s["state"], "updated_at": _fax_now()}
+        if s["state"] == "sent":
+            rec["sent_at"] = s.get("at") or _fax_now()
+            out["sent"] += 1
+        else:
+            rec["error"] = s.get("error") or "the payer's line did not take it"
+            out["failed"] += 1
+        if s.get("pages"):
+            rec["pages"] = s["pages"]
+        _record_action({"kind": "fax", "record": rec})
+    # another try for a fax that did not go through, unless a later fax already carried the same thing
+    for r in rows("""SELECT * FROM faxes x WHERE direction='out' AND status='failed' AND provider=? AND NOT EXISTS (
+                         SELECT 1 FROM faxes y WHERE y.direction='out' AND y.finding_id = x.finding_id AND y.purpose = x.purpose
+                           AND COALESCE(y.level,1) = COALESCE(x.level,1) AND y.created_at > x.created_at)""", (prov.name,)):
+        doc = json.loads(r["doc"] or "{}")
+        if int(doc.get("attempts") or 1) >= fax.MAX_ATTEMPTS or not r["finding_id"] or _time.monotonic() - t0 > budget_s:
+            continue
+        f = one("SELECT * FROM findings WHERE finding_id=?", (r["finding_id"],))
+        p = _stored_packet(r["packet_id"]) if r["packet_id"] else None
+        if not f or f.get("status") != "appealed" or not p or not p.get("pdf"):
+            continue
+        try:
+            front = fax.letter_pdf(*doc["front"]) if doc.get("front") else None
+            body, pages = _fax_doc(prov, f, r["number"], p["pdf"], doc.get("subject"), front)
+            _send_fax(prov, f, r["number"], body, pages, packet_id=r["packet_id"], purpose=r["purpose"], level=int(r["level"] or 1),
+                      actor="retry", subject=doc.get("subject"), extra={"attempts": int(doc.get("attempts") or 1) + 1, "front": doc.get("front"),
+                                                                         "retry_of": r["fax_key"]})
+            out["retried"] += 1
+        except fax.FaxError as exc:
+            out["errors"].append(str(exc))
+    known = {r["provider_id"] for r in rows("SELECT provider_id FROM faxes WHERE direction='in' AND provider=?", (prov.name,))}
+    try:
+        inbox = prov.inbox(days)
+    except fax.FaxError as exc:
+        out["errors"].append(str(exc))
+        inbox = []
+    for item in inbox:
+        if item["key"] in known:
+            continue
+        if _time.monotonic() - t0 > budget_s:
+            out["more"] = True
+            break
+        try:
+            pdf = prov.fetch(item["key"])
+        except fax.FaxError as exc:
+            out["errors"].append(str(exc))
+            continue
+        cls: dict = {}
+        if use_ai and os.environ.get("ANTHROPIC_API_KEY"):
+            try:
+                cls = fax.classify(pdf)
+            except Exception as exc:
+                cls = {"error": f"Claude could not read it ({type(exc).__name__})"}
+        conn = db()
+        try:
+            matches = fax.match_inbound(conn, cls) if cls and not cls.get("error") else []
+        finally:
+            conn.close()
+        first = one("SELECT payer_group FROM findings WHERE finding_id=?", (matches[0],)) if matches else None
+        now = _fax_now()
+        _record_action({"kind": "fax", "record": {
+            "fax_key": f"in:{prov.name}:{item['key']}", "direction": "in", "finding_id": matches[0] if matches else None,
+            "payer_group": (first or {}).get("payer_group"), "number": item.get("caller"), "purpose": cls.get("document_type") or "unread",
+            "provider": prov.name, "provider_id": item["key"], "status": "received", "pages": item.get("pages"), "created_at": now,
+            "updated_at": now, "doc": dict(cls, matches=matches, received_at=item.get("received_at"))}})
+        out["received"] += 1
+        if matches:
+            out["matched"] += 1
+            words = {"appeal_decision": "decision", "records_request": "request for records", "payment_notice": "payment notice",
+                     "denial": "denial", "acknowledgement": "acknowledgement"}.get(cls.get("document_type"), "fax")
+            note = f"Fax from the payer ({words}" + (f", {cls['decision'].replace('_', ' ')}" if cls.get("decision") not in (None, "", "none") else "") \
+                + f"): {(cls.get('summary') or '')[:300]}"
+            for fid in matches[:5]:
+                _record_action({"kind": "event", "finding_id": fid, "note": note, "actor": "fax", "at": now})
+    return out
+
+
+def _send_followup(prov, d: dict, actor: str) -> dict:
+    """One follow-up from fax.followups: the letter on top, the original packet behind it (and, for the next level, the
+    payer's decision), to the payer's number for that level."""
+    from . import fax
+    from .appeals import PRACTICE
+    fid = d["finding_id"]
+    out = {"finding_id": fid, "action": d["action"], "payer_group": d.get("payer_group")}
+    if d["action"] == "person":
+        return dict(out, status="held", reason=d["why"])
+    detail = finding_detail(fid, "ok")
+    f = detail["finding"]
+    number = _payer_number(f.get("payer_group"), "level_2") if d["action"] == "next_level" else ""
+    if not number and not (d["action"] == "next_level" and f.get("payer_kind") == "medicare"):
+        number = _payer_number(f.get("payer_group"))
+    if not number:
+        return dict(out, status="held", reason=f"No {'second-level ' if d['action'] == 'next_level' else ''}fax number is saved for "
+                                               f"{f.get('payer_group') or 'this payer'}: add it on the Faxes page.")
+    outs = _faxes_out(fid)
+    packet_id = next((o["packet_id"] for o in reversed(outs) if o.get("packet_id")), None)
+    p = _stored_packet(packet_id) if packet_id else None
+    if not p or not p.get("pdf"):
+        return dict(out, status="held", reason="The appeal packet that was faxed cannot be found.")
+    dec = d.get("decision") or {}
+    facts = dict(f, payer_claim_control_number=(detail.get("claim") or {}).get("payer_claim_control_number"))
+    title, paras = fax.follow_up_letter(d["action"], facts, outs, {"date": dec.get("decision_date") or dec.get("received")}, PRACTICE, d.get("n") or 1)
+    extra = None
+    if d["action"] == "next_level" and has_table("faxes"):
+        got = one("""SELECT provider_id FROM faxes WHERE direction='in' AND finding_id=? AND provider=? ORDER BY created_at DESC LIMIT 1""",
+                  (fid, prov.name))
+        if got:
+            try:
+                extra = prov.fetch(got["provider_id"])        # the payer's decision goes with the request for the next level
+            except fax.FaxError:
+                extra = None
+    try:
+        body, pages = _fax_doc(prov, f, number, p["pdf"], title, fax.letter_pdf(title, paras), extra)
+        sent = _send_fax(prov, f, number, body, pages, packet_id=packet_id, purpose=d["action"], level=d["level"], actor=actor, subject=title,
+                         extra={"front": [title, paras], "why": d["why"]})
+    except fax.FaxError as exc:
+        return dict(out, status="held", reason=str(exc))
+    _record_action({"kind": "event", "finding_id": fid, "actor": actor,
+                    "note": f"{title}: faxed to {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages). Why: {d['why']}."})
+    return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), title=title)
+
+
+def _send_followups(prov, actor: str, ids: list[str] | None = None, budget_s: float = 240.0) -> dict:
+    import time as _time
+    from . import fax
+    t0 = _time.monotonic()
+    conn = db()
+    try:
+        due = fax.followups(conn)
+    finally:
+        conn.close()
+    if ids is not None:
+        due = [d for d in due if d["finding_id"] in set(ids)]
+    results, more = [], False
+    for d in due:
+        if _time.monotonic() - t0 > budget_s:
+            more = True
+            break
+        results.append(_send_followup(prov, d, actor))
+    return {"results": results, "sent": sum(r["status"] == "sent" for r in results), "held": sum(r["status"] == "held" for r in results), "more": more}
+
+
+@app.post("/api/faxes/refresh", dependencies=[Depends(require_xhr)])
+def faxes_refresh(_: str = Depends(require_auth)):
+    from . import fax
+    prov = fax.provider()
+    if prov is None:
+        raise HTTPException(503, "The fax line is not set up yet (SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD).")
+    return _fax_refresh(prov)
+
+
+@app.post("/api/faxes/follow_up", dependencies=[Depends(require_xhr)])
+def faxes_follow_up(body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Send the follow-ups that are due (all of them, or the items named)."""
+    from . import fax
+    prov = fax.provider()
+    if prov is None:
+        raise HTTPException(503, "The fax line is not set up yet (SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD).")
+    ids = body.get("finding_ids")
+    return _send_followups(prov, user, [str(i) for i in ids][:500] if isinstance(ids, list) else None)
+
+
+@app.post("/api/faxes/match", dependencies=[Depends(require_xhr)])
+def faxes_match(body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Tie a fax that came in to the item it answers, where reading it did not."""
+    key, fid = str(body.get("fax_key") or ""), str(body.get("finding_id") or "")
+    if not re.fullmatch(FAX_KEY, key) or not re.fullmatch(FAX_KEY, fid):
+        raise HTTPException(400, "fax_key and finding_id are required")
+    r = one("SELECT * FROM faxes WHERE fax_key=? AND direction='in'", (key,)) if has_table("faxes") else None
+    f = one("SELECT finding_id, payer_group FROM findings WHERE finding_id=?", (fid,))
+    if not r or not f:
+        raise HTTPException(404, "No such fax or item.")
+    doc = json.loads(r["doc"] or "{}")
+    doc["matches"] = [fid] + [m for m in doc.get("matches") or [] if m != fid]
+    _record_action({"kind": "fax", "record": {"fax_key": key, "finding_id": fid, "payer_group": f["payer_group"], "doc": doc, "updated_at": _now_iso()}})
+    _record_action({"kind": "event", "finding_id": fid, "actor": user, "note": f"Fax from the payer tied to this item: {(doc.get('summary') or '')[:300]}"})
+    return {"ok": True}
+
+
+@app.get("/api/faxes/pdf")
+def faxes_pdf(key: str = Query(..., max_length=160), _: str = Depends(require_auth)):
+    """A fax as a PDF: one that came in is fetched from the fax line; one that went out is its packet."""
+    from . import fax
+    r = one("SELECT * FROM faxes WHERE fax_key=?", (key,)) if has_table("faxes") else None
+    if not r:
+        raise HTTPException(404, "No such fax.")
+    if r["direction"] == "in":
+        prov = fax.provider()
+        if prov is None:
+            raise HTTPException(503, "The fax line is not set up.")
+        try:
+            pdf = prov.fetch(r["provider_id"])
+        except fax.FaxError as exc:
+            raise HTTPException(502, str(exc))
+    else:
+        p = _stored_packet(r["packet_id"]) if r["packet_id"] else None
+        pdf = (p or {}).get("pdf") or b""
+    if not pdf:
+        raise HTTPException(404, "The fax could not be found.")
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", key)[:80]
+    return StreamingResponse(iter([pdf]), media_type="application/pdf",
+                             headers={"Content-Disposition": f'inline; filename="fax-{safe}.pdf"', "Cache-Control": "no-store"})
+
+
+@app.post("/api/faxes/test", dependencies=[Depends(require_xhr)])
+def faxes_test(_: str = Depends(require_auth)):
+    from . import fax
+    prov = fax.provider()
+    if prov is None:
+        return {"ok": False, "steps": [{"step": "Settings", "ok": False, "detail": "SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD are not set"}]}
+    return JSONResponse(prov.check(), headers={"Cache-Control": "no-store"})
+
+
+@app.api_route("/api/cron/faxes", methods=["GET", "POST"], include_in_schema=False)
+def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    """Every day: the faxes brought up to date and the follow-ups that are due sent (a week apart for each item)."""
+    _cron_auth(request, credentials)
+    from . import fax
+    if runtime.serverless() and runtime.preview():
+        raise HTTPException(409, "This is a preview deployment. Only the production site sends faxes.")
+    prov = fax.provider()
+    if prov is None:
+        return {"skipped": "The fax line is not set up."}
+    budget = max(60.0, runtime.max_seconds() - 60.0) if runtime.serverless() else 3600.0
+    got = _fax_refresh(prov, budget_s=budget / 2)
+    return {"refresh": got, "follow_up": _send_followups(prov, "daily run", budget_s=budget / 2)}
+
+
+# --------------------------------------------------------------------------- suggested templates (remitwatch.lessons)
+@app.get("/api/lessons")
+def lessons_list(request: Request, _: str = Depends(require_auth)):
+    """What the note reviews found missing, by code, for the suggested templates. Which clinicians' notes fell short is
+    shown only where the Providers tab would show it."""
+    from . import lessons
+    named = owner_state(request) == "open"
+    conn = db()
+    try:
+        out = lessons.summarize(conn, with_providers=named)
+    finally:
+        conn.close()
+    return dict(out, providers_locked=not named, review=bool(os.environ.get("ANTHROPIC_API_KEY")))
+
+
+@app.post("/api/lessons/template", dependencies=[Depends(require_xhr)])
+def lessons_template(body: dict = Body(default={}), _: str = Depends(require_auth)):
+    """Claude's suggested EMA template for one code's lessons: the fields to require, each one's prompt, and the line
+    the clinician signs. Only the code, the payers and the gaps go to the model."""
+    from . import lessons
+    key = str(body.get("key") or "")
+    conn = db()
+    try:
+        groups = lessons.summarize(conn, with_providers=False)["codes"]
+    finally:
+        conn.close()
+    g = next((x for x in groups if x["key"] == key), None)
+    if not g:
+        raise HTTPException(404, "No lessons for that code yet.")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(503, "ANTHROPIC_API_KEY is not set, so Claude cannot write the template. The elements above are the checklist.")
+    try:
+        return {"key": key, "template": lessons.write_template(g)}
+    except Exception as exc:
+        raise HTTPException(502, f"Claude could not write it just now ({type(exc).__name__}). Try again.")
 
 
 def _cloud_state():

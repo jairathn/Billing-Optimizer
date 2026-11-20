@@ -8,6 +8,9 @@
     python -m remitwatch.cli modmed-check                every step of the ModMed connection
     python -m remitwatch.cli prepare-appeals [--limit N] [--no-ai] [--db PATH]
                                                          build packets from EMA for the next items that need the visit note
+    python -m remitwatch.cli send-appeals [--limit N] [--payer NAME] [--db PATH]
+                                                         fax every open item a letter settles (Appeal everything appealable)
+    python -m remitwatch.cli fax-cycle [--db PATH]       the daily fax run: states, retries, faxes in, follow-ups due
 """
 from __future__ import annotations
 
@@ -240,6 +243,44 @@ def cmd_prepare_appeals(args: argparse.Namespace) -> int:
     return 0 if not n["failed"] else 1
 
 
+def cmd_send_appeals(args: argparse.Namespace) -> int:
+    """The Worklist's "Appeal everything appealable" on a host with a disk: the same routes, one item after another."""
+    from collections import Counter
+
+    from fastapi import HTTPException
+
+    from . import api
+    api.DB_PATH = args.db
+    q = api.appeals_appealable(payer=args.payer, limit=args.limit, _="cli")
+    n: Counter = Counter()
+    for it in q["items"]:
+        if not it["ready"]:
+            n["no_number"] += 1
+            continue
+        try:
+            r = api.appeals_send({"finding_id": it["finding_id"]}, "cli")
+        except HTTPException as exc:
+            r = {"status": "failed", "reason": exc.detail}
+        n[r["status"]] += 1
+        print(it["finding_id"], r["status"], r.get("code") or "", r.get("reason") or "", flush=True)
+        if r.get("code") in ("practice", "no_fax"):        # every other item would stop on the same thing
+            break
+    print(json.dumps({"appealable": len(q["items"]), **n}))
+    return 0 if not n["failed"] else 1
+
+
+def cmd_fax_cycle(args: argparse.Namespace) -> int:
+    from . import api, fax
+    api.DB_PATH = args.db
+    prov = fax.provider()
+    if prov is None:
+        print("The fax line is not set up (SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD).")
+        return 1
+    out = {"refresh": api._fax_refresh(prov, budget_s=3600), "follow_up": api._send_followups(prov, "cli", budget_s=3600)}
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="remitwatch")
     ap.add_argument("--db", default=DEFAULT_DB)
@@ -265,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("modmed-check").set_defaults(fn=cmd_modmed_check)
     pa = sub.add_parser("prepare-appeals"); pa.add_argument("--limit", type=int, default=25)
     pa.add_argument("--no-ai", action="store_true", help="attach the note without Claude's review"); pa.set_defaults(fn=cmd_prepare_appeals)
+    sa = sub.add_parser("send-appeals"); sa.add_argument("--limit", type=int, default=2000); sa.add_argument("--payer", default=None)
+    sa.set_defaults(fn=cmd_send_appeals)
+    sub.add_parser("fax-cycle").set_defaults(fn=cmd_fax_cycle)
     args = ap.parse_args(argv)
     return args.fn(args)
 

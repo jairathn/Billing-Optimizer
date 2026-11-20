@@ -157,7 +157,8 @@ function whatToDoHtml(f, letter){
     : (f.shortfall_cents ? money2(f.shortfall_cents)+' at stake.' : 'The amount is not known: this payer has no usual rate for the code to compare with.');
   const ids = state.worklist||[], i = ids.indexOf(f.finding_id);
   const more = i>=0 && (i < ids.length-1 || (!!state.wlNext && (state.wlTotal||0) > ids.length)), decide = kk === 'check' || !due;
-  const waiting = {appealed:`Sent${f.appealed_at?' on '+longDate(String(f.appealed_at).slice(0,10)):''}. It waits on the payer: if it is still unpaid 30 days after sending, follow up by portal or phone.`,
+  const waiting = {appealed: f.faxed_at ? `Faxed on ${longDate(String(f.faxed_at).slice(0,10))}. It waits on the payer: once the payer's time to answer has passed, the follow-ups are faxed by themselves every week until it is paid or decided (Faxes page).`
+      : `Sent${f.appealed_at?' on '+longDate(String(f.appealed_at).slice(0,10)):''}. It waits on the payer: if it is still unpaid 30 days after sending, follow up by portal or phone.`,
     resolved:'Paid. Nothing more to do.', lost:'Lost: the payer upheld its decision.', dismissed:'Let go.'}[f.status];
   const shut = !waiting && !!due && due < today;        // a closed window: nothing to send, so no send button and no letter
   // an item already sent, paid or let go: its filing date is history, not an alarm
@@ -217,6 +218,7 @@ async function winsTab(v){
           <li><b>Indiana Medicaid</b> moves to 100% of the January 2026 Medicare rates, and its managed-care plans must match.</li></ul>
         ${why(`From Medicare's 2027 physician fee schedule (final rule, November 2026). Same-day visits: biopsy, shave, injection and Mohs are 0-day procedures. When one is done with a modifier-25 visit, every other service that day is paid at 80%, a destruction or excision on the same claim included; a visit with only a destruction (17000, 17110) or an excision, which have 10- or 90-day globals, does not bring the rule in. G2211: without the change, those add-on payments will be denied. Rates: the conversion factor drops 2.3% and Kentucky's and Indiana's work adjustment loses its floor. The site already expects the 80% on those lines from January, for Medicare and for Medicare Advantage plans that follow it, so they are not shown as underpaid. How it combines with the multiple-procedure cut on a second procedure awaits CMS's instructions, so those lines are not flagged meanwhile.`)}</div>
     </div>
+    <div class="panel" id="wins-templates"><h2>Suggested templates for next time</h2><div class="muted small">Loading…</div></div>
     <div class="panel" id="wins-leaks"><h2>Stop the leaks</h2><div class="small"><b>Next step:</b> give each cause to the person named; it is a habit or a front-desk step to change.</div>
       ${why('Denial causes in the last 90 days of payments against the 90 days before. Appealing them one by one never ends; fixing the cause stops the next ones.')}
       <table><thead><tr><th>Cause</th><th>Who fixes it</th><th class="num">Last 90 days</th><th class="num">Items</th><th>Trend</th><th></th></tr></thead>
@@ -233,6 +235,7 @@ async function winsTab(v){
   const rl = v.querySelector('#ratesLink'); if(rl) rl.onclick = e => { e.preventDefault(); goDetails('contracts'); };
   const fl = v.querySelector('#feesLink'); if(fl) fl.onclick = e => { e.preventDefault(); state.filt.feesDesk = {list:'fees'}; state.tab = 'fees'; location.hash = 'fees'; render(); };
   if(state.winsAnchor){ const el = v.querySelector('#'+state.winsAnchor); state.winsAnchor = null; if(el) el.scrollIntoView({block:'start'}); }
+  if(typeof lessonsPanel === 'function') lessonsPanel(v.querySelector('#wins-templates'));
 }
 
 // ---------------------------------------------------------------- More: the analysis pages

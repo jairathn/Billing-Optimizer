@@ -225,7 +225,8 @@ Rules for this review:
 4. The clinical paragraphs you write go into a letter to the payer under the practice's name. Write them in plain, formal
    sentences, in the first person plural, with the quoted phrases from the note in quotation marks. No headings, no bullet
    symbols, no dashes used as punctuation, no adjectives of emphasis. One paragraph per element that supports the claim.
-5. Identifiers in the note have been replaced with placeholders such as [REDACTED]. Do not try to restore them."""
+5. Identifiers in the note have been replaced with placeholders such as [REDACTED]. Do not try to restore them, and keep
+   them out of the clinical paragraphs: quote around a placeholder rather than through it."""
 
 ELEMENT = {
     "type": "object",
@@ -280,6 +281,11 @@ def dispute_context(detail: dict) -> dict:
         issue = (f"The payer reduced the visit billed as {billed}" + (f" to {code}" if code and code != billed else "")
                  + (f", paying it at the {ev['paid_like']} rate with the code unchanged" if ev.get("paid_like") else "") + ".")
         mode = "em_level"
+    elif sig in ("PROCEDURE_BUNDLED", "ADDON_BUNDLED"):
+        issue = (f"The payer denied {code} as included in the same-day service(s) "
+                 f"{', '.join(ev.get('same_day_codes') or []) or 'on the claim'}. The appeal must show it was distinct: a separate "
+                 "lesion, site or session, or an add-on reported with its primary procedure.")
+        mode = "procedure"
     elif sig.startswith("EM_BUNDLED"):
         issue = (f"The payer denied the visit {code} (modifiers {f.get('modifiers') or 'none'}) as included in the same-day procedure(s) "
                  f"{', '.join(ev.get('same_day_codes') or []) or 'on the claim'}.")
@@ -304,7 +310,8 @@ def review_note(context: dict, note_text: str | None, pdf_bytes: bytes | None = 
     ask = (f"Dispute: {context['issue']}\nPayer: {context['payer']}\nPayer's stated reason: {context['payer_reason'] or 'none given'}\n"
            f"Lines on the claim: {', '.join(context['claim_lines']) or 'not available'}\n"
            f"Review type: {context['mode']} (em_level: does the note support the level billed; modifier_25: is the visit significant and "
-           f"separately identifiable from the procedure; procedure: does the note document the disputed procedure as billed).\n\n"
+           f"separately identifiable from the procedure; procedure: does the note document the disputed procedure as billed and, where "
+           f"the payer bundled it into another service that day, as distinct from it).\n\n"
            "Review the visit note that follows and return the audit.")
     content: list[dict] = []
     if pdf_bytes is not None:
@@ -409,6 +416,53 @@ def build_from_note(conn: sqlite3.Connection, detail: dict, raw_claim: dict | No
     if not reveal:
         out["letter"] = redacted
     return out
+
+
+def build_letter_only(conn: sqlite3.Connection, detail: dict, raw_claim: dict | None, reveal: bool = False) -> dict:
+    """A packet with no visit note: the letter, the remittance evidence and the enclosures list, for an appeal that rests
+    on the remittance and the payer's own rates (a line paid below the payer's usual rate). Stored like the others."""
+    ensure_packets(conn)
+    analysis = {"mode": "letter", "reason": "No visit note is needed: the letter rests on the remittance and the payer's own rates.",
+                "clinical_paragraphs": [], "recommendation": "appeal", "recommendation_reason": ""}
+    full = dict(detail, claim=raw_claim) if raw_claim else detail
+    packet = build_packet(full, show_phi=True)
+    redacted = build_packet(detail, show_phi=False)["letter"]
+    pid = _new_id(detail["finding"].get("finding_id"), "letter")
+    out = {"packet_id": pid, "finding_id": detail["finding"].get("finding_id"), "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "mode": "letter", "model": None, "subject": packet["subject"], "letter": packet["letter"], "analysis": analysis,
+           "evidence": packet["evidence"], "attachments": packet["attachments"], "note_name": "", "note_kind": "none",
+           "deadline": packet.get("deadline"), "deadline_basis": packet.get("deadline_basis"),
+           "corrected_claim_instructions": packet.get("corrected_claim_instructions")}
+    pdf = render_pdf(out)
+    conn.execute("""INSERT OR REPLACE INTO appeal_packets (packet_id, finding_id, created_at, mode, model, subject, letter, analysis, evidence, attachments,
+                    note_name, note_sha256, note_kind, note_blob, pdf, letter_redacted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 (pid, out["finding_id"], out["created_at"], "letter", None, out["subject"], out["letter"], json.dumps(analysis),
+                  out["evidence"], json.dumps(out["attachments"]), "", None, "none", None, pdf, redacted))
+    conn.commit()
+    if not reveal:
+        out["letter"] = redacted
+    return out
+
+
+def lesson(packet: dict, detail: dict) -> dict | None:
+    """What a review that found the note short teaches, for the suggested templates (remitwatch.fax, the Bigger wins
+    page): the payer, the code, the clinician, what was missing and what to document next time. Nothing that names the
+    patient: the gaps and tips were scrubbed of identifiers with the rest of the review. None when the review found the
+    note sufficient."""
+    a = packet.get("analysis") or {}
+    if a.get("mode") != "ai":
+        return None
+    weak = a.get("recommendation") in ("do_not_appeal", "correct_and_resubmit", "appeal_with_caution") or a.get("supports_billed") in ("no", "borderline")
+    if not weak:
+        return None
+    f = detail.get("finding") or {}
+    ev = f.get("evidence") or {}
+    code = f.get("billed_code") or f.get("original_procedure_code") or ev.get("billed_code") or ev.get("charge_implies") or f.get("procedure_code")
+    return {"lesson_key": packet["packet_id"], "created_at": packet.get("created_at"), "finding_id": f.get("finding_id"),
+            "payer_group": f.get("payer_group"), "payer_kind": f.get("payer_kind"), "signal": f.get("signal"), "code": code,
+            "npi": f.get("rendering_provider_npi"), "provider": f.get("rendering_provider_name"),
+            "recommendation": a.get("recommendation"), "supports": a.get("supports_billed"), "amount_cents": f.get("shortfall_cents"),
+            "gaps": [str(g)[:400] for g in (a.get("gaps") or [])][:12], "tips": [str(t)[:400] for t in (a.get("documentation_tips") or [])][:12]}
 
 
 # --------------------------------------------------------------------------- PDF

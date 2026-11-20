@@ -53,7 +53,7 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "4"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
+SERVING_BUILD = "5"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -530,6 +530,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     # what each clinician did (remitwatch.activity): counts and sums per clinician, no patient rows
     ("provider_roster", None, None), ("provider_days", None, None), ("provider_services", None, None), ("provider_payers", None, None),
     ("provider_panels", None, None), ("provider_cohorts", None, None), ("provider_recall", None, None),
+    # faxes sent and received, payers' confirmed fax numbers, what the note reviews taught (remitwatch.fax, the journal)
+    ("faxes", None, None), ("payer_fax", None, None), ("note_lessons", None, None),
     ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
 ]
 
@@ -547,6 +549,7 @@ def empty_serving(path: str) -> None:
     ensure_schema(c)
     c.executescript(ALERTS_DDL + LINK_DDL)
     activity.ensure_schema(c)
+    actions_mod.ensure_fax_tables(c)
     c.commit()
     c.close()
 
@@ -1254,9 +1257,18 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         "set: press Test the ModMed connection below" if mm_on else
         "not set: notes are attached by hand. To connect EMA, follow docs/OPERATIONS.md, Connecting ModMed EMA")
     out["modmed"] = {"configured": mm_on, "key": bool(env("MODMED_PRIVATE_KEY"))}
-    missing = [k for k in ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI") if not env(k)]
+    fx_on, fx_line = bool(env("SRFAX_ACCESS_ID") and env("SRFAX_ACCESS_PWD")), env("SRFAX_CALLER_ID") or ""
+    add("fax", "Fax line: appeals faxed, payers' answers read (optional)", bool(fx_line and env("SRFAX_SENDER_EMAIL")) if fx_on else None,
+        (f"set: faxes go out from {fx_line}, and letters give it for the payer's answer; press Test the fax line below"
+         if fx_line and env("SRFAX_SENDER_EMAIL") else "set, but SRFAX_CALLER_ID (the line's own number) or SRFAX_SENDER_EMAIL is missing")
+        if fx_on else "not set: appeal packets are downloaded and sent by hand. To fax them, follow docs/OPERATIONS.md, Faxing appeals",
+        "Set SRFAX_CALLER_ID to the SRFax fax number and SRFAX_SENDER_EMAIL to the address SRFax sends its notices to, then redeploy.")
+    out["fax"] = {"configured": fx_on}
+    missing = [k for k in ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI", "PRACTICE_PHONE", "PRACTICE_EMAIL") if not env(k)]
+    if not (env("SRFAX_CALLER_ID") or env("PRACTICE_FAX")):
+        missing.append("PRACTICE_FAX (or SRFAX_CALLER_ID)")
     add("letterhead", "Practice details for appeal letters (optional)", None if missing else True,
-        "set" if not missing else "not set: " + ", ".join(missing) + ". Letters show bracketed words in their place.")
+        "set" if not missing else "not set: " + ", ".join(missing) + ". Letters show bracketed words in their place, and none is faxed until these are set.")
     owner = env("REMITWATCH_OWNER_PASSWORD") or ""
     owner_bad = runtime.owner_password_problem(owner, pw)
     add("owner_password", "Owner's password for the Providers tab (optional)", (not owner_bad) if owner else None,

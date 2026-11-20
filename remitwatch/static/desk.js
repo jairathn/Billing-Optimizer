@@ -141,7 +141,7 @@ async function deskTab(v, key){
   const oneKind = !!f.kind || single;
   const bulkSet = closed ? ['dismissed','open'] : waiting ? ['open','dismissed'] : ['in_progress','appealed','dismissed','open'];
   v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">${esc(D.title)}</h1> <span class="muted">${esc(D.intro)}</span></div>
-      ${startLbl ? `<div class="ph-go"><button class="primary" id="startFirst">${startLbl}</button></div>` : ''}</div>
+      ${startLbl || !(closed || waiting) ? `<div class="ph-go">${closed || waiting ? '' : '<button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax">Appeal everything appealable</button>'}${startLbl ? `<button class="primary" id="startFirst">${startLbl}</button>` : ''}</div>` : ''}</div>
     ${dataLine(b)}
     <div class="tiles">${tiles}</div>
     ${key==='worklist' ? (only ? `<div class="small muted allopen">Counting ${esc(only)} only.</div>` : '') : `<div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}<a href="#" class="see-all" title="${esc(allTip)}">Everything open, any window: ${num(all.n)} · ${money(all.cents)}</a></div>`}
@@ -156,7 +156,7 @@ async function deskTab(v, key){
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
     <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES,f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
-    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}</div>
+    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}</div>
     <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item shown"></th><th>Closes</th><th>Patient</th>${f.payer?'':'<th>Payer</th>'}<th>What happened</th><th class="num">Amount</th></tr></thead>
     <tbody>${res.items.map(r=>rowHtml(b, r, {oneKind, onePayer: !!f.payer, oneSignal: !!f.signal})).join('')}</tbody></table></div>
     ${res.items.length ? '' : `<div class="empty">Nothing here. ${chips.length ? 'Remove a filter above, or pick' : 'Pick'} another box at the top.</div>`}
@@ -202,6 +202,7 @@ async function deskTab(v, key){
   v.querySelectorAll('.seeA').forEach(a=>a.onclick=e=>{ e.preventDefault(); const x = (state.alertsNew||[]).find(y=>y.alert_id===a.dataset.id); if(x && typeof seeAlert==='function') seeAlert(x); });
   const st = v.querySelector('#startFirst'); if(st) st.onclick = () => { if(res.items.length) openDetail(res.items[0].finding_id); };
   const eb = v.querySelector('#emaBatch'); if(eb) eb.onclick = () => emaBatch(eb, v.querySelector('#emaBatchMsg'));
+  const fe = v.querySelector('#fxEverything'); if(fe) fe.onclick = () => appealEverything({payer: f.payer || '', after: render});
   const mr = v.querySelector('#moreRows'); if(mr) mr.onclick = () => { const y = window.scrollY; state.lim[key] = lim + ROWS; render().then(()=>window.scrollTo(0, y)); };
   bindRows(v);
   bindBulk(v);
@@ -232,6 +233,13 @@ function bindBulk(v){
   const sync = () => { const n = picked().length; bulk.hidden = !n; bulkN.textContent = n + ' selected'; };
   v.querySelectorAll('.sel').forEach(cb=>cb.onchange=sync);
   const all = v.querySelector('#selAll'); if(all) all.onchange = e => { v.querySelectorAll('.sel').forEach(cb=>cb.checked = e.target.checked); sync(); };
+  const fx = v.querySelector('#bulkFax');
+  if(fx) fx.onclick = () => { const rows = [...v.querySelectorAll('.sel:checked')].map(x=>x.closest('tr.row')).filter(Boolean);
+    const ok = rows.filter(tr => FAX_KINDS.has(tr.dataset.kind) && !tr.dataset.closed), out = rows.length - ok.length;
+    if(!ok.length){ alert('None of the ticked items is settled by an appeal letter inside its window (they are fixed in EMA, need a decision first, or their windows closed).'); return; }
+    if(out && !confirm(`${pl(out, 'ticked item')} ${out===1?'is':'are'} not settled by an appeal letter (fixed in EMA, a decision first, or the window closed) and will be left out. Fax the other ${ok.length}?`)) return;
+    if(!out && ok.length > 20 && !confirm(`Fax ${pl(ok.length, 'appeal')} now? Each takes about a minute; keep this page open.`)) return;
+    appealByFax(ok.map(tr => tr.dataset.id), {after: render}); };
   v.querySelectorAll('[data-bulk]').forEach(bt=>bt.onclick=async()=>{ let ids = picked(); if(!ids.length) return;
     if(['appealed','in_progress'].includes(bt.dataset.bulk)){
       const shut = new Set([...v.querySelectorAll('tr.row[data-closed]')].map(tr=>tr.dataset.id));
@@ -264,7 +272,7 @@ function rowHtml(b, r, o){
   const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>` : '';
   const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
   const shut = live && due && daysUntil(due) < 0;
-  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
+  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-kind="${esc(kindFor(b, r))}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
     <td class="day">${when}</td>
     <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
     ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}

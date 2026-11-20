@@ -6,10 +6,81 @@ in the state folder (remitwatch.cloud) so that it survives and reaches the next 
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
 STATUSES = ("open", "in_progress", "appealed", "resolved", "lost", "dismissed")
+
+# Faxes sent and received (remitwatch.fax), each payer's confirmed fax numbers, and what each note review taught (the
+# suggested templates): written through the journal like statuses, so they last on a serverless host too.
+FAX_DDL = """
+CREATE TABLE IF NOT EXISTS faxes (
+    fax_key TEXT PRIMARY KEY, direction TEXT, finding_id TEXT, packet_id TEXT, payer_group TEXT, number TEXT, purpose TEXT,
+    level INTEGER, provider TEXT, provider_id TEXT, status TEXT, pages INTEGER, error TEXT, created_at TEXT, updated_at TEXT,
+    sent_at TEXT, doc TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_fax_finding ON faxes(finding_id);
+CREATE TABLE IF NOT EXISTS payer_fax (
+    payer_group TEXT, purpose TEXT, number TEXT, confirmed_by TEXT, confirmed_at TEXT, PRIMARY KEY (payer_group, purpose)
+);
+CREATE TABLE IF NOT EXISTS note_lessons (
+    lesson_key TEXT PRIMARY KEY, created_at TEXT, finding_id TEXT, payer_group TEXT, payer_kind TEXT, signal TEXT, code TEXT,
+    npi TEXT, provider TEXT, recommendation TEXT, supports TEXT, amount_cents INTEGER, gaps TEXT, tips TEXT
+);
+"""
+FAX_COLS = ("direction", "finding_id", "packet_id", "payer_group", "number", "purpose", "level", "provider", "provider_id", "status",
+            "pages", "error", "created_at", "updated_at", "sent_at", "doc")
+LESSON_COLS = ("created_at", "finding_id", "payer_group", "payer_kind", "signal", "code", "npi", "provider", "recommendation",
+               "supports", "amount_cents", "gaps", "tips")
+
+
+def ensure_fax_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(FAX_DDL)
+
+
+def apply_fax(conn: sqlite3.Connection, rec: dict) -> None:
+    """Add a fax, or bring one up to date: only the fields given are changed (a status check sends only the status)."""
+    ensure_fax_tables(conn)
+    key = rec["fax_key"]
+    vals = {k: (json.dumps(rec[k], default=str) if k == "doc" and not isinstance(rec[k], (str, type(None))) else rec[k])
+            for k in FAX_COLS if k in rec}
+    if conn.execute("SELECT 1 FROM faxes WHERE fax_key=?", (key,)).fetchone():
+        if vals:
+            conn.execute(f"UPDATE faxes SET {', '.join(f'{k}=?' for k in vals)} WHERE fax_key=?", (*vals.values(), key))
+    else:
+        conn.execute(f"INSERT INTO faxes (fax_key, {', '.join(vals)}) VALUES (?{', ?' * len(vals)})", (key, *vals.values()))
+
+
+def apply_payer_fax(conn: sqlite3.Connection, a: dict) -> None:
+    """A payer's fax number for one purpose ('appeal', 'level_2'), confirmed by a person; an empty number removes it."""
+    ensure_fax_tables(conn)
+    if not a.get("number"):
+        conn.execute("DELETE FROM payer_fax WHERE payer_group=? AND purpose=?", (a["payer_group"], a.get("purpose") or "appeal"))
+        return
+    conn.execute("INSERT OR REPLACE INTO payer_fax (payer_group, purpose, number, confirmed_by, confirmed_at) VALUES (?,?,?,?,?)",
+                 (a["payer_group"], a.get("purpose") or "appeal", a["number"], a.get("actor") or "", a.get("at") or _now()))
+
+
+def apply_event(conn: sqlite3.Connection, a: dict) -> bool:
+    """A line in an item's history that changes no status: a follow-up faxed, the payer's answer received
+    (remitwatch.fax). False when the item is not in this copy, so the journal keeps the entry and tries it again."""
+    r = conn.execute("SELECT status FROM findings WHERE finding_id=?", (a["finding_id"],)).fetchone()
+    if not r:
+        return False
+    at, kind, note = a.get("at") or _now(), a.get("event") or "fax", a.get("note") or ""
+    if not conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND at=? AND kind=? AND COALESCE(note,'')=?",
+                        (a["finding_id"], at, kind, note)).fetchone():
+        conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) VALUES (?,?,?,?,?,?,?,?)",
+                     (a["finding_id"], at, kind, r[0], r[0], a.get("amount_cents"), a.get("actor") or "", note))
+    return True
+
+
+def apply_lesson(conn: sqlite3.Connection, rec: dict) -> None:
+    ensure_fax_tables(conn)
+    vals = {k: (json.dumps(rec.get(k)) if k in ("gaps", "tips") else rec.get(k)) for k in LESSON_COLS}
+    conn.execute(f"INSERT OR IGNORE INTO note_lessons (lesson_key, {', '.join(vals)}) VALUES (?{', ?' * len(vals)})",
+                 (rec["lesson_key"], *vals.values()))
 
 
 def _now() -> str:
@@ -56,4 +127,15 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
     if kind == "alert_ack":
         apply_alert_ack(conn, action["alert_id"], action.get("at"))
         return True
+    if kind == "fax":
+        apply_fax(conn, action["record"])
+        return True
+    if kind == "payer_fax":
+        apply_payer_fax(conn, action)
+        return True
+    if kind == "lesson":
+        apply_lesson(conn, action["record"])
+        return True
+    if kind == "event":
+        return apply_event(conn, action)
     return False

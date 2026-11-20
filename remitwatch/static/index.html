@@ -261,11 +261,12 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/lab.js"></script>
 <script src="/static/asc_model.js"></script>
 <script src="/static/asc.js"></script>
+<script src="/static/faxes.js"></script>
 <script>
 // Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
 // right in smaller type. The analysis pages are under More (and open by their address).
 const TABS = [['today','Today'],['denials','Denials'],['bundling','Bundling & modifiers'],['downcoding','Downcoding'],['contracts','Contracts & underpayment'],
-  ['fees','Fees & takebacks'],['worklist','Worklist'],['wins','Bigger wins'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
+  ['fees','Fees & takebacks'],['worklist','Worklist'],['faxes','Faxes'],['wins','Bigger wins'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
 const REF_TABS = new Set(['progress','data','providers','calculator','more']);
 const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates']];
 const ALIASES = {appeals:'worklist'};        // the earlier Appeals queue is the Worklist
@@ -323,7 +324,7 @@ const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 const mods = js => { try { const a = JSON.parse(js||'[]'); return Array.isArray(a)&&a.length ? '-'+esc(a.join(',')) : ''; } catch(e){ return ''; } };
 async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); }
   // what each clinician is doing may be kept for the owner: the password typed into the Providers tab rides along on those calls only
-  if(state.ownerKey && /^\/api\/(activity\/|breakdown)/.test(path)){ opts = Object.assign({}, opts||{}); opts.headers = Object.assign({'X-Owner-Password': state.ownerKey}, opts.headers||{}); }
+  if(state.ownerKey && /^\/api\/(activity\/|breakdown|lessons)/.test(path)){ opts = Object.assign({}, opts||{}); opts.headers = Object.assign({'X-Owner-Password': state.ownerKey}, opts.headers||{}); }
   const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); const err = new Error(m || ('The server did not answer as expected ('+r.status+').')); err.status = r.status; throw err; } return r.json(); }
 function qs(o){ return Object.entries(o).filter(([k,v])=>v!==''&&v!=null).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&'); }
 function sweepCharts(){ Object.keys(state.charts).forEach(id=>{ const c=state.charts[id]; if(!c.canvas || !c.canvas.isConnected){ c.destroy(); delete state.charts[id]; } }); }
@@ -378,7 +379,7 @@ async function render(){
   old.replaceWith(v);
   v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
   const fn = {today: todayTab, denials: x=>deskTab(x,'denials'), bundling: x=>deskTab(x,'bundling'), downcoding: x=>deskTab(x,'downcoding'),
-    contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), wins: winsTab, more: moreTab, overview, payers, data,
+    contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), faxes: faxesTab, wins: winsTab, more: moreTab, overview, payers, data,
     alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab, calculator: calculatorTab}[state.tab] || todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
@@ -575,6 +576,7 @@ async function openDetail(id){
   const noteWork = !!state.brief && kindFor(state.brief, f) === 'note' && ['open','in_progress'].includes(f.status);
   d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')}</div></div><button id="closeD" aria-label="Close">✕</button></div>
     ${whatToDoHtml(f, letter) || (letter ? `<div class="actions">${letter}</div>` : '')}
+    ${typeof faxDrawerHtml === 'function' ? faxDrawerHtml(f, r) : ''}
     <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
@@ -616,6 +618,7 @@ async function openDetail(id){
   const oc = d.querySelector('#openClaim'); if(oc) oc.onclick = e => { e.preventDefault(); openClaim(r.bill, id); };
   d.querySelectorAll('a.claim-link').forEach(a => a.onclick = e => { e.preventDefault(); openClaim(a.dataset.claim, id); });
   bindDrawerExtras(id, d);
+  if(typeof bindFaxDrawer === 'function'){ bindFaxDrawer(id, d); tieFaxHtml(d, id); }
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);
     $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">${esc(p.subject)}</h2><button id="closeM">✕</button></div>
