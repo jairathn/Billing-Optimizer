@@ -4,6 +4,10 @@
     python -m remitwatch.cli ingest-ema <dir-or-file>... [--db PATH]
     python -m remitwatch.cli detect [--db PATH]
     python -m remitwatch.cli stats [--db PATH]
+    python -m remitwatch.cli modmed-key [--rsa]          the key pair for ModMed's FHIR API (remitwatch.modmed)
+    python -m remitwatch.cli modmed-check                every step of the ModMed connection
+    python -m remitwatch.cli prepare-appeals [--limit N] [--no-ai] [--db PATH]
+                                                         build packets from EMA for the next items that need the visit note
 """
 from __future__ import annotations
 
@@ -190,6 +194,52 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_modmed_key(args: argparse.Namespace) -> int:
+    """A new key for ModMed: the private half for the host's settings, the public half for ModMed's registration."""
+    from .modmed import generate_key, load_private_key, public_jwk
+    pem = generate_key("RSA" if args.rsa else "EC")
+    jwk = public_jwk(load_private_key(pem))
+    print("PRIVATE KEY: keep it secret. Put all of it, BEGIN and END lines included, in the host's settings as MODMED_PRIVATE_KEY.\n")
+    print(pem)
+    print("PUBLIC KEY for ModMed's app registration (a JWK set). Once MODMED_PRIVATE_KEY is set, the site also publishes it at")
+    print("https://<the site>/.well-known/jwks.json, for a registration that asks for a JWKS URL.\n")
+    print(json.dumps({"keys": [jwk]}, indent=2))
+    print(f"\nKey id (kid): {jwk['kid']}   algorithm: {jwk['alg']}")
+    return 0
+
+
+def cmd_modmed_check(args: argparse.Namespace) -> int:
+    from .modmed import check
+    r = check()
+    print(json.dumps(r, indent=2))
+    return 0 if r["ok"] else 1
+
+
+def cmd_prepare_appeals(args: argparse.Namespace) -> int:
+    """The Worklist's "Build packets from EMA" on a host with a disk (run it nightly from cron): the same routes, called
+    in turn, so what this builds is what the button would."""
+    from collections import Counter
+
+    from fastapi import HTTPException
+
+    from . import api
+    api.DB_PATH = args.db
+    q = api.appeals_ema_queue(limit=args.limit, _="cli")
+    n: Counter = Counter()
+    for it in q["items"]:
+        try:
+            r = api.appeals_from_ema({"finding_id": it["finding_id"], "skip_if_packet": True, "since": q["since"], "use_ai": not args.no_ai}, "cli")
+            n[r["status"]] += 1
+            print(it["finding_id"], r["status"], r.get("reason") or "", flush=True)
+        except HTTPException as exc:
+            n["failed"] += 1
+            print(it["finding_id"], "failed", exc.detail, flush=True)
+            if exc.status_code in (502, 503):          # ModMed down or not connected: the rest would fail the same way
+                break
+    print(json.dumps({"queued": len(q["items"]), **n}))
+    return 0 if not n["failed"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="remitwatch")
     ap.add_argument("--db", default=DEFAULT_DB)
@@ -210,6 +260,11 @@ def main(argv: list[str] | None = None) -> int:
     al = sub.add_parser("alerts"); al.add_argument("--notify", action="store_true"); al.set_defaults(fn=cmd_alerts)
     v = sub.add_parser("serve"); v.add_argument("--host", default="127.0.0.1"); v.add_argument("--port", type=int, default=8000); v.set_defaults(fn=cmd_serve)
     c = sub.add_parser("stats"); c.set_defaults(fn=cmd_stats)
+    mk = sub.add_parser("modmed-key"); mk.add_argument("--rsa", action="store_true", help="an RSA key (RS384) instead of EC P-384 (ES384)")
+    mk.set_defaults(fn=cmd_modmed_key)
+    sub.add_parser("modmed-check").set_defaults(fn=cmd_modmed_check)
+    pa = sub.add_parser("prepare-appeals"); pa.add_argument("--limit", type=int, default=25)
+    pa.add_argument("--no-ai", action="store_true", help="attach the note without Claude's review"); pa.set_defaults(fn=cmd_prepare_appeals)
     args = ap.parse_args(argv)
     return args.fn(args)
 

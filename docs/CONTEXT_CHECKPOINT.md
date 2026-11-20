@@ -160,7 +160,7 @@ What the user still has to do (see docs/OPERATIONS.md)
 1. Put it on a BAA-covered host (small AWS, Google Cloud or Azure VM, 4 GB) with docker compose.
 2. Create the Dropbox app, run `remitwatch.cli oauth`, set the three DROPBOX_ variables and REMITWATCH_SYNC_INTERVAL_MINUTES, add the webhook.
 3. Set SMTP_HOST and REPORT_TO for alerts and the summary.
-4. Get a BAA from Anthropic before setting ANTHROPIC_API_KEY for the note review.
+4. Done (November 2026): the practice's BAA with Anthropic is signed. Do not raise it again.
 5. Restart the remittance uploads, and route 837 claim files and annual EMA exports to the same Dropbox folder (docs/MISSING_DATA.md).
 
 Scratch (session only, not in the repository): store at <scratchpad>/data/remitwatch.sqlite, Dropbox mirror at <scratchpad>/data/dropbox,
@@ -478,3 +478,40 @@ Decisions:
 Open: the ASC's own 835s, if routed to the same Dropbox folder, would let the view read each payer's real facility payments
 instead of pricing them. The practice-wide professional 2027 change by payer is still per clinician (the Calculator's waterfall).
 In this sandbox three page tests fail because the network policy blocks cdnjs (Chart.js); they are unrelated to this work.
+
+
+## ModMed EMA connection, and the owner's direction (November 20, 2026)
+
+Settled, do not raise again: the practice's BAA with Anthropic is signed (November 2026); the owner has practice consent
+for EMA (it is the owner's practice); moving the site to AWS for its BAA is acceptable if needed. The owner wants
+automation over caution: every claim with evidence appealed, by fax at volume, followed up weekly and escalated until
+paid. The owner was annoyed by repeated BAA reminders: state facts once, then build.
+
+Built: `remitwatch/modmed.py` (ModMed's ONC-certified FHIR R4 API: SMART Backend Services sign-in with an ES384/RS384
+key, or a client secret plus x-api-key; discovery; search with fallbacks; Bulk FHIR export for an export-only app; the
+claim-to-note matcher), routes `/api/appeals/from_ema`, `/api/appeals/ema_queue`, `/api/modmed/test`,
+`/.well-known/jwks.json`, the drawer's "Get the note from EMA and build the packet", the Worklist's "Build packets from
+EMA (next 10)" (on "Appeal with the visit note"), the /setup panel with "Test the ModMed connection", CLI `modmed-key`,
+`modmed-check`, `prepare-appeals`. 18 tests against a stand-in ModMed (`tests/fake_modmed.py`); the UI flow was driven in
+Chromium on an invented store (batch built the packet; drawer built it, offered the day's other note, switched).
+
+Not verified (no credentials, and this sandbox's network blocks ModMed's sites): ModMed's real behaviour. From search
+summaries of ModMed's own pages: production token endpoint https://sso.ema.md/auth/realms/fhir/protocol/openid-connect/token
+(Keycloak), FHIR base https://fhirmp.mmi.prod.fhir.ema-api.com/fhir/r4, Bulk FHIR apps use private_key_jwt (ES384 in
+their July 2024 document), the practice consents in EMA Admin, Manage Bulk FHIR, the API is free (support may cost);
+one ModMed page instead describes client_secret plus an x-api-key, so both are supported. Unknown until connected:
+whether a Bulk FHIR app may search (else exports are used), the assertion audience ModMed wants (token URL, then FHIR
+base), how notes are attached (Binary, inline, PDF or HTML), whether unsigned notes are visible (they are never used for
+appeals). The /setup test reports each step.
+
+Next, asked for by the owner:
+1. Fax: a RemitWatch fax number (a HIPAA fax API service with a BAA) that sends appeal packets and receives payer
+   letters; incoming faxes read and matched to the claim and appeal; a weekly follow-up on everything sent and not yet
+   paid or decided, escalating level by level (Medicare: redetermination, then QIC reconsideration; commercial: first
+   and second level, external review, state insurance department prompt-pay complaints).
+2. A pre-billing documentation check: RemitWatch learns each payer's rules from denials, publishes per payer and code the
+   elements a note must show, the EMA admin builds them into EMA templates as required fields (outside software cannot
+   edit EMA's templates or block signing), and RemitWatch checks each signed note before its claim goes out and holds the
+   ones missing something. It prompts the provider to document what was done, or to change the code; it never writes
+   clinical text (padded notes are what payers' auditors claw back). Whether it can run before signing depends on
+   whether ModMed's API exposes unsigned notes.

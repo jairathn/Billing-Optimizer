@@ -319,7 +319,9 @@ def health():
 def meta(_: str = Depends(require_auth)):
     out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server",
                            # whether what each clinician is doing asks for the owner's password first
-                           "providers": {"locked": bool(OWNER_PASSWORD)}}
+                           "providers": {"locked": bool(OWNER_PASSWORD)},
+                           # whether visit notes can be read from ModMed EMA (remitwatch.modmed)
+                           "modmed": bool(os.environ.get("MODMED_CLIENT_ID") and (os.environ.get("MODMED_PRIVATE_KEY") or os.environ.get("MODMED_CLIENT_SECRET")))}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -2240,8 +2242,6 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
                   _: str = Depends(require_auth)):
     """Review the uploaded or pasted visit note for one finding and build the appeal packet (letter, review, evidence, note) as a PDF.
     A plain function on purpose: the review takes about a minute and must not hold up every other request."""
-    from .notes import build_from_note
-
     data = None
     if file is not None:
         data = file.file.read(MAX_NOTE_BYTES + 1)
@@ -2254,6 +2254,13 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
     detail = finding_detail(finding_id, "ok")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (detail["finding"].get("claim_key"),)) if detail["finding"].get("claim_key") else None
     name = file.filename if (file is not None and data) else ""
+    return _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1")
+
+
+def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes | None, text: str | None, use_ai: bool) -> dict:
+    """Build the packet from a note (uploaded, pasted or read from EMA) and keep it: in the store, or on a serverless host
+    as two files in the state folder."""
+    from .notes import build_from_note
     if runtime.serverless():
         # no database to keep the packet in: build it in memory and store it as two files in the state folder
         from . import cloud
@@ -2262,7 +2269,7 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
             raise HTTPException(503, "Storage is not connected yet. Open /setup.")
         mem = sqlite3.connect(":memory:")
         try:
-            packet = build_from_note(mem, detail, raw_claim, name, data, pasted_text=text or None, reveal=SHOW_PHI, use_ai=use_ai == "1")
+            packet = build_from_note(mem, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
             row = mem.execute("SELECT letter, letter_redacted, pdf FROM appeal_packets WHERE packet_id=?", (packet["packet_id"],)).fetchone()
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -2275,11 +2282,99 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
     conn = db()
     try:
         # the PDF goes to the payer and carries the real identifiers; the letter text in this response does only when names are switched on
-        return build_from_note(conn, detail, raw_claim, name, data, pasted_text=text or None, reveal=SHOW_PHI, use_ai=use_ai == "1")
+        return build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- ModMed EMA: the visit note behind an appeal
+def _ema_patient_ids(pcn: str | None) -> list[str]:
+    """EMA's own patient ID on the claim's EMA rows: the surest way to the chart."""
+    if not pcn or not has_table("ema_rows"):
+        return []
+    return [r["patient_id"] for r in rows("SELECT DISTINCT patient_id FROM ema_rows WHERE claim_id=? AND COALESCE(patient_id,'')!=''", (pcn,))]
+
+
+def _has_packet(finding_id: str) -> bool:
+    if runtime.serverless():
+        return bool(_packets_for(finding_id))
+    return bool(has_table("appeal_packets") and one("SELECT 1 FROM appeal_packets WHERE finding_id=? LIMIT 1", (finding_id,)))
+
+
+@app.post("/api/appeals/from_ema", dependencies=[Depends(require_xhr)])
+def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_auth)):
+    """Find the visit note for one finding's claim in ModMed EMA and build the appeal packet from it, as an uploaded note
+    would be (remitwatch.modmed). More than one note that day: the candidates come back and the person picks one
+    (document_id). skip_if_packet: leave a finding that already has a packet (the Worklist's batch)."""
+    from . import modmed
+    fid = str(body.get("finding_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9:_\-.]{1,120}", fid):
+        raise HTTPException(400, "finding_id is required")
+    detail = finding_detail(fid, "ok")
+    f = detail["finding"]
+    if not f.get("claim_key"):
+        raise HTTPException(400, "This item is not tied to one claim, so it has no visit note to read.")
+    if body.get("skip_if_packet") and _has_packet(fid):
+        return {"status": "skipped", "reason": "It already has a packet."}
+    raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
+    key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))
+    pick = body.get("document_id")
+    since = body.get("since")
+    try:
+        res = modmed.note_for_claim(modmed.client(), key, pick=str(pick) if pick else None, budget=200,
+                                    since=str(since)[:10] if since and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(since)[:10]) else None)
+    except modmed.NotConfigured as exc:
+        raise HTTPException(503, str(exc))
+    except modmed.ModMedError as exc:
+        raise HTTPException(502, str(exc))
+    out = {k: v for k, v in res.items() if k != "note"}
+    if res["status"] != "found":
+        return out
+    note = res["note"]
+    packet = _store_packet(detail, raw_claim, note["filename"], note["data"], None, body.get("use_ai", True) not in (False, 0, "0"))
+    out.update(status="built", packet=packet, note={k: v for k, v in note.items() if k != "data"})
+    return out
+
+
+@app.get("/api/appeals/ema_queue")
+def appeals_ema_queue(limit: int = Query(20, ge=1, le=200), _: str = Depends(require_auth)):
+    """What "Build packets from EMA" works through: the items that need the visit note, open or started, still inside
+    their filing window (or with none known), soonest window first and then the largest, without a packet yet where the
+    store can tell (on a serverless host each item is checked as it is built)."""
+    from .insights import kind_sql
+    cond, params = kind_sql("note")
+    skip_built = not runtime.serverless() and has_table("appeal_packets")
+    sql = f"""SELECT finding_id, service_date, appeal_deadline, payer_group, shortfall_cents FROM findings
+              WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
+                AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))
+                {"AND finding_id NOT IN (SELECT finding_id FROM appeal_packets WHERE finding_id IS NOT NULL)" if skip_built else ""}
+              ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?"""
+    items = rows(sql, (*params, limit))
+    return {"items": items, "since": min((i["service_date"] for i in items if i.get("service_date")), default=None)}
+
+
+@app.post("/api/modmed/test", dependencies=[Depends(require_xhr)])
+def modmed_test(_: str = Depends(require_auth)):
+    """Every step of the ModMed connection, for /setup: settings, key, discovery, sign-in, server, search. No patient
+    data is read into the answer."""
+    from . import modmed
+    return JSONResponse(modmed.check(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/.well-known/jwks.json", include_in_schema=False)
+def jwks_document():
+    """The public key ModMed checks the app's sign-in against (MODMED_PRIVATE_KEY's public half; never the private one),
+    for a registration that asks for a JWKS URL. Public on purpose: it is a public key."""
+    from . import modmed
+    try:
+        doc = modmed.jwks()
+    except modmed.ModMedError as exc:
+        raise HTTPException(503, str(exc))
+    if not doc:
+        raise HTTPException(404, "No key is set (MODMED_PRIVATE_KEY).")
+    return JSONResponse(doc, headers={"Cache-Control": "public, max-age=300"})
 
 
 def _cloud_state():

@@ -109,13 +109,26 @@ New alerts go to `REPORT_TO` by email and to `ALERT_WEBHOOK_URL` if set (Slack a
 
 ## 6. Appeal packets from the visit note
 
+### Connecting ModMed EMA
+
+With EMA connected, the visit note behind an appeal is read straight from EMA instead of being found and uploaded by hand: "Get the note from EMA and build the packet" in an item's drawer, and "Build packets from EMA (next 10)" on the Worklist when "Appeal with the visit note" is chosen (it works through the open items still inside their windows, soonest first, about a minute each). It reads only: nothing is written to EMA. It uses ModMed's ONC-certified FHIR API, which ModMed offers at no charge.
+
+1. Make the app's key on any computer with the code: `python -m remitwatch.cli modmed-key`. Put the private key it prints in the host's settings as `MODMED_PRIVATE_KEY` (all of it, BEGIN and END lines included; line breaks may be written as `\n`) and redeploy.
+2. Register the app with ModMed at portal.api.modmed.com as a Bulk FHIR (backend) application. Give ModMed the public key printed with the private one, or, where the form asks for a JWKS URL, `https://<the site>/.well-known/jwks.json`. Note the client ID ModMed gives the app.
+3. In EMA: Admin, Manage Bulk FHIR, add that client ID. This is the practice's consent.
+4. Set `MODMED_CLIENT_ID` and redeploy. On `/setup`, press "Test the ModMed connection": every step (key, discovery, sign-in, server, search) says what works.
+
+How a note is found: the patient by EMA's own patient ID on the claim's EMA rows (then the medical record number the payer echoed, then the name), only ever a patient whose family name matches the claim's; that patient's visits on the date of service and the signed notes tied to them. More than one note that day: the rendering clinician's (by NPI), then a progress note before a procedure note, else the drawer lists them to pick; the day's other notes stay one click away. Drafts and notes entered in error are never used. Where ModMed lets the app export but not search, the same lookups run over a Bulk FHIR export (set `MODMED_GROUP_ID` if ModMed gives a group to export from).
+
+If ModMed's registration differs: `MODMED_CLIENT_SECRET` and `MODMED_API_KEY` for a client-secret app; `MODMED_FHIR_BASE`, `MODMED_TOKEN_URL`, `MODMED_SCOPE`, `MODMED_AUDIENCE` and `MODMED_KEY_ID` where ModMed names other values. On a host with a disk, `python -m remitwatch.cli prepare-appeals --limit 25` does what the Worklist button does; run it nightly from cron after the cycle.
+
+
 Open a finding and use "Build the appeal from the visit note". Attach the note (PDF, Word or text) or paste it. The result is one PDF: the letter, the documentation review with word-for-word quotes, the remittance evidence and the note. It can be downloaded or emailed to an address in `APPEAL_EMAIL_DOMAINS`.
 
-The review is done by Claude through the Anthropic API when `ANTHROPIC_API_KEY` is set. Before setting it:
+The review is done by Claude through the Anthropic API when `ANTHROPIC_API_KEY` is set. The practice's business associate agreement with Anthropic is signed (November 2026) and covers it.
 
-1. Ask Anthropic for a BAA covering the API organisation (their privacy centre describes HIPAA-ready API access; the Messages API, which is all this uses, is covered).
-2. Leave `REMITWATCH_NOTE_SCRUB=1`. Names, member and claim numbers known from the remittance, dates, phone numbers and similar patterns are removed from the note text before it is sent. This reduces exposure. It is not a guarantee of de-identification, which is why the BAA comes first.
-3. Scanned PDFs have no text layer to clean, so they are not sent unless `REMITWATCH_NOTE_SEND_SCANS=1`. Paste the text instead.
+1. `REMITWATCH_NOTE_SCRUB=1` (the default) removes names, member and claim numbers known from the remittance, dates, phone numbers and similar patterns from the note text before it is sent, so less leaves the site than it needs to.
+2. Scanned PDFs have no text layer to clean. Set `REMITWATCH_NOTE_SEND_SCANS=1` to have them reviewed as they are.
 
 Without a key the packet is still built, with the template letter and the note attached.
 

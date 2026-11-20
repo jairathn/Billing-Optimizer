@@ -28,7 +28,9 @@ redeploy after every change.
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |
 | `APPEAL_EMAIL_DOMAINS` | The domains appeal packets may be emailed to, comma separated. Until it is set, packets can be downloaded but not emailed. | To email packets |
 | `PRACTICE_NAME`, `PRACTICE_ADDRESS`, `PRACTICE_TIN`, `PRACTICE_NPI`, `PRACTICE_PHONE`, `PRACTICE_FAX`, `PRACTICE_EMAIL` | The practice's legal name, mailing address, tax ID, group NPI and billing contacts, as they should appear at the top of appeal letters. Until they are set the letters show bracketed words in their place. | For appeal letters |
-| `ANTHROPIC_API_KEY` | Turns on the visit-note review for appeal packets. Set it only when a business associate agreement covers that account. | No |
+| `ANTHROPIC_API_KEY` | Turns on the visit-note review for appeal packets. The practice's business associate agreement with Anthropic covers it. | No |
+| `MODMED_CLIENT_ID`, `MODMED_PRIVATE_KEY` | Connect ModMed EMA, so the visit note behind an appeal is read from EMA instead of uploaded (OPERATIONS.md, Connecting ModMed EMA). Make the key with `python -m remitwatch.cli modmed-key`. | To read notes from EMA |
+| `MODMED_CLIENT_SECRET`, `MODMED_API_KEY`, `MODMED_FHIR_BASE`, `MODMED_TOKEN_URL`, `MODMED_SCOPE`, `MODMED_AUDIENCE`, `MODMED_KEY_ID`, `MODMED_GROUP_ID` | Only where ModMed's registration names other values than the defaults. | No |
 
 The rest of `.env.example` (alert windows, letterhead, appeal email limits) works the same on Vercel.
 

@@ -22,7 +22,7 @@ Built for a dermatology practice. Everything is practice-agnostic except the pay
 | Who and what | Any finding family broken down by provider, payer, plan, billed code, billed-to-paid pair, modifier, place of service, location, diagnosis, month and more, one or two at a time, with the number of lines billed beside each count so a rate is always shown |
 | Alerts | Ramp, slow climb, restart after a quiet period, new behavior, one provider singled out, rate cuts, new reason codes, deadlines, stopped feed. By email and optional webhook, with no patient data |
 | Progress | Statuses (open, in progress, appealed, recovered, lost), recovered dollars by month, share recovered by payer, downcoded visits per 100 by payer over time |
-| Appeal packets | Template letter for every signal with verified statute wording; or upload the visit note and get a reviewed packet (letter, documentation review with quotes, remittance evidence, the note) as one PDF to download or email |
+| Appeal packets | Template letter for every signal with verified statute wording; or upload the visit note and get a reviewed packet (letter, documentation review with quotes, remittance evidence, the note) as one PDF to download or email. With ModMed EMA connected, the note is read from EMA itself: one button in the item, or a batch from the Worklist |
 | Hands-off | One cycle does sync, ingest, detect, alerts and notify. It cannot overlap itself and needs no attention |
 
 ## What it found (the archive through October 9, 2026)
@@ -114,6 +114,7 @@ remitwatch/
   alerts.py       what changed since the last look
   appeals.py      letters and correction instructions
   notes.py        visit-note review and appeal packet (PDF, email)
+  modmed.py       ModMed EMA through its certified FHIR API: the visit note for a claim (signed sign-in, search or Bulk FHIR export)
   pipeline.py     the cycle, its lock and the scheduler (a host with a disk)
   cloud.py        the same cycle for a serverless host: store in memory, saved to a state folder, time-boxed runs
   state.py        the state folder (Dropbox, or a local directory for tests)
@@ -133,4 +134,4 @@ tests/            synthetic-fixture tests (no patient data); fakes.py stands in 
 
 ## PHI
 
-The store, the Dropbox mirror and the appeal packets contain patient names, member numbers and dates of service. `data/` is git-ignored. Run the dashboard behind HTTPS with the shared login and keep the host under a BAA. With `REMITWATCH_SHOW_PHI` off (the default) the screens show initials and placeholders, the CSV export has no patient column, and each finding carries the claim ID to look the patient up in EMA. With `REMITWATCH_SHOW_PHI=1` the work queue, the search box, the claim detail and the CSV export show the patient's name and member number to everyone who can sign in. Off is a setting for the screens, not a barrier: the packet PDF carries the name and member number for every login, because the payer needs them, and dates of service and claim numbers are served either way. So the long random password and the BAA are needed in both settings. Alert and summary emails never contain patient data. The visit-note review sends note text, with known identifiers removed, to the Anthropic API and must not be switched on before a BAA covers it.
+The store, the Dropbox mirror and the appeal packets contain patient names, member numbers and dates of service. `data/` is git-ignored. Run the dashboard behind HTTPS with the shared login and keep the host under a BAA. With `REMITWATCH_SHOW_PHI` off (the default) the screens show initials and placeholders, the CSV export has no patient column, and each finding carries the claim ID to look the patient up in EMA. With `REMITWATCH_SHOW_PHI=1` the work queue, the search box, the claim detail and the CSV export show the patient's name and member number to everyone who can sign in. Off is a setting for the screens, not a barrier: the packet PDF carries the name and member number for every login, because the payer needs them, and dates of service and claim numbers are served either way. So the long random password and the BAA are needed in both settings. Alert and summary emails never contain patient data. The visit-note review sends note text, with known identifiers removed, to the Anthropic API under the practice's business associate agreement with Anthropic (signed November 2026).

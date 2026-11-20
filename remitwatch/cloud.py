@@ -1249,6 +1249,11 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         + (f"; appeal packets may be emailed to {domains}" if domains else "; appeal packets cannot be emailed until APPEAL_EMAIL_DOMAINS names the domains allowed"))
     add("note_review", "Visit-note review (optional)", bool(env("ANTHROPIC_API_KEY")) or None,
         "on" if env("ANTHROPIC_API_KEY") else "off: packets are built from the template")
+    mm_on = bool(env("MODMED_CLIENT_ID") and (env("MODMED_PRIVATE_KEY") or env("MODMED_CLIENT_SECRET")))
+    add("modmed", "ModMed EMA: visit notes for appeals (optional)", mm_on or None,
+        "set: press Test the ModMed connection below" if mm_on else
+        "not set: notes are attached by hand. To connect EMA, follow docs/OPERATIONS.md, Connecting ModMed EMA")
+    out["modmed"] = {"configured": mm_on, "key": bool(env("MODMED_PRIVATE_KEY"))}
     missing = [k for k in ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI") if not env(k)]
     add("letterhead", "Practice details for appeal letters (optional)", None if missing else True,
         "set" if not missing else "not set: " + ", ".join(missing) + ". Letters show bracketed words in their place.")

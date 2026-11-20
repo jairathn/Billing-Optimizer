@@ -64,6 +64,17 @@ a{color:var(--accent)}
     <div class="row"><span class="val" id="hookUrl"></span> <button data-copy="hookUrl">Copy</button></div>
   </div>
 
+  <div class="panel" id="modmed" style="display:none"><h2>ModMed EMA</h2>
+    <div class="small">Reads the visit note behind each appeal straight from EMA, through ModMed's certified FHIR API. Read only: nothing is written to EMA.</div>
+    <ol class="small">
+      <li>Make the app's key: <code>python -m remitwatch.cli modmed-key</code>. Put the private key in the host's settings as <code>MODMED_PRIVATE_KEY</code> and redeploy.</li>
+      <li>Register the app with ModMed (portal.api.modmed.com) as a Bulk FHIR backend app. Give it the public key printed with the private one, or this address: <span class="val" id="jwksUrl"></span> <button data-copy="jwksUrl">Copy</button></li>
+      <li>In EMA: Admin, Manage Bulk FHIR, add the app's client ID. Then set <code>MODMED_CLIENT_ID</code> and redeploy.</li>
+    </ol>
+    <div class="row"><button class="primary" id="mmTest">Test the ModMed connection</button><span id="mmMsg" class="small muted"></span></div>
+    <table id="mmSteps"></table>
+  </div>
+
   <div class="panel" id="load" style="display:none"><h2>First load</h2>
     <div class="small muted">Reads every remittance file in the Dropbox folder. It runs by itself and continues on its own until it is done. You can close this page.</div>
     <div class="row"><button class="primary" id="run">Run the first load now</button><a href="/">Open the dashboard</a></div>
@@ -78,6 +89,16 @@ async function api(path, opts){ opts = opts||{}; if(opts.method==='POST'){ opts.
 function rand(n){ const a = new Uint8Array(n); crypto.getRandomValues(a); const abc='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'; return [...a].map(x=>abc[x%abc.length]).join(''); }
 document.addEventListener('click', e => { const id = e.target.dataset && e.target.dataset.copy; if(!id) return; const el = document.getElementById(id); navigator.clipboard.writeText(el.value!==undefined && el.tagName==='TEXTAREA' ? el.value : el.textContent); e.target.textContent='Copied'; setTimeout(()=>e.target.textContent='Copy',1500); });
 
+async function mmTest(){
+  const b = $('#mmTest'); b.disabled = true; $('#mmMsg').textContent = 'Testing…'; $('#mmSteps').innerHTML = '';
+  try {
+    const r = await api('/api/modmed/test', {method:'POST', body: '{}'});
+    $('#mmSteps').innerHTML = r.steps.map(x => { const cls = x.ok===true?'ok':(x.ok===false?'no':'opt'); const mark = x.ok===true?'✓':(x.ok===false?'✗':'–');
+      return `<tr><td class="mark ${cls}">${mark}</td><td><b>${esc(x.step)}</b><div class="small muted">${esc(x.detail||'')}</div></td></tr>`; }).join('');
+    $('#mmMsg').innerHTML = r.ok ? `<span class="ok">Connected${r.mode==='export'?' (notes come from Bulk FHIR exports)':''}.</span>` : '<span class="no">Not connected yet: fix the first ✗.</span>';
+  } catch(e){ $('#mmMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; }
+  b.disabled = false;
+}
 async function check(){
   let s; try { s = await api('/api/setup/status'); } catch(e){ $('#checks').innerHTML = `<tr><td class="no">Could not check: ${esc(e.message)}</td></tr>`; return; }
   $('#checks').innerHTML = s.checks.map(c => { const cls = c.ok===true?'ok':(c.ok===false?'no':'opt'); const mark = c.ok===true?'✓':(c.ok===false?'✗':'–');
@@ -90,6 +111,8 @@ async function check(){
   $('#hook').style.display = (s.ready && s.webhook_url) ? '' : 'none';
   if(s.webhook_url) $('#hookUrl').textContent = s.webhook_url;
   $('#load').style.display = s.ready ? '' : 'none';
+  $('#modmed').style.display = s.locked ? 'none' : '';
+  $('#jwksUrl').textContent = location.origin + '/.well-known/jwks.json';
   $('#ready').innerHTML = s.locked ? '<span class="no">This site is locked until a dashboard password is set.</span>' : (s.ready ? '<span class="ok">Required settings are complete.</span>' : '<span class="muted">Fix the items marked ✗ from the top down.</span>');
   if(s.ready) loadStatus(s);
 }
@@ -121,6 +144,7 @@ async function loadStatus(s){
   if((running || (lc && lc.more)) && !poll) poll = setInterval(async()=>{ try { const t = await api('/api/setup/status'); loadStatus(t); if(!t.running && !(t.last_cycle&&t.last_cycle.more)){ clearInterval(poll); poll=null; } } catch(e){} }, 10000);
 }
 $('#recheck').onclick = check;
+$('#mmTest').onclick = mmTest;
 $('#exchange').onclick = async () => { $('#exMsg').textContent = 'Asking Dropbox…';
   try { const r = await api('/api/setup/dropbox-token', {method:'POST', body: JSON.stringify({code: $('#code').value})});
     $('#token').value = r.refresh_token; $('#tokStep').style.display = '';

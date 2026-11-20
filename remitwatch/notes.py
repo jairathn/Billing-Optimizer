@@ -8,10 +8,10 @@ table with verbatim quotes, the remittance evidence and the note itself, as
 one PDF that can be downloaded or emailed.
 
 The review is done by Claude through the Anthropic API when ANTHROPIC_API_KEY
-is set. Notes are protected health information: turn this on only after a
-business associate agreement covers the API organisation (see
-docs/OPERATIONS.md). Known patient identifiers are removed from the text
-before it is sent. Without a key the builder still assembles the packet from
+is set. Notes are protected health information; the practice's business
+associate agreement with Anthropic covers the API organisation (signed
+November 2026). Known patient identifiers are still removed from the text
+before it is sent, so no more leaves the site than the review needs. Without a key the builder still assembles the packet from
 the template letter and attaches the note.
 
 The review is written to be honest. If the note does not support the level
@@ -376,7 +376,7 @@ def build_from_note(conn: sqlite3.Connection, detail: dict, raw_claim: dict | No
         analysis = template_analysis("ANTHROPIC_API_KEY is not set, so the note was attached without an automated review.")
     elif kind == "pdf_scanned" and os.environ.get("REMITWATCH_NOTE_SEND_SCANS", "0") != "1":
         analysis = template_analysis("This PDF has no text layer. A scanned page cannot have identifiers removed before review, so it was not sent. "
-                                     "Paste the note text instead, or set REMITWATCH_NOTE_SEND_SCANS=1 once a business associate agreement covers the API.")
+                                     "Paste the note text instead, or set REMITWATCH_NOTE_SEND_SCANS=1 to have scanned pages reviewed as they are.")
     else:
         try:
             if kind == "pdf_scanned":

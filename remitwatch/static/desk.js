@@ -150,6 +150,8 @@ async function deskTab(v, key){
     <div class="ph-what">${f.kind ? reasonChips : ''}${single && !f.payer ? pileRows(kinds[0]) : ''}</div>
     <div class="desk-mid ${fix.side?'has-side':''}"><div class="todo-list"><div class="sec">What to do${tile && tile[0]!=='valid' ? ` <span class="muted small">(${esc(tile[1])})</span>` : !tile ? ` <span class="muted small">(${esc(viewName(f))})</span>` : ''}</div>${kindRows}</div>${fix.side||''}</div>
     <div class="fix-top">${fix.line||''}</div>
+    ${(f.kind || (single && kinds[0] ? kinds[0].key : '')) === 'note' && state.meta && state.meta.modmed && !closed
+      ? `<div class="ema-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><button id="emaBatch" class="primary">Build packets from EMA (next 10)</button><span id="emaBatchMsg" class="small muted">Reads each item's visit note from EMA and reviews it into a packet, about a minute each.</span></div>` : ''}
     <div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>${chips.join('')}
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
@@ -199,6 +201,7 @@ async function deskTab(v, key){
   v.querySelectorAll('.go-wins').forEach(a=>a.onclick=e=>{ e.preventDefault(); goWins(a.dataset.anchor); });
   v.querySelectorAll('.seeA').forEach(a=>a.onclick=e=>{ e.preventDefault(); const x = (state.alertsNew||[]).find(y=>y.alert_id===a.dataset.id); if(x && typeof seeAlert==='function') seeAlert(x); });
   const st = v.querySelector('#startFirst'); if(st) st.onclick = () => { if(res.items.length) openDetail(res.items[0].finding_id); };
+  const eb = v.querySelector('#emaBatch'); if(eb) eb.onclick = () => emaBatch(eb, v.querySelector('#emaBatchMsg'));
   const mr = v.querySelector('#moreRows'); if(mr) mr.onclick = () => { const y = window.scrollY; state.lim[key] = lim + ROWS; render().then(()=>window.scrollTo(0, y)); };
   bindRows(v);
   bindBulk(v);
@@ -468,4 +471,31 @@ async function feesDetails(el){
       <div class="panel"><h2>Federal 2% reduction <span class="chip">For information</span></h2>${seq.length ? `<table><tbody>${seq.map(r=>`<tr><td>${esc(r.year)}</td><td class="num">${money(r.shortfall_cents)}</td></tr>`).join('')}</tbody></table><div class="small muted">Withheld on Medicare and Medicare Advantage lines by law; not recoverable.</div>` : '<div class="muted small">None found.</div>'}</div></div>`;
   chart('cPlb', {type:'bar', data:{labels:months, datasets:codes.map((c,i)=>({label:PLB_WORDS[c], backgroundColor:palette[i], data:months.map(m=>{ const r = vol.plb.find(x=>x.month===m && x.reason_code===c); return r ? r.cents/100 : 0; })}))},
     options:{scales:{x:{stacked:true}, y:{stacked:true, ticks:{callback:x=>'$'+x.toLocaleString()}}}, plugins:{legend:{position:'bottom'}}}});
+}
+
+// "Build packets from EMA": the next items that need the visit note (open, window still open, no packet yet), one at a
+// time, each read from ModMed EMA and reviewed into a packet. An item with more than one note that day waits for a person.
+async function emaBatch(btn, box){
+  btn.disabled = true;
+  let q;
+  try { q = await api('/api/appeals/ema_queue?limit=10'); } catch(e){ box.textContent = e.message; btn.disabled = false; return; }
+  if(!q.items.length){ box.textContent = 'Nothing to build: every open item that needs a note already has a packet.'; btn.disabled = false; return; }
+  const n = {built: 0, skipped: 0, ambiguous: 0, not_found: 0, failed: 0};
+  for(let i = 0; i < q.items.length; i++){
+    box.textContent = `Building ${i + 1} of ${q.items.length} (about a minute each)…`;
+    try {
+      const r = await post('/api/appeals/from_ema', {finding_id: q.items[i].finding_id, skip_if_packet: true, since: q.since});
+      n[r.status] = (n[r.status] || 0) + 1;
+    } catch(e){
+      n.failed++;
+      if([502, 503].includes(e.status)){ box.textContent = `Stopped: ${e.message}`; btn.disabled = false; return; }
+    }
+  }
+  const parts = [`${n.built} packet${n.built === 1 ? '' : 's'} built`];
+  if(n.ambiguous) parts.push(`${n.ambiguous} with more than one note that day (open the item to pick)`);
+  if(n.not_found) parts.push(`${n.not_found} with no signed note found in EMA`);
+  if(n.skipped) parts.push(`${n.skipped} already had one`);
+  if(n.failed) parts.push(`${n.failed} failed`);
+  box.textContent = 'Done: ' + parts.join(', ') + '. Open an item to send its packet.';
+  btn.disabled = false;
 }

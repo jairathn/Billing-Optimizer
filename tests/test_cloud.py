@@ -804,10 +804,13 @@ def test_self_test_passes_when_many_requests_ask_at_once(monkeypatch):
     assert runtime.selftest()["ok"] is True
 
 
-def test_every_address_needs_the_login_except_three(site):
+def test_every_address_needs_the_login_except_the_public_ones(site):
     import re
     tc, auth, api, _state = site
     public = {("GET", "/api/health"), ("GET", "/robots.txt"), ("GET", "/api/dropbox/webhook")}
+    # the public key ModMed checks the app's sign-in against: public by design (only the public half), 404 until a key is
+    # set (tests/test_modmed.py serves it with one)
+    public_404 = {("GET", "/.well-known/jwks.json")}
     seen = 0
     for r in api.app.routes:
         path, methods = getattr(r, "path", None), getattr(r, "methods", None) or []
@@ -818,7 +821,7 @@ def test_every_address_needs_the_login_except_three(site):
                 continue
             seen += 1
             got = tc.request(m, re.sub(r"\{[^}]+\}", "x", path), headers={"X-Requested-With": "remitwatch"}, follow_redirects=False).status_code
-            want = 200 if (m, path) in public else (403 if (m, path) == ("POST", "/api/dropbox/webhook") else 401)
+            want = 200 if (m, path) in public else 404 if (m, path) in public_404 else (403 if (m, path) == ("POST", "/api/dropbox/webhook") else 401)
             assert got == want, (m, path, got)
     assert seen >= 35
     assert tc.get("/openapi.json").status_code == 404 and tc.get("/docs").status_code == 404
