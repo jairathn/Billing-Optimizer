@@ -345,3 +345,14 @@ def test_cli_makes_a_key_pair(capsys):
     pem = printed[printed.index("-----BEGIN PRIVATE KEY-----"):printed.index("-----END PRIVATE KEY-----") + 25]
     jwk = json.loads(printed[printed.index('{\n  "keys"'):printed.index("\nKey id")])["keys"][0]
     assert M.public_jwk(M.load_private_key(pem))["kid"] == jwk["kid"] and "d" not in jwk
+
+
+def test_the_key_is_read_however_the_settings_box_kept_it():
+    """Vercel keeps a pasted key with its line breaks; other boxes write them as \\n, or run the key onto one line."""
+    import base64
+    ref = M.public_jwk(M.load_private_key(PEM))
+    for kept in (PEM, PEM.replace("\n", "\\n"), " ".join(PEM.split()), PEM.replace("\n", "\r\n"), '"' + PEM.replace("\n", "\\n") + '"',
+                 base64.b64encode(PEM.encode()).decode()):
+        assert M.jwks(M.Settings.from_env({"MODMED_PRIVATE_KEY": kept}))["keys"][0] == ref
+    with pytest.raises(M.ModMedError, match="BEGIN and END"):
+        M.jwks(M.Settings.from_env({"MODMED_PRIVATE_KEY": "-----BEGIN PRIVATE KEY----- not a key -----END PRIVATE KEY-----"}))

@@ -84,6 +84,8 @@ class Forbidden(ModMedError):
 
 # --------------------------------------------------------------------------- settings and keys
 def _pem(text: str) -> str:
+    """The private key as a PEM, however the host's settings kept it: with its line breaks, with them written as \\n,
+    base64 of the whole PEM, or run onto one line with spaces (some settings boxes do that to a pasted key)."""
     t = (text or "").strip().strip('"').strip("'")
     if not t:
         return ""
@@ -92,7 +94,12 @@ def _pem(text: str) -> str:
             t = base64.b64decode(t).decode("ascii")
         except Exception:
             return t
-    return t.replace("\\n", "\n")
+    t = t.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n").strip()
+    m = re.fullmatch(r"(-----BEGIN [A-Z ]+-----)\s*(.+?)\s*(-----END [A-Z ]+-----)", t, flags=re.S)
+    if m:
+        body = re.sub(r"\s+", "", m.group(2))
+        t = "\n".join([m.group(1), *[body[i:i + 64] for i in range(0, len(body), 64)], m.group(3)]) + "\n"
+    return t
 
 
 @dataclass
