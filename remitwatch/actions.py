@@ -76,6 +76,67 @@ def apply_event(conn: sqlite3.Connection, a: dict) -> bool:
     return True
 
 
+# Hide rules: a reason a payer is known not to pay (a visit with modifier 57 at a payer that never pays it) leaves the lists.
+# Its open items go to Let go with the rule's note, and so do new ones after each analysis; an item a person has worked or
+# reopened is left alone. Removing the rule reopens what it hid.
+HIDE_DDL = """
+CREATE TABLE IF NOT EXISTS hide_rules (
+    payer_group TEXT, signal TEXT, actor TEXT, at TEXT, note TEXT, PRIMARY KEY (payer_group, signal)
+);
+"""
+HIDE_ACTOR = "hide rule"
+
+
+def ensure_hide_rules(conn: sqlite3.Connection) -> None:
+    conn.executescript(HIDE_DDL)
+
+
+def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str) -> int:
+    """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands)."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "findings" not in have:
+        return 0
+    touched = "AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='manual')" if "finding_events" in have else ""
+    ids = [r[0] for r in conn.execute(f"""SELECT finding_id FROM findings WHERE payer_group=? AND signal=? AND status='open'
+                                          AND COALESCE(stale,0)=0 {touched}""", (payer_group, signal))]
+    for fid in ids:
+        conn.execute("UPDATE findings SET status='dismissed', status_changed_at=? WHERE finding_id=?", (at, fid))
+        if "finding_events" in have:
+            conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) "
+                         "VALUES (?,?,'hidden','open','dismissed',NULL,?,?)", (fid, at, HIDE_ACTOR, note))
+    return len(ids)
+
+
+def apply_hide_rule(conn: sqlite3.Connection, a: dict) -> None:
+    """Add a rule and hide what it covers, or remove one and reopen what it hid (and nothing a person has changed since)."""
+    ensure_hide_rules(conn)
+    pg, sig, at = a["payer_group"], a["signal"], a.get("at") or _now()
+    if a.get("op") == "remove":
+        conn.execute("DELETE FROM hide_rules WHERE payer_group=? AND signal=?", (pg, sig))
+        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "finding_events" not in have:
+            return
+        for (fid,) in conn.execute("""SELECT f.finding_id FROM findings f WHERE f.payer_group=? AND f.signal=? AND f.status='dismissed'
+                                        AND (SELECT e.kind FROM finding_events e WHERE e.finding_id=f.finding_id ORDER BY e.at DESC, e.id DESC LIMIT 1)='hidden'""",
+                                     (pg, sig)).fetchall():
+            conn.execute("UPDATE findings SET status='open', status_changed_at=? WHERE finding_id=?", (at, fid))
+            conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) "
+                         "VALUES (?,?,'unhidden','dismissed','open',NULL,?,?)", (fid, at, a.get("actor") or "", "rule removed"))
+        return
+    note = (a.get("note") or "").strip()[:300] or f"Hidden: {pg} is not expected to pay these"
+    conn.execute("INSERT OR REPLACE INTO hide_rules (payer_group, signal, actor, at, note) VALUES (?,?,?,?,?)", (pg, sig, a.get("actor") or "", at, note))
+    _hide_matching(conn, pg, sig, note, at)
+
+
+def apply_hide_rules(conn: sqlite3.Connection) -> int:
+    """After an analysis: every rule hides the new items it covers."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "hide_rules" not in have:
+        return 0
+    at = _now()
+    return sum(_hide_matching(conn, pg, sig, note, at) for pg, sig, note in conn.execute("SELECT payer_group, signal, note FROM hide_rules").fetchall())
+
+
 def apply_lesson(conn: sqlite3.Connection, rec: dict) -> None:
     ensure_fax_tables(conn)
     vals = {k: (json.dumps(rec.get(k)) if k in ("gaps", "tips") else rec.get(k)) for k in LESSON_COLS}
@@ -138,4 +199,7 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
         return True
     if kind == "event":
         return apply_event(conn, action)
+    if kind == "hide_rule":
+        apply_hide_rule(conn, action)
+        return True
     return False

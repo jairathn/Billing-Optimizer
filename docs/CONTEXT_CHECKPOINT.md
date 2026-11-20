@@ -546,3 +546,30 @@ Two downcode kinds rest on inference (DOWNCODE_CHARGE, and DOWNCODE_VS_BILLED wh
 rather than the 837 claim file): they are held ("check_code") until a person confirms in EMA that the higher level went
 out, then sent with one click ("It went out as billed: fax it"). `letter_blanks` catches prompts of any length (eight
 template prompts are over 80 characters) and ignores the scrub's placeholders ([DATE], [REDACTED]) in quoted paragraphs.
+
+## Keeping the lists current: TriZetto direct, EMA's payments, hide rules (November 20, 2026)
+
+The owner reported that the practice manager found every item she checked had been paid, some after October 9 (the
+newest remittance in Dropbox: the TriZetto files stopped being copied there), and asked for the fullest ModMed
+integration, a TriZetto integration instead of Dropbox, and (from Alex, the biller) filters, e.g. modifier 57 on visits
+for payers known not to pay it.
+
+Built:
+- `remitwatch/trizetto.py`: read-only SFTP pull of TriZetto's remittance files (default host sftp.gatewayedi.com, from a
+  vendor's guide; TriZetto writes remits every 3 to 4 hours when Auto Generate Remittances is on), in both cycles, with a
+  /setup check. Not verified against TriZetto itself (no account here; this sandbox's network blocks it).
+- What EMA has posted as paid now closes a denial or bundled visit (was a hint): `detect.EMA_CLOSES`, reversible,
+  `REMITWATCH_EMA_CLOSES=0` restores the hint. Two tests that pinned the old rule were changed on purpose.
+- Opening the dashboard starts a run when none has looked for files in 3 hours (`/api/sync/freshen`).
+- Appeal by fax holds every item while the newest remittance is over 14 days old (`stale`), "Fax it anyway" overrides.
+- Hide rules by payer and reason (`hide_rules`, journal kind `hide_rule`): open untouched items go to Let go with the
+  note (event kind `hidden`, not counted as work done), new ones after each analysis, "Show again" reopens them.
+
+ModMed, what exists (search summaries, not verified with ModMed): the certified FHIR API (free; clinical: built); the
+proprietary synapSYS API (partner-gated, paid): production https://mmapi.ema-api.com/ema-prod/firm/{firm prefix}/ema/fhir/v2/,
+token at .../ema/ws/oauth2/grant with an x-api-key; resources include Patient, Appointment, ChargeItem (with a
+financialTransaction extension "designed to replicate HL7 DFT"), Account (outstanding balances); no documented claim,
+EOB or payment resource (a 2020 spec listed PaymentReconciliation). The EHI population export (support case, pipe-
+delimited CSV per table, possibly a fee) has every PM financial table (payments posted, payer adjustments with CARC/RARC,
+ERA received, claim and claim log). Not built: a reader for the proprietary API's financial data, because its payment
+fields are not documented; ask ModMed which financial resources a synapSYS key can read before building it.

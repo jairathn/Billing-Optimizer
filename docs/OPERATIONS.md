@@ -42,6 +42,31 @@ For updates within a minute of an upload, add a webhook in the Dropbox app conso
 
 The header of every page shows the newest payment date in the store and whether sync is on. The Data tab shows the last cycle and has a "Sync and analyse now" button. If no new remittance arrives for `REMITWATCH_STALE_DAYS` days, an alert says so; that usually means the TriZetto download or the Dropbox upload stopped, not that the payers stopped paying.
 
+Opening the dashboard also looks for new remittances when nothing has for `REMITWATCH_FRESHEN_HOURS` hours (3 by default): a run starts in the background (TriZetto, Dropbox, the analysis) and the page redraws itself when it has brought newer payments. Nobody has to press Sync.
+
+### TriZetto direct
+
+Remittances can come straight from TriZetto instead of through the Dropbox folder: the site reads the practice's TriZetto SFTP account on every run, so a claim the payer paid leaves the lists within hours, with nobody copying files. The Dropbox folder can stay as it is (a file read from both is stored once).
+
+1. Call TriZetto support with the practice's Site ID and ask them to turn on SFTP for it (usually within two days; they issue the SFTP password).
+2. In TriZetto's portal, Remittance Advice Settings: turn on **Auto Generate Remittances** (TriZetto then writes the remittances to the SFTP folder every few hours).
+3. Set `TRIZETTO_SFTP_USER` (the Site ID) and `TRIZETTO_SFTP_PASSWORD`, then redeploy. `TRIZETTO_SFTP_HOST` only if TriZetto names a server other than sftp.gatewayedi.com, `TRIZETTO_SFTP_DIRS` only if the remittances are not under the login folder.
+4. On `/setup`, press "Test the TriZetto connection": the server and its key, the sign-in, the files there and one remittance read.
+
+It only reads: nothing on TriZetto's server is moved, renamed or deleted, because the practice's billing system may collect the same files. Ask TriZetto whether anything else (ModMed) collects and removes files from that account; if so, ask them to keep the files (or send RemitWatch a copy) so both get every remittance. The server's key is kept the first time (or set `TRIZETTO_SFTP_HOSTKEY` to the fingerprint TriZetto gives); a different key afterwards stops the connection before the password is sent. If TriZetto only lets fixed addresses in: Vercel has none, so run the site on a small server instead (section 1).
+
+### What EMA shows as paid
+
+An item EMA shows paid is closed by the analysis: insurance payments on the line in EMA's newest charge export, or on its ERA lines after the denial, of at least half the expected amount, where the claim has the code once on that date. That covers a claim corrected and paid under a new number, a paper check, or a payment that never came as an 835. Its note says where the payment was seen; reopen it if that money is for something else. If a newer export no longer shows the payment, the item opens again. `REMITWATCH_EMA_CLOSES=0` turns it back into a hint.
+
+### Hiding a reason for a payer
+
+When a payer is known never to pay something (a visit with modifier 57 at some payers), open one such item and click "Hide ... for (payer)", or pick the reason and the payer on a list and click "Hide ... for (payer)". Its open items go to Let go with the note typed, and so do new ones after each analysis. An item someone has started, sent or reopened stays as they left it. "Hidden" beside the list's count lists the rules; "Show again" brings back what a rule hid.
+
+### No appeal on old data
+
+When the newest remittance is more than `REMITWATCH_STALE_APPEAL_DAYS` days old (14), Appeal by fax holds every item: it may have been paid since. Get the remittances current (TriZetto direct, or the Dropbox upload) and send again; "Fax it anyway" in the item, or "Fax them anyway" after a batch, sends them when someone has checked in EMA that they are still unpaid.
+
 ### The Providers tab
 
 The same cycle rebuilds the provider tables after detection (`remitwatch/activity.py`; `python -m remitwatch.cli activity` rebuilds them alone). Five things decide how far the tab can be trusted:

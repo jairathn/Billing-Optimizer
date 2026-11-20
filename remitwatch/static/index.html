@@ -577,6 +577,7 @@ async function openDetail(id){
   d.innerHTML = `<div class="dr-head"><div><h2>${esc(plain)}</h2><div class="small muted">${esc(f.payer_group||'')}</div></div><button id="closeD" aria-label="Close">✕</button></div>
     ${whatToDoHtml(f, letter) || (letter ? `<div class="actions">${letter}</div>` : '')}
     ${typeof faxDrawerHtml === 'function' ? faxDrawerHtml(f, r) : ''}
+    ${typeof hideDrawerHtml === 'function' ? hideDrawerHtml(f) : ''}
     <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
@@ -619,6 +620,7 @@ async function openDetail(id){
   d.querySelectorAll('a.claim-link').forEach(a => a.onclick = e => { e.preventDefault(); openClaim(a.dataset.claim, id); });
   bindDrawerExtras(id, d);
   if(typeof bindFaxDrawer === 'function'){ bindFaxDrawer(id, d); tieFaxHtml(d, id); }
+  if(typeof bindHideDrawer === 'function') bindHideDrawer(f, d);
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);
     $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">${esc(p.subject)}</h2><button id="closeM">✕</button></div>
@@ -635,6 +637,24 @@ async function openDetail(id){
   };
 }
 
+// Opening the site looks for new remittances when nothing has for a few hours (TriZetto, Dropbox), then redraws the page
+// once the run has finished and brought newer payments: paid claims leave the lists without anyone pressing Sync.
+async function freshen(){
+  let r; try { r = await api('/api/sync/freshen', {method:'POST'}); } catch(e){ return; }
+  if(!r || !r.started) return;
+  const before = state.meta && state.meta.remits ? state.meta.remits.last_payment : null;
+  const was = $('#fresh').textContent;
+  $('#fresh').textContent = 'Looking for new payments (TriZetto, Dropbox)… ' + was;
+  for(let i = 0; i < 30; i++){
+    await new Promise(ok => setTimeout(ok, 20000));
+    let st; try { st = await api('/api/sync/status'); } catch(e){ continue; }
+    if(st.running) continue;
+    try { await loadMeta(); await refreshHeader(); } catch(e){}
+    const now = state.meta && state.meta.remits ? state.meta.remits.last_payment : null;
+    if(now !== before){ state.brief = null; render(); }
+    return;
+  }
+}
 window.addEventListener('hashchange', ()=>{ const h=location.hash.slice(1); if(tabOpen(h) && h!==state.tab){ state.tab=h; render(); } });
 // Leaving the page locks what the owner's password opened. A browser may keep the page as it was and bring it back
 // on Back: it must come back locked, with nothing left on it.
@@ -648,6 +668,7 @@ window.addEventListener('pageshow', e=>{ if(e.persisted) render(); });
   await refreshHeader();
   if(!state.run) render();       // a click while the first answer was slow has drawn the page already
   setInterval(async()=>{ try { await loadMeta(); await refreshHeader(); } catch(e){} }, 120000);
+  freshen();
 })();
 </script>
 </body>

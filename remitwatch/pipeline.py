@@ -148,6 +148,17 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             ingested = ingest_new_files(store, new_files, log=log)
             ingested.pop("remit_stats", None)
             heartbeat(store.conn, token)
+        from . import trizetto
+        if trizetto.configured():         # the remittances straight from TriZetto's SFTP (remitwatch.trizetto)
+            from .cloud import _ingest_batch
+            try:
+                tz = trizetto.pull(store.conn, lambda items: _ingest_batch(store, items, beat_log), deadline=time.time() + 3000, log=beat_log)
+            except Exception as exc:
+                tz = {"error": str(exc)[:300]}
+            out["trizetto"] = {k: v for k, v in tz.items() if k != "seen_changed"}
+            for k in ("remits", "ema", "claims_837"):
+                ingested[k] = ingested.get(k, 0) + (tz.get(k) or 0)
+            heartbeat(store.conn, token)
         out["ingest"] = ingested
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
         has_run = bool(store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='detection_runs'").fetchone()) and \

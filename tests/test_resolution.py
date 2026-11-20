@@ -152,7 +152,7 @@ def test_a_payment_taken_back_on_the_same_bill_does_not_close_either(tmp_path):
     store.close()
 
 
-def test_ema_alone_never_closes_and_reads_the_newest_export(tmp_path):
+def test_ema_closes_and_reads_the_newest_export(tmp_path):
     who = "PINE*AL****MI*W55500303"
     store = build_store(tmp_path, base_visits() + [visit(300, who)], pay_date="20260415")
     store.close()
@@ -166,7 +166,8 @@ def test_ema_alone_never_closes_and_reads_the_newest_export(tmp_path):
     store.conn.commit()
     Detector(store, run_id="t").run()
     r = denials(store)["CB0000300C017:99214:DENIED_MEDICAL_NECESSITY"]
-    assert r["status"] == "open" and r["hint"].startswith("EMA shows $117.60 paid by insurance")
+    assert r["status"] == "resolved" and r["auto_note"].startswith("EMA shows $117.60 paid by insurance")
+    # the newer export shows the payment gone (the takeback): the item is open again
     ema(store, [("f2", "charge_lines", "Encounter & Charge Lines 2026-06-01.xlsx", 1, "2026-04-01", "CB0000300C017", "99214", 1, 22365, "Charge", 0, None, None, None)])
     store.conn.execute("UPDATE ema_rows SET source_sha256='s2' WHERE row_fingerprint='f2'")
     store.conn.commit()

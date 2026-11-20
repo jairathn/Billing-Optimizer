@@ -323,7 +323,9 @@ def meta(_: str = Depends(require_auth)):
                            # whether visit notes can be read from ModMed EMA (remitwatch.modmed)
                            "modmed": bool(os.environ.get("MODMED_CLIENT_ID") and (os.environ.get("MODMED_PRIVATE_KEY") or os.environ.get("MODMED_CLIENT_SECRET"))),
                            # whether appeals go out by fax (remitwatch.fax)
-                           "fax": bool(os.environ.get("SRFAX_ACCESS_ID") and os.environ.get("SRFAX_ACCESS_PWD"))}
+                           "fax": bool(os.environ.get("SRFAX_ACCESS_ID") and os.environ.get("SRFAX_ACCESS_PWD")),
+                           # whether remittances come straight from TriZetto (remitwatch.trizetto)
+                           "trizetto": bool(os.environ.get("TRIZETTO_SFTP_USER") and os.environ.get("TRIZETTO_SFTP_PASSWORD"))}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -2079,6 +2081,52 @@ def sync_status(_: str = Depends(require_auth)):
     return dict(status(DB_PATH), mode="server")
 
 
+FRESHEN_HOURS = float(os.environ.get("REMITWATCH_FRESHEN_HOURS", "3"))
+
+
+def _last_pull_hours() -> float | None:
+    """Hours since the last run that looked for new files (Dropbox or TriZetto), as its status says."""
+    try:
+        if runtime.serverless():
+            from . import cloud
+            lc = (cloud.SERVING_COPY.status() or {}).get("last_cycle") or {}
+            at = lc.get("finished") or lc.get("started")
+        else:
+            from .pipeline import status
+            at = (status(DB_PATH).get("last_cycle") or {}).get("finished")
+        if not at:
+            return None
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(str(at).replace("Z", "+00:00"))).total_seconds() / 3600
+    except Exception:
+        return None
+
+
+@app.post("/api/sync/freshen", dependencies=[Depends(require_xhr)])
+def sync_freshen(request: Request, _: str = Depends(require_auth)):
+    """The dashboard asks this when it opens: when nothing has looked for new remittances for a few hours, a run starts in
+    the background (TriZetto, Dropbox, the analysis), so the lists catch up with payments without anyone pressing Sync."""
+    from . import trizetto
+    from .pipeline import dropbox_configured
+    if not (dropbox_configured() or trizetto.configured()):
+        return {"started": False, "reason": "no feed is set up"}
+    hours = _last_pull_hours()
+    if hours is not None and hours < FRESHEN_HOURS:
+        return {"started": False, "hours": round(hours, 1)}
+    if runtime.serverless():
+        from . import cloud
+        if runtime.preview():
+            return {"started": False, "reason": "preview"}
+        st = cloud.SERVING_COPY.status()
+        if st.get("running"):
+            return {"started": False, "running": True}
+        ok = cloud.trigger_cycle(base_url(request), "freshen")
+        cloud.SERVING_COPY._status = (0.0, None)
+        return {"started": bool(ok), "hours": None if hours is None else round(hours, 1)}
+    from .pipeline import run_once_in_background
+    run_once_in_background(DB_PATH, "freshen")
+    return {"started": True, "hours": None if hours is None else round(hours, 1)}
+
+
 @app.post("/api/sync/run", dependencies=[Depends(require_xhr)])
 def sync_run(request: Request, _: str = Depends(require_auth)):
     if runtime.serverless():
@@ -2387,6 +2435,15 @@ def modmed_test(_: str = Depends(require_auth)):
     return JSONResponse(modmed.check(), headers={"Cache-Control": "no-store"})
 
 
+@app.post("/api/trizetto/test", dependencies=[Depends(require_xhr)])
+def trizetto_test(_: str = Depends(require_auth)):
+    """Every step of the TriZetto connection, for /setup: settings, the server and its key, the sign-in, the files there,
+    one remittance read. Only file names, counts and dates come back."""
+    from . import trizetto
+    known = (one("SELECT value FROM meta WHERE key=?", (trizetto.HOSTKEY_META,)) or {}).get("value") if has_table("meta") else None
+    return JSONResponse(trizetto.check(known=known), headers={"Cache-Control": "no-store"})
+
+
 @app.get("/.well-known/jwks.json", include_in_schema=False)
 def jwks_document():
     """The public key ModMed checks the app's sign-in against (MODMED_PRIVATE_KEY's public half; never the private one),
@@ -2409,6 +2466,21 @@ STATUS_WORDS = {"appealed": "already sent", "resolved": "paid or settled", "lost
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+STALE_APPEAL_DAYS = int(os.environ.get("REMITWATCH_STALE_APPEAL_DAYS", "14"))
+
+
+def _data_behind_days() -> int | None:
+    """Days since the newest payment in the store (None without remittances): past two weeks or so, a claim on the lists
+    may have been paid since and nobody here can see it."""
+    if not has_table("transactions"):
+        return None
+    d = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d")
+    try:
+        return (datetime.now(timezone.utc).date() - datetime.fromisoformat(d[:10]).date()).days if d else None
+    except ValueError:
+        return None
 
 
 def _fax_now() -> str:
@@ -2533,6 +2605,11 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
                     .get(kind, "This one is not an appeal."))
     if f.get("status") not in ("open", "in_progress"):
         return dict(out, status="skipped", reason=f"It is {STATUS_WORDS.get(f.get('status'), f.get('status'))}.")
+    # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed
+    behind = _data_behind_days()
+    if behind is not None and behind > STALE_APPEAL_DAYS and not body.get("confirmed") and not body.get("stale_ok"):
+        return held("stale", f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since. "
+                             "Get the remittances current first (Data tab, or the TriZetto feed); \"Fax it anyway\" in the item sends it now.")
     # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
     # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
@@ -2964,6 +3041,42 @@ def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = D
     budget = max(60.0, runtime.max_seconds() - 60.0) if runtime.serverless() else 3600.0
     got = _fax_refresh(prov, budget_s=budget / 2)
     return {"refresh": got, "follow_up": _send_followups(prov, "daily run", budget_s=budget / 2)}
+
+
+# --------------------------------------------------------------------------- reasons hidden for a payer (actions.apply_hide_rule)
+@app.get("/api/hide")
+def hide_list(_: str = Depends(require_auth)):
+    """The reasons hidden for a payer, with how many items each hides now."""
+    from .insights import SHORT_LABELS
+    if not has_table("hide_rules"):
+        return {"rules": []}
+    out = []
+    for r in rows("SELECT payer_group, signal, actor, at, note FROM hide_rules ORDER BY at DESC"):
+        n = one("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE payer_group=? AND signal=? AND status='dismissed'
+                   AND COALESCE(stale,0)=0""", (r["payer_group"], r["signal"])) or {}
+        out.append(dict(r, label=SHORT_LABELS.get(r["signal"], r["signal"]), n=n.get("n") or 0, cents=n.get("cents") or 0))
+    return {"rules": out}
+
+
+@app.post("/api/hide", dependencies=[Depends(require_xhr)])
+def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Hide one reason for one payer: its open items go to Let go with the note, and so do new ones; nothing a person
+    has worked is touched. remove: true takes the rule away and reopens what it hid."""
+    pg, sig = str(body.get("payer_group") or "").strip(), str(body.get("signal") or "").strip()
+    if not pg or not sig or len(pg) > 200 or not re.fullmatch(r"[A-Z0-9_]{2,60}", sig):
+        raise HTTPException(400, "payer_group and signal are required")
+    if body.get("remove"):
+        if not (has_table("hide_rules") and one("SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=?", (pg, sig))):
+            raise HTTPException(404, "No such rule.")
+        _record_action({"kind": "hide_rule", "op": "remove", "payer_group": pg, "signal": sig, "actor": user})
+        return {"ok": True}
+    if not one("SELECT 1 FROM findings WHERE payer_group=? AND signal=? LIMIT 1", (pg, sig)):
+        raise HTTPException(404, "Nothing of that kind for that payer.")
+    before = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
+    _record_action({"kind": "hide_rule", "op": "add", "payer_group": pg, "signal": sig, "actor": user,
+                    "note": str(body.get("note") or "")[:300]})
+    after = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
+    return {"ok": True, "hidden": before - after}
 
 
 # --------------------------------------------------------------------------- suggested templates (remitwatch.lessons)

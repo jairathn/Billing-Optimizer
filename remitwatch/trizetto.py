@@ -1,0 +1,259 @@
+"""
+TriZetto direct: the payers' remittances (835 files, .RMT) read straight from the practice's TriZetto SFTP account, so
+nobody has to copy them into Dropbox and the lists catch up with payments within hours of the payer sending them.
+
+    TRIZETTO_SFTP_USER        the TriZetto Site ID (TriZetto support turns SFTP on for it, usually within two days)
+    TRIZETTO_SFTP_PASSWORD    the SFTP password TriZetto issues for it
+    TRIZETTO_SFTP_HOST        default sftp.gatewayedi.com
+    TRIZETTO_SFTP_PORT        default 22
+    TRIZETTO_SFTP_DIRS        the folders to read, comma-separated (default: the login folder, three levels down)
+    TRIZETTO_SFTP_HOSTKEY     the server key's fingerprint (SHA256:...), if TriZetto gives one. Without it the first key
+                              seen is kept and any other is refused (trust on first use): a different key means someone
+                              may be standing between the site and TriZetto, and the password is not sent to it.
+
+In TriZetto's portal, turn on "Auto Generate Remittances" (remittances are then written to the SFTP folder every few
+hours). Read only: nothing on TriZetto's server is deleted, renamed or written, because the practice's billing system may
+read the same files. Each file is read once (its path, size and time are kept in the store); a remittance read twice under
+two names is stored once (the store keys remittances by content). Claim files (837) and EMA exports found there are read
+the same way as from Dropbox.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import posixpath
+import re
+import socket
+import stat
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable
+
+DEFAULT_HOST = "sftp.gatewayedi.com"
+WANTED = re.compile(r"(?i)\.(rmt|835|era|edi|x12|dat|txt)$")
+MAX_FILE_BYTES = 60 * 1024 * 1024
+BATCH = 40
+SEEN_DDL = """
+CREATE TABLE IF NOT EXISTS trizetto_seen (path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, at TEXT, status TEXT);
+"""
+HOSTKEY_META = "trizetto:hostkey"
+
+
+class TriZettoError(Exception):
+    pass
+
+
+@dataclass
+class Settings:
+    user: str = ""
+    password: str = ""
+    host: str = DEFAULT_HOST
+    port: int = 22
+    dirs: list[str] = field(default_factory=lambda: ["."])
+    hostkey: str = ""
+
+    @classmethod
+    def from_env(cls, env: dict | None = None) -> "Settings":
+        e = os.environ if env is None else env
+        dirs = [d.strip() for d in (e.get("TRIZETTO_SFTP_DIRS") or "").split(",") if d.strip()] or ["."]
+        try:
+            port = int(e.get("TRIZETTO_SFTP_PORT") or 22)
+        except ValueError:
+            port = 22
+        return cls(user=(e.get("TRIZETTO_SFTP_USER") or "").strip(), password=e.get("TRIZETTO_SFTP_PASSWORD") or "",
+                   host=(e.get("TRIZETTO_SFTP_HOST") or DEFAULT_HOST).strip(), port=port, dirs=dirs,
+                   hostkey=(e.get("TRIZETTO_SFTP_HOSTKEY") or "").strip())
+
+    def configured(self) -> bool:
+        return bool(self.user and self.password)
+
+
+def configured(env: dict | None = None) -> bool:
+    return Settings.from_env(env).configured()
+
+
+def fingerprint(key) -> str:
+    """OpenSSH's form of a host key's fingerprint: SHA256 of the key, base64 without padding."""
+    return "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+
+
+class Session:
+    """One sign-in to TriZetto's SFTP server. known: the fingerprint kept from an earlier sign-in (trust on first use)."""
+
+    def __init__(self, s: Settings, known: str | None = None, timeout: float = 30):
+        self.s, self.known, self.timeout = s, known, timeout
+        self.transport = self.sftp = None
+        self.key_fp = ""
+        self.first_key = False
+
+    def __enter__(self) -> "Session":
+        import paramiko
+        try:
+            sock = socket.create_connection((self.s.host, self.s.port), timeout=self.timeout)
+        except OSError as exc:
+            raise TriZettoError(f"Could not reach {self.s.host}:{self.s.port} ({type(exc).__name__}). Check the host and that the network allows it.") from exc
+        t = paramiko.Transport(sock)
+        t.banner_timeout = t.auth_timeout = self.timeout
+        self.transport = t
+        try:
+            t.start_client(timeout=self.timeout)
+        except Exception as exc:
+            self.close()
+            raise TriZettoError(f"{self.s.host} did not complete the SSH handshake ({type(exc).__name__}).") from exc
+        self.key_fp = fingerprint(t.get_remote_server_key())
+        want = self.s.hostkey or self.known
+        if want and want != self.key_fp:
+            self.close()
+            raise TriZettoError(f"The server's key is not the one {'set in TRIZETTO_SFTP_HOSTKEY' if self.s.hostkey else 'seen before'} "
+                                f"({self.key_fp}, expected {want}). Nothing was sent to it. If TriZetto changed its key, confirm the new "
+                                "fingerprint with TriZetto and set it as TRIZETTO_SFTP_HOSTKEY.")
+        self.first_key = not want
+        try:
+            t.auth_password(self.s.user, self.s.password)
+        except Exception as exc:
+            self.close()
+            raise TriZettoError("TriZetto refused the sign-in: check TRIZETTO_SFTP_USER (the Site ID) and TRIZETTO_SFTP_PASSWORD, and that "
+                                "TriZetto support has turned SFTP on for the Site ID.") from exc
+        if not t.is_authenticated():
+            self.close()
+            raise TriZettoError("TriZetto did not accept the sign-in.")
+        self.sftp = paramiko.SFTPClient.from_transport(t)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        for x in (self.sftp, self.transport):
+            try:
+                if x is not None:
+                    x.close()
+            except Exception:
+                pass
+
+    def walk(self, depth: int = 3) -> list[tuple[str, int, int]]:
+        """Every file worth reading under the folders set: (path, size, modified time), oldest first."""
+        out, seen_dirs = [], set()
+
+        def go(path: str, level: int) -> None:
+            if path in seen_dirs or level > depth:
+                return
+            seen_dirs.add(path)
+            try:
+                entries = self.sftp.listdir_attr(path)
+            except OSError as exc:
+                if level == 0:
+                    raise TriZettoError(f"The folder {path!r} could not be listed ({exc}).") from exc
+                return
+            for a in entries:
+                name = a.filename
+                if name in (".", "..") or name.startswith("."):
+                    continue
+                full = name if path in (".", "") else posixpath.join(path, name)
+                if stat.S_ISDIR(a.st_mode or 0):
+                    go(full, level + 1)
+                elif stat.S_ISREG(a.st_mode or 0) and WANTED.search(name):
+                    out.append((full, int(a.st_size or 0), int(a.st_mtime or 0)))
+        for d in self.s.dirs:
+            go(d, 0)
+        return sorted(out, key=lambda f: (f[2], f[0]))
+
+    def read(self, path: str) -> bytes:
+        with self.sftp.open(path, "rb") as fh:
+            fh.prefetch()
+            data = fh.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise TriZettoError(f"{path} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB")
+        return data
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings: Settings | None = None, log=print) -> dict:
+    """Read the files not read yet (or changed since) and hand them to `handle` in batches: [(name, bytes, mtime)] ->
+    the loaders' counts. The files read are remembered in the store (trizetto_seen), and so is the server's key."""
+    s = settings or Settings.from_env()
+    conn.executescript(SEEN_DDL)
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (HOSTKEY_META,)).fetchone()
+    out: dict = {"listed": 0, "new": 0, "downloaded": 0, "remits": 0, "ema": 0, "claims_837": 0, "errors": 0, "remaining": 0,
+                 "failed": [], "seen_changed": False}
+    with Session(s, known=row[0] if row else None) as ses:
+        if ses.first_key:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (HOSTKEY_META, ses.key_fp))
+            conn.commit()
+            out["hostkey"] = ses.key_fp
+            out["seen_changed"] = True
+        files = ses.walk()
+        seen = {p: (sz, mt) for p, sz, mt in conn.execute("SELECT path, size, mtime FROM trizetto_seen")}
+        todo = [f for f in files if seen.get(f[0]) != (f[1], f[2])]
+        out["listed"], out["new"] = len(files), len(todo)
+        if files:
+            out["newest_file"] = datetime.fromtimestamp(files[-1][2], timezone.utc).isoformat(timespec="minutes")
+        for i in range(0, len(todo), BATCH):
+            if time.time() > deadline:
+                out["remaining"] = len(todo) - i
+                break
+            items, rows = [], []
+            for path, size, mtime in todo[i:i + BATCH]:
+                if size > MAX_FILE_BYTES:
+                    rows.append((path, size, mtime, _now(), "too large"))
+                    out["errors"] += 1
+                    out["failed"].append(f"{posixpath.basename(path)} (too large)")
+                    continue
+                try:
+                    data = ses.read(path)
+                except Exception as exc:
+                    log(f"  TriZetto: could not read {path}: {exc}")
+                    out["errors"] += 1         # not remembered: tried again on the next run
+                    continue
+                items.append((posixpath.basename(path), data, mtime or None))
+                rows.append((path, size, mtime, _now(), "read"))
+            out["downloaded"] += len(items)
+            if items:
+                part = handle(items) or {}
+                for k in ("remits", "ema", "claims_837"):
+                    out[k] += part.get(k) or 0
+                out["errors"] += part.get("errors") or 0
+                out["failed"] += [f"{n} (could not be read)" for n in part.get("failed") or []]
+            conn.executemany("INSERT OR REPLACE INTO trizetto_seen (path, size, mtime, at, status) VALUES (?,?,?,?,?)", rows)
+            conn.commit()
+            out["seen_changed"] = out["seen_changed"] or bool(rows)
+    out["failed"] = out["failed"][:20]
+    return out
+
+
+def check(env: dict | None = None, known: str | None = None) -> dict:
+    """Every step of the TriZetto connection, for /setup: settings, the server and its key, the sign-in, the files there,
+    and one remittance read. Only file names, counts and dates come back."""
+    s = Settings.from_env(env)
+    steps: list[dict] = []
+    if not s.configured():
+        steps.append({"step": "Settings", "ok": False, "detail": "set TRIZETTO_SFTP_USER (the Site ID) and TRIZETTO_SFTP_PASSWORD"})
+        return {"ok": False, "steps": steps}
+    steps.append({"step": "Settings", "ok": True, "detail": f"Site ID {s.user} on {s.host}:{s.port}, folders {', '.join(s.dirs)}"})
+    try:
+        with Session(s, known=known) as ses:
+            steps.append({"step": "Server", "ok": True, "detail": f"{s.host} answered; its key is {ses.key_fp}"
+                          + (" (kept from now on)" if ses.first_key else " (as expected)")})
+            steps.append({"step": "Sign-in", "ok": True, "detail": "TriZetto accepted the Site ID and password"})
+            files = ses.walk()
+            remits = [f for f in files if re.search(r"(?i)\.(rmt|835|era)$", f[0])]
+            if not files:
+                steps.append({"step": "Files", "ok": False, "detail": "no remittance files in the folders read: in TriZetto's portal turn on "
+                              "Auto Generate Remittances, or set TRIZETTO_SFTP_DIRS to the folder they are written to"})
+                return {"ok": False, "steps": steps, "hostkey": ses.key_fp}
+            newest = files[-1]
+            steps.append({"step": "Files", "ok": True, "detail": f"{len(files)} files ({len(remits)} remittances); newest {posixpath.basename(newest[0])} "
+                          f"of {datetime.fromtimestamp(newest[2], timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"})
+            pick = (remits or files)[-1][0]
+            head = ses.read(pick)[:3]
+            steps.append({"step": "Read", "ok": head == b"ISA", "detail": f"{posixpath.basename(pick)} is an X12 file" if head == b"ISA"
+                          else f"{posixpath.basename(pick)} does not start like an X12 file"})
+            return {"ok": all(x["ok"] for x in steps), "steps": steps, "hostkey": ses.key_fp}
+    except TriZettoError as exc:
+        steps.append({"step": "Connection", "ok": False, "detail": str(exc)})
+        return {"ok": False, "steps": steps}

@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 
 from . import actions as actions_mod
+from . import trizetto
 from . import activity, runtime
 from .state import Conflict, state_from_env
 
@@ -53,7 +54,7 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "5"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
+SERVING_BUILD = "6"                 # bump when SERVING_TABLES changes: a copy made by another build is made again
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -532,6 +533,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     ("provider_panels", None, None), ("provider_cohorts", None, None), ("provider_recall", None, None),
     # faxes sent and received, payers' confirmed fax numbers, what the note reviews taught (remitwatch.fax, the journal)
     ("faxes", None, None), ("payer_fax", None, None), ("note_lessons", None, None),
+    # reasons hidden for a payer (actions.apply_hide_rule)
+    ("hide_rules", None, None),
     ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
 ]
 
@@ -550,6 +553,7 @@ def empty_serving(path: str) -> None:
     c.executescript(ALERTS_DDL + LINK_DDL)
     activity.ensure_schema(c)
     actions_mod.ensure_fax_tables(c)
+    actions_mod.ensure_hide_rules(c)
     c.commit()
     c.close()
 
@@ -916,14 +920,22 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         journal = read_actions(state)
         done, left, wrote = apply_actions(conn, journal) if journal else ([], [], False)
 
+        # TriZetto first (remitwatch.trizetto): the remittances straight from the clearinghouse, the freshest source
+        tz: dict = {}
+        if trizetto.configured():
+            try:
+                tz = trizetto.pull(conn, lambda items: _ingest_batch(store, items, log), deadline=t0 + budget * 0.4, log=log)
+            except Exception as exc:
+                tz = {"error": str(exc)[:300] if isinstance(exc, trizetto.TriZettoError) else f"{type(exc).__name__}: {str(exc)[:200]}"}
+            out["trizetto"] = {k: v for k, v in tz.items() if k != "seen_changed"}
         ingest: dict = {"skipped": "Dropbox credentials are not configured"}
         if client is not None:
             # leave room for detection and for saving: ingestion gets at most half of the budget
             ingest = sync_and_ingest(store, client, state, deadline=t0 + budget * 0.5, full=full, log=log)
         out["ingest"] = {k: v for k, v in ingest.items() if k not in ("cursor", "remit_stats", "seen_changed")}
-        n_ingested = ingest.get("remits", 0) + ingest.get("ema", 0) + ingest.get("claims_837", 0)
+        n_ingested = sum((src.get(k) or 0) for src in (ingest, tz) for k in ("remits", "ema", "claims_837"))
         ingested = n_ingested > 0
-        remaining = (ingest.get("remaining") or 0) > 0
+        remaining = (ingest.get("remaining") or 0) > 0 or (tz.get("remaining") or 0) > 0
         mem["ingest"] = peak_mb()
 
         # exports read by a release that did not yet keep their pull time: fetch that once (see backfill_export_times)
@@ -1010,7 +1022,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             data_rev = str(int(data_rev or 0) + 1)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
             conn.commit()
-        if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed"):
+        if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed"):
             t2 = time.time()
             meta = save_raw(state, store)
             out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
@@ -1264,6 +1276,11 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         if fx_on else "not set: appeal packets are downloaded and sent by hand. To fax them, follow docs/OPERATIONS.md, Faxing appeals",
         "Set SRFAX_CALLER_ID to the SRFax fax number and SRFAX_SENDER_EMAIL to the address SRFax sends its notices to, then redeploy.")
     out["fax"] = {"configured": fx_on}
+    tz_on = bool(env("TRIZETTO_SFTP_USER") and env("TRIZETTO_SFTP_PASSWORD"))
+    add("trizetto", "TriZetto direct: remittances from the clearinghouse, no Dropbox needed (optional)", tz_on or None,
+        "set: press Test the TriZetto connection below" if tz_on else
+        "not set: remittances come only from the Dropbox folder. To read them straight from TriZetto, follow docs/OPERATIONS.md, TriZetto direct")
+    out["trizetto"] = {"configured": tz_on}
     missing = [k for k in ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI", "PRACTICE_PHONE", "PRACTICE_EMAIL") if not env(k)]
     if not (env("SRFAX_CALLER_ID") or env("PRACTICE_FAX")):
         missing.append("PRACTICE_FAX (or SRFAX_CALLER_ID)")

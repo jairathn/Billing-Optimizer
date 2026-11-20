@@ -12,7 +12,7 @@ const FAX_DECISION = {overturned:['Overturned','ok'], partially_overturned:['Par
 // what each hold means, in the order a person fixes them
 const HOLDS = [
   ['practice', 'The practice\'s details are missing from the letters'], ['no_fax', 'The fax line is not set up'],
-  ['check_code', 'Check in EMA which code went out first (open each one)'], ['no_number', 'No fax number saved for the payer'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
+  ['stale', 'The remittances are behind: these may have been paid since'], ['check_code', 'Check in EMA which code went out first (open each one)'], ['no_number', 'No fax number saved for the payer'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
   ['ambiguous', 'More than one note that day: pick one in the item'], ['no_note', 'No signed note in EMA yet'],
   ['review_no', 'Claude\'s review: the note does not support it (counted in Suggested templates)'], ['review_fix', 'Correct and resubmit instead'],
   ['blanks', 'The letter still has blanks'], ['fax_error', 'The fax line refused it'], ['expired', 'Filing window closed'],
@@ -42,11 +42,11 @@ async function appealByFax(ids, opts){
     while(next < ids.length && !stopped){
       const id = ids[next++];
       let r;
-      try { r = await post('/api/appeals/send', {finding_id: id}); }
+      try { r = await post('/api/appeals/send', {finding_id: id, stale_ok: !!opts.staleOk}); }
       catch(e){ r = {finding_id: id, status: 'held', code: 'failed', reason: e.message}; if([401,403,429].includes(e.status)) stopped = e.message; }
       res.push(r);
       // a hold that every item would hit: say it once instead of running through the rest
-      if(r.code === 'practice' || r.code === 'no_fax') stopped = r.reason;
+      if(r.code === 'practice' || r.code === 'no_fax' || r.code === 'stale') stopped = r.reason;
       tally();
     }
   }
@@ -54,6 +54,13 @@ async function appealByFax(ids, opts){
   tally();
   state.brief = null; state.dirty = true;
   faxSummary(box.querySelector('#fxOut'), res, ids.length - res.length, opts);
+  if(res.some(r => r.code === 'stale')){
+    const out = box.querySelector('#fxOut'), b = document.createElement('div');
+    b.className = 'actions';
+    b.innerHTML = '<button id="fxStaleGo">Fax them anyway</button><span class="small muted">Only when you know they are still unpaid (checked in EMA).</span>';
+    out.prepend(b);
+    b.querySelector('#fxStaleGo').onclick = () => appealByFax(ids, Object.assign({}, opts, {staleOk: true}));
+  }
 }
 function faxSummary(el, res, notTried, opts){
   const sent = res.filter(r=>r.status==='sent'), skipped = res.filter(r=>r.status==='skipped'), held = res.filter(r=>r.status==='held');
@@ -154,6 +161,7 @@ function bindFaxDrawer(id, d){
     msg.innerHTML = esc(r.reason || 'Not sent.') + (r.code === 'no_number' ? ' <a href="#faxes" id="fxGoNums">Open the Faxes page</a>' : '')
       + ((r.candidates||[]).length ? ' Use "Get the note from EMA" below to pick it.' : '');
     if(r.code === 'check_code') msg.innerHTML += ' <button id="fxSure">It went out as billed: fax it</button>';
+    if(r.code === 'stale') msg.innerHTML += ' <button id="fxSure">Still unpaid in EMA: fax it anyway</button>';
     const g = d.querySelector('#fxGoNums'); if(g) g.onclick = e => { e.preventDefault(); closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); };
     const sure = d.querySelector('#fxSure'); if(sure) sure.onclick = () => go(true);
     b.disabled = false;

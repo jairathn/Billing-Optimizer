@@ -9,3 +9,5 @@ pypdf>=5.0
 python-docx>=1.1
 reportlab>=4.2
 PyJWT[crypto]>=2.8
+# remittances straight from TriZetto's SFTP (remitwatch.trizetto)
+paramiko>=3.4

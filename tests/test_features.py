@@ -867,7 +867,7 @@ def test_a_denial_of_a_code_billed_twice_on_a_date_is_not_closed_by_another_clai
     store.close()
 
 
-def test_a_denial_ema_shows_paid_gets_a_hint_not_a_closure(tmp_path):
+def test_a_denial_ema_shows_paid_is_closed(tmp_path, monkeypatch):
     denied = ("CLP*CB0000300C017*1*223.65*0.00*0.00*12*PC300*11~NM1*QC*1*ORCHARD*LEE****MI*W55500300~NM1*82*2*TEST PROVIDER*****XX*" + NPI
               + "~DTM*232*20260401~" + svc("99214", "223.65", "0.00", None, "CAS*CO*16*223.65~"))
     store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied])
@@ -877,15 +877,24 @@ def test_a_denial_ema_shows_paid_gets_a_hint_not_a_closure(tmp_path):
                            [("f1", "charge_lines", "Encounter & Charge Lines.xlsx", 1, "2026-04-01", "CB0000300C017", "99214", "Charge", 11760)])
     store.conn.commit()
     Detector(store, run_id="t").run()
-    q = "SELECT status, hint, evidence FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'"
+    q = "SELECT status, hint, evidence, auto_note, recovered_cents FROM findings WHERE patient_control_number='CB0000300C017' AND category='denial'"
     f = store.query(q)[0]
-    # EMA's figure is by claim, code and date, with no payer: it is shown, never taken as the payment
-    assert f["status"] == "open" and f["hint"] == "EMA shows $117.60 paid by insurance; check before marking recovered"
+    # what EMA has posted is what the billers see as paid: the item closes, with where the payment was seen
+    assert f["status"] == "resolved" and f["hint"] is None and f["recovered_cents"] == 11760
+    assert f["auto_note"].startswith("EMA shows $117.60 paid by insurance (Encounter & Charge Lines.xlsx)")
     assert json.loads(f["evidence"])["ema_shows_paid"]["paid_cents"] == 11760
-    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=2000")     # under half the expected amount: no hint
+    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=2000")     # under half the expected amount: open again, no hint
     store.conn.commit()
     Detector(store, run_id="t2").run()
-    assert store.query(q)[0]["hint"] is None
+    assert store.query(q)[0]["status"] == "open" and store.query(q)[0]["hint"] is None
+    # with REMITWATCH_EMA_CLOSES=0 it is only a hint
+    import remitwatch.detect as D
+    monkeypatch.setattr(D, "EMA_CLOSES", False)
+    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=11760")
+    store.conn.commit()
+    Detector(store, run_id="t3").run()
+    f = store.query(q)[0]
+    assert f["status"] == "open" and f["hint"] == "EMA shows $117.60 paid by insurance; check before marking recovered"
     store.close()
 
 

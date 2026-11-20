@@ -132,6 +132,8 @@ async function deskTab(v, key){
   if(f.paid) chips.push(chip('paid', `Paid in the last ${esc(f.paid)} days`));
   if(f.year) chips.push(chip('year', `Year ${esc(f.year)}`));
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
+  // a reason this payer is known not to pay: one click takes it off the lists (and keeps new ones off)
+  if(f.signal && f.payer && !closed && !waiting) chips.push(`<button class="ghost small" id="hideRule" title="Its open items go to Let go with your note, and new ones will too. Undo it under Hidden.">Hide “${esc(shortOf(b, f.signal))}” for ${esc(f.payer)}</button>`);
   if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Window open">✕</button></span>`);
   const sel = (name, label, opts, cur) => `<select data-f="${name}" aria-label="${label}">${opts.map(([val,l])=>`<option value="${esc(val)}" ${String(cur)===val?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
   const plist = payers.concat(f.payer && !payers.includes(f.payer) ? [f.payer] : []);
@@ -152,7 +154,7 @@ async function deskTab(v, key){
     <div class="fix-top">${fix.line||''}</div>
     ${(f.kind || (single && kinds[0] ? kinds[0].key : '')) === 'note' && state.meta && state.meta.modmed && !closed
       ? `<div class="ema-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><button id="emaBatch" class="primary">Build packets from EMA (next 10)</button><span id="emaBatchMsg" class="small muted">Reads each item's visit note from EMA and reviews it into a packet, about a minute each.</span></div>` : ''}
-    <div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>${chips.join('')}
+    <div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>${chips.join('')}<span id="hiddenLine" class="small muted"></span>
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
     <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES,f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
@@ -203,6 +205,8 @@ async function deskTab(v, key){
   const st = v.querySelector('#startFirst'); if(st) st.onclick = () => { if(res.items.length) openDetail(res.items[0].finding_id); };
   const eb = v.querySelector('#emaBatch'); if(eb) eb.onclick = () => emaBatch(eb, v.querySelector('#emaBatchMsg'));
   const fe = v.querySelector('#fxEverything'); if(fe) fe.onclick = () => appealEverything({payer: f.payer || '', after: render});
+  const hr = v.querySelector('#hideRule'); if(hr) hr.onclick = () => hideReason(f.payer, f.signal, shortOf(b, f.signal), () => set({signal: ''}, '#listHead'));
+  hiddenLine(v.querySelector('#hiddenLine'));
   const mr = v.querySelector('#moreRows'); if(mr) mr.onclick = () => { const y = window.scrollY; state.lim[key] = lim + ROWS; render().then(()=>window.scrollTo(0, y)); };
   bindRows(v);
   bindBulk(v);
@@ -506,4 +510,46 @@ async function emaBatch(btn, box){
   if(n.failed) parts.push(`${n.failed} failed`);
   box.textContent = 'Done: ' + parts.join(', ') + '. Open an item to send its packet.';
   btn.disabled = false;
+}
+
+// ---------------------------------------------------------------- reasons hidden for a payer (Alex: "we know which payers don't pay that")
+async function hideReason(payer, signal, label, after){
+  const note = prompt(`Hide “${label}” for ${payer}?\n\nIts open items go to Let go, and new ones will too; anything someone has worked stays. Undo it under Hidden.\n\nWhy (shown on each item):`, `${payer} does not pay these`);
+  if(note === null) return;
+  let r;
+  try { r = await post('/api/hide', {payer_group: payer, signal, note}); } catch(e){ alert('Not saved: ' + e.message); return; }
+  state.brief = null; state.dirty = true;
+  if(after) after(); else render();
+  setTimeout(() => alert(`${pl(r.hidden, 'item')} hidden. New ones will be hidden too.`), 50);
+}
+async function hiddenLine(el){
+  if(!el) return;
+  let h; try { h = await api('/api/hide'); } catch(e){ return; }
+  const rules = h.rules || []; if(!rules.length) return;
+  const n = rules.reduce((a, r) => a + (r.n || 0), 0);
+  el.innerHTML = ` · <a href="#" id="hiddenMgr">Hidden: ${pl(rules.length, 'reason')} (${pl(n, 'item')})</a>`;
+  el.querySelector('#hiddenMgr').onclick = e => { e.preventDefault(); hiddenManage(rules); };
+}
+function hiddenManage(rules){
+  $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">Hidden for a payer</h2><button id="closeM" aria-label="Close">✕</button></div>
+    <div class="note">Each line keeps one reason off the lists for one payer: its items are under Let go with the note. Show again puts the ones it hid back on the lists.</div>
+    <table class="small"><thead><tr><th>Payer</th><th>Reason</th><th>Why</th><th class="num">Items</th><th></th></tr></thead><tbody>
+    ${rules.map((r, i)=>`<tr><td>${esc(r.payer_group)}</td><td>${esc(r.label)}</td><td class="muted">${esc(r.note||'')}<div>${esc(r.actor||'')} · ${esc(String(r.at||'').slice(0,10))}</div></td><td class="num">${num(r.n)} · ${money(r.cents)}</td><td><button data-unhide="${i}">Show again</button></td></tr>`).join('')}</tbody></table>`;
+  $('#modal').classList.add('open');
+  $('#closeM').onclick = () => $('#modal').classList.remove('open');
+  $('#modalBox').querySelectorAll('[data-unhide]').forEach(b => b.onclick = async () => {
+    const r = rules[+b.dataset.unhide];
+    try { await post('/api/hide', {payer_group: r.payer_group, signal: r.signal, remove: true}); } catch(e){ alert('Not saved: ' + e.message); return; }
+    $('#modal').classList.remove('open'); state.brief = null; state.dirty = true; render();
+  });
+}
+// the item's panel: the same, for the reason and payer of the item open
+function hideDrawerHtml(f){
+  if(!f.payer_group || !f.signal || !['open','in_progress'].includes(f.status)) return '';
+  const label = state.brief ? shortOf(state.brief, f.signal) : f.signal;
+  return `<div class="small" style="margin:4px 0"><a href="#" id="hideFromItem" data-label="${esc(label)}">Hide “${esc(label)}” for ${esc(f.payer_group)}</a> <span class="muted">(for a reason this payer never pays)</span></div>`;
+}
+function bindHideDrawer(f, d){
+  const a = d.querySelector('#hideFromItem'); if(!a) return;
+  a.onclick = e => { e.preventDefault(); hideReason(f.payer_group, f.signal, a.dataset.label, () => { closeDetail(); render(); }); };
 }

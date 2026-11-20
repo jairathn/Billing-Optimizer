@@ -69,7 +69,10 @@ from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLO
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_RULES = "2.3"
+DETECT_RULES = "2.4"
+# whether what EMA has posted as paid closes an item (resolve_elsewhere), or only adds a hint: the billers check EMA, and
+# an item EMA shows paid is not work
+EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
 
 
 def _rules_hash() -> str:
@@ -1170,8 +1173,10 @@ class Detector:
         covering the units denied, for a code paid at most once per patient and date, and, for a claim-level denial, every
         code it lists. A duplicate's denial also closes when the service was paid on another claim before it. Anything
         short of that (a payment before the denial, another member number, fewer units, a code often paid twice in a day,
-        an adjudication to the patient's deductible, a bundled procedure paid elsewhere) and anything only EMA shows as
-        paid is left open with a hint."""
+        an adjudication to the patient's deductible, a bundled procedure paid elsewhere) is left open with a hint.
+        What EMA has posted closes it too (EMA_CLOSES): insurance payments on the line in EMA's newest charge export, or
+        on its ERA lines after the denial, of at least half the expected amount, where the claim carries the code once
+        on that date. With REMITWATCH_EMA_CLOSES=0 that is only a hint."""
         for f in self.findings.values():           # same bill, fewer units than billed: a hint
             got = self.partly_paid.get(f.get("line_key") or "")
             if got and not f.get("auto_status") and not f.get("hint"):
@@ -1346,8 +1351,20 @@ class Detector:
                     hint = (got[0], None, got[1])
             if hint:
                 ev["ema_shows_paid"] = {"paid_cents": hint[0], "date": hint[1], "source": hint[2]}
-                f["hint"] = f"EMA shows ${hint[0]/100:,.2f} paid by insurance" + (f" on {hint[1]}" if hint[1] else "") + "; check before marking recovered"
                 f["evidence"] = json.dumps(ev, default=str)
+                if EMA_CLOSES:
+                    # what EMA has posted is what the billers see as paid: a claim corrected and paid, a paper check, a
+                    # payment that never came as an 835. The item closes; a person can reopen it if that money is for
+                    # something else.
+                    ln = ls[0] if ls else {}
+                    self._mark_paid(f, hint[1], hint[0],
+                                    f"EMA shows ${hint[0]/100:,.2f} paid by insurance" + (f" on {hint[1]}" if hint[1] else "")
+                                    + f" ({hint[2]}). Reopen it if that payment is for something else.",
+                                    {"payment_date": hint[1], "claim": f["patient_control_number"], "paid_cents": hint[0], "how": "EMA shows it paid",
+                                     "trace": f"EMA {ln.get('procedure_code') or ''} {ln.get('service_date') or ''}".strip(), "source": hint[2]})
+                    f["hint"] = None
+                    continue
+                f["hint"] = f"EMA shows ${hint[0]/100:,.2f} paid by insurance" + (f" on {hint[1]}" if hint[1] else "") + "; check before marking recovered"
 
     def _emit(self, signal, category, severity, actionable, title, l, expected, shortfall, carc, rarc, evidence,
               key_parts=None, claim=None, resolved_by: tuple | None = None) -> None:
@@ -2386,7 +2403,14 @@ class Detector:
         self.run_aggregate_rules()
         self.emit_second_rates()
         self.resolve_elsewhere()
-        return self.save()
+        out = self.save()
+        try:        # reasons hidden for a payer (actions.apply_hide_rule) hide the new items they cover
+            from .actions import apply_hide_rules
+            if apply_hide_rules(self.conn):
+                self.conn.commit()
+        except Exception:
+            self.conn.rollback()        # the analysis is saved; the rules run again after the next one
+        return out
 
 
 def run_detection(db_path: str, run_id: str | None = None) -> dict:
