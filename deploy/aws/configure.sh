@@ -86,7 +86,13 @@ ask MODMED_PRIVATE_KEY pem "ModMed private key (the one from modmed-key)"
 
 echo; echo "== TriZetto, the remittances straight from the clearinghouse (optional until TriZetto issues the login)"
 ask TRIZETTO_SFTP_USER text "TriZetto SFTP user (the Site ID, or the separate login TriZetto issues for RemitWatch)"
+tz_before=$(current TRIZETTO_SFTP_PASSWORD)
 ask TRIZETTO_SFTP_PASSWORD secret "TriZetto SFTP password"
+if [ -n "$(current TRIZETTO_SFTP_PASSWORD)" ] && [ "$(current TRIZETTO_SFTP_PASSWORD)" != "$tz_before" ]; then
+  put TRIZETTO_SFTP_PASSWORD_SET "$(date -u +%F)"      # for the reminder before it expires (the data checks)
+  echo "  noted: changed on $(date -u +%F)"
+fi
+ask TRIZETTO_SFTP_PASSWORD_DAYS text "How many days a TriZetto SFTP password lasts before TriZetto makes you change it (from TriZetto's answer; empty if it never expires)"
 ask TRIZETTO_SFTP_DIRS text "Folder(s) the remittances are in, comma-separated (empty: the whole login folder)"
 ask TRIZETTO_SFTP_HOSTKEY text "The SFTP server's key fingerprint TriZetto gives (SHA256:...), optional"
 

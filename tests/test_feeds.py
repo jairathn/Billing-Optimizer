@@ -97,6 +97,42 @@ def test_a_server_with_another_key_or_a_wrong_password_gets_nothing(tmp_path, sf
     store.close()
 
 
+def test_a_refused_password_is_not_tried_again_so_the_login_is_never_locked(tmp_path, sftp):
+    """TriZetto locks a login after repeated failures, and the login may be the one ModMed uses: a refused user name and
+    password are not tried again for a day, a new password is tried at once, and a sign-in that works clears the hold."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from remitwatch.store import Store
+    _remits(sftp.root, 1)
+    store = Store(str(tmp_path / "s.sqlite"))
+    pull = lambda env: trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + 60, settings=trizetto.Settings.from_env(env), log=lambda *a: None)
+    sftp.refuse_password = True
+    with pytest.raises(trizetto.SignInRefused):
+        pull(sftp.env())
+    assert len(sftp.logins) == 1
+    for _ in range(3):                                          # every cycle after it: no sign-in at all
+        out = pull(sftp.env())
+        assert out["skipped"].startswith("TriZetto refused this user name and password") and out["downloaded"] == 0
+    assert len(sftp.logins) == 1
+    raw = store.conn.execute("SELECT value FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone()[0]
+    assert sftp.password not in raw                             # only a hash of the settings is kept
+    # a day later the same password is tried once (TriZetto may have turned SFTP on since); refused again, held again
+    held = json.loads(raw)
+    held["at"] = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(timespec="seconds")
+    store.conn.execute("UPDATE meta SET value=? WHERE key=?", (json.dumps(held), trizetto.REFUSED_META))
+    with pytest.raises(trizetto.SignInRefused):
+        pull(sftp.env())
+    assert len(sftp.logins) == 2 and pull(sftp.env())["skipped"]
+    # a new password is tried at once; once a sign-in works, the hold is gone
+    sftp.refuse_password = False
+    sftp.password = "the-new-one-from-the-portal"
+    out = pull(sftp.env(TRIZETTO_SFTP_PASSWORD="the-new-one-from-the-portal"))
+    assert len(sftp.logins) == 3 and out["remits"] == 1 and "skipped" not in out
+    assert store.conn.execute("SELECT 1 FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone() is None
+    store.close()
+
+
 def test_the_setup_check_walks_every_step(sftp):
     assert trizetto.check({})["steps"][0]["ok"] is False
     empty = trizetto.check(sftp.env())
@@ -229,3 +265,22 @@ def test_opening_the_dashboard_on_old_data_starts_a_run(site, monkeypatch):
     assert c.post("/api/sync/freshen", headers=XHR).json()["started"] is False and started == ["freshen"]
     assert c.post("/api/sync/freshen").status_code == 400          # only the site's own pages start it
     assert c.get("/api/meta").json()["trizetto"] is True
+
+
+def test_the_data_checks_warn_before_the_trizetto_password_expires_and_while_a_sign_in_is_held(tmp_path):
+    import json
+    import sqlite3
+
+    from remitwatch.insights import trizetto_health
+    conn = sqlite3.connect(str(tmp_path / "m.sqlite"))
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    env = {"TRIZETTO_SFTP_USER": "SITE", "TRIZETTO_SFTP_PASSWORD": "x", "TRIZETTO_SFTP_PASSWORD_SET": "2026-10-01"}
+    assert trizetto_health(conn, "2026-11-21", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="365")) == []
+    soon = trizetto_health(conn, "2026-11-21", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="60"))
+    assert [(h["key"], h["due"], h["days_left"]) for h in soon] == [("trizetto_password", "2026-11-30", 9)]
+    assert "Manage SFTP Password" in soon[0]["who"]
+    gone = trizetto_health(conn, "2026-12-05", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="60"))
+    assert gone[0]["title"] == "TriZetto's SFTP password expired on 2026-11-30"
+    conn.execute("INSERT INTO meta VALUES (?, ?)", (trizetto.REFUSED_META, json.dumps({"who": "h", "at": "2026-11-20T08:00:00+00:00"})))
+    assert [h["key"] for h in trizetto_health(conn, "2026-11-21", env)] == ["trizetto_signin"]
+    assert trizetto_health(conn, "2026-11-21", {}) == []                 # no feed set up: nothing to say

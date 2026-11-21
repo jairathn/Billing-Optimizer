@@ -66,9 +66,22 @@ TriZetto has confirmed it cannot disturb ModMed's posting.
 
 It only reads: nothing on TriZetto's server is moved, renamed or deleted, and TriZetto's own text reports (.DAT) are not
 opened (a download of one starts the next report). The server's key is kept the first time unless `TRIZETTO_SFTP_HOSTKEY`
-is set; a different key afterwards stops the connection before the password is sent. The SFTP password expires (yearly,
-by vendors' accounts): when the test fails with a sign-in error, put the new one in with configure.sh. The server has a
-fixed address, so an address TriZetto has to allow is no obstacle.
+is set; a different key afterwards stops the connection before the password is sent. The server has a fixed address
+(3.128.37.47), so an address TriZetto has to allow is no obstacle.
+
+The password. TriZetto's SFTP login is usually the Site ID itself, with one password for the account, and the practice's
+billing system (ModMed) may sign in with the same one. Two things protect it:
+
+- A refused password is not tried again for a day. TriZetto locks a login for an hour after repeated failed sign-ins, and
+  a locked Site ID login would stop ModMed's claims and remittances too. After a refusal the scheduled runs do not sign in
+  with the same user name and password for 24 hours (then once more: TriZetto may have switched SFTP on since); a new
+  password is tried at once, and a successful "Test the TriZetto connection" ends the hold. Today's data checks and the
+  test on `/setup` say when a hold is in place. Only a hash of the settings is kept, never the password.
+- A reminder before it expires. TriZetto makes the SFTP password expire (every 60 days to a year, by vendors' accounts).
+  configure.sh notes the day a new password is entered (`TRIZETTO_SFTP_PASSWORD_SET`) and asks how many days it lasts
+  (`TRIZETTO_SFTP_PASSWORD_DAYS`, from TriZetto's answer); from 20 days before, Today's data checks say when it expires.
+  The TriZetto administrator sets the new one in the portal (My Account, Manage Products, Manage SFTP Password) and gives
+  it by phone to whoever runs the server, the same day, and to anything else that signs in with that login.
 
 ### What EMA shows as paid
 

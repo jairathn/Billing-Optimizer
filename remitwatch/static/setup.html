@@ -127,7 +127,8 @@ async function tzTest(){
     const r = await api('/api/trizetto/test', {method:'POST', body: '{}'});
     $('#tzSteps').innerHTML = r.steps.map(x => { const cls = x.ok===true?'ok':(x.ok===false?'no':'opt'); const mark = x.ok===true?'✓':(x.ok===false?'✗':'–');
       return `<tr><td class="mark ${cls}">${mark}</td><td><b>${esc(x.step)}</b><div class="small muted">${esc(x.detail||'')}</div></td></tr>`; }).join('');
-    $('#tzMsg').innerHTML = r.ok ? '<span class="ok">Connected: the next run reads the remittances.</span>' : '<span class="no">Not connected yet: fix the first ✗.</span>';
+    $('#tzMsg').innerHTML = r.ok ? '<span class="ok">Connected: the next run reads the remittances.</span>'
+      : '<span class="no">Not connected yet: fix the first ✗.</span>' + (r.held ? `<div class="small">TriZetto refused this user name and password on ${esc(String(r.held.at).slice(0,16).replace('T',' '))} UTC, so the scheduled runs do not sign in with them again until ${esc(String(r.held.retry_at).replace('T',' '))} UTC: a login TriZetto locks may be the one ModMed uses too. Enter the new password on the server and it is tried at once.</div>` : '');
   } catch(e){ $('#tzMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; }
   b.disabled = false;
 }

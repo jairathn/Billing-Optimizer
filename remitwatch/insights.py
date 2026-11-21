@@ -401,6 +401,42 @@ def denial_causes(conn: sqlite3.Connection, newest: str | None) -> list[dict]:
     return out
 
 
+def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = None) -> list[dict]:
+    """The TriZetto feed's sign-in, which nothing else watches: a password TriZetto refused (the feed holds off for a day so
+    the login is never locked: remitwatch.trizetto), and a password about to expire (TriZetto makes it expire, every 60
+    days to a year by vendors' accounts). Changed late, the feed stops, and so does everything else that signs in with it."""
+    import os
+    e = os.environ if env is None else env
+    if not (e.get("TRIZETTO_SFTP_USER") and e.get("TRIZETTO_SFTP_PASSWORD")):
+        return []
+    out = []
+    held = _meta(conn, "trizetto:signin_refused")
+    if held and held.get("at"):
+        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
+                    "title": f"TriZetto refused the feed's password on {held['at'][:10]}",
+                    "detail": "No remittances come straight from TriZetto until it is fixed. The feed tries the same password only once a "
+                              "day, so the login is never locked (ModMed may sign in with it too).",
+                    "who": "TriZetto administrator: set a new SFTP password in the TriZetto portal (My Account, Manage Products, Manage "
+                           "SFTP Password) and give it by phone to whoever runs the server, who enters it with configure.sh."})
+    try:
+        set_on = date.fromisoformat((e.get("TRIZETTO_SFTP_PASSWORD_SET") or "")[:10])
+        days = int(e.get("TRIZETTO_SFTP_PASSWORD_DAYS") or 0)
+    except ValueError:
+        set_on, days = None, 0
+    if set_on and days > 0:
+        due = set_on + timedelta(days=days)
+        left = (due - date.fromisoformat(today)).days
+        if left <= 20:
+            out.append({"key": "trizetto_password", "ok": False, "due": due.isoformat(), "days_left": left,
+                        "title": (f"TriZetto's SFTP password expires on {due.isoformat()}" if left >= 0 else
+                                  f"TriZetto's SFTP password expired on {due.isoformat()}"),
+                        "detail": "Change it before then, the same day everywhere it is used: the remittance feed stops on the old one.",
+                        "who": "TriZetto administrator: set a new SFTP password in the TriZetto portal (My Account, Manage Products, Manage "
+                               "SFTP Password), and give it by phone to whoever runs the server (configure.sh) and to anything else that "
+                               "signs in with that login."})
+    return out
+
+
 def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> list[dict]:
     """What in the data is hiding money, most urgent first. Each item says what to do and who does it."""
     items = []
@@ -418,6 +454,7 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
                                                        + (f" Files did arrive on {got[:10]}, but none holds a later payment." if recent else "")),
                       "who": ("Billing lead, with TriZetto: ask whether newer remittances exist and why they are not in the downloads." if recent
                               else "Billing lead: put the latest TriZetto downloads in the Dropbox folder.")})
+    items += trizetto_health(conn, today)
     info = _meta(conn, "activity:info") or {}
     gaps = info.get("gaps") or []
     if gaps:

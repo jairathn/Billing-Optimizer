@@ -30,7 +30,8 @@ The same as on Vercel, wherever Vercel has them:
   `APPEAL_EMAIL_DOMAINS`, `APPEAL_EMAIL_TO`
 - `SRFAX_ACCESS_ID`, `SRFAX_ACCESS_PWD`, `SRFAX_CALLER_ID`, `SRFAX_SENDER_EMAIL` (once SRFax is set up)
 - `TRIZETTO_SFTP_USER`, `TRIZETTO_SFTP_PASSWORD`, `TRIZETTO_SFTP_HOST`, `TRIZETTO_SFTP_PORT`, `TRIZETTO_SFTP_DIRS`,
-  `TRIZETTO_SFTP_HOSTKEY` (only if set up)
+  `TRIZETTO_SFTP_HOSTKEY` (only if set up); `TRIZETTO_SFTP_PASSWORD_SET` (written by configure.sh when a new password is
+  entered) and `TRIZETTO_SFTP_PASSWORD_DAYS` (how long TriZetto lets it last), for the reminder before it expires
 - `CRON_SECRET`: optional on a server (only an outside caller of `/api/cron/` needs it)
 - Tuning, only if Vercel sets them: `REMITWATCH_REPORT_EVERY_DAYS`, `REMITWATCH_STALE_DAYS`, `REMITWATCH_ALERT_RECENT_DAYS`,
   `REMITWATCH_ALERT_BASELINE_DAYS`, `REMITWATCH_NOTE_MODEL`, `REMITWATCH_NOTE_SCRUB`, `REMITWATCH_NOTE_SEND_SCANS`,

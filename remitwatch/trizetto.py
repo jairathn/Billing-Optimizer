@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import posixpath
 import re
@@ -29,7 +30,7 @@ import socket
 import stat
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 DEFAULT_HOST = "sftp.gatewayedi.com"
@@ -42,10 +43,20 @@ SEEN_DDL = """
 CREATE TABLE IF NOT EXISTS trizetto_seen (path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, at TEXT, status TEXT);
 """
 HOSTKEY_META = "trizetto:hostkey"
+# A refused sign-in is not tried again with the same user name and password for a day: TriZetto locks a login for an hour
+# after repeated failures, and the login may be the Site ID's own, which the practice's billing system (ModMed) uses for its
+# claims and remittances. A new password is tried at once; a day later the same one is tried once (TriZetto may have turned
+# SFTP on in the meantime). Only a hash of the settings is kept, never the password.
+REFUSED_META = "trizetto:signin_refused"
+RETRY_AFTER_HOURS = 24
 
 
 class TriZettoError(Exception):
     pass
+
+
+class SignInRefused(TriZettoError):
+    """TriZetto refused the user name and password (not the network, nor the server's key)."""
 
 
 @dataclass
@@ -117,11 +128,13 @@ class Session:
             t.auth_password(self.s.user, self.s.password)
         except Exception as exc:
             self.close()
-            raise TriZettoError("TriZetto refused the sign-in: check TRIZETTO_SFTP_USER (the Site ID) and TRIZETTO_SFTP_PASSWORD, and that "
+            if isinstance(exc, (socket.timeout, OSError, EOFError)) and not type(exc).__name__.endswith("AuthenticationException"):
+                raise TriZettoError(f"The sign-in to {self.s.host} did not finish ({type(exc).__name__}).") from exc
+            raise SignInRefused("TriZetto refused the sign-in: check TRIZETTO_SFTP_USER (the Site ID) and TRIZETTO_SFTP_PASSWORD, and that "
                                 "TriZetto support has turned SFTP on for the Site ID.") from exc
         if not t.is_authenticated():
             self.close()
-            raise TriZettoError("TriZetto did not accept the sign-in.")
+            raise SignInRefused("TriZetto did not accept the sign-in.")
         self.sftp = paramiko.SFTPClient.from_transport(t)
         return self
 
@@ -176,15 +189,77 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def credential_tag(s: Settings) -> str:
+    """Which server, user name and password a refusal was for: a hash, so the password itself is never stored."""
+    return hashlib.sha256(f"{s.host}\0{s.port}\0{s.user}\0{s.password}".encode()).hexdigest()[:16]
+
+
+def refusal(conn, s: Settings | None = None, now: datetime | None = None) -> dict | None:
+    """The refused sign-in that still holds for these settings ({at, detail, retry_at}), or None: none was refused, a new
+    user name or password was entered since (the refusal is cleared), or a day has passed (one more try is due)."""
+    s = settings_or_env(s)
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (REFUSED_META,)).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        r = json.loads(row[0])
+        at = datetime.fromisoformat(r["at"])
+    except (TypeError, ValueError, KeyError):
+        r, at = {}, None
+    if r.get("who") != credential_tag(s):
+        forget_refusal(conn)
+        return None
+    if at is None or ((now or datetime.now(timezone.utc)) - at).total_seconds() >= RETRY_AFTER_HOURS * 3600:
+        return None
+    return {"at": r["at"], "detail": r.get("detail") or "", "retry_at": (at + timedelta(hours=RETRY_AFTER_HOURS)).isoformat(timespec="minutes")}
+
+
+def settings_or_env(s: Settings | None) -> Settings:
+    return s or Settings.from_env()
+
+
+def remember_refusal(conn, s: Settings, detail: str) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                 (REFUSED_META, json.dumps({"who": credential_tag(s), "at": _now(), "detail": detail[:300]})))
+    conn.commit()
+
+
+def forget_refusal(conn) -> None:
+    try:
+        conn.execute("DELETE FROM meta WHERE key=?", (REFUSED_META,))
+        conn.commit()
+    except Exception:
+        pass
+
+
 def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings: Settings | None = None, log=print) -> dict:
     """Read the files not read yet (or changed since) and hand them to `handle` in batches: [(name, bytes, mtime)] ->
-    the loaders' counts. The files read are remembered in the store (trizetto_seen), and so is the server's key."""
+    the loaders' counts. The files read are remembered in the store (trizetto_seen), and so is the server's key. A user
+    name and password TriZetto refused are not tried again for a day (REFUSED_META), so the login is never locked."""
     s = settings or Settings.from_env()
     conn.executescript(SEEN_DDL)
-    row = conn.execute("SELECT value FROM meta WHERE key=?", (HOSTKEY_META,)).fetchone()
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     out: dict = {"listed": 0, "new": 0, "downloaded": 0, "remits": 0, "ema": 0, "claims_837": 0, "errors": 0, "remaining": 0,
                  "failed": [], "seen_changed": False}
-    with Session(s, known=row[0] if row else None) as ses:
+    held = refusal(conn, s)
+    if held:
+        msg = (f"TriZetto refused this user name and password on {held['at'][:16].replace('T', ' ')} UTC. Not signing in again with them "
+               f"until {held['retry_at'].replace('T', ' ')} UTC, so the login is never locked (ModMed may use it too). A new password is "
+               "tried at once.")
+        log(f"  TriZetto: {msg}")
+        return dict(out, skipped=msg, refused_at=held["at"])
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (HOSTKEY_META,)).fetchone()
+    try:
+        ses = Session(s, known=row[0] if row else None).__enter__()
+    except SignInRefused as exc:
+        remember_refusal(conn, s, str(exc))
+        raise
+    forget_refusal(conn)
+    try:
         if ses.first_key:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (HOSTKEY_META, ses.key_fp))
             conn.commit()
@@ -225,6 +300,8 @@ def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings:
             conn.executemany("INSERT OR REPLACE INTO trizetto_seen (path, size, mtime, at, status) VALUES (?,?,?,?,?)", rows)
             conn.commit()
             out["seen_changed"] = out["seen_changed"] or bool(rows)
+    finally:
+        ses.close()
     out["failed"] = out["failed"][:20]
     return out
 

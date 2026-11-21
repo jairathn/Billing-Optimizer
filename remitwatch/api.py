@@ -2726,7 +2726,21 @@ def trizetto_test(_: str = Depends(require_auth)):
     one remittance read. Only file names, counts and dates come back."""
     from . import trizetto
     known = (one("SELECT value FROM meta WHERE key=?", (trizetto.HOSTKEY_META,)) or {}).get("value") if has_table("meta") else None
-    return JSONResponse(trizetto.check(known=known), headers={"Cache-Control": "no-store"})
+    out = trizetto.check(known=known)
+    if not runtime.serverless() and has_table("meta"):
+        # the store this server's cycles read from: a sign-in that works now ends a hold left by an earlier refusal, and
+        # one still in place is shown (the cycles do not sign in with a refused password for a day)
+        conn = db()
+        try:
+            if out.get("ok"):
+                trizetto.forget_refusal(conn)
+            else:
+                held = trizetto.refusal(conn)
+                if held:
+                    out["held"] = held
+        finally:
+            conn.close()
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/.well-known/jwks.json", include_in_schema=False)

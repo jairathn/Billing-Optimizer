@@ -128,7 +128,7 @@ def test_the_settings_script_keeps_values_exactly_and_the_key_loads(tmp_path):
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", REMITWATCH_DEPLOY_STATE=str(tmp_path / "deploy-state"))
     pem = M.generate_key()
     answers = ("\n\n\n\n" "key123\n" "sec$ret#1 x\n" "tok\n\n" "Test Derm\n1 Main St\n\n\n\n\n\n" "\n\n" + pem
-               + "\n\n\n\n" "\n\n\n\n" "\n\n\n\n\n" "n\n")
+               + "\n\n\n\n\n" "\n\n\n\n" "\n\n\n\n\n" "n\n")      # TriZetto: user, password, how long it lasts, folders, key
     r = subprocess.run(["bash", str(repo / "deploy" / "aws" / "configure.sh")], input=answers, text=True, capture_output=True,
                        env=env, timeout=60)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
