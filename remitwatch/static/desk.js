@@ -24,7 +24,7 @@ const KIND_SHORT = {fix:'Correct it in EMA and resend it the way the item says.'
   note:'Send the appeal letter with the visit note from EMA.', rule:'Send the appeal letter; it cites the coding rule.',
   rate:'Ask the payer to reprocess at its usual rate.', check:'Decide: other payer, the patient, appeal, or let go.'};
 const ROWS = 20;
-const DESK_DEFAULTS = {kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:'', min:'', year:''};
+const DESK_DEFAULTS = {kind:'', payer:'', status:'open,in_progress', deadline:'valid', q:'', sort:'deadline', signal:'', paid:'', min:'', year:'', handling:''};
 const ALERT_FLOOR = 50000;          // a payer change worth less than $500 takes no line on a category page
 const CHANGE_WORDS = {RAMP:'ramping up', RISING:'climbing', RESUMED:'back again'};
 const BULK_WORDS = {in_progress:'Mark started', appealed:'Mark sent', dismissed:'Let go', open:'Back to To do'};
@@ -73,11 +73,11 @@ async function deskTab(v, key){
   const typed = String(f.q||'').slice(0,200);
   let sent = ''; try { sent = encodeURIComponent(typed); } catch(e){ sent = encodeURIComponent(typed.replace(/[\uD800-\uDFFF]/g,'')); }
   const find = Object.assign({cache:'no-store'}, sent ? {headers:{'X-Search':sent}} : {});
-  const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min, year:f.year};
+  const scope = {category:D.cat, live:1, payer:f.payer, status:f.status, deadline:f.deadline, signal:f.signal, paid:f.paid, min:f.min, year:f.year, handling:f.handling};
   const listUrl = n => '/api/findings?'+qs(Object.assign({}, scope, {kind:f.kind, sort:f.sort, limit:n, offset:0}));
   // the tiles count under the chosen kind of work and reason; the kinds of work under the chosen tile, payment window and search
   const [dk, res, why, payers] = await Promise.all([
-    api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal, year:f.year}), find),
+    api('/api/desk?'+qs({category:D.cat, payer:f.payer, min:f.min, status:f.status, deadline:f.deadline, paid:f.paid, kind:f.kind, reason:f.signal, year:f.year, handling:f.handling}), find),
     api(listUrl(lim), find),
     f.kind ? api('/api/worklist/counts?'+qs(Object.assign({}, scope, {signal:'', kind:f.kind})), find) : Promise.resolve(null),
     payerList()]);
@@ -131,6 +131,7 @@ async function deskTab(v, key){
   if(f.payer) chips.push(chip('payer', esc(f.payer)));
   if(f.paid) chips.push(chip('paid', `Paid in the last ${esc(f.paid)} days`));
   if(f.year) chips.push(chip('year', `Year ${esc(f.year)}`));
+  if(f.handling === 'written_off') chips.push(chip('handling', 'Written off in EMA, still workable'));
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
   // a reason this payer is known not to pay: one click takes it off the lists (and keeps new ones off)
   if(f.signal && f.payer && !closed && !waiting) chips.push(`<button class="ghost small" id="hideRule" title="Its open items go to Let go with your note, and new ones will too. Undo it under Hidden.">Hide “${esc(shortOf(b, f.signal))}” for ${esc(f.payer)}</button>`);
@@ -276,6 +277,8 @@ function rowHtml(b, r, o){
   const amt = r.window_cents != null ? `<b>${money2(r.window_cents)}</b><div class="small muted">${pl(r.window_lines, 'line')} in range</div>`
     : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
   const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>` : '';
+  // the biller wrote it off in EMA: money given up, though the window may still be open
+  const wo = r.written_off_cents ? `<div class="small"><span class="chip hint" title="EMA shows ${esc(money2(r.written_off_cents))} written off on this line${r.written_off_on ? ' on ' + esc(r.written_off_on) : ''}">written off in EMA</span></div>` : '';
   const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
   const shut = live && due && daysUntil(due) < 0;
   return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-kind="${esc(kindFor(b, r))}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
@@ -283,7 +286,7 @@ function rowHtml(b, r, o){
     <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
     ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}
     <td class="what" title="${esc(lb.label)}">${o.oneSignal ? '' : `${o.oneKind ? '' : kindBadge(b, kindFor(b, r))+' '}${esc(shortOf(b, r.signal))}`}<div class="small muted">${code}</div>${r.hint?`<div class="small"><span class="chip hint">${esc(r.hint)}</span></div>`:''}</td>
-    <td class="num">${amt}${pill}</td></tr>`;
+    <td class="num">${amt}${pill}${wo}</td></tr>`;
 }
 
 // At most two lines of money fixed once or payer behaviour. Never a claim, never a status button.

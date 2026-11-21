@@ -74,6 +74,14 @@ fixed address, so an address TriZetto has to allow is no obstacle.
 
 An item EMA shows paid is closed by the analysis: insurance payments on the line in EMA's newest charge export, or on its ERA lines after the denial, of at least half the expected amount, where the claim has the code once on that date. That covers a claim corrected and paid under a new number, a paper check, or a payment that never came as an 835. Its note says where the payment was seen; reopen it if that money is for something else. If a newer export no longer shows the payment, the item opens again. `REMITWATCH_EMA_CLOSES=0` turns it back into a hint.
 
+### Written off in EMA, still workable
+
+Each item carries what the biller wrote off in EMA on its line (from the ERA & Payment Line Adjustments export: write-offs
+on the payer's reasons; the patient's share is not counted). An item written off while its filing window is still open is
+money given up that the payer can still be asked for: Today's plan lists them ("Work what EMA wrote off"), the Worklist
+opens them with a filter chip ("Written off in EMA, still workable"), each row says "written off in EMA", and the item says
+when and how much. Work it as any other item, and reverse the write-off in EMA when the payer pays.
+
 ### Hiding a reason for a payer
 
 When a payer is known never to pay something (a visit with modifier 57 at some payers), open one such item and click "Hide ... for (payer)", or pick the reason and the payer on a list and click "Hide ... for (payer)". Its open items go to Let go with the note typed, and so do new ones after each analysis. An item someone has started, sent or reopened stays as they left it. "Hidden" beside the list's count lists the rules; "Show again" brings back what a rule hid.

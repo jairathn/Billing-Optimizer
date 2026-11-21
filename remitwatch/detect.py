@@ -69,7 +69,7 @@ from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLO
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_RULES = "2.4"
+DETECT_RULES = "2.5"
 # whether what EMA has posted as paid closes an item (resolve_elsewhere), or only adds a hint: the billers check EMA, and
 # an item EMA shows paid is not work
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
@@ -118,6 +118,9 @@ EXTRA_FINDING_COLS = {
     "plan": "TEXT", "month": "TEXT", "service_month": "TEXT", "modifier_class": "TEXT", "location": "TEXT", "diagnosis": "TEXT",
     "deadline_basis": "TEXT", "recovered_cents": "INTEGER", "recovered_date": "TEXT", "appealed_at": "TEXT", "status_changed_at": "TEXT",
     "stale": "INTEGER DEFAULT 0", "auto_note": "TEXT", "prev_status": "TEXT", "hint": "TEXT",
+    # what the biller wrote off in EMA on the item's line (its ERA & Payment Line Adjustments rows, the payer's own reasons:
+    # the patient's share is not a write-off), and the newest date of those write-offs
+    "written_off_cents": "INTEGER", "written_off_on": "TEXT",
 }
 EM_SQL = ",".join(f"'{c}'" for c in sorted(EM_CODES))
 AUTO_NOTE_PREFIX = "Paid on a later remittance"
@@ -383,6 +386,23 @@ def pattern_windows(conn: sqlite3.Connection, statuses: tuple = ("open",)) -> li
 
 
 _EMA_CLAIM_ID = re.compile(r"([A-Z]{2}\d{2}[A-Z0-9]{5,6})C\d{0,3}")
+
+
+def written_off_of(handling: list[dict]) -> tuple[int | None, str | None]:
+    """What the biller wrote off in EMA among these ERA adjustment rows (link.line_handling): the WRITE_OFF rows on the
+    payer's reasons (contractual, other or payer-initiated; a patient-responsibility amount is the patient's share, not a
+    write-off), each counted once though several exports repeat it, and the newest date among them."""
+    seen, total, last = set(), 0, ""
+    for h in handling:
+        if (h.get("adjustment_status") or "").upper() != "WRITE_OFF" or (h.get("carc") or "").strip().upper().startswith("PR"):
+            continue
+        k = ((h.get("carc") or "").strip().upper(), h.get("adjustments_cents"), h.get("transaction_date"))
+        if k in seen:
+            continue
+        seen.add(k)
+        total += abs(h.get("adjustments_cents") or 0)
+        last = max(last, h.get("transaction_date") or "")
+    return (total, last or None) if seen else (None, None)
 
 
 def bill_of(pcn: str | None) -> str:
@@ -1371,15 +1391,20 @@ class Detector:
         base = l or claim or {}
         lk = base.get("line_key")
         ema_handling = None
+        written_off, written_on = None, None
+        hs: list[dict] = []
         if lk:
             link = self.links.get(lk)
             if link:
                 evidence = dict(evidence, ema_link=link["state"], ema_billed=f"{link['ema_cpt']}{'-' + ','.join(json.loads(link['ema_modifiers'])) if link.get('ema_modifiers') else ''} x{link['ema_units']} ${(link['ema_charges_cents'] or 0)/100:.2f}", ema_claim_status=link.get("ema_claim_status"))
-            hs = self.handling.get(lk)
-            if hs:
-                statuses = sorted({h["adjustment_status"] for h in hs if h.get("adjustment_status")})
-                ema_handling = statuses[0] if len(statuses) == 1 else ("MIXED" if statuses else None)
-                evidence = dict(evidence, ema_handling=[f"{h['carc'] or ''} {h['adjustment_status'] or ''} ${(h['adjustments_cents'] or 0)/100:.2f} on {h['transaction_date'] or ''}".strip() for h in hs[:8]])
+            hs = self.handling.get(lk) or []
+        elif base.get("claim_key"):         # a whole claim: what the biller did on its lines
+            hs = [h for x in self.lines_by_claim.get(base["claim_key"], []) for h in self.handling.get(x["line_key"], [])]
+        if hs:
+            statuses = sorted({h["adjustment_status"] for h in hs if h.get("adjustment_status")})
+            ema_handling = statuses[0] if len(statuses) == 1 else ("MIXED" if statuses else None)
+            evidence = dict(evidence, ema_handling=[f"{h['carc'] or ''} {h['adjustment_status'] or ''} ${(h['adjustments_cents'] or 0)/100:.2f} on {h['transaction_date'] or ''}".strip() for h in hs[:8]])
+            written_off, written_on = written_off_of(hs)
         if resolved_by:
             evidence = dict(evidence, paid_later={"payment_date": resolved_by[0], "trace": resolved_by[1], "paid_cents": resolved_by[2], "claim_status": resolved_by[3]})
         fid = _fid(signal, *(key_parts or (base.get("line_key") or base.get("claim_key") or json.dumps(evidence, sort_keys=True),)))
@@ -1455,7 +1480,7 @@ class Detector:
             "carc": carc, "carc_text": carc_text(carc), "rarc": rarc, "rarc_text": rarc_text((rarc or "").split(",")[0]),
             "evidence": json.dumps(evidence, default=str),
             "appeal_deadline": deadline,
-            "ema_handling": ema_handling,
+            "ema_handling": ema_handling, "written_off_cents": written_off, "written_off_on": written_on,
             "auto_status": "resolved" if resolved_by else None,
             "auto_notes": f"Paid on a later remittance ({resolved_by[0]}, trace {resolved_by[1]}, ${(resolved_by[2] or 0)/100:.2f})" if resolved_by else None,
             "run_id": self.run_id,

@@ -413,7 +413,7 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
 # --------------------------------------------------------------------------- findings
 FINDING_COLS = ("finding_id, signal, category, severity, actionable, title, patient_control_number, claim_key, line_key, payer_name, payer_group, payer_kind, "
                 "rendering_provider_name, rendering_provider_npi, provider_tier, service_date, payment_date, year, procedure_code, modifiers, original_procedure_code, "
-                "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, ema_handling, status, notes, first_seen, last_seen, "
+                "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, ema_handling, written_off_cents, written_off_on, status, notes, first_seen, last_seen, "
                 "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note, hint")
 
 
@@ -633,7 +633,10 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
             clause += f" OR claim_key IN (SELECT c.claim_key FROM claims c WHERE {who})"
             params += who_params
         where.append(f"({clause})")
-    if handling:
+    if handling == "written_off":
+        # the biller wrote the disputed money off in EMA (detect.written_off_of): with a window still open, money given up
+        where.append("COALESCE(written_off_cents,0) > 0")
+    elif handling:
         where.append("ema_handling=?")
         params.append(handling)
     return (" WHERE " + " AND ".join(where)) if where else "", params
@@ -1567,6 +1570,18 @@ def _activity(fn, *args):
         conn.close()
 
 
+def _written_off_summary() -> dict:
+    """Open items on the claim pages, inside their filing window, whose disputed money the biller wrote off in EMA: what
+    "Work what EMA wrote off" opens (the Worklist with handling=written_off), with the payers that hold the most."""
+    if "written_off_cents" not in {r["name"] for r in rows("PRAGMA table_info(findings)")}:
+        return {"n": 0, "cents": 0, "written_off_cents": 0, "payers": []}
+    w, params = _filters(None, CLAIM_CATEGORIES, None, None, TODO_STATUSES, None, None, None, None, None, "valid", "written_off", None, None, None, True)
+    tot = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, COALESCE(SUM(written_off_cents),0) w, MIN(written_off_on) since FROM findings{w}", tuple(params)) or {}
+    payers = rows(f"""SELECT payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}
+                      GROUP BY payer_group ORDER BY cents DESC, n DESC LIMIT 3""", tuple(params))
+    return {"n": tot.get("n") or 0, "cents": tot.get("cents") or 0, "written_off_cents": tot.get("w") or 0, "since": tot.get("since"), "payers": payers}
+
+
 @app.get("/api/brief")
 def brief(_: str = Depends(require_auth)):
     """Everything the home screen shows in one call: the open work still inside its filing window by the kind of work it
@@ -1580,6 +1595,7 @@ def brief(_: str = Depends(require_auth)):
     finally:
         conn.close()
     if out.get("ready"):
+        out["written_off"] = _written_off_summary()
         # the red number on each category tab: what closes within 7 days, counted as that page's first tile and its list
         token = _WINDOWS_MEMO.set({})
         try:
@@ -1593,11 +1609,11 @@ def brief(_: str = Depends(require_auth)):
 def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None, status: str = "open", deadline: Optional[str] = None,
                     q: Optional[str] = None, signal: Optional[str] = None, live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650),
                     min: int = Query(0, ge=0, le=10**6), kind: Optional[str] = Query(None, max_length=20), year: Optional[str] = Query(None, max_length=4),
-                    request: Request = None, _: str = Depends(require_auth)):
+                    handling: Optional[str] = Query(None, max_length=40), request: Request = None, _: str = Depends(require_auth)):
     """Items and dollars for each kind of work under the worklist's other filters, so each tab counts what a click on it
     opens, and for each reason (signal), so a reason chip counts what it opens too. Counts only: no patient, claim or date."""
     from .insights import WORK_TYPES, work_type
-    w, params = _filters(signal, category, payer, year, status, None, None, _search_text(request, q), None, None, deadline, None, None,
+    w, params = _filters(signal, category, payer, year, status, None, None, _search_text(request, q), None, None, deadline, handling or None, None,
                          None, kind, bool(live), paid, min)
     out = {t["key"]: {"key": t["key"], "n": 0, "cents": 0} for t in WORK_TYPES}
     by_signal: dict[str, dict] = {}
@@ -1636,20 +1652,20 @@ BADGE_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
 CLAIM_CATEGORIES = ",".join(BADGE_CATEGORIES)          # the four claim pages together: the Worklist
 
 
-def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None, year=None) -> dict:
+def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None, year=None, handling=None) -> dict:
     """Items and dollars under exactly the filter /api/findings uses for the same choices (live findings only): the
     count line of the list a click opens. A routine-rate pattern counts its claims in range, as the list does."""
-    w, params = _filters(signal, category, payer, year, status, None, None, None, None, None, deadline, None, None, None, kind, True, 0, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, None, None, None, deadline, handling, None, None, kind, True, 0, min_dollars)
     r = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}", tuple(params))
     delta, _each = _pattern_cents(w, params, deadline)
     return {"n": r["n"], "cents": (r["cents"] or 0) + (delta if r["n"] else 0)}
 
 
-def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None, year=None) -> dict:
+def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None, year=None, handling=None) -> dict:
     """The kinds of work under one filter, largest dollars first, each with its three biggest payer piles; a pile's count
     and dollars are what the list shows for that kind and payer."""
     from .insights import WORK_TYPES, work_type
-    w, params = _filters(signal, category, payer, year, status, None, None, q, None, None, deadline, None, None, None, None, True, paid_days, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, q, None, None, deadline, handling, None, None, None, True, paid_days, min_dollars)
     kinds = {t["key"]: {"key": t["key"], "n": 0, "cents": 0, "payers": {}} for t in WORK_TYPES}
     for r in rows(f"""SELECT signal, actionable, carc, payer_group pg, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}
                       GROUP BY 1,2,3,4""", tuple(params)):
@@ -1685,7 +1701,8 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
          status: str = Query(TODO_STATUSES, max_length=80), deadline: Optional[str] = Query(None, max_length=20),
          signal: Optional[str] = Query(None, max_length=400), paid: int = Query(0, ge=0, le=3650), tiles: int = Query(1, ge=0, le=1),
          kind: Optional[str] = Query(None, max_length=20), reason: Optional[str] = Query(None, max_length=60), q: Optional[str] = None,
-         year: Optional[str] = Query(None, max_length=4), request: Request = None, _: str = Depends(require_auth)):
+         year: Optional[str] = Query(None, max_length=4), handling: Optional[str] = Query(None, max_length=40), request: Request = None,
+         _: str = Depends(require_auth)):
     """A category page in one call: its tiles (closes in 7 and 30 days, window open, to decide, older with no date, window
     closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), and the kinds of work under
     the chosen status, filing date, payment window and search with their payer piles. `signal` narrows the whole page;
@@ -1693,9 +1710,10 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
     another can be chosen). Every number is the count line of the list it opens. Counts only: no patient, claim or date."""
     token = _WINDOWS_MEMO.set({})
     try:
-        out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid, _search_text(request, q), year)}
+        out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid, _search_text(request, q), year,
+                                                         handling or None)}
         if tiles:
-            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year) for name, st, dl in DESK_TILES}
+            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year, handling or None) for name, st, dl in DESK_TILES}
         return out
     finally:
         _WINDOWS_MEMO.reset(token)

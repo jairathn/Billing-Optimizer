@@ -84,6 +84,10 @@ async function todayTab(v){
   steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${Number(w.due7_n).toLocaleString()} items worth ${money(w.due7_cents)} have a filing window that closes within 7 days.`,
       chips: byKind7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' '), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
     : {n:1, title:'Nothing closes this week', line: w.due30_n ? `${w.due30_n} items worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:true, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
+  // money the biller wrote off in EMA while the payer can still be asked for it: the quiet loss
+  const wo = b.written_off || {};
+  if(wo.n) steps.push({n:steps.length+1, title:'Work what EMA wrote off', line:`${pl(wo.n, 'item')} worth ${money(wo.cents)} ${wo.n===1?'was':'were'} written off in EMA but ${wo.n===1?'is':'are'} still inside the filing window${(wo.payers||[])[0] ? ` (most: ${esc(wo.payers[0].payer_group)}, ${money(wo.payers[0].cents)})` : ''}. Work ${wo.n===1?'it':'them'}, and reverse the write-off in EMA when the payer pays.`,
+      btn:`Open them (${wo.n})`, go:{handling:'written_off', sort:'shortfall'}});
   if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`${fu.n} items sent to the payer more than ${fu.days} days ago are still unpaid (${money(fu.cents)}). Check the portal or call.`, btn:`Follow up (${fu.n})`, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
   if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}: ${top.n} items on ${top.claims} claims, ${money(top.cents)}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
       chips: kindBadge(b, top.kind), btn:'Open the batch', go:{kind: top.kind, payer: top.payer_group, sort:'deadline'}});
