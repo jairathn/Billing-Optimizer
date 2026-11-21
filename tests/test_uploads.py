@@ -80,6 +80,7 @@ def xlsx(title: str, cols: list[str], rows: list[list], total: int | None = None
         line[total] = round(sum(r[total] or 0 for r in rows), 2)
         ws.append(line)
     wb.properties.created = created
+    wb.properties.modified = created          # openpyxl stamps the save time otherwise: the same rows must give the same bytes
     b = io.BytesIO()
     wb.save(b)
     return b.getvalue()
@@ -332,7 +333,8 @@ def test_an_upload_lands_where_the_same_files_from_dropbox_land(tmp_path, monkey
 
 
 def test_the_same_file_twice_changes_nothing(site):
-    first = site.up("Encounter & Charge Lines.xlsx", xlsx("Encounter & Charge Lines", CHARGE_COLS, charge_rows(), total=13))
+    data = xlsx("Encounter & Charge Lines", CHARGE_COLS, charge_rows(), total=13)
+    first = site.up("Encounter & Charge Lines.xlsx", data)
     assert first["status"] == "queued" and first["new"] == 3 and first["already"] == 0
     assert "New to RemitWatch: 3. Already in it: 0." in first["lines"][1]
     cycle(site.db, sync=False)
@@ -341,7 +343,7 @@ def test_the_same_file_twice_changes_nothing(site):
     before, woken = snapshot(site.db), len(site.woken)
     # the same bytes again, under any name: refused as already there, and not one row anywhere changes
     for name in ("Encounter & Charge Lines.xlsx", "Encounter & Charge Lines (1).xlsx"):
-        again = site.up(name, xlsx("Encounter & Charge Lines", CHARGE_COLS, charge_rows(), total=13))
+        again = site.up(name, data)
         assert again["status"] == "already" and again["lines"][0].startswith("This exact file was already uploaded on ")
     again = site.up("visit note (1).pdf", note_pdf(NOTE))
     assert again["status"] == "already"
