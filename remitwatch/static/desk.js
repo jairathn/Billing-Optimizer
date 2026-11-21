@@ -4,6 +4,8 @@
 // Every number you can click opens a list whose count line shows that same number (/api/desk counts through the list's
 // own filter). Loaded after today.js; uses its helpers and index.html's.
 
+// claims no payer answered are never hidden for a payer (actions.NEVER_HIDDEN): each is let go one at a time
+const NEVER_HIDDEN = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER']);
 const DESKS = {
   denials:    {cat:'denial', title:'Denials', intro:'Lines and whole claims the payer paid $0 and has not paid since.'},
   bundling:   {cat:'bundling', title:'Bundling & modifiers', intro:'Visits, procedures and add-ons paid $0 because the payer folded them into another service.'},
@@ -134,7 +136,7 @@ async function deskTab(v, key){
   if(f.handling === 'written_off') chips.push(chip('handling', 'Written off in EMA, still workable'));
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
   // a reason this payer is known not to pay: one click takes it off the lists (and keeps new ones off)
-  if(f.signal && f.payer && !closed && !waiting) chips.push(`<button class="ghost small" id="hideRule" title="Its open items go to Let go with your note, and new ones will too. Undo it under Hidden.">Hide “${esc(shortOf(b, f.signal))}” for ${esc(f.payer)}</button>`);
+  if(f.signal && f.payer && !closed && !waiting && !NEVER_HIDDEN.has(f.signal)) chips.push(`<button class="ghost small" id="hideRule" title="Its open items go to Let go with your note, and new ones will too. Undo it under Hidden.">Hide “${esc(shortOf(b, f.signal))}” for ${esc(f.payer)}</button>`);
   if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Window open">✕</button></span>`);
   const sel = (name, label, opts, cur) => `<select data-f="${name}" aria-label="${label}">${opts.map(([val,l])=>`<option value="${esc(val)}" ${String(cur)===val?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
   const plist = payers.concat(f.payer && !payers.includes(f.payer) ? [f.payer] : []);
@@ -552,7 +554,7 @@ function hiddenManage(rules){
 }
 // the item's panel: the same, for the reason and payer of the item open
 function hideDrawerHtml(f){
-  if(!f.payer_group || !f.signal || !['open','in_progress'].includes(f.status)) return '';
+  if(!f.payer_group || !f.signal || NEVER_HIDDEN.has(f.signal) || !['open','in_progress'].includes(f.status)) return '';
   const label = state.brief ? shortOf(state.brief, f.signal) : f.signal;
   return `<div class="small" style="margin:4px 0"><a href="#" id="hideFromItem" data-label="${esc(label)}">Hide “${esc(label)}” for ${esc(f.payer_group)}</a> <span class="muted">(for a reason this payer never pays)</span></div>`;
 }

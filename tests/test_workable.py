@@ -216,9 +216,21 @@ def test_the_page_counts_them_and_today_points_at_them(open_claims, monkeypatch)
     assert [i["patient_control_number"] for i in closed] == ["CB0000506C024"]
     d = c.get(f"/api/findings/{items[0]['finding_id']}").json()["finding"]
     assert d["evidence"]["sent"] and d["evidence"]["answer_due"] and d["evidence"]["lines"]
+    # never hidden wholesale for a payer: each unanswered claim is let go one at a time, by a person
+    xhr = {"X-Requested-With": "remitwatch"}
+    for sig in ("NO_ANSWER", "REJECTED_PRE_PAYER"):
+        r = c.post("/api/hide", json={"payer_group": "Anthem / BCBS", "signal": sig, "note": "x"}, headers=xhr)
+        assert r.status_code == 400 and "one at a time" in r.json()["detail"]
+    from remitwatch.actions import _hide_matching
+    conn = sqlite3.connect(db)
+    assert _hide_matching(conn, "Anthem / BCBS", "NO_ANSWER", "x", "2026-11-21") == 0
+    conn.close()
+    assert c.get("/api/brief").json()["no_answer"]["chase"]["n"] == 2
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     today = open(os.path.join(root, "remitwatch", "static", "today.js")).read()
     assert "title:'Chase claims the payer never answered'" in today and "go:{kind:'chase', sort:'deadline'}" in today
+    desk = open(os.path.join(root, "remitwatch", "static", "desk.js")).read()
+    assert "const NEVER_HIDDEN = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER']);" in desk and desk.count("NEVER_HIDDEN.has(") == 2
 
 
 def test_a_stopped_feed_does_not_make_newer_claims_look_unanswered(tmp_path):

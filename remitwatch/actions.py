@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS hide_rules (
 );
 """
 HIDE_ACTOR = "hide rule"
+# Never hidden wholesale for a payer: a claim no payer answered (or one rejected before reaching the payer) is not a
+# reason the payer won't pay. It is money nobody has asked for yet, so each one is let go only by a person, one at a time.
+NEVER_HIDDEN = frozenset({"NO_ANSWER", "REJECTED_PRE_PAYER"})
 
 
 def ensure_hide_rules(conn: sqlite3.Connection) -> None:
@@ -94,7 +97,7 @@ def ensure_hide_rules(conn: sqlite3.Connection) -> None:
 def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str) -> int:
     """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands)."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "findings" not in have:
+    if "findings" not in have or signal in NEVER_HIDDEN:
         return 0
     touched = "AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='manual')" if "finding_events" in have else ""
     ids = [r[0] for r in conn.execute(f"""SELECT finding_id FROM findings WHERE payer_group=? AND signal=? AND status='open'

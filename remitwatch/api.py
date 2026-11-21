@@ -3348,6 +3348,10 @@ def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
             raise HTTPException(404, "No such rule.")
         _record_action({"kind": "hide_rule", "op": "remove", "payer_group": pg, "signal": sig, "actor": user})
         return {"ok": True}
+    from .actions import NEVER_HIDDEN
+    if sig in NEVER_HIDDEN:
+        raise HTTPException(400, "Claims the payer never answered are not hidden for a payer: each one is money nobody has "
+                                 "asked for yet. Let them go one at a time, with a note.")
     if not one("SELECT 1 FROM findings WHERE payer_group=? AND signal=? LIMIT 1", (pg, sig)):
         raise HTTPException(404, "Nothing of that kind for that payer.")
     before = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0

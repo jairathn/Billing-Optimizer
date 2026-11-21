@@ -95,11 +95,12 @@ of service: Medicare's 1 year is the regulation's (42 CFR 424.44); other payers'
 participation agreement's own limit applies). Left out: claims EMA shows paid by insurance (missing remittance files: the
 Data tab), voided, self-pay, and those EMA's status says are settled or not sent yet. EMA's claim statuses are matched by
 words (rejected; paid, closed, void, write-off; on hold, ready, unbilled), to be checked against the practice's sample
-reports when they arrive.
+reports when they arrive. They cannot be hidden for a payer (below): a claim nobody answered is not a reason a payer won't
+pay, so each is let go one at a time, with a note.
 
 ### Hiding a reason for a payer
 
-When a payer is known never to pay something (a visit with modifier 57 at some payers), open one such item and click "Hide ... for (payer)", or pick the reason and the payer on a list and click "Hide ... for (payer)". Its open items go to Let go with the note typed, and so do new ones after each analysis. An item someone has started, sent or reopened stays as they left it. "Hidden" beside the list's count lists the rules; "Show again" brings back what a rule hid.
+When a payer is known never to pay something (a visit with modifier 57 at some payers), open one such item and click "Hide ... for (payer)", or pick the reason and the payer on a list and click "Hide ... for (payer)". Its open items go to Let go with the note typed, and so do new ones after each analysis. An item someone has started, sent or reopened stays as they left it. "Hidden" beside the list's count lists the rules; "Show again" brings back what a rule hid. Claims the payer never answered, and claims rejected before reaching it, are never hidden this way (`actions.NEVER_HIDDEN`).
 
 ### No appeal on old data
 
