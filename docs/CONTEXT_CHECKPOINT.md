@@ -624,3 +624,27 @@ moved to the patient, still inside their window) and (2) "open in EMA, no answer
 with no remittance, past the payer's answer time and before its filing limit; rejected-before-the-payer claims). Plus an
 exact list for the practice's admin of what to request from TriZetto (SFTP access, auto-generated remittances, ERA
 enrollment gaps, rejection reports).
+
+## Builds 1 and 2, the written TriZetto request, and the feed's sign-in safeguards (November 21, 2026)
+
+Built and reviewed in four adversarial rounds (each round's confirmed findings fixed and re-checked with the reviewers' own
+probes; the reports and probes were kept in the session's scratchpad):
+- Build 1, "Written off in EMA, still workable" (`detect.written_off_of`, `findings.written_off_cents/written_off_on`, the
+  Worklist filter `handling=written_off`, Today's step "Work what EMA wrote off"). Counts only the payer's own reasons for not
+  paying, written off or moved on; routine contractual posting (IGNORE_CARCS) and PR are left out unless the reason is the
+  item's own (CO-59 on MPPR_EXCESS); deduplicated, netted in the direction EMA posts write-offs, capped at the shortfall.
+- Build 2, "Claims the payer never answered" (`Detector.run_ema_open_claims`, `_emit_open_claim`; NO_ANSWER under "Chase the
+  payer", REJECTED_PRE_PAYER under "Fix and resubmit"). Principle after round three: when in doubt a claim stays listed; a
+  visit leaves a claim only for a payment still standing on its own line under another bill, or when the same visit is
+  chased under a newer bill. Never hidden for a payer (`actions.NEVER_HIDDEN`). Notes follow only to the claim's own first
+  remittance or the bill's claim sent again to the same payer family (`Detector.save`). Status words are matched by words
+  (EMA_REJECTED / EMA_DENIED / EMA_SETTLED / EMA_GAVE_UP / EMA_NOT_SENT): check them against the practice's sample reports.
+- TriZetto feed (`remitwatch/trizetto.py`): a refused password is not tried again for 24 h (two unclear sign-ins in a row:
+  6 h), kept on Vercel too and ended by a passing setup test; fingerprints may be a list (SHA256 or MD5); the data checks
+  warn 20 days before the password expires (`TRIZETTO_SFTP_PASSWORD_SET`, `TRIZETTO_SFTP_PASSWORD_DAYS`).
+- `docs/TRIZETTO_REQUEST.md` is now the email the owner sends the TriZetto administrator: one written request inside it
+  (portal Contact Us, or physiciansupport@cognizant.com), rules that protect ModMed's login, settings and files, and a form
+  back. The owner fills the four OWNER brackets (fee limits, name and email for an order form) before sending.
+
+Still open: the sample AR report and collections report (STANDING ITEM above); EMA's export layouts and status words to
+confirm against them; TriZetto's answers (login, folders, fingerprints, password lifetime) for configure.sh.
