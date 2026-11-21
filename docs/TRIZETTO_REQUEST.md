@@ -31,7 +31,8 @@ Then ask, and write each answer on the form:
    rejection reports.
 6. The SFTP server's SSH host-key fingerprint (it looks like SHA256:…). Ask them to read it out or put it in the ticket.
 7. How often the SFTP password expires, and who gets the notice before it does. Ask that the notice go to you.
-8. Do you restrict SFTP access by IP address? If yes, ask them to allow the practice's server: **⟨server address⟩**.
+8. Do you restrict SFTP access by IP address? If yes, ask them to allow the practice's server: **3.128.37.47** (its fixed
+   address; originbilling.com points to it).
 
 **If they say remittances only reach SFTP when "Auto Generate Remittances" is turned on** (a setting in TriZetto's
 Remittance Advice Settings), decide on the call as follows:
