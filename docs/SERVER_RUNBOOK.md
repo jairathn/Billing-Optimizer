@@ -95,6 +95,7 @@ docker compose exec app python -m remitwatch.cli cycle      # one cycle by hand:
 docker compose exec app python -m remitwatch.cli stats      # counts in the store
 docker compose exec app python -m remitwatch.cli backup     # a copy of the store now
 git pull && docker compose up -d --build                    # update to the newest version on main
+docker compose restart caddy                                # after an update that changed deploy/Caddyfile
 docker compose restart app                                  # after changing .env
 ```
 
