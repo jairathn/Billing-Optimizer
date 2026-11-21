@@ -94,7 +94,7 @@ if [ -n "$(current TRIZETTO_SFTP_PASSWORD)" ] && [ "$(current TRIZETTO_SFTP_PASS
 fi
 ask TRIZETTO_SFTP_PASSWORD_DAYS text "How many days a TriZetto SFTP password lasts before TriZetto makes you change it (from TriZetto's answer; empty if it never expires)"
 ask TRIZETTO_SFTP_DIRS text "Folder(s) the remittances are in, comma-separated (empty: the whole login folder)"
-ask TRIZETTO_SFTP_HOSTKEY text "The SFTP server's key fingerprint TriZetto gives (SHA256:...), optional"
+ask TRIZETTO_SFTP_HOSTKEY text "The SFTP server's key fingerprints TriZetto gives (SHA256:... or MD5:..., several separated by commas), optional"
 
 echo; echo "== Fax line, SRFax (optional until signed up)"
 ask SRFAX_ACCESS_ID text "SRFax account number"

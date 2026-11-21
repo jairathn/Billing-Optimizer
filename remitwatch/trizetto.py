@@ -7,7 +7,8 @@ nobody has to copy them into Dropbox and the lists catch up with payments within
     TRIZETTO_SFTP_HOST        default sftp.gatewayedi.com
     TRIZETTO_SFTP_PORT        default 22
     TRIZETTO_SFTP_DIRS        the folders to read, comma-separated (default: the login folder, three levels down)
-    TRIZETTO_SFTP_HOSTKEY     the server key's fingerprint (SHA256:...), if TriZetto gives one. Without it the first key
+    TRIZETTO_SFTP_HOSTKEY     the server key's fingerprint (SHA256:..., or MD5:...), if TriZetto gives one; several (one per
+                              key type) separated by commas, and any of them is accepted. Without it the first key
                               seen is kept and any other is refused (trust on first use): a different key means someone
                               may be standing between the site and TriZetto, and the password is not sent to it.
 
@@ -93,6 +94,28 @@ def fingerprint(key) -> str:
     return "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
 
 
+def fingerprints_of(key) -> set[str]:
+    """Every way a host key's fingerprint may be written down: OpenSSH's SHA256 form, and the older MD5 form (hex pairs)."""
+    md5 = hashlib.md5(key.asbytes()).hexdigest()
+    return {fingerprint(key), "MD5:" + ":".join(md5[i:i + 2] for i in range(0, 32, 2))}
+
+
+def pinned(value: str) -> list[str]:
+    """The fingerprints given in TRIZETTO_SFTP_HOSTKEY: one, or several (a server has one key per type: ED25519, ECDSA,
+    RSA), separated by commas or spaces. A key-type word in front of one (ED25519 SHA256:...) is allowed and ignored;
+    an MD5 fingerprint is compared in lower case."""
+    out = []
+    for word in re.split(r"[\s,;]+", value or ""):
+        w = word.strip().strip("()")
+        if w.upper().startswith("SHA256:"):
+            out.append("SHA256:" + w[7:].rstrip("="))
+        elif w.upper().startswith("MD5:"):
+            out.append("MD5:" + w[4:].lower())
+        elif re.fullmatch(r"(?i)[0-9a-f]{2}(:[0-9a-f]{2}){15}", w):
+            out.append("MD5:" + w.lower())
+    return out
+
+
 class Session:
     """One sign-in to TriZetto's SFTP server. known: the fingerprint kept from an earlier sign-in (trust on first use)."""
 
@@ -116,13 +139,15 @@ class Session:
         except Exception as exc:
             self.close()
             raise TriZettoError(f"{self.s.host} did not complete the SSH handshake ({type(exc).__name__}).") from exc
-        self.key_fp = fingerprint(t.get_remote_server_key())
-        want = self.s.hostkey or self.known
-        if want and want != self.key_fp:
+        key = t.get_remote_server_key()
+        self.key_fp = fingerprint(key)
+        given = pinned(self.s.hostkey)
+        want = given or ([self.known] if self.known else [])
+        if want and not (fingerprints_of(key) & set(want)):
             self.close()
-            raise TriZettoError(f"The server's key is not the one {'set in TRIZETTO_SFTP_HOSTKEY' if self.s.hostkey else 'seen before'} "
-                                f"({self.key_fp}, expected {want}). Nothing was sent to it. If TriZetto changed its key, confirm the new "
-                                "fingerprint with TriZetto and set it as TRIZETTO_SFTP_HOSTKEY.")
+            raise TriZettoError(f"The server's key is not the one {'set in TRIZETTO_SFTP_HOSTKEY' if given else 'seen before'} "
+                                f"({key.get_name()} {self.key_fp}, expected {' or '.join(want)}). Nothing was sent to it. If TriZetto "
+                                "changed its key, confirm the new fingerprint with TriZetto and set it as TRIZETTO_SFTP_HOSTKEY.")
         self.first_key = not want
         try:
             t.auth_password(self.s.user, self.s.password)

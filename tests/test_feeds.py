@@ -97,6 +97,20 @@ def test_a_server_with_another_key_or_a_wrong_password_gets_nothing(tmp_path, sf
     store.close()
 
 
+def test_the_fingerprints_trizetto_gives_are_accepted_however_they_are_written(sftp):
+    """A server has one key per type, and TriZetto may give them all, with their type, or in the older MD5 form."""
+    with trizetto.Session(trizetto.Settings.from_env(sftp.env())) as ses:
+        key = ses.transport.get_remote_server_key()
+    sha, md5 = trizetto.fingerprint(key), next(f for f in trizetto.fingerprints_of(key) if f.startswith("MD5:"))
+    for given in (f"ED25519 SHA256:AAAA, RSA {sha}", f"{sha}=", md5.upper().replace("MD5:", "MD5:"), md5[4:], f"(ECDSA) SHA256:BBBB; {md5}"):
+        with trizetto.Session(trizetto.Settings.from_env(sftp.env(TRIZETTO_SFTP_HOSTKEY=given))) as ses:
+            assert ses.key_fp == sha
+    with pytest.raises(trizetto.TriZettoError, match="expected SHA256:AAAA or SHA256:BBBB"):
+        with trizetto.Session(trizetto.Settings.from_env(sftp.env(TRIZETTO_SFTP_HOSTKEY="SHA256:AAAA, SHA256:BBBB"))):
+            pass
+    assert trizetto.pinned("ssh-ed25519 255 SHA256:abc= no-fingerprint-here") == ["SHA256:abc"]
+
+
 def test_a_refused_password_is_not_tried_again_so_the_login_is_never_locked(tmp_path, sftp):
     """TriZetto locks a login after repeated failures, and the login may be the one ModMed uses: a refused user name and
     password are not tried again for a day, a new password is tried at once, and a sign-in that works clears the hold."""

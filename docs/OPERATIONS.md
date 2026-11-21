@@ -52,14 +52,17 @@ Opening the dashboard also looks for new remittances when nothing has for `REMIT
 
 Remittances can come straight from TriZetto instead of through the Dropbox folder: the site reads the practice's TriZetto SFTP account on every run, so a claim the payer paid leaves the lists within hours, with nobody copying files. The Dropbox folder can stay as it is (a file read from both is stored once).
 
-What to ask TriZetto, word for word, is in `docs/TRIZETTO_REQUEST.md`. In short: ask TriZetto support how ModMed collects
-the practice's remittances, and for a separate read-only SFTP login (or a copy folder) that gets every 835 file without
-changing ModMed's delivery; do not change TriZetto's Remittance Advice Settings ("Auto Generate Remittances") until
-TriZetto has confirmed it cannot disturb ModMed's posting.
+What to ask TriZetto, word for word, is in `docs/TRIZETTO_REQUEST.md`: an email the owner sends the practice's TriZetto
+administrator, with one written request inside it for TriZetto (no phone call). In short: a second SFTP login of its own
+that gets a copy of every 835 (or a separate login such as a child Site ID, on the same terms), how ModMed collects the
+practice's remittances, what the feed needs to run unattended, and the missing remittances re-sent to that login only.
+Nothing in it may change what ModMed gets: not the existing SFTP password, not the Remittance Advice Settings ("Auto
+Generate Remittances"), and nobody downloads or re-sends remittances in the portal.
 
 1. When TriZetto sends the login: `sudo bash /opt/remitwatch/deploy/aws/configure.sh`, TriZetto section:
    `TRIZETTO_SFTP_USER`, `TRIZETTO_SFTP_PASSWORD`, `TRIZETTO_SFTP_DIRS` (the folder the 835 files are in) and
-   `TRIZETTO_SFTP_HOSTKEY` (the fingerprint TriZetto gives). `TRIZETTO_SFTP_HOST` only if TriZetto names a server other
+   `TRIZETTO_SFTP_HOSTKEY` (the fingerprints TriZetto gives: a server has one per key type, so paste them all, separated
+   by commas; SHA256:... or the older MD5:... form, a key-type word in front is fine). `TRIZETTO_SFTP_HOST` only if TriZetto names a server other
    than sftp.gatewayedi.com.
 2. On `/setup`, press "Test the TriZetto connection": the server and its key, the sign-in, the files there and one
    remittance read.
