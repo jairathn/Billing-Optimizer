@@ -3,7 +3,7 @@
 // desk.js. Loaded after features.js and before the page's own script; uses its helpers (api, esc, money, money2, state,
 // render, openDetail, setFindingStatus).
 
-const KIND_STYLE = {fix:'k-fix', auth:'k-auth', note:'k-note', rule:'k-rule', rate:'k-rate', check:'k-check'};
+const KIND_STYLE = {fix:'k-fix', auth:'k-auth', note:'k-note', rule:'k-rule', rate:'k-rate', chase:'k-chase', check:'k-check'};
 const STATUS_WORDS = {open:'To do', in_progress:'Started', appealed:'Sent', resolved:'Paid', lost:'Lost', dismissed:'Let go'};
 const OWNER_OF = {fix:'Billing', auth:'Front desk', note:'Clinicians and coder', rule:'Billing', rate:'Billing', check:'Front desk and billing'};
 const GUIDE_KEY = 'rw:guide:v1';
@@ -88,6 +88,10 @@ async function todayTab(v){
   const wo = b.written_off || {};
   if(wo.n) steps.push({n:steps.length+1, title:'Work what EMA wrote off', line:`${pl(wo.n, 'item')} worth ${money(wo.cents)} ${wo.n===1?'was':'were'} written off in EMA but ${wo.n===1?'is':'are'} still inside the filing window${(wo.payers||[])[0] ? ` (most: ${esc(wo.payers[0].payer_group)}, ${money(wo.payers[0].cents)})` : ''}. Work ${wo.n===1?'it':'them'}, and reverse the write-off in EMA when the payer pays.`,
       btn:`Open them (${wo.n})`, go:{handling:'written_off', sort:'shortfall'}});
+  // claims EMA shows sent and unpaid that no remittance answers: nobody is chasing them, and their filing limit runs
+  const na = (b.no_answer || {}).chase || {}, rj = (b.no_answer || {}).rejected || {};
+  if(na.n) steps.push({n:steps.length+1, title:'Chase claims the payer never answered', line:`${pl(na.n, 'claim')} worth ${money(na.cents)} ${na.n===1?'was':'were'} sent and never answered: look ${na.n===1?'it':'them'} up on the payer's portal or call${na.first_deadline ? `; the first must reach the payer by ${esc(longDate(na.first_deadline))} if the payer has no record of it` : ''}.${rj.n ? ` ${pl(rj.n, 'more')} ${rj.n===1?'was':'were'} rejected before reaching the payer (under Fix and resubmit).` : ''}`,
+      chips: kindBadge(b, 'chase'), btn:`Chase them (${na.n})`, go:{kind:'chase', sort:'deadline'}});
   if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`${fu.n} items sent to the payer more than ${fu.days} days ago are still unpaid (${money(fu.cents)}). Check the portal or call.`, btn:`Follow up (${fu.n})`, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
   if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}: ${top.n} items on ${top.claims} claims, ${money(top.cents)}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
       chips: kindBadge(b, top.kind), btn:'Open the batch', go:{kind: top.kind, payer: top.payer_group, sort:'deadline'}});

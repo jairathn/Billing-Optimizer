@@ -65,11 +65,11 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, MPPR_CODES, appeal_rule,
-                    carc_text, code_category, corrected_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
+                    carc_text, code_category, corrected_rule, filing_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_RULES = "2.5"
+DETECT_RULES = "2.6"
 # whether what EMA has posted as paid closes an item (resolve_elsewhere), or only adds a hint: the billers check EMA, and
 # an item EMA shows paid is not work
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
@@ -111,6 +111,14 @@ PRICING_MODIFIERS = {"26", "TC", "50", "52", "53", "54", "55", "56", "62", "66",
 DOWNCODE_SIGNALS = ("DOWNCODE_SVC06", "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE",
                     "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED")
 MANUAL_STATUSES = ("in_progress", "appealed", "lost")
+
+# Claims EMA shows sent and unpaid with no answer from the payer (Detector.run_ema_open_claims): how long a payer has to
+# answer before a claim counts as unanswered (Kentucky's prompt-pay law gives 30 days for a clean claim, KRS 304.17A-702).
+NO_ANSWER_DAYS = int(os.environ.get("REMITWATCH_NO_ANSWER_DAYS", "30") or 30)
+SELF_PAY = re.compile(r"SELF|PATIENT|CASH|PRIVATE PAY|NO INSURANCE|UNINSURED", re.I)
+EMA_REJECTED = re.compile(r"REJECT", re.I)
+EMA_SETTLED = re.compile(r"\bPAID\b|CLOSED|VOID|SETTLED|WRITE.?OFF|WRITTEN OFF|COLLECTION|ZERO BALANCE|RESOLVED|CANCEL", re.I)
+EMA_NOT_SENT = re.compile(r"HOLD|READY|UNBILLED|NOT SENT|NOT SUBMITTED|DRAFT|QUEUED|UNSUBMITTED", re.I)
 
 # columns added after the first release; created by ALTER TABLE on older stores
 EXTRA_FINDING_COLS = {
@@ -185,6 +193,13 @@ CREATE TABLE IF NOT EXISTS detection_runs (run_id TEXT PRIMARY KEY, started_at T
 
 def _fid(*parts) -> str:
     return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()[:24]
+
+
+def _days_between(a: str | None, b: str | None) -> int | None:
+    try:
+        return (date.fromisoformat(b[:10]) - date.fromisoformat(a[:10])).days
+    except (TypeError, ValueError):
+        return None
 
 
 def _add_days(iso: str | None, days: int) -> str | None:
@@ -1387,7 +1402,7 @@ class Detector:
                 f["hint"] = f"EMA shows ${hint[0]/100:,.2f} paid by insurance" + (f" on {hint[1]}" if hint[1] else "") + "; check before marking recovered"
 
     def _emit(self, signal, category, severity, actionable, title, l, expected, shortfall, carc, rarc, evidence,
-              key_parts=None, claim=None, resolved_by: tuple | None = None) -> None:
+              key_parts=None, claim=None, resolved_by: tuple | None = None, id_signal: str | None = None) -> None:
         base = l or claim or {}
         lk = base.get("line_key")
         ema_handling = None
@@ -1407,7 +1422,7 @@ class Detector:
             written_off, written_on = written_off_of(hs)
         if resolved_by:
             evidence = dict(evidence, paid_later={"payment_date": resolved_by[0], "trace": resolved_by[1], "paid_cents": resolved_by[2], "claim_status": resolved_by[3]})
-        fid = _fid(signal, *(key_parts or (base.get("line_key") or base.get("claim_key") or json.dumps(evidence, sort_keys=True),)))
+        fid = _fid(id_signal or signal, *(key_parts or (base.get("line_key") or base.get("claim_key") or json.dumps(evidence, sort_keys=True),)))
         kind = base.get("payer_kind", "other")
         grp = base.get("payer_group")
         pay_date = base.get("payment_date") or base.get("txn_payment_date")
@@ -2026,6 +2041,153 @@ class Detector:
                     ev["other_denied_submissions"] = home.pop("_also")
                     home["evidence"] = json.dumps(ev, default=str)
 
+    # ------------------------------------------------------------------ claims EMA shows open that the payer never answered
+    def run_ema_open_claims(self) -> None:
+        """Claims EMA shows sent to a payer and unpaid that no remittance answers: no 835 for the claim, none for its bill
+        since it was sent, nothing paid by insurance in EMA, and not voided, self-pay or (by EMA's own status) settled or not
+        yet sent. One counts once NO_ANSWER_DAYS have passed since it was sent and the remittances on file reach that day,
+        so a feed that stopped does not make every newer claim look unanswered (NO_ANSWER, "Chase the payer"). One EMA
+        calls rejected never reached the payer and counts at once (REJECTED_PRE_PAYER, "Fix and resubmit"). Each is sized
+        by the payer's usual rate for its codes and dated by the payer's first-filing limit from the date of service (a
+        claim the payer has no record of must reach it by then). Both signals of one claim share its id, so the work
+        people record follows the claim from one to the other."""
+        c = self.conn
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "ema_rows" not in tables:
+            return
+        newest = c.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+        if not newest:
+            return
+        since = _add_days(newest, -400)         # older than every filing limit: nothing left to chase
+        answered: set[str] = set()
+        bill_last: dict[str, str] = {}
+        payer_last: dict[str, str] = {}
+        for pcn, payer, paid_on in c.execute("""SELECT cl.patient_control_number, t.payer_name, MAX(t.payment_date) FROM claims cl
+                                                JOIN transactions t ON t.transaction_key = cl.transaction_key
+                                                WHERE COALESCE(t.superseded,0)=0 AND cl.patient_control_number IS NOT NULL GROUP BY 1, 2"""):
+            answered.add(pcn)
+            b = bill_of(pcn)
+            bill_last[b] = max(bill_last.get(b, ""), paid_on or "")
+            g = normalize_payer(payer)[0]
+            payer_last[g] = max(payer_last.get(g, ""), paid_on or "")
+        # what the remittances call each payer EMA names: the group most of its answered claims were paid under
+        pcn_payer: dict[str, tuple[str, str]] = {}
+        for l in self.lines:
+            pcn_payer.setdefault(l["patient_control_number"], (l.get("payer_group") or "Unknown", l.get("payer_kind") or "other"))
+        pulled = "COALESCE(s.created_at, '')" if "ema_sources" in tables else "''"
+        join = "LEFT JOIN ema_sources s ON s.sha256 = e.source_sha256" if "ema_sources" in tables else ""
+        claims: dict[str, dict] = {}
+        for r in c.execute(f"""SELECT e.claim_id, e.family, e.activity_type, e.bill_item_id, e.cpt, e.modifiers, e.units, e.charges_cents,
+                                      e.insurance_payments_cents, e.payer, e.payer_id, e.patient_id, e.provider, e.location, e.service_date,
+                                      e.bill_created, e.claim_status, e.claims_state, e.claim_submission_date, {pulled} AS pulled, e.row_index
+                               FROM ema_rows e {join}
+                               WHERE e.claim_id IS NOT NULL AND e.family IN ('charge_lines', 'claim_status')
+                                 AND (e.service_date IS NULL OR e.service_date >= ?)""", (since,)):
+            r = dict(r)
+            k = claims.setdefault(r["claim_id"], {"charges": {}, "voided": set(), "paid": 0, "payers": Counter(), "payer_ids": Counter(),
+                                                  "patients": Counter(), "providers": Counter(), "days": set(), "created": "", "sent": "",
+                                                  "status": None, "status_at": ("", -1), "rows": 0})
+            k["rows"] += 1
+            if r["payer"]:
+                k["payers"][r["payer"]] += 1
+            if r["payer_id"]:
+                k["payer_ids"][r["payer_id"]] += 1
+            if r["patient_id"]:
+                k["patients"][r["patient_id"]] += 1
+            k["paid"] = max(k["paid"], r["insurance_payments_cents"] or 0)
+            st = " ".join(x for x in (r["claim_status"], r["claims_state"]) if x)
+            if st and (r["pulled"], r["row_index"] or 0) >= k["status_at"]:
+                k["status"], k["status_at"] = st, (r["pulled"], r["row_index"] or 0)
+            if r["claim_submission_date"]:
+                k["sent"] = max(k["sent"], r["claim_submission_date"])
+            if r["family"] != "charge_lines":
+                if r["service_date"]:
+                    k["days"].add(r["service_date"])
+                continue
+            act = (r["activity_type"] or "").lower()
+            if "void" in act:
+                if r["bill_item_id"]:
+                    k["voided"].add(r["bill_item_id"])
+                continue
+            if act != "charge" or not r["cpt"]:
+                continue
+            item = r["bill_item_id"] or (r["cpt"], r["service_date"], r["modifiers"], r["units"], r["charges_cents"])
+            k["charges"][item] = (r["cpt"], r["service_date"], r["charges_cents"] or 0, r["bill_item_id"])
+            if r["service_date"]:
+                k["days"].add(r["service_date"])
+            if r["provider"]:
+                k["providers"][r["provider"]] += 1
+            if r["bill_created"]:
+                k["created"] = max(k["created"], r["bill_created"][:10])
+        votes: dict[str, Counter] = defaultdict(Counter)
+        for pcn, k in claims.items():
+            if pcn in pcn_payer and k["payers"]:
+                votes[k["payers"].most_common(1)[0][0]][pcn_payer[pcn]] += 1
+        for pcn, k in claims.items():
+            if pcn in answered or k["paid"] > 0 or not k["payers"]:
+                continue
+            ema_payer = k["payers"].most_common(1)[0][0]
+            if SELF_PAY.search(ema_payer):
+                continue
+            items = {i: v for i, v in k["charges"].items() if not (v[3] and v[3] in k["voided"])}
+            status = k["status"] or ""
+            rejected = bool(EMA_REJECTED.search(status))
+            if not rejected and (EMA_SETTLED.search(status) or EMA_NOT_SENT.search(status)):
+                continue
+            billed = sum(v[2] for v in items.values())
+            if billed <= 0 and not rejected:
+                continue
+            days = sorted(d for d in k["days"] if d)
+            if not days:
+                continue
+            sent, basis = ((k["sent"], "the claim's submission date in EMA") if k["sent"] else
+                           (k["created"], "the date EMA created the bill") if k["created"] else (days[-1], "the date of service"))
+            b = bill_of(pcn)
+            if bill_last.get(b) and bill_last[b] >= sent:
+                continue                    # the payer answered the bill after this claim went out
+            due = _add_days(sent, NO_ANSWER_DAYS)
+            if not rejected and (not due or due > newest):
+                continue                    # not due yet, or the remittances on file do not reach the day it was due
+            grp, kind = votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
+            rule = filing_rule(grp, kind)
+            file_by = _add_days(days[0], rule["days"])
+            codes = sorted({v[0] for v in items.values()})
+            year = days[0][:4]
+            exp_total, priced = 0, 0
+            lines = []
+            for cpt, dos, charge, _item in sorted(items.values(), key=lambda v: (v[1] or "", v[0])):
+                rate, _basis, _r = self.usual_rate({"payer_group": grp, "year": year, "provider_tier": "unknown", "pos_class": "office"}, cpt)
+                if rate:
+                    exp_total += rate
+                    priced += 1
+                lines.append([cpt, dos, charge, rate])
+            expected = exp_total if priced else None
+            top = max(items.values(), key=lambda v: v[2])[0] if items else None
+            claim = {"patient_control_number": pcn, "payer_name": ema_payer, "payer_group": grp, "payer_kind": kind,
+                     "payer_id": k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None, "service_date": days[0],
+                     "year": year, "procedure_code": top, "charge_cents": billed or None,
+                     "rendering_provider_name": k["providers"].most_common(1)[0][0] if k["providers"] else None}
+            ev = {"codes": codes, "billed_cents": billed, "sent": sent, "sent_basis": basis, "answer_due": due, "newest_remittance": newest,
+                  "ema_status": status or None, "payer_in_ema": ema_payer, "lines": lines, "days_waiting": _days_between(sent, newest),
+                  "payer_last_remittance": payer_last.get(grp)}
+            label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
+            soon = file_by and file_by <= _add_days(newest, 30)
+            if rejected:
+                self._emit("REJECTED_PRE_PAYER", "denial", "high" if soon else "medium", "correct_and_resubmit",
+                           f"Rejected before reaching {grp} (EMA: {status}): {label}", None, expected, expected, None, None, ev,
+                           key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
+            else:
+                self._emit("NO_ANSWER", "denial", "high" if soon else "medium", "review",
+                           f"Sent {sent}, no answer from {grp} in {ev['days_waiting']} days: {label}", None, expected, expected, None, None, ev,
+                           key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
+            f = self.findings[_fid("EMA_OPEN_CLAIM", pcn)]
+            f["appeal_deadline"] = file_by
+            f["deadline_basis"] = ("If the payer has no record of the claim, it must reach the payer by this date: " + rule["label"]
+                                   + ("" if rule["verified"] else " (not confirmed against the payer's current manual)"))
+            if payer_last.get(grp) and due and payer_last[grp] < due and not rejected:
+                f["hint"] = (f"No remittance from {grp} since {payer_last[grp]}: its remittances may be missing (Data tab), so check its "
+                             "portal before sending the claim again")
+
     # ------------------------------------------------------------------ aggregate rules
     def run_aggregate_rules(self) -> None:
         c = self.conn
@@ -2425,6 +2587,7 @@ class Detector:
         self.build_baselines()
         self.run_line_rules()
         self.run_claim_rules()
+        self.run_ema_open_claims()
         self.run_aggregate_rules()
         self.emit_second_rates()
         self.resolve_elsewhere()

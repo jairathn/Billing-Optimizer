@@ -308,10 +308,16 @@ def test_an_upload_lands_where_the_same_files_from_dropbox_land(tmp_path, monkey
     import remitwatch.api as api
     from tests.test_parity import _strip
 
+    import re
+
     def clockless(x):
+        """The two runs differ only by when they ran: a full timestamp (a date with a time) is left out; dates, amounts and
+        statuses are compared."""
         if isinstance(x, dict):
-            return {k: clockless(v) for k, v in x.items() if k not in ("first_seen", "last_seen", "run_id", "started_at", "finished_at", "snapshots")}
-        return [clockless(v) for v in x] if isinstance(x, list) else x
+            return {k: clockless(v) for k, v in x.items() if k not in ("run_id", "snapshots")}
+        if isinstance(x, list):
+            return [clockless(v) for v in x]
+        return "<time>" if isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}.*", x) else x
     for page in ("/api/summary", "/api/findings?status=all&limit=500", "/api/worklist/counts", "/api/desk?category=denial", "/api/coverage", "/api/progress"):
         monkeypatch.setattr(api, "DB_PATH", feed_db)
         a = site.c.get(page).json()

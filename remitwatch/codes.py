@@ -371,6 +371,39 @@ def appeal_rule(payer_group: str | None, payer_kind: str | None, plan: str | Non
     return {"days": days, "label": label, "source": "default by payer type", "verified": kind == "medicare"}
 
 
+# The limit for a claim's first filing, counted from the date of service: a claim the payer has no record of (never
+# answered, or rejected before it reached the payer) must reach it again by then. Medicare's is the regulation's; Humana
+# Medicare Advantage's is its manual's. Every other limit is the common one for the kind of payer and is not confirmed:
+# the participation agreement's own limit applies, and it can be shorter.
+FILING_RULES: list[dict] = [
+    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 365, "verified": True,
+     "label": "Medicare Part B: 1 calendar year from the date of service (42 CFR 424.44)", "source": "42 CFR 424.44"},
+    {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "verified": True,
+     "label": "Humana Medicare Advantage: 1 year from the date of service (Humana Provider Manual 2026, claims submission)",
+     "source": "Humana Provider Manual 2026"},
+]
+FILING_DEFAULTS: dict[str, tuple[int, str]] = {
+    "medicare": (365, "Medicare: 1 calendar year from the date of service (42 CFR 424.44)"),
+    "medicare_advantage": (365, "Medicare Advantage: 1 year from the date of service is the common limit; a contracted plan's agreement can set less"),
+    "medicaid": (365, "Medicaid: 365 days from the date of service is the common limit; check the plan"),
+    "commercial": (90, "Commercial plans: 90 days from the date of service is the common limit for participating providers; the agreement's own limit applies"),
+    "supplement": (365, "Supplement plans: claims normally follow Medicare's, so 1 year from the date of service"),
+    "tricare": (365, "TRICARE: 1 year from the date of service"),
+    "va": (180, "VA Community Care Network: 180 days from the date of service"),
+    "other": (90, "90 days from the date of service, the shortest common limit: this payer's limit is not known"),
+}
+
+
+def filing_rule(payer_group: str | None, payer_kind: str | None) -> dict:
+    """The first-filing limit for this payer: {'days', 'label', 'source', 'verified'}, counted from the date of service."""
+    grp, kind = payer_group or "", payer_kind or "other"
+    for r in FILING_RULES:
+        if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
+            return {k: r[k] for k in ("days", "label", "source", "verified")}
+    days, label = FILING_DEFAULTS.get(kind, FILING_DEFAULTS["other"])
+    return {"days": days, "label": label, "source": "common limit for this kind of payer", "verified": kind == "medicare"}
+
+
 # --------------------------------------------------------------------------- statutes cited in letters
 # Wording checked against the Kentucky Legislative Research Commission statute PDFs and the Indiana Code.
 LEGAL = {

@@ -1582,6 +1582,18 @@ def _written_off_summary() -> dict:
     return {"n": tot.get("n") or 0, "cents": tot.get("cents") or 0, "written_off_cents": tot.get("w") or 0, "since": tot.get("since"), "payers": payers}
 
 
+def _no_answer_summary() -> dict:
+    """Claims EMA shows sent and unpaid that the payer never answered (Chase the payer), as the Worklist's kind opens them,
+    and those EMA calls rejected before they reached the payer (under Fix and resubmit)."""
+    out = {}
+    for name, kind, signal in (("chase", "chase", "NO_ANSWER"), ("rejected", None, "REJECTED_PRE_PAYER")):
+        w, params = _filters(signal if kind is None else None, CLAIM_CATEGORIES, None, None, TODO_STATUSES, None, None, None, None, None, "valid",
+                             None, None, None, kind, True)
+        r = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, MIN(appeal_deadline) first FROM findings{w}", tuple(params)) or {}
+        out[name] = {"n": r.get("n") or 0, "cents": r.get("cents") or 0, "first_deadline": r.get("first")}
+    return out
+
+
 @app.get("/api/brief")
 def brief(_: str = Depends(require_auth)):
     """Everything the home screen shows in one call: the open work still inside its filing window by the kind of work it
@@ -1596,6 +1608,7 @@ def brief(_: str = Depends(require_auth)):
         conn.close()
     if out.get("ready"):
         out["written_off"] = _written_off_summary()
+        out["no_answer"] = _no_answer_summary()
         # the red number on each category tab: what closes within 7 days, counted as that page's first tile and its list
         token = _WINDOWS_MEMO.set({})
         try:

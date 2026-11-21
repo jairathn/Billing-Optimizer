@@ -11,7 +11,9 @@ keep receiving them exactly as it does today; nothing in this request may change
 
 ## The call: TriZetto Provider Solutions support, 1-800-556-2231
 
-Have ready: the practice's name, Tax ID and TriZetto Site ID. Ask for a ticket number at the start.
+Have ready: the practice's name, Tax ID and TriZetto Site ID. Ask for a ticket number at the start. (The number above is
+the one clearinghouse guides give for TriZetto's provider support; if it does not reach them, use the support number or
+"Contact us" link inside the TriZetto portal you already log in to.)
 
 ### 1. A separate, read-only SFTP login for the practice's own system
 

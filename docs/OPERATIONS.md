@@ -82,6 +82,21 @@ money given up that the payer can still be asked for: Today's plan lists them ("
 opens them with a filter chip ("Written off in EMA, still workable"), each row says "written off in EMA", and the item says
 when and how much. Work it as any other item, and reverse the write-off in EMA when the payer pays.
 
+### Claims the payer never answered
+
+EMA's exports say which claims went out; the remittances say which ones a payer answered. A claim EMA shows sent to a
+payer, with nothing paid by insurance in EMA and no remittance for it (or for its bill since it went out), is listed once
+30 days have passed since it was sent (`REMITWATCH_NO_ANSWER_DAYS`) and the remittances on file reach that day: a feed
+that stopped never makes newer claims look unanswered. These are "Chase the payer" items (Today's plan: "Chase claims the
+payer never answered"): look the claim up on the payer's portal or call; not on file, send it again before the date shown;
+rejected, correct and resend; denied or paid, get the remittance or EOB and work it here. A claim EMA calls rejected is
+listed at once, under "Fix and resubmit". The date on each is the payer's limit for a first filing, counted from the date
+of service: Medicare's 1 year is the regulation's (42 CFR 424.44); other payers' limits are the common ones and say so (the
+participation agreement's own limit applies). Left out: claims EMA shows paid by insurance (missing remittance files: the
+Data tab), voided, self-pay, and those EMA's status says are settled or not sent yet. EMA's claim statuses are matched by
+words (rejected; paid, closed, void, write-off; on hold, ready, unbilled), to be checked against the practice's sample
+reports when they arrive.
+
 ### Hiding a reason for a payer
 
 When a payer is known never to pay something (a visit with modifier 57 at some payers), open one such item and click "Hide ... for (payer)", or pick the reason and the payer on a list and click "Hide ... for (payer)". Its open items go to Let go with the note typed, and so do new ones after each analysis. An item someone has started, sent or reopened stays as they left it. "Hidden" beside the list's count lists the rules; "Show again" brings back what a rule hid.
