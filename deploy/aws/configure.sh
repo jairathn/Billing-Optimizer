@@ -84,6 +84,12 @@ echo; echo "== ModMed EMA (optional until ModMed approves the app)"
 ask MODMED_CLIENT_ID text "ModMed client ID"
 ask MODMED_PRIVATE_KEY pem "ModMed private key (the one from modmed-key)"
 
+echo; echo "== TriZetto, the remittances straight from the clearinghouse (optional until TriZetto issues the login)"
+ask TRIZETTO_SFTP_USER text "TriZetto SFTP user (the Site ID, or the separate login TriZetto issues for RemitWatch)"
+ask TRIZETTO_SFTP_PASSWORD secret "TriZetto SFTP password"
+ask TRIZETTO_SFTP_DIRS text "Folder(s) the remittances are in, comma-separated (empty: the whole login folder)"
+ask TRIZETTO_SFTP_HOSTKEY text "The SFTP server's key fingerprint TriZetto gives (SHA256:...), optional"
+
 echo; echo "== Fax line, SRFax (optional until signed up)"
 ask SRFAX_ACCESS_ID text "SRFax account number"
 ask SRFAX_ACCESS_PWD secret "SRFax password"

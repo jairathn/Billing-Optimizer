@@ -11,9 +11,10 @@ nobody has to copy them into Dropbox and the lists catch up with payments within
                               seen is kept and any other is refused (trust on first use): a different key means someone
                               may be standing between the site and TriZetto, and the password is not sent to it.
 
-In TriZetto's portal, turn on "Auto Generate Remittances" (remittances are then written to the SFTP folder every few
-hours). Read only: nothing on TriZetto's server is deleted, renamed or written, because the practice's billing system may
-read the same files. Each file is read once (its path, size and time are kept in the store); a remittance read twice under
+Remittances reach the SFTP folder when "Auto Generate Remittances" is on in TriZetto's portal; change that setting only
+after TriZetto confirms how ModMed collects the practice's remittances (docs/OPERATIONS.md, "TriZetto direct"). Read
+only: nothing on TriZetto's server is deleted, renamed or written, because the practice's billing system may read the same
+files, and TriZetto's text reports (.DAT) are not opened. Each file is read once (its path, size and time are kept in the store); a remittance read twice under
 two names is stored once (the store keys remittances by content). Claim files (837) and EMA exports found there are read
 the same way as from Dropbox.
 """
@@ -32,7 +33,9 @@ from datetime import datetime, timezone
 from typing import Callable
 
 DEFAULT_HOST = "sftp.gatewayedi.com"
-WANTED = re.compile(r"(?i)\.(rmt|835|era|edi|x12|dat|txt)$")
+# remittances and X12 files only. TriZetto's own claim report is a text .DAT file, and a download of one starts the next
+# report (as clearinghouse guides describe it): reading it could change what the practice's billing system receives.
+WANTED = re.compile(r"(?i)\.(rmt|835|era|edi|x12|txt)$")
 MAX_FILE_BYTES = 60 * 1024 * 1024
 BATCH = 40
 SEEN_DDL = """

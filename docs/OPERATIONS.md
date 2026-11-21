@@ -52,12 +52,23 @@ Opening the dashboard also looks for new remittances when nothing has for `REMIT
 
 Remittances can come straight from TriZetto instead of through the Dropbox folder: the site reads the practice's TriZetto SFTP account on every run, so a claim the payer paid leaves the lists within hours, with nobody copying files. The Dropbox folder can stay as it is (a file read from both is stored once).
 
-1. Call TriZetto support with the practice's Site ID and ask them to turn on SFTP for it (usually within two days; they issue the SFTP password).
-2. In TriZetto's portal, Remittance Advice Settings: turn on **Auto Generate Remittances** (TriZetto then writes the remittances to the SFTP folder every few hours).
-3. Set `TRIZETTO_SFTP_USER` (the Site ID) and `TRIZETTO_SFTP_PASSWORD`, then redeploy. `TRIZETTO_SFTP_HOST` only if TriZetto names a server other than sftp.gatewayedi.com, `TRIZETTO_SFTP_DIRS` only if the remittances are not under the login folder.
-4. On `/setup`, press "Test the TriZetto connection": the server and its key, the sign-in, the files there and one remittance read.
+What to ask TriZetto, word for word, is in `docs/TRIZETTO_REQUEST.md`. In short: ask TriZetto support how ModMed collects
+the practice's remittances, and for a separate read-only SFTP login (or a copy folder) that gets every 835 file without
+changing ModMed's delivery; do not change TriZetto's Remittance Advice Settings ("Auto Generate Remittances") until
+TriZetto has confirmed it cannot disturb ModMed's posting.
 
-It only reads: nothing on TriZetto's server is moved, renamed or deleted, because the practice's billing system may collect the same files. Ask TriZetto whether anything else (ModMed) collects and removes files from that account; if so, ask them to keep the files (or send RemitWatch a copy) so both get every remittance. The server's key is kept the first time (or set `TRIZETTO_SFTP_HOSTKEY` to the fingerprint TriZetto gives); a different key afterwards stops the connection before the password is sent. If TriZetto only lets fixed addresses in: Vercel has none, so run the site on a small server instead (section 1).
+1. When TriZetto sends the login: `sudo bash /opt/remitwatch/deploy/aws/configure.sh`, TriZetto section:
+   `TRIZETTO_SFTP_USER`, `TRIZETTO_SFTP_PASSWORD`, `TRIZETTO_SFTP_DIRS` (the folder the 835 files are in) and
+   `TRIZETTO_SFTP_HOSTKEY` (the fingerprint TriZetto gives). `TRIZETTO_SFTP_HOST` only if TriZetto names a server other
+   than sftp.gatewayedi.com.
+2. On `/setup`, press "Test the TriZetto connection": the server and its key, the sign-in, the files there and one
+   remittance read.
+
+It only reads: nothing on TriZetto's server is moved, renamed or deleted, and TriZetto's own text reports (.DAT) are not
+opened (a download of one starts the next report). The server's key is kept the first time unless `TRIZETTO_SFTP_HOSTKEY`
+is set; a different key afterwards stops the connection before the password is sent. The SFTP password expires (yearly,
+by vendors' accounts): when the test fails with a sign-in error, put the new one in with configure.sh. The server has a
+fixed address, so an address TriZetto has to allow is no obstacle.
 
 ### What EMA shows as paid
 
