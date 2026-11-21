@@ -331,11 +331,19 @@ def test_setup_lists_the_connection(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     off = next(c for c in cloud.setup_status(probe=False)["checks"] if c["key"] == "modmed")
     assert off["ok"] is None and "attached by hand" in off["detail"]
-    monkeypatch.setenv("MODMED_CLIENT_ID", "abc")
+    # the key alone (ModMed has not given a client ID yet): its id is shown, and what to do next
     monkeypatch.setenv("MODMED_PRIVATE_KEY", PEM)
+    kid = M.public_jwk(M.load_private_key(PEM))["kid"]
+    half = next(c for c in cloud.setup_status(probe=False)["checks"] if c["key"] == "modmed")
+    assert half["ok"] is None and kid in half["detail"] and "MODMED_CLIENT_ID" in half["detail"]
+    monkeypatch.setenv("MODMED_CLIENT_ID", "abc")
     out = cloud.setup_status(probe=False)
     on = next(c for c in out["checks"] if c["key"] == "modmed")
-    assert on["ok"] is True and out["modmed"] == {"configured": True, "key": True}
+    assert on["ok"] is True and out["modmed"] == {"configured": True, "key": True, "kid": kid} and kid in on["detail"]
+    # a key that does not load is said plainly
+    monkeypatch.setenv("MODMED_PRIVATE_KEY", "-----BEGIN PRIVATE KEY----- nope -----END PRIVATE KEY-----")
+    bad = next(c for c in cloud.setup_status(probe=False)["checks"] if c["key"] == "modmed")
+    assert bad["ok"] is False and "BEGIN and END" in bad["detail"]
 
 
 def test_cli_makes_a_key_pair(capsys):

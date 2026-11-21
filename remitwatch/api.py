@@ -2454,7 +2454,7 @@ def jwks_document():
     except modmed.ModMedError as exc:
         raise HTTPException(503, str(exc))
     if not doc:
-        raise HTTPException(404, "No key is set (MODMED_PRIVATE_KEY).")
+        raise HTTPException(404, "No key is set yet: add MODMED_PRIVATE_KEY in Vercel (Settings, Environment Variables) and redeploy.")
     return JSONResponse(doc, headers={"Cache-Control": "public, max-age=300"})
 
 

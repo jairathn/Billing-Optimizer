@@ -1265,10 +1265,23 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     add("note_review", "Visit-note review (optional)", bool(env("ANTHROPIC_API_KEY")) or None,
         "on" if env("ANTHROPIC_API_KEY") else "off: packets are built from the template")
     mm_on = bool(env("MODMED_CLIENT_ID") and (env("MODMED_PRIVATE_KEY") or env("MODMED_CLIENT_SECRET")))
-    add("modmed", "ModMed EMA: visit notes for appeals (optional)", mm_on or None,
-        "set: press Test the ModMed connection below" if mm_on else
-        "not set: notes are attached by hand. To connect EMA, follow docs/OPERATIONS.md, Connecting ModMed EMA")
-    out["modmed"] = {"configured": mm_on, "key": bool(env("MODMED_PRIVATE_KEY"))}
+    # the key's id, so a person can see the key they put in the settings is the one this deployment uses
+    mm_key, mm_bad = "", ""
+    if env("MODMED_PRIVATE_KEY"):
+        from . import modmed
+        try:
+            k = (modmed.jwks() or {"keys": [{}]})["keys"][0]
+            mm_key = f"key {k.get('alg')}, id {k.get('kid')}"
+        except modmed.ModMedError as exc:
+            mm_bad = str(exc)
+    add("modmed", "ModMed EMA: visit notes for appeals (optional)", False if mm_bad else (mm_on or None),
+        mm_bad or (f"set ({mm_key}): press Test the ModMed connection below" if mm_on and mm_key else
+                   "set: press Test the ModMed connection below" if mm_on else
+                   f"{mm_key} is set and published at /.well-known/jwks.json: register the app with ModMed with that address, "
+                   "then set MODMED_CLIENT_ID" if mm_key else
+                   "not set: notes are attached by hand. To connect EMA, follow docs/OPERATIONS.md, Connecting ModMed EMA"),
+        "Paste the whole key into MODMED_PRIVATE_KEY again, BEGIN and END lines included, and redeploy." if mm_bad else "")
+    out["modmed"] = {"configured": mm_on, "key": bool(env("MODMED_PRIVATE_KEY")), "kid": mm_key.rsplit("id ", 1)[-1] if mm_key else None}
     fx_on, fx_line = bool(env("SRFAX_ACCESS_ID") and env("SRFAX_ACCESS_PWD")), env("SRFAX_CALLER_ID") or ""
     add("fax", "Fax line: appeals faxed, payers' answers read (optional)", bool(fx_line and env("SRFAX_SENDER_EMAIL")) if fx_on else None,
         (f"set: faxes go out from {fx_line}, and letters give it for the payer's answer; press Test the fax line below"
