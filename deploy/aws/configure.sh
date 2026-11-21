@@ -92,7 +92,13 @@ if [ -n "$(current TRIZETTO_SFTP_PASSWORD)" ] && [ "$(current TRIZETTO_SFTP_PASS
   put TRIZETTO_SFTP_PASSWORD_SET "$(date -u +%F)"      # for the reminder before it expires (the data checks)
   echo "  noted: changed on $(date -u +%F)"
 fi
-ask TRIZETTO_SFTP_PASSWORD_DAYS text "How many days a TriZetto SFTP password lasts before TriZetto makes you change it (from TriZetto's answer; empty if it never expires)"
+ask TRIZETTO_SFTP_PASSWORD_DAYS text "How many days a TriZetto SFTP password lasts before TriZetto makes you change it (from TriZetto's answer; 0 if it never expires)"
+tz_days=$(current TRIZETTO_SFTP_PASSWORD_DAYS)
+case "$tz_days" in
+  ""|*[!0-9]*)                            # "90 days" -> 90; "never", "none" or anything without a number -> 0 (no reminder)
+    tz_num=$(printf '%s' "$tz_days" | grep -o '[0-9][0-9]*' | head -n1 || true)
+    if [ -n "$tz_days" ]; then put TRIZETTO_SFTP_PASSWORD_DAYS "${tz_num:-0}"; echo "  noted as ${tz_num:-0} days"; fi ;;
+esac
 ask TRIZETTO_SFTP_DIRS text "Folder(s) the remittances are in, comma-separated (empty: the whole login folder)"
 ask TRIZETTO_SFTP_HOSTKEY text "The SFTP server's key fingerprints TriZetto gives (SHA256:... or MD5:..., several separated by commas), optional"
 

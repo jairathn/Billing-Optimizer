@@ -298,3 +298,55 @@ def test_the_data_checks_warn_before_the_trizetto_password_expires_and_while_a_s
     conn.execute("INSERT INTO meta VALUES (?, ?)", (trizetto.REFUSED_META, json.dumps({"who": "h", "at": "2026-11-20T08:00:00+00:00"})))
     assert [h["key"] for h in trizetto_health(conn, "2026-11-21", env)] == ["trizetto_signin"]
     assert trizetto_health(conn, "2026-11-21", {}) == []                 # no feed set up: nothing to say
+
+
+def test_a_slow_or_dropped_sign_in_is_the_network_not_a_refused_password(tmp_path, sftp, monkeypatch):
+    """A sign-in TriZetto is slow to answer (past the client's timeout) says nothing about the password: no hold, and the next
+    run reads the files."""
+    from remitwatch.store import Store
+    from tests.fake_sftp import _Server
+    _remits(sftp.root, 1)
+    store = Store(str(tmp_path / "s.sqlite"))
+    slow = {"on": True}
+    orig_init, orig_auth = trizetto.Session.__init__, _Server.check_auth_password
+
+    def check_auth_password(self, username, password):
+        if slow["on"]:
+            time.sleep(3)
+        return orig_auth(self, username, password)
+    monkeypatch.setattr(trizetto.Session, "__init__", lambda self, s, known=None, timeout=1: orig_init(self, s, known=known, timeout=timeout))
+    monkeypatch.setattr(_Server, "check_auth_password", check_auth_password)
+    pull = lambda: trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + 60, settings=trizetto.Settings.from_env(sftp.env()), log=lambda *a: None)
+    with pytest.raises(trizetto.TriZettoError) as err:
+        pull()
+    assert not isinstance(err.value, trizetto.SignInRefused) and "Nothing was concluded about the password" in str(err.value)
+    assert trizetto.refusal(store.conn) is None
+    slow["on"] = False
+    assert pull()["remits"] == 1
+    store.close()
+
+
+def test_a_serverless_run_keeps_the_hold_so_a_refused_password_is_sent_once_a_day(tmp_path, monkeypatch):
+    from remitwatch import cloud
+    from remitwatch.state import DropboxState
+    from tests.fake_sftp import FakeSFTP
+    from tests.fakes import FakeDropbox
+    root = tmp_path / "trizetto"
+    root.mkdir()
+    f = FakeSFTP(str(root))
+    try:
+        monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
+        for k, v in f.env().items():
+            monkeypatch.setenv(k, v)
+        _remits(str(root), 2)
+        state = DropboxState(FakeDropbox(str(tmp_path / "dbx")), "/RemitWatch-state")
+        run = lambda: cloud.run_cloud_cycle(state, None, budget_s=600, email=False, log=lambda *a: None)
+        assert run()["trizetto"]["remits"] == 2
+        run()
+        f.refuse_password = True
+        before = len(f.logins)
+        outs = [run() for _ in range(4)]                 # Sync now presses, the dashboard opening, the daily run
+        assert len(f.logins) - before == 1               # one refused sign-in, then the saved hold keeps the rest off
+        assert "error" in outs[0]["trizetto"] and all(o["trizetto"].get("skipped") for o in outs[1:])
+    finally:
+        f.stop()

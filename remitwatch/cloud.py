@@ -927,6 +927,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 tz = trizetto.pull(conn, lambda items: _ingest_batch(store, items, log), deadline=t0 + budget * 0.4, log=log)
             except Exception as exc:
                 tz = {"error": str(exc)[:300] if isinstance(exc, trizetto.TriZettoError) else f"{type(exc).__name__}: {str(exc)[:200]}"}
+                if getattr(exc, "seen_changed", False):
+                    tz["seen_changed"] = True   # a refused password's hold is in the store: save it, or the next run signs in again
             out["trizetto"] = {k: v for k, v in tz.items() if k != "seen_changed"}
         ingest: dict = {"skipped": "Dropbox credentials are not configured"}
         if client is not None:

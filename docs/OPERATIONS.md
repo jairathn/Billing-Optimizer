@@ -76,13 +76,16 @@ The password. TriZetto's SFTP login is usually the Site ID itself, with one pass
 billing system (ModMed) may sign in with the same one. Two things protect it:
 
 - A refused password is not tried again for a day. TriZetto locks a login for an hour after repeated failed sign-ins, and
-  a locked Site ID login would stop ModMed's claims and remittances too. After a refusal the scheduled runs do not sign in
-  with the same user name and password for 24 hours (then once more: TriZetto may have switched SFTP on since); a new
-  password is tried at once, and a successful "Test the TriZetto connection" ends the hold. Today's data checks and the
-  test on `/setup` say when a hold is in place. Only a hash of the settings is kept, never the password.
+  a locked Site ID login would stop ModMed's claims and remittances too. After a refusal (TriZetto's own answer to the user
+  name and password; a sign-in that timed out or a line that dropped is the network and holds nothing) the scheduled runs
+  do not sign in with the same user name and password for 24 hours, then once more (TriZetto may have switched SFTP on
+  since). A new password is tried at once. "Test the TriZetto connection" ends the hold when its sign-in step passes, and
+  a refusal there holds the scheduled runs too. Today's data checks and the test on `/setup` say when a hold is in place;
+  the hold is kept on Vercel too. Only a hash of the settings is kept, never the password.
 - A reminder before it expires. TriZetto makes the SFTP password expire (every 60 days to a year, by vendors' accounts).
   configure.sh notes the day a new password is entered (`TRIZETTO_SFTP_PASSWORD_SET`) and asks how many days it lasts
-  (`TRIZETTO_SFTP_PASSWORD_DAYS`, from TriZetto's answer); from 20 days before, Today's data checks say when it expires.
+  (`TRIZETTO_SFTP_PASSWORD_DAYS`, from TriZetto's answer; a number, 0 if it never expires); from 20 days before, Today's
+  data checks say when it expires.
   The TriZetto administrator sets the new one in the portal (My Account, Manage Products, Manage SFTP Password) and gives
   it by phone to whoever runs the server, the same day, and to anything else that signs in with that login.
 
@@ -94,10 +97,12 @@ An item EMA shows paid is closed by the analysis: insurance payments on the line
 
 Each item carries what the biller gave up in EMA of the money it disputes (from the ERA & Payment Line Adjustments
 export): rows written off, or moved on to the patient or the next payer, on the payer's own reasons for not paying.
-EMA's routine posting of a contractual reduction (CO-45, CO-253, CO-59 and the like) is not giving anything up, and the
-patient's share (PR) is not the payer's: neither counts. A row is counted once though several exports repeat it, a
-reversal cancels it, the amount is capped at the item's disputed amount, and where a claim carries the same code twice on
-one date (EMA's rows are by claim, code and date) nothing is attributed. An item written off while its filing window is
+EMA's routine posting of a contractual reduction (CO-45, CO-253, CO-59 and the like) is not giving anything up, unless
+that reason is the item's own (CO-59 on a multiple-procedure reduction), and the patient's share (PR) is not the payer's:
+neither counts. Reasons are read however EMA spaces them ("CO - 45"). A row is counted once though several exports repeat
+it, a reversal cancels it (a reversal alone counts nothing; the direction is the one most of EMA's write-offs carry), the
+amount is capped at the item's disputed amount, a whole-claim item counts only the codes and dates it lists, and where a
+claim carries the same code twice on one date (EMA's rows are by claim, code and date) nothing is attributed. An item written off while its filing window is
 still open is money given up that the payer can still be asked for: Today's plan lists them ("Work what EMA wrote off"),
 the Worklist opens them with a filter chip ("Written off in EMA, still workable"), each row says "written off in EMA", and
 the item says how much and since when. Work it as any other item, and reverse the write-off in EMA when the payer pays.
@@ -110,17 +115,23 @@ reach that day (a feed that stopped never makes newer claims look unanswered), w
 
 - no remittance for it, and none for its bill since it went out;
 - no ERA line posted in EMA for it (the payer's answer reached EMA even if its 835 never reached the site);
-- nothing paid by insurance in EMA (the Insurance Payments column, or an insurer's Payment row), by the newest export;
+- nothing paid by insurance in EMA, by the newest export: the Insurance Payments column, or a Payment row whose activity
+  or payment method says insurance (ERA, EFT); a Payment row that only names the payer counts when it is 40% of the
+  charges or more (a copay never is);
 - EMA's status is not denied (a denial is the payer's answer), paid, void, cancelled or in collections, and the claim
   was sent (not on hold, ready or unbilled);
-- it is the bill's latest submission (an earlier one sent again is not chased twice), and its visits were not answered
-  under another bill made for them (same patient, date and code).
+- it is the bill's latest submission, by its number (C017, C024, ...): an earlier one sent again is not chased twice. A
+  later submission EMA's exports give no date for yet counts as sent the day after the bill's previous submission or
+  answer ("Sent again after ...");
+- its visits (same patient, date and code) are not on another bill that settles them: one the payer paid, one the payer
+  answered after this claim went out, a newer bill made for the visit, or one EMA shows paid. A denial of the same bill's
+  earlier submission, or of an older bill, never stops the claim sent again from being chased.
 
 These are "Chase the payer" items (Today's plan: "Chase claims the payer never answered"): look the claim up on the
 payer's portal or call; not on file, send it again before the date shown; rejected, correct and resend; denied or paid,
 get the remittance or EOB and work it here. A claim EMA calls rejected is listed at once, under "Fix and resubmit". A
-claim EMA shows closed or written off though no payer answered is listed all the same, marked written off in EMA (it is
-also under "Work what EMA wrote off"). A claim known only from the Claim & Claim Status report is listed too. Each is
+claim EMA shows closed or written off though no payer answered is listed all the same, marked written off in EMA (no
+more than its charge, and not when the patient paid it; it is also under "Work what EMA wrote off"). A claim known only from the Claim & Claim Status report is listed too. Each is
 sized by the payer's usual rate for its codes and units (a second and later surgical procedure at the payer's usual
 share), and one charge listed by two export layouts counts once. The newest export decides a claim's status: a
 spreadsheet's own creation time, or for a CSV the newest date among its rows.
@@ -129,11 +140,12 @@ The date on each is the payer's limit for a first filing, counted from the date 
 regulation's (42 CFR 424.44); other payers' limits are the common ones and say so (the participation agreement's own
 limit applies). A claim sent on time keeps its item after that date: the payer still owes a claim it has, and most take
 proof of timely filing (EMA's submission date, or the clearinghouse's acceptance report) for one they have no record of,
-so it is then dated by the payer's appeal window from the day its answer was due, marked not confirmed. Medicare's year
-from the date of service is firm, and a rejected claim never reached the payer. When a payer's remittances stop before
+so its date runs the payer's appeal window past that limit (marked not confirmed), and its note says to send it again by
+the limit. Medicare's year from the date of service is firm, and a rejected claim never reached the payer. When a payer's remittances stop before
 a claim's answer was due, or none from it is on file at all, the item says so: check its portal (and its ERA enrollment)
-before sending the claim again. The work recorded on one follows its bill: to the items its remittance brings, or to the
-claim sent again. EMA's claim statuses are matched by words (rejected; denied; paid, void, collections; closed, written
+before sending the claim again. The notes recorded on one follow its bill, even a run or more later: to each item its remittance
+brings, or to the claim sent again. Each starts To do (Started if someone was working the claim), never Sent, Paid or Let
+go: the payer's answer is a new matter. An item a person wrote on is kept until its notes have moved on. EMA's claim statuses are matched by words (rejected; denied; paid, void, collections; closed, written
 off; on hold, ready, unbilled), to be checked against the practice's sample reports when they arrive. They cannot be
 hidden for a payer (below): a claim nobody answered is not a reason a payer won't pay, so each is let go one at a time,
 with a note.

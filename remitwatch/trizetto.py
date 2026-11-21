@@ -152,15 +152,29 @@ class Session:
         try:
             t.auth_password(self.s.user, self.s.password)
         except Exception as exc:
+            # a refusal is TriZetto's own answer to the user name and password, on a line still open; a sign-in that timed out or
+            # a line that dropped is the network, and says nothing about the password
+            definite = isinstance(exc, paramiko.BadAuthenticationType) or (
+                isinstance(exc, paramiko.AuthenticationException) and t.is_active()
+                and not re.search(r"timeout|timed out|EOF|shut down|closed", str(exc), re.I))
             self.close()
-            if isinstance(exc, (socket.timeout, OSError, EOFError)) and not type(exc).__name__.endswith("AuthenticationException"):
-                raise TriZettoError(f"The sign-in to {self.s.host} did not finish ({type(exc).__name__}).") from exc
+            if not definite:
+                raise TriZettoError(f"The sign-in to {self.s.host} did not finish ({type(exc).__name__}: {str(exc)[:120]}). "
+                                    "Nothing was concluded about the password; the next run tries again.") from exc
             raise SignInRefused("TriZetto refused the sign-in: check TRIZETTO_SFTP_USER (the Site ID) and TRIZETTO_SFTP_PASSWORD, and that "
                                 "TriZetto support has turned SFTP on for the Site ID.") from exc
         if not t.is_authenticated():
             self.close()
             raise SignInRefused("TriZetto did not accept the sign-in.")
-        self.sftp = paramiko.SFTPClient.from_transport(t)
+        try:
+            self.sftp = paramiko.SFTPClient.from_transport(t)
+        except Exception as exc:        # signed in, but the file service refused (SFTP not switched on, or too many sessions)
+            self.close()
+            raise TriZettoError(f"TriZetto accepted the sign-in but would not open its file service ({type(exc).__name__}). "
+                                "Ask TriZetto support to switch SFTP on for this login.") from exc
+        if self.sftp is None:
+            self.close()
+            raise TriZettoError("TriZetto accepted the sign-in but would not open its file service. Ask TriZetto support to switch SFTP on.")
         return self
 
     def __exit__(self, *exc) -> None:
@@ -253,12 +267,14 @@ def remember_refusal(conn, s: Settings, detail: str) -> None:
     conn.commit()
 
 
-def forget_refusal(conn) -> None:
+def forget_refusal(conn) -> bool:
+    """End a hold; True when there was one (the store changed, so a serverless run must save it)."""
     try:
-        conn.execute("DELETE FROM meta WHERE key=?", (REFUSED_META,))
+        gone = conn.execute("DELETE FROM meta WHERE key=?", (REFUSED_META,)).rowcount
         conn.commit()
+        return bool(gone)
     except Exception:
-        pass
+        return False
 
 
 def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings: Settings | None = None, log=print) -> dict:
@@ -282,8 +298,10 @@ def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings:
         ses = Session(s, known=row[0] if row else None).__enter__()
     except SignInRefused as exc:
         remember_refusal(conn, s, str(exc))
+        exc.seen_changed = True         # a serverless run saves the store, or the hold would be lost with it
         raise
-    forget_refusal(conn)
+    if forget_refusal(conn):
+        out["seen_changed"] = True
     try:
         if ses.first_key:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (HOSTKEY_META, ses.key_fp))
@@ -359,6 +377,9 @@ def check(env: dict | None = None, known: str | None = None) -> dict:
             steps.append({"step": "Read", "ok": head == b"ISA", "detail": f"{posixpath.basename(pick)} is an X12 file" if head == b"ISA"
                           else f"{posixpath.basename(pick)} does not start like an X12 file"})
             return {"ok": all(x["ok"] for x in steps), "steps": steps, "hostkey": ses.key_fp}
+    except SignInRefused as exc:
+        steps.append({"step": "Sign-in", "ok": False, "detail": str(exc)})
+        return {"ok": False, "steps": steps, "refused": str(exc)}
     except TriZettoError as exc:
         steps.append({"step": "Connection", "ok": False, "detail": str(exc)})
         return {"ok": False, "steps": steps}

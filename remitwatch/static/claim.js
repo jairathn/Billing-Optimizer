@@ -52,7 +52,7 @@ async function openClaim(id, backTo){
   // which lines and remittances the items were found on
   const itemsOnLine = {};
   c.findings.forEach(f => (f.line_key ? [f.line_key] : (f.line_keys||[])).forEach(k => { (itemsOnLine[k] = itemsOnLine[k] || []).push(f); }));
-  const open = c.findings.filter(f => ['open','in_progress'].includes(f.status)).length;
+  const open = c.findings.filter(f => ['open','in_progress'].includes(f.status) && !f.stale).length;
   const due = f => f.via === 'pattern' ? f.claim_deadline : f.appeal_deadline;
   const itemRow = f => { const d0 = due(f), ct = closesText(d0), live = ['open','in_progress'].includes(f.status);
     const where = f.via === 'takeback' ? `taken back ${f.remit_date ? longDate(f.remit_date) : ''}${f.remit_payer ? ' by '+f.remit_payer : ''}`

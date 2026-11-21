@@ -2732,8 +2732,13 @@ def trizetto_test(_: str = Depends(require_auth)):
         # one still in place is shown (the cycles do not sign in with a refused password for a day)
         conn = db()
         try:
-            if out.get("ok"):
-                trizetto.forget_refusal(conn)
+            if any(x["step"] == "Sign-in" and x["ok"] for x in out.get("steps", [])):
+                trizetto.forget_refusal(conn)       # the sign-in works: whatever else is still to fix, the hold ends
+            elif out.get("refused"):
+                # refused here too: the scheduled runs must not try the same password again within the day either
+                if not trizetto.refusal(conn):
+                    trizetto.remember_refusal(conn, trizetto.Settings.from_env(), out["refused"])
+                out["held"] = trizetto.refusal(conn)
             else:
                 held = trizetto.refusal(conn)
                 if held:

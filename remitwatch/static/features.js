@@ -266,7 +266,8 @@ function drawerExtras(f, r){
   // what bears on the next step stays in view; the facts and the note builder go in the drawer's folds
   const openWindow = !f.appeal_deadline || f.appeal_deadline >= today;
   // the same rule as Today's step and the list it opens: a filing date on file that has not passed
-  const datedOpen = !!f.appeal_deadline && f.appeal_deadline >= today;
+  const site = typeof siteDay === 'function' ? siteDay() : today;       // the day the lists use, not the browser's
+  const datedOpen = !!f.appeal_deadline && f.appeal_deadline >= site;
   const wroteOff = f.written_off_cents ? `<div class="note sev-medium"><b>Written off in EMA.</b> ${money2(f.written_off_cents)} of the money in dispute on this ${f.line_key ? 'line' : 'claim'} is written off (or moved to the patient) in EMA${f.written_off_on ? ', as of ' + esc(f.written_off_on) : ''}${!['open','in_progress'].includes(f.status) ? '.' : datedOpen ? '. The payer can still be asked for it: work it, and reverse the write-off in EMA when the payer pays.' : f.appeal_deadline ? '. Its filing window has closed.' : '. No filing date is on file for it: check the payer\'s rules before working it.'}</div>` : '';
   const notes = `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${wroteOff}${why}${windows}${later}`;
   const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${e.kind==='fax' ? '<b>Fax</b>' : `${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>`}</td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';

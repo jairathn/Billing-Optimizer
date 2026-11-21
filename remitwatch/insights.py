@@ -21,7 +21,7 @@ SMALL_CENTS = 2000                      # items known to be worth under $20: abo
 # The kind of work each finding takes. A signal not named here falls to its action (fix and resubmit, appeal) and then
 # to "check first".
 WORK_TYPES: list[dict] = [
-    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number", "short": "Correct it in EMA and resend it the way the item says.",
+    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number (for a claim rejected before the payer: its rejection report)", "short": "Correct it in EMA and resend it the way the item says.",
      "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send the correction the way the payer takes it before the date shown (a corrected claim for most payers; for Medicare a reopening, a new claim or a redetermination, as the item says), then press Mark sent."},
     {"key": "auth", "label": "Get the authorization", "needs": "The authorization record, or the payer's portal",
      "short": "Find the authorization and appeal, or ask for a retro-auth.",
@@ -418,11 +418,13 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
                               "day, so the login is never locked (ModMed may sign in with it too).",
                     "who": "TriZetto administrator: set a new SFTP password in the TriZetto portal (My Account, Manage Products, Manage "
                            "SFTP Password) and give it by phone to whoever runs the server, who enters it with configure.sh."})
+    import re
     try:
         set_on = date.fromisoformat((e.get("TRIZETTO_SFTP_PASSWORD_SET") or "")[:10])
-        days = int(e.get("TRIZETTO_SFTP_PASSWORD_DAYS") or 0)
     except ValueError:
-        set_on, days = None, 0
+        set_on = None
+    m = re.search(r"\d+", e.get("TRIZETTO_SFTP_PASSWORD_DAYS") or "")     # "90", or "90 days"; 0 or nothing: it does not expire
+    days = int(m.group(0)) if m else 0
     if set_on and days > 0:
         due = set_on + timedelta(days=days)
         left = (due - date.fromisoformat(today)).days
