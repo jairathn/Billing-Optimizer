@@ -6,7 +6,9 @@ The store, the Dropbox mirror and the appeal packets hold patient information. R
 
 Recommended: one small virtual machine in AWS, Google Cloud or Azure. For AWS, `docs/AWS_SETUP.md` walks through it with a
 template that builds the server (`deploy/aws/remitwatch.yaml`), a script that asks for the settings
-(`deploy/aws/configure.sh`), and `python -m remitwatch.cli import-cloud`, which moves a Vercel site's data over once. All three sign a BAA at no extra charge (accept it in the account before loading data). Size it at 2 vCPU and 4 GB of memory, because a detection run on the full archive peaks at about 2 GB, with a 20 GB encrypted disk. That is roughly $25 to $35 a month. Install Docker and run `docker compose up -d`; the compose file starts the dashboard, its scheduler and Caddy for HTTPS.
+(`deploy/aws/configure.sh`), and `python -m remitwatch.cli import-cloud`, which moves a Vercel site's data over once.
+`docs/SERVER_RUNBOOK.md` is the short version for whoever runs the server: the settings, the commands, the move and its
+proof (`compare-cloud`), and the backups. All three sign a BAA at no extra charge (accept it in the account before loading data). Size it at 2 vCPU and 4 GB of memory, because a detection run on the full archive peaks at about 2 GB, with a 20 GB encrypted disk. That is roughly $25 to $35 a month. Install Docker and run `docker compose up -d`; the compose file starts the dashboard, its scheduler and Caddy for HTTPS.
 
 Alternatives that cost more and need less administration: Fly.io with its compliance package, or Render on its HIPAA plan. Check current pricing; in November 2026 they were about $99 and $499 a month.
 

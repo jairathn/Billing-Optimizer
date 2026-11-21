@@ -318,11 +318,22 @@ class Scheduler:
 SCHEDULER = Scheduler()
 
 
+DAILY_MINUTES = 24 * 60
+
+
 def start_scheduler_from_env(db_path: str) -> bool:
-    interval = int(os.environ.get("REMITWATCH_SYNC_INTERVAL_MINUTES", "0") or 0)
-    if interval <= 0 and not os.environ.get("DROPBOX_APP_SECRET"):
+    """The background cycles on a server: every REMITWATCH_SYNC_INTERVAL_MINUTES (60 is a good value), and at least once
+    a day whenever a feed is set up (Dropbox or TriZetto), as Vercel's daily scheduled call does; Dropbox's webhook and
+    the dashboard's Sync now add cycles in between. Each cycle also looks after the fax line (cli.cmd_cycle)."""
+    from . import trizetto
+    try:
+        interval = int(os.environ.get("REMITWATCH_SYNC_INTERVAL_MINUTES", "0") or 0)
+    except ValueError:
+        interval = 0
+    feed = bool(os.environ.get("DROPBOX_APP_SECRET") or dropbox_configured() or trizetto.configured())
+    if interval <= 0 and not feed:
         return False
-    SCHEDULER.start(db_path, interval)
+    SCHEDULER.start(db_path, interval if interval > 0 else DAILY_MINUTES)
     return True
 
 

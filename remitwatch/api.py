@@ -58,29 +58,41 @@ security = HTTPBasic(auto_error=False)
 
 
 
+def ensure_server_schema(path: str) -> None:
+    """The store's tables, the analysis's, and the dashboard's own (alerts, links, the provider tables, faxes, hidden
+    reasons, packets): the same set the serverless copy starts with (cloud.empty_serving), created where missing."""
+    from . import activity
+    from .actions import ensure_fax_tables, ensure_hide_rules
+    from .alerts import ALERTS_DDL
+    from .link import DDL as LINK_DDL
+    from .notes import ensure_packets
+    from .store import connect
+    conn = connect(path)
+    try:
+        ensure_schema(conn)
+        conn.executescript(ALERTS_DDL + LINK_DDL)
+        activity.ensure_schema(conn)
+        ensure_fax_tables(conn)
+        ensure_hide_rules(conn)
+        ensure_packets(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Bring an older store up to the current schema and start the background scheduler when it is configured."""
     if runtime.serverless():
         yield           # nothing on disk to migrate and no process to keep: remitwatch.cloud does both jobs
         return
-    if os.path.exists(DB_PATH):
-        conn = sqlite3.connect(DB_PATH, timeout=60)
-        try:
-            ensure_schema(conn)
-            from .alerts import ALERTS_DDL
-            from .notes import ensure_packets
-            conn.executescript(ALERTS_DDL)
-            ensure_packets(conn)
-            conn.commit()
-        finally:
-            conn.close()
-        from .pipeline import SCHEDULER, start_scheduler_from_env
-        start_scheduler_from_env(DB_PATH)
-        yield
-        SCHEDULER.stop()
-    else:
-        yield
+    # every table the dashboard reads, whether or not a store exists yet (a new server's first page must not fail
+    # before its first run), then the scheduler: the daily work runs without any outside cron
+    ensure_server_schema(DB_PATH)
+    from .pipeline import SCHEDULER, start_scheduler_from_env
+    start_scheduler_from_env(DB_PATH)
+    yield
+    SCHEDULER.stop()
 
 
 app = FastAPI(title="RemitWatch", version=__version__, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)

@@ -1178,6 +1178,10 @@ def backfill_export_times(store, client, deadline: float, log=print) -> int:
 
 # --------------------------------------------------------------------------- setup checks
 
+class _ServerStore(Exception):
+    """A server has no state folder to try a write in (setup_status)."""
+
+
 def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     """Every setting the deployment needs, checked live, in the order the setup sheet sets them."""
     from .dropbox_sync import DropboxAuthError, DropboxClient
@@ -1187,24 +1191,31 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     def add(key: str, label: str, ok: bool | None, detail: str = "", fix: str = "") -> None:
         checks.append({"key": key, "label": label, "ok": ok, "detail": detail, "fix": "" if ok else fix})
 
+    # on a server the settings are its .env file and a restart applies them; on Vercel, the project's settings and a redeploy
+    server = not runtime.serverless()
+    where, apply = ("in the server's .env", "then restart it (docker compose up -d)") if server else ("in Vercel", "then redeploy")
     pw = env("REMITWATCH_PASSWORD") or ""
     pw_ok = bool(pw) and (not runtime.serverless() or (pw.isascii() and len(pw) >= 12))
     add("password", "Dashboard password (REMITWATCH_PASSWORD)", pw_ok,
         "set" if pw_ok else ("not set" if not pw else "set, but shorter than 12 characters or not plain letters and digits"),
-        "Set REMITWATCH_PASSWORD in Vercel to 12 or more plain letters and digits, then redeploy.")
+        f"Set REMITWATCH_PASSWORD {where} to 12 or more plain letters and digits, {apply}.")
     cron = env("CRON_SECRET") or ""
     cron_ok = bool(cron) and cron == cron.strip() and "\n" not in cron and len(cron) >= 16
-    add("cron_secret", "Scheduler secret (CRON_SECRET)", cron_ok,
-        "set" if cron_ok else ("not set" if not cron else "set, but it is shorter than 16 characters or has a space or line break at an end"),
-        "Add CRON_SECRET in Vercel (a long random value with no spaces), then redeploy. Without it the site cannot start its own updates.")
+    if server and not cron:     # the server's own scheduler runs the cycles; the secret only lets an outside caller start one
+        add("cron_secret", "Scheduler secret (CRON_SECRET, optional on a server)", None,
+            "not set: not needed here, the server's own scheduler runs the cycles (set it only for an outside caller of /api/cron/)")
+    else:
+        add("cron_secret", "Scheduler secret (CRON_SECRET)", cron_ok,
+            "set" if cron_ok else ("not set" if not cron else "set, but it is shorter than 16 characters or has a space or line break at an end"),
+            f"Add CRON_SECRET {where} (a long random value with no spaces), {apply}. Without it the site cannot start its own updates.")
     key, secret, token = env("DROPBOX_APP_KEY"), env("DROPBOX_APP_SECRET"), env("DROPBOX_REFRESH_TOKEN")
     add("dropbox_app", "Dropbox app key and secret", bool(key and secret), "set" if key and secret else "not set",
-        "Add DROPBOX_APP_KEY and DROPBOX_APP_SECRET in Vercel, then redeploy.")
+        f"Add DROPBOX_APP_KEY and DROPBOX_APP_SECRET {where}, {apply}.")
     out: dict = {"checks": checks, "mode": "serverless" if runtime.serverless() else "server"}
     if key:
         out["authorize_url"] = DropboxClient.authorize_url(key)
     add("dropbox_token", "Dropbox connection (DROPBOX_REFRESH_TOKEN)", bool(token) and None, "not set" if not token else "",
-        "Use the Connect Dropbox step on this page, add the value it shows as DROPBOX_REFRESH_TOKEN in Vercel, then redeploy.")
+        f"Use the Connect Dropbox step on this page, add the value it shows as DROPBOX_REFRESH_TOKEN {where}, {apply}.")
     root = env("DROPBOX_ROOT_PATH", "/Trizetto Data")
     if key and secret and token and probe:
         client = DropboxClient(attempts=1, timeout=10)      # the page must answer even when Dropbox is slow
@@ -1226,19 +1237,25 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
                 n = len(res.get("entries", []))
                 add("data_folder", f"Data folder {root}", True, f"found, {n}{'+' if res.get('has_more') else ''} items at the top level")
             except Exception as exc:
-                hint = (f" This account is in a team space: add DROPBOX_PATH_ROOT_NS={team_root} in Vercel and redeploy." if team_root and not env("DROPBOX_PATH_ROOT_NS") else "")
+                hint = (f" This account is in a team space: add DROPBOX_PATH_ROOT_NS={team_root} {where}, {apply}." if team_root and not env("DROPBOX_PATH_ROOT_NS") else "")
                 add("data_folder", f"Data folder {root}", False, str(exc)[:160],
                     "The folder was not found. Check DROPBOX_ROOT_PATH matches the folder name exactly, starting with a slash." + hint)
             from .state import DropboxState
-            if env("REMITWATCH_STATE_DIR"):
+            if server:
+                st = None   # a server keeps its store on its own disk (checked below), not in a Dropbox folder
+            elif env("REMITWATCH_STATE_DIR"):
                 st = state_from_env()       # a laptop trying the mode with a local state folder: check that folder
             else:
                 # a write is tried a few times: Dropbox answers "busy" when something else is writing to the account
                 st = DropboxState(DropboxClient(attempts=3, timeout=10), env("REMITWATCH_STATE_PATH", "/RemitWatch-state"))
             try:
+                if st is None:
+                    raise _ServerStore()
                 st.put("setup-check.txt", b"ok")
                 st.delete("setup-check.txt")
                 add("state_folder", f"Private storage ({st.describe()})", True, "the app can write and delete here")
+            except _ServerStore:
+                pass
             except DropboxAuthError as exc:
                 out["reconnect"] = True
                 add("state_folder", "Private storage", False, str(exc)[:200],
@@ -1249,15 +1266,30 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
                     "Dropbox did not accept a test write just now. Wait a minute and press Check again. Nothing needs to be changed unless this stays red.")
     else:
         add("data_folder", f"Data folder {root}", None, "checked once Dropbox is connected")
-        add("state_folder", "Private storage", None, "checked once Dropbox is connected")
+        if not server:
+            add("state_folder", "Private storage", None, "checked once Dropbox is connected")
+    if server:
+        db = os.environ.get("REMITWATCH_DB", "data/remitwatch.sqlite")
+        try:
+            free = shutil.disk_usage(os.path.dirname(os.path.abspath(db)) or ".").free // (1024 * 1024)
+        except OSError:
+            free = None
+        size = os.path.getsize(db) // (1024 * 1024) if os.path.exists(db) else None
+        add("store", f"The store ({db})", (free is None or free >= 2048) and size is not None,
+            (f"{size:,} MB" if size is not None else "not made yet") + (f"; {free:,} MB free on its disk" if free is not None else ""),
+            "Keep at least 2 GB free on the disk that holds the store (a run writes a copy beside it); the store is made when the site starts.")
     rt, st_ = runtime.describe(), runtime.selftest()
     add("runtime", "Runtime", bool(rt["in_memory_store"] and st_.get("ok")),
         f"Python {rt['python']}, SQLite {rt['sqlite']}" + ("" if st_.get("ok") else f"; self-test failed: {st_.get('error') or 'wrong result'}"),
         "This host cannot hold the store in memory and write its scratch files, which the site needs. Tell the practice owner.")
     mem, secs = runtime.memory_mb(), runtime.max_seconds()
-    add("limits", "Function memory and time", None if mem is None else mem >= NEEDED_MEMORY_MB,
-        f"memory {mem or 'not reported by the host'} MB, time allowed for one run {secs} s",
-        f"A run needs about {NEEDED_MEMORY_MB:,} MB at its peak. In Vercel open Settings, Functions, Function CPU, choose Performance (needs the Pro plan), then redeploy.")
+    if server:
+        add("limits", "Memory", None if mem is None else mem >= NEEDED_MEMORY_MB, f"{mem or 'not reported by the host'} MB",
+            f"A run needs about {NEEDED_MEMORY_MB:,} MB at its peak: give the server 4 GB of memory.")
+    else:
+        add("limits", "Function memory and time", None if mem is None else mem >= NEEDED_MEMORY_MB,
+            f"memory {mem or 'not reported by the host'} MB, time allowed for one run {secs} s",
+            f"A run needs about {NEEDED_MEMORY_MB:,} MB at its peak. In Vercel open Settings, Functions, Function CPU, choose Performance (needs the Pro plan), then redeploy.")
     domains = env("APPEAL_EMAIL_DOMAINS") or ""
     add("email", "Email for alerts and the weekly summary (optional)", bool(env("SMTP_HOST") and env("REPORT_TO")) or None,
         ("configured" if env("SMTP_HOST") and env("REPORT_TO") else "not configured")
@@ -1280,7 +1312,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
                    f"{mm_key} is set and published at /.well-known/jwks.json: register the app with ModMed with that address, "
                    "then set MODMED_CLIENT_ID" if mm_key else
                    "not set: notes are attached by hand. To connect EMA, follow docs/OPERATIONS.md, Connecting ModMed EMA"),
-        "Paste the whole key into MODMED_PRIVATE_KEY again, BEGIN and END lines included, and redeploy." if mm_bad else "")
+        f"Paste the whole key into MODMED_PRIVATE_KEY again, BEGIN and END lines included, {apply}." if mm_bad else "")
     out["modmed"] = {"configured": mm_on, "key": bool(env("MODMED_PRIVATE_KEY")), "kid": mm_key.rsplit("id ", 1)[-1] if mm_key else None}
     fx_on, fx_line = bool(env("SRFAX_ACCESS_ID") and env("SRFAX_ACCESS_PWD")), env("SRFAX_CALLER_ID") or ""
     add("fax", "Fax line: appeals faxed, payers' answers read (optional)", bool(fx_line and env("SRFAX_SENDER_EMAIL")) if fx_on else None,
@@ -1317,7 +1349,8 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
             out["running"], out["stalled"] = lock_state(st)
         except Exception as exc:
             out["storage_error"] = str(exc)[:160]
-    required = [c for c in checks if c["key"] in ("password", "cron_secret", "dropbox_app", "dropbox_token", "data_folder", "state_folder")]
+    required = [c for c in checks if c["key"] in (("password", "dropbox_app", "dropbox_token", "data_folder", "store") if server else
+                                                    ("password", "cron_secret", "dropbox_app", "dropbox_token", "data_folder", "state_folder"))]
     out["ready"] = all(c["ok"] for c in required)
     # the Connect Dropbox step is needed when there is no token yet, or Dropbox refused the one in place or its
     # permissions; not when Dropbox was merely slow to answer
