@@ -64,6 +64,14 @@ class FileServiceRefused(TriZettoError):
     """TriZetto accepted the user name and password but would not open its file service: the sign-in itself works."""
 
 
+class SignInUnclear(TriZettoError):
+    """The sign-in did not finish (a timeout, or the line dropped) before TriZetto said yes or no. Twice in a row with the same
+    user name and password counts as a refusal: a server may hang up instead of saying no, and that must not lock the login."""
+
+
+UNCLEAR_META = "trizetto:signin_unclear"
+
+
 @dataclass
 class Settings:
     user: str = ""
@@ -164,8 +172,14 @@ class Session:
             except paramiko.BadAuthenticationType as bad:
                 if "keyboard-interactive" not in (getattr(bad, "allowed_types", None) or []):
                     raise
-                # the server asks for the password as a typed answer: give it the same password, judged by the same rule
-                t.auth_interactive(self.s.user, lambda title, instructions, prompts: [self.s.password for _ in prompts])
+                # the server asks for the password as a typed answer: give it the same password once (a server asking again
+                # gets nothing, so a refused password is never sent twice in one sign-in), judged by the same rule
+                rounds = []
+
+                def answer(title, instructions, prompts):
+                    rounds.append(1)
+                    return [self.s.password for _ in prompts] if len(rounds) == 1 else ["" for _ in prompts]
+                t.auth_interactive(self.s.user, answer)
         except Exception as exc:
             # a refusal is TriZetto's own answer to the user name and password; a sign-in that timed out or a line that dropped
             # before any answer is the network, and says nothing about the password
@@ -174,7 +188,7 @@ class Session:
                 answered() or (t.is_active() and not re.search(r"timeout|timed out|EOF|shut down|closed", str(exc), re.I))))
             self.close()
             if not definite:
-                raise TriZettoError(f"The sign-in to {self.s.host} did not finish ({type(exc).__name__}: {str(exc)[:120]}). "
+                raise SignInUnclear(f"The sign-in to {self.s.host} did not finish ({type(exc).__name__}: {str(exc)[:120]}). "
                                     "Nothing was concluded about the password; the next run tries again.") from exc
             raise SignInRefused("TriZetto refused the sign-in: check TRIZETTO_SFTP_USER (the Site ID) and TRIZETTO_SFTP_PASSWORD, and that "
                                 "TriZetto support has turned SFTP on for the Site ID.") from exc
@@ -266,19 +280,23 @@ def refusal(conn, s: Settings | None = None, now: datetime | None = None) -> dic
     if r.get("who") != credential_tag(s):
         forget_refusal(conn)
         return None
-    if at is None or ((now or datetime.now(timezone.utc)) - at).total_seconds() >= RETRY_AFTER_HOURS * 3600:
+    hours = 6 if r.get("unclear") else RETRY_AFTER_HOURS
+    if at is None or ((now or datetime.now(timezone.utc)) - at).total_seconds() >= hours * 3600:
         return None
-    return {"at": r["at"], "detail": r.get("detail") or "", "retry_at": (at + timedelta(hours=RETRY_AFTER_HOURS)).isoformat(timespec="minutes")}
+    return {"at": r["at"], "detail": r.get("detail") or "", "unclear": bool(r.get("unclear")),
+            "retry_at": (at + timedelta(hours=hours)).isoformat(timespec="minutes")}
 
 
 def settings_or_env(s: Settings | None) -> Settings:
     return s or Settings.from_env()
 
 
-def remember_refusal(conn, s: Settings, detail: str) -> None:
+def remember_refusal(conn, s: Settings, detail: str, unclear: bool = False) -> None:
+    """Hold the sign-in: a day after TriZetto's refusal; 6 hours after two sign-ins that did not finish (TriZetto may just
+    have been down)."""
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                 (REFUSED_META, json.dumps({"who": credential_tag(s), "at": _now(), "detail": detail[:300]})))
+                 (REFUSED_META, json.dumps({"who": credential_tag(s), "at": _now(), "detail": detail[:300], "unclear": unclear})))
     conn.commit()
 
 
@@ -303,9 +321,10 @@ def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings:
                  "failed": [], "seen_changed": False}
     held = refusal(conn, s)
     if held:
-        msg = (f"TriZetto refused this user name and password on {held['at'][:16].replace('T', ' ')} UTC. Not signing in again with them "
-               f"until {held['retry_at'].replace('T', ' ')} UTC, so the login is never locked (ModMed may use it too). A new password is "
-               "tried at once.")
+        msg = ((f"The sign-in to TriZetto did not finish twice in a row (last {held['at'][:16].replace('T', ' ')} UTC). " if held.get("unclear") else
+                f"TriZetto refused this user name and password on {held['at'][:16].replace('T', ' ')} UTC. ")
+               + f"Not signing in again with them until {held['retry_at'].replace('T', ' ')} UTC, so the login is never locked (ModMed may "
+               "use it too). A new password is tried at once.")
         log(f"  TriZetto: {msg}")
         return dict(out, skipped=msg, refused_at=held["at"])
     row = conn.execute("SELECT value FROM meta WHERE key=?", (HOSTKEY_META,)).fetchone()
@@ -315,10 +334,31 @@ def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings:
         remember_refusal(conn, s, str(exc))
         exc.seen_changed = exc.hold_changed = True     # a serverless run saves the store, or the hold would be lost with it
         raise
+    except SignInUnclear as exc:
+        # a second unclear sign-in in a row with the same user name and password is taken as a refusal: a server may hang up
+        # instead of saying no, and the login must not be locked by an hourly retry
+        got = conn.execute("SELECT value FROM meta WHERE key=?", (UNCLEAR_META,)).fetchone()
+        try:
+            prev = json.loads(got[0]) if got else {}
+        except (TypeError, ValueError):
+            prev = {}
+        n = (prev.get("n") or 0) + 1 if prev.get("who") == credential_tag(s) else 1
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (UNCLEAR_META, json.dumps({"who": credential_tag(s), "n": n})))
+        conn.commit()
+        exc.seen_changed = True
+        if n >= 2:
+            remember_refusal(conn, s, f"The sign-in did not finish twice in a row ({str(exc)[:160]}); waiting 6 hours so the login is never locked.",
+                             unclear=True)
+            exc.hold_changed = True
+        raise
     except FileServiceRefused as exc:   # the sign-in itself worked: no hold
         if forget_refusal(conn):
             exc.seen_changed = exc.hold_changed = True
+        conn.execute("DELETE FROM meta WHERE key=?", (UNCLEAR_META,))
+        conn.commit()
         raise
+    conn.execute("DELETE FROM meta WHERE key=?", (UNCLEAR_META,))
+    conn.commit()
     if forget_refusal(conn):
         out["seen_changed"] = out["hold_changed"] = True
     try:
@@ -388,7 +428,11 @@ def check(env: dict | None = None, known: str | None = None) -> dict:
             steps.append({"step": "Server", "ok": True, "detail": f"{s.host} answered; its key is {ses.key_fp}"
                           + (" (kept from now on)" if ses.first_key else " (as expected)")})
             steps.append({"step": "Sign-in", "ok": True, "detail": "TriZetto accepted the Site ID and password"})
-            files = ses.walk()
+            try:
+                files = ses.walk()
+            except Exception as exc:        # signed in, then the line dropped or a folder could not be listed
+                steps.append({"step": "Files", "ok": False, "detail": f"the folders could not be listed ({type(exc).__name__}: {str(exc)[:120]})"})
+                return {"ok": False, "steps": steps, "hostkey": ses.key_fp}
             remits = [f for f in files if re.search(r"(?i)\.(rmt|835|era)$", f[0])]
             if not files:
                 steps.append({"step": "Files", "ok": False, "detail": "no remittance files in the folders read: in TriZetto's portal turn on "
@@ -398,7 +442,11 @@ def check(env: dict | None = None, known: str | None = None) -> dict:
             steps.append({"step": "Files", "ok": True, "detail": f"{len(files)} files ({len(remits)} remittances); newest {posixpath.basename(newest[0])} "
                           f"of {datetime.fromtimestamp(newest[2], timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"})
             pick = (remits or files)[-1][0]
-            head = ses.read(pick)[:3]
+            try:
+                head = ses.read(pick)[:3]
+            except Exception as exc:        # the file moved, or the line dropped, between the listing and the read
+                steps.append({"step": "Read", "ok": False, "detail": f"{posixpath.basename(pick)} could not be read ({type(exc).__name__})"})
+                return {"ok": False, "steps": steps, "hostkey": ses.key_fp}
             steps.append({"step": "Read", "ok": head == b"ISA", "detail": f"{posixpath.basename(pick)} is an X12 file" if head == b"ISA"
                           else f"{posixpath.basename(pick)} does not start like an X12 file"})
             return {"ok": all(x["ok"] for x in steps), "steps": steps, "hostkey": ses.key_fp}

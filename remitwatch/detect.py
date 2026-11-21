@@ -2125,10 +2125,13 @@ class Detector:
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "ema_rows" not in tables:
             return
-        newest = c.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+        newest, oldest = c.execute("SELECT MAX(payment_date), MIN(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
         if not newest:
             return
-        since = _add_days(newest, -400)         # older than every filing limit: nothing left to chase
+        # as far back as an item can still be open (a claim sent on time runs the longest appeal window, 730 days, past the
+        # longest first-filing limit, 365); and nothing sent before the remittances on file begin can be judged unanswered
+        since = _add_days(newest, -(365 + NO_ANSWER_DAYS + 730 + 5))
+        recent = _add_days(newest, -400) or ""
         # answered: a remittance for the claim, or the payer's answer posted in EMA (its 835 may never have reached us)
         answered: set[str] = set()
         bill_last: dict[str, str] = {}
@@ -2225,7 +2228,7 @@ class Detector:
                     k["status_items"][(cpt, dos)] = (cpt, dos, abs(charges or 0), None, mods, units)
                 continue
             sig = (cpt, dos, mods, abs(units) if units is not None else None, abs(charges or 0))
-            if "void" in act:
+            if "void" in act and "payment" not in act and "adjust" not in act:     # a voided charge (not a voided payment)
                 if item_id:
                     k["void_ids"].add(item_id)
                 else:
@@ -2233,15 +2236,16 @@ class Detector:
                 continue
             if "payment" in act:
                 # the insurer's when the row's Insurance Payments says so, or (a layout without that column) its activity or payment
-                # method does; a copay or a card payment is the patient's; a row naming only the payer is not decided either way
+                # method does; a copay or a card payment is the patient's; a row naming only the payer is not decided either way.
+                # Signed: a payment taken back (a voided or reversed one) cancels it
                 if ins_paid is not None:
-                    k["paid_rows"] += max(0, ins_paid)
-                    k["pat_paid"] += max(0, (paid or 0) - max(0, ins_paid))
-                elif (paid or 0) > 0 and "patient" not in act and INSURER_PAYMENT.search(f"{act} {method or ''}"):
+                    k["paid_rows"] += ins_paid
+                    k["pat_paid"] += (paid or 0) - ins_paid
+                elif paid and "patient" not in act and INSURER_PAYMENT.search(f"{act} {method or ''}"):
                     k["paid_rows"] += paid
-                elif (paid or 0) > 0 and "patient" not in act and payer and not SELF_PAY.search(payer):
+                elif paid and "patient" not in act and payer and not SELF_PAY.search(payer):
                     k["amb_paid"] += paid
-                elif (paid or 0) > 0:
+                elif paid:
                     k["pat_paid"] += paid
                 continue
             if act != "charge" or not cpt:
@@ -2249,9 +2253,9 @@ class Detector:
             key = item_id or sig
             k["charges"][key] = (cpt, dos, abs(charges or 0), item_id, mods, units)
             if ins_paid is not None or paid is not None:
-                was = k["ins"].get(key)
+                was = k["ins"].get(sig)             # by the charge itself: the two export layouts key it differently
                 if was is None or at >= was[0]:     # the newest export's figures for this charge
-                    k["ins"][key] = (at, ins_paid or 0, max(0, (paid or 0) - (ins_paid or 0)))
+                    k["ins"][sig] = (at, ins_paid or 0, (paid or 0) - (ins_paid or 0))
             if provider:
                 k["providers"][provider] += 1
             if created:
@@ -2301,21 +2305,29 @@ class Detector:
                 continue
             if b not in latest or order(pcn, k) > order(latest[b], claims[latest[b]]):
                 latest[b] = pcn
-        self.ema_latest = set(latest.values())
-        # each bill's first submission number seen, answered or not: a higher one is a submission sent again
+        # each bill's first and last submission numbers seen, answered or not: a higher one is a submission sent again, and
+        # an answered submission newer than every unanswered one supersedes them all (its answer is worked from its remittance)
         first_sub: dict[str, int] = {}
+        last_answered: dict[str, int] = {}
         for x in list(claims) + [x for x in answered if bill_of(x) in latest]:
             m = _SUBMISSION.search(x)
             if m:
-                bx = bill_of(x)
-                first_sub[bx] = min(first_sub.get(bx, int(m.group(1))), int(m.group(1)))
+                bx, n = bill_of(x), int(m.group(1))
+                first_sub[bx] = min(first_sub.get(bx, n), n)
+                if x in answered:
+                    last_answered[bx] = max(last_answered.get(bx, n), n)
+        for bx in list(latest):
+            m = _SUBMISSION.search(latest[bx])
+            if m and last_answered.get(bx, -1) > int(m.group(1)):
+                del latest[bx]                  # sent again and answered: nothing on this bill is left to chase
+        self.ema_latest = set(latest.values())
         # EMA's own insurance payments on a visit line (the newest export's): that visit is paid under that bill
         for pcn, k in claims.items():
             pat = k["patients"].most_common(1)[0][0] if k["patients"] else None
             if not pat:
                 continue
             for key, v in k["charges"].items():
-                got = k["ins"].get(key)
+                got = k["ins"].get((v[0], v[1], v[4], abs(v[5]) if v[5] is not None else None, v[2]))
                 if v[1] and got and got[1] > 0:
                     paid_visits.setdefault(hash((pat, v[1], v[0])), set()).add(bill_of(pcn))
 
@@ -2324,8 +2336,8 @@ class Detector:
             b = bill_of(pcn)
             if latest.get(b) != pcn or not k["payers"]:
                 continue                    # an earlier submission of a bill sent again, or one that never went out
-            if sum(v[1] for v in k["ins"].values()) > 0 or k["paid_rows"] > 0:
-                continue                    # EMA shows insurance paid it (its 835 may be missing: the Data tab)
+            if sum(v[1] for v in k["ins"].values()) + k["paid_rows"] > 0:
+                continue                    # EMA shows insurance paid it, net of anything taken back (its 835 may be missing)
             ema_payer = k["payers"].most_common(1)[0][0]
             if SELF_PAY.search(ema_payer):
                 continue
@@ -2350,16 +2362,17 @@ class Detector:
             if not k["sent"] and m and int(m.group(1)) > first_sub.get(b, int(m.group(1))):
                 # a later submission EMA's exports give no date for yet: it went out after the bill's previous submission, after
                 # the payer's answer to it, and after any denial EMA recorded, whatever date the bill was created
-                prior = max(before.get(b, ""), bill_last.get(b, ""))
-                if prior and _add_days(prior, 1) > sent:
-                    sent, basis, again_after = _add_days(prior, 1), "the day after the bill's previous submission or answer (EMA has no date for this one yet)", True
-            if bill_last.get(b) and bill_last[b] >= sent:
-                continue                    # the payer answered the bill after this claim went out
+                nxt = _add_days(max(before.get(b, ""), bill_last.get(b, "")), 1)
+                if nxt and nxt > sent:
+                    sent, basis, again_after = nxt, "the day after the bill's previous submission or answer (EMA has no date for this one yet)", True
+            if not sent or (sent < recent and sent < (oldest or "")):
+                continue                    # sent before the remittances on file begin: nothing here can say it went unanswered
             due = _add_days(sent, NO_ANSWER_DAYS)
             if not rejected and (not due or due > newest):
                 continue                    # not due yet, or the remittances on file do not reach the day it was due
             cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
-                          "again_after": again_after, "rejected": rejected, "gave_up": gave_up, "status": status, "ema_payer": ema_payer})
+                          "again_after": again_after, "rejected": rejected, "gave_up": gave_up, "status": status, "ema_payer": ema_payer,
+                          "bill_answered": bill_last.get(b) if (bill_last.get(b) or "") >= sent else None})
         # one visit chased under two bills (a bill made again): only the newest carries it
         newest_for: dict[int, tuple] = {}
         for cd in cands:
@@ -2385,7 +2398,7 @@ class Detector:
         rule = filing_rule(grp, kind)
         file_by = _add_days(days[0], rule["days"])
         billed = sum(x[2] for x in items)
-        pat_paid = k["pat_paid"] + sum(v[2] for v in k["ins"].values())
+        pat_paid = max(0, k["pat_paid"] + sum(v[2] for v in k["ins"].values()))
         if gave_up and billed and pat_paid >= billed:
             return                          # closed in EMA because the patient paid it all
         year = days[0][:4]
@@ -2444,6 +2457,9 @@ class Detector:
             f["written_off_cents"] = min(expected, owed) if expected else owed
             f["written_off_on"] = (k["status_at"][0] or "")[:10] or None
         hints = []
+        if cd.get("bill_answered"):
+            hints.append(f"Another submission of this bill was answered on {cd['bill_answered']}: if that answer was for this claim, "
+                         "work it from that remittance")
         if k["amb_paid"]:
             hints.append(f"EMA shows ${k['amb_paid']/100:,.2f} paid on this claim by a payment row that names {ema_payer} but is "
                          "not marked insurance or patient: if it is the insurer's, the claim was answered")
@@ -2721,7 +2737,6 @@ class Detector:
         # own claim's answer brings, in the run that answer arrives; or the same bill's claim sent again to the same payer, when
         # that one comes due. Otherwise the item waits, stale, and comes back with its own status and notes if its claim id is
         # listed again. A later reprocessing, another payer's claim or a rate finding never takes it.
-        answered_now = getattr(self, "ema_answered", set())
         own_answer: dict[str, dict] = {}
         sent_again: dict[str, list[dict]] = {}
         for fid, prev in existing.items():
@@ -2730,18 +2745,31 @@ class Detector:
             if prev.get("line_key"):
                 if not prev.get("stale"):
                     orphans.setdefault((prev["line_key"], prev["category"]), prev)
-            elif prev.get("signal") in EMA_CLAIM_SIGNALS and prev.get("patient_control_number"):
+            elif prev.get("signal") in EMA_CLAIM_SIGNALS and prev.get("patient_control_number") and prev["status"] != "resolved":
+                # (an item a person marked Paid is a recovery on the record: it stays as it is and hands nothing on)
                 pcn_w = prev["patient_control_number"]
-                if pcn_w in answered_now:
-                    own_answer[pcn_w] = prev
-                else:
-                    sent_again.setdefault(bill_of(pcn_w), []).append(prev)
-        # the claim's own answer is its first remittance: a reprocessing months later is a new matter, not the answer chased
-        first_paid: dict[str, str] = {}
-        for pcn_w in own_answer:
-            got = c.execute("""SELECT MIN(t.payment_date) FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
-                               WHERE cl.patient_control_number=? AND COALESCE(t.superseded,0)=0""", (pcn_w,)).fetchone()
-            first_paid[pcn_w] = (got[0] if got else None) or ""
+                own_answer[pcn_w] = prev
+                sent_again.setdefault(bill_of(pcn_w), []).append(prev)
+        first_cache: dict[str, str] = {}
+
+        def first_paid(pcn: str) -> str:
+            """A claim's first remittance date: its own answer, as against a reprocessing months later (a new matter)."""
+            if pcn not in first_cache:
+                got = c.execute("""SELECT MIN(t.payment_date) FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
+                                   WHERE cl.patient_control_number=? AND COALESCE(t.superseded,0)=0""", (pcn,)).fetchone()
+                first_cache[pcn] = (got[0] if got else None) or ""
+            return first_cache[pcn]
+
+        def payer_family(r: dict) -> str:
+            """Who a claim went to, in a form that does not change between runs: the first word of the payer's usual group
+            ('anthem', 'humana', 'medicaid', ...), from the name EMA or the remittance gives."""
+            ev = r.get("evidence")
+            try:
+                ev = json.loads(ev) if isinstance(ev, str) else (ev or {})
+            except ValueError:
+                ev = {}
+            name = ev.get("payer_in_ema") or r.get("payer_name") or r.get("payer_group") or ""
+            return (normalize_payer(name)[0] or "").split(" ")[0].lower()
 
         def sub_no(pcn: str | None) -> int:
             m = _SUBMISSION.search(pcn or "")
@@ -2755,11 +2783,13 @@ class Detector:
             heir = orphans.get((f["line_key"], f["category"])) if (prev is None and f.get("line_key")) else None
             if prev is None and heir is None and f.get("patient_control_number"):
                 pcn_f = f["patient_control_number"]
-                if pcn_f in own_answer and (f.get("payment_date") or f.get("txn_payment_date") or "") == first_paid.get(pcn_f, ""):
+                paid_on = f.get("payment_date") or f.get("txn_payment_date") or ""
+                own = f.get("signal") in EMA_CLAIM_SIGNALS or paid_on == first_paid(pcn_f)    # a claim's chase, or its first answer
+                if pcn_f in own_answer and paid_on and paid_on == first_paid(pcn_f):
                     via_bill = own_answer[pcn_f]
-                elif f.get("signal") in EMA_CLAIM_SIGNALS:
+                elif own:                       # the same bill sent again to the same payer: its chase, or its first answer
                     via_bill = next((w for w in sent_again.get(bill_of(pcn_f), [])
-                                     if sub_no(pcn_f) > sub_no(w["patient_control_number"]) and w.get("payer_group") == f.get("payer_group")), None)
+                                     if sub_no(pcn_f) > sub_no(w["patient_control_number"]) and payer_family(w) == payer_family(f)), None)
             if via_bill is not None:
                 # a new item is a new matter: it starts To do (Started if someone was working the claim), with the notes; never
                 # Sent, Paid or Let go from the earlier item, whose own record stays in its events
@@ -2819,14 +2849,14 @@ class Detector:
             rows.append(tuple(f.get(k) for k in cols))
         # findings a person worked, dismissed or lost that the current rules no longer produce are kept, marked stale, so that
         # no work is lost and a dismissed finding cannot come back as new. Stale rows are left out of every total.
-        # An unanswered claim's item a person wrote on is kept even while open, so its notes can still follow its bill; once
-        # they have, it goes.
+        # Any item a person wrote on is kept, even while open, so no note is lost; an unanswered claim's item stays after its
+        # notes moved on, so it comes back with its own status if its claim id is listed again. One a person marked Paid stays
+        # counted (a recovery on the record), not stale.
         for fid, prev in existing.items():
-            if fid in self.findings or fid in inherited or fid in bill_heirs or not worked(prev):
+            if fid in self.findings or fid in inherited or not worked(prev):
                 continue
-            if prev["status"] != "open" or prev.get("signal") in EMA_CLAIM_SIGNALS:
-                prev["stale"] = 1
-                rows.append(tuple(prev.get(k) for k in cols))
+            prev["stale"] = 0 if (prev.get("signal") in EMA_CLAIM_SIGNALS and prev["status"] == "resolved") else 1
+            rows.append(tuple(prev.get(k) for k in cols))
         c.execute("DELETE FROM findings")
         c.executemany(f"INSERT INTO findings ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", rows)
         if events:

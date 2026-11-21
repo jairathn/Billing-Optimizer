@@ -424,7 +424,14 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
         return []
     out = []
     held = _meta(conn, "trizetto:signin_refused")
-    if held and held.get("at"):
+    if held and held.get("at") and held.get("unclear"):
+        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
+                    "title": f"TriZetto's sign-in did not finish twice in a row on {held['at'][:10]}",
+                    "detail": "The feed waits 6 hours before it tries again, so the login is never locked (ModMed may sign in with it "
+                              "too). TriZetto may have been down; if it keeps happening, the password may be refused without a clear answer.",
+                    "who": "Whoever runs the server: press Test the TriZetto connection on /setup; if it is refused, the TriZetto "
+                           "administrator sets a new SFTP password in the portal."})
+    elif held and held.get("at"):
         out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
                     "title": f"TriZetto refused the feed's password on {held['at'][:10]}",
                     "detail": "No remittances come straight from TriZetto until it is fixed. The feed tries the same password only once a "

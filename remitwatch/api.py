@@ -2732,11 +2732,17 @@ def trizetto_test(_: str = Depends(require_auth)):
     # serverless host, through the journal (this instance's copy at once, the store at the next run)
     signed_in = any(x["step"] == "Sign-in" and x["ok"] for x in out.get("steps", []))
     if runtime.serverless():
-        if signed_in:
-            _record_action({"kind": "trizetto_hold", "op": "clear"})
-        elif out.get("refused"):
-            _record_action({"kind": "trizetto_hold", "op": "set", "who": trizetto.credential_tag(trizetto.Settings.from_env()),
-                            "detail": out["refused"]})
+        from .cloud import SERVING_COPY
+        try:
+            if SERVING_COPY.state() is None:
+                pass                            # no storage yet: nothing to hold, and the steps still come back
+            elif signed_in:
+                _record_action({"kind": "trizetto_hold", "op": "clear"})
+            elif out.get("refused"):
+                _record_action({"kind": "trizetto_hold", "op": "set", "who": trizetto.credential_tag(trizetto.Settings.from_env()),
+                                "detail": out["refused"]})
+        except Exception as exc:
+            out["hold_note"] = f"The hold could not be recorded just now ({type(exc).__name__}); the next run decides by itself."
     elif has_table("meta") or out.get("refused"):
         conn = db()
         try:

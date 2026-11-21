@@ -411,3 +411,29 @@ def test_the_setup_test_holds_and_releases_through_the_journal_on_a_serverless_h
     assert actions.apply(conn, {"kind": "trizetto_hold", "op": "clear"}) is True
     assert conn.execute("SELECT 1 FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone() is None
     assert [password_days(v) for v in ("90", "90 days", "8 weeks", "6 months", "1 year", "annually", "never", "")] == [90, 90, 56, 180, 365, 365, 0, 0]
+
+
+def test_two_unclear_sign_ins_in_a_row_hold_for_six_hours(tmp_path, sftp, monkeypatch):
+    """A server that hangs up instead of saying no must not get the password every hour: the second unclear sign-in in a
+    row holds the feed for 6 hours, and Today says what happened (not that TriZetto refused it)."""
+    from remitwatch.insights import trizetto_health
+    from remitwatch.store import Store
+    from tests.fake_sftp import _Server
+    _remits(sftp.root, 1)
+    store = Store(str(tmp_path / "s.sqlite"))
+    orig_init, orig_auth = trizetto.Session.__init__, _Server.check_auth_password
+
+    def slow(self, username, password):
+        time.sleep(3)
+        return orig_auth(self, username, password)
+    monkeypatch.setattr(_Server, "check_auth_password", slow)
+    monkeypatch.setattr(trizetto.Session, "__init__", lambda self, s, known=None, timeout=1: orig_init(self, s, known=known, timeout=timeout))
+    settings = trizetto.Settings.from_env(sftp.env())
+    pull = lambda: trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + 60, settings=settings, log=lambda *a: None)
+    for _ in range(2):
+        with pytest.raises(trizetto.SignInUnclear):
+            pull()
+    held = trizetto.refusal(store.conn, settings)
+    assert held and held["unclear"] and pull()["skipped"].startswith("The sign-in to TriZetto did not finish twice in a row")
+    assert [h["title"][:44] for h in trizetto_health(store.conn, "2026-11-21", sftp.env())] == ["TriZetto's sign-in did not finish twice in a"]
+    store.close()

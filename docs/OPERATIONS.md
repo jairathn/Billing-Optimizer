@@ -80,8 +80,10 @@ billing system (ModMed) may sign in with the same one. Two things protect it:
   name and password, however the server asks for it; a sign-in that timed out or a line that dropped before any answer is
   the network and holds nothing; a sign-in that worked but whose file service was refused ends a hold) the scheduled runs
   do not sign in with the same user name and password for 24 hours, then once more (TriZetto may have switched SFTP on
-  since). A new password is tried at once. "Test the TriZetto connection" ends the hold when its sign-in step passes, and
-  a refusal there holds the scheduled runs too. Today's data checks and the test on `/setup` say when a hold is in place;
+  since). Two sign-ins in a row that did not finish (a server may hang up instead of saying no) hold the feed for 6 hours,
+  and Today says so. A typed-answer (keyboard-interactive) sign-in is given the password once. A new password is tried at
+  once. "Test the TriZetto connection" ends the hold when its sign-in step passes (on Vercel, only a hold older than the
+  test), a refusal there holds the scheduled runs too, and the test always returns its steps. Today's data checks and the test on `/setup` say when a hold is in place;
   the hold is kept on Vercel too (the test sets or ends it through the journal there). Only a hash of the settings is
   kept, never the password.
 - A reminder before it expires. TriZetto makes the SFTP password expire (every 60 days to a year, by vendors' accounts).
@@ -115,11 +117,13 @@ EMA's exports say which claims went out; the remittances say which ones a payer 
 payer is listed once 30 days have passed since it was sent (`REMITWATCH_NO_ANSWER_DAYS`) and the remittances on file
 reach that day (a feed that stopped never makes newer claims look unanswered), when nothing answers it:
 
-- no remittance for it, and none for its bill since it went out;
+- no remittance for it (another submission's answer, from this payer or another, is not this claim's: the item says when
+  one came; a later submission of the bill that was answered supersedes it);
 - no ERA line posted in EMA for it (the payer's answer reached EMA even if its 835 never reached the site);
-- nothing paid by insurance in EMA, by the newest export: the Insurance Payments column, or a Payment row whose activity
-  or payment method says insurance (ERA, EFT). A Payment row that only names the payer could be the insurer's or a copay:
-  the claim stays listed, and the item says EMA shows that payment;
+- nothing paid by insurance in EMA, by the newest export, net of anything taken back: the Insurance Payments column, or a
+  Payment row whose activity or payment method says insurance (ERA, EFT). A Payment row that only names the payer could be
+  the insurer's or a copay: the claim stays listed, and the item says EMA shows that payment. A voided payment is a payment
+  taken back, never a voided charge;
 - EMA's status is not denied (a denial is the payer's answer), paid, void, cancelled or in collections, and the claim
   was sent (not on hold, ready or unbilled);
 - it is the latest submission of its bill that went out, by its number (C017, C024, ...): an earlier one sent again is
@@ -140,7 +144,8 @@ sized by the payer's usual rate for its codes and units (a second and later surg
 share), and one charge listed by two export layouts counts once. The newest export decides a claim's status: a
 spreadsheet's own creation time, or for a CSV the newest date among its rows.
 
-The date on each is the payer's limit for a first filing, counted from the date of service: Medicare's 1 year is the
+Claims are read as far back as an item can still be open (the longest first-filing limit and appeal window); one sent
+before the remittances on file begin is not judged. The date on each is the payer's limit for a first filing, counted from the date of service: Medicare's 1 year is the
 regulation's (42 CFR 424.44); other payers' limits are the common ones and say so (the participation agreement's own
 limit applies). A claim sent on time keeps its item after that date: the payer still owes a claim it has, and most take
 proof of timely filing (EMA's submission date, or the clearinghouse's acceptance report) for one they have no record of,
@@ -148,10 +153,12 @@ so its date runs the payer's appeal window past that limit (marked not confirmed
 the limit. Medicare's year from the date of service is firm, and a rejected claim never reached the payer. When a payer's remittances stop before
 a claim's answer was due, or none from it is on file at all, the item says so: check its portal (and its ERA enrollment)
 before sending the claim again. The notes recorded on one go to exactly two places: each item its claim's first remittance
-brings, or the same bill's claim sent again to the same payer. Each starts To do (Started if someone was working the
-claim), never Sent, Paid or Let go: the payer's answer is a new matter. Otherwise the item waits (stale, out of every
-total) and, if its own claim id is listed again, comes back with its own status and notes. Another payer's claim on the
-bill, a reprocessing months later or another submission's findings never take them. EMA's claim statuses are matched by words (rejected; denied; paid, void, collections; closed, written
+brings, or the same bill's claim sent again to the same payer (its chase, or the items its first remittance brings). The
+payer is judged by its name's family (Anthem, Humana, Medicaid, ...), which does not change between runs. Each starts To
+do (Started if someone was working the claim), never Sent, Paid or Let go: the payer's answer is a new matter. The earlier
+item stays (stale, out of every total) and, if its own claim id is listed again, comes back with its own status and notes.
+One a person marked Paid stays counted as a recovery and hands nothing on. Another payer's claim on the bill or a
+reprocessing months later never takes them, and any item a person wrote on is kept when it is no longer found. EMA's claim statuses are matched by words (rejected; denied; paid, void, collections; closed, written
 off; on hold, ready, unbilled), to be checked against the practice's sample reports when they arrive. They cannot be
 hidden for a payer (below): a claim nobody answered is not a reason a payer won't pay, so each is let go one at a time,
 with a note.

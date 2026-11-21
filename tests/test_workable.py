@@ -504,7 +504,8 @@ def test_the_work_waits_for_the_claim_sent_again_a_run_later(tmp_path):
     s.conn.execute("UPDATE ema_rows SET claim_submission_date='2026-10-01' WHERE claim_id='CB0000R01C024'")   # now it is due
     found = chased(s)
     assert found["CB0000R01C024"]["status"] == "open" and "member id corrected" in found["CB0000R01C024"]["notes"]
-    assert s.query("SELECT COUNT(*) n FROM findings WHERE finding_id=?", (fid,))[0]["n"] == 0
+    # the earlier item stays (stale, out of every list) with its own notes, should its claim id be listed again
+    assert [(x["stale"], x["notes"]) for x in s.query("SELECT stale, notes FROM findings WHERE finding_id=?", (fid,))] == [(1, "member id corrected, resending")]
 
 
 # --------------------------------------------------------------------------- what the third review found
@@ -581,3 +582,101 @@ def test_the_work_goes_only_to_the_claims_own_answer_or_its_resend_to_the_same_p
     c.execute("UPDATE ema_rows SET claim_submission_date='2026-10-01' WHERE claim_id='CB0000R31C017' AND family='claim_status'")
     back = chased(s)["CB0000R31C017"]                                            # due now: the same item, with its decision
     assert back["finding_id"] == fid_r and back["status"] == "appealed" and "resent 10/22" in back["notes"]
+
+
+# --------------------------------------------------------------------------- what the fourth review found
+def test_another_submissions_answer_or_a_voided_payment_never_drops_a_claim(tmp_path):
+    """The primary's remittance dated the day the secondary went out; a copay voided in EMA; an insurer's payment posted and
+    taken back: each claim is still chased. A date EMA wrote that is not a real day stops nothing."""
+    import pathlib
+
+    from tests.test_features import claim
+    from tests.test_remitwatch import remit
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    paid = claim(0, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*82.13~CAS*PR*2*23.92~", dos="20260914"), dos="20260914").replace("CB0000000C017", "CB0000S41C017")
+    p = pathlib.Path(s.db_path).parent / "primary.RMT"
+    p.write_bytes(remit(paid, "117.60", seg_count=99, isa_ctrl="000000081", pay_date="20261002"))
+    s.ingest_835_paths([str(p)])
+    ema(c, "CB0000S41C024", payer="Medicaid of Kentucky", payer_id="KYMCD")     # the secondary, sent the day the 835 is dated
+    ema(c, "CB0000S41C024", family="claim_status", payer="Medicaid of Kentucky", payer_id="KYMCD", claim_status="Submitted",
+        claim_submission_date="2026-10-02")
+    ema(c, "CB0000V01C017", bill_item_id="v1")                                   # a copay, then the copay voided
+    ema(c, "CB0000V01C017", bill_item_id="v1", activity_type="Payment", charges_cents=0, payments_cents=2500, insurance_payments_cents=0)
+    ema(c, "CB0000V01C017", bill_item_id="v1", activity_type="Void Payment", charges_cents=0, payments_cents=-2500, insurance_payments_cents=0)
+    ema(c, "CB0000M71C017", bill_item_id="m1")                                   # an insurer's payment posted, then reversed
+    ema(c, "CB0000M71C017", bill_item_id="m1", activity_type="Payment", charges_cents=0, payments_cents=11760, insurance_payments_cents=11760)
+    ema(c, "CB0000M71C017", bill_item_id="m1", activity_type="Payment", charges_cents=0, payments_cents=-11760, insurance_payments_cents=-11760)
+    ema(c, "CB0000Q01C017")                                                      # an impossible date, and a later submission with none
+    ema(c, "CB0000Q01C017", family="claim_status", claim_status="Submitted", claim_submission_date="0000-00-00")
+    ema(c, "CB0000Q01C024")
+    found = chased(s)
+    assert {"CB0000S41C024", "CB0000V01C017", "CB0000M71C017"} <= set(found)
+    assert "Another submission of this bill was answered on 2026-10-02" in found["CB0000S41C024"]["hint"]
+
+
+def test_a_claim_sent_on_time_stays_listed_until_its_own_date(tmp_path):
+    """An Anthem claim sent on time 14 months ago is still inside its date (the first-filing limit plus the appeal window);
+    the remittances on file reach back that far, so it is judged and listed."""
+    from tests.test_features import claim
+    s = build_store(tmp_path, [claim(900, svc("99213", "150.00", "90.00", "90.00", "CAS*CO*45*60.00~", dos="20250901"), dos="20250901")],
+                    pay_date="20250915")
+    s.close()
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    ema(s.conn, "CB0000T41C017", service_date="2025-09-29", bill_created="2025-09-30")
+    ema(s.conn, "CB0000T41C017", family="claim_status", service_date="2025-09-29", claim_status="Submitted", claim_submission_date="2025-09-30")
+    f = chased(s)["CB0000T41C017"]
+    assert f["appeal_deadline"] == "2027-12-28"
+
+
+def test_a_marked_recovery_stays_counted_and_a_passing_test_clears_only_older_holds(tmp_path):
+    import json
+    import pathlib
+    import sqlite3
+
+    from remitwatch import actions, trizetto
+    from remitwatch.actions import apply_status
+    from tests.test_features import claim
+    from tests.test_remitwatch import remit
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    ema(s.conn, "CB0000W01C017")
+    fid = chased(s)["CB0000W01C017"]["finding_id"]
+    apply_status(s.conn, fid, "resolved", "Anthem is paying it", recovered_cents=11760, actor="biller")
+    s.conn.commit()
+    paid = claim(0, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20260914"), dos="20260914").replace("CB0000000C017", "CB0000W01C017")
+    p = pathlib.Path(s.db_path).parent / "w.RMT"
+    p.write_bytes(remit(paid, "117.60", seg_count=99, isa_ctrl="000000082", pay_date="20261120"))
+    s.ingest_835_paths([str(p)])
+    chased(s)
+    r = s.query("SELECT status, stale, recovered_cents FROM findings WHERE finding_id=?", (fid,))
+    assert [(x["status"], x["stale"], x["recovered_cents"]) for x in r] == [("resolved", 0, 11760)]
+    # Vercel's journal: a passing test with no hold is done at once; it never clears a hold recorded after it
+    conn = sqlite3.connect(str(tmp_path / "m.sqlite"))
+    assert actions.apply(conn, {"kind": "trizetto_hold", "op": "clear", "at": "2026-11-21T10:00:00+00:00"}) is True
+    actions.apply(conn, {"kind": "trizetto_hold", "op": "set", "who": "w", "detail": "refused", "at": "2026-11-22T10:00:00+00:00"})
+    assert actions.apply(conn, {"kind": "trizetto_hold", "op": "clear", "at": "2026-11-21T10:00:00+00:00"}) is True
+    assert json.loads(conn.execute("SELECT value FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone()[0])["who"] == "w"
+
+
+def test_a_claim_sent_again_and_answered_takes_the_notes_and_the_earlier_one_stays_superseded(tmp_path):
+    import pathlib
+
+    from remitwatch.actions import apply_status
+    from tests.test_features import claim
+    from tests.test_remitwatch import remit
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    ema(c, "CB0000R51C017")
+    fid = chased(s)["CB0000R51C017"]["finding_id"]
+    apply_status(c, fid, "appealed", "Anthem has no record (ref 4471); resent as C024 10/21 with the acceptance report", actor="biller")
+    c.commit()
+    ema(c, "CB0000R51C024")
+    ema(c, "CB0000R51C024", family="claim_status", claim_status="Submitted", claim_submission_date="2026-10-21")
+    assert chased(s) == {}                                                       # C024 not due yet
+    den = claim(0, svc("99214", "223.65", "0.00", None, "CAS*CO*29*223.65~", dos="20260914"), dos="20260914").replace("CB0000000C017", "CB0000R51C024")
+    p = pathlib.Path(s.db_path).parent / "c024.RMT"
+    p.write_bytes(remit(den, "0.00", seg_count=99, isa_ctrl="000000083", pay_date="20261118"))
+    s.ingest_835_paths([str(p)])
+    assert chased(s) == {}                                                       # C017 stays superseded by the answered C024
+    r = s.query("SELECT signal, status, notes FROM findings WHERE patient_control_number='CB0000R51C024' AND COALESCE(stale,0)=0")
+    assert [(x["signal"], x["status"]) for x in r] == [("DENIED_TIMELY_FILING", "in_progress")] and "ref 4471" in r[0]["notes"]

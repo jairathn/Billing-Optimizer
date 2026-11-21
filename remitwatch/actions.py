@@ -209,7 +209,16 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
         # the /setup test on a serverless host: a sign-in that worked ends the hold, a refusal starts one (remitwatch.trizetto)
         from . import trizetto
         if action.get("op") == "clear":
-            return trizetto.forget_refusal(conn)
+            # only a hold older than the test that passed: a refusal after it stands. Applied once, whether or not a hold was there
+            row = conn.execute("SELECT value FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone() if \
+                conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() else None
+            try:
+                held_at = json.loads(row[0]).get("at") if row else None
+            except (TypeError, ValueError):
+                held_at = ""
+            if row and (held_at or "") <= (action.get("at") or "~"):
+                trizetto.forget_refusal(conn)
+            return True
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                      (trizetto.REFUSED_META, json.dumps({"who": action.get("who") or "", "at": action.get("at") or _now(),
