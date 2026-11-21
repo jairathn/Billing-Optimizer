@@ -314,14 +314,16 @@ def test_a_claim_answered_superseded_settled_or_paid_is_not_chased(tmp_path):
     ema(c, "CB0000A05C017", family="claim_status", claim_status="Rejected", claim_submission_date="2026-09-16")
     ema(c, "CB0000A06C017")                                       # rejected and voided by its status
     ema(c, "CB0000A06C017", family="claim_status", claim_status="Rejected - Voided", claim_submission_date="2026-09-16")
-    ema(c, "CB0000A07C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly")   # an insurer's payment in a ledger layout
+    ema(c, "CB0000A07C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly")   # a payment row naming only the payer
     ema(c, "CB0000A07C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly", activity_type="Payment", charges_cents=0,
         payments_cents=11760, payer="Blue Cross and Blue Shield")
     ema(c, "CB0000H01C017", patient_id="EMA9")                    # the bill was made again (CB0000H02) and that one was paid
     ema(c, "CB0000H02C017", patient_id="EMA9", bill_created="2026-09-20", insurance_payments_cents=11760)
     found = chased(s)
-    assert set(found) == {"CB0000A03C024"}
+    # a payment row that only names the payer could be the insurer's or a copay: the claim stays listed, and the item says so
+    assert set(found) == {"CB0000A03C024", "CB0000A07C017"}
     assert found["CB0000A03C024"]["shortfall_cents"] == 11760           # one visit, counted once
+    assert "names Anthem Blue Cross but is not marked insurance or patient" in found["CB0000A07C017"]["hint"]
 
 
 def test_each_claim_is_chased_once_at_its_own_size_and_closed_ones_show_as_written_off(tmp_path):
@@ -503,3 +505,79 @@ def test_the_work_waits_for_the_claim_sent_again_a_run_later(tmp_path):
     found = chased(s)
     assert found["CB0000R01C024"]["status"] == "open" and "member id corrected" in found["CB0000R01C024"]["notes"]
     assert s.query("SELECT COUNT(*) n FROM findings WHERE finding_id=?", (fid,))[0]["n"] == 0
+
+
+# --------------------------------------------------------------------------- what the third review found
+def test_only_a_payment_still_standing_on_that_visit_line_takes_it_off_the_list(tmp_path):
+    """The old bill's answer paid a different line, EMA showed a payment on a different line, or the payment was taken back:
+    the visit billed again is still chased. A later submission on hold does not hide the one that went out."""
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(50, 10, "11102", "150.00", "110.00"), pay_date="20261110")
+    c = s.conn
+    ema(c, "CB0000H71C017", patient_id="P71")                                    # its answer posted in EMA: 99214 paid, 11102 denied
+    ema(c, "CB0000H71C017", patient_id="P71", cpt="11102", charges_cents=15000)
+    ema(c, "CB0000H71C017", family="era_lines", source_name="ERA.xlsx", cpt="99214", carc="CO-45", adjustment_status="IGNORE",
+        adjustments_cents=10605, payments_cents=11760, transaction_date="2026-09-25")
+    ema(c, "CB0000H71C017", family="era_lines", source_name="ERA.xlsx", cpt="11102", carc="CO-50", adjustment_status="IGNORE",
+        adjustments_cents=15000, payments_cents=0, transaction_date="2026-09-25")
+    ema(c, "CB0000H72C017", patient_id="P71", cpt="11102", charges_cents=15000, bill_created="2026-10-01")
+    ema(c, "CB0000H72C017", family="claim_status", patient_id="P71", cpt="11102", claim_status="Submitted", claim_submission_date="2026-10-01")
+    ema(c, "CB0000H73C017", patient_id="P73", insurance_payments_cents=11760)   # EMA shows its 99214 paid, not its 11102
+    ema(c, "CB0000H73C017", patient_id="P73", cpt="11102", charges_cents=15000)
+    ema(c, "CB0000H74C017", patient_id="P73", cpt="11102", charges_cents=15000, bill_created="2026-10-01")
+    ema(c, "CB0000H74C017", family="claim_status", patient_id="P73", cpt="11102", claim_status="Submitted", claim_submission_date="2026-10-01")
+    ema(c, "CB0000N01C017")                                                      # sent, unanswered; its corrected claim is on hold
+    ema(c, "CB0000N01C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-01")
+    ema(c, "CB0000N01C024")
+    ema(c, "CB0000N01C024", family="claim_status", claim_status="On Hold")
+    ema(c, "CB0000S21C017")                                                      # the payer's denial recorded in EMA on Oct 12
+    ema(c, "CB0000S21C017", family="claim_status", claim_status="Denied", claim_submission_date="2026-09-16", denial_date="2026-10-12")
+    ema(c, "CB0000S21C024")                                                      # sent again after it: not due before Nov 11
+    found = chased(s)
+    assert set(found) == {"CB0000H72C017", "CB0000H74C017", "CB0000N01C017"}
+    assert found["CB0000H72C017"]["shortfall_cents"] == 11000 and found["CB0000H74C017"]["shortfall_cents"] == 11000
+
+
+def test_a_whole_claim_denial_with_an_undated_line_does_not_stop_the_analysis(tmp_path):
+    from remitwatch.detect import Detector
+    from tests.test_features import claim
+    lines = (svc("96910", "150.00", "0.00", None, "CAS*CO*16*150.00~", dos="20261101")
+             + "SVC*HC:96910*150.00*0.00**1~CAS*CO*16*150.00~")                    # a second line with no date of its own
+    whole = claim(800, lines, status="4", dos="20261101").replace("DTM*232*20261101~", "DTM*232*20261101~DTM*233*20261105~")
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [whole], pay_date="20261110")
+    Detector(s, run_id="t").run()
+    assert s.query("SELECT signal FROM findings WHERE patient_control_number='CB0000800C017'")
+
+
+def test_the_work_goes_only_to_the_claims_own_answer_or_its_resend_to_the_same_payer(tmp_path):
+    """A claim sent again under its own id gets its decision back; another payer's claim on the bill, or a reprocessing
+    months later, starts with nothing."""
+    import pathlib
+
+    from remitwatch.actions import apply_status
+    from tests.test_features import claim
+    from tests.test_remitwatch import remit
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    ema(c, "CB0000R31C017")                                                      # rejected; fixed and marked Sent
+    ema(c, "CB0000R31C017", family="claim_status", claim_status="Rejected", claim_submission_date="2026-10-20")
+    ema(c, "CB0000S31C017")                                                      # no answer; being chased
+    fid_r, fid_s = (chased(s)[x]["finding_id"] for x in ("CB0000R31C017", "CB0000S31C017"))
+    apply_status(c, fid_r, "appealed", "subscriber id fixed; resent 10/22", actor="biller")
+    apply_status(c, fid_s, "in_progress", "Anthem: no record; resent with proof of timely filing", actor="biller")
+    c.commit()
+    # the same claim id goes out again (not due yet); Anthem pays S31 in full, and its coinsurance goes to Medicaid as C024
+    c.execute("UPDATE ema_rows SET claim_status='Submitted', claim_submission_date='2026-10-22' WHERE claim_id='CB0000R31C017' AND family='claim_status'")
+    paid = claim(0, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*82.13~CAS*PR*2*23.92~", dos="20260914"), dos="20260914").replace("CB0000000C017", "CB0000S31C017")
+    p = pathlib.Path(s.db_path).parent / "paid.RMT"
+    p.write_bytes(remit(paid, "117.60", seg_count=99, isa_ctrl="000000079", pay_date="20261120"))
+    s.ingest_835_paths([str(p)])
+    ema(c, "CB0000S31C024", payer="Medicaid of Kentucky", payer_id="KYMCD", bill_created="2026-11-21")
+    ema(c, "CB0000S31C024", family="claim_status", payer="Medicaid of Kentucky", payer_id="KYMCD", claim_status="Submitted", claim_submission_date="2026-11-21")
+    later = pathlib.Path(s.db_path).parent / "later.RMT"                       # the remittances on file reach January
+    later.write_bytes(remit(clean_visits(90, 1, "99214", "223.65", "117.60")[0], "117.60", seg_count=99, isa_ctrl="000000080", pay_date="20270105"))
+    s.ingest_835_paths([str(later)])
+    found = chased(s)
+    assert "CB0000S31C024" in found and found["CB0000S31C024"]["notes"] is None and found["CB0000S31C024"]["status"] == "open"
+    c.execute("UPDATE ema_rows SET claim_submission_date='2026-10-01' WHERE claim_id='CB0000R31C017' AND family='claim_status'")
+    back = chased(s)["CB0000R31C017"]                                            # due now: the same item, with its decision
+    assert back["finding_id"] == fid_r and back["status"] == "appealed" and "resent 10/22" in back["notes"]

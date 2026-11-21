@@ -42,7 +42,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     lines += [f"- [{a['severity']}] {a['title']}" for a in alerts] or ["No active alerts."]
     lines.append("")
     prog = q("""SELECT status, COUNT(*) n, SUM(shortfall_cents) cents, SUM(recovered_cents) rec FROM findings
-                WHERE category IN ('downcoding','bundling','denial','underpayment') GROUP BY 1""")
+                WHERE category IN ('downcoding','bundling','denial','underpayment') AND COALESCE(stale,0)=0 GROUP BY 1""")
     by = {r["status"]: r for r in prog}
     lines.append("## Scoreboard")
     lines.append("| status | findings | dollars |")
@@ -64,7 +64,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
         lines.append("No new findings.")
     lines.append("")
     due = q("""SELECT signal, payer_group, patient_control_number, service_date, procedure_code, shortfall_cents, appeal_deadline
-               FROM findings WHERE status='open' AND actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')
+               FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')
                ORDER BY appeal_deadline, shortfall_cents DESC LIMIT 40""")
     # a payer's routine lower rate: one row with the claims whose own windows close in the period
     from .detect import pattern_windows
@@ -79,7 +79,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
             r["appeal_deadline"] = min(r["appeal_deadline"], d)
     for r in soon.values():
         r["patient_control_number"] = f"{r['n']} claim{'s' if r['n'] != 1 else ''} at the payer's routine lower rate"
-    due_n = q("""SELECT COUNT(*) n FROM findings WHERE status='open' AND actionable IN ('appeal','correct_and_resubmit')
+    due_n = q("""SELECT COUNT(*) n FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit')
                   AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')""")[0]["n"] + len(soon)
     due = sorted([dict(r) for r in due] + list(soon.values()), key=lambda r: (r["appeal_deadline"], -(r["shortfall_cents"] or 0)))
     lines.append("## Appeals due in the next 45 days")
@@ -94,7 +94,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
         lines.append("Nothing due.")
     lines.append("")
     top = [dict(r) for r in q("""SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
-               WHERE status='open' AND category IN ('downcoding','bundling','denial','underpayment') AND appeal_deadline >= date('now')
+               WHERE status='open' AND COALESCE(stale,0)=0 AND category IN ('downcoding','bundling','denial','underpayment') AND appeal_deadline >= date('now')
                  AND signal != 'SECOND_RATE' GROUP BY 1""")]
     # a payer's routine lower rate: the claims whose own windows are still open
     by_payer = {r["payer_group"]: r for r in top}
@@ -113,7 +113,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     for r in top:
         lines.append(f"| {r['payer_group']} | {r['n']} | {money(r['cents'])} |")
     lines.append("")
-    fix = q("""SELECT signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings WHERE status='open' AND actionable='correct_and_resubmit' AND appeal_deadline >= date('now') GROUP BY 1 ORDER BY cents DESC""")
+    fix = q("""SELECT signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable='correct_and_resubmit' AND appeal_deadline >= date('now') GROUP BY 1 ORDER BY cents DESC""")
     lines.append("## Correctable billing errors (resubmit, no appeal needed)")
     for r in fix:
         lines.append(f"- {r['signal']}: {r['n']} lines, {money(r['cents'])}")

@@ -350,3 +350,64 @@ def test_a_serverless_run_keeps_the_hold_so_a_refused_password_is_sent_once_a_da
         assert "error" in outs[0]["trizetto"] and all(o["trizetto"].get("skipped") for o in outs[1:])
     finally:
         f.stop()
+
+
+def test_a_keyboard_style_sign_in_is_judged_the_same_way_and_a_refused_file_service_holds_nothing(tmp_path, sftp, monkeypatch):
+    """Many SFTP servers ask for the password as a typed answer: slow there is still the network, not a refusal. And a
+    sign-in that works but whose file service is refused ends a hold: the password is fine."""
+    import paramiko
+
+    from remitwatch.store import Store
+    from tests.fake_sftp import _Server
+    _remits(sftp.root, 1)
+    store = Store(str(tmp_path / "s.sqlite"))
+    slow = {"on": True}
+
+    def check_auth_interactive(self, username, submethods):
+        self._user = username
+        self.fake.logins.append(username)
+        return paramiko.InteractiveQuery("", "", ("Password: ", False))
+
+    def check_auth_interactive_response(self, responses):
+        if slow["on"]:
+            time.sleep(3)
+        ok = self._user == self.fake.user and responses and responses[0] == self.fake.password and not self.fake.refuse_password
+        return paramiko.AUTH_SUCCESSFUL if ok else paramiko.AUTH_FAILED
+    monkeypatch.setattr(_Server, "get_allowed_auths", lambda self, username: "keyboard-interactive")
+    monkeypatch.setattr(_Server, "check_auth_password", lambda self, username, password: paramiko.AUTH_FAILED)
+    monkeypatch.setattr(_Server, "check_auth_interactive", check_auth_interactive, raising=False)
+    monkeypatch.setattr(_Server, "check_auth_interactive_response", check_auth_interactive_response, raising=False)
+    orig_init = trizetto.Session.__init__
+    monkeypatch.setattr(trizetto.Session, "__init__", lambda self, s, known=None, timeout=1: orig_init(self, s, known=known, timeout=timeout))
+    pull = lambda: trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + 60, settings=trizetto.Settings.from_env(sftp.env()), log=lambda *a: None)
+    with pytest.raises(trizetto.TriZettoError) as err:
+        pull()
+    assert not isinstance(err.value, trizetto.SignInRefused) and trizetto.refusal(store.conn, trizetto.Settings.from_env(sftp.env())) is None
+    slow["on"] = False
+    sftp.refuse_password = True
+    with pytest.raises(trizetto.SignInRefused):                 # refused by the typed-answer route too: held
+        pull()
+    assert trizetto.refusal(store.conn, trizetto.Settings.from_env(sftp.env())) is not None
+    # TriZetto switches the login on but refuses the file service: the sign-in works, so the hold ends
+    sftp.refuse_password = False
+    monkeypatch.setattr(_Server, "check_channel_request", lambda self, kind, chanid: paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED)
+    store.conn.execute("UPDATE meta SET value=json_set(value, '$.at', '2000-01-01T00:00:00+00:00') WHERE key=?", (trizetto.REFUSED_META,))
+    with pytest.raises(trizetto.FileServiceRefused):
+        pull()
+    assert trizetto.refusal(store.conn, trizetto.Settings.from_env(sftp.env())) is None and store.conn.execute("SELECT 1 FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone() is None
+    out = trizetto.check(env=sftp.env())
+    assert [(x["step"], x["ok"]) for x in out["steps"]][-2:] == [("Sign-in", True), ("Files", False)]
+    store.close()
+
+
+def test_the_setup_test_holds_and_releases_through_the_journal_on_a_serverless_host(tmp_path):
+    import sqlite3
+
+    from remitwatch import actions
+    from remitwatch.insights import password_days
+    conn = sqlite3.connect(str(tmp_path / "m.sqlite"))
+    assert actions.apply(conn, {"kind": "trizetto_hold", "op": "set", "who": "tag1", "detail": "refused", "at": "2026-11-21T10:00:00+00:00"})
+    assert "tag1" in conn.execute("SELECT value FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone()[0]
+    assert actions.apply(conn, {"kind": "trizetto_hold", "op": "clear"}) is True
+    assert conn.execute("SELECT 1 FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone() is None
+    assert [password_days(v) for v in ("90", "90 days", "8 weeks", "6 months", "1 year", "annually", "never", "")] == [90, 90, 56, 180, 365, 365, 0, 0]

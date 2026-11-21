@@ -60,6 +60,10 @@ class SignInRefused(TriZettoError):
     """TriZetto refused the user name and password (not the network, nor the server's key)."""
 
 
+class FileServiceRefused(TriZettoError):
+    """TriZetto accepted the user name and password but would not open its file service: the sign-in itself works."""
+
+
 @dataclass
 class Settings:
     user: str = ""
@@ -149,14 +153,25 @@ class Session:
                                 f"({key.get_name()} {self.key_fp}, expected {' or '.join(want)}). Nothing was sent to it. If TriZetto "
                                 "changed its key, confirm the new fingerprint with TriZetto and set it as TRIZETTO_SFTP_HOSTKEY.")
         self.first_key = not want
+        def answered() -> bool:
+            # paramiko forgets the user name when it reads the server's refusal (USERAUTH_FAILURE): TriZetto did answer, even
+            # if it hung up straight after; a line that dropped or timed out before any answer keeps it
+            h = getattr(t, "auth_handler", None)
+            return h is not None and getattr(h, "username", "") is None
         try:
-            t.auth_password(self.s.user, self.s.password)
+            try:
+                t.auth_password(self.s.user, self.s.password, fallback=False)
+            except paramiko.BadAuthenticationType as bad:
+                if "keyboard-interactive" not in (getattr(bad, "allowed_types", None) or []):
+                    raise
+                # the server asks for the password as a typed answer: give it the same password, judged by the same rule
+                t.auth_interactive(self.s.user, lambda title, instructions, prompts: [self.s.password for _ in prompts])
         except Exception as exc:
-            # a refusal is TriZetto's own answer to the user name and password, on a line still open; a sign-in that timed out or
-            # a line that dropped is the network, and says nothing about the password
-            definite = isinstance(exc, paramiko.BadAuthenticationType) or (
-                isinstance(exc, paramiko.AuthenticationException) and t.is_active()
-                and not re.search(r"timeout|timed out|EOF|shut down|closed", str(exc), re.I))
+            # a refusal is TriZetto's own answer to the user name and password; a sign-in that timed out or a line that dropped
+            # before any answer is the network, and says nothing about the password
+            no_method = isinstance(exc, paramiko.BadAuthenticationType)
+            definite = no_method or (isinstance(exc, paramiko.AuthenticationException) and (
+                answered() or (t.is_active() and not re.search(r"timeout|timed out|EOF|shut down|closed", str(exc), re.I))))
             self.close()
             if not definite:
                 raise TriZettoError(f"The sign-in to {self.s.host} did not finish ({type(exc).__name__}: {str(exc)[:120]}). "
@@ -170,11 +185,11 @@ class Session:
             self.sftp = paramiko.SFTPClient.from_transport(t)
         except Exception as exc:        # signed in, but the file service refused (SFTP not switched on, or too many sessions)
             self.close()
-            raise TriZettoError(f"TriZetto accepted the sign-in but would not open its file service ({type(exc).__name__}). "
-                                "Ask TriZetto support to switch SFTP on for this login.") from exc
+            raise FileServiceRefused(f"TriZetto accepted the sign-in but would not open its file service ({type(exc).__name__}). "
+                                     "Ask TriZetto support to switch SFTP on for this login.") from exc
         if self.sftp is None:
             self.close()
-            raise TriZettoError("TriZetto accepted the sign-in but would not open its file service. Ask TriZetto support to switch SFTP on.")
+            raise FileServiceRefused("TriZetto accepted the sign-in but would not open its file service. Ask TriZetto support to switch SFTP on.")
         return self
 
     def __exit__(self, *exc) -> None:
@@ -298,10 +313,14 @@ def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings:
         ses = Session(s, known=row[0] if row else None).__enter__()
     except SignInRefused as exc:
         remember_refusal(conn, s, str(exc))
-        exc.seen_changed = True         # a serverless run saves the store, or the hold would be lost with it
+        exc.seen_changed = exc.hold_changed = True     # a serverless run saves the store, or the hold would be lost with it
+        raise
+    except FileServiceRefused as exc:   # the sign-in itself worked: no hold
+        if forget_refusal(conn):
+            exc.seen_changed = exc.hold_changed = True
         raise
     if forget_refusal(conn):
-        out["seen_changed"] = True
+        out["seen_changed"] = out["hold_changed"] = True
     try:
         if ses.first_key:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (HOSTKEY_META, ses.key_fp))
@@ -359,7 +378,13 @@ def check(env: dict | None = None, known: str | None = None) -> dict:
         return {"ok": False, "steps": steps}
     steps.append({"step": "Settings", "ok": True, "detail": f"Site ID {s.user} on {s.host}:{s.port}, folders {', '.join(s.dirs)}"})
     try:
-        with Session(s, known=known) as ses:
+        try:
+            ses = Session(s, known=known).__enter__()
+        except FileServiceRefused as exc:
+            steps.append({"step": "Sign-in", "ok": True, "detail": "TriZetto accepted the Site ID and password"})
+            steps.append({"step": "Files", "ok": False, "detail": str(exc)})
+            return {"ok": False, "steps": steps}
+        try:
             steps.append({"step": "Server", "ok": True, "detail": f"{s.host} answered; its key is {ses.key_fp}"
                           + (" (kept from now on)" if ses.first_key else " (as expected)")})
             steps.append({"step": "Sign-in", "ok": True, "detail": "TriZetto accepted the Site ID and password"})
@@ -377,6 +402,8 @@ def check(env: dict | None = None, known: str | None = None) -> dict:
             steps.append({"step": "Read", "ok": head == b"ISA", "detail": f"{posixpath.basename(pick)} is an X12 file" if head == b"ISA"
                           else f"{posixpath.basename(pick)} does not start like an X12 file"})
             return {"ok": all(x["ok"] for x in steps), "steps": steps, "hostkey": ses.key_fp}
+        finally:
+            ses.close()
     except SignInRefused as exc:
         steps.append({"step": "Sign-in", "ok": False, "detail": str(exc)})
         return {"ok": False, "steps": steps, "refused": str(exc)}

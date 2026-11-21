@@ -77,15 +77,17 @@ billing system (ModMed) may sign in with the same one. Two things protect it:
 
 - A refused password is not tried again for a day. TriZetto locks a login for an hour after repeated failed sign-ins, and
   a locked Site ID login would stop ModMed's claims and remittances too. After a refusal (TriZetto's own answer to the user
-  name and password; a sign-in that timed out or a line that dropped is the network and holds nothing) the scheduled runs
+  name and password, however the server asks for it; a sign-in that timed out or a line that dropped before any answer is
+  the network and holds nothing; a sign-in that worked but whose file service was refused ends a hold) the scheduled runs
   do not sign in with the same user name and password for 24 hours, then once more (TriZetto may have switched SFTP on
   since). A new password is tried at once. "Test the TriZetto connection" ends the hold when its sign-in step passes, and
   a refusal there holds the scheduled runs too. Today's data checks and the test on `/setup` say when a hold is in place;
-  the hold is kept on Vercel too. Only a hash of the settings is kept, never the password.
+  the hold is kept on Vercel too (the test sets or ends it through the journal there). Only a hash of the settings is
+  kept, never the password.
 - A reminder before it expires. TriZetto makes the SFTP password expire (every 60 days to a year, by vendors' accounts).
   configure.sh notes the day a new password is entered (`TRIZETTO_SFTP_PASSWORD_SET`) and asks how many days it lasts
-  (`TRIZETTO_SFTP_PASSWORD_DAYS`, from TriZetto's answer; a number, 0 if it never expires); from 20 days before, Today's
-  data checks say when it expires.
+  (`TRIZETTO_SFTP_PASSWORD_DAYS`, from TriZetto's answer: "90", "6 months" or "1 year" are all understood; 0 or "never"
+  for none); from 20 days before, Today's data checks say when it expires.
   The TriZetto administrator sets the new one in the portal (My Account, Manage Products, Manage SFTP Password) and gives
   it by phone to whoever runs the server, the same day, and to anything else that signs in with that login.
 
@@ -116,16 +118,18 @@ reach that day (a feed that stopped never makes newer claims look unanswered), w
 - no remittance for it, and none for its bill since it went out;
 - no ERA line posted in EMA for it (the payer's answer reached EMA even if its 835 never reached the site);
 - nothing paid by insurance in EMA, by the newest export: the Insurance Payments column, or a Payment row whose activity
-  or payment method says insurance (ERA, EFT); a Payment row that only names the payer counts when it is 40% of the
-  charges or more (a copay never is);
+  or payment method says insurance (ERA, EFT). A Payment row that only names the payer could be the insurer's or a copay:
+  the claim stays listed, and the item says EMA shows that payment;
 - EMA's status is not denied (a denial is the payer's answer), paid, void, cancelled or in collections, and the claim
   was sent (not on hold, ready or unbilled);
-- it is the bill's latest submission, by its number (C017, C024, ...): an earlier one sent again is not chased twice. A
-  later submission EMA's exports give no date for yet counts as sent the day after the bill's previous submission or
-  answer ("Sent again after ...");
-- its visits (same patient, date and code) are not on another bill that settles them: one the payer paid, one the payer
-  answered after this claim went out, a newer bill made for the visit, or one EMA shows paid. A denial of the same bill's
-  earlier submission, or of an older bill, never stops the claim sent again from being chased.
+- it is the latest submission of its bill that went out, by its number (C017, C024, ...): an earlier one sent again is
+  not chased twice, and one on hold or not sent yet does not hide the one that went out. A later submission EMA's exports
+  give no date for yet counts as sent the day after the bill's previous submission, its answer, or the denial EMA
+  recorded ("Sent again after ...");
+- when in doubt, a claim stays listed. A visit (same patient, date and code) leaves it only for a payment that still
+  stands on that visit's own line under another bill (on its remittance, takebacks applied; in EMA's ERA lines; or EMA's
+  Insurance Payments on that line), or when the same visit is chased under a newer bill (chased once). A denial of the
+  same bill's earlier submission, or of an older bill, never stops the claim sent again from being chased.
 
 These are "Chase the payer" items (Today's plan: "Chase claims the payer never answered"): look the claim up on the
 payer's portal or call; not on file, send it again before the date shown; rejected, correct and resend; denied or paid,
@@ -143,9 +147,11 @@ proof of timely filing (EMA's submission date, or the clearinghouse's acceptance
 so its date runs the payer's appeal window past that limit (marked not confirmed), and its note says to send it again by
 the limit. Medicare's year from the date of service is firm, and a rejected claim never reached the payer. When a payer's remittances stop before
 a claim's answer was due, or none from it is on file at all, the item says so: check its portal (and its ERA enrollment)
-before sending the claim again. The notes recorded on one follow its bill, even a run or more later: to each item its remittance
-brings, or to the claim sent again. Each starts To do (Started if someone was working the claim), never Sent, Paid or Let
-go: the payer's answer is a new matter. An item a person wrote on is kept until its notes have moved on. EMA's claim statuses are matched by words (rejected; denied; paid, void, collections; closed, written
+before sending the claim again. The notes recorded on one go to exactly two places: each item its claim's first remittance
+brings, or the same bill's claim sent again to the same payer. Each starts To do (Started if someone was working the
+claim), never Sent, Paid or Let go: the payer's answer is a new matter. Otherwise the item waits (stale, out of every
+total) and, if its own claim id is listed again, comes back with its own status and notes. Another payer's claim on the
+bill, a reprocessing months later or another submission's findings never take them. EMA's claim statuses are matched by words (rejected; denied; paid, void, collections; closed, written
 off; on hold, ready, unbilled), to be checked against the practice's sample reports when they arrive. They cannot be
 hidden for a payer (below): a claim nobody answered is not a reason a payer won't pay, so each is let go one at a time,
 with a note.

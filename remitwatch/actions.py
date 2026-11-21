@@ -205,4 +205,14 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
     if kind == "hide_rule":
         apply_hide_rule(conn, action)
         return True
+    if kind == "trizetto_hold":
+        # the /setup test on a serverless host: a sign-in that worked ends the hold, a refusal starts one (remitwatch.trizetto)
+        from . import trizetto
+        if action.get("op") == "clear":
+            return trizetto.forget_refusal(conn)
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     (trizetto.REFUSED_META, json.dumps({"who": action.get("who") or "", "at": action.get("at") or _now(),
+                                                         "detail": str(action.get("detail") or "")[:300]})))
+        return True
     return False

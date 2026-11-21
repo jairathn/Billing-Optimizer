@@ -95,9 +95,19 @@ fi
 ask TRIZETTO_SFTP_PASSWORD_DAYS text "How many days a TriZetto SFTP password lasts before TriZetto makes you change it (from TriZetto's answer; 0 if it never expires)"
 tz_days=$(current TRIZETTO_SFTP_PASSWORD_DAYS)
 case "$tz_days" in
-  ""|*[!0-9]*)                            # "90 days" -> 90; "never", "none" or anything without a number -> 0 (no reminder)
-    tz_num=$(printf '%s' "$tz_days" | grep -o '[0-9][0-9]*' | head -n1 || true)
-    if [ -n "$tz_days" ]; then put TRIZETTO_SFTP_PASSWORD_DAYS "${tz_num:-0}"; echo "  noted as ${tz_num:-0} days"; fi ;;
+  ""|*[!0-9]*)                            # "1 year" -> 365, "6 months" -> 180, "8 weeks" -> 56, "60 days" -> 60, "never" -> 0
+    if [ -n "$tz_days" ]; then
+      tz_lc=$(printf '%s' "$tz_days" | tr 'A-Z' 'a-z')
+      tz_num=$(printf '%s' "$tz_lc" | grep -o '[0-9][0-9]*' | head -n1 || true)
+      case "$tz_lc" in
+        *year*|*annual*) tz_d=$(( ${tz_num:-1} * 365 )) ;;
+        *month*)         tz_d=$(( ${tz_num:-1} * 30 )) ;;
+        *week*)          tz_d=$(( ${tz_num:-1} * 7 )) ;;
+        *)               tz_d=${tz_num:-0} ;;
+      esac
+      put TRIZETTO_SFTP_PASSWORD_DAYS "$tz_d"
+      echo "  noted as $tz_d days$([ "$tz_d" = 0 ] && echo ' (no reminder)')"
+    fi ;;
 esac
 ask TRIZETTO_SFTP_DIRS text "Folder(s) the remittances are in, comma-separated (empty: the whole login folder)"
 ask TRIZETTO_SFTP_HOSTKEY text "The SFTP server's key fingerprints TriZetto gives (SHA256:... or MD5:..., several separated by commas), optional"

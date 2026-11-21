@@ -2063,7 +2063,7 @@ class Detector:
                 else:
                     act = "appeal"
                 paid_codes = sorted({code for (code, _d) in need if (code, _d) not in unpaid and (code, _d) not in elsewhere})
-                ev = {"codes": codes, "unpaid": sorted([code, d] for code, d in novel if code != "*"),
+                ev = {"codes": codes, "unpaid": sorted(([code, d] for code, d in novel if code != "*"), key=lambda p: (p[0], p[1] or "")),
                       "claim_charge_cents": cl.get("charge_cents"), "payer_claim_control_number": cl.get("payer_claim_control_number")}
                 if elsewhere:
                     ev["settled_elsewhere"] = {code: f"{how} (claim {other})" for (code, _d), (how, other) in elsewhere.items()}
@@ -2110,16 +2110,18 @@ class Detector:
     def run_ema_open_claims(self) -> None:
         """Claims EMA shows sent to a payer and unpaid that no payer answered: no 835 for the claim, none for its bill since
         it was sent, no ERA line posted in EMA for it, nothing paid by insurance in EMA, and not voided, self-pay, denied or
-        (by EMA's own status) settled or not yet sent. Only the latest submission of a bill counts (an earlier one was
-        superseded), and a visit answered under another bill (a bill made again) does not. One counts once NO_ANSWER_DAYS
-        have passed since it was sent and the remittances on file reach that day, so a feed that stopped does not make every
-        newer claim look unanswered (NO_ANSWER, "Chase the payer"). One EMA calls rejected never reached the payer and
-        counts at once (REJECTED_PRE_PAYER, "Fix and resubmit"). One EMA shows closed or written off is listed all the
-        same, marked written off in EMA. Each is sized by the payer's usual rate for its codes and units, and dated by the
-        payer's first-filing limit from the date of service; a claim sent on time keeps its item past that date, since the
-        payer has it or takes proof of timely filing (except Medicare, whose year from the date of service is firm). Both
-        signals of one claim share its id, so the work people record follows the claim from one to the other."""
+        (by EMA's own status) settled or not yet sent. Only the latest submission of a bill that went out counts (an earlier
+        one was superseded). When in doubt a claim stays listed: a visit leaves it only for a payment that still stands on
+        that visit's own line under another bill, or because the same visit is chased under a newer bill. One counts once
+        NO_ANSWER_DAYS have passed since it was sent and the remittances on file reach that day, so a feed that stopped does
+        not make every newer claim look unanswered (NO_ANSWER, "Chase the payer"). One EMA calls rejected never reached the
+        payer and counts at once (REJECTED_PRE_PAYER, "Fix and resubmit"). One EMA shows closed or written off is listed
+        all the same, marked written off in EMA. Each is sized by the payer's usual rate for its codes and units, and dated
+        by the payer's first-filing limit from the date of service; a claim sent on time runs the payer's appeal window past
+        that limit (except Medicare, whose year is firm). Both signals of one claim share its id, so the work people record
+        follows the claim from one to the other; save() hands it to the claim's own answer or its later submission."""
         c = self.conn
+        self.ema_answered: set[str] = set()
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "ema_rows" not in tables:
             return
@@ -2129,7 +2131,6 @@ class Detector:
         since = _add_days(newest, -400)         # older than every filing limit: nothing left to chase
         # answered: a remittance for the claim, or the payer's answer posted in EMA (its 835 may never have reached us)
         answered: set[str] = set()
-        answered_paid: set[str] = set()         # answered with money in EMA's ERA lines (a denial answers without paying)
         bill_last: dict[str, str] = {}
         for pcn, paid_on in c.execute("""SELECT cl.patient_control_number, MAX(t.payment_date) FROM claims cl
                                          JOIN transactions t ON t.transaction_key = cl.transaction_key
@@ -2137,19 +2138,21 @@ class Detector:
             answered.add(pcn)
             b = bill_of(pcn)
             bill_last[b] = max(bill_last.get(b, ""), paid_on or "")
-        for cid, when, paid_sum in c.execute("""SELECT claim_id, MAX(COALESCE(transaction_date, posted_date, '')), SUM(COALESCE(payments_cents,0))
-                                                FROM ema_rows WHERE family='era_lines' AND claim_id IS NOT NULL GROUP BY 1"""):
+        for cid, when in c.execute("""SELECT claim_id, MAX(COALESCE(transaction_date, posted_date, '')) FROM ema_rows
+                                      WHERE family='era_lines' AND claim_id IS NOT NULL GROUP BY 1"""):
             answered.add(cid)
-            if (paid_sum or 0) > 0:
-                answered_paid.add(cid)
             b = bill_of(cid)
             bill_last[b] = max(bill_last.get(b, ""), when or "")
-        # each payer's newest remittance, by the group the lines use and by the payer's name
+        self.ema_answered = answered
+        # the visit lines a payment still stands on: on the remittances (takebacks applied), or in EMA's ERA lines
+        paid_lines: set[int] = set()
+        for cid, cpt, dos in c.execute("""SELECT claim_id, cpt, service_date FROM ema_rows WHERE family='era_lines' AND claim_id IS NOT NULL
+                                          GROUP BY 1, 2, 3 HAVING SUM(COALESCE(payments_cents,0)) > 0"""):
+            paid_lines.add(hash((cid, cpt, dos)))
         payer_last: dict[str, str] = {}
         pcn_payer: dict[str, tuple[str, str]] = {}
-        paid_lines: set[int] = set()            # (claim, billed code, date) the payer paid something on, by its remittance line
         for l in self.lines:
-            if (l.get("paid_cents") or 0) > 0:
+            if (self.standing.get(l["line_key"]) or 0) > 0:
                 paid_lines.add(hash((l["patient_control_number"], l.get("original_procedure_code") or l.get("procedure_code"),
                                      l.get("service_date") or l.get("statement_from"))))
             g, d = l.get("payer_group"), l.get("payment_date") or l.get("txn_payment_date") or ""
@@ -2177,8 +2180,8 @@ class Detector:
             src_at[sha] = (at or newest_in or "", rec)
         votes: dict[str, Counter] = defaultdict(Counter)
         voted: set[str] = set()
-        # each visit (patient, date, code) answered by a payer: under which bill, and whether it was paid
-        answered_visits: dict[int, list[tuple[str, bool]]] = {}
+        # each visit (patient, date, code) a payment still stands on, and under which bill
+        paid_visits: dict[int, set[str]] = {}
         claims: dict[str, dict] = {}
         for (cid, fam, act, item_id, cpt, mods, units, charges, ins_paid, paid, payer, payer_id, patient, provider, dos, created,
              status, state, sent, denied_on, sha, row, method) in c.execute(
@@ -2193,18 +2196,15 @@ class Detector:
                 if cid not in voted and payer and billing and cid in pcn_payer:
                     votes[payer][pcn_payer[cid]] += 1
                     voted.add(cid)
-                if act == "charge" and cpt and patient and dos:
-                    seen = answered_visits.setdefault(hash((patient, dos, cpt)), [])
-                    mark = (bill_of(cid), cid in answered_paid or (ins_paid or 0) > 0 or hash((cid, cpt, dos)) in paid_lines)
-                    if mark not in seen:
-                        seen.append(mark)
+                if act == "charge" and cpt and patient and dos and hash((cid, cpt, dos)) in paid_lines:
+                    paid_visits.setdefault(hash((patient, dos, cpt)), set()).add(bill_of(cid))
                 continue
             k = claims.get(cid)
             if k is None:
                 k = claims[cid] = {"charges": {}, "void_ids": set(), "void_sigs": set(), "ins": {}, "paid_rows": 0, "pat_paid": 0, "amb_paid": 0,
-                                   "status_items": {},
-                                   "payers": Counter(), "payer_ids": Counter(), "patients": Counter(), "providers": Counter(), "days": set(),
-                                   "created": "", "sent": "", "status": None, "denied": "", "status_at": ("", "", -1)}
+                                   "status_items": {}, "payers": Counter(), "payer_ids": Counter(), "patients": Counter(),
+                                   "providers": Counter(), "days": set(), "created": "", "sent": "", "status": None, "denied": "",
+                                   "status_at": ("", "", -1)}
             at = src_at.get(sha, ("", "")) + (row if row is not None else -1,)
             if billing:
                 if payer:
@@ -2233,14 +2233,14 @@ class Detector:
                 continue
             if "payment" in act:
                 # the insurer's when the row's Insurance Payments says so, or (a layout without that column) its activity or payment
-                # method does; a copay or a card payment is the patient's, whatever payer the row names
+                # method does; a copay or a card payment is the patient's; a row naming only the payer is not decided either way
                 if ins_paid is not None:
                     k["paid_rows"] += max(0, ins_paid)
                     k["pat_paid"] += max(0, (paid or 0) - max(0, ins_paid))
                 elif (paid or 0) > 0 and "patient" not in act and INSURER_PAYMENT.search(f"{act} {method or ''}"):
                     k["paid_rows"] += paid
                 elif (paid or 0) > 0 and "patient" not in act and payer and not SELF_PAY.search(payer):
-                    k["amb_paid"] += paid       # the payer's name, nothing else: decided by its size once the charges are known
+                    k["amb_paid"] += paid
                 elif (paid or 0) > 0:
                     k["pat_paid"] += paid
                 continue
@@ -2257,62 +2257,16 @@ class Detector:
             if created:
                 k["created"] = max(k["created"], created[:10])
 
-        def order(pcn: str, k: dict) -> tuple:
-            # a bill's submissions in the order they went out: its suffix (C017, C024, ...) first. A bill's creation date
-            # belongs to every submission of it, so it can never say which came later
-            m = _SUBMISSION.search(pcn)
-            return (int(m.group(1)) if m else 0, k["sent"] or k["created"] or "", pcn)
-        latest: dict[str, str] = {}
-        sent_before: dict[str, str] = {}        # the newest date any submission of the bill was sent
-        for pcn, k in claims.items():
-            b = bill_of(pcn)
-            if b not in latest or order(pcn, k) > order(latest[b], claims[latest[b]]):
-                latest[b] = pcn
-            if k["sent"]:
-                sent_before[b] = max(sent_before.get(b, ""), k["sent"])
-        # each bill's first submission number seen, answered or not: a higher one is a submission sent again
-        first_sub: dict[str, int] = {}
-        for x in list(claims) + [x for x in answered if bill_of(x) in latest]:
-            m = _SUBMISSION.search(x)
-            if m:
-                bx = bill_of(x)
-                first_sub[bx] = min(first_sub.get(bx, int(m.group(1))), int(m.group(1)))
+        def went_out(k: dict) -> bool:
+            """EMA shows the claim sent (a rejected claim went out and came back), not on hold, ready, voided or cancelled."""
+            st = k["status"] or ""
+            if re.search(r"VOID|CANCEL", st, re.I):
+                return False
+            return bool(EMA_REJECTED.search(st)) or not EMA_NOT_SENT.search(st)
 
-        def ema_paid(k: dict) -> bool:
-            # a payment row naming the payer and nothing else is the insurer's when it is 40% of the charges or more: a copay
-            # never comes near that, and a payer's answer that left the patient to pay it all is an answer too
-            charged = sum(v[2] for v in k["charges"].values())
-            if k["amb_paid"] and charged and k["amb_paid"] >= 0.4 * charged:
-                return True
-            return sum(v[1] for v in k["ins"].values()) > 0 or k["paid_rows"] > 0
-
-        # a visit on two bills (a bill made again): only the newer bill's claim carries it, and one EMA shows paid settles it
-        visit_bills: dict[int, list[tuple]] = {}
-        for b, pcn in latest.items():
-            k = claims[pcn]
-            pat = k["patients"].most_common(1)[0][0] if k["patients"] else None
-            if not pat or re.search(r"VOID|CANCEL", k["status"] or "", re.I):
-                continue                    # a bill voided or cancelled carries no visit
-            when, paid_now = k["sent"] or k["created"] or "", ema_paid(k)
-            for v in k["charges"].values():
-                if v[1] and not (v[3] and v[3] in k["void_ids"]):
-                    visit_bills.setdefault(hash((pat, v[1], v[0])), []).append((b, when, pcn, paid_now))
-        for pcn, k in claims.items():
-            if latest.get(bill_of(pcn)) != pcn or not k["payers"]:
-                continue                    # an earlier submission of a bill sent again
-            if ema_paid(k):
-                continue                    # EMA shows insurance paid it (its 835 may be missing: the Data tab)
-            ema_payer = k["payers"].most_common(1)[0][0]
-            if SELF_PAY.search(ema_payer):
-                continue
-            status = k["status"] or ""
-            if k["denied"] or EMA_DENIED.search(status) or EMA_SETTLED.search(status):
-                continue                    # denied (the payer answered), or settled, voided or with collections
-            rejected = bool(EMA_REJECTED.search(status))
-            if not rejected and EMA_NOT_SENT.search(status):
-                continue
-            gave_up = bool(EMA_GAVE_UP.search(status))
-            # one charge for each, though two export layouts list it (with and without its bill item id), less the voids
+        def live_items(k: dict) -> list[tuple]:
+            """One charge for each, though two export layouts list it (with and without its bill item id), less the voids:
+            (code, date, charge, units, item id or None)."""
             groups: dict[tuple, list] = {}
             for v in k["charges"].values():
                 sig = (v[0], v[1], v[4], abs(v[5]) if v[5] is not None else None, v[2])
@@ -2321,121 +2275,187 @@ class Detector:
                     g[0].add(v[3])
                 else:
                     g[1] = True
-            items = []
+            out = []
             for sig, (ids, loose) in groups.items():
-                n = len(ids - k["void_ids"]) if ids else (1 if loose else 0)
+                keep = sorted(ids - k["void_ids"]) if ids else ([None] if loose else [])
                 if sig in k["void_sigs"]:   # a void with no bill item id cancels one, unless a void by id already did
-                    n = max(0, len(ids) - max(len(ids & k["void_ids"]), 1)) if ids else 0
-                items += [(sig[0], sig[1], sig[4], sig[3])] * n
-            if not items and not k["charges"]:
-                items = [(v[0], v[1], v[2], v[5]) for v in k["status_items"].values()]
+                    keep = keep[:max(0, len(ids) - max(len(ids & k["void_ids"]), 1))] if ids else []
+                out += [(sig[0], sig[1], sig[4], sig[3], item) for item in keep]
+            if not out and not k["charges"]:
+                out = [(v[0], v[1], v[2], v[5], None) for v in k["status_items"].values()]
+            return out
+
+        def order(pcn: str, k: dict) -> tuple:
+            # a bill's submissions in the order they went out: its suffix (C017, C024, ...) first. A bill's creation date
+            # belongs to every submission of it, so it can never say which came later
+            m = _SUBMISSION.search(pcn)
+            return (int(m.group(1)) if m else 0, k["sent"] or k["created"] or "", pcn)
+        latest: dict[str, str] = {}
+        before: dict[str, str] = {}             # the newest date the bill was sent, or EMA recorded the payer's denial of it
+        for pcn, k in claims.items():
             b = bill_of(pcn)
+            for d in (k["sent"], k["denied"]):
+                if d:
+                    before[b] = max(before.get(b, ""), d[:10])
+            if not went_out(k):
+                continue
+            if b not in latest or order(pcn, k) > order(latest[b], claims[latest[b]]):
+                latest[b] = pcn
+        self.ema_latest = set(latest.values())
+        # each bill's first submission number seen, answered or not: a higher one is a submission sent again
+        first_sub: dict[str, int] = {}
+        for x in list(claims) + [x for x in answered if bill_of(x) in latest]:
+            m = _SUBMISSION.search(x)
+            if m:
+                bx = bill_of(x)
+                first_sub[bx] = min(first_sub.get(bx, int(m.group(1))), int(m.group(1)))
+        # EMA's own insurance payments on a visit line (the newest export's): that visit is paid under that bill
+        for pcn, k in claims.items():
+            pat = k["patients"].most_common(1)[0][0] if k["patients"] else None
+            if not pat:
+                continue
+            for key, v in k["charges"].items():
+                got = k["ins"].get(key)
+                if v[1] and got and got[1] > 0:
+                    paid_visits.setdefault(hash((pat, v[1], v[0])), set()).add(bill_of(pcn))
+
+        cands: list[dict] = []
+        for pcn, k in claims.items():
+            b = bill_of(pcn)
+            if latest.get(b) != pcn or not k["payers"]:
+                continue                    # an earlier submission of a bill sent again, or one that never went out
+            if sum(v[1] for v in k["ins"].values()) > 0 or k["paid_rows"] > 0:
+                continue                    # EMA shows insurance paid it (its 835 may be missing: the Data tab)
+            ema_payer = k["payers"].most_common(1)[0][0]
+            if SELF_PAY.search(ema_payer):
+                continue
+            status = k["status"] or ""
+            if k["denied"] or EMA_DENIED.search(status) or EMA_SETTLED.search(status):
+                continue                    # denied (the payer answered), or settled, voided or with collections
+            rejected = bool(EMA_REJECTED.search(status))
+            gave_up = bool(EMA_GAVE_UP.search(status))
+            items = live_items(k)
+            patient = k["patients"].most_common(1)[0][0] if k["patients"] else None
+            if patient:                     # a visit a payment still stands on under another bill is paid
+                items = [x for x in items if not (x[1] and (paid_visits.get(hash((patient, x[1], x[0]))) or set()) - {b})]
+            if not items:
+                continue                    # voided, or every visit on it paid under another bill
             days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
+            if not days:
+                continue
             sent, basis = ((k["sent"], "the claim's submission date in EMA") if k["sent"] else
-                           (k["created"], "the date EMA created the bill") if k["created"] else
-                           ((days[-1], "the date of service") if days else ("", "")))
+                           (k["created"], "the date EMA created the bill") if k["created"] else (days[-1], "the date of service"))
             m = _SUBMISSION.search(pcn)
             again_after = False
             if not k["sent"] and m and int(m.group(1)) > first_sub.get(b, int(m.group(1))):
-                # a later submission EMA's exports give no date for yet: it went out after the bill's previous submission and
-                # after the payer's answer to it, whatever date the bill was created
-                after = max(_add_days(sent_before.get(b), 1) or "", _add_days(bill_last.get(b), 1) or "")
-                if after > sent:
-                    sent, basis, again_after = after, "the day after the bill's previous submission or answer (EMA has no date for this one yet)", True
-            patient = k["patients"].most_common(1)[0][0] if k["patients"] else None
-            if patient:
-                when = k["sent"] or k["created"] or ""
-
-                def elsewhere(x: tuple) -> bool:
-                    """This visit belongs to another bill: one the payer paid, or answered after this claim went out (a denial
-                    of an earlier bill does not answer the bill made again after it), or a newer bill made for it, or one EMA
-                    shows paid. Another submission of this same bill is never 'another bill'."""
-                    if not x[1]:
-                        return False
-                    h = hash((patient, x[1], x[0]))
-                    if any(ob != b and (paid_ob or (sent and bill_last.get(ob, "") >= sent)) for ob, paid_ob in answered_visits.get(h, ())):
-                        return True
-                    return any(ob != b and (paid_ob or (w, op) > (when, pcn)) for ob, w, op, paid_ob in visit_bills.get(h, ()))
-                items = [x for x in items if not elsewhere(x)]
-            if not items:
-                continue                    # voided, or every visit on it answered, paid or billed again elsewhere
-            days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
-            if not days or not sent:
-                continue
+                # a later submission EMA's exports give no date for yet: it went out after the bill's previous submission, after
+                # the payer's answer to it, and after any denial EMA recorded, whatever date the bill was created
+                prior = max(before.get(b, ""), bill_last.get(b, ""))
+                if prior and _add_days(prior, 1) > sent:
+                    sent, basis, again_after = _add_days(prior, 1), "the day after the bill's previous submission or answer (EMA has no date for this one yet)", True
             if bill_last.get(b) and bill_last[b] >= sent:
                 continue                    # the payer answered the bill after this claim went out
             due = _add_days(sent, NO_ANSWER_DAYS)
             if not rejected and (not due or due > newest):
                 continue                    # not due yet, or the remittances on file do not reach the day it was due
-            grp, kind = votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
-            rule = filing_rule(grp, kind)
-            file_by = _add_days(days[0], rule["days"])
-            billed = sum(x[2] for x in items)
-            pat_paid = k["pat_paid"] + k["amb_paid"] + sum(v[2] for v in k["ins"].values())
-            if gave_up and billed and pat_paid >= billed:
-                continue                    # closed in EMA because the patient paid it all
-            year = days[0][:4]
-            priced = []
-            for cpt, dos, charge, units in sorted(items, key=lambda x: (x[1] or "", x[0])):
-                rate, _basis, _r = self.usual_rate({"payer_group": grp, "year": year, "provider_tier": "unknown", "pos_class": "office"}, cpt)
-                priced.append([cpt, dos, charge, rate, max(1, int(abs(units))) if units else 1])
-            # a second and later surgical procedure at this payer's usual share, as the payer would price them
-            surg = sorted((p for p in priced if p[3] and is_surgical(p[0])), key=lambda p: -p[3])
-            for rank, p in enumerate(surg, 1):
-                if rank >= 2:
-                    p[3] = int(round(p[3] * self.mppr_pct({"payer_group": grp, "surg_rank": 2 if rank == 2 else 3})[0]))
-            lines = [[cpt, dos, charge, rate * units if rate else None] for cpt, dos, charge, rate, units in priced]
-            expected = sum(x[3] for x in lines if x[3]) if any(x[3] for x in lines) else None
-            codes = sorted({x[0] for x in items})
-            top = max(items, key=lambda x: x[2])[0]
-            claim = {"patient_control_number": pcn, "payer_name": ema_payer, "payer_group": grp, "payer_kind": kind,
-                     "payer_id": k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None, "service_date": days[0],
-                     "year": year, "procedure_code": top, "charge_cents": billed or None,
-                     "rendering_provider_name": k["providers"].most_common(1)[0][0] if k["providers"] else None}
-            last = payer_last.get(grp) or name_last.get(normalize_payer(grp)[0]) or name_last.get(normalize_payer(ema_payer)[0])
-            ev = {"codes": codes, "billed_cents": billed or None, "sent": sent, "sent_basis": basis, "answer_due": due,
-                  "newest_remittance": newest, "ema_status": status or None, "payer_in_ema": ema_payer, "lines": lines,
-                  "days_waiting": _days_between(sent, newest), "payer_last_remittance": last}
-            label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
-            # sent on time: past the first-filing date the payer still owes a claim it has, and most take proof of timely filing
-            # for one they have no record of (Medicare's year from the date of service is firm). Its date runs the payer's
-            # appeal window past the first-filing limit, so it never expires on that limit, whatever day the page is opened
-            timely = bool(not rejected and kind != "medicare" and file_by and sent <= file_by)
-            limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
-            if timely:
-                ap = appeal_rule(grp, kind)
-                deadline = _add_days(max(file_by, due), ap["days"])
-                dbasis = (f"Sent on time ({sent}). If the payer has no record of it, send it again by {file_by}, the first-filing "
-                          f"limit ({limit}); after that, most payers take proof of timely filing (EMA's submission date, or the "
-                          f"clearinghouse's acceptance report). The date shown runs the payer's appeal window past that limit "
-                          f"({ap['label']}), not confirmed for a claim the payer never answered")
-            else:
-                deadline = file_by
-                dbasis = f"If the payer has no record of the claim, it must reach the payer by this date: {limit}"
-            soon = (file_by if timely else deadline) and (file_by if timely else deadline) <= _add_days(newest, 30)
-            if rejected:
-                self._emit("REJECTED_PRE_PAYER", "denial", "high" if soon else "medium", "correct_and_resubmit",
-                           f"Rejected before reaching {grp} (EMA: {status}): {label}", None, expected, expected, None, None, ev,
-                           key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
-            else:
-                said = f" (EMA: {status})" if gave_up else ""
-                when_said = f"Sent again after {_add_days(sent, -1)}" if again_after else f"Sent {sent}"
-                self._emit("NO_ANSWER", "denial", "high" if soon else "medium", "review",
-                           f"{when_said}, no answer from {grp} in {ev['days_waiting']}+ days{said}: {label}" if again_after else
-                           f"{when_said}, no answer from {grp} in {ev['days_waiting']} days{said}: {label}", None, expected, expected,
-                           None, None, ev, key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
-            f = self.findings[_fid("EMA_OPEN_CLAIM", pcn)]
-            f["appeal_deadline"], f["deadline_basis"] = deadline, dbasis
-            if gave_up and not pat_paid:    # given up in EMA though no payer answered: the claim's money, written off
-                f["written_off_cents"] = min(expected, billed) if (expected and billed) else (billed or expected or None)
-                f["written_off_on"] = (k["status_at"][0] or "")[:10] or None
-            if not rejected:
-                if last and due and last < due:
-                    f["hint"] = (f"No remittance from {grp} since {last}: its remittances may be missing (Data tab), so check its "
-                                 "portal before sending the claim again")
-                elif not last:
-                    f["hint"] = (f"No remittance from {grp} is on file at all: check its portal, and whether its ERAs are enrolled, "
-                                 "before sending the claim again")
+            cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
+                          "again_after": again_after, "rejected": rejected, "gave_up": gave_up, "status": status, "ema_payer": ema_payer})
+        # one visit chased under two bills (a bill made again): only the newest carries it
+        newest_for: dict[int, tuple] = {}
+        for cd in cands:
+            for x in cd["items"]:
+                if cd["patient"] and x[1]:
+                    h = hash((cd["patient"], x[1], x[0]))
+                    mark = (cd["sent"], cd["pcn"])
+                    if h not in newest_for or mark > newest_for[h][0]:
+                        newest_for[h] = (mark, cd["b"])
+        for cd in cands:
+            b, patient = cd["b"], cd["patient"]
+            items = [x for x in cd["items"] if not (patient and x[1] and newest_for.get(hash((patient, x[1], x[0])), (None, b))[1] != b)]
+            if not items:
+                continue                    # chased under the newer bill made for the same visit
+            self._emit_open_claim(cd, items, newest, votes, payer_last, name_last)
+
+    def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str, votes: dict, payer_last: dict, name_last: dict) -> None:
+        """One claim no payer answered (run_ema_open_claims): its payer group, size, filing date and item."""
+        k, pcn, sent, due, rejected, gave_up, status, ema_payer = (cd["k"], cd["pcn"], cd["sent"], cd["due"], cd["rejected"], cd["gave_up"],
+                                                                   cd["status"], cd["ema_payer"])
+        days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
+        grp, kind = votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
+        rule = filing_rule(grp, kind)
+        file_by = _add_days(days[0], rule["days"])
+        billed = sum(x[2] for x in items)
+        pat_paid = k["pat_paid"] + sum(v[2] for v in k["ins"].values())
+        if gave_up and billed and pat_paid >= billed:
+            return                          # closed in EMA because the patient paid it all
+        year = days[0][:4]
+        priced = []
+        for cpt, dos, charge, units, _item in sorted(items, key=lambda x: (x[1] or "", x[0])):
+            rate, _basis, _r = self.usual_rate({"payer_group": grp, "year": year, "provider_tier": "unknown", "pos_class": "office"}, cpt)
+            priced.append([cpt, dos, charge, rate, max(1, int(abs(units))) if units else 1])
+        # a second and later surgical procedure at this payer's usual share, as the payer would price them
+        surg = sorted((p for p in priced if p[3] and is_surgical(p[0])), key=lambda p: -p[3])
+        for rank, p in enumerate(surg, 1):
+            if rank >= 2:
+                p[3] = int(round(p[3] * self.mppr_pct({"payer_group": grp, "surg_rank": 2 if rank == 2 else 3})[0]))
+        lines = [[cpt, dos, charge, rate * units if rate else None] for cpt, dos, charge, rate, units in priced]
+        expected = sum(x[3] for x in lines if x[3]) if any(x[3] for x in lines) else None
+        codes = sorted({x[0] for x in items})
+        top = max(items, key=lambda x: x[2])[0]
+        claim = {"patient_control_number": pcn, "payer_name": ema_payer, "payer_group": grp, "payer_kind": kind,
+                 "payer_id": k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None, "service_date": days[0],
+                 "year": year, "procedure_code": top, "charge_cents": billed or None,
+                 "rendering_provider_name": k["providers"].most_common(1)[0][0] if k["providers"] else None}
+        last = payer_last.get(grp) or name_last.get(normalize_payer(grp)[0]) or name_last.get(normalize_payer(ema_payer)[0])
+        ev = {"codes": codes, "billed_cents": billed or None, "sent": sent, "sent_basis": cd["basis"], "answer_due": due,
+              "newest_remittance": newest, "ema_status": status or None, "payer_in_ema": ema_payer, "lines": lines,
+              "days_waiting": _days_between(sent, newest), "payer_last_remittance": last}
+        label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
+        # sent on time: past the first-filing date the payer still owes a claim it has, and most take proof of timely filing
+        # for one they have no record of (Medicare's year from the date of service is firm). Its date runs the payer's
+        # appeal window past the first-filing limit, so it never expires on that limit, whatever day the page is opened
+        timely = bool(not rejected and kind != "medicare" and file_by and sent <= file_by)
+        limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
+        if timely:
+            ap = appeal_rule(grp, kind)
+            deadline = _add_days(max(file_by, due), ap["days"])
+            dbasis = (f"Sent on time ({sent}). If the payer has no record of it, send it again by {file_by}, the first-filing "
+                      f"limit ({limit}); after that, most payers take proof of timely filing (EMA's submission date, or the "
+                      f"clearinghouse's acceptance report). The date shown runs the payer's appeal window past that limit "
+                      f"({ap['label']}), not confirmed for a claim the payer never answered")
+        else:
+            deadline = file_by
+            dbasis = f"If the payer has no record of the claim, it must reach the payer by this date: {limit}"
+        soon = (file_by if timely else deadline) and (file_by if timely else deadline) <= _add_days(newest, 30)
+        if rejected:
+            self._emit("REJECTED_PRE_PAYER", "denial", "high" if soon else "medium", "correct_and_resubmit",
+                       f"Rejected before reaching {grp} (EMA: {status}): {label}", None, expected, expected, None, None, ev,
+                       key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
+        else:
+            said = f" (EMA: {status})" if gave_up else ""
+            title = (f"Sent again after {_add_days(sent, -1)}, no answer from {grp} yet{said}: {label}" if cd["again_after"] else
+                     f"Sent {sent}, no answer from {grp} in {ev['days_waiting']} days{said}: {label}")
+            self._emit("NO_ANSWER", "denial", "high" if soon else "medium", "review", title, None, expected, expected,
+                       None, None, ev, key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
+        f = self.findings[_fid("EMA_OPEN_CLAIM", pcn)]
+        f["appeal_deadline"], f["deadline_basis"] = deadline, dbasis
+        if gave_up and billed > pat_paid:   # given up in EMA though no payer answered: what the patient did not pay, written off
+            owed = billed - pat_paid
+            f["written_off_cents"] = min(expected, owed) if expected else owed
+            f["written_off_on"] = (k["status_at"][0] or "")[:10] or None
+        hints = []
+        if k["amb_paid"]:
+            hints.append(f"EMA shows ${k['amb_paid']/100:,.2f} paid on this claim by a payment row that names {ema_payer} but is "
+                         "not marked insurance or patient: if it is the insurer's, the claim was answered")
+        if not rejected:
+            if last and due and last < due:
+                hints.append(f"No remittance from {grp} since {last}: its remittances may be missing (Data tab), so check its "
+                             "portal before sending the claim again")
+            elif not last:
+                hints.append(f"No remittance from {grp} is on file at all: check its portal, and whether its ERAs are enrolled, "
+                             "before sending the claim again")
+        if hints:
+            f["hint"] = ". ".join(hints)
 
     # ------------------------------------------------------------------ aggregate rules
     def run_aggregate_rules(self) -> None:
@@ -2697,9 +2717,13 @@ class Detector:
 
         # when new information changes a line's signal (and so its id), the work recorded on the old finding follows the line
         orphans: dict[tuple, dict] = {}
-        # ... and the notes on a claim no payer had answered follow its bill: to each item its remittance brings, or to the
-        # claim sent again under a new submission, even when that comes a run or more later (the old item waits, stale)
-        by_bill: dict[str, dict] = {}
+        # ... and the notes on a claim no payer had answered (an item no longer found) go to exactly two places: the items its
+        # own claim's answer brings, in the run that answer arrives; or the same bill's claim sent again to the same payer, when
+        # that one comes due. Otherwise the item waits, stale, and comes back with its own status and notes if its claim id is
+        # listed again. A later reprocessing, another payer's claim or a rate finding never takes it.
+        answered_now = getattr(self, "ema_answered", set())
+        own_answer: dict[str, dict] = {}
+        sent_again: dict[str, list[dict]] = {}
         for fid, prev in existing.items():
             if fid in self.findings or not worked(prev):
                 continue
@@ -2707,19 +2731,35 @@ class Detector:
                 if not prev.get("stale"):
                     orphans.setdefault((prev["line_key"], prev["category"]), prev)
             elif prev.get("signal") in EMA_CLAIM_SIGNALS and prev.get("patient_control_number"):
-                by_bill.setdefault(bill_of(prev["patient_control_number"]), prev)
+                pcn_w = prev["patient_control_number"]
+                if pcn_w in answered_now:
+                    own_answer[pcn_w] = prev
+                else:
+                    sent_again.setdefault(bill_of(pcn_w), []).append(prev)
+        # the claim's own answer is its first remittance: a reprocessing months later is a new matter, not the answer chased
+        first_paid: dict[str, str] = {}
+        for pcn_w in own_answer:
+            got = c.execute("""SELECT MIN(t.payment_date) FROM claims cl JOIN transactions t ON t.transaction_key = cl.transaction_key
+                               WHERE cl.patient_control_number=? AND COALESCE(t.superseded,0)=0""", (pcn_w,)).fetchone()
+            first_paid[pcn_w] = (got[0] if got else None) or ""
+
+        def sub_no(pcn: str | None) -> int:
+            m = _SUBMISSION.search(pcn or "")
+            return int(m.group(1)) if m else 0
         inherited: set[str] = set()
         bill_heirs: set[str] = set()
         rows, events = [], []
         for fid, f in self.findings.items():
             prev = existing.get(fid)
             via_bill = None
-            if prev is None and f.get("line_key") and (f["line_key"], f["category"]) in orphans:
-                heir = orphans[(f["line_key"], f["category"])]
-            else:
-                heir = None
-                if prev is None and f.get("patient_control_number"):
-                    via_bill = by_bill.get(bill_of(f["patient_control_number"]))
+            heir = orphans.get((f["line_key"], f["category"])) if (prev is None and f.get("line_key")) else None
+            if prev is None and heir is None and f.get("patient_control_number"):
+                pcn_f = f["patient_control_number"]
+                if pcn_f in own_answer and (f.get("payment_date") or f.get("txn_payment_date") or "") == first_paid.get(pcn_f, ""):
+                    via_bill = own_answer[pcn_f]
+                elif f.get("signal") in EMA_CLAIM_SIGNALS:
+                    via_bill = next((w for w in sent_again.get(bill_of(pcn_f), [])
+                                     if sub_no(pcn_f) > sub_no(w["patient_control_number"]) and w.get("payer_group") == f.get("payer_group")), None)
             if via_bill is not None:
                 # a new item is a new matter: it starts To do (Started if someone was working the claim), with the notes; never
                 # Sent, Paid or Let go from the earlier item, whose own record stays in its events

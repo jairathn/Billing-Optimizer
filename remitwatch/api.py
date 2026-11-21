@@ -2727,24 +2727,33 @@ def trizetto_test(_: str = Depends(require_auth)):
     from . import trizetto
     known = (one("SELECT value FROM meta WHERE key=?", (trizetto.HOSTKEY_META,)) or {}).get("value") if has_table("meta") else None
     out = trizetto.check(known=known)
-    if not runtime.serverless() and has_table("meta"):
-        # the store this server's cycles read from: a sign-in that works now ends a hold left by an earlier refusal, and
-        # one still in place is shown (the cycles do not sign in with a refused password for a day)
+    # a sign-in that works now ends a hold left by an earlier refusal (whatever else is still to fix); a refusal here holds the
+    # scheduled runs for a day from now; a hold still in place is shown. On a server, in the store the cycles read; on a
+    # serverless host, through the journal (this instance's copy at once, the store at the next run)
+    signed_in = any(x["step"] == "Sign-in" and x["ok"] for x in out.get("steps", []))
+    if runtime.serverless():
+        if signed_in:
+            _record_action({"kind": "trizetto_hold", "op": "clear"})
+        elif out.get("refused"):
+            _record_action({"kind": "trizetto_hold", "op": "set", "who": trizetto.credential_tag(trizetto.Settings.from_env()),
+                            "detail": out["refused"]})
+    elif has_table("meta") or out.get("refused"):
         conn = db()
         try:
-            if any(x["step"] == "Sign-in" and x["ok"] for x in out.get("steps", [])):
-                trizetto.forget_refusal(conn)       # the sign-in works: whatever else is still to fix, the hold ends
+            if signed_in:
+                trizetto.forget_refusal(conn)
             elif out.get("refused"):
-                # refused here too: the scheduled runs must not try the same password again within the day either
-                if not trizetto.refusal(conn):
-                    trizetto.remember_refusal(conn, trizetto.Settings.from_env(), out["refused"])
-                out["held"] = trizetto.refusal(conn)
-            else:
-                held = trizetto.refusal(conn)
-                if held:
-                    out["held"] = held
+                trizetto.remember_refusal(conn, trizetto.Settings.from_env(), out["refused"])
         finally:
             conn.close()
+    if not signed_in and has_table("meta"):
+        conn = db()
+        try:
+            held = trizetto.refusal(conn)
+        finally:
+            conn.close()
+        if held:
+            out["held"] = held
     return JSONResponse(out, headers={"Cache-Control": "no-store"})
 
 

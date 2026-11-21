@@ -401,6 +401,19 @@ def denial_causes(conn: sqlite3.Connection, newest: str | None) -> list[dict]:
     return out
 
 
+def password_days(value: str | None) -> int:
+    """How long a password lasts, in days, however it was written: '90', '90 days', '8 weeks', '6 months', '1 year',
+    'annually'; 0 (no reminder) for nothing, 'never' or anything without a number or a unit."""
+    import re
+    v = (value or "").strip().lower()
+    m = re.search(r"\d+", v)
+    n = int(m.group(0)) if m else None
+    for words, per in (("year|annual", 365), ("month", 30), ("week", 7)):
+        if re.search(words, v):
+            return (n if n is not None else 1) * per
+    return n or 0
+
+
 def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = None) -> list[dict]:
     """The TriZetto feed's sign-in, which nothing else watches: a password TriZetto refused (the feed holds off for a day so
     the login is never locked: remitwatch.trizetto), and a password about to expire (TriZetto makes it expire, every 60
@@ -423,8 +436,7 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
         set_on = date.fromisoformat((e.get("TRIZETTO_SFTP_PASSWORD_SET") or "")[:10])
     except ValueError:
         set_on = None
-    m = re.search(r"\d+", e.get("TRIZETTO_SFTP_PASSWORD_DAYS") or "")     # "90", or "90 days"; 0 or nothing: it does not expire
-    days = int(m.group(0)) if m else 0
+    days = password_days(e.get("TRIZETTO_SFTP_PASSWORD_DAYS"))
     if set_on and days > 0:
         due = set_on + timedelta(days=days)
         left = (due - date.fromisoformat(today)).days

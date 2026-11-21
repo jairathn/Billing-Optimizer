@@ -929,6 +929,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 tz = {"error": str(exc)[:300] if isinstance(exc, trizetto.TriZettoError) else f"{type(exc).__name__}: {str(exc)[:200]}"}
                 if getattr(exc, "seen_changed", False):
                     tz["seen_changed"] = True   # a refused password's hold is in the store: save it, or the next run signs in again
+                if getattr(exc, "hold_changed", False):
+                    tz["hold_changed"] = True
             out["trizetto"] = {k: v for k, v in tz.items() if k != "seen_changed"}
         ingest: dict = {"skipped": "Dropbox credentials are not configured"}
         if client is not None:
@@ -1019,7 +1021,8 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         # run (nothing new in Dropbox, nothing recorded by people) uploads neither.
         alerts_changed = bool((out.get("alerts") or {}).get("new") or (out.get("alerts") or {}).get("cleared"))
         progressed = ingested or (ingest.get("from_archive") or 0) > 0
-        shown_changed = bool(ran_detect or ran_activity or folded or alerts_changed or (progressed and not existed))
+        # a TriZetto sign-in hold set or ended is on Today's data checks: the dashboard's copy is made again
+        shown_changed = bool(ran_detect or ran_activity or folded or alerts_changed or (progressed and not existed) or tz.get("hold_changed"))
         if shown_changed:
             data_rev = str(int(data_rev or 0) + 1)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
