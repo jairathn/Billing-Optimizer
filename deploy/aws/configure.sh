@@ -7,6 +7,13 @@
 # Values are kept in /opt/remitwatch/.env, readable by root only. Nothing typed here is shown on screen for the secret ones.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# no automatic deploy may swap the containers while the settings change or the data moves (deploy/auto-deploy.sh)
+DEPLOY_STATE=${REMITWATCH_DEPLOY_STATE:-/var/lib/remitwatch-deploy}
+mkdir -p "$DEPLOY_STATE" && chmod 700 "$DEPLOY_STATE"
+exec 9>"$DEPLOY_STATE/lock"
+if command -v flock >/dev/null 2>&1; then
+  flock -w 3600 9 || { echo "An automatic deploy has been running for an hour; try again when it ends."; exit 1; }
+fi
 ENV_FILE=.env
 [ -f "$ENV_FILE" ] || install -m 600 /dev/null "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -103,6 +110,17 @@ fi
 
 echo; echo "== Starting the site"
 docker compose up -d --build
+
+echo; echo "== Automatic deploys"
+if systemctl is-enabled --quiet remitwatch-deploy.timer 2>/dev/null; then
+  echo "On: each new commit on main is deployed by itself (sudo bash deploy/auto-deploy.sh --status says what runs)."
+  bash deploy/install-auto-deploy.sh --mark-current >/dev/null || echo "  (the record of the commit running was not updated)"
+else
+  if ! read -r -p "Deploy each new version on main by itself, as the Vercel site did (it checks every 5 minutes)? [Y/n] " yn; then yn=n; fi
+  if [ "${yn:-Y}" != "n" ] && [ "${yn:-Y}" != "N" ]; then
+    bash deploy/install-auto-deploy.sh --mark-current || echo "Auto-deploy was not switched on (see above)."
+  fi
+fi
 site=$(current SITE_ADDRESS)
 cat <<NEXT
 

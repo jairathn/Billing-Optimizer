@@ -123,11 +123,14 @@ def test_the_settings_script_keeps_values_exactly_and_the_key_loads(tmp_path):
     bindir.mkdir()
     (bindir / "docker").write_text(f'#!/bin/bash\necho "$*" >> "{tmp_path}/docker.log"\n')
     (bindir / "docker").chmod(0o755)
+    (bindir / "systemctl").write_text(f'#!/bin/bash\necho "$*" >> "{tmp_path}/systemctl.log"\nexit 1\n')     # auto-deploy not on
+    (bindir / "systemctl").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", REMITWATCH_DEPLOY_STATE=str(tmp_path / "deploy-state"))
     pem = M.generate_key()
     answers = ("\n\n\n\n" "key123\n" "sec$ret#1 x\n" "tok\n\n" "Test Derm\n1 Main St\n\n\n\n\n\n" "\n\n" + pem
                + "\n\n\n\n" "\n\n\n\n\n" "n\n")
     r = subprocess.run(["bash", str(repo / "deploy" / "aws" / "configure.sh")], input=answers, text=True, capture_output=True,
-                       env=dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}"), timeout=60)
+                       env=env, timeout=60)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     vals = {}
     for ln in (repo / ".env").read_text().splitlines():
@@ -142,7 +145,7 @@ def test_the_settings_script_keeps_values_exactly_and_the_key_loads(tmp_path):
     # run again, pressing Enter everywhere: everything is kept
     before = (repo / ".env").read_text()
     r = subprocess.run(["bash", str(repo / "deploy" / "aws" / "configure.sh")], input="\n" * 40, text=True, capture_output=True,
-                       env=dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}"), timeout=60)
+                       env=env, timeout=60)
     assert r.returncode == 0 and (repo / ".env").read_text() == before
 
 

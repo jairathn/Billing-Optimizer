@@ -99,7 +99,8 @@ The first command prints the Dropbox refresh token for `.env` (once). The second
 ### On AWS
 
 `docs/AWS_SETUP.md`: one template builds the server (encrypted disk, HTTPS only, daily backups, automatic updates), one
-script takes the settings and moves the Vercel site's data over. AWS's business associate agreement is free.
+script takes the settings and moves the Vercel site's data over. AWS's business associate agreement is free. A merge to
+main deploys itself within about 5 minutes (`deploy/auto-deploy.sh`; `docs/SERVER_RUNBOOK.md`).
 
 ### On Vercel
 
@@ -139,7 +140,7 @@ remitwatch/
 api/index.py      Vercel entry point
 vercel.json       one function behind every address, the daily schedule
 docs/             findings, operations, Vercel setup, missing data, research summary and raw research notes
-deploy/           container entrypoint, Caddyfile, cron example
+deploy/           container entrypoint, Caddyfile, cron example, the AWS template and settings script, auto-deploy (script, systemd timer)
 tests/            synthetic-fixture tests (no patient data); fakes.py stands in for Dropbox
 ```
 

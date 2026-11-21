@@ -601,3 +601,26 @@ Built (server only; Vercel answers 409 and the page says so; `/api/meta` has `up
 - Caddy: 260 MB on /api/uploads only. `.gitignore`: uploads/, *.csv, *.tsv (cms/ kept).
 - Tests: `tests/test_uploads.py` (12): Dropbox route vs upload route give the same store and pages; FHIR note vs uploaded
   note give the same review text, packet and fax; the same file twice leaves every table unchanged; CSV == XLSX.
+
+## Auto-deploy on the AWS server, and standing items (November 21, 2026)
+
+Kevin: the migration is done (originbilling.com live on AWS, compare-cloud zero differences, Dropbox webhook re-pointed).
+Built at Neil's request: `deploy/auto-deploy.sh` + `deploy/systemd/remitwatch-deploy.{service,timer}` +
+`deploy/install-auto-deploy.sh`: every 5 minutes as root from /opt/remitwatch, fetch main; docs-only diffs are checked out
+without a rebuild; otherwise build first and `up -d` only after a good build (waits up to 20 min for a running data
+cycle, clears the lock of one the swap ended, restarts Caddy when its file changed, health check on /robots.txt inside the
+app container with rollback and hold); a failed build restores the files and leaves the site alone (retry next tick,
+hourly after 3); hand-edited tracked files block it. Log: /var/log/remitwatch-deploy.log (time, from, to, result, detail);
+marker /var/lib/remitwatch-deploy/deployed; builds/ keeps the last 30 build outputs. configure.sh offers it and holds the
+deploy lock; CloudFormation first boot runs `install-auto-deploy.sh --mark-current`. Verified on a real compose stack in
+the sandbox (deploy, broken build, docs-only, never-answering version rolled back, lock cleared after a swap).
+Switch it on: `sudo bash -c 'cd /opt/remitwatch && git pull --ff-only && bash deploy/install-auto-deploy.sh'`.
+From then on every push to main deploys itself to the live site.
+
+STANDING ITEM, to remind Neil in every reply until done: the sample AR report (and a collections report) from the
+practice, for the AR reconciliation (every open claim, why, next step) and write-offs checked against what the payer said.
+Next builds asked by Neil: (1) "written off but still workable" (findings whose disputed money EMA shows written off or
+moved to the patient, still inside their window) and (2) "open in EMA, no answer from the payer" (claims EMA shows open
+with no remittance, past the payer's answer time and before its filing limit; rejected-before-the-payer claims). Plus an
+exact list for the practice's admin of what to request from TriZetto (SFTP access, auto-generated remittances, ERA
+enrollment gaps, rejection reports).

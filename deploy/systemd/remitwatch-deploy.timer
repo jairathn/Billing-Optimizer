@@ -1,0 +1,10 @@
+[Unit]
+Description=RemitWatch auto-deploy: look for a new commit on main every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=30s
+Unit=remitwatch-deploy.service
+
+[Install]
+WantedBy=timers.target

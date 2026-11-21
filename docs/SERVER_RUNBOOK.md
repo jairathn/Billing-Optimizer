@@ -4,7 +4,8 @@ One host runs everything with Docker Compose: the dashboard (`app`, uvicorn on p
 80/443, certificate from Let's Encrypt for `SITE_ADDRESS`). The store is `/data/remitwatch.sqlite` on the `remitwatch-data`
 volume. No outside cron is needed: the app's own scheduler runs the cycles (see "What runs by itself").
 
-Paths below assume the repository is at `/opt/remitwatch`; run the commands from there (`cd /opt/remitwatch`).
+Paths below assume the repository is at `/opt/remitwatch`; run the commands from there (`cd /opt/remitwatch`). New
+versions on main deploy themselves ("Automatic deploys" below).
 
 ## Production .env (names only)
 
@@ -94,8 +95,9 @@ docker compose logs --tail 200 app                          # the app's log (add
 docker compose exec app python -m remitwatch.cli cycle      # one cycle by hand: Dropbox, ingest, analysis, alerts, faxes, backup
 docker compose exec app python -m remitwatch.cli stats      # counts in the store
 docker compose exec app python -m remitwatch.cli backup     # a copy of the store now
-git pull && docker compose up -d --build                    # update to the newest version on main
-docker compose restart caddy                                # after an update that changed deploy/Caddyfile
+sudo bash deploy/auto-deploy.sh --status                    # what runs, main's newest commit, the last deploys
+sudo systemctl start remitwatch-deploy                      # look for a new commit now instead of in up to 5 minutes
+sudo bash deploy/auto-deploy.sh --force                     # deploy main's newest commit now, even one that was held
 docker compose restart app                                  # after changing .env
 ```
 
@@ -111,6 +113,50 @@ A cycle started by hand waits for (or skips) one already running: they never ove
   sent, busy lines tried again, payers' faxes read, follow-ups that are due) and the day's backup. This is what Vercel's
   two daily calls (`/api/cron/cycle` at 10:17 UTC and `/api/cron/faxes` at 15:43 UTC) do there. Both addresses also work
   on the server, with `CRON_SECRET`, for an outside scheduler if one is ever wanted.
+
+## Automatic deploys
+
+The server follows the repository's main branch by itself, as Vercel did: a merge to main is live within about 5
+minutes, with nobody on the box. Switch it on once (a server built from the template, and `configure.sh` when you answer
+yes, have it on already):
+
+```
+sudo bash -c 'cd /opt/remitwatch && git pull --ff-only && bash deploy/install-auto-deploy.sh'
+```
+
+That installs `remitwatch-deploy.timer`, deploys main's newest commit at once (so the record of what runs is exact) and
+leaves the timer running. `sudo bash deploy/install-auto-deploy.sh --off` switches it off; the log and state stay.
+
+How it works (`deploy/auto-deploy.sh`, run every 5 minutes as root from `/opt/remitwatch` by the timer):
+
+- `git fetch`. When origin/main is the commit already running (`/var/lib/remitwatch-deploy/deployed`), nothing happens
+  and nothing is logged.
+- Only docs changed (files under `docs/` and `*.md`): the files are checked out; nothing is rebuilt or restarted.
+- Anything else: build first, swap second. The files are checked out and `docker compose build` runs. A failed build
+  puts the files back, leaves the running site as it was, and is logged with its output; the next tick tries again, and
+  after three failures of the same commit it is tried once an hour (a new commit on main is tried at once).
+- After a good build it waits (up to 20 minutes) for a data cycle that is running to finish, then `docker compose up -d`.
+  A cycle still running then is ended by the swap and its lock cleared, so the next one is not held up. When
+  `deploy/Caddyfile` changed, Caddy is restarted.
+- The app must answer within 3 minutes. If it does not (or `up -d` fails), the previous commit is built and started
+  again and the new one is held: it is not tried again by itself (push a fix, or `--force` it).
+- Files changed by hand in `/opt/remitwatch` (anything `git status` shows) stop it: nothing is overwritten, the log says
+  so. Put them back (`git checkout -- .`) or make the change on main. `.env` is not tracked and is never touched.
+- One deploy at a time: a tick that finds one running (or `configure.sh` running) skips. Old images are pruned after
+  each good deploy. A change to the timer's own files under `deploy/systemd/` reinstalls them.
+
+Reading its log: one line per deploy, tab-separated: time (UTC), the commit it came from, the commit it went to, the
+result, and the detail.
+
+```
+sudo tail -n 20 /var/log/remitwatch-deploy.log
+2026-11-21T22:05:31Z  from=8f1ca8875eeb  to=d55184cacaf6  deployed  212s; 21 file(s) changed. Output: /var/lib/remitwatch-deploy/builds/…
+```
+
+Results: `deployed`; `docs-only` (checked out, no rebuild); `build-failed` (the site untouched; the build's own output is
+in `/var/lib/remitwatch-deploy/builds/`, the last 30 kept); `unhealthy` or `up-failed` (rolled back and held);
+`refused` (files changed by hand); `checkout-failed`. The timer's own runs: `journalctl -u remitwatch-deploy`;
+`systemctl list-timers remitwatch-deploy.timer` shows the next one.
 
 ## Uploads by hand (until ModMed's API is approved)
 

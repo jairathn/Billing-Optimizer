@@ -67,6 +67,8 @@ Run the script again any time to change a setting.
 ## After
 
 - Backups: **EC2**, **Snapshots** shows one a day. To go back to one: make a volume from it and swap it in (or ask).
-- Updates to RemitWatch: in Session Manager, `cd /opt/remitwatch && sudo git pull && sudo docker compose up -d --build`.
+- Updates to RemitWatch deploy themselves: every 5 minutes the server looks at main and deploys a new commit (build
+  first, swap only when the build succeeds). How it works and how to read its log: `docs/SERVER_RUNBOOK.md`,
+  "Automatic deploys".
 - Logs: `cd /opt/remitwatch && sudo docker compose logs --tail 200 app`.
 - If the site does not answer: **EC2**, **Instances**, the RemitWatch server, **Instance state**, **Reboot**.

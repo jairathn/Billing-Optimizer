@@ -1,0 +1,13 @@
+[Unit]
+Description=RemitWatch auto-deploy: deploy the newest commit on main (build first, swap second)
+Documentation=file:///opt/remitwatch/docs/SERVER_RUNBOOK.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/remitwatch
+ExecStart=/bin/bash /opt/remitwatch/deploy/auto-deploy.sh
+TimeoutStartSec=50min

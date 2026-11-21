@@ -88,7 +88,7 @@ Resources:
             #!/bin/bash
             # First boot: Docker, automatic security updates, the site. Settings come after (configure.sh).
             set -euxo pipefail
-            dnf -y install docker git dnf-automatic
+            dnf -y install docker git dnf-automatic util-linux
             sed -i 's/^upgrade_type *=.*/upgrade_type = security/; s/^apply_updates *=.*/apply_updates = yes/' /etc/dnf/automatic.conf
             systemctl enable --now dnf-automatic.timer
             systemctl enable --now docker
@@ -102,8 +102,10 @@ Resources:
             cd /opt/remitwatch
             [ -f .env ] || install -m 600 /dev/null .env
             grep -q '^SITE_ADDRESS=' .env || echo "SITE_ADDRESS='${SiteAddress}'" >> .env
-            chmod +x deploy/aws/configure.sh
+            chmod +x deploy/aws/configure.sh deploy/auto-deploy.sh deploy/install-auto-deploy.sh
             docker compose up -d --build
+            # auto-deploy: from here on each new commit on the branch is deployed by itself (deploy/auto-deploy.sh)
+            bash deploy/install-auto-deploy.sh --mark-current || echo "auto-deploy was not switched on"
 
   Server:
     Type: AWS::EC2::Instance
