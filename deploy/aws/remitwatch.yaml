@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  RemitWatch on one small server: an encrypted disk, a fixed public address, HTTPS only (no SSH: admin through Session
+  Manager in the AWS console), automatic security updates, a daily disk snapshot kept 14 days, and automatic recovery
+  if AWS's hardware fails. On first boot it installs Docker and starts the site from the public repository; then run
+  sudo /opt/remitwatch/deploy/aws/configure.sh in Session Manager to enter the settings. Accept the AWS BAA (AWS Artifact)
+  before any patient data reaches it.
+
+Parameters:
+  SiteAddress:
+    Type: String
+    Description: The site's address, e.g. remitwatch.example.com (a domain you own; Route 53 sells them)
+    AllowedPattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+    ConstraintDescription: a lowercase host name such as remitwatch.example.com
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional. The Route 53 hosted zone of that domain (Route 53, Hosted zones, the zone's ID). With it the address is
+      pointed at the server for you; without it, add an A record yourself (the stack's outputs say which).
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t3a.medium, t3.large, t3a.large]
+    Description: 2 vCPU and 4 GB of memory is enough (an analysis of the full archive peaks near 2 GB)
+  DiskSizeGiB:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 200
+  GitRef:
+    Type: String
+    Default: main
+    Description: The branch of github.com/jairathn/Billing-Optimizer to run
+
+Conditions:
+  HasZone: !Not [!Equals [!Ref HostedZoneId, ""]]
+
+Resources:
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RemitWatch - HTTPS (and HTTP, which only redirects) from anywhere; no SSH
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP: certificate checks and the redirect to HTTPS" }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0", Description: HTTPS }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIpv6: "::/0", Description: HTTP }
+      Tags: [{ Key: Name, Value: RemitWatch }]
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: RemitWatch server - Session Manager access only
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        SecurityGroupIds: [!GetAtt WebSecurityGroup.GroupId]
+        MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: { VolumeSize: !Ref DiskSizeGiB, VolumeType: gp3, Encrypted: true, DeleteOnTermination: false }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: RemitWatch }]
+          - ResourceType: volume
+            Tags: [{ Key: Name, Value: RemitWatch }, { Key: remitwatch-backup, Value: daily }]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # First boot: Docker, automatic security updates, the site. Settings come after (configure.sh).
+            set -euxo pipefail
+            dnf -y install docker git dnf-automatic
+            sed -i 's/^upgrade_type *=.*/upgrade_type = security/; s/^apply_updates *=.*/apply_updates = yes/' /etc/dnf/automatic.conf
+            systemctl enable --now dnf-automatic.timer
+            systemctl enable --now docker
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose
+            chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            if [ ! -d /opt/remitwatch/.git ]; then
+              git clone --branch ${GitRef} https://github.com/jairathn/Billing-Optimizer /opt/remitwatch
+            fi
+            cd /opt/remitwatch
+            [ -f .env ] || install -m 600 /dev/null .env
+            grep -q '^SITE_ADDRESS=' .env || echo "SITE_ADDRESS='${SiteAddress}'" >> .env
+            chmod +x deploy/aws/configure.sh
+            docker compose up -d --build
+
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+  Address:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Server
+      Tags: [{ Key: Name, Value: RemitWatch }]
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref SiteAddress
+      Type: A
+      TTL: "300"
+      ResourceRecords: [!Ref Address]
+
+  RecoverAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Move RemitWatch to healthy AWS hardware when the host fails
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions: [{ Name: InstanceId, Value: !Ref Server }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: [!Sub "arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover"]
+
+  SnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: RemitWatch - daily disk snapshots
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: dlm.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole
+
+  DailySnapshots:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: RemitWatch disk daily - 14 kept
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt SnapshotRole.Arn
+      PolicyDetails:
+        ResourceTypes: [VOLUME]
+        TargetTags: [{ Key: remitwatch-backup, Value: daily }]
+        Schedules:
+          - Name: Daily
+            CopyTags: true
+            CreateRule: { Interval: 24, IntervalUnit: HOURS, Times: ["08:00"] }
+            RetainRule: { Count: 14 }
+
+Outputs:
+  SiteUrl:
+    Description: The site, once the address points at the server and the settings are in
+    Value: !Sub https://${SiteAddress}
+  PublicIp:
+    Description: The server's fixed address
+    Value: !Ref Address
+  DnsToAdd:
+    Description: The DNS record the address needs (made for you when a hosted zone was given)
+    Value: !If [HasZone, "Made in Route 53: nothing to do", !Sub "Add an A record: ${SiteAddress} -> ${Address}"]
+  NextStep:
+    Description: Enter the settings and move the data over
+    Value: !Sub "Open https://${AWS::Region}.console.aws.amazon.com/systems-manager/session-manager/${Server}?region=${AWS::Region} , then run: sudo /opt/remitwatch/deploy/aws/configure.sh"

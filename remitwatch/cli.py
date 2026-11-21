@@ -11,6 +11,7 @@
     python -m remitwatch.cli send-appeals [--limit N] [--payer NAME] [--db PATH]
                                                          fax every open item a letter settles (Appeal everything appealable)
     python -m remitwatch.cli fax-cycle [--db PATH]       the daily fax run: states, retries, faxes in, follow-ups due
+    python -m remitwatch.cli import-cloud [--force]      move the Vercel site's store and packets to this server, once
 """
 from __future__ import annotations
 
@@ -148,8 +149,23 @@ def cmd_cycle(args: argparse.Namespace) -> int:
     out = run_cycle(args.db, sync=not args.skip_sync, full=args.full, local=args.local, force_detect=args.force_detect,
                     report=True if args.report else None, email=not args.no_email, report_dir=args.report_dir,
                     log=lambda *a: print(*a, file=sys.stderr))
+    # on a server the fax line is looked after with every cycle (on Vercel it has its own daily call): the state of what
+    # went out, the busy lines tried again, the payers' faxes read, and the follow-ups that are due (each a week apart)
+    from . import fax
+    if fax.configured() and "skipped" not in out:
+        try:
+            out["fax"] = _fax_run(args.db, budget_s=1500)
+        except Exception as exc:
+            out["fax"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     print(json.dumps(out, indent=1, default=str))
     return 0 if "error" not in out else 1
+
+
+def _fax_run(db: str, budget_s: float = 3600) -> dict:
+    from . import api, fax
+    api.DB_PATH = db
+    prov = fax.provider()
+    return {"refresh": api._fax_refresh(prov, budget_s=budget_s / 2), "follow_up": api._send_followups(prov, "scheduled run", budget_s=budget_s / 2)}
 
 
 def cmd_weekly(args: argparse.Namespace) -> int:
@@ -270,14 +286,88 @@ def cmd_send_appeals(args: argparse.Namespace) -> int:
 
 
 def cmd_fax_cycle(args: argparse.Namespace) -> int:
-    from . import api, fax
-    api.DB_PATH = args.db
-    prov = fax.provider()
-    if prov is None:
+    from . import fax
+    if not fax.configured():
         print("The fax line is not set up (SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD).")
         return 1
-    out = {"refresh": api._fax_refresh(prov, budget_s=3600), "follow_up": api._send_followups(prov, "cli", budget_s=3600)}
-    print(json.dumps(out, indent=2, default=str))
+    print(json.dumps(_fax_run(args.db, budget_s=7200), indent=2, default=str))
+    return 0
+
+
+def cmd_import_cloud(args: argparse.Namespace) -> int:
+    """Move from the serverless site (Vercel) to this server, once: the store kept in the Dropbox state folder with everything
+    people recorded since its last run (statuses, faxes, payer numbers, hidden reasons, lessons), the appeal packets, and
+    the position in the Dropbox data folder, so this server carries on where that site left off without fetching every
+    file again. It needs the same Dropbox settings as that site. After it, turn that site's scheduled runs off."""
+    import sqlite3
+
+    from . import cloud
+    from .notes import ensure_packets
+    from .state import state_from_env
+    from .store import Store
+    if os.path.exists(args.db) and os.path.getsize(args.db) > 0 and not args.force:
+        print(f"There is already a store at {args.db}. Add --force to replace it with the one from the state folder.")
+        return 1
+    st = state_from_env()
+    if st is None:
+        print("Set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN (the same values as on Vercel), then run this again.")
+        return 1
+    print(f"Reading the store from {st.describe()}...", flush=True)
+    store, existed = cloud.load_raw(st)
+    if not existed:
+        print("The state folder has no store yet: nothing to move. Start this server with an empty store instead.")
+        return 1
+    journal = cloud.read_actions(st)
+    done, left, _ = cloud.apply_actions(store.conn, journal) if journal else ([], [], False)
+    os.makedirs(os.path.dirname(os.path.abspath(args.db)) or ".", exist_ok=True)
+    tmp = args.db + ".importing"
+    for p in (tmp, tmp + "-wal", tmp + "-shm"):
+        if os.path.exists(p):
+            os.remove(p)
+    dst = sqlite3.connect(tmp)
+    store.conn.backup(dst)
+    dst.close()
+    store.close()
+    full = Store(tmp)                    # the server's schema: the indexes the serverless copy leaves out
+    conn = full.conn
+    cur = st.get(cloud.CURSOR)
+    if cur:
+        try:
+            c = json.loads(cur)
+            if c.get("cursor"):
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:cursor', ?)", (c["cursor"],))
+        except ValueError:
+            pass
+    ensure_packets(conn)
+    packets = 0
+    for m in st.list(cloud.PACKETS):
+        name = m["name"]
+        if not name.endswith(".json"):
+            continue
+        try:
+            p = json.loads(st.get(name) or b"{}")
+        except ValueError:
+            continue
+        pdf = st.get(name[:-5] + ".pdf")
+        if not p.get("packet_id") or not pdf:
+            continue
+        conn.execute("""INSERT OR REPLACE INTO appeal_packets (packet_id, finding_id, created_at, mode, model, subject, letter, analysis, evidence,
+                        attachments, note_name, note_sha256, note_kind, note_blob, pdf, emailed_to, emailed_at, letter_redacted)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     (p["packet_id"], p.get("finding_id"), p.get("created_at"), p.get("mode"), p.get("model"), p.get("subject"),
+                      p.get("letter_full") or p.get("letter"), json.dumps(p.get("analysis") or {}), p.get("evidence"),
+                      json.dumps(p.get("attachments") or []), p.get("note_name"), None, p.get("note_kind"), None, pdf,
+                      p.get("emailed_to"), p.get("emailed_at"), p.get("letter_redacted")))
+        packets += 1
+    conn.commit()
+    counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("transactions", "findings", "appeal_packets")}
+    full.close()
+    for p in (args.db + "-wal", args.db + "-shm"):
+        if os.path.exists(p):
+            os.remove(p)
+    os.replace(tmp, args.db)
+    print(json.dumps({"store": args.db, "journal_applied": len(done), "journal_waiting": len(left), "packets": packets,
+                      "dropbox_position": bool(cur), **counts}, indent=1))
     return 0
 
 
@@ -309,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     sa = sub.add_parser("send-appeals"); sa.add_argument("--limit", type=int, default=2000); sa.add_argument("--payer", default=None)
     sa.set_defaults(fn=cmd_send_appeals)
     sub.add_parser("fax-cycle").set_defaults(fn=cmd_fax_cycle)
+    ic = sub.add_parser("import-cloud", help="move the store and packets from the Vercel site's Dropbox state folder to this server")
+    ic.add_argument("--force", action="store_true", help="replace a store already on this server"); ic.set_defaults(fn=cmd_import_cloud)
     args = ap.parse_args(argv)
     return args.fn(args)
 

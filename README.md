@@ -95,6 +95,11 @@ docker compose up -d
 
 The first command prints the Dropbox refresh token for `.env` (once). The second starts the dashboard, its scheduler and HTTPS. Hosting, the webhook, alerts, the note review and the agreements that have to be in place are in `docs/OPERATIONS.md`.
 
+### On AWS
+
+`docs/AWS_SETUP.md`: one template builds the server (encrypted disk, HTTPS only, daily backups, automatic updates), one
+script takes the settings and moves the Vercel site's data over. AWS's business associate agreement is free.
+
 ### On Vercel
 
 A push to `main` deploys the site on Vercel. Vercel keeps no files and no running process, so there the store lives in a private folder of the practice's Dropbox and each update is one time-boxed run (`remitwatch/cloud.py`). Add the settings in Vercel, open `/setup` on the site, and follow its checklist: it checks every setting live, gets the Dropbox token, and starts the first load. The settings, the limits (memory above all) and how it works are in `docs/VERCEL_SETUP.md`.
