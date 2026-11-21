@@ -506,6 +506,11 @@ def _search_text(request: Request | None, q: str | None) -> str | None:
     return q
 
 
+def _has_written_off() -> bool:
+    """Whether the findings table has written_off_cents: a dashboard copy made before it was added has not."""
+    return "written_off_cents" in {r["name"] for r in rows("PRAGMA table_info(findings)")}
+
+
 def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None,
              patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0, min_dollars: int = 0):
     where, params = [], []
@@ -634,8 +639,9 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
             params += who_params
         where.append(f"({clause})")
     if handling == "written_off":
-        # the biller wrote the disputed money off in EMA (detect.written_off_of): with a window still open, money given up
-        where.append("COALESCE(written_off_cents,0) > 0")
+        # the biller wrote the disputed money off in EMA (detect.written_off_of): with a window still open, money given up.
+        # A dashboard copy made before the column existed has none of it (and must not fail)
+        where.append("COALESCE(written_off_cents,0) > 0" if _has_written_off() else "0")
     elif handling:
         where.append("ema_handling=?")
         params.append(handling)
@@ -1199,10 +1205,12 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
         if not rem and not ema_ids:
             continue
         open_ids = set()
-        if pcns:
-            q2 = ",".join("?" * len(pcns))
+        ids = sorted(set(pcns) | set(ema_ids))      # a submission no payer has answered has items too (Chase, Fix and resubmit)
+        if ids:
+            q2 = ",".join("?" * len(ids))
             open_ids = {r["finding_id"] for r in rows(f"""SELECT finding_id FROM findings WHERE patient_control_number IN ({q2})
-                                                           AND status IN ('open','in_progress') AND COALESCE(stale,0)=0""", tuple(pcns))}
+                                                           AND status IN ('open','in_progress') AND COALESCE(stale,0)=0""", tuple(ids))}
+        if pcns:
             keys = [x["claim_key"] for x in rem]
             lks = {r["line_key"] for r in rows(f"SELECT line_key FROM lines WHERE claim_key IN ({','.join('?' * len(keys))})", tuple(keys))} if keys else set()
             _plb, tbs, pats = _bill_extras(pcns, {x["payer_claim_control_number"] for x in rem if x.get("payer_claim_control_number")}, lks)
@@ -1257,15 +1265,15 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
                           for l in lines if l["claim_key"] == r["claim_key"]])
         remits.append(out)
     findings = []
-    if pcns:
-        qp = ",".join("?" * len(pcns))
+    ids = sorted(set(pcns) | set(ema_ids))      # with the submissions no payer has answered: their items are on the bill too
+    if ids:
+        qp = ",".join("?" * len(ids))
         findings = [dict(f, via="line") for f in rows(f"""SELECT f.finding_id, f.signal, f.category, f.status, f.shortfall_cents, f.appeal_deadline, f.procedure_code,
                                                                 f.claim_key, f.line_key, f.stale, c.payment_date remit_date, c.payer_name remit_payer
                                                          FROM findings f LEFT JOIN claims c ON c.claim_key = f.claim_key
-                                                         WHERE f.patient_control_number IN ({qp}) ORDER BY f.payment_date, f.finding_id""", tuple(pcns))]
+                                                         WHERE f.patient_control_number IN ({qp}) ORDER BY f.payment_date, f.finding_id""", tuple(ids))]
     plb, takebacks, patterns = _bill_extras(pcns, {r["payer_claim_control_number"] for r in rem if r.get("payer_claim_control_number")},
                                             {l["line_key"] for l in lines})
-    ids = sorted(set(pcns) | set(ema_ids))
     qe = ",".join("?" * len(ids))
     ema = rows(f"""SELECT claim_id, family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents,
                           claim_status, activity_type, carc, rarc, adjustment_status, denial_category, posted_date, claim_submission_date, transaction_date
@@ -1573,7 +1581,7 @@ def _activity(fn, *args):
 def _written_off_summary() -> dict:
     """Open items on the claim pages, inside their filing window, whose disputed money the biller wrote off in EMA: what
     "Work what EMA wrote off" opens (the Worklist with handling=written_off), with the payers that hold the most."""
-    if "written_off_cents" not in {r["name"] for r in rows("PRAGMA table_info(findings)")}:
+    if not _has_written_off():
         return {"n": 0, "cents": 0, "written_off_cents": 0, "payers": []}
     w, params = _filters(None, CLAIM_CATEGORIES, None, None, TODO_STATUSES, None, None, None, None, None, "valid", "written_off", None, None, None, True)
     tot = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, COALESCE(SUM(written_off_cents),0) w, MIN(written_off_on) since FROM findings{w}", tuple(params)) or {}

@@ -129,7 +129,11 @@ MEDICARE_NEXT = {
 
 
 def next_step(f: dict) -> str | None:
-    """What to do, where the payer's own route differs from the plain label: a Medicare Part B fix goes by its route."""
+    """What to do, where the payer's own route differs from the plain label: a Medicare Part B fix goes by its route. A
+    claim no payer answered, or one rejected before reaching the payer, has no remittance to reopen or redetermine: its
+    label says what to do (detect.run_ema_open_claims)."""
+    if f.get("signal") in ("NO_ANSWER", "REJECTED_PRE_PAYER"):
+        return None
     if f.get("payer_kind") == "medicare" and f.get("actionable") == "correct_and_resubmit":
         return MEDICARE_NEXT[_medicare_route(f)]
     return None

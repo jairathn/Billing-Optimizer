@@ -52,12 +52,23 @@ def test_the_disputed_money_written_off_in_ema_is_recorded_on_its_item(store):
     from remitwatch.detect import written_off_of
     f = {r["signal"]: dict(r) for r in store.query("SELECT signal, patient_control_number, written_off_cents, written_off_on, ema_handling FROM findings")}
     line = f["DENIED_MEDICAL_NECESSITY"]
-    assert line["written_off_cents"] == 22365 and line["written_off_on"] == "2026-11-12"      # once, though two exports carry it
+    # once, though two exports carry it, and only the part in dispute: the payer's usual $117.60, not the $223.65 charge
+    assert line["written_off_cents"] == 11760 and line["written_off_on"] == "2026-11-12"
     whole = next(v for k, v in f.items() if v["patient_control_number"] == WHOLE)
     assert whole["written_off_cents"] == 15000 and whole["written_off_on"] == "2026-11-13"       # a whole claim: its lines' write-offs
-    assert written_off_of([{"adjustment_status": "TRANSFER_RESPONSIBILITY", "carc": "CO-50", "adjustments_cents": 100}]) == (None, None)
+    # a payer's denial moved on to the patient counts; the patient's share and EMA's routine contractual posting do not
+    assert written_off_of([{"adjustment_status": "TRANSFER_RESPONSIBILITY", "carc": "CO-50", "adjustments_cents": 100}]) == (100, None)
     assert written_off_of([{"adjustment_status": "WRITE_OFF", "carc": "PR-3", "adjustments_cents": 100}]) == (None, None)
-    assert written_off_of([{"adjustment_status": "write_off", "carc": "OA-23", "adjustments_cents": -250, "transaction_date": "2026-11-02"}]) == (250, "2026-11-02")
+    for routine in ("CO-45", "CO-253", "CO-59", "OA-23"):
+        assert written_off_of([{"adjustment_status": "WRITE_OFF", "carc": routine, "adjustments_cents": 13365}]) == (None, None)
+    assert written_off_of([{"adjustment_status": "write_off", "carc": "CO-16", "adjustments_cents": -250, "transaction_date": "2026-11-02"}]) == (250, "2026-11-02")
+    # a reversal nets out; one row read from a layout without its date adds nothing; two codes count apart; the cap holds
+    wo = lambda cpt, cents, when: {"adjustment_status": "WRITE_OFF", "carc": "CO-50", "cpt": cpt, "service_date": "2026-10-01",
+                                   "adjustments_cents": cents, "transaction_date": when}
+    assert written_off_of([wo("11102", 15000, "2026-11-12"), wo("11102", -15000, "2026-11-20")]) == (None, None)
+    assert written_off_of([wo("11102", 15000, "2026-11-12"), wo("11102", 15000, None)]) == (15000, "2026-11-12")
+    assert written_off_of([wo("11102", 15000, "2026-11-12"), wo("99213", 15000, "2026-11-12")]) == (30000, "2026-11-12")
+    assert written_off_of([wo("11102", 15000, "2026-11-12")], cap=4260) == (4260, "2026-11-12")
     assert all(v["written_off_cents"] is None for v in f.values() if v["patient_control_number"] not in (DENIED, WHOLE))
 
 
@@ -83,7 +94,7 @@ def test_the_list_the_tiles_the_counts_and_today_agree(site):
     assert ids == {DENIED, WHOLE} and all(i["written_off_cents"] for i in items["items"])
     cents = sum(i["shortfall_cents"] or 0 for i in items["items"])
     wo = c.get("/api/brief").json()["written_off"]
-    assert wo["n"] == 2 and wo["cents"] == cents and wo["written_off_cents"] == 22365 + 15000 and wo["since"] == "2026-11-12"
+    assert wo["n"] == 2 and wo["cents"] == cents and wo["written_off_cents"] == 11760 + 15000 and wo["since"] == "2026-11-12"
     assert wo["payers"][0]["payer_group"] == "Anthem / BCBS"
     desk = c.get(f"/api/desk?category={cats}&status=open,in_progress&deadline=valid&handling=written_off").json()
     assert desk["tiles"]["valid"]["n"] == 2 and desk["scope"]["n"] == 2
@@ -94,7 +105,7 @@ def test_the_list_the_tiles_the_counts_and_today_agree(site):
     # the drawer has it too
     fid = next(i["finding_id"] for i in items["items"] if i["patient_control_number"] == DENIED)
     d = c.get(f"/api/findings/{fid}").json()["finding"]
-    assert d["written_off_cents"] == 22365 and d["written_off_on"] == "2026-11-12"
+    assert d["written_off_cents"] == 11760 and d["written_off_on"] == "2026-11-12"
 
 
 def test_what_is_sent_or_past_its_window_is_not_counted(site):
@@ -206,14 +217,16 @@ def test_the_page_counts_them_and_today_points_at_them(open_claims, monkeypatch)
     monkeypatch.setattr(api, "PASSWORD", "")
     c = TestClient(api.app)
     na = c.get("/api/brief").json()["no_answer"]
-    # the claim sent again in September is for an August visit: Anthem's 90 days from that date have passed (window closed)
-    assert na["chase"]["n"] == 2 and na["rejected"]["n"] == 1 and na["chase"]["first_deadline"] == "2026-12-13"
+    # the claim sent again in September for an August visit went out on time: past Anthem's 90 days from the visit it stays
+    # listed (the payer owes a claim it has, and takes proof of timely filing for one it has no record of)
+    assert na["chase"]["n"] == 3 and na["rejected"]["n"] == 1 and na["chase"]["first_deadline"] == "2026-12-13"
     kinds = {k["key"]: k for k in c.get("/api/worklist/counts?category=denial,bundling,downcoding,underpayment&status=open,in_progress&deadline=valid&live=1").json()["kinds"]}
-    assert kinds["chase"]["n"] == 2
+    assert kinds["chase"]["n"] == 3
     items = c.get("/api/findings?kind=chase&status=open,in_progress&deadline=valid&live=1&limit=50").json()["items"]
-    assert {i["patient_control_number"] for i in items} == {"CB0000501C017", "CB0000601C017"}
-    closed = c.get("/api/findings?kind=chase&status=open,in_progress&deadline=expired&live=1&limit=50").json()["items"]
-    assert [i["patient_control_number"] for i in closed] == ["CB0000506C024"]
+    assert {i["patient_control_number"] for i in items} == {"CB0000501C017", "CB0000601C017", "CB0000506C024"}
+    assert c.get("/api/findings?kind=chase&status=open,in_progress&deadline=expired&live=1&limit=50").json()["items"] == []
+    late = next(i for i in items if i["patient_control_number"] == "CB0000506C024")
+    assert late["appeal_deadline"] == "2028-10-19" and "proof of timely filing" in late["deadline_basis"]   # due Oct 20 + Anthem's 730
     d = c.get(f"/api/findings/{items[0]['finding_id']}").json()["finding"]
     assert d["evidence"]["sent"] and d["evidence"]["answer_due"] and d["evidence"]["lines"]
     # never hidden wholesale for a payer: each unanswered claim is let go one at a time, by a person
@@ -225,7 +238,7 @@ def test_the_page_counts_them_and_today_points_at_them(open_claims, monkeypatch)
     conn = sqlite3.connect(db)
     assert _hide_matching(conn, "Anthem / BCBS", "NO_ANSWER", "x", "2026-11-21") == 0
     conn.close()
-    assert c.get("/api/brief").json()["no_answer"]["chase"]["n"] == 2
+    assert c.get("/api/brief").json()["no_answer"]["chase"]["n"] == 3
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     today = open(os.path.join(root, "remitwatch", "static", "today.js")).read()
     assert "title:'Chase claims the payer never answered'" in today and "go:{kind:'chase', sort:'deadline'}" in today
@@ -242,3 +255,150 @@ def test_a_stopped_feed_does_not_make_newer_claims_look_unanswered(tmp_path):
     s.conn.commit()
     Detector(s, run_id="t").run()
     assert [r[0] for r in s.conn.execute("SELECT patient_control_number FROM findings WHERE signal='NO_ANSWER'")] == ["CB0000701C017"]
+
+
+# --------------------------------------------------------------------------- what the review of the build found
+_N = [0]
+
+
+def ema(conn, claim, **kw) -> None:
+    """One EMA export row as the loaders store it: by default a 99214 charge to Anthem on the charge export."""
+    _N[0] += 1
+    row = {"row_fingerprint": f"r{_N[0]}", "family": "charge_lines", "source_name": "Encounter & Charge Lines.xlsx", "source_sha256": "charges",
+           "row_index": _N[0], "claim_id": claim, "activity_type": "Charge", "bill_item_id": f"i{_N[0]}", "cpt": "99214",
+           "service_date": "2026-09-14", "bill_created": "2026-09-15", "charges_cents": 22365, "payer": "Anthem Blue Cross",
+           "payer_id": "00660", "patient_id": f"P{claim[4:9]}", "provider": "Provider, Test", "units": 1.0}   # one patient per bill
+    if kw.get("family", "charge_lines") != "charge_lines":
+        row.update(activity_type=None, bill_item_id=None, charges_cents=None, bill_created=None, source_name="Claim & Claim Status.xlsx",
+                   source_sha256="status")
+    row.update(kw)
+    conn.execute(f"INSERT INTO ema_rows ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+
+
+def chased(s) -> dict:
+    from remitwatch.detect import Detector
+    s.conn.commit()
+    Detector(s, run_id=f"t{_N[0]}").run()
+    return {r["patient_control_number"]: dict(r) for r in s.query(
+        "SELECT * FROM findings WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER') AND COALESCE(stale,0)=0")}
+
+
+def test_a_claim_answered_superseded_settled_or_paid_is_not_chased(tmp_path):
+    from tests.test_features import claim
+    paid = claim(0, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20260914"), dos="20260914").replace("CB0000000C017", "CB0000H02C017")
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [paid], pay_date="20261110")
+    c = s.conn
+    ema(c, "CB0000A01C017")                                       # the payer's answer is posted in EMA, though its 835 never came
+    ema(c, "CB0000A01C017", family="era_lines", source_name="ERA & Payment Lines.xlsx", carc="PR-1", adjustment_status="TRANSFER_RESPONSIBILITY",
+        adjustments_cents=11760, transaction_date="2026-10-02")
+    ema(c, "CB0000A02C017")                                       # EMA records the payer's denial
+    ema(c, "CB0000A02C017", family="claim_status", claim_status="Denied", claim_submission_date="2026-09-16", denial_date="2026-10-12")
+    ema(c, "CB0000A03C017")                                       # sent, then sent again: only the later submission is chased
+    ema(c, "CB0000A03C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-01")
+    ema(c, "CB0000A03C024")
+    ema(c, "CB0000A03C024", family="claim_status", claim_status="Submitted", claim_submission_date="2026-10-05")
+    ema(c, "CB0000A04C017")                                       # rejected and already resent (not due yet)
+    ema(c, "CB0000A04C017", family="claim_status", claim_status="Rejected", claim_submission_date="2026-11-01")
+    ema(c, "CB0000A04C024", service_date="2026-09-14")
+    ema(c, "CB0000A04C024", family="claim_status", claim_status="Submitted", claim_submission_date="2026-11-04")
+    ema(c, "CB0000A05C017", bill_item_id="v5")                    # rejected, and its charge voided
+    ema(c, "CB0000A05C017", bill_item_id="v5", activity_type="Void Charge")
+    ema(c, "CB0000A05C017", family="claim_status", claim_status="Rejected", claim_submission_date="2026-09-16")
+    ema(c, "CB0000A06C017")                                       # rejected and voided by its status
+    ema(c, "CB0000A06C017", family="claim_status", claim_status="Rejected - Voided", claim_submission_date="2026-09-16")
+    ema(c, "CB0000A07C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly")   # an insurer's payment in a ledger layout
+    ema(c, "CB0000A07C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly", activity_type="Payment", charges_cents=0,
+        payments_cents=11760, payer="Blue Cross and Blue Shield")
+    ema(c, "CB0000H01C017", patient_id="EMA9")                    # the bill was made again (CB0000H02) and that one was paid
+    ema(c, "CB0000H02C017", patient_id="EMA9", bill_created="2026-09-20", insurance_payments_cents=11760)
+    found = chased(s)
+    assert set(found) == {"CB0000A03C024"}
+    assert found["CB0000A03C024"]["shortfall_cents"] == 11760           # one visit, counted once
+
+
+def test_each_claim_is_chased_once_at_its_own_size_and_closed_ones_show_as_written_off(tmp_path):
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(100, 10, "17003", "30.00", "20.00"), pay_date="20261110")
+    c = s.conn
+    ema(c, "CB0000B01C017")                                       # closed in EMA though no payer answered: given up
+    ema(c, "CB0000B01C017", family="claim_status", claim_status="Closed", claim_submission_date="2026-09-16")
+    ema(c, "CB0000B02C017", bill_item_id="k1")                    # one charge in two export layouts, with and without its item id
+    ema(c, "CB0000B02C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly")
+    ema(c, "CB0000B03C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly")   # voided in a layout with no item ids
+    ema(c, "CB0000B03C017", bill_item_id=None, source_name="Weekly.csv", source_sha256="weekly", activity_type="Void Charge")
+    ema(c, "CB0000B04C017", family="claim_status", claim_status="Submitted", claim_submission_date="2026-09-16")   # known from the status report alone
+    ema(c, "CB0000B05C017", cpt="17003", units=13.0, charges_cents=39000)                                      # 13 units at Anthem's $20
+    for name, sha, row, status, sent in (("Claim Status Oct.csv", "oct", 40, "Submitted", "2026-09-16"), ("Claim Status Nov.csv", "nov", 2, "Closed", "2026-09-16")):
+        ema(c, "CB0000B06C017", family="claim_status", source_name=name, source_sha256=sha, row_index=row, claim_status=status, claim_submission_date=sent)
+    ema(c, "CB0000B06C017")
+    ema(c, "CB0000B07C017", family="claim_status", source_name="Claim Status Nov.csv", source_sha256="nov", claim_status="Submitted",
+        claim_submission_date="2026-10-20")                       # the November export holds a later date than the October one
+    ema(c, "CB0000B08C017", payer="Passport Health Plan", payer_id="PASS1")   # a payer that has never sent a remittance
+    c.execute("INSERT INTO ema_sources (source_name, sha256, family, created_at, rows, recorded_at) VALUES ('Claim Status Nov.csv','nov','claim_status',NULL,2,'2026-11-01')")
+    c.execute("INSERT INTO ema_sources (source_name, sha256, family, created_at, rows, recorded_at) VALUES ('Claim Status Oct.csv','oct','claim_status',NULL,1,'2026-11-02')")
+    found = chased(s)
+    assert set(found) == {"CB0000B01C017", "CB0000B02C017", "CB0000B04C017", "CB0000B05C017", "CB0000B06C017", "CB0000B08C017"}   # B07 is not due yet
+    closed = found["CB0000B01C017"]
+    assert "(EMA: Closed)" in closed["title"] and closed["written_off_cents"] == 11760
+    assert found["CB0000B02C017"]["charge_cents"] == 22365 and found["CB0000B02C017"]["shortfall_cents"] == 11760
+    assert found["CB0000B04C017"]["charge_cents"] is None and found["CB0000B04C017"]["shortfall_cents"] == 11760
+    assert found["CB0000B05C017"]["shortfall_cents"] == 26000
+    assert "(EMA: Closed)" in found["CB0000B06C017"]["title"]          # the newer export's status, uploaded first or not
+    assert "on file at all" in found["CB0000B08C017"]["hint"]
+    # on the page: a claim given up in EMA is both chased and in "Work what EMA wrote off"; the claim view and the search list them
+    s.close()
+    db = os.path.join(os.path.dirname(s.db_path), "s.sqlite")
+    api.ensure_server_schema(db)
+    api.DB_PATH, api.PASSWORD = db, ""
+    cl = TestClient(api.app)
+    wo = cl.get("/api/findings?handling=written_off&status=open,in_progress&deadline=valid&live=1&limit=50").json()["items"]
+    assert {i["patient_control_number"] for i in wo} == {"CB0000B01C017", "CB0000B06C017"}
+    view = cl.get("/api/claims/view", headers={"X-Claim": "CB0000B04C017"}).json()
+    assert [f["signal"] for f in view["findings"]] == ["NO_ANSWER"]
+    hit = cl.get("/api/claims/search", headers={"X-Search": "CB0000B04"}).json()["items"]
+    assert hit and hit[0]["open_findings"] == 1
+    brief = cl.get("/api/brief").json()
+    assert all(b["claims"] >= 1 for b in brief["batches"] if b["kind"] == "chase")
+    assert not any(h["key"] == "ema_handling" for h in brief.get("health", []))     # no remittance, so no ERA row can describe them
+    rej = {"signal": "REJECTED_PRE_PAYER", "payer_kind": "medicare", "actionable": "correct_and_resubmit", "deadline_basis": "42 CFR 424.44"}
+    from remitwatch.appeals import next_step
+    assert next_step(rej) is None and next_step(dict(rej, signal="DENIED_MISSING_INFO")).startswith("Send Medicare a redetermination")
+
+
+def test_the_work_on_an_unanswered_claim_follows_it_when_the_payer_answers(tmp_path):
+    import pathlib
+
+    from remitwatch.actions import apply_status
+    from tests.test_features import claim
+    from tests.test_remitwatch import remit
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    ema(s.conn, "CB0000L01C017")
+    fid = chased(s)["CB0000L01C017"]["finding_id"]
+    apply_status(s.conn, fid, "in_progress", "called Anthem 11/12: denied, records requested", actor="biller")
+    s.conn.commit()
+    den = claim(0, svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~", dos="20260914"), dos="20260914").replace("CB0000000C017", "CB0000L01C017")
+    p = pathlib.Path(s.db_path).parent / "late.RMT"
+    p.write_bytes(remit(den, "0.00", seg_count=99, isa_ctrl="000000077", pay_date="20261115"))
+    s.ingest_835_paths([str(p)])
+    assert chased(s) == {}
+    r = s.query("SELECT signal, status, notes FROM findings WHERE patient_control_number='CB0000L01C017' AND COALESCE(stale,0)=0")
+    assert [(x["signal"], x["status"]) for x in r] == [("DENIED_MEDICAL_NECESSITY", "in_progress")] and "records requested" in r[0]["notes"]
+
+
+def test_only_the_disputed_money_written_off_marks_an_item(tmp_path):
+    """EMA's routine CO-45 posting gives nothing up; a code twice on one date cannot say which line EMA's row is."""
+    from remitwatch.detect import Detector
+    from tests.test_features import claim
+    under = claim(300, svc("99214", "223.65", "72.00", "90.00", "CAS*CO*45*133.65~CAS*PR*2*18.00~", dos="20261101"), dos="20261101")
+    twice = claim(301, svc("11102", "150.00", "0.00", None, "CAS*CO*50*150.00~", dos="20261101")
+                  + svc("11102", "120.00", "0.00", None, "CAS*CO*50*120.00~", dos="20261101", mods="59"), dos="20261101")
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + clean_visits(50, 10, "11102", "150.00", "110.00") + [under, twice],
+                    pay_date="20261110")
+    era(s.conn, [("u1", "ERA & Payment Lines.xlsx", "CB0000300C017", "99214", "CO-45", "WRITE_OFF", 13365, "2026-11-12"),
+                 ("t1", "ERA & Payment Lines.xlsx", "CB0000301C017", "11102", "CO-50", "WRITE_OFF", 15000, "2026-11-12"),
+                 ("t2", "ERA & Payment Lines.xlsx", "CB0000301C017", "11102", "CO-50", "IGNORE", 12000, "2026-11-12")])
+    Detector(s, run_id="t").run()
+    rows = s.query("SELECT signal, patient_control_number pcn, written_off_cents FROM findings WHERE patient_control_number IN ('CB0000300C017','CB0000301C017')")
+    assert rows and all(r["written_off_cents"] is None for r in rows)

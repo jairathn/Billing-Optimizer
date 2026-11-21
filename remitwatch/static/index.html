@@ -404,7 +404,7 @@ async function overview(v){
     ${kpi('Correctable billing errors', money(fix.shortfall_cents), (fix.n||0).toLocaleString()+' lines to resubmit', 'appeals')}
     ${kpi('Contract gap vs Medicare', money((cat.contract||0) - total(sigRows(['CHARGE_BELOW_RATE']))), 'commercial and MA rates', 'contracts')}
     ${kpi('Bundled away', money(cat.bundling), 'E/M, add-ons, Mohs stages', 'bundling')}
-    ${kpi('Denied, never paid', money(cat.denial), 'lines and whole claims', 'denials')}
+    ${kpi('Denied, never paid', money((cat.denial||0) - total(sigRows(['NO_ANSWER','REJECTED_PRE_PAYER']))), 'lines and whole claims', 'denials')}
     ${kpi('Downcoded', money(cat.downcoding), 'code or level reduced', 'downcoding')}
     ${kpi('Fees and takebacks', money(cat.fees), 'PLB withholds', 'fees')}
     ${kpi('Due in 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' appeals · expired '+money((dl.expired||{}).shortfall_cents), 'appeals')}
@@ -583,6 +583,7 @@ async function openDetail(id){
     <div class="statusbar"><span class="small muted">Status:</span>${[['open','To do'],['in_progress','Started'],['appealed','Sent'],['resolved','Paid'],['lost','Lost'],['dismissed','Let go']].map(([s,l])=>`<button data-st="${s}" ${f.status===s?'disabled aria-pressed="true"':''}>${l}</button>`).join('')}</div>
     <div class="st-err sev-high small" role="alert"></div>
     ${ex.notes}
+    ${!f.claim_key && !f.line_key && f.patient_control_number ? `<div class="small" style="margin:6px 0">EMA claim ID <b>${esc(f.patient_control_number)}</b>${f.service_date ? ' · date of service ' + esc(f.service_date) : ''}${(f.evidence||{}).sent ? ' · sent ' + esc(f.evidence.sent) : ''} · no remittance from the payer for it</div>` : ''}
     ${r.bill ? `<div class="small" style="margin:6px 0"><a href="#" id="openClaim">${f.signal === 'TAKEBACK' ? 'See the claim this was taken from: every remittance, line and adjustment' : 'See the whole claim: every remittance, line and adjustment'}</a></div>` : ''}
     <details class="dfold"><summary>Claim details</summary>
     <table class="small">

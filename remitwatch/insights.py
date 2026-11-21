@@ -447,8 +447,10 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
                       "detail": "The date shown is a default for that payer type, or the appeal window where a corrected claim's limit is "
                                 "set by the payer agreement (often 90 days from the date of service, so it can be earlier).",
                       "who": "Practice administrator: check the windows in the payer agreements, Anthem and UnitedHealthcare first."})
+    # a claim no payer answered has no remittance line, so no ERA row in EMA can ever describe it: left out of both counts
     h = conn.execute(f"""SELECT COUNT(*), SUM(ema_handling IS NOT NULL) FROM findings WHERE status IN ({','.join('?' * len(TODO))})
-                         AND COALESCE(stale,0)=0 AND appeal_deadline >= ? AND category IN ('denial','bundling','downcoding','underpayment')""",
+                         AND COALESCE(stale,0)=0 AND appeal_deadline >= ? AND category IN ('denial','bundling','downcoding','underpayment')
+                         AND signal NOT IN ('NO_ANSWER','REJECTED_PRE_PAYER')""",
                      TODO + (today,)).fetchone()
     if h[0]:
         share = (h[1] or 0) / h[0]
@@ -474,7 +476,7 @@ def batches(conn: sqlite3.Connection, today: str, limit: int = 200) -> list[dict
     out: dict[tuple, dict] = {}
     for fid, sig, act, carc, status, dl, cents, payer, claim, code in conn.execute(
             f"""SELECT finding_id, signal, actionable, carc, status, appeal_deadline, COALESCE(shortfall_cents,0), COALESCE(payer_group,'Unknown'),
-                       claim_key, procedure_code
+                       COALESCE(claim_key, patient_control_number), procedure_code
                 FROM findings WHERE status IN ({','.join('?' * len(OPEN))}) AND COALESCE(stale,0)=0 AND appeal_deadline >= ?
                   AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""", OPEN + (today,) + MONEY_CATEGORIES):
         kind = work_type(sig, act, carc)

@@ -76,27 +76,51 @@ An item EMA shows paid is closed by the analysis: insurance payments on the line
 
 ### Written off in EMA, still workable
 
-Each item carries what the biller wrote off in EMA on its line (from the ERA & Payment Line Adjustments export: write-offs
-on the payer's reasons; the patient's share is not counted). An item written off while its filing window is still open is
-money given up that the payer can still be asked for: Today's plan lists them ("Work what EMA wrote off"), the Worklist
-opens them with a filter chip ("Written off in EMA, still workable"), each row says "written off in EMA", and the item says
-when and how much. Work it as any other item, and reverse the write-off in EMA when the payer pays.
+Each item carries what the biller gave up in EMA of the money it disputes (from the ERA & Payment Line Adjustments
+export): rows written off, or moved on to the patient or the next payer, on the payer's own reasons for not paying.
+EMA's routine posting of a contractual reduction (CO-45, CO-253, CO-59 and the like) is not giving anything up, and the
+patient's share (PR) is not the payer's: neither counts. A row is counted once though several exports repeat it, a
+reversal cancels it, the amount is capped at the item's disputed amount, and where a claim carries the same code twice on
+one date (EMA's rows are by claim, code and date) nothing is attributed. An item written off while its filing window is
+still open is money given up that the payer can still be asked for: Today's plan lists them ("Work what EMA wrote off"),
+the Worklist opens them with a filter chip ("Written off in EMA, still workable"), each row says "written off in EMA", and
+the item says how much and since when. Work it as any other item, and reverse the write-off in EMA when the payer pays.
 
 ### Claims the payer never answered
 
 EMA's exports say which claims went out; the remittances say which ones a payer answered. A claim EMA shows sent to a
-payer, with nothing paid by insurance in EMA and no remittance for it (or for its bill since it went out), is listed once
-30 days have passed since it was sent (`REMITWATCH_NO_ANSWER_DAYS`) and the remittances on file reach that day: a feed
-that stopped never makes newer claims look unanswered. These are "Chase the payer" items (Today's plan: "Chase claims the
-payer never answered"): look the claim up on the payer's portal or call; not on file, send it again before the date shown;
-rejected, correct and resend; denied or paid, get the remittance or EOB and work it here. A claim EMA calls rejected is
-listed at once, under "Fix and resubmit". The date on each is the payer's limit for a first filing, counted from the date
-of service: Medicare's 1 year is the regulation's (42 CFR 424.44); other payers' limits are the common ones and say so (the
-participation agreement's own limit applies). Left out: claims EMA shows paid by insurance (missing remittance files: the
-Data tab), voided, self-pay, and those EMA's status says are settled or not sent yet. EMA's claim statuses are matched by
-words (rejected; paid, closed, void, write-off; on hold, ready, unbilled), to be checked against the practice's sample
-reports when they arrive. They cannot be hidden for a payer (below): a claim nobody answered is not a reason a payer won't
-pay, so each is let go one at a time, with a note.
+payer is listed once 30 days have passed since it was sent (`REMITWATCH_NO_ANSWER_DAYS`) and the remittances on file
+reach that day (a feed that stopped never makes newer claims look unanswered), when nothing answers it:
+
+- no remittance for it, and none for its bill since it went out;
+- no ERA line posted in EMA for it (the payer's answer reached EMA even if its 835 never reached the site);
+- nothing paid by insurance in EMA (the Insurance Payments column, or an insurer's Payment row), by the newest export;
+- EMA's status is not denied (a denial is the payer's answer), paid, void, cancelled or in collections, and the claim
+  was sent (not on hold, ready or unbilled);
+- it is the bill's latest submission (an earlier one sent again is not chased twice), and its visits were not answered
+  under another bill made for them (same patient, date and code).
+
+These are "Chase the payer" items (Today's plan: "Chase claims the payer never answered"): look the claim up on the
+payer's portal or call; not on file, send it again before the date shown; rejected, correct and resend; denied or paid,
+get the remittance or EOB and work it here. A claim EMA calls rejected is listed at once, under "Fix and resubmit". A
+claim EMA shows closed or written off though no payer answered is listed all the same, marked written off in EMA (it is
+also under "Work what EMA wrote off"). A claim known only from the Claim & Claim Status report is listed too. Each is
+sized by the payer's usual rate for its codes and units (a second and later surgical procedure at the payer's usual
+share), and one charge listed by two export layouts counts once. The newest export decides a claim's status: a
+spreadsheet's own creation time, or for a CSV the newest date among its rows.
+
+The date on each is the payer's limit for a first filing, counted from the date of service: Medicare's 1 year is the
+regulation's (42 CFR 424.44); other payers' limits are the common ones and say so (the participation agreement's own
+limit applies). A claim sent on time keeps its item after that date: the payer still owes a claim it has, and most take
+proof of timely filing (EMA's submission date, or the clearinghouse's acceptance report) for one they have no record of,
+so it is then dated by the payer's appeal window from the day its answer was due, marked not confirmed. Medicare's year
+from the date of service is firm, and a rejected claim never reached the payer. When a payer's remittances stop before
+a claim's answer was due, or none from it is on file at all, the item says so: check its portal (and its ERA enrollment)
+before sending the claim again. The work recorded on one follows its bill: to the items its remittance brings, or to the
+claim sent again. EMA's claim statuses are matched by words (rejected; denied; paid, void, collections; closed, written
+off; on hold, ready, unbilled), to be checked against the practice's sample reports when they arrive. They cannot be
+hidden for a payer (below): a claim nobody answered is not a reason a payer won't pay, so each is let go one at a time,
+with a note.
 
 ### Hiding a reason for a payer
 

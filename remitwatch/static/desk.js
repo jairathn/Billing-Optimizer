@@ -280,7 +280,7 @@ function rowHtml(b, r, o){
     : (r.shortfall_cents ? `<b>${money2(r.shortfall_cents)}</b>` : '<span class="small muted" title="No usual rate to compare with">not known</span>');
   const pill = r.status && r.status !== 'open' ? `<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>` : '';
   // the biller wrote it off in EMA: money given up, though the window may still be open
-  const wo = r.written_off_cents ? `<div class="small"><span class="chip hint" title="EMA shows ${esc(money2(r.written_off_cents))} written off on this line${r.written_off_on ? ' on ' + esc(r.written_off_on) : ''}">written off in EMA</span></div>` : '';
+  const wo = r.written_off_cents ? `<div class="small"><span class="chip hint" title="${esc(money2(r.written_off_cents))} of the money in dispute is written off (or moved to the patient) in EMA${r.written_off_on ? ', as of ' + esc(r.written_off_on) : ''}">written off in EMA</span></div>` : '';
   const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
   const shut = live && due && daysUntil(due) < 0;
   return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-kind="${esc(kindFor(b, r))}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
