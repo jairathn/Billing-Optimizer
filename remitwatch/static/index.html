@@ -239,6 +239,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
   <div class="fresh"><div id="feedChip"></div><div id="fresh">loading…</div></div>
   <input id="claimFind" type="search" maxlength="200" placeholder="Find a claim" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line">
   <button id="guideBtn" class="ghost" title="What this site does and how to use it">How this works</button>
+  <a id="uploadLink" href="/upload" hidden class="small" title="Bring EMA's exports, remittance files and visit notes in by hand">Upload from EMA</a>
   <button id="bellBtn" title="alerts">Alerts</button>
   <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
   <label class="small">Status <select id="statusSel"><option value="open">Open</option><option value="all">All</option><option value="in_progress">In progress</option><option value="appealed">Appealed</option><option value="resolved">Recovered</option><option value="lost">Lost</option><option value="dismissed">Dismissed</option></select></label>
@@ -355,6 +356,7 @@ async function loadMeta(){
   const m = state.meta, r = m.remits||{}, runs = (m.runs||[])[0];
   $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?runs.finished_at.replace('T',' ').slice(0,16):'never'} · files ${m.files?m.files.n:0}`;
   $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
+  $('#uploadLink').hidden = !m.uploads;            // a server only: Vercel keeps the Dropbox folder
 }
 async function loadSummary(){
   state.summary = await api('/api/summary?'+qs({year:state.year,status:state.status}));

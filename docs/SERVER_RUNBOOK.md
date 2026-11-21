@@ -36,7 +36,7 @@ The same as on Vercel, wherever Vercel has them:
   `REMITWATCH_EMA_CLOSES`, `REMITWATCH_STALE_APPEAL_DAYS`, `REMITWATCH_FRESHEN_HOURS`, `REMITWATCH_WEBHOOK_DEBOUNCE_SECONDS`
 
 Server only (optional): `REMITWATCH_BACKUP_KEEP` (daily copies kept, default 7; 0 turns them off), `REMITWATCH_BACKUP_DIR`
-(default `/data/backups`).
+(default `/data/backups`), `REMITWATCH_UPLOAD_DIR` (default `/data/uploads`: leave it unset).
 
 Never on the server: `REMITWATCH_MODE=serverless`, `REMITWATCH_STATE_DIR`, `REMITWATCH_ALLOW_OPEN`, any `VERCEL*`,
 `REMITWATCH_MAX_SECONDS`, `REMITWATCH_DEFER_DETECT_FILES`, `REMITWATCH_BACKFILL_ZIP`. `REMITWATCH_DB` and
@@ -103,12 +103,28 @@ A cycle started by hand waits for (or skips) one already running: they never ove
 ## What runs by itself
 
 - A cycle every `REMITWATCH_SYNC_INTERVAL_MINUTES` (at least once a day even when unset), 45 seconds after the app
-  starts, whenever Dropbox calls the webhook, when someone presses Sync now, and when someone opens the dashboard after
-  3 hours without one. A cycle is: new Dropbox files (and TriZetto's, if set up), ingest, analysis when anything is new,
+  starts, whenever Dropbox calls the webhook, when someone presses Sync now or uploads a file, and when someone opens the
+  dashboard after 3 hours without one. A cycle is: new Dropbox files (and TriZetto's, if set up, and what was uploaded by
+  hand), ingest, analysis when anything is new,
   alerts and their emails, the weekly report when due (saved in `/data/reports`), then the fax line (the state of faxes
   sent, busy lines tried again, payers' faxes read, follow-ups that are due) and the day's backup. This is what Vercel's
   two daily calls (`/api/cron/cycle` at 10:17 UTC and `/api/cron/faxes` at 15:43 UTC) do there. Both addresses also work
   on the server, with `CRON_SECRET`, for an outside scheduler if one is ever wanted.
+
+## Uploads by hand (until ModMed's API is approved)
+
+`https://<SITE_ADDRESS>/upload` (the dashboard's login) takes EMA's exports, remittance and claim files and visit notes;
+`docs/OPERATIONS.md` ("EMA by hand") has the person's steps. Nothing to configure. On the server:
+
+- Files are kept on the data volume beside the store, owner-only: `/data/uploads/exports/` (EMA's exports),
+  `/data/uploads/remittances/` (835 and 837 files), `/data/uploads/notes/` (visit notes). A file being received is written
+  to `/data/uploads/.incoming/` and moved or removed when it is done. Never in the repository, never emailed.
+- An export or remittance file waits (`uploads` table, status `queued`) for the next cycle, which reads it with the
+  Dropbox loader and notes what it added; the upload wakes the scheduler, which waits its usual 45 seconds for the rest of
+  a batch. To read waiting files at once: `docker compose exec app python -m remitwatch.cli cycle`.
+- Caddy accepts up to 260 MB on `/api/uploads` (the app's own limit is 250 MB per file) and 20 MB everywhere else.
+- Backups: the store's daily copy holds what was read from the files and the record of every upload; the files themselves
+  are on the same volume and are covered by its daily snapshot (below).
 
 ## Backups
 

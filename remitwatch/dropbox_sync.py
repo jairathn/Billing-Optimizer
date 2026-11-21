@@ -415,23 +415,28 @@ def sync(store, client: DropboxClient | None = None, root_path: str | None = Non
 
 def ingest_new_files(store, paths: list[str], log=print) -> dict:
     """Route downloaded files to the right loader."""
-    from .ema_exports import export_created, iter_rows
+    from .ema_exports import TEXT_EXPORTS, export_created, iter_rows
     from .x12_835 import looks_like_x12
 
     out = {"remits": 0, "ema": 0, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []}
     remits = []
     for p in paths:
         low = p.lower()
-        if low.endswith(".xlsx"):
+        if low.endswith((".xlsx",) + TEXT_EXPORTS):        # a CSV export arrives only by upload (remitwatch.uploads)
             try:
                 with open(p, "rb") as fh:
                     sha = hashlib.sha256(fh.read()).hexdigest()
                 if store.file_seen(sha):
                     out["skipped"] += 1
                     continue
-                rows = list(iter_rows(p))
+                acct: dict = {}
+                rows = list(iter_rows(p, acct))
                 r = store.ingest_ema_rows(rows)
-                fam = rows[0]["family"] if rows else "unknown"
+                left = {k: v for k, v in (acct.get("left") or {}).items() if v}
+                if left or acct.get("above"):
+                    log(f"  EMA {os.path.basename(p)}: {acct.get('above', 0)} line(s) above the column names left out"
+                        + "".join(f", {v} {k} line(s) left out" for k, v in left.items()))
+                fam = rows[0]["family"] if rows else (acct.get("family") or "unknown")
                 store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
                 store.record_export(os.path.basename(p), sha, fam, export_created(p), len(rows))
                 out["ema"] += 1

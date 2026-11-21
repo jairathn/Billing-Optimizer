@@ -7,7 +7,13 @@
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
 	}
-	request_body {
+	# uploads by hand (EMA's exports, remittance files, visit notes) may be large: a year of charge lines runs to tens of MB
+	@uploads path /api/uploads /api/uploads/*
+	request_body @uploads {
+		max_size 260MB
+	}
+	@other not path /api/uploads /api/uploads/*
+	request_body @other {
 		max_size 20MB
 	}
 	reverse_proxy app:8000

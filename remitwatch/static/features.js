@@ -269,8 +269,9 @@ function drawerExtras(f, r){
   const factsHtml = `${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
       <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
-  const ema = typeof state !== 'undefined' && !!(state.meta && state.meta.modmed);     // no page state when evaluated on its own
-  const builder = f.claim_key ? `${ema ? `<div class="filters" style="margin-bottom:6px"><button class="primary" id="noteEma">Get the note from EMA and build the packet</button></div><div id="emaMsg" class="small muted"></div>` : ''}<div class="note">${ema ? 'Or attach' : 'Attach'} the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
+  const ema = typeof state !== 'undefined' && !!(state.meta && (state.meta.modmed || state.meta.uploads));     // no page state when evaluated on its own
+  const byHand = ema && !state.meta.modmed;         // no API yet: the note uploaded from EMA on the Upload page
+  const builder = f.claim_key ? `${ema ? `<div class="filters" style="margin-bottom:6px"><button class="primary" id="noteEma">${byHand ? 'Use the note uploaded from EMA and build the packet' : 'Get the note from EMA and build the packet'}</button>${byHand ? ' <a class="small" href="/upload">Upload notes</a>' : ''}</div><div id="emaMsg" class="small muted"></div>` : ''}<div class="note">${ema ? 'Or attach' : 'Attach'} the note for this date of service (PDF, Word or text) or paste it. The review checks the note against the CPT rules that decide this dispute, quotes it word for word, and tells you plainly when the note does not support an appeal. The result is one PDF: letter, review, remittance evidence and the note.</div>
       <div class="filters"><input type="file" id="noteFile" accept=".pdf,.docx,.txt,.rtf,.html,.htm"><label class="small"><input type="checkbox" id="noteAi" checked> review with Claude</label><button id="noteGo">Build packet</button></div>
       <textarea id="noteText" rows="4" placeholder="…or paste the note text here" style="width:100%"></textarea>
       <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
@@ -305,7 +306,7 @@ async function noteFromEma(id, d, documentId){
   if(!out) return;
   if(btn) btn.disabled = true;
   msg.textContent = '';
-  out.innerHTML = '<div class="muted small">Finding the note in EMA and building the packet. A review takes about a minute.</div>';
+  out.innerHTML = '<div class="muted small">Finding the visit note and building the packet. A review takes about a minute.</div>';
   const pickList = (list, label) => `<table class="small" style="margin-top:4px"><tbody>${list.map(c => `<tr><td>${esc(c.date||'')}</td><td>${esc(c.type||'Note')}</td><td>${esc(c.author||'')}</td><td><button data-ema-pick="${esc(c.id)}">${label}</button></td></tr>`).join('')}</tbody></table>`;
   const bindPicks = el => el.querySelectorAll('[data-ema-pick]').forEach(b => b.onclick = () => noteFromEma(id, d, b.dataset.emaPick));
   try {
@@ -313,14 +314,15 @@ async function noteFromEma(id, d, documentId){
     if(r.status === 'built'){
       showPacket(out, r.packet);
       const n = r.note || {};
-      msg.innerHTML = `Built from EMA: ${esc(n.type||'note')}${n.date?' of '+esc(n.date):''}${n.author?' by '+esc(n.author):''} (patient found by ${esc(r.found_by||'')}).`
+      msg.innerHTML = (r.source === 'upload' ? `Built from the note uploaded from EMA${n.uploaded_name ? ' (' + esc(n.uploaded_name) + ')' : ''}: ${esc(n.type||'note')}${n.date?' of '+esc(n.date):''}.`
+          : `Built from EMA: ${esc(n.type||'note')}${n.date?' of '+esc(n.date):''}${n.author?' by '+esc(n.author):''} (patient found by ${esc(r.found_by||'')}).`)
         + ((r.others||[]).length ? ` Other notes that day:${pickList(r.others, 'Use this one instead')}` : '');
       bindPicks(msg);
     } else if(r.status === 'ambiguous'){
       out.innerHTML = `<div class="small sev-medium">${esc(r.reason)}</div>${pickList(r.candidates||[], 'Use this note')}`;
       bindPicks(out);
     } else {
-      out.innerHTML = `<div class="small sev-medium">${esc(r.reason || 'No note was found in EMA.')} Attach it below instead.</div>`;
+      out.innerHTML = `<div class="small sev-medium">${esc(r.reason || 'No note was found in EMA.')}${r.source === 'upload' ? '' : ' Attach it below instead.'}</div>`;
     }
   } catch(e){ out.innerHTML = `<div class="sev-high small">Could not read EMA: ${esc(e.message)}</div>`; }
   if(btn) btn.disabled = false;

@@ -1,6 +1,6 @@
 # Context checkpoint (resume here after compaction)
 
-Last updated: 2026-11-12 (detection 2.1, living site, alerts and note-based appeal packets built, reviewed and pushed). Read the last section first.
+Last updated: 2026-11-21 (the Upload page: EMA by hand until ModMed's API is approved). Read the last section first.
 
 ## Mission
 Rebuild the Billing-Optimizer repo (currently "DermBill AI", an LLM note-analysis tool) into a
@@ -573,3 +573,31 @@ EOB or payment resource (a 2020 spec listed PaymentReconciliation). The EHI popu
 delimited CSV per table, possibly a fee) has every PM financial table (payments posted, payer adjustments with CARC/RARC,
 ERA received, claim and claim log). Not built: a reader for the proprietary API's financial data, because its payment
 fields are not documented; ask ModMed which financial resources a synapSYS key can read before building it.
+
+## The manual ModMed workflow: the Upload page (November 21, 2026)
+
+Kevin (Neil's assistant, running the AWS move; AWS account live, BAA signed, cutting over to originbilling.com) asked for
+a manual workflow while ModMed's Bulk FHIR app and synapSYS application are pending: what a person can export from EMA by
+hand, an upload page behind the login landing in the same pipeline and tables, idempotent, a plain summary per upload,
+an in-app guide, files kept under /data, tests, Vercel unbroken.
+
+What EMA gives by hand (ModMed's own report documentation is behind its customer login; nothing public names the menu
+paths, so the guide names the reports the practice already saves to Dropbox): the three report families the code reads
+("Encounter and Charge Lines" full layout, "ERA and Payment Line Adjustments", "Claim and Claim Status" with Patient ID),
+visit notes printed or saved as PDF, and ERA 835 files from TriZetto's portal. Neil said he would send example ModMed
+reports: check `ema_exports.header_row`, the totals/footer rule (`_row_kind`) and `uploads.WANT` against them, and make
+any test fixtures from their column layout only (made-up rows; never the real files).
+
+Built (server only; Vercel answers 409 and the page says so; `/api/meta` has `uploads`):
+- `remitwatch/uploads.py`, `static/upload.html` (`/upload`), header link "Upload from EMA". Exports and remittance files
+  are queued and read by `pipeline.run_cycle` with `dropbox_sync.ingest_new_files` (the Dropbox loader); a visit note is
+  matched to its visit (patient name + date of service from its text; EMA patient ID to tell two patients apart; a person
+  picks otherwise) and offered to `modmed.find_note` as `UploadSource`; `api._note_lookup` checks uploaded notes before
+  EMA's API for from_ema, send and ema_queue?ready=1. Notes attached in an item's drawer are kept the same way.
+- `ema_exports`: CSV/TSV/pipe exports typed as a spreadsheet would (same fingerprints as the .xlsx), the column names
+  found by known names (a report's title lines above them), blank/totals/footer lines left out and counted.
+- Behaviour change on purpose: on a server with no ModMed connection, from_ema answers not_found pointing to the Upload
+  page instead of 503 (test_modmed updated).
+- Caddy: 260 MB on /api/uploads only. `.gitignore`: uploads/, *.csv, *.tsv (cms/ kept).
+- Tests: `tests/test_uploads.py` (12): Dropbox route vs upload route give the same store and pages; FHIR note vs uploaded
+  note give the same review text, packet and fax; the same file twice leaves every table unchanged; CSV == XLSX.

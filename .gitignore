@@ -1,5 +1,6 @@
 # Data (contains PHI): never commit
 data/
+uploads/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
@@ -7,6 +8,9 @@ data/
 *.rmt
 *.835
 *.xlsx
+*.csv
+*.tsv
+!remitwatch/cms/*.csv
 !tests/fixtures/*.xlsx
 PROFESSIONAL_Claims_*.txt
 .env

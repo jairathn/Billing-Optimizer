@@ -152,8 +152,10 @@ async function deskTab(v, key){
     <div class="ph-what">${f.kind ? reasonChips : ''}${single && !f.payer ? pileRows(kinds[0]) : ''}</div>
     <div class="desk-mid ${fix.side?'has-side':''}"><div class="todo-list"><div class="sec">What to do${tile && tile[0]!=='valid' ? ` <span class="muted small">(${esc(tile[1])})</span>` : !tile ? ` <span class="muted small">(${esc(viewName(f))})</span>` : ''}</div>${kindRows}</div>${fix.side||''}</div>
     <div class="fix-top">${fix.line||''}</div>
-    ${(f.kind || (single && kinds[0] ? kinds[0].key : '')) === 'note' && state.meta && state.meta.modmed && !closed
-      ? `<div class="ema-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><button id="emaBatch" class="primary">Build packets from EMA (next 10)</button><span id="emaBatchMsg" class="small muted">Reads each item's visit note from EMA and reviews it into a packet, about a minute each.</span></div>` : ''}
+    ${(f.kind || (single && kinds[0] ? kinds[0].key : '')) === 'note' && state.meta && (state.meta.modmed || state.meta.uploads) && !closed
+      ? (state.meta.modmed
+        ? `<div class="ema-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><button id="emaBatch" class="primary">Build packets from EMA (next 10)</button><span id="emaBatchMsg" class="small muted">Reads each item's visit note from EMA and reviews it into a packet, about a minute each.</span></div>`
+        : `<div class="ema-bar" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><button id="emaBatch" class="primary">Build packets from the uploaded notes (next 10)</button><span id="emaBatchMsg" class="small muted">Reviews each visit note uploaded from EMA into a packet, about a minute each. <a href="/upload">Upload notes</a>.</span></div>`) : ''}
     <div class="list-head" id="listHead" tabindex="-1"><span class="lh-count"><b>${pl(res.total, 'item')}</b> · <b>${money(res.shortfall_cents)}</b></span>${chips.join('')}<span id="hiddenLine" class="small muted"></span>
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
@@ -490,8 +492,10 @@ async function feesDetails(el){
 async function emaBatch(btn, box){
   btn.disabled = true;
   let q;
-  try { q = await api('/api/appeals/ema_queue?limit=10'); } catch(e){ box.textContent = e.message; btn.disabled = false; return; }
-  if(!q.items.length){ box.textContent = 'Nothing to build: every open item that needs a note already has a packet.'; btn.disabled = false; return; }
+  const byHand = !(state.meta && state.meta.modmed);          // no API yet: the notes uploaded on the Upload page
+  try { q = await api('/api/appeals/ema_queue?limit=10' + (byHand ? '&ready=1' : '')); } catch(e){ box.textContent = e.message; btn.disabled = false; return; }
+  if(!q.items.length){ box.innerHTML = byHand ? 'Nothing to build: no open item without a packet has an uploaded note. <a href="/upload">Upload notes</a>.'
+    : 'Nothing to build: every open item that needs a note already has a packet.'; btn.disabled = false; return; }
   const n = {built: 0, skipped: 0, ambiguous: 0, not_found: 0, failed: 0};
   for(let i = 0; i < q.items.length; i++){
     box.textContent = `Building ${i + 1} of ${q.items.length} (about a minute each)…`;
@@ -505,7 +509,7 @@ async function emaBatch(btn, box){
   }
   const parts = [`${n.built} packet${n.built === 1 ? '' : 's'} built`];
   if(n.ambiguous) parts.push(`${n.ambiguous} with more than one note that day (open the item to pick)`);
-  if(n.not_found) parts.push(`${n.not_found} with no signed note found in EMA`);
+  if(n.not_found) parts.push(byHand ? `${n.not_found} with no note uploaded` : `${n.not_found} with no signed note found in EMA`);
   if(n.skipped) parts.push(`${n.skipped} already had one`);
   if(n.failed) parts.push(`${n.failed} failed`);
   box.textContent = 'Done: ' + parts.join(', ') + '. Open an item to send its packet.';

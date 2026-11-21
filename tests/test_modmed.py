@@ -295,7 +295,8 @@ def test_the_routes_build_a_packet_from_ema(tmp_path, fake, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     assert c.get("/api/meta").json()["modmed"] is False
     nc = c.post("/api/appeals/from_ema", json={"finding_id": fid}, headers=xhr)
-    assert nc.status_code == 503 and "MODMED_CLIENT_ID" in nc.json()["detail"]
+    # a server can take the note by hand meanwhile (the Upload page, remitwatch.uploads): it says so
+    assert nc.status_code == 200 and nc.json()["status"] == "not_found" and "Upload page" in nc.json()["reason"]
     assert c.get("/.well-known/jwks.json").status_code == 404
     monkeypatch.setenv("MODMED_CLIENT_ID", fake.client_id)
     monkeypatch.setenv("MODMED_PRIVATE_KEY", PEM.replace("\n", "\\n"))

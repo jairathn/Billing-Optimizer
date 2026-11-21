@@ -27,6 +27,7 @@ Built for a dermatology practice. Everything is practice-agnostic except the pay
 | Always current | Remittances read straight from TriZetto's SFTP on every run (no Dropbox copying), a run started when the site is opened on old data, items EMA shows paid closed by themselves (a corrected claim paid under a new number, a paper check), and no appeal faxed while the remittances are more than two weeks behind |
 | Hide a reason for a payer | One click takes a reason a payer never pays (a modifier 57 visit at some payers) off every list, now and after each analysis; "Show again" undoes it |
 | Suggested templates | Bigger wins lists, by code, what Claude's reviews found missing from notes that could not be appealed, next to what the note for that kind of service must carry, and writes the EMA template fields to require so the next note carries them before it is signed |
+| Upload from EMA | On the server, until ModMed's API is approved: EMA's three weekly exports, remittance files and visit notes dropped on one page go through the same loader and the same note matching as the automated feeds. Each upload says what it held, what was new, what was already there and what was left out and why; the same file twice changes nothing; a guide on the page says which reports to run, with which columns, for which dates and how often |
 | Hands-off | One cycle does sync, ingest, detect, alerts and notify. It cannot overlap itself and needs no attention |
 
 ## What it found (the archive through October 9, 2026)
@@ -110,7 +111,8 @@ A push to `main` deploys the site on Vercel. Vercel keeps no files and no runnin
 remitwatch/
   x12_835.py      835 parser (all loops, balancing, content fingerprint for duplicate detection)
   x12_837.py      837P reader (what was submitted)
-  ema_exports.py  ModMed EMA xlsx loaders (charge lines, ERA lines, claim status)
+  ema_exports.py  ModMed EMA export loaders, Excel or CSV (charge lines, ERA lines, claim status)
+  uploads.py      files brought in by hand on the Upload page (a server): exports and remittances queued for the cycle, visit notes matched to their visits
   store.py        SQLite store, idempotent ingestion
   link.py         835 line to EMA charge line and biller handling
   fees.py         fee-schedule inference from charges; code level families
@@ -132,7 +134,7 @@ remitwatch/
   dropbox_sync.py Dropbox client (refresh token, cursor deltas, downloads, uploads)
   report.py       summary report and email
   api.py          FastAPI endpoints
-  static/         dashboard (index.html, features.js, providers.js, calc*.js, lab*.js, asc*.js) and the setup checklist (setup.html); no build step
+  static/         dashboard (index.html, features.js, providers.js, calc*.js, lab*.js, asc*.js), the setup checklist (setup.html) and the Upload page (upload.html); no build step
   cli.py          cycle | alerts | detect | activity | serve | oauth | sync | ingest-835 | ingest-ema | link | stats | weekly
 api/index.py      Vercel entry point
 vercel.json       one function behind every address, the daily schedule

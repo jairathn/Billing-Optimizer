@@ -67,6 +67,7 @@ def ensure_server_schema(path: str) -> None:
     from .link import DDL as LINK_DDL
     from .notes import ensure_packets
     from .store import connect
+    from .uploads import ensure_schema as ensure_uploads
     conn = connect(path)
     try:
         ensure_schema(conn)
@@ -75,6 +76,7 @@ def ensure_server_schema(path: str) -> None:
         ensure_fax_tables(conn)
         ensure_hide_rules(conn)
         ensure_packets(conn)
+        ensure_uploads(conn)            # files and visit notes uploaded by hand (remitwatch.uploads): a server only
         conn.commit()
     finally:
         conn.close()
@@ -298,6 +300,15 @@ def setup_page(request: Request, credentials: Optional[HTTPBasicCredentials] = D
     return FileResponse(STATIC_DIR / "setup.html", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/upload", include_in_schema=False)
+def upload_page(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    """Bringing EMA's exports, remittance files and visit notes in by hand, with the guide to running them in EMA."""
+    if password_problem() and not open_allowed():
+        return RedirectResponse("/setup")
+    require_auth(request, credentials)
+    return FileResponse(STATIC_DIR / "upload.html", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/", include_in_schema=False)
 def index(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
     if password_problem() and not open_allowed():
@@ -337,7 +348,9 @@ def meta(_: str = Depends(require_auth)):
                            # whether appeals go out by fax (remitwatch.fax)
                            "fax": bool(os.environ.get("SRFAX_ACCESS_ID") and os.environ.get("SRFAX_ACCESS_PWD")),
                            # whether remittances come straight from TriZetto (remitwatch.trizetto)
-                           "trizetto": bool(os.environ.get("TRIZETTO_SFTP_USER") and os.environ.get("TRIZETTO_SFTP_PASSWORD"))}
+                           "trizetto": bool(os.environ.get("TRIZETTO_SFTP_USER") and os.environ.get("TRIZETTO_SFTP_PASSWORD")),
+                           # whether EMA's exports and visit notes can be uploaded by hand (remitwatch.uploads): a server only
+                           "uploads": not runtime.serverless()}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -2311,7 +2324,7 @@ MAX_NOTE_BYTES = (3 if runtime.serverless() else 15) * 1024 * 1024
 
 @app.post("/api/appeals/build", dependencies=[Depends(require_xhr)])
 def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str = Form("1"), file: Optional[UploadFile] = File(None),
-                  _: str = Depends(require_auth)):
+                  user: str = Depends(require_auth)):
     """Review the uploaded or pasted visit note for one finding and build the appeal packet (letter, review, evidence, note) as a PDF.
     A plain function on purpose: the review takes about a minute and must not hold up every other request."""
     data = None
@@ -2326,7 +2339,18 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
     detail = finding_detail(finding_id, "ok")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (detail["finding"].get("claim_key"),)) if detail["finding"].get("claim_key") else None
     name = file.filename if (file is not None and data) else ""
-    return _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1")
+    packet = _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1")
+    if data and not runtime.serverless() and detail["finding"].get("claim_key"):
+        # kept as a note uploaded for this item's visit too (remitwatch.uploads): a rebuild, and the visit's other items, find it
+        try:
+            from . import uploads
+            tmp = uploads.incoming(DB_PATH)
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            uploads.accept(DB_PATH, tmp, name or "visit note", user, finding_id=finding_id)
+        except Exception:
+            pass        # the packet is what was asked for
+    return packet
 
 
 def _keep_packet(build) -> dict:
@@ -2381,6 +2405,59 @@ def _ema_patient_ids(pcn: str | None) -> list[str]:
     return [r["patient_id"] for r in rows("SELECT DISTINCT patient_id FROM ema_rows WHERE claim_id=? AND COALESCE(patient_id,'')!=''", (pcn,))]
 
 
+def _note_lookup(key, pick: Any = None, since: str | None = None) -> dict:
+    """The visit note behind an appeal, through one matching (modmed.find_note): first among the notes uploaded on the
+    Upload page (a server: remitwatch.uploads), then from EMA's API. An uploaded note is used exactly as a note read from
+    EMA would be. With neither, a server answers not_found saying how to upload it; a serverless host raises
+    modmed.NotConfigured as before."""
+    from . import modmed
+    pick = str(pick) if pick else None
+    if not runtime.serverless():
+        from . import uploads
+        conn = db()
+        try:
+            res = uploads.find_note(conn, key, pick)
+        finally:
+            conn.close()
+        if res["status"] != "not_found" or (pick and pick.startswith(uploads.DOC_PREFIX)):
+            return res
+        if not modmed.Settings.from_env().configured():
+            return res
+    elif pick and pick.startswith("upload-"):
+        pick = None
+    return modmed.note_for_claim(modmed.client(), key, pick=pick, budget=200, since=since)
+
+
+def _note_ready(items: list[dict]) -> dict[str, str]:
+    """For items that rest on the visit note: whether an uploaded note covers each ('found', 'ambiguous' or 'not_found'),
+    as an appeal would find it. Items on a date no uploaded note is for are not looked at."""
+    from . import modmed, uploads
+    if runtime.serverless() or not items:
+        return {}
+    conn = db()
+    try:
+        days = uploads.note_days(conn)
+        todo = [i for i in items if i.get("service_date") in days and i.get("claim_key")]
+        if not todo:
+            return {}
+        src = uploads.UploadSource(conn)
+        keys = sorted({i["claim_key"] for i in todo})
+        claims: dict[str, dict] = {}
+        for k in range(0, len(keys), 900):
+            part = keys[k:k + 900]
+            for r in conn.execute(f"SELECT * FROM claims WHERE claim_key IN ({','.join('?' * len(part))})", part):
+                claims[r["claim_key"]] = dict(r)
+        pcns = sorted({i.get("patient_control_number") for i in todo if i.get("patient_control_number")})
+        ids = uploads._ema_ids(conn, pcns)
+        out = {}
+        for i in todo:
+            key = modmed.claim_key({"finding": i}, claims.get(i["claim_key"]), sorted(ids.get(i.get("patient_control_number"), ())))
+            out[i["finding_id"]] = modmed.find_note(src, key)["status"]
+        return out
+    finally:
+        conn.close()
+
+
 def _has_packet(finding_id: str) -> bool:
     if runtime.serverless():
         return bool(_packets_for(finding_id))
@@ -2407,8 +2484,7 @@ def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_aut
     pick = body.get("document_id")
     since = body.get("since")
     try:
-        res = modmed.note_for_claim(modmed.client(), key, pick=str(pick) if pick else None, budget=200,
-                                    since=str(since)[:10] if since and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(since)[:10]) else None)
+        res = _note_lookup(key, pick, since=str(since)[:10] if since and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(since)[:10]) else None)
     except modmed.NotConfigured as exc:
         raise HTTPException(503, str(exc))
     except modmed.ModMedError as exc:
@@ -2423,20 +2499,178 @@ def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_aut
 
 
 @app.get("/api/appeals/ema_queue")
-def appeals_ema_queue(limit: int = Query(20, ge=1, le=200), _: str = Depends(require_auth)):
+def appeals_ema_queue(limit: int = Query(20, ge=1, le=200), ready: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
     """What "Build packets from EMA" works through: the items that need the visit note, open or started, still inside
     their filing window (or with none known), soonest window first and then the largest, without a packet yet where the
-    store can tell (on a serverless host each item is checked as it is built)."""
+    store can tell (on a serverless host each item is checked as it is built). ready=1 (a server): only the items an
+    uploaded note covers."""
     from .insights import kind_sql
     cond, params = kind_sql("note")
     skip_built = not runtime.serverless() and has_table("appeal_packets")
-    sql = f"""SELECT finding_id, service_date, appeal_deadline, payer_group, shortfall_cents FROM findings
+    sql = f"""SELECT finding_id, service_date, appeal_deadline, payer_group, shortfall_cents{", claim_key, patient_control_number" if ready else ""} FROM findings
               WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
                 AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))
                 {"AND finding_id NOT IN (SELECT finding_id FROM appeal_packets WHERE finding_id IS NOT NULL)" if skip_built else ""}
-              ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?"""
-    items = rows(sql, (*params, limit))
+              ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id {"" if ready else "LIMIT ?"}"""
+    items = rows(sql, tuple(params) if ready else (*params, limit))
+    if ready:
+        got = _note_ready(items)
+        items = [{k: v for k, v in i.items() if k not in ("claim_key", "patient_control_number")}
+                 for i in items if got.get(i["finding_id"]) in ("found", "ambiguous")][:limit]
     return {"items": items, "since": min((i["service_date"] for i in items if i.get("service_date")), default=None)}
+
+
+# --------------------------------------------------------------------------- files brought in by hand (remitwatch.uploads)
+def _uploads_here() -> None:
+    """Uploads are kept beside the store, so only a server takes them; a serverless host says so plainly."""
+    if runtime.serverless():
+        from .uploads import SERVER_ONLY
+        raise HTTPException(409, SERVER_ONLY)
+
+
+def _wake_cycle(trigger: str = "upload") -> None:
+    """The next cycle reads what was uploaded. The scheduler waits its usual minute for the rest of a batch; on a server
+    that had no feed to start it, it is started now (and from then on runs a cycle a day as well)."""
+    from .pipeline import DAILY_MINUTES, SCHEDULER
+    if not SCHEDULER.is_alive():
+        SCHEDULER.start(DB_PATH, DAILY_MINUTES)
+    SCHEDULER.poke(trigger)
+
+
+@app.post("/api/uploads", dependencies=[Depends(require_xhr)])
+async def uploads_post(request: Request, name: str = Query(..., min_length=1, max_length=300),
+                       finding_id: Optional[str] = Query(None, max_length=160), user: str = Depends(require_auth)):
+    """One file as the request's body (the page sends each file on its own): an EMA export, a remittance or claim file,
+    a zip of those, or a visit note (with finding_id: attached to that item). Its bytes go straight into the upload
+    folder beside the store; the answer says what it holds, what is new, what RemitWatch has already, and what was left
+    out and why. An export or a remittance file goes in with the next cycle, which this wakes."""
+    _uploads_here()
+    from . import uploads
+    if finding_id and not re.fullmatch(FAX_KEY, finding_id):
+        raise HTTPException(400, "finding_id is not valid")
+    tmp = uploads.incoming(DB_PATH)
+    h, size = hashlib.sha256(), 0
+    try:
+        with open(tmp, "wb") as fh:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > uploads.MAX_BYTES:
+                    raise HTTPException(413, f"A file can be at most {uploads.MAX_BYTES // (1024 * 1024)} MB. Export a shorter date range.")
+                h.update(chunk)
+                fh.write(chunk)
+        if not size:
+            raise HTTPException(400, "The file is empty.")
+        res = await asyncio.to_thread(uploads.accept, DB_PATH, tmp, name, user, h.hexdigest(), finding_id or None, None, None, SHOW_PHI)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if res.get("status") == "queued" or res.get("queued"):
+        try:
+            _wake_cycle()
+        except Exception:
+            pass            # the scheduler's own daily cycle reads it anyway
+    return JSONResponse(res, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/uploads")
+def uploads_list(_: str = Depends(require_auth)):
+    """The Upload page: what was uploaded and what became of each file, what waits for the cycle, and the visit notes."""
+    from . import uploads
+    if runtime.serverless():
+        return {"server": False, "message": uploads.SERVER_ONLY}
+    from .pipeline import LAST_KEY, LOCK_KEY, SCHEDULER
+    conn = db()
+    try:
+        items = uploads.history(conn, reveal=SHOW_PHI)
+        queued = conn.execute("SELECT COUNT(*) FROM uploads WHERE status='queued'").fetchone()[0]
+        notes = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM uploaded_notes GROUP BY 1")}
+        meta = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM meta WHERE key IN (?, ?)", (LOCK_KEY, LAST_KEY))}
+    finally:
+        conn.close()
+    last = json.loads(meta.get(LAST_KEY) or "{}")
+    lock = json.loads(meta.get(LOCK_KEY) or "{}")
+    return {"server": True, "items": items, "queued": queued, "notes": notes, "show_phi": SHOW_PHI,
+            "cycle": {"running": bool(lock), "since": lock.get("started"), "last_finished": last.get("finished"),
+                      "last_error": last.get("error"), "next": SCHEDULER.next_run if SCHEDULER.is_alive() else None}}
+
+
+@app.get("/api/uploads/needed")
+def uploads_needed(limit: int = Query(100, ge=1, le=500), _: str = Depends(require_auth)):
+    """The visit notes appeals wait for: open items that rest on the note, inside their filing window, with no packet
+    yet, soonest window first; each says whether an uploaded note already covers it (as an appeal would find it)."""
+    _uploads_here()
+    from .insights import kind_sql
+    cond, params = kind_sql("note")
+    built = "AND finding_id NOT IN (SELECT finding_id FROM appeal_packets WHERE finding_id IS NOT NULL)" if has_table("appeal_packets") else ""
+    items = rows(f"""SELECT finding_id, claim_key, patient_control_number, service_date, appeal_deadline, payer_group, shortfall_cents,
+                            procedure_code, title FROM findings
+                     WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
+                       AND (appeal_deadline IS NULL OR appeal_deadline >= date('now')) {built}
+                     ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id""", tuple(params))
+    got = _note_ready(items)
+    names = {}
+    if SHOW_PHI and items:
+        keys = sorted({i["claim_key"] for i in items[:limit]})
+        names = {r["claim_key"]: _name(r["patient_last"], r["patient_first"])
+                 for r in rows(f"SELECT claim_key, patient_last, patient_first FROM claims WHERE claim_key IN ({','.join('?' * len(keys))})", tuple(keys))}
+    out = []
+    for i in items[:limit]:
+        out.append({"finding_id": i["finding_id"], "claim_id": i["patient_control_number"], "service_date": i["service_date"],
+                    "appeal_deadline": i["appeal_deadline"], "payer_group": i["payer_group"], "cents": i["shortfall_cents"] or 0,
+                    "code": i["procedure_code"], "title": i["title"], "note": got.get(i["finding_id"], "not_found"),
+                    **({"patient": names.get(i["claim_key"])} if SHOW_PHI else {})})
+    return {"items": out, "total": len(items), "covered": sum(1 for v in got.values() if v == "found")}
+
+
+@app.post("/api/uploads/notes/{note_id}/match", dependencies=[Depends(require_xhr)])
+def uploads_note_match(note_id: str, body: dict = Body(default={}), _: str = Depends(require_auth)):
+    """A person settles which visit an uploaded note is for: one of the visits it could be (pick), or an item (finding_id)."""
+    _uploads_here()
+    from . import uploads
+    if not re.fullmatch(r"[0-9a-f]{24}", note_id):
+        raise HTTPException(400, "note_id is not valid")
+    fid = body.get("finding_id")
+    if fid is not None and not re.fullmatch(FAX_KEY, str(fid)):
+        raise HTTPException(400, "finding_id is not valid")
+    conn = db()
+    try:
+        n = uploads.choose(conn, note_id, pick=int(body["pick"]) if str(body.get("pick", "")).isdigit() else None,
+                           finding_id=str(fid) if fid else None)
+    except uploads.Rejected as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        conn.close()
+    return {"note": uploads._note_public(n, SHOW_PHI), "lines": uploads._note_lines(n, SHOW_PHI)}
+
+
+@app.post("/api/uploads/notes/{note_id}/remove", dependencies=[Depends(require_xhr)])
+def uploads_note_remove(note_id: str, _: str = Depends(require_auth)):
+    """Take an uploaded note back (the wrong file, or the wrong visit). A packet already built from it stays."""
+    _uploads_here()
+    from . import uploads
+    if not re.fullmatch(r"[0-9a-f]{24}", note_id):
+        raise HTTPException(400, "note_id is not valid")
+    conn = db()
+    try:
+        if not uploads.remove_note(conn, note_id):
+            raise HTTPException(404, "No such note.")
+    finally:
+        conn.close()
+    return {"removed": True}
+
+
+@app.get("/api/uploads/notes/{note_id}/file")
+def uploads_note_file(note_id: str, _: str = Depends(require_auth)):
+    """The uploaded note itself, to check it is the right one."""
+    _uploads_here()
+    if not re.fullmatch(r"[0-9a-f]{24}", note_id):
+        raise HTTPException(400, "note_id is not valid")
+    n = one("SELECT name, path, content_type FROM uploaded_notes WHERE note_id=?", (note_id,)) if has_table("uploaded_notes") else None
+    if not n or not n["path"] or not os.path.exists(n["path"]):
+        raise HTTPException(404, "No such note.")
+    ctype = n["content_type"] if n["content_type"] in ("application/pdf", "text/plain") else "application/octet-stream"
+    return FileResponse(n["path"], media_type=ctype, headers={"Cache-Control": "no-store", "Content-Disposition":
+                        f"{'inline' if ctype != 'application/octet-stream' else 'attachment'}; filename=note-{note_id[:8]}{os.path.splitext(n['path'])[1]}"})
 
 
 @app.post("/api/modmed/test", dependencies=[Depends(require_xhr)])
@@ -2661,16 +2895,17 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))
         pick = body.get("document_id")
         try:
-            res = modmed.note_for_claim(modmed.client(), key, pick=str(pick) if pick else None, budget=200)
+            res = _note_lookup(key, pick)
         except modmed.NotConfigured:
             return held("no_ema", "EMA is not connected, so the visit note cannot be read: connect it on /setup, or upload the note in the item.")
         except modmed.ModMedError as exc:
             return held("ema_error", f"EMA did not give the note: {exc}")
         if res["status"] == "ambiguous":
-            return held("ambiguous", "EMA has more than one note that day: open the item and pick the right one.",
-                        candidates=res.get("candidates"))
+            return held("ambiguous", ("More than one uploaded note fits that visit" if res.get("source") == "upload" else "EMA has more than one note that day")
+                        + ": open the item and pick the right one.", candidates=res.get("candidates"))
         if res["status"] != "found":
-            return held("no_note", "EMA has no signed note for this visit: sign it in EMA, or upload the note in the item.")
+            return held("no_note", res["reason"] if res.get("source") == "upload" else
+                        "EMA has no signed note for this visit: sign it in EMA, or upload the note on the Upload page or in the item.")
         note = {k: v for k, v in res["note"].items() if k != "data"}
         packet_id = _store_packet(detail, raw_claim, res["note"]["filename"], res["note"]["data"], None, use_ai)["packet_id"]
     out["packet_id"] = packet_id

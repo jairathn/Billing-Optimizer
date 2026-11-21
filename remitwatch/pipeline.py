@@ -1,7 +1,8 @@
 """
 The hands-off pipeline and the scheduler that keeps the site current.
 
-One cycle:  pull new files from Dropbox -> ingest -> detect -> alerts -> notify (-> weekly report)
+One cycle:  pull new files from Dropbox (and TriZetto, and what was uploaded by hand) -> ingest -> detect -> alerts
+            -> notify (-> weekly report)
 
 A cycle can be started three ways and they all go through the same lock, so
 two never overlap:
@@ -159,6 +160,17 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             for k in ("remits", "ema", "claims_837"):
                 ingested[k] = ingested.get(k, 0) + (tz.get(k) or 0)
             heartbeat(store.conn, token)
+        # files uploaded by hand (the Upload page, remitwatch.uploads): the same loader, in the same cycle
+        from . import uploads
+        try:
+            up = uploads.ingest_queued(store, log=beat_log)
+        except Exception as exc:
+            up = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        if up.get("uploads") or up.get("error"):
+            out["uploads"] = up
+            for k in ("remits", "ema", "claims_837"):
+                ingested[k] = ingested.get(k, 0) + (up.get(k) or 0)
+            heartbeat(store.conn, token)
         out["ingest"] = ingested
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
         has_run = bool(store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='detection_runs'").fetchone()) and \
@@ -179,6 +191,13 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             if activity.stale(store.conn):
                 out["activity"] = activity.refresh(store, log=log)
                 heartbeat(store.conn, token)
+        if "detect" in out:             # new items can be the visits of uploaded notes not matched yet
+            try:
+                matched = uploads.rematch(store.conn)
+                if matched:
+                    out["notes_matched"] = matched
+            except Exception as exc:
+                out["notes_matched"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
         out["alerts"] = run_alerts(store.conn)
         out["notified"] = notify(store.conn, log=log) if email else {"sent": 0, "skipped": True}
         every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))

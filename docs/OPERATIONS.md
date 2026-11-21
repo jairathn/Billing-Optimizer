@@ -163,6 +163,38 @@ Without a key the packet is still built, with the template letter and the note a
 
 The review is written to be honest. When the note does not support the level billed it says so, recommends against the appeal, and none of its arguments go into the letter. This live call was not exercised during the build because no API key was available; the request shape follows the SDK documentation and is covered by a test with a stand-in client. Check the first few packets by hand.
 
+### Until ModMed's API is approved: EMA by hand (the Upload page, on the server)
+
+While ModMed's approval of the Bulk FHIR app and the synapSYS application is pending, the practice brings EMA's side in by
+hand. On the server, open **Upload from EMA** at the top of the dashboard (`https://<the site>/upload`; the same login).
+The page has its own guide; in short:
+
+1. **Every week (say Monday), three reports from EMA, the last six weeks by date of service, saved as Excel:**
+   **Encounter & Charge Lines** in the full layout (Service Date, Patient ID, Bill ID, Bill Creation Date, Claim ID, Bill
+   Item Identifier, CPT/Product, Modifiers, Units, Charges, Insurance Payments, Activity Type, Primary Provider, Payer,
+   Location); **ERA & Payment Line Adjustments** (Claim ID, CPT, Service Date, Reason Code, RARC Code, Adjustment Status and
+   Subtype, Adjustments, Payments, Transaction Date); **Claim & Claim Status** with the Patient ID column added. These are
+   the reports the practice already saves to the Dropbox folder. Drop the three files on the page (several at once, or a
+   .zip). CSV works too; Excel is best.
+2. **Visit notes, as items need them:** the page lists the open items that rest on the visit note ("Visit notes appeals are
+   waiting for"). For each, open the patient's visit in EMA on that date of service and save the signed note as a PDF;
+   drop the PDFs on the page together. Each is matched to its visit by the patient's name and the date of service it
+   states (a scanned page has no text: use the row's Attach note button). Then the appeal goes as it would with a note
+   from EMA's API: "Use the note uploaded from EMA" in the item, "Build packets from the uploaded notes" on the Worklist,
+   or Appeal everything appealable.
+3. **Remittances, only when they stop coming:** download the missing ERA (835) files from TriZetto's portal and drop them
+   on the page.
+
+What happens: each export and remittance file is kept in the upload folder beside the store (`/data/uploads`) and read by
+the next cycle (it starts within about a minute of an upload) with the same loader as a file from Dropbox; the worklist
+follows when that cycle's analysis finishes. Each upload says what was in the file, what was new, what RemitWatch had
+already, and what it left out and why (the report's title lines, a totals line, a row repeated exactly, columns it does
+not use, columns it needs that are missing). Uploading the same file again changes nothing. A note is kept the same way
+and becomes one more place the appeal's note lookup searches, ahead of EMA's API: the same matching rules (the right
+patient only; a progress note before a procedure note; a person picks when two still fit). Nothing uploaded is emailed or
+sent anywhere. Uploads are a server's: on the Vercel site the page says so, and the exports keep going to the Dropbox
+folder.
+
 ### Faxing appeals
 
 With a fax line connected, an appeal goes to the payer in one click and is chased until the claim is paid or decided.

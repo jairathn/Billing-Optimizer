@@ -13,7 +13,7 @@ const FAX_DECISION = {overturned:['Overturned','ok'], partially_overturned:['Par
 const HOLDS = [
   ['practice', 'The practice\'s details are missing from the letters'], ['no_fax', 'The fax line is not set up'],
   ['stale', 'The remittances are behind: these may have been paid since'], ['check_code', 'Check in EMA which code went out first (open each one)'], ['no_number', 'No fax number saved for the payer'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
-  ['ambiguous', 'More than one note that day: pick one in the item'], ['no_note', 'No signed note in EMA yet'],
+  ['ambiguous', 'More than one note that day: pick one in the item'], ['no_note', 'No visit note yet (from EMA, or uploaded on the Upload page)'],
   ['review_no', 'Claude\'s review: the note does not support it (counted in Suggested templates)'], ['review_fix', 'Correct and resubmit instead'],
   ['blanks', 'The letter still has blanks'], ['fax_error', 'The fax line refused it'], ['expired', 'Filing window closed'],
   ['not_appealable', 'Not something a letter settles'], ['no_claim', 'Not tied to one claim'], ['no_packet', 'Packet missing'], ['failed', 'Failed']];
@@ -107,7 +107,10 @@ async function appealEverything(opts){
   const warn = [];
   if(!a.fax) warn.push('The fax line is not set up yet (SRFax: SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD, SRFAX_CALLER_ID in the host\'s settings). Nothing can go until it is.');
   if((a.practice_missing||[]).length) warn.push('The letters still lack the practice\'s details: set ' + a.practice_missing.join(', ') + '.');
-  if(needNote && !a.modmed) warn.push(`${pl(needNote, 'item')} need${needNote===1?'s':''} the visit note and EMA is not connected: those are held. The rate ones still go.`);
+  const byHand = typeof state !== 'undefined' && state.meta && state.meta.uploads;      // a server takes the notes by hand
+  if(needNote && !a.modmed) warn.push(byHand
+    ? `${pl(needNote, 'item')} need${needNote===1?'s':''} the visit note: the ones whose note was uploaded from EMA (the Upload page) go; the others are held until it is. The rate ones still go.`
+    : `${pl(needNote, 'item')} need${needNote===1?'s':''} the visit note and EMA is not connected: those are held. The rate ones still go.`);
   if(needNote && !a.review) warn.push('Claude\'s review is off (ANTHROPIC_API_KEY): letters that rest on the note keep their blanks and are held.');
   const body = `<div class="small" style="margin:6px 0"><b>${pl(a.items.length, 'item')}</b> · ${money(all$)}: every open item a letter settles (the visit note, the coding rules, or the payer's own rate), inside its filing window and not faxed yet.</div>
     ${warn.map(w=>`<div class="small sev-medium">${esc(w)}</div>`).join('')}

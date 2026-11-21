@@ -159,19 +159,121 @@ def export_created(path: str) -> str | None:
     return m.group(1) + "Z" if m else None
 
 
-def read_export(path: str) -> tuple[list[dict], str, str]:
-    """Return (rows as dicts keyed by canonical column name, family, sha256 of the file). First sheet only."""
+HEADER_SCAN = 25        # rows searched for the column names (a report's title and filter lines sit above them)
+TEXT_EXPORTS = (".csv", ".tsv")
+# rows with none of these say nothing about a claim, a bill, a patient or a day: a totals line or a footer
+ROW_KEYS = ("claim_id", "bill_id", "bill_item_id", "patient_id", "service_date", "transaction_date", "posted_date", "bill_created",
+            "claim_submission_date", "denial_date", "cpt")
+TOTAL_LINE = re.compile(r"^\s*(grand\s+|report\s+|sub-?\s*)?totals?\b", re.I)
+
+
+def _csv_cell(v: str) -> Any:
+    """A cell of a CSV export as the spreadsheet would hold it, so the same rows read from a CSV and from an .xlsx come out
+    the same: numbers as numbers (with $, thousands commas and (negative) amounts), dates and times as datetimes, TRUE and
+    FALSE as booleans. A number with a leading zero stays text (an identifier, as a spreadsheet keeps it)."""
+    import datetime as _dt
+
+    t = (v or "").strip()
+    if not t:
+        return None
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?)?", t)
+    if m:
+        try:
+            hh = int(m.group(4) or 0)
+            if m.group(7):
+                hh = hh % 12 + (12 if m.group(7).lower() == "pm" else 0)
+            y = int(m.group(3))
+            y = y if len(m.group(3)) == 4 else (2000 + y if y < 30 else 1900 + y)        # a two-digit year as Excel reads it
+            return _dt.datetime(y, int(m.group(1)), int(m.group(2)), hh, int(m.group(5) or 0), int(m.group(6) or 0))
+        except ValueError:
+            return t
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?", t)
+    if m:
+        try:
+            return _dt.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4) or 0), int(m.group(5) or 0), int(m.group(6) or 0))
+        except ValueError:
+            return t
+    if t.upper() in ("TRUE", "FALSE"):
+        return t.upper() == "TRUE"
+    m = re.fullmatch(r"(\()?\s*(-)?\s*\$?\s*(-)?\s*((?:\d{1,3}(?:,\d{3})+)|\d+)(\.\d+)?\s*(\))?", t)
+    if m and bool(m.group(1)) == bool(m.group(6)):
+        whole, frac = m.group(4).replace(",", ""), m.group(5) or ""
+        if len(whole) > 1 and whole.startswith("0") and not frac and "," not in m.group(4) and "$" not in t:
+            return t                                # 00123: an identifier
+        neg = bool(m.group(1)) ^ bool(m.group(2)) ^ bool(m.group(3))
+        num: Any = float(whole + frac) if frac else int(whole)
+        return -num if neg else num
+    return t
+
+
+def _decode(data: bytes) -> str:
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
+
+
+def _csv_rows(data: bytes) -> list[list]:
+    """The rows of a delimited text export (comma, tab, pipe or semicolon), cells typed as a spreadsheet would type them."""
+    import csv
+    import io
+
+    text = _decode(data)
+    sample = text[:65536]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t|;")
+        delim = dialect.delimiter
+    except csv.Error:
+        counts = {d: sample.count(d) for d in (",", "\t", "|", ";")}
+        delim = max(counts, key=counts.get) if any(counts.values()) else ","
+    return [[_csv_cell(c) for c in r] for r in csv.reader(io.StringIO(text, newline=""), delimiter=delim)]
+
+
+def is_text_export(path: str) -> bool:
+    return path.lower().endswith(TEXT_EXPORTS)
+
+
+def _raw_rows(path: str, data: bytes) -> list[list]:
+    if is_text_export(path):
+        return _csv_rows(data)
+    import io
+
     import openpyxl
 
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        return [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+
+
+def header_row(raw: list[list]) -> int:
+    """Where the column names are: the row among the first HEADER_SCAN that names the most columns this module knows
+    (at least three), else the first of the first ten with five or more text cells, as the reader always did."""
+    best, best_n = 0, 0
+    for i in range(min(HEADER_SCAN, len(raw))):
+        n = sum(1 for v in raw[i] if isinstance(v, str) and v.lower().strip() in CANON)
+        if n > best_n:
+            best, best_n = i, n
+    if best_n >= 3:
+        return best
+    for i in range(min(10, len(raw))):
+        if sum(isinstance(v, str) for v in raw[i]) >= 5:
+            return i
+    return 0
+
+
+def read_export_detail(path: str) -> dict:
+    """Everything read_export returns, and what the file holds above and around its rows: {'rows', 'family', 'sha256',
+    'header_index', 'columns' (as the file names them), 'canon' (the names they map to), 'above' (non-empty lines above the
+    column names: the report's title and filters), 'format'}. First sheet only."""
     with open(path, "rb") as fh:
         data = fh.read()
     sha = hashlib.sha256(data).hexdigest()
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    try:
-        ws = wb.worksheets[0]
-        raw = [list(r) for r in ws.iter_rows(values_only=True)]
-    finally:
-        wb.close()
+    raw = _raw_rows(path, data)
     # A sheet often declares more columns and rows than it uses. Keep only up to the last cell that holds something:
     # a row's identity (its fingerprint) is built from its columns, and empty ones must not change it from file to file.
     def used(r: list) -> int:
@@ -185,11 +287,7 @@ def read_export(path: str) -> tuple[list[dict], str, str]:
     raw = raw[:len(widths)]
     width = max(widths, default=0)
     raw = [r[:width] + [None] * (width - len(r)) for r in raw]
-    hdr = 0
-    for i in range(min(10, len(raw))):
-        if sum(isinstance(v, str) for v in raw[i]) >= 5:
-            hdr = i
-            break
+    hdr = header_row(raw)
     header = raw[hdr] if raw else []
     names: list[str] = []
     seen: dict[str, int] = {}
@@ -207,15 +305,44 @@ def read_export(path: str) -> tuple[list[dict], str, str]:
     for r in raw[hdr + 1:]:
         r = list(r) + [None] * (len(canon) - len(r))
         rows.append({canon[i]: r[i] for i in range(len(canon))})
-    return rows, family, sha
+    above = sum(1 for r in raw[:hdr] if any(_clean(v) is not None for v in r))
+    return {"rows": rows, "family": family, "sha256": sha, "header_index": hdr, "columns": names, "canon": canon, "above": above,
+            "format": "csv" if is_text_export(path) else "xlsx"}
 
 
-def iter_rows(path: str) -> Iterator[dict]:
-    """Yield canonical row dicts (cents, ISO dates, modifier lists) ready for the store."""
-    records, family, sha = read_export(path)
+def read_export(path: str) -> tuple[list[dict], str, str]:
+    """Return (rows as dicts keyed by canonical column name, family, sha256 of the file). First sheet only."""
+    d = read_export_detail(path)
+    return d["rows"], d["family"], d["sha256"]
+
+
+def _row_kind(rec: dict, keyed: bool) -> str:
+    """'row', 'blank', 'total' (a totals line) or 'footer' (a line naming no claim, bill, patient, code or day). A totals
+    line usually writes "Total" in its first column, which is often the date of service: that word names nothing."""
+    vals = [_clean(v) for v in rec.values()]
+    if all(v is None for v in vals):
+        return "blank"
+    label = lambda v: isinstance(v, str) and bool(TOTAL_LINE.match(v))      # noqa: E731
+    if keyed and all(_clean(rec.get(k)) is None or label(_clean(rec.get(k))) for k in ROW_KEYS if k in rec):
+        return "total" if any(label(v) for v in vals) else "footer"
+    return "row"
+
+
+def iter_rows(path: str, account: dict | None = None) -> Iterator[dict]:
+    """Yield canonical row dicts (cents, ISO dates, modifier lists) ready for the store. Blank lines, a totals line and a
+    footer (a line naming no claim, bill, patient, code or day) are left out; `account`, when given, is filled with what
+    the file held: the detail of read_export_detail and the count of each kind of line left out."""
+    d = read_export_detail(path)
+    records, family, sha = d["rows"], d["family"], d["sha256"]
+    keyed = any(k in ROW_KEYS for k in d["canon"])      # a layout with none of these columns has no way to tell a footer
     name = os.path.basename(path)
+    left = {"blank": 0, "total": 0, "footer": 0}
+    if account is not None:
+        account.update({k: v for k, v in d.items() if k != "rows"}, left=left, rows=0)
     for idx, rec in enumerate(records):
-        if all(_clean(v) is None for v in rec.values()):
+        kind = _row_kind(rec, keyed)
+        if kind != "row":
+            left[kind] += 1
             continue
         row: dict[str, Any] = {"family": family, "source_sha256": sha, "source_name": name, "row_index": idx}
         for k, v in rec.items():
@@ -239,18 +366,17 @@ def iter_rows(path: str) -> Iterator[dict]:
                     row["units"] = None
             else:
                 row[k] = _text(v)
-        # rename to table column names
-        if "allowed_cents" in row:
-            pass
         fp_fields = sorted((k, str(v)) for k, v in row.items() if k not in ("source_sha256", "source_name", "row_index"))
         row["row_fingerprint"] = hashlib.sha256(json.dumps(fp_fields).encode()).hexdigest()
+        if account is not None:
+            account["rows"] += 1
         yield row
 
 
 def iter_export_paths(root: str) -> Iterator[str]:
     for dirpath, _dirs, files in os.walk(root):
         for n in files:
-            if n.lower().endswith(".xlsx") and not n.startswith("~$"):
+            if n.lower().endswith(".xlsx") and not n.startswith("~$"):        # a CSV export comes in only by upload
                 yield os.path.join(dirpath, n)
 
 
