@@ -123,11 +123,19 @@ for a in "$@"; do
     *"SELECT 1 FROM transactions"*) args+=("<store-state>") ;;
     *"DELETE FROM meta WHERE key LIKE"*) args+=("<clear-locks>") ;;
     *"SELECT key, value FROM meta"*) args+=("<run-locks>") ;;
+    *"import password_days"*) args+=("<password-days>") ;;
     *$'\n'*) args+=("<code>") ;;
     *) args+=("$a") ;;
   esac
 done
 echo "${args[*]}" >> "$LOGDIR/docker.log"
+for ((i = 1; i <= $#; i++)); do              # python given with -c: the app's own code runs as it would in its image
+  if [ "${!i}" = -c ]; then
+    j=$((i + 1)); code=${!j}; shift "$j"
+    case "$code" in *"remitwatch.insights import password_days"*) PYTHONPATH="$REPO" exec "$PY" -c "$code" "$@" ;; esac
+    break
+  fi
+done
 case "${args[*]}" in
   *"<store-state>"*) cat "$LOGDIR/store" 2>/dev/null ;;
   *import-cloud*) [ -f "$LOGDIR/import_fails" ] && { echo "Dropbox could not be reached."; exit 1; } ;;
@@ -217,7 +225,7 @@ def _configure_repo(tmp_path):
     for f in ("docker", "systemctl"):
         (bindir / f).chmod(0o755)
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", REMITWATCH_DEPLOY_STATE=str(tmp_path / "deploy-state"),
-               LOGDIR=str(tmp_path), TERM="dumb", REMITWATCH_DEPLOY_POLL="0")
+               LOGDIR=str(tmp_path), TERM="dumb", REMITWATCH_DEPLOY_POLL="0", REPO=HERE, PY=sys.executable)
     return repo, env
 
 
@@ -307,19 +315,19 @@ def test_passwords_the_site_would_refuse_are_asked_for_again(tmp_path):
     assert "short1" not in screen and "a-long-enough-pass-1" not in screen
 
 
-def _shell_function(path, name):
-    text = open(os.path.join(HERE, path)).read()
-    return re.search(rf"^{name}\(\) \{{.*?^\}}\n", text, re.S | re.M).group(0)
-
-
-@pytest.mark.parametrize("words,days", [
-    ("90 days (3 months)", 90), ("Expires every 180 days, i.e. 6 months", 180), ("3 months (90 days)", 90), ("1 yr", 365),
-    ("6 months", 180), ("8 weeks", 56), ("90-day", 90), ("annually", 365), ("every quarter", 91), ("never", 0),
-    ("Passwords do not expire", 0), ("60", 60), ("", 0)])
-def test_a_password_lifetime_is_read_from_trizettos_own_words(words, days):
-    fn = _shell_function("deploy/aws/configure.sh", "days_of")
-    r = subprocess.run(["bash", "-c", fn + 'days_of "$1"', "-", words], capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0 and r.stdout.strip() == str(days), (words, r.stdout, r.stderr)
+def test_a_password_lifetime_in_trizettos_words_is_read_by_the_apps_own_rules(tmp_path):
+    """configure.sh stores a number of days, read by remitwatch.insights.password_days (the rule the data checks use),
+    and asks again for words that rule cannot read instead of storing 0, which would turn the reminder off."""
+    repo, env = _configure_repo(tmp_path)
+    (tmp_path / "store").write_text("data\n")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {
+        "TRIZETTO_SFTP_PASSWORD_DAYS": ["bi-annually", "365 days (1 year)"], "AUTODEPLOY": "n"})
+    assert code == 0, screen[-1500:]
+    assert "could not be read as a number of days" in screen and "noted as 365 days" in screen
+    assert _env_values(repo)["TRIZETTO_SFTP_PASSWORD_DAYS"] == "365"
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {
+        "TRIZETTO_SFTP_PASSWORD_DAYS": "six months", "AUTODEPLOY": "n"})
+    assert code == 0 and _env_values(repo)["TRIZETTO_SFTP_PASSWORD_DAYS"] == "180"
 
 
 def test_configure_sh_python_finds_data_and_clears_run_locks(tmp_path):

@@ -1300,3 +1300,22 @@ def test_srfax_finds_a_fax_in_its_outbox():
     with pytest.raises(fax.FaxError) as e:
         line.send("(800) 555-0142", pdf_of("appeal"), "x.pdf")
     assert e.value.maybe_sent is True               # no answer: it may have gone out
+
+
+def test_a_follow_up_never_sends_again_a_note_taken_back(site):
+    c, line = site.c, site.line
+    note_id, rate = site.ids["DENIED_MEDICAL_NECESSITY"], site.ids["UNDERPAID_VS_OWN_RATE"]
+    _number(c, PAYER_FAX)
+    up = c.post(f"/api/uploads?name=visit.txt&finding_id={note_id}", content=b"Changing lesion, enlarging over three months. Biopsy. UPLOADED",
+                headers=XHR).json()
+    for fid in (note_id, rate):
+        assert _send(c, fid)["status"] == "sent"
+    assert "UPLOADED" in pdf_text(line.to(PAYER_FAX)[0]["pdf"])        # the appeal went with the uploaded note
+    line.deliver_all()
+    c.post("/api/faxes/refresh", headers=XHR)
+    assert c.post(f"/api/uploads/notes/{up['note_id']}/remove", headers=XHR).json()["removed"] is True
+    _age(site.db, 40)
+    r = {x["finding_id"]: x for x in c.post("/api/faxes/follow_up", json={}, headers=XHR).json()["results"]}
+    assert r[note_id]["status"] == "held" and "taken back" in r[note_id]["reason"]
+    assert r[rate]["status"] == "sent"                  # the rate letter rests on no note: its request goes
+    assert not any("UPLOADED" in pdf_text(s["pdf"]) for s in line.to(PAYER_FAX)[2:])

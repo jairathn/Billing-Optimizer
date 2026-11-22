@@ -36,7 +36,9 @@ The same as on Vercel, wherever Vercel has them:
   to `serverless` on Vercel while this server runs.
 - `TRIZETTO_SFTP_USER`, `TRIZETTO_SFTP_PASSWORD`, `TRIZETTO_SFTP_HOST`, `TRIZETTO_SFTP_PORT`, `TRIZETTO_SFTP_DIRS`,
   `TRIZETTO_SFTP_HOSTKEY` (only if set up); `TRIZETTO_SFTP_PASSWORD_SET` (written by configure.sh when a new password is
-  entered) and `TRIZETTO_SFTP_PASSWORD_DAYS` (how long TriZetto lets it last, in days), for the reminder before it expires
+  entered) and `TRIZETTO_SFTP_PASSWORD_DAYS` (how long TriZetto lets it last, in days), for the reminder before it expires.
+  `TRIZETTO_SFTP_SERVERLESS` stays unset here (the server always reads TriZetto), and on Vercel too unless Vercel is the
+  only site reading TriZetto.
 - `CRON_SECRET`: optional on a server (only an outside caller of `/api/cron/` needs it)
 - Tuning, only if Vercel sets them: `REMITWATCH_REPORT_EVERY_DAYS`, `REMITWATCH_STALE_DAYS`, `REMITWATCH_ALERT_RECENT_DAYS`,
   `REMITWATCH_ALERT_BASELINE_DAYS`, `REMITWATCH_NOTE_MODEL`, `REMITWATCH_NOTE_SCRUB`, `REMITWATCH_NOTE_SEND_SCANS`,
@@ -255,8 +257,8 @@ To update at once instead of waiting for the night: `sudo systemctl start remitw
 - An export or remittance file waits (`uploads` table, status `queued`) for the next cycle, which reads it with the
   Dropbox loader and notes what it added; the upload wakes the scheduler, which waits its usual 45 seconds for the rest of
   a batch. To read waiting files at once: `sudo docker compose exec app python -m remitwatch.cli cycle`.
-- Caddy accepts up to 260 MiB (272,629,760 bytes) on `/api/uploads`, more than the app's own limit of 250 MiB per file,
-  and 20 MB everywhere else.
+- Caddy accepts up to 260 MiB (272,629,760 bytes) on `/api/uploads`, more than the app's own limits (240 MiB per upload,
+  60 MiB per EMA export), so a file too large gets the app's own plain answer. Everywhere else Caddy takes up to 20 MB.
 - Backups: the store's daily copy holds what was read from the files and the record of every upload; the files themselves
   are on the same volume and are covered by its daily snapshot (below).
 

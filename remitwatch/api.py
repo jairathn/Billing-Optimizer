@@ -2924,18 +2924,19 @@ def _same_name(a: str | None, b: str | None) -> bool:
     return bool(n(a)) and n(a) == n(b)
 
 
-def _packet_problem(packet_id: str | None, f: dict) -> str | None:
-    """Why a stored packet must not be faxed as it is (it can be built again, or a person takes it), or None: the note an
-    uploaded packet rests on was taken back, matched again, or followed by another note for the visit since it was built;
-    or Claude's review in it was written before its quotations were checked against the note."""
+def _packet_problem(packet_id: str | None, f: dict, first: bool = False) -> str | None:
+    """Why a stored packet must not be faxed as it is (it can be built again, or a person takes it), or None: the uploaded
+    note it rests on was taken back or matched to a visit again since it was built; or Claude's review in it was written
+    before its quotations were checked against the note. first: before its first fax, another note uploaded for the visit
+    since counts too (the packet is built again, and a person picks when two notes fit)."""
     meta = _packet_meta(packet_id) if packet_id else None
     if not meta:
         return "The packet cannot be found."
     a = meta.get("analysis") or {}
     if a.get("mode") == "ai" and "quote_check" not in a:
         return "It was built before Claude's quotations were checked against the note."
-    if runtime.serverless() or not has_table("uploaded_notes"):
-        return None         # notes are uploaded on a server only
+    if runtime.serverless() or not has_table("uploaded_notes") or meta.get("mode") == "letter":
+        return None         # notes are uploaded on a server only; a letter on the payer's own rate rests on no note
     built, sha = meta.get("created_at") or "", meta.get("note_sha256")
     if sha:
         up = one("SELECT status FROM uploads WHERE upload_id=?", (sha,)) if has_table("uploads") else None
@@ -2946,7 +2947,7 @@ def _packet_problem(packet_id: str | None, f: dict) -> str | None:
             return "The note it was built from is no longer matched to a visit."
         if n and (n.get("matched_at") or "") > built:
             return "The note it was built from was matched to a visit again since."
-    claim = one("SELECT patient_last FROM claims WHERE claim_key=?", (f.get("claim_key"),)) if f.get("claim_key") else None
+    claim = one("SELECT patient_last FROM claims WHERE claim_key=?", (f.get("claim_key"),)) if (first and f.get("claim_key")) else None
     if claim and f.get("service_date"):
         for r in rows("""SELECT patient_last, matched_at FROM uploaded_notes WHERE status='matched' AND service_date=? AND COALESCE(sha256,'') != ?""",
                       (f["service_date"], sha or "")):
@@ -3324,7 +3325,7 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     pk = None if body.get("rebuild") else next(iter(_packets_for(fid)), None)
     if pk and pk.get("mode") == "template" and use_ai and os.environ.get("ANTHROPIC_API_KEY") and kind != "rate":
         pk = None           # built before the review could run: now it can
-    if pk and _packet_problem(pk["packet_id"], f):
+    if pk and _packet_problem(pk["packet_id"], f, first=True):
         pk = None           # its note was taken back or replaced, or its quotations were never checked: built again from the note now
     note = None
     if pk:
@@ -3354,7 +3355,7 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     p = _stored_packet(packet_id)
     if not p or not p.get("pdf"):
         return held("no_packet", "The packet could not be read back. Try again.")
-    why = _packet_problem(packet_id, f)
+    why = _packet_problem(packet_id, f, first=True)
     if why and "quotations" not in why:
         return held("no_packet", f"The packet cannot go: {why} Build it again in the item.")
     a = p.get("analysis") or {}
@@ -3582,7 +3583,7 @@ def _retry(prov, r: dict, doc: dict) -> str:
         _mark_held(r, doc, hold)
         return "held"
     p = _stored_packet(r["packet_id"]) if r["packet_id"] else None
-    why = "The packet that was faxed cannot be found." if not p or not p.get("pdf") else _packet_problem(r["packet_id"], f)
+    why = "The packet that was faxed cannot be found." if not p or not p.get("pdf") else _packet_problem(r["packet_id"], f, first=r["purpose"] == "appeal")
     if why:
         _mark_held(r, doc, f"It was not tried again: {why} Open the item and send it by hand.")
         return "held"

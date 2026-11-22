@@ -49,13 +49,13 @@ fits() {    # name value: says why the value cannot be used, and fails (the site
 }
 
 ask() {     # name kind question [default]. kind: text; secret; password (made when left empty, and shown once to be
-            # written down); gen (made when left empty, never shown); pem (a private key, pasted). A value that cannot
-            # be used is asked for again; Enter keeps what is there.
+            # written down); gen (made when left empty, never shown); pem (a private key, pasted); days (a number of
+            # days, or TriZetto's words for it). A value that cannot be used is asked for again; Enter keeps what is there.
   local name=$1 kind=$2 question=$3 default=${4:-} cur value line why
   cur=$(current "$name")
   while :; do
     case "$kind" in
-      text)   printf "\n%s\n  %s [%s]: " "$question" "$name" "${cur:-${default:-not set}}"; IFS= read -r value ;;
+      text|days) printf "\n%s\n  %s [%s]: " "$question" "$name" "${cur:-${default:-not set}}"; IFS= read -r value ;;
       secret|password|gen)
               printf "\n%s\n  %s, %s%s: " "$question" "$name" "$(masked "$cur")" "$([ "$kind" != secret ] && [ -z "$cur" ] && echo ', Enter makes one')"
               IFS= read -rs value; echo ;;
@@ -82,39 +82,21 @@ ask() {     # name kind question [default]. kind: text; secret; password (made w
       fi
     fi
     [ -z "$value" ] && return 0
+    if [ "$kind" = days ] && [ -n "${value//[0-9]/}" ]; then
+      line=$(lifetime_days "$value")
+      if [ -z "$line" ]; then
+        echo "  That could not be read as a number of days. Type the number of days (0 if it never expires)."
+        continue
+      fi
+      echo "  noted as $line days$([ "$line" = 0 ] && echo ' (no reminder)')"
+      value=$line
+    fi
     if why=$(fits "$name" "$value"); then
       put "$name" "$value"
       return 0
     fi
     echo "  $name $why. Type it again, or press Enter to keep it as it is."
   done
-}
-
-days_of() {   # how long a password lasts, in days, from TriZetto's own words: the number written with the first unit word
-              # ("90 days (3 months)" is 90, "1 yr" is 365), a unit word alone counts one ("annually"), "never" is 0
-  local t n="" u=""
-  t=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
-  case "$t" in *never*|*"not expire"*|*"no expir"*) echo 0; return ;; esac
-  read -r n u < <(grep -oE '[0-9]+[ -]*(days?|weeks?|wks?|months?|mos?|quarters?|years?|yrs?)' <<<"$t" | head -n 1 \
-                  | sed -E 's/^([0-9]+)[ -]*([a-z]+)$/\1 \2/') || true
-  if [ -z "$n" ]; then
-    n=$(grep -oE '[0-9]+' <<<"$t" | head -n 1 || true)
-    case "$t" in
-      *year*|*annual*|*yr*) u=year ;;
-      *quarter*) u=quarter ;;
-      *month*) u=month ;;
-      *week*) u=week ;;
-      *) u=day ;;
-    esac
-    if [ -z "$n" ]; then [ "$u" = day ] && { echo 0; return; }; n=1; fi
-  fi
-  case "$u" in
-    d*) echo $(( 10#$n )) ;;
-    w*) echo $(( 10#$n * 7 )) ;;
-    m*) echo $(( 10#$n * 30 )) ;;
-    q*) echo $(( 10#$n * 91 )) ;;
-    *)  echo $(( 10#$n * 365 )) ;;
-  esac
 }
 
 # python run in the app's image: whether this server's store already holds remittances (it then never takes the Vercel
@@ -138,7 +120,14 @@ if os.path.exists(p) and os.path.getsize(p) > 0:
         c.commit()
     except sqlite3.OperationalError:
         pass'
+PASSWORD_DAYS='import sys
+from remitwatch.insights import password_days
+d = password_days(sys.argv[1])
+print("" if d is None else d)'
 store_state() { docker compose run --rm --no-deps -T app python -c "$STORE_STATE" 2>/dev/null | tail -n 1 || true; }
+lifetime_days() {   # TriZetto's words for how long a password lasts, read by the app itself; nothing when it cannot tell
+  docker compose run --rm --no-deps -T app python -c "$PASSWORD_DAYS" "$1" 2>/dev/null | tail -n 1 || true
+}
 
 echo "RemitWatch settings. Press Enter to keep a value. The names are the ones on Vercel (Settings, Environment Variables)."
 
@@ -175,23 +164,14 @@ ask MODMED_PRIVATE_KEY pem "ModMed private key (the one from modmed-key)"
 echo; echo "== TriZetto, the remittances straight from the clearinghouse (optional until TriZetto issues the login)"
 ask TRIZETTO_SFTP_HOST text "TriZetto SFTP server, if TriZetto names one (empty: its usual one, sftp.gatewayedi.com)"
 ask TRIZETTO_SFTP_PORT text "TriZetto SFTP port, if TriZetto names one (empty: 22)"
-ask TRIZETTO_SFTP_USER text "TriZetto SFTP user (the Site ID, or the separate login TriZetto issues for RemitWatch)"
+ask TRIZETTO_SFTP_USER text "TriZetto SFTP user: the login TriZetto issued for RemitWatch (the Site ID's own login only after ModMed has confirmed it is safe, docs/TRIZETTO_REQUEST.md step 3)"
 tz_before=$(current TRIZETTO_SFTP_PASSWORD)
 ask TRIZETTO_SFTP_PASSWORD secret "TriZetto SFTP password"
 if [ -n "$(current TRIZETTO_SFTP_PASSWORD)" ] && [ "$(current TRIZETTO_SFTP_PASSWORD)" != "$tz_before" ]; then
   put TRIZETTO_SFTP_PASSWORD_SET "$(date -u +%F)"      # for the reminder before it expires (the data checks)
   echo "  noted: changed on $(date -u +%F)"
 fi
-ask TRIZETTO_SFTP_PASSWORD_DAYS text "How many days a TriZetto SFTP password lasts before TriZetto makes you change it (from TriZetto's answer; 0 if it never expires)"
-tz_days=$(current TRIZETTO_SFTP_PASSWORD_DAYS)
-case "$tz_days" in
-  ""|*[!0-9]*)                    # TriZetto's words: "90 days (3 months)" -> 90, "1 yr" -> 365, "8 weeks" -> 56, "never" -> 0
-    if [ -n "$tz_days" ]; then
-      tz_d=$(days_of "$tz_days")
-      put TRIZETTO_SFTP_PASSWORD_DAYS "$tz_d"
-      echo "  noted as $tz_d days$([ "$tz_d" = 0 ] && echo ' (no reminder)'). If that is not right, run this again and type the number of days."
-    fi ;;
-esac
+ask TRIZETTO_SFTP_PASSWORD_DAYS days "How many days a TriZetto SFTP password lasts before TriZetto makes you change it (the number, or TriZetto's own words; 0 if it never expires)"
 ask TRIZETTO_SFTP_DIRS text "Folder(s) the remittances are in, comma-separated (empty: the whole login folder)"
 ask TRIZETTO_SFTP_HOSTKEY text "The SFTP server's key fingerprints TriZetto gives (SHA256:... or MD5:..., several separated by commas), optional"
 

@@ -367,7 +367,7 @@ async function tieFaxHtml(d, id){
     const order = [...all.filter(named), ...all.filter(x => !named(x) && !x.finding_id), ...all.filter(x => !named(x) && x.finding_id)];
     if(!order.length){ box.className = 'small muted'; box.textContent = 'No fax that came in is left to tie here.'; return; }
     box.className = 'small';
-    box.innerHTML = `<select id="fxTieSel">${order.map(x=>`<option value="${esc(x.fax_key)}">${named(x) ? 'Names this item · ' : x.finding_id ? 'Tied to another item · ' : ''}${esc(String(x.created_at||'').slice(0,10))} · ${esc(fax10(x.number))} · ${esc(FAX_DOC[x.purpose]||x.purpose||'')} · ${esc((x.summary||x.error||'').slice(0,80))}${(x.claim_numbers||[]).length ? ' · claim ' + esc(x.claim_numbers.join(', ')) : ''}</option>`).join('')}</select>
+    box.innerHTML = `<select id="fxTieSel">${order.map(x=>`<option value="${esc(x.fax_key)}">${named(x) ? 'Names this item · ' : x.finding_id ? 'Tied to another item · ' : ''}${esc(String(x.created_at||'').slice(0,10))} · ${esc(fax10(x.number))} · ${esc(FAX_DOC[x.purpose]||x.purpose||'')} · ${esc((x.summary||x.error||'').slice(0,80))}${(x.claim_numbers||[]).length ? ' · claim ' + esc(x.claim_numbers.join(', ')) : ''}${x.patient ? ' · ' + esc(x.patient) : ''}</option>`).join('')}</select>
       <select id="fxTieSays"><option value="">What it says (when it was not read)</option>${FAX_SAYS.map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join('')}</select> <button id="fxTieGo">Tie to this item</button>`;
     box.querySelector('#fxTieGo').onclick = async () => {
       const says = box.querySelector('#fxTieSays').value;
