@@ -423,3 +423,203 @@ async function setFindingStatus(id, status, shortfall, signal){
   else if(status==='lost'){ const n = prompt('Why was it lost? (optional note)'); if(n===null) return false; if(n) body.notes = n; }
   await post('/api/findings/'+id+'/status', body); return true;
 }
+
+// ---------------------------------------------------------------- an item's verdict, next step and story (remitwatch.story)
+// Asked for beside the item itself (/api/findings/{id}/explain), so the panel opens at once. What happened and how sure the
+// site is, then what to do next with its one main button (the rest under More), then the evidence row by row with the
+// balance line, folded until asked for. The same words for the states as everywhere else.
+const XP_STATE = {work_now:['Work now','xs-now'], waiting:['Waiting','xs-wait'], done:['Done','xs-done'], accepted:['Accepted','xs-quiet'],
+  expired:['Expired','xs-quiet'], cant_check:["Can't be checked",'xs-warn']};
+const XP_STRENGTH = {proven:'Proven: two sources agree', one_source:'From one source', inferred:'Inferred'};
+const XP_SOURCE = {'835':'835', production:'EMA posting', ar:'EMA A/R', weekly:'EMA export', claim_status:'Claim status', remitwatch:'RemitWatch'};
+const XP_BUTTON = {build_packet:'Build the appeal packet', attach_note:'Attach the visit note', find_note:'Find the note in EMA', upload_note:'Upload the note',
+  fax_payer:'Fax it to the payer', copy_instructions:'Copy the steps', mark_sent:'Mark sent', log_outcome:'Log what happened', mark_posted:'Mark posted in EMA',
+  mark_billed:'Mark billed', accept_pattern:'Accept this pattern', let_go:'Let go', reopen:'Reopen', request_era:'Copy the ERA request', open_in_ema:'Open in EMA'};
+// the one button that moves the item on, the first of these its next step offers (fax only once a packet can be read first)
+const XP_FIRST = ['fax_payer','build_packet','mark_posted','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
+const XP_OUTCOME = {auto_written_off:'Auto write-off', written_off_while_pending:'Written off while pending', lost_to_timely_filing:'Lost to late filing'};
+
+function xpPrimary(nx, hasPacket){
+  const b = (nx && nx.buttons) || [];
+  if(b.includes('fax_payer') && hasPacket) return 'fax_payer';
+  // a correction made in EMA: read the steps, do it there, then mark it sent
+  if(['corrected','eob_first'].includes(nx.route) && b.includes('mark_sent')) return 'mark_sent';
+  return XP_FIRST.find(k => k !== 'fax_payer' && b.includes(k)) || null;
+}
+function xpChips(f, ws){
+  const st = XP_STATE[ws];
+  return (st ? `<span class="xs ${st[1]}">${st[0]}</span>` : '') + (XP_OUTCOME[f.ema_outcome] ? ` <span class="xs xs-warn">${XP_OUTCOME[f.ema_outcome]}</span>` : '');
+}
+// what to do and how sure: the verdict sentence with its strength, the next step with who, by when, what it is worth and its buttons
+function xpBoxHtml(f, x, r){
+  const ex = x.explain || {}, vd = ex.verdict || {}, nx = ex.next_step || {}, st = ex.state || {};
+  const ws = vd.state || st.work_state || f.work_state;
+  const follow = ws === 'waiting' && (vd.follow_up_on || st.follow_up_on || f.follow_up_on);
+  const rowsCited = (vd.rows || []).filter(n => n != null);
+  const strength = vd.strength ? `${esc(XP_STRENGTH[vd.strength] || vd.strength)}${vd.strength === 'inferred' && vd.rule ? ` (rule: ${esc(vd.rule)})` : ''}` : '';
+  const legal = st.legal_deadline || f.legal_deadline;
+  const due = nx.deadline ? `By <b>${esc(longDate(nx.deadline))}</b> <span class="${closesText(nx.deadline).cls}">(${esc(closesText(nx.deadline).text)})</span>${nx.basis ? `<span class="muted">: ${esc(nx.basis)}</span>` : ''}${legal && legal !== nx.deadline ? ` · Payer's limit: <b>${esc(longDate(legal))}</b>` : ''}` : '';
+  const rec = nx.recovery || {};
+  const worth = nx.expected_cents ? `At stake <b>${money2(nx.expected_cents)}</b>${nx.ranked_cents != null ? ` · about <b>${money2(nx.ranked_cents)}</b> expected back` : ''}` : '';
+  const primary = xpPrimary(nx, (r.packets || []).length > 0);
+  const more = (nx.buttons || []).filter(k => k !== primary && XP_BUTTON[k]);
+  const ids = state.worklist || [], i = ids.indexOf(f.finding_id), more2 = i >= 0 && (i < ids.length - 1 || (!!state.wlNext && (state.wlTotal || 0) > ids.length));
+  const steps = (nx.steps || []).filter(Boolean);
+  const sib = (nx.siblings || []).length;
+  return `<div class="todo-box xp-box" id="xpBox">
+    <div class="todo-top">${xpChips(f, ws)}${follow ? `<span class="muted small">follow up ${esc(longDate(follow))}</span>` : ''}${i >= 0 ? `<span class="muted small">Item ${i+1} of ${Number(Math.max(state.wlTotal||0, ids.length)).toLocaleString()}</span>` : ''}</div>
+    ${vd.sentence ? `<div class="xp-verdict">${esc(vd.sentence)}${rowsCited.length ? ` <a href="#" class="xp-rows small" data-rows="${rowsCited.join(',')}">${rowsCited.length > 1 ? 'Rows' : 'Row'} ${rowsCited.join(', ')}</a>` : ''}</div>` : ''}
+    ${strength ? `<div class="small muted">${strength}</div>` : ''}
+    ${nx.action ? `<div class="todo-next"><b>Next:</b> ${esc(nx.action)}</div>` : ''}
+    ${nx.who || due ? `<div class="small">${nx.who ? `Who: ${esc(nx.who)}` : ''}${nx.who && due ? ' · ' : ''}${due}</div>` : ''}
+    ${worth ? `<div class="small" ${rec.basis ? `title="${esc(rec.basis)}"` : ''}>${worth}${rec.basis ? ` <span class="muted">(${esc(rec.basis)})</span>` : ''}</div>` : ''}
+    ${steps.length ? `<details class="xp-steps" ${steps.length <= 3 ? 'open' : ''}><summary class="small">${steps.length === 1 ? 'The step' : `The ${steps.length} steps`}</summary><ol class="small">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
+    ${(nx.needs || []).length ? `<div class="small muted">It needs: ${esc(nx.needs.join('; '))}</div>` : ''}
+    ${sib ? `<div class="small muted">${pl(sib, 'other open item')} on this visit: work them together.</div>` : ''}
+    <div class="todo-err sev-high small" id="xpErr" role="alert"></div>
+    <div class="actions todo-actions">${primary ? `<button class="primary" data-xp="${primary}" id="xpMain">${esc(XP_BUTTON[primary])}</button>` : ''}
+      ${more.length ? `<details class="xp-more"><summary class="small">More</summary><div class="actions">${more.map(k => `<button class="ghost" data-xp="${k}">${esc(XP_BUTTON[k])}</button>`).join('')}</div></details>` : ''}
+      ${i > 0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more2 ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div>
+    <div id="xpMsg" class="small"></div></div>`;
+}
+// the evidence: every event on the line in date order, each with its source, the rows the verdict rests on marked, and the
+// balance line (it reconciles to the cent, or says by how much it does not and why)
+function xpStoryHtml(sto, decisive){
+  const rows = (sto && sto.rows) || [], mark = new Set((decisive || []).map(Number));
+  const bal = (sto && sto.balance) || {};
+  const notes = ((sto && sto.notes) || []).filter(Boolean);
+  if(!rows.length && !bal.text) return '';
+  const head = `${pl(rows.length, 'event')}${bal.text ? (sto.reconciles ? ' · balances to the cent' : ` · ${money2(sto.gap_cents)} does not balance`) : ''}`;
+  return `<details class="dfold" id="xpStory"><summary>The story: ${esc(head)}</summary>
+    <div class="scroll"><table class="small xp-story"><thead><tr><th>#</th><th>Date</th><th>From</th><th>What happened</th><th class="num">Amount</th></tr></thead>
+    <tbody>${rows.map(w => `<tr data-n="${esc(w.n)}" class="${w.decisive || mark.has(Number(w.n)) ? 'has-item' : ''}"><td>${esc(w.n)}</td><td class="day">${esc(w.date ? longDate(w.date) : '')}</td>
+      <td><span class="chip">${esc(XP_SOURCE[w.source] || w.source)}</span></td>
+      <td>${esc(w.text)}${(w.codes || []).length ? `<div class="muted">${w.codes.map(c => esc(c.code) + (c.meaning ? ': ' + esc(c.meaning) : '')).join(' · ')}</div>` : ''}</td>
+      <td class="num">${w.amount_cents != null ? money2(w.amount_cents) : ''}</td></tr>`).join('')}</tbody></table></div>
+    ${bal.text ? `<div class="small ${sto.reconciles ? '' : 'sev-medium'}" style="margin-top:6px"><b>Balance.</b> ${esc(bal.text)}</div>` : ''}
+    ${notes.map(n => `<div class="note">${esc(n)}</div>`).join('')}</details>`;
+}
+// what EMA's reports hold on the claim (ema_checks.claim_block): the line as EMA has it, its A/R rows, and on the server
+// every posting (on Vercel, a note that they are kept on the server)
+function xpEmaHtml(b){
+  if(!b || !((b.lines || []).length || (b.ar || []).length)) return '';
+  const lines = (b.lines || []).map(l => `<tr><td>${esc(l.code)}</td><td class="day">${esc(l.service_date || '')}</td><td class="num">${money2(l.charges_cents)}</td><td class="num">${money2(l.ins_paid_cents)}</td>
+    <td class="num">${money2((l.contractual_cents || 0) + (l.noncontractual_cents || 0))}</td><td class="num">${money2(l.balance_cents)}</td><td class="small muted">${esc(l.status || '')}${l.as_of ? ' · as of ' + esc(l.as_of) : ''}</td></tr>`).join('');
+  const ar = (b.ar || []).map(a => `<tr><td>${esc(a.code || '')}</td><td class="day">${esc(a.service_date || '')}</td><td class="num">${money2(a.balance_cents)}</td><td class="num">${money2(a.denial_cents)}</td>
+    <td class="small">${esc(a.status || '')}${a.claim_action ? ' · ' + esc(a.claim_action) : ''}${a.has_note ? ' · a note' : ''}</td><td class="small muted">${esc(a.as_of || '')}</td></tr>`).join('');
+  return `<details class="dfold" id="xpEma"><summary>What EMA's reports show for this claim</summary>
+    ${lines ? `<table class="small"><thead><tr><th>Code</th><th>Date</th><th class="num">Charge</th><th class="num">Insurance paid</th><th class="num">Written off</th><th class="num">Open</th><th>EMA status</th></tr></thead><tbody>${lines}</tbody></table>` : ''}
+    ${ar ? `<h3 class="small">On the A/R</h3><table class="small"><thead><tr><th>Code</th><th>Date</th><th class="num">Balance</th><th class="num">Denied</th><th>Status</th><th>Pulled</th></tr></thead><tbody>${ar}</tbody></table>` : ''}
+    ${(b.postings || []).length ? `<div class="small muted">${pl(b.postings.length, 'EMA posting')} on these lines are in the story above.</div>` : ''}
+    ${b.postings_note ? `<div class="note">${esc(b.postings_note)}</div>` : ''}
+    <div class="small muted">EMA's claim status is context only: what happened to this line is in the story.</div></details>`;
+}
+// "Why did this change?": the run's decisions on this item (built later, GET /api/findings/{id}/decisions); hidden until it answers
+async function xpDecisions(id, el){
+  if(!el) return;
+  let r; try { r = await api('/api/findings/' + encodeURIComponent(id) + '/decisions'); } catch(e){ el.hidden = true; return; }
+  const items = (r && r.items) || [];
+  if(!items.length){ el.hidden = true; return; }
+  const change = c => Object.entries(c || {}).map(([k, v]) => `${esc(k)}: ${esc(Array.isArray(v) ? v[0] : '')} → <b>${esc(Array.isArray(v) ? v[1] : v)}</b>`).join('; ');
+  el.innerHTML = `<details class="dfold"><summary>Why did this change?</summary><table class="small"><tbody>${items.map(d => `<tr><td class="day">${esc(String(d.at || '').replace('T', ' ').slice(0, 16))}</td><td>${change(d.change)}</td><td class="muted">${esc(d.rule || '')}${d.rule_version ? ' v' + esc(d.rule_version) : ''}</td></tr>`).join('')}</tbody></table></details>`;
+  el.hidden = false;
+}
+// the next step's buttons. Each changes what it says it changes and nothing else: a status (with its note), a line in the
+// item's history, the clipboard, or a page to open. A fax goes only after the packet has been read, to the confirmed number.
+function xpBind(f, x, r, d, done){
+  const nx = ((x || {}).explain || {}).next_step || {};
+  const err = msg => { const e = d.querySelector('#xpErr'); if(e) e.textContent = msg; };
+  const say = msg => { const m = d.querySelector('#xpMsg'); if(m){ m.className = 'small ok'; m.textContent = msg; } };
+  const copy = async (text, what) => { try { await navigator.clipboard.writeText(text); say(`${what} copied.`); } catch(e){ err('Could not copy here: select the text and copy it by hand.'); } };
+  const status = async (st, notes, extra) => { await post('/api/findings/' + f.finding_id + '/status', Object.assign({status: st}, notes ? {notes} : {}, extra || {})); state.brief = null; state.dirty = true; done(st); };
+  const event = async (ev, note) => post('/api/findings/' + f.finding_id + '/event', {event: ev, note: note || ''});
+  const fold = id => { const el = d.querySelector(id); if(el){ el.open = true; el.scrollIntoView({block:'start'}); } };
+  const eraText = (nx.steps || []).find(s => /ERA of the check/.test(s)) || '';
+  const act = {
+    build_packet: () => { if(d.querySelector('#noteGo') && ['note'].includes(kindFor(state.brief || {}, f))) fold('#builderFold'); else { const b = d.querySelector('#btnAppeal'); if(b) b.click(); else fold('#builderFold'); } },
+    attach_note: () => { fold('#builderFold'); const i = d.querySelector('#noteFile'); if(i) i.focus(); },
+    find_note: () => { fold('#builderFold'); if(d.querySelector('#noteEma')) noteFromEma(f.finding_id, d); },
+    upload_note: () => { window.open('/upload', '_blank', 'noopener'); },
+    fax_payer: () => xpFaxPreview(f, r.packets, d),
+    copy_instructions: async () => { await copy(nx.instructions || nx.action || '', 'The steps'); event('instructions').catch(()=>{}); },
+    request_era: async () => { if(!eraText){ err('No ERA request for this item.'); return; } await copy(eraText, 'The ERA request'); event('era_requested').catch(()=>{}); },
+    mark_sent: async () => { const n = prompt('Mark it sent? Say what went out and how (kept in its history; optional):', ''); if(n === null) return; await status('appealed', n.trim() || 'Sent from the next step'); },
+    log_outcome: () => xpOutcome(f, d, status, err),
+    mark_posted: async () => {
+      if(nx.route === 'post'){ if(!confirm('Mark it posted in EMA? It leaves the list.')) return; await status('resolved', 'Posted in EMA', {recovered_cents: 0}); return; }
+      const n = prompt('What did you post in EMA (the remittance or the takeback)? Kept in its history; the item stays on the list:', ''); if(n === null) return;
+      await event('posted', n.trim()); say('Noted in its history.'); },
+    mark_billed: async () => { const n = prompt(`Who was billed, and when? (${nx.route === 'bill_patient' ? 'the patient' : 'the other payer'}; kept in its history)`, ''); if(n === null) return;
+      if(!n.trim()){ err('Not changed: say who was billed.'); return; } await event('billed', n.trim()); await status('appealed', 'Billed: ' + n.trim()); },
+    accept_pattern: () => xpAccept(f, nx, err, say),
+    let_go: async () => { const n = prompt('Let it go? It leaves the list and counts as let go.\n\nWhy (kept in its history; required):', ''); if(n === null) return;
+      if(!n.trim()){ err('Not changed: letting an item go needs a reason.'); return; } await status('dismissed', n.trim()); },
+    reopen: async () => { if(!confirm('Reopen it? It goes back on the list as To do.')) return; await status('open', 'Reopened'); },
+    open_in_ema: () => { if(nx.claim_url) window.open(nx.claim_url, '_blank', 'noopener,noreferrer'); else err('No EMA address is set for this site.'); },
+  };
+  d.querySelectorAll('[data-xp]').forEach(b => b.onclick = async () => { const fn = act[b.dataset.xp]; if(!fn) return; err(''); b.disabled = true;
+    try { await fn(); } catch(e){ err('Not done: ' + (e.message || 'no answer from the site') + '. Try again.'); } finally { b.disabled = false; } });
+  d.querySelectorAll('a.xp-rows').forEach(a => a.onclick = e => { e.preventDefault(); const st = d.querySelector('#xpStory'); if(!st) return; st.open = true;
+    const first = st.querySelector(`tr[data-n="${(a.dataset.rows || '').split(',')[0]}"]`); (first || st).scrollIntoView({block:'center'}); });
+}
+// Log what happened: the payer is working on it (it waits on the payer, with the note), the payer paid (Paid), or the payer
+// said no (it stays to do, with the answer in its history)
+function xpOutcome(f, d, status, err){
+  const box = d.querySelector('#xpMsg'); if(!box) return;
+  box.className = 'small';
+  box.innerHTML = `<div class="xp-log"><b>What happened?</b>
+    <label><input type="radio" name="xpo" value="working" checked> The payer is working on it (or I sent what it asked for)</label>
+    <label><input type="radio" name="xpo" value="paid"> The payer paid</label>
+    <label><input type="radio" name="xpo" value="no"> The payer said no</label>
+    <input id="xpoNote" maxlength="300" placeholder="What they said, a reference number" style="width:100%;margin:4px 0">
+    <div class="actions"><button class="primary" id="xpoSave">Save</button><button class="ghost" id="xpoCancel">Cancel</button></div></div>`;
+  box.querySelector('#xpoCancel').onclick = () => { box.innerHTML = ''; };
+  box.querySelector('#xpoSave').onclick = async () => {
+    const what = (box.querySelector('input[name=xpo]:checked') || {}).value, note = box.querySelector('#xpoNote').value.trim();
+    try {
+      if(what === 'paid'){ const x = prompt('Amount paid, in dollars (blank: the amount at stake):', f.shortfall_cents != null ? (f.shortfall_cents/100).toFixed(2) : ''); if(x === null) return;
+        await status('resolved', note || 'The payer paid', x.trim() && !isNaN(parseFloat(x)) ? {recovered_cents: Math.round(parseFloat(x) * 100)} : {}); }
+      else if(what === 'no'){ if(!note){ err('Say what the payer said.'); return; } await status('in_progress', 'The payer said no: ' + note); }
+      else { if(!note){ err('Say what the payer said, or what you sent.'); return; } await status('appealed', 'Call or portal check: ' + note); }
+    } catch(e){ err('Not saved: ' + (e.message || 'no answer from the site')); }
+  };
+}
+// Accept a write-off pattern: the owner's policy table (one decision for every item of the pattern), never one item quietly
+async function xpAccept(f, nx, err, say){
+  const pattern = nx.pattern;
+  if(!pattern){ state.tab = 'policy'; location.hash = 'policy'; if(typeof closeDetail === 'function') closeDetail(); render(); return; }
+  if(!confirm(`Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as the practice's policy? Its items leave the work list and stay findable; the owner can change it on the Write-off policy page.`)) return;
+  await post('/api/ema/policy', {pattern, decision: 'accept'});
+  say('Accepted as policy: the next run takes these items off the work list.');
+}
+// Fax it to the payer: what goes is read first (the packet's letter and PDF; for a rate request, the letter), then sent as it
+// is to the payer's confirmed number. A hold comes back in words, with the one answer a person may give where there is one
+// (still unpaid in EMA; the code went out as billed).
+async function xpFaxPreview(f, packets, d){
+  const pk = (packets || [])[0], kind = state.brief ? kindFor(state.brief, f) : '';
+  if(!pk && kind !== 'rate'){
+    const b = d && d.querySelector('#builderFold'); if(b){ b.open = true; b.scrollIntoView({block:'start'}); }
+    const m = d && d.querySelector('#fxOneMsg'); const text = 'Build the packet first (below), so you can read it before it goes.';
+    if(m){ m.className = 'small sev-medium'; m.textContent = text; } else alert(text);
+    return;
+  }
+  let letter = '';
+  try { letter = pk ? ((await api('/api/packets/' + encodeURIComponent(pk.packet_id))).letter || '') : ((await api('/api/appeal/' + encodeURIComponent(f.finding_id))).letter || ''); } catch(e){}
+  $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Fax to ${esc(f.payer_group || 'the payer')}</h2><button id="closeM" aria-label="Close">✕</button></div>
+    <div class="note">Read what goes, then send it. It goes as it is to the payer's confirmed appeal fax number, and the item is marked Sent.</div>
+    <div class="actions">${pk ? `<a href="/api/packets/${encodeURIComponent(pk.packet_id)}/pdf" target="_blank" rel="noopener"><button>Open the PDF</button></a>` : ''}<button class="primary" id="xpFaxGo">Send the fax</button></div>
+    <div id="xpFaxMsg" class="small"></div><pre>${esc(letter)}</pre>`;
+  $('#modal').classList.add('open');
+  $('#closeM').onclick = () => $('#modal').classList.remove('open');
+  const said = pk ? {packet_id: pk.packet_id} : {};
+  const go = async () => { const bt = $('#xpFaxGo'), msg = $('#xpFaxMsg'); bt.disabled = true; msg.className = 'small muted'; msg.textContent = 'Sending…';
+    let res; try { res = await post('/api/appeals/send', Object.assign({finding_id: f.finding_id}, said)); } catch(e){ msg.className = 'small sev-high'; msg.textContent = e.message; bt.disabled = false; return; }
+    if(res.status === 'sent'){ $('#modal').classList.remove('open'); state.brief = null; state.dirty = true; openDetail(f.finding_id); return; }
+    msg.className = 'small sev-medium'; msg.textContent = res.reason || 'Not sent.'; bt.disabled = false;
+    if(res.code === 'stale' || res.code === 'check_code'){
+      const again = document.createElement('button'); again.textContent = res.code === 'stale' ? 'Still unpaid in EMA: fax it anyway' : 'It went out as billed: fax it';
+      again.onclick = () => { if(res.code === 'stale') said.stale_ok = true; else said.confirmed = true; again.remove(); go(); };
+      msg.appendChild(document.createTextNode(' ')); msg.appendChild(again);
+    } };
+  $('#xpFaxGo').onclick = go;
+}

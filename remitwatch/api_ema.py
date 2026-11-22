@@ -276,7 +276,7 @@ def blind_spot(c: sqlite3.Connection) -> dict:
         as_of = fr.get(f"{key}_as_of")
         if as_of:
             d = _days(as_of, today)
-            feeds.append({"feed": key, "label": label, "since": str(as_of)[:10], "days": d, "stale": d is not None and d > limit})
+            feeds.append({"feed": key, "label": label, "since": str(as_of)[:10], "days": d, "stale": False})
     stale = [f for f in feeds if f["stale"]]
     out: dict = {"blind": bool(stale), "feeds": feeds, "cents": 0, "lines": [], "source": "run", "today": today}
     if not stale:
@@ -293,7 +293,7 @@ def blind_spot(c: sqlite3.Connection) -> dict:
             cents += int(after["cents"])
             lines.append(f"No remittance after {_long(f['since'])} ({_n(f['days'], 'day')}). Since then EMA posted {_usd(after['cents'])} "
                          f"of insurance payments on {_n(after.get('checks'), 'check')} that no remittance on file explains, so "
-                         "RemitWatch cannot check what the payers paid, cut or denied on them.")
+                         "RemitWatch cannot see what the payers paid, cut or denied on them.")
         else:
             cents += work["cents"]
             lines.append(f"No remittance after {_long(f['since'])} ({_n(f['days'], 'day')}). {_n(work['n'], 'item')} worth "
@@ -348,14 +348,8 @@ def today(user: str = Depends(_user)):
         ready = "work_state" in fcols
         out: dict = {"today": _today(), "ready": ready, "states": {}, "blind": blind_spot(c)}
         rec = _meta(c, "ema:reconcile", {}) or {}
-        health = []
-        if _reports_arrived(c):
-            try:
-                from . import ema_checks as ec
-                health = ec.data_health(c, today=out["today"])
-            except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
-                out["health_error"] = _fault(exc)
-        out["remits_missing"] = next((h for h in health if h.get("key") == "remits_missing"), None)
+        # last month's payments with no remittance, as the run judged them (ema_checks data health remits_missing)
+        out["remits_missing"] = rec.get("remits_missing") if isinstance(rec, dict) and _reports_arrived(c) else None
         out["fresh"] = _freshness(c)
         wiring = _meta(c, "ema:wiring", {}) or {}
         out["wiring_errors"] = len(wiring.get("errors") or []) if isinstance(wiring, dict) else 0

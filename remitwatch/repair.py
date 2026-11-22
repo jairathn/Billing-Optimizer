@@ -125,8 +125,8 @@ def is_transient(exc: BaseException) -> bool:
     """Network trouble worth trying again: a reset or refused connection, a timeout, a server's 5xx or 429, a line
     that went silent. Never a refused password or token, a missing file, a conflict or a code bug."""
     names = {c.__name__ for c in type(exc).__mro__}
-    if names & set(_NEVER_TRANSIENT):
-        return False
+    if names & set(_NEVER_TRANSIENT) or getattr(exc, "maybe_sent", False):
+        return False            # a refused login, a conflict, or a fax that may have gone out: trying again could repeat it
     code = status_of(exc)
     if code is not None:
         return code == 429 or code >= 500

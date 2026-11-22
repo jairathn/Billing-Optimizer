@@ -586,24 +586,30 @@ def test_find_a_claim_finds_archived_bills_by_claim_id_bill_and_payer_number_nev
     store.close()
 
 
-def test_an_ema_only_bill_and_its_837_rows_move_and_come_back(tmp_path):
+def test_a_bill_known_only_from_ema_exports_or_837_files_moves_and_comes_back(tmp_path):
     store = crafted("compact", tmp_path)
     from remitwatch.x12_837 import DDL as DDL_837
     store.conn.executescript(DDL_837)
     store.conn.execute("""INSERT INTO ema_rows (row_fingerprint, family, claim_id, service_date, cpt, charges_cents)
                           VALUES ('fp1', 'charge_lines', 'EM01ZZZZZC017', '2021-05-01', '99213', 10000)""")
     store.conn.execute("""INSERT INTO claims_837 (claim_837_key, patient_control_number, service_date, total_charge_cents)
-                          VALUES ('k837', 'EM01ZZZZZC017', '2021-05-01', 10000)""")
+                          VALUES ('k837', 'EM02YYYYYC017', '2021-05-01', 10000)""")
+    store.conn.execute("""INSERT INTO lines_837 (line_837_key, claim_837_key, patient_control_number, service_date, procedure_code)
+                          VALUES ('l837', 'k837', 'EM02YYYYYC017', '2021-05-01', '99213')""")
     store.conn.commit()
     put_item(store, "fe", bill="EM01ZZZZZ", work_state="expired")
     sink = sink_of(tmp_path, "compact")
     res = archive.run(store.conn, sink=sink, today=TODAY)
-    assert res["bills"] == 1 and res["rows"]["ema_rows"] == 1 and res["rows"]["claims_837"] == 1
+    assert res["bills"] == 2 and res["rows"]["ema_rows"] == 1 and res["rows"]["claims_837"] == 1 and res["rows"]["lines_837"] == 1
     assert store.conn.execute("SELECT COUNT(*) FROM ema_rows").fetchone()[0] == 0
     assert [x["bill"] for x in archive.search(store.conn, "EM01ZZZZZ")] == ["EM01ZZZZZ"]
+    assert [x["bill"] for x in archive.search(store.conn, "EM02Y")] == ["EM02YYYYY"]
     archive.restore(store.conn, "EM01ZZZZZC017", sink=sink, today=TODAY)
+    archive.restore(store.conn, "EM02YYYYY", sink=sink, today=TODAY)
     assert store.conn.execute("SELECT COUNT(*) FROM ema_rows").fetchone()[0] == 1
     assert store.conn.execute("SELECT COUNT(*) FROM claims_837").fetchone()[0] == 1
+    assert store.conn.execute("SELECT COUNT(*) FROM lines_837").fetchone()[0] == 1
+    assert store.conn.execute("SELECT status FROM findings WHERE finding_id='fe'").fetchone()[0] == "open"
     store.close()
 
 
@@ -748,13 +754,9 @@ def test_batches_and_the_deadline_split_the_work_across_runs(tmp_path, frozen_ho
     store.close()
 
 
-def _correlated_scans(conn, sql: str) -> list[str]:
+def _correlated_scans(plan: list) -> list[str]:
     """Plan steps that scan a table (any table: a temporary key table scanned per row is as slow) inside a correlated
-    subquery, or scan a large table inside a join loop."""
-    try:
-        plan = conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
-    except sqlite3.Error:
-        return []
+    subquery."""
     node = {r[0]: (r[1], r[3]) for r in plan}
     bad = []
     for _nid, (parent, detail) in node.items():
@@ -769,22 +771,41 @@ def _correlated_scans(conn, sql: str) -> list[str]:
     return bad
 
 
+class _PlanCheck:
+    """The store connection as the run sees it, explaining each statement just before it runs (while its temporary key
+    tables exist)."""
+
+    def __init__(self, conn):
+        self._c = conn
+        self.problems: dict = {}
+        self.explained = 0
+
+    def execute(self, sql, params=()):
+        if sql.lstrip().upper().startswith(("SELECT", "INSERT", "DELETE", "UPDATE", "WITH")):
+            try:
+                plan = self._c.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
+                self.explained += 1
+            except sqlite3.Error:
+                plan = []
+            bad = _correlated_scans(plan)
+            if bad:
+                self.problems[" ".join(sql.split())[:140]] = bad
+        return self._c.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
 def test_the_compact_store_is_read_once_per_table_never_per_row(tmp_path, frozen_hook):
     store = Store(":memory:", compact=True)
     ingest(store, tmp_path, [(visits(1, 30, OLD) + [denial(90, OLD)], "20220415"), (visits(500, 2, NEW), "20260415")])
     detect(store)
-    seen: list[str] = []
-    store.conn.set_trace_callback(seen.append)
-    res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, batch_bills=8)
-    store.conn.set_trace_callback(None)
-    assert res["bills"] == 31
-    problems = {}
-    for sql in dict.fromkeys(seen):
-        if sql.lstrip().upper().startswith(("SELECT", "INSERT", "DELETE", "UPDATE", "WITH")):
-            bad = _correlated_scans(store.conn, sql)
-            if bad:
-                problems[" ".join(sql.split())[:140]] = bad
-    assert not problems, problems
+    checked = _PlanCheck(store.conn)
+    res = archive.run(checked, sink=sink_of(tmp_path, "compact"), today=TODAY, batch_bills=8)
+    assert res["bills"] == 31 and checked.explained > 40
+    assert not checked.problems, checked.problems
+    out = archive.restore(checked, "CB0000090C017", sink=sink_of(tmp_path, "compact"), today=TODAY)
+    assert out["rows"]["claims"] == 1 and not checked.problems, checked.problems
     store.close()
 
 

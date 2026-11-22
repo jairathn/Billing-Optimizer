@@ -1717,6 +1717,7 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
     months = [m for (m,) in lc.execute("SELECT DISTINCT substr(svc, 1, 7) FROM postings ORDER BY 1") if m]
     cells: dict[tuple, Counter] = defaultdict(Counter)
     line_rows = 0
+    joined_total = 0
     for m in months:
         lo, hi = m + "-01", m + "-32"
         for tb in ("sc_ans", "sc_prim"):
@@ -1729,8 +1730,10 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
                       FROM postings WHERE svc >= ? AND svc < ? AND link IS NOT NULL AND primary_payer IS NOT NULL
                       GROUP BY link, svc, COALESCE(cpt, '')""", (lo, hi))
         lc.execute("CREATE UNIQUE INDEX temp.ix_sc_prim ON sc_prim(link, svc, cpt)")
-        for (prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal) in lc.execute(
-                f"""SELECT pr.prim, SUM(COALESCE(p.charges, 0)), SUM(COALESCE(p.ins_paid, 0)), SUM(COALESCE(p.pat_paid, 0)),
+        lines: dict[tuple, list] = {}
+        for (link, svc, cpt, person, prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal) in lc.execute(
+                f"""SELECT p.link, p.svc, COALESCE(p.cpt, ''), MAX(p.person), pr.prim, SUM(COALESCE(p.charges, 0)),
+                           SUM(COALESCE(p.ins_paid, 0)), SUM(COALESCE(p.pat_paid, 0)),
                            SUM(CASE WHEN x.cls IN ({routine}) THEN {money} ELSE 0 END),
                            SUM(CASE WHEN x.cls NOT IN ({routine}, 'timely') AND a.posted IS NOT NULL THEN {money} ELSE 0 END),
                            SUM(CASE WHEN x.cls NOT IN ({routine}, 'timely') AND a.posted IS NULL THEN {money} ELSE 0 END),
@@ -1745,30 +1748,55 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
                     LEFT JOIN temp.sc_prim pr ON pr.link = p.link AND pr.svc = p.svc AND pr.cpt = COALESCE(p.cpt, '')
                     WHERE p.svc >= ? AND p.svc < ? AND p.link IS NOT NULL
                     GROUP BY p.link, p.svc, COALESCE(p.cpt, '')""", (lo, hi)):
+            lines[(link, svc, cpt)] = [person, prim, chg or 0, ins or 0, pat or 0, contr_r or 0, wo_post or 0, wo_later or 0,
+                                       timely or 0, padj or 0, bal or 0]
+        by_pd: dict[tuple, list] = defaultdict(list)
+        for k, v in lines.items():
+            if v[0] is not None:
+                by_pd[(v[0], k[1], k[2])].append(k)
+        # money with no claim number, by patient, day and code: joined to the one line with the same keys (the ledger's
+        # own rule for the patient's payments); a patient-side service of its own when it carries charges (a self-pay
+        # visit, a product); otherwise a visible gap
+        own_lines: list[list] = []
+        for (person, svc, cpt, payer, prim, chg, ins, pat, contr, nonc, padj, n_rows) in lc.execute(
+                """SELECT person, svc, COALESCE(cpt, ''), MAX(payer), MAX(primary_payer), SUM(COALESCE(charges, 0)),
+                          SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)), SUM(COALESCE(contractual, 0)),
+                          SUM(COALESCE(noncontractual, 0)), SUM(COALESCE(pat_adj, 0)), COUNT(*)
+                   FROM postings WHERE svc >= ? AND svc < ? AND link IS NULL GROUP BY person, svc, COALESCE(cpt, '')""", (lo, hi)):
+            cands = by_pd.get((person, svc, cpt)) if person is not None else None
+            moneyed = (ins or 0) + (pat or 0) + (contr or 0) + (nonc or 0) + (padj or 0)
+            if not chg and cands and len(cands) == 1:
+                v = lines[cands[0]]
+                v[3] += ins or 0
+                v[4] += pat or 0
+                v[5] += (contr or 0) + (nonc or 0)          # adjustments on the patient's side: routine (they carry no payer reason)
+                v[9] += padj or 0
+                v[10] -= moneyed
+                joined_total += moneyed
+            elif chg:
+                own_lines.append([None, prim if prim is not None else payer, chg or 0, ins or 0, pat or 0, (contr or 0) + (nonc or 0),
+                                  0, 0, 0, padj or 0, (chg or 0) - moneyed])
+            else:
+                c = cells[(m, group(prim if prim is not None else payer))]
+                c["unlinked_money"] += moneyed
+                c["unlinked_rows"] += n_rows or 0
+        for v in list(lines.values()) + own_lines:
             line_rows += 1
+            person, prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal = v
             c = cells[(m, group(prim))]
-            c["charges"] += chg or 0
-            c["ins_paid"] += ins or 0
-            c["pat_paid"] += pat or 0
-            c["contractual"] += contr_r or 0
-            c["wo_at_posting"] += wo_post or 0
-            c["wo_later"] += wo_later or 0
-            c["wo_timely"] += timely or 0
-            c["pat_adj"] += padj or 0
+            c["charges"] += chg
+            c["ins_paid"] += ins
+            c["pat_paid"] += pat
+            c["contractual"] += contr_r
+            c["wo_at_posting"] += wo_post
+            c["wo_later"] += wo_later
+            c["wo_timely"] += timely
+            c["pat_adj"] += padj
             c["lines"] += 1
-            if (bal or 0) > 0:
+            if bal > 0:
                 c["open"] += bal
-            elif (bal or 0) < 0:
+            elif bal < 0:
                 c["credit"] += -bal
-        # postings that belong to no line: their own visible gap, in the cell of their service month and payer
-        for (payer, prim, chg, ins, pat, adj, n_rows) in lc.execute(
-                """SELECT payer, primary_payer, SUM(COALESCE(charges, 0)), SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)),
-                          SUM(COALESCE(contractual, 0) + COALESCE(noncontractual, 0) + COALESCE(pat_adj, 0)), COUNT(*)
-                   FROM postings WHERE svc >= ? AND svc < ? AND link IS NULL GROUP BY 1, 2""", (lo, hi)):
-            c = cells[(m, group(prim if prim is not None else payer))]
-            c["unlinked_charges"] += chg or 0
-            c["unlinked_money"] += (ins or 0) + (pat or 0) + (adj or 0)
-            c["unlinked_rows"] += n_rows or 0
     for tb in ("sc_ans", "sc_prim", "sc_cls"):
         lc.execute(f"DROP TABLE IF EXISTS temp.{tb}")
     offs, gaps = [], []
@@ -1781,9 +1809,8 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
         c["gap"] = gap
         if abs(gap) > 100:
             offs.append((f"{m}|{g}", abs(gap), None))
-        if c["unlinked_money"] or c["unlinked_charges"]:
-            gaps.append({"month": m, "payer_group": g, "unlinked_money_cents": c["unlinked_money"],
-                         "unlinked_charges_cents": c["unlinked_charges"], "rows": c["unlinked_rows"]})
+        if c["unlinked_money"]:
+            gaps.append({"month": m, "payer_group": g, "unlinked_money_cents": c["unlinked_money"], "rows": c["unlinked_rows"]})
         for measure, cents in c.items():
             rows.append((m or "", g or "", measure, int(cents), None))
     conn.executemany("INSERT OR REPLACE INTO selfcheck_money (month, payer_group, measure, cents, rows) VALUES (?,?,?,?,?)", rows)
@@ -1796,7 +1823,7 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
                "cells_off": [{"cell": k, "gap_cents": c} for k, c in [(o[0], o[1]) for o in offs]][:50],
                "unlinked": sorted(gaps, key=lambda x: -abs(x["unlinked_money_cents"]))[:50],
                "unlinked_money_cents": int(sum(c["unlinked_money"] for c in cells.values())),
-               "unlinked_since_cents": int(tot.get("unlinked_money", 0))}
+               "unlinked_since_cents": int(tot.get("unlinked_money", 0)), "patient_money_joined_cents": int(joined_total)}
     text = (f"{_n(len(cells), 'month and payer cell')} checked; " +
             ("every one adds up to its charges" if not offs else f"{_n(len(offs), 'cell')} do not add up ({usd0(sum(o[1] for o in offs))})") +
             f"; {usd0(summary['unlinked_since_cents'])} of patient or insurance money since {SERVICE_FROM[:7]} sits on no line")
@@ -1807,9 +1834,12 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
 
 
 def _ar_balance(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) -> dict:
-    """EMA's newest A/R against its own postings: each A/R line (claim number, date of service, code) carries a balance;
-    the postings up to the A/R's day leave one. Lines that differ by more than $1 are the lines that do not reconcile,
-    summed with their dollars (a warning: a posting missing from the export, or an A/R pulled before the postings)."""
+    """EMA's newest A/R against its own postings: each insurance line on the A/R (claim number, date of service, code)
+    carries what insurance still owes; the postings up to the A/R's day leave the line's whole balance (insurance and
+    patient). A line whose A/R insurance balance is more than $1 above everything its postings leave, or that has no
+    posting at all, does not reconcile: it is counted with its dollars (a warning: a posting missing from the Production
+    export, or an A/R pulled before the postings). A balance the postings leave above the A/R's is the patient's share
+    or patient money that sits on no line: counted beside it, not as a gap."""
     if not _has_table(conn, "ema_ar") or not _has_table(lc, "postings"):
         return {"check": _skip("line_balance", "no A/R or no posting ledger")}
     row = conn.execute("SELECT MAX(as_of) FROM ema_ar").fetchone()
@@ -1832,17 +1862,27 @@ def _ar_balance(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) ->
                 (*part, as_of)):
             led[(int(link), svc, cpt)] = int(bal or 0)
     offs = []
+    above, above_cents, equal = 0, 0, 0
     for k, bal in ar.items():
         got = led.get(k)
         if got is None:
-            offs.append((f"{k[0]}|{k[1]}|{k[2]}", abs(bal), None))
-        elif abs(got - bal) > 100:
-            offs.append((f"{k[0]}|{k[1]}|{k[2]}", abs(got - bal), None))
-    info = {"as_of": as_of, "lines": len(ar), "not_in_postings": sum(1 for k in ar if k not in led)}
+            if abs(bal) > 100:
+                offs.append((f"{k[0]}|{k[1]}|{k[2]}", abs(bal), None))
+        elif bal - got > 100:
+            offs.append((f"{k[0]}|{k[1]}|{k[2]}", bal - got, None))
+        elif got - bal > 100:
+            above += 1
+            above_cents += got - bal
+        else:
+            equal += 1
+    info = {"as_of": as_of, "lines": len(ar), "equal": equal, "not_in_postings": sum(1 for k in ar if k not in led),
+            "postings_leave_more": above, "postings_leave_more_cents": above_cents}
     return {"check": _result("line_balance", offs, info=info, examples=[],
-                             text=f"{_n(len(ar), 'line')} on the A/R of {as_of}; {_n(len(offs), 'line')} do not reconcile "
-                                  f"({usd0(sum(c for _k, c, _f in offs))})"),
-            "as_of": as_of, "lines": len(ar), "off": len(offs), "off_cents": sum(c for _k, c, _f in offs)}
+                             text=f"{_n(len(ar), 'insurance line')} on the A/R of {as_of}: {equal:,} agree with the postings to the "
+                                  f"dollar; on {_n(len(offs), 'line')} the A/R holds more than the postings leave "
+                                  f"({usd0(sum(o[1] for o in offs))})"),
+            "as_of": as_of, "lines": len(ar), "off": len(offs), "off_cents": sum(o[1] for o in offs), "equal": equal,
+            "postings_leave_more": above, "postings_leave_more_cents": above_cents}
 
 
 def check_serving(conn: sqlite3.Connection, serving: sqlite3.Connection) -> dict:
@@ -1965,7 +2005,7 @@ def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True)
         cents, about = _charges_since(conn, newest, t)
         sources.append({"source": "835", "since": newest, "days": days, "cents": cents, "about": about,
                         "text": f"No remittance since {newest} ({days} days): {'about ' if about else ''}{usd0(cents)} billed since "
-                                "then has no payer answer RemitWatch can check."})
+                                "then has no payer's answer on file. RemitWatch sees only what EMA posted for it."})
     if _has_table(conn, "ema_report_files") and conn.execute("SELECT 1 FROM ema_report_files LIMIT 1").fetchone():
         try:
             from .ema_checks import freshness
@@ -2823,6 +2863,7 @@ def _poisson_sf(k: int, lam: float) -> float:
 
 
 COVERING_KINDS = ("RAMP", "RISING", "NEW_BEHAVIOR", "RESUMED", "NEW_REASON_CODE")
+KNOWN_RATIOS = (0.85, 0.5, 0.75)        # the non-physician rate, and the multiple-procedure cuts: never a clinician's own rate
 
 
 def pattern_watch(conn: sqlite3.Connection, *, today: Any = None, asof: Any = None, active: dict | None = None,
@@ -2877,7 +2918,7 @@ def _pw_denials(conn: sqlite3.Connection, asof: str, covered: set) -> list[dict]
             continue
         b = base.get(k, 0)
         grp, code, mod, carc, rc = k
-        what = f"{code}{'-' + mod if mod else ''}, reason {carc}{' / ' + rc if rc else ''}"
+        what = f"{code or 'whole claims'}{'-' + mod if mod else ''}, reason {carc}{' / ' + rc if rc else ''}"
         if b == 0:
             kind, title = "DENIAL_PATTERN", f"{grp} began denying {what}: {n} in the last 30 days ({usd0(cents[k])}), none in the 90 before"
         else:
@@ -2983,6 +3024,10 @@ def _pw_below_group(conn: sqlite3.Connection, asof: str, covered: set) -> list[d
     for (grp, code, tier, npi), cnt in by.items():
         pools[(grp, code, tier)].update(cnt)
     names = _provider_names(conn)
+    try:
+        from .codes import MPPR_CODES as mppr
+    except ImportError:
+        mppr = frozenset()
     out = []
     for (grp, code, tier, npi), cnt in by.items():
         n = sum(cnt.values())
@@ -2996,6 +3041,9 @@ def _pw_below_group(conn: sqlite3.Connection, asof: str, covered: set) -> list[d
         mine = _pct(sorted(a for a, k in cnt.items() for _ in range(k)), 50)
         if mine is None or mine >= mode_o * 0.95 or mode_o - mine < 200:
             continue
+        ratio = mine / mode_o if mode_o else 1.0
+        if code in mppr or any(abs(ratio - r) <= 0.015 for r in KNOWN_RATIOS):
+            continue                    # a multiple-procedure cut or the non-physician rate, not this clinician's own rate
         cents = (mode_o - mine) * n
         who = names.get(npi) or "one clinician"
         out.append({"kind": "CLINICIAN_BELOW_GROUP", "severity": "medium", "payer_group": grp, "n": n, "cents": cents,

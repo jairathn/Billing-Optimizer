@@ -323,6 +323,8 @@ def test_today_counts_each_state_and_each_count_is_the_list_it_opens(server):
     un = t["unworked"]
     stored = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:unworked'")[0][0])
     assert (un["n"], un["cents"], un["data_through"]) == (stored["n"], stored["cents"], stored["data_through"]) == (2, 21000, iso(2))
+    rec = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:reconcile'")[0][0])
+    assert t["remits_missing"] == rec["remits_missing"] and t["remits_missing"]["ok"] is True       # the run's own judgment
     assert t["other"]["post"]["n"] == 1 and t["other"]["post"]["cents"] == 8500           # the 835 payment EMA never posted
     assert t["other"]["refund"]["n"] == 1 and t["other"]["refund"]["cents"] == 6000       # the credit EMA holds
     # and the Worklist, once it takes these filters (unit C1), lists exactly what was counted
@@ -442,7 +444,7 @@ def test_a_stale_remittance_feed_says_in_dollars_what_cannot_be_checked(worlds, 
     # the dollars: what EMA posted after the newest remittance that no 835 explains (the run's figure, meta ema:reconcile)
     rec = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:reconcile'")[0][0])
     assert rec["since_feed_stopped"] == {"checks": 1, "cents": 8000}
-    assert b["cents"] == 8000 and "$80" in b["lines"][0] and "1 check" in b["lines"][0] and "cannot check" in b["lines"][0]
+    assert b["cents"] == 8000 and "$80" in b["lines"][0] and "1 check" in b["lines"][0] and "cannot see" in b["lines"][0]
     assert c.get("/api/ema/today").json()["blind"]["blind"] is True
 
 
@@ -800,7 +802,7 @@ const ctx = { console, Date, Math, JSON, Promise, Set, Map, URLSearchParams, set
   render: async () => { went.push({ tab: ctx.state.tab, hash: ctx.location.hash, filt: ctx.state.filt.worklist ? JSON.parse(JSON.stringify(ctx.state.filt.worklist)) : null }); },
   openDetail: id => went.push({ open: id }), localStorage: { getItem: () => '1', setItem() {}, removeItem() {} },
   confirm: () => true, prompt: (q, d) => 'Owner Test', alert: m => calls.push({ alert: m }), navigator: {},
-  document: { querySelector: () => null, querySelectorAll: () => [] }, window: {} };
+  document: { querySelector: () => null, querySelectorAll: () => [] }, window: answers.__narrow ? { innerWidth: 390 } : {} };
 vm.createContext(ctx);
 for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js'), read('data.js'), read('policy.js')]) vm.runInContext(src, ctx);
 ctx.dataChecks = async () => {}; ctx.feedPanel = async () => {};
@@ -828,10 +830,13 @@ const click = async el => { if (!el) throw new Error('nothing to click'); await 
   calls.length = 0;
   const held = v.querySelector('[data-decide="apply"]');
   out.decide_button = held ? held.dataset.file : null;
+  out.file_rows = v.querySelector('tbody#dtFiles') ? 'table' : (v.querySelector('div#dtFiles') ? 'list' : null);
+  out.ask_buttons = v.querySelectorAll('.dtAsk').length;
   v = new El('main'); calls.length = 0;
   await ctx.policyTab(v);
   out.policy_html = v.innerHTML;
   out.policy_buttons = v.querySelectorAll('[data-dec]').map(e => [e.dataset.i, e.dataset.dec, e.attrs['aria-pressed']]);
+  out.policy_cards = v.querySelectorAll('.lab-card').length;
   calls.length = 0; went.length = 0;
   await click(v.querySelector('[data-dec="accept"][data-i="1"]'));
   out.accept_calls = calls.filter(c => c.method === 'POST');
@@ -841,7 +846,7 @@ const click = async el => { if (!el) throw new Error('nothing to click'); await 
   await ctx.polItems(cell, answers['/api/ema/policy'].patterns[1], 1);
   out.items_html = cell.innerHTML;
   went.length = 0;
-  const row = cell.querySelector('tr.row'); if (row) row.onclick(); out.items_open = went.slice();
+  const row = cell.querySelector('.row[data-id]'); if (row) row.onclick(); out.items_open = went.slice();
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e && e.stack || e); process.exit(1); });
 """
@@ -916,10 +921,12 @@ def test_today_says_the_blind_spot_in_dollars_and_says_no_all_clear(page_run):
     today = dict(ans["/api/ema/today"], blind=blind)
     brief = json.loads(json.dumps(ans["/api/brief"]))
     brief["work"]["total"]["due7_n"] = 0
+    brief["health"] = [{"key": "feed", "ok": False, "title": "No payment newer than 2026-10-28 (25 days ago)", "detail": "", "who": ""}] + brief["health"]
     out, _ = page_run({"/api/ema/today": today, "/api/brief": brief})
     h = out["today_html"]
     assert "Blind spot: $80 the site cannot check." in h and "No remittance after" in h
     assert "Nothing closes this week in the payments on file" in h and "is-done" not in h
+    assert "No payment newer than" not in h          # the health banner does not say the blind spot a second time
 
 
 def test_the_data_tab_draws_each_panel_and_its_lists(page_run):
@@ -954,3 +961,15 @@ def test_the_policy_page_draws_each_pattern_and_records_a_decision(page_run):
     assert out["accept_went"]                                  # the page redraws with the decision
     assert "1 item</b>, $90" in out["items_html"] and out["items_open"] == [{"open": ans["/api/ema/policy/items?"]["rows"][0]["finding_id"]}]
     assert "—" not in h + out["items_html"]
+
+
+def test_at_phone_width_each_main_action_stays_on_screen(page_run):
+    """At 390 px the wide tables become lists and cards: the request button, the report decision and the pattern
+    decision are in each row's own block, not off to the right of a table that scrolls."""
+    out, ans = page_run({"__narrow": True})
+    assert out["file_rows"] == "list" and out["ask_buttons"] == len(ans["/api/ema/data"]["resend"])
+    assert out["policy_cards"] == len(ans["/api/ema/policy"]["patterns"]) == 2
+    assert [b[1] for b in out["policy_buttons"]] == ["pursue", "accept", "pursue", "accept"]
+    assert "1 item</b>, $90" in out["items_html"] and out["items_open"]          # the items as a list, each one opens
+    wide, _ = page_run()
+    assert wide["file_rows"] == "table" and wide["policy_cards"] == 0

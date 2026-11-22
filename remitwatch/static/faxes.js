@@ -198,15 +198,19 @@ function faxDrawerHtml(f, r){
       : esc(FAX_PURPOSE[x.purpose]||x.purpose||'') + (x.level > 1 ? ' (level ' + esc(x.level) + ')' : '')}</td>
     <td>${x.direction==='in' ? '' : `<span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status||'')}</span>`}</td>
     <td class="small muted">${esc(x.summary||x.error||'')}</td><td><a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">PDF</a></td></tr>`;
-  return `<div class="fax-box" style="margin:8px 0">${can ? `<div class="actions"><button class="primary" id="fxOne">${again ? 'Send the appeal again' : 'Appeal by fax'}</button><span class="small muted">${again
-      ? 'Its faxes never got through. It goes to the number saved for the payer now.' : 'The note from EMA, Claude\'s review, the letter, faxed to the payer, marked Sent.'}</span></div>` : ''}
+  // an item whose own next step says not to appeal (paid, settled, credited, reprocessed or waiting) offers no fax
+  const blocked = !!f.appeal_block && !again;
+  return `<div class="fax-box" style="margin:8px 0">${can && !blocked ? `<div class="actions"><button id="fxOne">${again ? 'Send the appeal again' : 'Appeal by fax'}</button><span class="small muted">${again
+      ? 'Its faxes never got through. It goes to the number saved for the payer now.' : 'You read the packet first; it goes to the payer\'s confirmed number and the item is marked Sent.'}</span></div>` : ''}
     ${list.length ? `<h3 class="small">Faxes</h3><table class="small"><tbody>${list.map(row).join('')}</tbody></table>` : ''}
     ${line && f.claim_key ? '<div><button class="ghost small" id="fxTie">Tie a fax that came in to this item</button></div>' : ''}
     <div id="fxOneMsg" class="small"></div></div>`;
 }
 function fax10(n){ const d = faxDigits(n); return d ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}` : String(n||''); }
-function bindFaxDrawer(id, d){
+function bindFaxDrawer(id, d, r){
   const b = d.querySelector('#fxOne'); if(!b) return;
+  // with the item at hand, what goes is read first (features.js xpFaxPreview): the packet, or for a rate request its letter
+  if(r && r.finding && typeof xpFaxPreview === 'function'){ b.onclick = () => xpFaxPreview(r.finding, r.packets, d); return; }
   // what the person checked in EMA, each answer kept apart: "still unpaid" says nothing about which code went out
   const said = {};
   const go = async () => {

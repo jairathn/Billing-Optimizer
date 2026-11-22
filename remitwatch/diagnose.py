@@ -179,16 +179,20 @@ def _examples(conn: sqlite3.Connection, ids: list[str]) -> list[dict]:
 
 
 def _failing_checks(manifests: list[dict]) -> dict[str, list[str]]:
-    """Failing invariants of the newest run that has any, with their example ids: {name: [finding ids]}."""
+    """Failing invariants of the newest run that has any, with their example ids: {name: [finding ids]}. Reads the
+    self-check's run summary as the hook attaches it (selfcheck: {"checks": [{"id", "status", "examples"}]}) or a plain
+    list of {"name", "ok", "examples"}."""
     for m in reversed(manifests):
         inv = m.get("invariants")
-        rows = inv.get("results") if isinstance(inv, dict) else inv
+        rows = (inv.get("checks") or inv.get("results")) if isinstance(inv, dict) else inv
         if not isinstance(rows, list):
             continue
         out = {}
         for r in rows:
-            if isinstance(r, dict) and r.get("ok") is False:
-                out[str(r.get("name") or r.get("check") or "check")] = [x for x in (r.get("examples") or []) if isinstance(x, str)]
+            if not isinstance(r, dict) or not (r.get("ok") is False or r.get("status") in ("fail", "error")):
+                continue
+            ex = [x if isinstance(x, str) else (x or {}).get("finding_id") for x in (r.get("examples") or [])]
+            out[str(r.get("id") or r.get("name") or r.get("check") or "check")] = [x for x in ex if isinstance(x, str)]
         if out:
             return out
     return {}
@@ -206,11 +210,15 @@ def _decision_counts(conn: sqlite3.Connection, since: str) -> dict:
         return {"note": "no decision log in this store yet"}
 
 
+SELFCHECK_SKIP = ("selfcheck_held",)       # the held worklist itself: item rows, not history
+
+
 def _selfcheck_tables(conn: sqlite3.Connection) -> dict:
-    """Any table the self-check keeps (named selfcheck_*, invariant*, self_audit*): rows scrubbed, dates by month."""
+    """The tables the self-check keeps (named selfcheck_*, invariant*, self_audit*): its run history, cycles, audits
+    and money checks, rows scrubbed and dates by month (the held worklist copy is left out)."""
     out = {}
     for t in _tables(conn):
-        if re.match(r"^(selfcheck|invariant|self_audit|audit_)", t):
+        if re.match(r"^(selfcheck|invariant|self_audit|audit_)", t) and t not in SELFCHECK_SKIP:
             try:
                 cur = _cur(conn).execute(f'SELECT * FROM "{t}" ORDER BY rowid DESC LIMIT 400')
                 names = [d[0] for d in cur.description]
