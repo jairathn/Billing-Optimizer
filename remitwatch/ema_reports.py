@@ -2673,12 +2673,18 @@ def migrate_misread(store: Any, *, serverless: bool, log: Any = print) -> dict:
     ensure_schema(conn)
     if conn.execute("SELECT 1 FROM meta WHERE key=?", (META_MIGRATED,)).fetchone():
         return {"skipped": True}
-    out = {"candidates": 0, "purged": 0, "queued": 0, "kept": 0, "unknown_rows_deleted": 0, "genuine": 0}
+    out = {"candidates": 0, "purged": 0, "queued": 0, "kept": 0, "unknown_rows_deleted": 0, "genuine": 0, "rowless": 0}
     suspects: list[dict] = []
     for c in _misread_candidates(conn):
         out["candidates"] += 1
         sha, fam = c["sha"], c["family"]
         if serverless:
+            if not c["rows"]:
+                # nothing to purge (its rows went in under another copy of the same rows); an unknown file is noted
+                if fam == "unknown":
+                    _clear_unknown(conn, sha)
+                out["rowless"] = out.get("rowless", 0) + 1
+                continue
             origin = _dropbox_origin(conn, c.get("name"))
             if fam == "unknown":
                 out["unknown_rows_deleted"] += _clear_unknown(conn, sha)
@@ -2717,6 +2723,8 @@ def migrate_misread(store: Any, *, serverless: bool, log: Any = print) -> dict:
             out["unknown_rows_deleted"] += _clear_unknown(conn, sha)
         elif found:
             out["genuine"] += 1             # the original is a real export that names no claim: left as it is
+        elif not c["rows"]:
+            out["rowless"] = out.get("rowless", 0) + 1     # no rows of its own and no file to look at: no evidence either way
         else:
             suspects.append({"sha256": sha, "family": fam, "rows": c["rows"], "why": "original file gone"})
             out["kept"] += 1
