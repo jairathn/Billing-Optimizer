@@ -122,9 +122,9 @@ args=()
 for a in "$@"; do
   case "$a" in
     *"SELECT 1 FROM transactions"*) args+=("<store-state>") ;;
-    *"DELETE FROM meta WHERE key LIKE"*) args+=("<clear-locks>") ;;
-    *"SELECT key, value FROM meta"*) args+=("<run-locks>") ;;
     *"import password_days"*) args+=("<password-days>") ;;
+    *"sys.argv"*) args+=("<run-locks>") ;;                 # the deploy's lock reader (busy, clear)
+    *"DELETE FROM meta WHERE key"*) args+=("<clear-locks>") ;;
     *$'\n'*) args+=("<code>") ;;
     *) args+=("$a") ;;
   esac
@@ -420,6 +420,15 @@ def test_configure_sh_python_finds_data_and_clears_run_locks(tmp_path):
     assert run(state) == "data"
     run(clear)
     assert [k for (k,) in c.execute("SELECT key FROM meta")] == ["sync:cursor"]
+    # with the app stopped, a lock of the app's own containers goes; one taken in a container of its own (a cycle started
+    # with `docker compose run`, which the stop did not end) stays for its run to release
+    lock = lambda host: json.dumps({"pid": 1, "started": "2026-11-22T10:00:00+00:00", "host": host})     # noqa: E731
+    c.executemany("INSERT INTO meta VALUES (?, ?)", [("pipeline:servers", json.dumps(["app-container-1"])),
+                                                     ("pipeline:lock", lock("a-docker-compose-run-container")),
+                                                     ("fax:lock", lock("app-container-1")), ("backup:lock", json.dumps({"pid": 7}))])
+    c.commit()
+    run(clear)
+    assert sorted(k for (k,) in c.execute("SELECT key FROM meta")) == ["pipeline:lock", "pipeline:servers", "sync:cursor"]
 
 
 def test_the_aws_template_passes_awss_own_checks():

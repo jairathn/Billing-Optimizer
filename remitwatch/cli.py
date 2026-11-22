@@ -139,7 +139,16 @@ def cmd_sync(args: argparse.Namespace) -> int:
     from .store import Store
 
     store = Store(args.db)
-    stats = sync(store, full=args.full)
+    try:
+        stats = sync(store, full=args.full)
+    except Exception as exc:
+        # a sync that failed part-way hands back what it downloaded before the failure (exc.new_files): read it now, or the
+        # mirror keeps those files and every later sync calls them unchanged, so they would never be read
+        got = list(getattr(exc, "new_files", None) or [])
+        if got and not args.no_ingest:
+            print(f"The sync stopped part-way; reading the {len(got)} file(s) it downloaded first.", file=sys.stderr)
+            print(json.dumps(ingest_new_files(store, got), indent=1, default=str))
+        raise
     print(json.dumps({k: v for k, v in stats.items() if k != "new_files"}, indent=1))
     if stats["new_files"] and not args.no_ingest:
         print(json.dumps(ingest_new_files(store, stats["new_files"]), indent=1, default=str))
@@ -205,8 +214,10 @@ def _take_backup_lock(db: str) -> str:
                 c.execute("ROLLBACK")
                 raise BackupBusy(f"Another copy of the store is being made (since {held.get('started')} UTC).")
         token, now = secrets.token_hex(8), datetime.now(timezone.utc).isoformat(timespec="seconds")
+        from .pipeline import _host         # the container it runs in, as the cycle's lock says it
         c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                  (BACKUP_LOCK, json.dumps({"token": token, "started": now, "heartbeat": now, "pid": os.getpid(), "who": "backup"})))
+                  (BACKUP_LOCK, json.dumps({"token": token, "started": now, "heartbeat": now, "pid": os.getpid(), "who": "backup",
+                                            "host": _host()})))
         c.execute("COMMIT")
         return token
     finally:

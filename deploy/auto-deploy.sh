@@ -2,9 +2,10 @@
 # Auto-deploy: this server follows the repository's main branch by itself, as the Vercel site did.
 #
 # remitwatch-deploy.timer runs this every 5 minutes, as root. What it runs is the copy deploy/install-auto-deploy.sh put
-# in /usr/local/lib/remitwatch, never the file in the checkout, so a commit cannot change what runs here as root. A new
-# version of this script takes effect only when a person runs the installer again (--update); the log says when a
-# deploy brings one. Each run fetches the branch and, when its newest commit is not the one this server runs, deploys it:
+# in /usr/local/lib/remitwatch, never the file in the checkout, so a commit cannot change the deploy script that runs here
+# as root. A new version of this script takes effect only when a person runs the installer again (--update); the log
+# says when a deploy brings one. What it builds and starts (Dockerfile, docker-compose.yml) still comes from main: see
+# docs/SERVER_RUNBOOK.md, "Who controls the server". Each run fetches the branch and, when its newest commit is not the one this server runs, deploys it:
 #   - only docs changed (docs/ and *.md): the files are checked out; nothing is rebuilt or restarted;
 #   - otherwise build first, swap second: the files are checked out, Caddy's image is refreshed, `docker compose build
 #     --pull` runs (the image keeps the commit it is built from, which /api/health shows, as the Vercel site shows its
@@ -60,12 +61,15 @@ now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # The locks of the app's runs, read inside its container: the data cycle's (pipeline:lock) and any other run's that
 # keeps one the same way, such as the fax run (a row of the store's meta table whose key ends in ":lock", with the
-# holder's "pid" and the time it "started"). "busy" prints the key of each lock whose holder is a process running in the
-# container now. A process that started after the lock was taken does not count: it only got the same number. A lock
-# with no pid counts while its heartbeat is under 15 minutes old. "clear" removes the locks whose holder is gone (a run
-# that ended with its container), so that the next run is not held up for hours.
+# holder's "pid", the time it "started" and the container it runs in, "host"). "busy" prints the key of each lock whose
+# holder is a process running in the container now. A process that started after the lock was taken does not count: it
+# only got the same number. A lock with no pid counts while its heartbeat is under 15 minutes old. A lock taken in
+# another container (`docker compose run`) is not busy here: a swap does not touch that container, and its process
+# cannot be seen from this one. "clear" removes the locks whose holder is gone (a run that ended with its container), so
+# that the next run is not held up for hours: a lock of an earlier container of the app (named in pipeline:servers),
+# never one of another container's run that may still be going (pipeline.clear_locks_left_behind keeps it the same way).
 read -r -d '' LOCKS_PY <<'PY'
-import json, os, sqlite3, sys
+import json, os, socket, sqlite3, sys
 from datetime import datetime, timezone
 
 
@@ -102,20 +106,28 @@ def live(held):
 
 db = os.environ.get("REMITWATCH_DB", "/data/remitwatch.sqlite")
 if os.path.exists(db) and os.path.getsize(db) > 0:
+    here = socket.gethostname()
     c = sqlite3.connect(db, timeout=30)
     try:
         rows = c.execute("SELECT key, value FROM meta WHERE key LIKE '%:lock'").fetchall()
     except sqlite3.Error:
         rows = []
+    try:
+        got = c.execute("SELECT value FROM meta WHERE key='pipeline:servers'").fetchone()
+        servers = {str(h) for h in json.loads(got[0]) if h} if got else set()
+    except (sqlite3.Error, TypeError, ValueError):
+        servers = set()
     for key, value in rows:
         try:
             held = json.loads(value)
         except (TypeError, ValueError):
             held = None
         held = held if isinstance(held, dict) else {}
-        if sys.argv[1] == "busy" and live(held):
+        host = str(held.get("host") or "")
+        elsewhere = bool(host) and host != here          # taken in another container
+        if sys.argv[1] == "busy" and not elsewhere and live(held):
             print(key)
-        elif sys.argv[1] == "clear" and held.get("pid") and not live(held):
+        elif sys.argv[1] == "clear" and held.get("pid") and ((host in servers) if elsewhere else not live(held)):
             c.execute("DELETE FROM meta WHERE key=? AND value=?", (key, value))
             c.commit()
             print(key)
@@ -244,12 +256,15 @@ put_back() {    # the files, and each image name, as they were before this attem
 }
 
 rollback() {    # result why: after a swap that failed, the previous images and files started again; the new commit held
-  local how
+  local how back="rolled back to ${BACK:0:12}"
+  # no record said which commit ran (switched on without one): the images that ran come back, but the files cannot be put
+  # back to the commit they were built from, so the log does not say they match
+  [ "$FROM" = none ] && back="the images that ran before were started again; the files stay at ${BACK:0:12}, as no record said which commit ran"
   put_back
   if compose up -d >>"$BLOG" 2>&1 && compose restart caddy >>"$BLOG" 2>&1 && healthy; then
-    how="rolled back to ${BACK:0:12}, which answers again; the new commit is held"
+    how="$back, and the site answers again; the new commit is held"
   else
-    how="rolled back to ${BACK:0:12}, but the site still does not answer: see docker compose ps and docker compose logs"
+    how="$back, but the site still does not answer: see docker compose ps and docker compose logs"
   fi
   failed "$1" "$2; $how. Output: $BLOG" hold
   prune

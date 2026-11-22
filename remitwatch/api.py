@@ -674,8 +674,10 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
                 parts.append("(" + " OR ".join(f"{full} LIKE ?" for _ in forms) + ")")
                 who_params += [f"%{x}%" for x in forms]
             who = "(" + " AND ".join(parts) + ")"
+            name_only, name_params = who, list(who_params)
             number = re.sub(r"[\s\-]", "", q)
-            if re.search(r"\d", number):
+            digits = bool(re.search(r"\d", number))
+            if digits:
                 # or part of a member number, typed with or without the spaces and dashes a card prints, whichever way
                 # the payer wrote it
                 bare = "REPLACE(REPLACE(c.{k}_id,'-',''),' ','')"
@@ -684,6 +686,21 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
                 who_params += [f"%{number}%"] * 2
             clause += f" OR claim_key IN (SELECT c.claim_key FROM claims c WHERE {who})"
             params += who_params
+            if has_table("ema_rows"):
+                # a claim no payer has answered has no remittance (no claim_key). Its row shows the member ID EMA holds for
+                # it and the name from a remittance for another claim of the same EMA patient (_ema_people): the search finds
+                # it by those too. Only those claims' own EMA rows are looked at (by claim ID, which is indexed)
+                mine = "SELECT patient_control_number FROM findings WHERE claim_key IS NULL"
+                ema = (f"patient_control_number IN (SELECT e.claim_id FROM ema_rows e WHERE e.claim_id IN ({mine}) AND e.patient_id IN ("
+                       f"SELECT e2.patient_id FROM ema_rows e2 WHERE COALESCE(e2.patient_id,'') != '' AND e2.claim_id IN ("
+                       f"SELECT c.patient_control_number FROM claims c WHERE {name_only})))")
+                ema_params = name_params
+                if digits:
+                    ema += (f" OR patient_control_number IN (SELECT e.claim_id FROM ema_rows e WHERE e.claim_id IN ({mine}) "
+                            "AND REPLACE(REPLACE(e.policy_number,'-',''),' ','') LIKE ?)")
+                    ema_params = ema_params + [f"%{number}%"]
+                clause += f" OR (claim_key IS NULL AND ({ema}))"
+                params += ema_params
         where.append(f"({clause})")
     if handling == "written_off":
         # the biller wrote the disputed money off in EMA (detect.written_off_of): with a window still open, money given up.
@@ -2237,8 +2254,11 @@ def progress(_: str = Depends(require_auth)):
                                    FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1""")
     out["all_lines"] = rows("SELECT month, SUM(lines) lines FROM exposure WHERE month >= '2024-01' GROUP BY 1 ORDER BY 1") if has_table("exposure") else []
     out["snapshots"] = rows("SELECT at, status, SUM(n) n, SUM(cents) cents FROM progress_snapshots WHERE category IN ('downcoding','bundling','denial','underpayment') GROUP BY run_id, status ORDER BY at") if has_table("progress_snapshots") else []
+    # Activity: what people and the payers did. The lines "Build packets from EMA" writes for each item it looked at (a note
+    # lookup, a packet built) stay in the item's own history: ten of them a press would push the status changes out of the 60
     out["events"] = rows("""SELECT e.at, e.kind, e.from_status, e.to_status, e.amount_cents, e.actor, f.payer_group, f.signal, f.procedure_code, e.finding_id
-                            FROM finding_events e LEFT JOIN findings f ON f.finding_id = e.finding_id ORDER BY e.at DESC, e.id DESC LIMIT 60""") if has_table("finding_events") else []
+                            FROM finding_events e LEFT JOIN findings f ON f.finding_id = e.finding_id
+                            WHERE COALESCE(e.kind,'') NOT IN ('note_lookup','packet') ORDER BY e.at DESC, e.id DESC LIMIT 60""") if has_table("finding_events") else []
     return out
 
 
@@ -2693,8 +2713,10 @@ def _has_packet(finding_id: str) -> bool:
 @app.post("/api/appeals/from_ema", dependencies=[Depends(require_xhr)])
 def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_auth)):
     """Find the visit note for one finding's claim in ModMed EMA and build the appeal packet from it, as an uploaded note
-    would be (remitwatch.modmed). More than one note that day: the candidates come back and the person picks one
-    (document_id). skip_if_packet: leave a finding that already has a packet (the Worklist's batch)."""
+    would be (remitwatch.modmed). When a person has to choose, the candidates come back and the person picks one
+    (document_id): more than one note that day, only the name agrees with the claim, two patients fit (with names off: no
+    candidates, the note is attached by hand), or the only documents are a later note or not a visit note.
+    skip_if_packet: leave a finding that already has a packet (the Worklist's batch)."""
     from . import modmed
     fid = str(body.get("finding_id") or "")
     if not re.fullmatch(r"[A-Za-z0-9:_\-.]{1,120}", fid):
@@ -3243,7 +3265,10 @@ def _fax_lock_take(who: str) -> str | None:
     """Take the fax run's lock; None when another run holds it. One nobody refreshed for FAX_LOCK_STALE_S is taken over."""
     token = secrets.token_hex(8)
     now = _now_iso()
-    body = {"token": token, "started": now, "heartbeat": now, "pid": os.getpid(), "who": str(who)[:60]}
+    # the container it runs in, as the cycle's lock says it (pipeline._host): a fax run in another container (`docker compose
+    # run ... fax-cycle`) is judged by its heartbeat there, never by a process number that means nothing here
+    from .pipeline import _host
+    body = {"token": token, "started": now, "heartbeat": now, "pid": os.getpid(), "who": str(who)[:60], "host": _host()}
     if runtime.serverless():
         from .state import Conflict
         cloud, st = _cloud_state()
@@ -4435,6 +4460,11 @@ def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends
         if out.get("sent"):
             cloud.mark_packet_emailed(st, packet_id, to)
         return out
+    # a packet whose uploaded note was taken back, or matched to another visit since, may carry another patient's note:
+    # it is not faxed any more (_packet_problem), and it is not emailed either
+    why = _packet_problem(packet_id, {})
+    if why and why.startswith("The note it was built from"):
+        raise HTTPException(409, f"{why} It is not emailed: build the packet again in the item.")
     from .notes import email_packet
     conn = db()
     try:

@@ -103,7 +103,8 @@ Resources:
             [ -f .env ] || install -m 600 /dev/null .env
             grep -q '^SITE_ADDRESS=' .env || echo "SITE_ADDRESS='${SiteAddress}'" >> .env
             chmod +x deploy/aws/configure.sh deploy/auto-deploy.sh deploy/install-auto-deploy.sh
-            docker compose up -d --build
+            # the image keeps the commit it is built from, which /api/health shows from the first boot on
+            REMITWATCH_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
             # auto-deploy: from here on each new commit on the branch is deployed by itself (deploy/auto-deploy.sh)
             bash deploy/install-auto-deploy.sh --mark-current || echo "auto-deploy was not switched on"
             # System updates. Amazon Linux 2023 stays on the release its image was made from unless told to move, so a

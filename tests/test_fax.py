@@ -696,6 +696,8 @@ def test_fax_runs_take_turns_and_the_deploy_can_see_it(site, capsys):
         assert cli.main(["--db", site.db, "fax-cycle"]) == 1
         held = json.loads(_rows(site.db, "SELECT value FROM meta WHERE key='fax:lock'")[0][0])
         assert held["token"] == lock                  # the row the deploy script waits for, as for pipeline:lock
+        import socket
+        assert held["host"] == socket.gethostname()   # and the container it runs in, as the cycle's lock says it
     assert _rows(site.db, "SELECT value FROM meta WHERE key='fax:lock'") == []
     # the cycle's fax step holds it while it sends
     seen = []
@@ -938,6 +940,10 @@ def test_a_member_id_a_family_shares_ties_a_letter_to_its_own_patient_only(site,
     # which only the ID and the date fit, is left to a person (the parent's tie list names the fax)
     r = letter("in-claim", claim_numbers=["CB0000702C017"], member_ids=[fam], service_dates=["2026-11-01"])
     assert [who[i] for i in r["tied"]] == ["child"] and r["tied_by"] == "claim_id"
+    assert [who[s["finding_id"]] for s in r["suggested"]] == ["parent"]
+    # the child's bill (another submission of it) with the family name, the family's ID and the date: the child's item
+    r = letter("in-bill", claim_numbers=["CB0000702C099"], member_ids=[fam], patient_last="ROE", service_dates=["2026-11-01"])
+    assert [who[i] for i in r["tied"]] == ["child"] and r["tied_by"] == "bill_and_name"
     assert [who[s["finding_id"]] for s in r["suggested"]] == ["parent"]
     # the member ID, the date and the child's name: the child's item only
     r = letter("in-name", member_ids=[fam], patient_last="ROE", patient_first="EMMA", service_dates=["2026-11-01"])
@@ -1312,6 +1318,11 @@ def test_a_packet_from_a_note_taken_back_is_built_again_not_faxed(site):
     assert r["status"] == "sent" and r["packet_id"] != built["packet"]["packet_id"]
     text = pdf_text(line.to(PAYER_FAX)[0]["pdf"])
     assert "WRONGVISIT" not in text and "Changing lesion" in text
+    # nor is the old packet emailed by hand: it may carry another visit's note
+    old = c.post(f"/api/packets/{built['packet']['packet_id']}/email", json={"to": "billing@example.org"}, headers=XHR)
+    assert old.status_code == 409 and "taken back" in old.json()["detail"]
+    new = c.post(f"/api/packets/{r['packet_id']}/email", json={"to": "billing@example.org"}, headers=XHR)
+    assert new.status_code == 200 and new.json()["sent"] is False          # this test site has no mail server: it got that far
 
 
 def test_follow_ups_wait_on_old_remittances_and_on_practice_blanks(site, monkeypatch):

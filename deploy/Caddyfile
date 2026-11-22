@@ -8,7 +8,7 @@
 		Referrer-Policy "no-referrer"
 	}
 	# uploads by hand (EMA's exports, remittance files, visit notes) may be large: a year of charge lines runs to tens of MB.
-	# MiB, not MB: Caddy's MB is 1,000,000 bytes, and this must stay above the app's own limit of 250 MiB per file.
+	# MiB, not MB: Caddy's MB is 1,000,000 bytes, and this must stay above the app's own limit of 240 MiB per upload.
 	@uploads path /api/uploads /api/uploads/*
 	request_body @uploads {
 		max_size 260MiB

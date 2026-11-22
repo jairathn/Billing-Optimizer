@@ -24,7 +24,7 @@ PATH_NPI = "1666666661"       # an invented dermatopathologist
 
 
 def claim(i, code, charge, allowed, *, npi=DOC_NPI, cfi="12", dos="20260401", plan="PPO", status="1", pcn=None,
-          who=None, prov="1*DOCTOR*ALEX", paid=None):
+          who=None, prov="1*DOCTOR*QUINN", paid=None):
     """One claim with one line. `prov` is NM102*NM103*NM104 of the rendering provider (1 = a person)."""
     pcn = pcn or f"CB{i:07d}C017"
     who = who or f"SAMPLE*PAT****MI*M{i:08d}"
@@ -70,7 +70,7 @@ def test_R1_the_same_named_clinician_paid_both_amounts_is_called_the_pa_rate(tmp
     npis = {r[0] for r in store.query("SELECT DISTINCT c.rendering_provider_npi FROM claims c")}
     names = {r[0] for r in store.query("SELECT DISTINCT c.rendering_provider_name FROM claims c")}
     print("rendering NPIs on every claim:", npis, names)
-    assert npis == {DOC_NPI} and names == {"DOCTOR ALEX"}
+    assert npis == {DOC_NPI} and names == {"DOCTOR QUINN"}
     assert [r["signal"] for r in rows] == ["UNDERPAID_VS_OWN_RATE"] * 6, \
         "the clinician paid $117.60 on 25 visits is grouped as 'the rate for a PA or NP' on the other 6"
     store.close()

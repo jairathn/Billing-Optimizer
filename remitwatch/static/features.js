@@ -240,6 +240,13 @@ async function feedPanel(el){
 
 // ---------------------------------------------------------------- finding detail: facts, history, note-based appeal builder
 function drawerExtras(f, r){
+  // What EMA shows paid on an item no remittance shows paid. A whole claim EMA shows partly paid stays open (detect.py),
+  // and its codes paid and not paid are named: marking it recovered on the codes paid would drop the rest from every list.
+  const emaPaidNote = e => {
+    const src = `${e.date ? ' on ' + esc(e.date) : ''}, ${esc(e.source || 'EMA')}`;
+    if((e.codes_not_paid||[]).length) return `<div class="note"><b>EMA shows part of this claim paid.</b> Insurance paid ${esc((e.codes_paid||[]).join(', ') || 'some of its codes')} (${money2(e.paid_cents)}${src}) but not ${esc(e.codes_not_paid.join(', '))}. The item stays open until every code is paid. Check EMA, and mark it recovered only if the rest was paid too.</div>`;
+    return `<div class="note"><b>EMA shows this line paid.</b> ${money2(e.paid_cents)} from insurance${e.date?' on '+esc(e.date):''} (${esc(e.source||'EMA')}), but no remittance in the files shows that payment. Check the payment in EMA; if it is real, mark this recovered. If the remittance for it is missing, put it in the Dropbox folder.</div>`;
+  };
   const facts = [['Billed code', f.billed_code], ['Billed → paid', f.code_pair], ['Plan on the remit', f.plan], ['Place of service', f.pos_class], ['Location', f.location], ['Diagnosis', f.diagnosis],
     ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? String(f.appealed_at).slice(0,10) : null]].filter(x=>x[1]!=null && x[1]!=='');
   const ev = f.evidence || {};
@@ -260,7 +267,7 @@ function drawerExtras(f, r){
     : ev.partly_paid ? `<div class="note"><b>Partly paid.</b> Claim ${esc(ev.partly_paid.claim)} paid ${esc(ev.partly_paid.units_paid)} of the ${esc(ev.partly_paid.units_billed)} units billed (${money2(ev.partly_paid.paid_cents)} on ${esc(ev.partly_paid.payment_date)}). The rest is still unpaid.</div>`
     : ev.adjudicated_elsewhere ? `<div class="note"><b>Processed on another claim.</b> Claim ${esc(ev.adjudicated_elsewhere.claim)} for this patient, date and code was processed on ${esc(ev.adjudicated_elsewhere.payment_date)} with ${money2(ev.adjudicated_elsewhere.patient_owes_cents)} owed by the patient (deductible, coinsurance or copay). If that is this service, the payer has decided it.</div>`
     : ev.maybe_paid_later ? `<div class="note"><b>Possibly paid on another claim.</b> Claim ${esc(ev.maybe_paid_later.claim)} for this patient and date paid ${esc((ev.maybe_paid_later.codes_paid||[]).join(', '))} on ${esc(ev.maybe_paid_later.payment_date)}. It was not closed automatically because ${esc(ev.maybe_paid_later.why_not_closed)}. If that claim covers this line, mark it recovered.</div>`
-    : ev.ema_shows_paid ? `<div class="note"><b>EMA shows this line paid.</b> ${money2(ev.ema_shows_paid.paid_cents)} from insurance${ev.ema_shows_paid.date?' on '+esc(ev.ema_shows_paid.date):''} (${esc(ev.ema_shows_paid.source||'EMA')}), but no remittance in the files shows that payment. Check the payment in EMA; if it is real, mark this recovered. If the remittance for it is missing, put it in the Dropbox folder.</div>` : '';
+    : ev.ema_shows_paid ? emaPaidNote(ev.ema_shows_paid) : '';
   const claims = f.signal==='SECOND_RATE' && (ev.claims||[]).length ? `<h3 class="small">Claims paid at this amount${ev.lines > ev.claims.length ? ' (first '+ev.claims.length+' of '+ev.lines+')' : ''}</h3>
     <table class="small"><thead><tr><th>EMA claim ID</th><th>Date of service</th><th class="num">Allowed</th><th>File by</th></tr></thead><tbody>${ev.claims.map(c=>`<tr><td>${c[0] ? `<a href="#" class="claim-link" data-claim="${esc(c[0])}" title="Every remittance for this claim">${esc(c[0])}</a>` : ''}</td><td>${esc(c[1])}</td><td class="num">${money2(c[2])}</td><td class="${c[3] && c[3] < today ? 'muted' : ''}">${c[3] ? esc(c[3]) + (c[3] < today ? ' (passed)' : '') : '<span class="muted">unknown</span>'}</td></tr>`).join('')}</tbody></table>` : '';
   // what bears on the next step stays in view; the facts and the note builder go in the drawer's folds

@@ -332,6 +332,28 @@ def test_an_unanswered_claim_shows_its_patient_and_member_id_from_emas_rows(chas
     assert "ZX0000501" not in c.get("/api/claims/view", headers={"X-Claim": NA}).text
 
 
+def test_with_names_on_the_search_finds_an_unanswered_claim_by_what_its_row_shows(chase, monkeypatch):
+    """A claim no payer answered has no remittance, so its row's name and member ID come from EMA's rows. The search box
+    finds it by them too, as it finds any other item by the name and member number its row shows. With names off it does
+    not look at names or member numbers at all. Invented patient and numbers."""
+    c, db, api = chase.c, chase.db, chase.api
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE ema_rows SET policy_number='ZX-0000-501' WHERE claim_id=?", (NA,))
+    conn.execute("UPDATE claims SET patient_last='RIVERS', patient_first='JO', patient_middle=NULL WHERE patient_control_number='CB0000001C017'")
+    conn.execute("INSERT INTO ema_rows (row_fingerprint, family, claim_id, patient_id) VALUES ('x1', 'charge_lines', 'CB0000001C017', 'P00501')")
+    conn.commit()
+    conn.close()
+
+    def found(text: str) -> list[str]:
+        return [i["patient_control_number"] for i in c.get("/api/findings?status=all&limit=200", headers={"X-Search": text}).json()["items"]]
+    monkeypatch.setattr(api, "SHOW_PHI", True)
+    for text in ("ZX0000501", "zx-0000-501", "0000501", "rivers jo", "Jo Rivers"):
+        assert NA in found(text), text
+    assert REJ not in found("rivers jo") and NA not in found("someone else") and NA not in found("ZX0000505")
+    monkeypatch.setattr(api, "SHOW_PHI", False)
+    assert NA not in found("rivers jo") and NA not in found("ZX0000501")
+
+
 # --------------------------------------------------------------------------- notes: names, lookups and the batch
 @pytest.fixture()
 def notes_site(tmp_path, monkeypatch):
@@ -414,6 +436,9 @@ def test_the_note_lookups_carry_the_names_switch_the_lookups_reason_and_the_batc
     mark = conn.execute("SELECT note FROM finding_events WHERE finding_id=? AND kind='note_lookup'", (notes_site.fid,)).fetchone()[0]
     conn.close()
     assert mark == "Build packets from EMA: Only the name agrees with the claim: a person confirms the note in the item."
+    # the line stays in the item's history, and out of Progress's Activity, where ten a press would push out people's work
+    assert "note_lookup" in [e["kind"] for e in notes_site.c.get(f"/api/findings/{notes_site.fid}").json()["events"]]
+    assert "note_lookup" not in [e["kind"] for e in notes_site.c.get("/api/progress").json()["events"]]
 
 
 def _send_ready(api, monkeypatch) -> None:
@@ -488,6 +513,8 @@ def test_a_backup_is_whole_or_absent_and_one_at_a_time(server, monkeypatch):
     token = cli._take_backup_lock(db)
     held = json.loads(conn.execute("SELECT value FROM meta WHERE key='backup:lock'").fetchone()[0])
     assert held["pid"] == os.getpid() and held["started"] and held["token"] == token
+    import socket
+    assert held["host"] == socket.gethostname()         # the container it runs in, as the cycle's lock says it
     with pytest.raises(cli.BackupBusy):
         cli.backup_store(db, str(dest), keep=7)
     assert "skipped" in cli._daily_backup(db)

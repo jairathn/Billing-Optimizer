@@ -45,7 +45,7 @@ def sv(code: str, charge: str, paid: str, allowed: str | None = None, cas: str =
 def clm(pcn: str, status: str, lines: str, *, who: str = "SAMPLE*PAT****MI*M00000001", cfi: str = "12", plan: str = "PPO",
         dos: str = "20260401", charge: str = "100.00", paid: str = "0.00") -> str:
     """One claim loop with a physician as rendering provider."""
-    return (f"CLP*{pcn}*{status}*{charge}*{paid}*0.00*{cfi}*PC{pcn}*11~NM1*QC*1*{who}~NM1*82*1*DOCTOR*ALEX****XX*{DOC}~"
+    return (f"CLP*{pcn}*{status}*{charge}*{paid}*0.00*{cfi}*PC{pcn}*11~NM1*QC*1*{who}~NM1*82*1*DOCTOR*QUINN****XX*{DOC}~"
             f"REF*CE*{plan}~DTM*232*{dos}~{lines}")
 
 
@@ -78,7 +78,7 @@ def real_fingerprint(row: dict) -> str:
 
 def charge_row(source: str, i: int, d: str, claim_id: str | None, cpt: str = "99213", status: str | None = None, patient: str | None = None) -> dict:
     row = {"family": "charge_lines", "source_sha256": source, "source_name": source, "row_index": i, "service_date": d,
-           "provider": "Doctor, Alex", "provider_role": "Doctor", "patient_id": patient, "claim_id": claim_id, "cpt": cpt, "units": 1.0,
+           "provider": "Doctor, Quinn", "provider_role": "Doctor", "patient_id": patient, "claim_id": claim_id, "cpt": cpt, "units": 1.0,
            "charges_cents": 15000, "activity_type": "Charge", "claim_status": status, "location": "North Office"}
     row["row_fingerprint"] = real_fingerprint(row)
     return row

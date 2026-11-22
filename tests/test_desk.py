@@ -457,6 +457,9 @@ const step = async (name, say, fn) => { ctx.state.brief = BRIEF; asked.length = 
   await step('let go and next, unanswered, with a note', ['a duplicate of a paid claim'], () => drawer(ITEMS[0]).querySelector('#letGoNext').onclick());
   await step('let go and next, a denial, confirmed', [true], () => drawer(ITEMS[3]).querySelector('#letGoNext').onclick());
   await step('texts', [], async () => ({ intro: vm.runInContext('DESKS.denials.intro', ctx), help: vm.runInContext('({NO_ANSWER: SIGNAL_HELP.NO_ANSWER, REJECTED_PRE_PAYER: SIGNAL_HELP.REJECTED_PRE_PAYER})', ctx) }));
+  // what an item's panel says is needed: a claim rejected on the way, or one EMA shows still in its print batch, never sent
+  const need = ev => (ctx.whatToDoHtml(Object.assign(item('c2', 'REJECTED_PRE_PAYER', 'correct_and_resubmit'), { evidence: ev }), null).match(/You need: ([^<]*)</) || [])[1];
+  await step('you need', [], async () => ({ rejected: need({}), unsent: need({ not_sent: true }) }));
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e); process.exit(1); });
 """
@@ -730,6 +733,11 @@ const cand = (id, n, o = {}) => Object.assign({ id, date: '2026-09-14', written:
   await step('build packets from EMA', { '/api/appeals/ema_queue': [{ items: [{ finding_id: 'q1' }, { finding_id: 'q2' }, { finding_id: 'q3' }], since: '2026-09-01' }],
     '/api/appeals/from_ema': [{ status: 'built' }, { status: 'ambiguous', reason: 'Only the name agrees with the claim.', candidates: [] }, { status: 'not_found', reason: 'EMA has no signed note.' }] },
     async () => { await ctx.emaBatch(bt, bx); return bx.textContent; });
+  // a whole claim EMA shows partly paid: the panel names the codes paid and the codes not paid; one line paid keeps its words
+  const said = ev => unesc(ctx.drawerExtras({ signal: 'CLAIM_DENIED_UNPAID', status: 'open', evidence: ev }, {}).notes.replace(/<[^>]*>/g, ''));
+  await step('EMA shows part of a claim paid', {}, async () => ({
+    part: said({ ema_shows_paid: { paid_cents: 11760, date: '2026-11-02', source: 'Encounter & Charge Lines.xlsx', codes_paid: ['99214'], codes_not_paid: ['11102', '11103'] } }),
+    line: said({ ema_shows_paid: { paid_cents: 11760, source: 'Encounter & Charge Lines.xlsx' } }) }));
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e); process.exit(1); });
 """
@@ -857,3 +865,34 @@ def test_held_and_batch_notes_say_a_person_picks_or_attaches_the_note(note_steps
     assert batch["got"] == ("Done: 1 packet built, 1 whose note a person has to pick or attach (open the item), 1 with no signed note found in EMA. "
                             "Open an item to send its packet.")
     assert [x.get("body", {}).get("finding_id") for x in batch["sent"] if x["path"] == "/api/appeals/from_ema"] == ["q1", "q2", "q3"]
+
+
+def test_a_claim_ema_shows_partly_paid_names_the_codes_not_paid_in_its_panel(note_steps):
+    """A whole-claim item that EMA shows paid for some codes only stays open (detect.py). Its panel, where the status
+    buttons are, names the codes paid and the codes not paid, and says to mark it recovered only if the rest was paid too:
+    "this line paid" would send the biller to mark the whole claim recovered. One line EMA shows paid keeps its words."""
+    got = note_steps["EMA shows part of a claim paid"]["got"]
+    assert got["part"] == ("EMA shows part of this claim paid. Insurance paid 99214 ($117.60 on 2026-11-02, Encounter & Charge Lines.xlsx) "
+                           "but not 11102, 11103. The item stays open until every code is paid. Check EMA, and mark it recovered only if "
+                           "the rest was paid too.")
+    assert got["line"].startswith("EMA shows this line paid. $117.60 from insurance (Encounter & Charge Lines.xlsx), but no remittance")
+
+
+def test_a_claim_still_in_emas_print_batch_is_not_called_a_rejection(page_steps):
+    """A claim EMA shows waiting in its print batch, never sent, is a REJECTED_PRE_PAYER item too (detect.py). Its labels,
+    the help text, Today's line and its panel say it never reached the payer, and send the biller to the print batch, not
+    to a clearinghouse rejection report that does not exist."""
+    import html as htmllib
+    label, nxt = insights.SIGNAL_LABELS["REJECTED_PRE_PAYER"]
+    assert "print batch" in label and label.startswith("Never reached the payer") and "print it" in nxt
+    assert insights.SHORT_LABELS["REJECTED_PRE_PAYER"] == "Never reached the payer"
+    fix = next(t for t in insights.WORK_TYPES if t["key"] == "fix")
+    assert "rejection report" in fix["needs"] and "print batch" in fix["needs"]
+    got = {k: htmllib.unescape(v) for k, v in page_steps["you need"]["got"].items()}
+    assert got == {"rejected": "EMA and the rejection's reason (on the clearinghouse's rejection report)",
+                   "unsent": "EMA's print batch (print and mail the claim, or send it electronically)"}
+    assert "print batch" in page_steps["texts"]["got"]["help"]["REJECTED_PRE_PAYER"]
+    today = open(os.path.join(os.path.dirname(insights.__file__), "static", "today.js"), encoding="utf-8").read()
+    assert "more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit)" in today
+    for text in (label, nxt, fix["needs"], *got.values()):
+        assert "—" not in text

@@ -133,7 +133,8 @@ be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
 - Both brakes (ten wrong logins, ten wrong tries at the owner's password) count per address and per running copy of the site. Someone on the same office network
   can therefore close the tab to the owner for ten minutes at a time by guessing; the owner can still open it from another network, and nothing else is affected.
 - Add the settings for the Production environment only. A preview build of another branch that was given them would
-  hold the Dropbox token; the app refuses to run a cycle on a preview build either way.
+  hold the Dropbox token; the app refuses to run a cycle on a preview build either way, and a preview build never sends
+  faxes.
 - No page can be framed by another site, answers with data are marked not to be stored, and the run address accepts the
   login only from the site's own pages.
 

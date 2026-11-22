@@ -155,7 +155,8 @@ class FakeSFTP:
         self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
         self._stop = False
-        threading.Thread(target=self._serve, daemon=True).start()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
 
     def _serve(self) -> None:
         while not self._stop:
@@ -187,6 +188,13 @@ class FakeSFTP:
     def stop(self) -> None:
         self._stop = True
         try:
+            # on Linux a close alone does not wake the thread waiting in accept(): shut the socket down first, or each
+            # stand-in leaves a thread behind (what test_aws.py's forkpty warnings came from)
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
             self.sock.close()
         except OSError:
             pass
+        self._thread.join(timeout=5)

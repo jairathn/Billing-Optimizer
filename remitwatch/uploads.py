@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 from . import ema_exports, modmed
 
-MAX_BYTES = 240 * 1024 * 1024           # one upload (a zip of remittances can be large); under Caddy's 260 MB (260,000,000 bytes)
+MAX_BYTES = 240 * 1024 * 1024           # one upload (a zip of remittances can be large); under Caddy's 260 MiB (272,629,760 bytes)
 EXPORT_MAX_BYTES = 60 * 1024 * 1024     # one EMA export, as cloud.MAX_FILE_BYTES: a year of Encounter & Charge Lines is tens of MB,
                                         # and reading one takes ten to twenty times its size in memory
 INCOMING_MAX_AGE = 24 * 60 * 60         # a file left in .incoming this long (a request cut off) is removed

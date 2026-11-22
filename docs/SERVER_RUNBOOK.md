@@ -208,7 +208,8 @@ sudo bash /opt/remitwatch/deploy/install-auto-deploy.sh --update
 ```
 
 The deploy log says when a deploy brought such a change, and `--status` says when the checkout's script differs from the
-copy that runs. The installer refuses a script that does not parse, and the copy that runs stays as it was.
+copy that runs. Running configure.sh again says so too, and installs nothing. The installer refuses a script that does
+not parse, and the copy that runs stays as it was.
 
 ### How it works
 
@@ -221,7 +222,9 @@ copy that runs. The installer refuses a script that does not parse, and the copy
 - Only docs changed (files under `docs/` and `*.md`): the files are checked out; nothing is rebuilt or restarted.
 - Anything else: build first, swap second. The files are checked out, Caddy's image is refreshed, `docker compose build
   --pull` runs (fresh base images, so security fixes in them arrive), and Caddy checks its file with the image about to
-  run (`caddy validate`). A failed build, or a Caddy file Caddy cannot load, puts the files and images back, leaves the
+  run (`caddy validate`). A new base image also installs every Python package again, at its newest version
+  (`requirements.txt` sets lower bounds only), and only the site answering checks them. Pinning the versions is the
+  owner's decision. A failed build, or a Caddy file Caddy cannot load, puts the files and images back, leaves the
   running site as it was, and is logged with its output. The next tick tries again, and after three failures of the same
   commit it is tried once an hour (a new commit on main is tried at once).
 - No swap while a data cycle, a fax run or a backup is going in the app (each holds a lock in the store). A deploy waits
@@ -264,8 +267,8 @@ built from; on the Vercel site, the commit Vercel built. So the two sites can be
 - After a rollback it is the commit that runs again.
 - After a commit that changes only docs nothing is rebuilt, so the server keeps showing the commit before it, while Vercel
   (which builds every commit) shows the newer one. `git diff --stat <server's> <Vercel's>` then lists only docs.
-- It is `null` for an image built without it: a plain `sudo docker compose build`, the template's first boot, and the
-  first deploy made by an older deploy script. The next deploy, or configure.sh, names it again.
+- It is `null` for an image built without it: a plain `sudo docker compose build`, a server first booted from an older
+  template, and the first deploy made by an older deploy script. The next deploy, or configure.sh, names it again.
 - The same commit means the same code, not the same library versions: `requirements.txt` sets lower bounds only, and each
   site installs what is newest when it builds.
 

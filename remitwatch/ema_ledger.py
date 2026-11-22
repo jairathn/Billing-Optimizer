@@ -1394,19 +1394,22 @@ def _marks(conn: sqlite3.Connection) -> dict:
     in_835 and trace_key on each payment, ins_paid_no835 and payer groups on each line."""
     x = conn.execute
     W = _W
-    order = "ORDER BY (t.grp = pa_chk.payer_group) DESC, t.paid_on DESC, t.tk LIMIT 1"
+    def pick(cond: str) -> str:
+        # the payer group is compared in a derived table's select list, not in ORDER BY: SQLite 3.45 (Ubuntu 24.04)
+        # cannot name the updated table's columns in a subquery's ORDER BY ("no such column"); 3.53 can
+        return (f"(SELECT tk FROM (SELECT t.tk AS tk, t.paid_on AS paid_on, (t.grp = pa_chk.payer_group) AS same "
+                f"FROM {W}.pb_tr t WHERE {cond}) ORDER BY same DESC, paid_on DESC, tk LIMIT 1)")
     x(f"""UPDATE {W}.pa_chk SET payer_group = rw_payer_group(payer), payer_kind = rw_payer_kind(payer), match = 'none',
               trace_key = NULL, trace_payment_date = NULL, trace_paid_cents = NULL""")
     x(f"""UPDATE {W}.pa_chk SET match = 'exact',
-              trace_key = (SELECT t.tk FROM {W}.pb_tr t WHERE t.ckey = rw_ckey(pa_chk.check_no) {order})
+              trace_key = {pick("t.ckey = rw_ckey(pa_chk.check_no)")}
           WHERE EXISTS (SELECT 1 FROM {W}.pb_tr t WHERE t.ckey = rw_ckey(pa_chk.check_no))""")
     x(f"""UPDATE {W}.pa_chk SET match = 'loose',
-              trace_key = (SELECT t.tk FROM {W}.pb_tr t WHERE t.lkey = rw_check_loose(pa_chk.check_no) {order})
+              trace_key = {pick("t.lkey = rw_check_loose(pa_chk.check_no)")}
           WHERE match = 'none' AND rw_check_loose(check_no) IS NOT NULL
             AND EXISTS (SELECT 1 FROM {W}.pb_tr t WHERE t.lkey = rw_check_loose(pa_chk.check_no))""")
     x(f"""UPDATE {W}.pa_chk SET match = 'loose',
-              trace_key = (SELECT t.tk FROM {W}.pb_tr t WHERE t.last10 = substr(trim(pa_chk.check_no), -10)
-                           AND t.grp = pa_chk.payer_group AND t.len >= 10 {order})
+              trace_key = {pick("t.last10 = substr(trim(pa_chk.check_no), -10) AND t.grp = pa_chk.payer_group AND t.len >= 10")}
           WHERE match = 'none' AND length(trim(check_no)) >= 10
             AND EXISTS (SELECT 1 FROM {W}.pb_tr t WHERE t.last10 = substr(trim(pa_chk.check_no), -10)
                         AND t.grp = pa_chk.payer_group AND t.len >= 10)""")

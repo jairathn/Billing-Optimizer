@@ -713,10 +713,13 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
         fid, pcn, payer_no = r["finding_id"], _norm(r["patient_control_number"]), _norm(r["payer_claim_control_number"])
         rlast, same_day = _norm(r["patient_last"]), r["service_date"] in days
         how = None
+        bill = bool(pcn) and len(pcn) >= 9 and any(len(n) >= 9 and n[:9] == pcn[:9] for n in nums)
         if pcn and pcn in nums:
             how = "claim_id"
         elif payer_no and payer_no in nums:
             how = "payer_claim"
+        elif bill and last and rlast == last:
+            how = "bill_and_name"           # the bill names one patient's visit: before the member ID, which a family can share
         elif members and same_day and members & {_norm(r[k]) for k in ("patient_id", "insured_id", "member_id_ref") if r[k]}:
             rfirst = _norm(r["patient_first"])
             if (last and rlast and rlast != last) or (first and rfirst and not _first_agrees(first, rfirst)):
@@ -724,11 +727,8 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
                 weak[fid] = (2, "a member ID and a date, under another patient's name")
             else:
                 how = "member_and_date"
-        elif pcn and len(pcn) >= 9 and any(len(n) >= 9 and n[:9] == pcn[:9] for n in nums):
-            if last and rlast == last:
-                how = "bill_and_name"
-            else:
-                weak[fid] = (1, "the first nine characters of a claim number")
+        elif bill:
+            weak[fid] = (1, "the first nine characters of a claim number")
         elif last and rlast == last and same_day:
             rfirst = _norm(r["patient_first"])
             weak[fid] = (0 if (first and rfirst and rfirst[:3] == first[:3]) else 2, "the family name and the date of service")
@@ -778,13 +778,13 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
     if not trusted:
         why = (f"It came from {pretty(caller) or 'a number that was not shown'}, which is not saved for {', '.join(p or 'the payer' for p in payers)}"
                if not known else f"It names a claim of {', '.join(p or 'another payer' for p in payers)} but came from a number saved for {', '.join(sorted(known))}")
-        out.update(suggested=suggest(strong), needs=why + ": a person checks it before it is tied.")
+        out.update(suggested=suggest(list(strong) + left), needs=why + ": a person checks it before it is tied.")
         out["matches"] = out["suggested"]
         return out
     if codes:       # a letter about some lines of a claim answers those lines only
         lines = {i: h for i, h in trusted.items() if _norm(info[i]["procedure_code"])[:5] in codes}
         if not lines:
-            out.update(suggested=suggest(trusted), needs="It names procedure codes that none of the claim's items has: a person checks which it answers.")
+            out.update(suggested=suggest(list(trusted) + left), needs="It names procedure codes that none of the claim's items has: a person checks which it answers.")
             out["matches"] = out["suggested"]
             return out
         trusted = lines

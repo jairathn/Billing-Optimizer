@@ -498,13 +498,70 @@ def test_a_server_that_stops_answering_cannot_hold_the_run_past_its_deadline(tmp
         t0 = time.time()
         out = _pull(store, sftp.env(), secs=2)
         assert time.time() - t0 < 2 + trizetto.WATCHDOG_GRACE + 4, "the stalled read held the run past its deadline"
-        assert out["remits"] == 1 and "1 of 3 new files were read" in out["error"] and out["remaining"] == 0
+        # the files not read are counted, so a serverless cycle carries on with them as it does after its deadline
+        assert out["remits"] == 1 and "1 of 3 new files were read" in out["error"] and out["remaining"] == 2
     finally:
         release.set()
     stall["read"] = ""
     out = _pull(store, sftp.env())
     assert out["remits"] == 2 and "error" not in out
     store.close()
+
+
+def test_a_host_that_holds_the_line_without_speaking_ssh_is_a_failed_step_not_a_page_error(tmp_path, monkeypatch):
+    """A proxy, or a host and port that point at a service that waits for the client to speak first, takes the connection
+    and never sends SSH's greeting. paramiko then gives up without saying so. The /setup test shows a failed Connection
+    step, not "request failed (500)", and the scheduled pull fails as a TriZetto error with nothing sent. Invented settings."""
+    _fake_sftp()            # paramiko, or skip
+    import base64
+    import socket
+
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    from remitwatch.store import Store
+    ls = socket.socket()
+    ls.bind(("127.0.0.1", 0))
+    ls.listen(8)
+    held: list = []
+    threading.Thread(target=lambda: [held.append(ls.accept()) for _ in range(8)], daemon=True).start()
+    monkeypatch.setattr(trizetto.Session.__init__, "__defaults__", (None, 2))      # wait 2 seconds for the greeting, not 30
+    env = {"TRIZETTO_SFTP_HOST": "127.0.0.1", "TRIZETTO_SFTP_PORT": str(ls.getsockname()[1]), "TRIZETTO_SFTP_USER": "RWLOGIN",
+           "TRIZETTO_SFTP_PASSWORD": "pw-invented-0001"}
+    try:
+        got = trizetto.check(env)
+        assert got["ok"] is False and got["steps"][-1]["step"] == "Connection", got
+        assert "did not complete the SSH handshake within 2 s; nothing was sent" in got["steps"][-1]["detail"]
+        store = Store(str(tmp_path / "s.sqlite"))
+        with pytest.raises(trizetto.TriZettoError, match="did not complete the SSH handshake"):
+            _pull(store, env, secs=30)
+        store.close()
+        # the route answers with its steps
+        db = str(tmp_path / "api.sqlite")
+        Store(db).close()
+        api.ensure_server_schema(db)
+        for k in ("REMITWATCH_MODE", "VERCEL", "REMITWATCH_ALLOW_OPEN"):
+            monkeypatch.delenv(k, raising=False)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.setattr(api, "DB_PATH", db)
+        monkeypatch.setattr(api, "PASSWORD", "a-long-test-password-1")
+        monkeypatch.setattr(api, "USERNAME", "staff")
+        auth = {"Authorization": "Basic " + base64.b64encode(b"staff:a-long-test-password-1").decode(), "X-Requested-With": "remitwatch"}
+        r = TestClient(api.app, raise_server_exceptions=False).post("/api/trizetto/test", headers=auth)
+        assert r.status_code == 200 and r.json()["steps"][-1]["step"] == "Connection", r.text[:300]
+    finally:
+        ls.close()
+        for c, _ in held:
+            c.close()
+
+
+def test_a_hold_says_its_times_in_plain_words():
+    """The hold's times read "2026-11-23 19:32 UTC", never "2026-11-23 19:32+00:00 UTC"."""
+    text = trizetto.held_text({"at": "2026-11-22T19:32:05+00:00", "retry_at": "2026-11-23T19:32+00:00", "kind": "password"})
+    assert "on 2026-11-22 19:32 UTC" in text and "until 2026-11-23 19:32 UTC" in text and "+00:00" not in text
+    # a time with another offset is said in UTC
+    assert "until 2026-11-23 19:32 UTC" in trizetto.held_text({"at": "2026-11-22T19:32:05+00:00", "retry_at": "2026-11-23T14:32-05:00"})
 
 
 def test_the_deadline_is_checked_before_each_file(tmp_path, sftp, monkeypatch):
@@ -1106,6 +1163,36 @@ def test_a_sync_that_stops_part_way_hands_back_what_it_already_downloaded(tmp_pa
     assert store.conn.execute("SELECT value FROM meta WHERE key='sync:cursor'").fetchone() is None
     after = sync(store, client=_dropbox(files), **kw)
     assert after["unchanged"] == 2 and _names(after["new_files"]) == ["remit_502.RMT"]
+
+
+def test_the_sync_command_reads_what_a_failed_sync_downloaded(tmp_path, monkeypatch, capsys):
+    """`remitwatch.cli sync` by hand, with Dropbox failing after two new remittances came down: the two are read before
+    the command fails with Dropbox's error, so they are not left in the mirror for good (the next listing calls them
+    unchanged). With --no-ingest nothing is read."""
+    import argparse
+    import sqlite3
+
+    from remitwatch import cli, dropbox_sync
+    from remitwatch.store import Store
+    for k, v in {"DROPBOX_APP_KEY": "k", "DROPBOX_APP_SECRET": "s", "DROPBOX_REFRESH_TOKEN": "r", "DROPBOX_ROOT_PATH": "/Trizetto Data",
+                 "REMITWATCH_DATA_DIR": str(tmp_path / "mirror")}.items():
+        monkeypatch.setenv(k, v)
+    files = {f"/Trizetto Data/Trizetto/remit_{i}.RMT": _remit_bytes(i) for i in (500, 501, 502)}
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: _dropbox(files, stop_listing_after=2))
+    count = lambda db: sqlite3.connect(db).execute("SELECT COUNT(*) FROM transactions").fetchone()[0]     # noqa: E731
+    asked = str(tmp_path / "asked.sqlite")          # --no-ingest: nothing is read
+    Store(asked).close()
+    with pytest.raises(RuntimeError):
+        cli.cmd_sync(argparse.Namespace(db=asked, full=False, no_ingest=True))
+    assert count(asked) == 0
+    monkeypatch.setenv("REMITWATCH_DATA_DIR", str(tmp_path / "mirror2"))
+    db = str(tmp_path / "s.sqlite")
+    Store(db).close()
+    with pytest.raises(RuntimeError):
+        cli.cmd_sync(argparse.Namespace(db=db, full=False, no_ingest=False))
+    assert count(db) == 2 and "reading the 2 file(s) it downloaded first" in capsys.readouterr().err
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: _dropbox(files))
+    assert cli.cmd_sync(argparse.Namespace(db=db, full=False, no_ingest=False)) == 0 and count(db) == 3
 
 
 def test_the_servers_cycle_reads_in_the_same_cycle_what_a_failed_sync_downloaded(tmp_path, monkeypatch):

@@ -130,7 +130,9 @@ ask() {     # name kind question [default]. kind: text; secret; password (made w
 }
 
 # python run in the app's image: whether this server's store already holds remittances (it then never takes the Vercel
-# site's data again), and the removal of run locks once the app is stopped (nothing in it can be running then)
+# site's data again), and the removal of run locks once the app is stopped (nothing in it can be running then). A lock
+# taken in a container of its own (`docker compose run`, not a container of the app named in pipeline:servers) is kept:
+# that run may still be going, and the app's next start judges it (pipeline.clear_locks_left_behind)
 STORE_STATE='import os, sqlite3
 p = os.environ.get("REMITWATCH_DB", "/data/remitwatch.sqlite")
 if not os.path.exists(p) or os.path.getsize(p) == 0:
@@ -141,12 +143,25 @@ else:
         print("data" if c.execute("SELECT 1 FROM transactions LIMIT 1").fetchone() else "empty")
     except sqlite3.OperationalError as e:
         print("empty" if "no such table" in str(e) else "unreadable")'
-CLEAR_LOCKS='import os, sqlite3
+CLEAR_LOCKS='import json, os, sqlite3
 p = os.environ.get("REMITWATCH_DB", "/data/remitwatch.sqlite")
 if os.path.exists(p) and os.path.getsize(p) > 0:
     c = sqlite3.connect(p, timeout=30)
     try:
-        c.execute("DELETE FROM meta WHERE key LIKE ?", ("%:lock",))
+        got = c.execute("SELECT value FROM meta WHERE key=?", ("pipeline:servers",)).fetchone()
+        try:
+            servers = {str(h) for h in json.loads(got[0]) if h} if got else set()
+        except (TypeError, ValueError):
+            servers = set()
+        for key, value in c.execute("SELECT key, value FROM meta WHERE key LIKE ?", ("%:lock",)).fetchall():
+            try:
+                held = json.loads(value)
+            except (TypeError, ValueError):
+                held = None
+            host = str(held.get("host") or "") if isinstance(held, dict) else ""
+            if host and host not in servers:
+                continue
+            c.execute("DELETE FROM meta WHERE key=? AND value=?", (key, value))
         c.commit()
     except sqlite3.OperationalError:
         pass'
@@ -268,7 +283,8 @@ docker compose up -d
 echo; echo "== Automatic deploys"
 if systemctl is-enabled --quiet remitwatch-deploy.timer 2>/dev/null; then
   echo "On: each new commit on main is deployed by itself (sudo bash /usr/local/lib/remitwatch/auto-deploy.sh --status says what runs)."
-  bash deploy/install-auto-deploy.sh --mark-current >/dev/null || echo "  (the record of the commit running was not updated)"
+  # the commit just built is recorded as running; a new deploy script in the checkout is not installed by this, only said
+  bash deploy/install-auto-deploy.sh --mark-only || echo "  (the record of the commit running was not updated)"
 else
   if ! read -r -p "Deploy each new version on main by itself, as the Vercel site did (it checks every 5 minutes)? [Y/n] " yn; then yn=n; fi
   if [ "${yn:-Y}" != "n" ] && [ "${yn:-Y}" != "N" ]; then

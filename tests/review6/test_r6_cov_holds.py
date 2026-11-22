@@ -42,7 +42,7 @@ def write_export(path, rows):
     ws = wb.active
     ws.append(["Service Date", "Primary Provider", "Primary Provider Role", "Claim ID", "CPT/Product", "Units", "Charges", "Activity Type", "Location"])
     for d, cid in rows:
-        ws.append([d, "Doctor, Alex", "Doctor", cid, "99213", 1, 150.0, "Charge", "North Office"])
+        ws.append([d, "Doctor, Quinn", "Doctor", cid, "99213", 1, 150.0, "Charge", "North Office"])
     wb.save(path)
 
 

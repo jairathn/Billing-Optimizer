@@ -662,6 +662,47 @@ def test_the_documented_switch_on_command_keeps_a_way_back(tmp_path):
     assert b.running == b.first and b.head == b.first and b.marker == b.first
 
 
+def test_switched_on_with_no_record_of_what_ran_a_rollback_says_the_files_stay(tmp_path):
+    """Switched on with the older command (`git pull --ff-only && bash deploy/install-auto-deploy.sh`, no record of the
+    commit running) and a newest commit that does not answer: the images that ran come back, but the pull moved the files,
+    and no record says which commit the images were built from. The log says so, not "rolled back to <the new commit>"."""
+    b = Box(tmp_path)
+    b.boot()
+    b.write("unhealthy", "")
+    new = b.commit("newest on main, does not answer", {"remitwatch/api.py": "x = 99\n"})
+    r = sh("bash", "-c", f"cd {b.dir} && git pull -q --ff-only && bash deploy/install-auto-deploy.sh", env=b.env, check=False)
+    assert r.returncode == 1 and b.last()[3] == "unhealthy" and b.running == b.first          # the images that ran are back
+    detail = b.last()[4]
+    assert "the images that ran before were started again; the files stay at " + new[:12] in detail
+    assert "rolled back to" not in detail
+
+
+def test_running_configure_sh_again_does_not_install_a_deploy_script_nobody_read(tmp_path):
+    """With auto-deploy on, configure.sh records the commit it built as the one running. It does not install the checkout's
+    deploy script or timer files: a new deploy script works only once a person has read it and run --update, as the deploy
+    log asks. configure.sh says when the checkout's script differs."""
+    b = Box(tmp_path)
+    b.boot()
+    b.install("--mark-current")
+    script = (b.dev / "deploy" / "auto-deploy.sh").read_text()
+    changed = script.replace("main() {\n", 'main() {\n  echo "new behaviour" >> "$FAKE/new_script_ran"\n', 1)
+    assert changed != script
+    b.commit("change the deploy script", {"deploy/auto-deploy.sh": changed, "remitwatch/api.py": "x = 2\n"})
+    assert b.run().returncode == 0 and "install-auto-deploy.sh --update" in b.last()[4]
+    assert (b.lib / "auto-deploy.sh").read_text() == script
+    shutil.copytree(os.path.join(ROOT, "deploy", "aws"), b.dir / "deploy" / "aws")
+    (b.dir / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\n")
+    r = sh("bash", str(b.dir / "deploy" / "aws" / "configure.sh"), env=b.env, input="\n" * 120, check=False)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    assert (b.lib / "auto-deploy.sh").read_text() == script                     # the copy a person installed still runs
+    assert "differ from the ones that run" in r.stdout and "install-auto-deploy.sh --update" in r.stdout
+    assert b.marker == b.head                                                    # the commit it built is the one running
+    # once a person installs it, configure.sh has nothing to say about it
+    b.install("--update")
+    r = sh("bash", str(b.dir / "deploy" / "aws" / "configure.sh"), env=b.env, input="\n" * 120, check=False)
+    assert r.returncode == 0 and "differ from the ones that run" not in r.stdout and (b.lib / "auto-deploy.sh").read_text() == changed
+
+
 def test_configure_sh_offers_it_and_holds_the_lock_while_it_runs(tmp_path):
     b = Box(tmp_path)
     b.boot()
@@ -682,6 +723,8 @@ def test_the_first_boot_of_a_rebuilt_server_switches_it_on():
     boot = text[text.index("UserData:"):text.index("  Server:")]
     assert "bash deploy/install-auto-deploy.sh --mark-current" in boot
     assert boot.index("docker compose up -d --build") < boot.index("install-auto-deploy.sh --mark-current")
+    # the first build keeps its commit, so /api/health names it from the first boot ($(...) is not CloudFormation's ${...})
+    assert "REMITWATCH_COMMIT=$(git rev-parse HEAD) docker compose up -d --build" in boot
     assert "util-linux" in boot                                            # flock
     line = next(ln for ln in boot.splitlines() if "--mark-current" in ln)
     assert "${" not in line                                                 # nothing CloudFormation would substitute
@@ -735,3 +778,42 @@ def test_a_lock_counts_while_its_holder_runs_and_is_cleared_once_it_is_gone(tmp_
         for p in (holder, other):
             p.kill()
             p.wait()
+
+
+def test_a_lock_taken_in_another_container_is_judged_by_its_container_not_by_a_process_number_here(tmp_path):
+    """Each lock says the container its run is in ("host"). A process number means nothing outside its container: a run
+    started with `docker compose run` is PID 1 of its own container, and PID 1 here is the app. So the deploy does not wait
+    for a lock of another container (a swap does not touch that container), and its clear after a swap leaves such a lock
+    alone while that run may still be going. A lock of an earlier container of the app (pipeline:servers) is cleared: that
+    container ended with the swap. pipeline.clear_locks_left_behind, at the app's start, judges them the same way."""
+    import socket
+
+    from remitwatch import pipeline
+    here = socket.gethostname()
+    db = str(tmp_path / "remitwatch.sqlite")
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    # a remitwatch process that started before every lock: the app's PID 1 stands in for any other container's run
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "remitwatch-app-stand-in"])
+    gone = subprocess.Popen([sys.executable, "-c", "pass", "remitwatch"])
+    gone.wait()
+    try:
+        time.sleep(1.2)
+        iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        lock = lambda pid, host: json.dumps({"pid": pid, "started": iso, "heartbeat": iso, "token": "t", "host": host})    # noqa: E731
+        c.executemany("INSERT INTO meta VALUES (?, ?)", [
+            ("pipeline:lock", lock(holder.pid, "a-docker-compose-run-container")),     # a run in a container of its own
+            ("fax:lock", lock(holder.pid, "an-earlier-app-container")),                  # left by the app before the swap
+            ("backup:lock", lock(holder.pid, here)),                                      # a backup going here now
+            ("other:lock", lock(gone.pid, here)),                                         # its run here ended
+            ("pipeline:servers", json.dumps(["an-earlier-app-container", here]))])
+        c.commit()
+        env = dict(os.environ, REMITWATCH_DB=db)
+        assert sh(sys.executable, "-c", _locks_py(), "busy", env=env).stdout.split() == ["backup:lock"]
+        assert sorted(sh(sys.executable, "-c", _locks_py(), "clear", env=env).stdout.split()) == ["fax:lock", "other:lock"]
+        assert sorted(k for (k,) in c.execute("SELECT key FROM meta WHERE key LIKE '%:lock'")) == ["backup:lock", "pipeline:lock"]
+        # the app's own rule at its start keeps the other container's run too
+        assert pipeline.clear_locks_left_behind(db) == []
+    finally:
+        holder.kill()
+        holder.wait()

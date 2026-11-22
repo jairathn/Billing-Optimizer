@@ -27,7 +27,7 @@ def claim(i, code, charge, allowed, *, cfi="12", dos="20260401", plan="PPO", sta
     paid = allowed if paid is None else paid
     co = f"{float(charge) - float(allowed):.2f}"
     cas = f"CAS*CO*45*{co}~" if float(paid) > 0 else f"CAS*CO*16*{charge}~"
-    return (f"CLP*{pcn}*{status}*{charge}*{paid}*0.00*{cfi}*PC{i}*11~NM1*QC*1*{who}~NM1*82*1*DOCTOR*ALEX****XX*{DOC}~REF*CE*{plan}~"
+    return (f"CLP*{pcn}*{status}*{charge}*{paid}*0.00*{cfi}*PC{i}*11~NM1*QC*1*{who}~NM1*82*1*DOCTOR*QUINN****XX*{DOC}~REF*CE*{plan}~"
             f"DTM*232*{dos}~" + svc(code, charge, paid, allowed if float(paid) > 0 else None, cas, dos=dos))
 
 

@@ -23,8 +23,8 @@ def test_an_individual_npi_sent_as_a_non_person_is_called_the_pa_rate(tmp_path):
     """R1 again, with the payer writing the rendering provider as an entity (NM1*82*2) with her own NPI and her name in
     NM103, a way some payers fill the loop. One physician (no Medicare visits yet, tier unknown): 25 visits at $117.60 and
     6 at $100.00 (85%), all on her NPI. The same clinician is paid the usual rate, so the PA explanation cannot hold."""
-    claims = [claim(100 + i, "99214", "223.65", "117.60", prov="2*ALEX DOCTOR MD") for i in range(25)]
-    claims += [claim(200 + i, "99214", "223.65", "100.00", prov="2*ALEX DOCTOR MD") for i in range(6)]
+    claims = [claim(100 + i, "99214", "223.65", "117.60", prov="2*QUINN DOCTOR MD") for i in range(25)]
+    claims += [claim(200 + i, "99214", "223.65", "100.00", prov="2*QUINN DOCTOR MD") for i in range(6)]
     store = build_store(tmp_path, claims)
     Detector(store, run_id="t").run()
     rows = findings(store)

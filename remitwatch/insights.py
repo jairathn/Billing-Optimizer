@@ -21,7 +21,7 @@ SMALL_CENTS = 2000                      # items known to be worth under $20: abo
 # The kind of work each finding takes. A signal not named here falls to its action (fix and resubmit, appeal) and then
 # to "check first".
 WORK_TYPES: list[dict] = [
-    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number (for a claim rejected before the payer: its rejection report)", "short": "Correct it in EMA and resend it the way the item says.",
+    {"key": "fix", "label": "Fix and resubmit", "needs": "EMA and the payer's claim number (for a claim rejected before the payer: its rejection report; for one still in EMA's print batch: the batch)", "short": "Correct it in EMA and resend it the way the item says.",
      "how": "The claim went out with something missing or wrong (a modifier, a code, information the payer asked for). Correct it in EMA and send the correction the way the payer takes it before the date shown (a corrected claim for most payers; for Medicare a reopening, a new claim or a redetermination, as the item says), then press Mark sent."},
     {"key": "auth", "label": "Get the authorization", "needs": "The authorization record, or the payer's portal",
      "short": "Find the authorization and appeal, or ask for a retro-auth.",
@@ -102,7 +102,7 @@ SIGNAL_LABELS: dict[str, tuple[str, str]] = {
     "NO_ANSWER": ("Sent, and the payer never answered", "Look the claim up on the payer's portal or call. If the payer has no record of it, send it "
                                                         "again within the first-filing limit (see the filing window on the item); if it was "
                                                         "denied or paid, get the remittance and work it here."),
-    "REJECTED_PRE_PAYER": ("Rejected before it reached the payer", "Correct the claim in EMA and send it again before the date shown."),
+    "REJECTED_PRE_PAYER": ("Never reached the payer: rejected, or still in EMA's print batch", "Correct it in EMA, or print it, and send it before the date shown."),
     "CLAIM_DENIED_UNPAID": ("Whole claim denied and never paid", "Read the reason: fix and resubmit if it names an error, appeal if not, let it go if the payer is right."),
     "UNDERPAID_VS_OWN_RATE": ("Paid less than this payer usually pays", "Ask the payer to reprocess at its usual rate; one request can list every claim for the code."),
     "SECOND_RATE": ("Payer pays a second, lower amount for this code", "Ask the payer once about all the claims at this amount, giving the likely reason shown."),
@@ -132,7 +132,7 @@ SHORT_LABELS: dict[str, str] = {
     "DENIED_AUTH": "No authorization", "DENIED_LEVEL_OF_SERVICE": "Records do not support it", "DENIED_MEDICAL_NECESSITY": "Medical necessity",
     "DENIED_FREQUENCY": "Frequency or units", "DENIED_NONCOVERED": "Not covered by the plan", "DENIED_TIMELY_FILING": "Filed too late",
     "DENIED_PROVIDER": "Clinician not enrolled", "DENIED_DUPLICATE_UNPAID": "Called a duplicate, never paid", "DENIED_OTHER": "Paid $0, other reason",
-    "CLAIM_DENIED_UNPAID": "Whole claim denied", "NO_ANSWER": "No answer from the payer", "REJECTED_PRE_PAYER": "Rejected before the payer", "UNDERPAID_VS_OWN_RATE": "Below the payer's usual rate", "SECOND_RATE": "Payer's second, lower rate",
+    "CLAIM_DENIED_UNPAID": "Whole claim denied", "NO_ANSWER": "No answer from the payer", "REJECTED_PRE_PAYER": "Never reached the payer", "UNDERPAID_VS_OWN_RATE": "Below the payer's usual rate", "SECOND_RATE": "Payer's second, lower rate",
     "MPPR_EXCESS": "Multiple-procedure cut too deep", "FEE_SKIM": "Payment fee", "TAKEBACK": "Money taken back",
     "CONTRACT_RATE_GAP": "Far below Medicare", "MA_BELOW_MEDICARE": "Below Medicare", "MPPR_POLICY": "Later procedures cut below half",
     "CHARGE_BELOW_RATE": "Your fee below the payer's rate", "G2211_DENIED": "G2211 usually denied", "MIPS_ADJUSTMENT": "MIPS adjustment",

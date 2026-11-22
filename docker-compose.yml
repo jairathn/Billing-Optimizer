@@ -1,6 +1,7 @@
 # One small host runs everything: the dashboard, the scheduler that pulls from Dropbox, and HTTPS.
 #   docker compose up -d                  -> site on https://YOUR-HOST (set SITE_ADDRESS in .env)
-#   docker compose run --rm app cycle     -> run one cycle now
+#   docker compose exec app python -m remitwatch.cli cycle   -> run one cycle now, in the app's own container (the
+#                                                               deploy and the app see it there and wait for it)
 #   docker compose logs -f app            -> watch it
 services:
   app:

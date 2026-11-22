@@ -298,5 +298,6 @@ def test_an_unanswered_claim_is_sent_again_within_the_first_filing_limit_not_by_
     chase = next(t for t in b["work_types"] if t["key"] == "chase")["how"]
     for text in (b["labels"]["NO_ANSWER"]["next"], chase):
         assert "send it again within the first-filing limit (see the filing window on the item)" in text and "before the date shown" not in text
-    assert "send it again before the date shown" in b["labels"]["REJECTED_PRE_PAYER"]["next"]
+    # a claim that never reached the payer (rejected on the way, or still in EMA's print batch): the date shown is the limit
+    assert "send it before the date shown" in b["labels"]["REJECTED_PRE_PAYER"]["next"]
     st.close()

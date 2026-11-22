@@ -3,14 +3,19 @@
 # commit on main by itself (deploy/auto-deploy.sh; docs/SERVER_RUNBOOK.md, "Automatic deploys").
 #
 # The timer runs a copy of deploy/auto-deploy.sh that this installs in /usr/local/lib/remitwatch (root's only), never
-# the file in the checkout: a commit on main cannot change what runs here as root. A new version of the script, or of
-# the timer's files, takes effect only when a person runs this again; the deploy log says when a deploy brought one.
+# the file in the checkout: a commit on main cannot change the deploy script that runs here as root. A new version of the
+# script, or of the timer's files, takes effect only when a person runs this again; the deploy log says when a deploy
+# brought one. What the copy builds and starts (Dockerfile, docker-compose.yml) still comes from main: see
+# docs/SERVER_RUNBOOK.md, "Who controls the server".
 #
 #   sudo /opt/remitwatch/deploy/install-auto-deploy.sh                  switch it on, and deploy main's newest commit now
 #   sudo /opt/remitwatch/deploy/install-auto-deploy.sh --mark-current   switch it on; the commit checked out is the one
 #                                                                       running (just built: first boot, configure.sh)
 #   sudo /opt/remitwatch/deploy/install-auto-deploy.sh --update         install the checkout's version of the deploy
 #                                                                       script and the timer's files; deploys nothing
+#   sudo /opt/remitwatch/deploy/install-auto-deploy.sh --mark-only      once it is on: record the commit checked out as the
+#                                                                       one running (configure.sh); installs nothing, and
+#                                                                       says when the checkout's deploy script differs
 #   sudo /opt/remitwatch/deploy/install-auto-deploy.sh --off            switch it off (its log and state stay)
 set -euo pipefail
 DIR=${REMITWATCH_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
@@ -42,9 +47,9 @@ install_files() {   # the deploy script, copied out of the checkout, and the tim
 }
 
 case "$mode" in
-  now|--mark-current|--off|--update) ;;
+  now|--mark-current|--mark-only|--off|--update) ;;
   --units-only) mode=--update ;;                # the older name, which an older deploy script calls by itself
-  *) echo "usage: $0 [--mark-current | --update | --off]"; exit 2 ;;
+  *) echo "usage: $0 [--mark-current | --mark-only | --update | --off]"; exit 2 ;;
 esac
 if [ "$(id -u)" != 0 ] && [ -z "${REMITWATCH_SYSTEMD_DIR:-}" ]; then
   echo "Run it as root: sudo $0 $*"
@@ -54,6 +59,27 @@ if [ "$mode" = --off ]; then
   systemctl disable --now remitwatch-deploy.timer || true
   echo "Auto-deploy is off: new commits on main are not deployed until it is switched on again. Its log: $LOG"
   exit 0
+fi
+differs() {         # whether the checkout's deploy script or timer files are not the ones installed
+  local f
+  cmp -s "$LIB/auto-deploy.sh" "$DIR/deploy/auto-deploy.sh" || return 0
+  for f in remitwatch-deploy.service remitwatch-deploy.timer; do
+    sed -e "s#/usr/local/lib/remitwatch#$LIB#g" -e "s#/opt/remitwatch#$DIR#g" "$DIR/deploy/systemd/$f" | cmp -s - "$UNITS/$f" || return 0
+  done
+  return 1
+}
+if [ "$mode" = --mark-only ]; then
+  if [ -f "$LIB/auto-deploy.sh" ]; then
+    # the commit just built is the one running; the deploy script that runs stays the one a person installed
+    install -d -m 700 "$STATE"
+    git rev-parse HEAD > "$STATE/deployed"
+    if differs; then
+      echo "The checkout's deploy script or timer files differ from the ones that run ($LIB/auto-deploy.sh): they were not"
+      echo "installed. Read the change (git log -p -- deploy/), then install it with: sudo bash $DIR/deploy/install-auto-deploy.sh --update"
+    fi
+    exit 0
+  fi
+  mode=--mark-current       # never installed: switching it on installs it, as it always did
 fi
 # flock keeps two deploys (or a deploy and configure.sh) apart; curl checks the site through Caddy after a swap
 for need in flock:util-linux curl:curl-minimal; do

@@ -21,7 +21,7 @@ function letGoNote(signal, status){
   return note;
 }
 const DESKS = {
-  denials:    {cat:'denial', title:'Denials', intro:'Lines and whole claims the payer paid $0 and has not paid since. Also claims the payer never answered, and claims rejected before they reached it.'},
+  denials:    {cat:'denial', title:'Denials', intro:'Lines and whole claims the payer paid $0 and has not paid since. Also claims the payer never answered, and claims rejected before they reached it or still in EMA\'s print batch.'},
   bundling:   {cat:'bundling', title:'Bundling & modifiers', intro:'Visits, procedures and add-ons paid $0 because the payer folded them into another service.'},
   downcoding: {cat:'downcoding', title:'Downcoding', intro:'Visits paid at a lower level than billed, and procedure codes the payer changed.'},
   contracts:  {cat:'underpayment', title:'Contracts & underpayment', intro:"Claims paid below the payer's own usual rate, and contract rates that sit below Medicare."},

@@ -248,6 +248,10 @@ class Session:
                     raise _NoOtherKeyType("no other key type")
                 opts.key_types = left
             t.start_client(timeout=self.timeout)
+            # paramiko's start_client returns quietly when its own time runs out before the keys are agreed (a host that
+            # takes the connection and never speaks SSH): a session with no keys agreed is no session
+            if not t.is_active() or not getattr(t, "initial_kex_done", False):
+                raise TriZettoError(f"{self.s.host} did not complete the SSH handshake within {self.timeout:g} s; nothing was sent.")
         except Exception as exc:
             self._close_lines()         # not close(): the watchdog stays armed for the caller
             try:
@@ -485,10 +489,19 @@ def refusal(conn, s: Settings | None = None, now: datetime | None = None) -> dic
     return held
 
 
+def _utc_minute(iso) -> str:
+    """A time as 'YYYY-MM-DD HH:MM' in UTC, without the offset ('2026-11-23 19:32', not '2026-11-23 19:32+00:00'). The
+    words around it say UTC."""
+    try:
+        d = datetime.fromisoformat(str(iso or ""))
+    except ValueError:
+        return str(iso or "")[:16].replace("T", " ")
+    return (d.astimezone(timezone.utc) if d.tzinfo else d).strftime("%Y-%m-%d %H:%M")
+
+
 def held_text(held: dict) -> str:
     """What a hold means, in words for the person reading /setup or the run's log."""
-    at = str(held.get("at") or "")[:16].replace("T", " ")
-    until = str(held.get("retry_at") or "").replace("T", " ")
+    at, until = _utc_minute(held.get("at")), _utc_minute(held.get("retry_at"))
     if held.get("unclear"):
         why = f"The sign-in to TriZetto did not finish twice in a row (last {at} UTC)."
     elif held.get("kind") == "password":
@@ -645,8 +658,10 @@ def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings:
             try:
                 data = ses.read(path)
             except Stalled as exc:
-                # not a reason to stop the run: what was read is kept, the rest is read by the next run
+                # not a reason to stop the run: what was read is kept, the rest is read by the next run (counted, so a
+                # serverless cycle carries on with them as it does after its deadline)
                 out["error"] = f"{exc} {done} of {len(todo)} new files were read; the rest are read on the next run."
+                out["remaining"] = len(todo) - i
                 break
             except Exception as exc:
                 log(f"  TriZetto: could not read {path}: {exc}")
@@ -730,6 +745,9 @@ def check(env: dict | None = None, known: str | None = None, conn=None, override
         return {"ok": False, "steps": steps, "refused": str(exc), "refused_kind": exc.kind}
     except TriZettoError as exc:
         steps.append({"step": "Connection", "ok": False, "detail": str(exc)})
+        return {"ok": False, "steps": steps}
+    except Exception as exc:        # anything else the SSH library raises is still a step that failed, never a page error
+        steps.append({"step": "Connection", "ok": False, "detail": f"the connection failed ({type(exc).__name__}: {str(exc)[:160]})"})
         return {"ok": False, "steps": steps}
     finally:
         ses.close()
