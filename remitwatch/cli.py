@@ -11,7 +11,8 @@
     python -m remitwatch.cli send-appeals [--limit N] [--payer NAME] [--db PATH]
                                                          fax every open item a letter settles (Appeal everything appealable)
     python -m remitwatch.cli fax-cycle [--db PATH]       the daily fax run: states, retries, faxes in, follow-ups due
-    python -m remitwatch.cli import-cloud [--force]      move the Vercel site's store and packets to this server, once
+    python -m remitwatch.cli import-cloud [--force] [--drop-waiting]
+                                                         move the Vercel site's store and packets to this server, once
     python -m remitwatch.cli compare-cloud               prove it: the Vercel site's state against this server, table by table
     python -m remitwatch.cli backup [--dir D] [--keep N] a consistent copy of the store while the site runs (also made daily)
 """
@@ -172,31 +173,94 @@ def cmd_cycle(args: argparse.Namespace) -> int:
     return 0 if "error" not in out else 1
 
 
+# One copy of the store at a time, under a lock kept as the cycle's is (a row of the store's meta table; the deploy waits
+# for every row whose key ends in ":lock" while its holder runs, so a swap of the container never cuts a copy short).
+BACKUP_LOCK = "backup:lock"
+BACKUP_LOCK_STALE_MINUTES = 60          # a lock nobody released for this long was left by a copy that was cut short
+# what a copy cut short leaves in the backups folder (the raw copy, its journal, a gzip not finished): never a backup
+_BACKUP_LEFTOVER = re.compile(r"^remitwatch-\d{8}-\d{6}\.sqlite(?:\.part|\.gz\.part)?(?:-journal|-wal|-shm)?$")
+
+
+class BackupBusy(Exception):
+    """Another copy of the store is being made."""
+
+
+def _take_backup_lock(db: str) -> str:
+    import secrets
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    c = sqlite3.connect(db, timeout=60)
+    try:
+        c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT value FROM meta WHERE key=?", (BACKUP_LOCK,)).fetchone()
+        if row:
+            try:
+                held = json.loads(row[0])
+                fresh = datetime.now(timezone.utc) - datetime.fromisoformat(held.get("heartbeat") or held["started"]) \
+                    < timedelta(minutes=BACKUP_LOCK_STALE_MINUTES)
+            except Exception:
+                held, fresh = {}, False
+            if fresh:
+                c.execute("ROLLBACK")
+                raise BackupBusy(f"Another copy of the store is being made (since {held.get('started')} UTC).")
+        token, now = secrets.token_hex(8), datetime.now(timezone.utc).isoformat(timespec="seconds")
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                  (BACKUP_LOCK, json.dumps({"token": token, "started": now, "heartbeat": now, "pid": os.getpid(), "who": "backup"})))
+        c.execute("COMMIT")
+        return token
+    finally:
+        c.close()
+
+
+def _drop_backup_lock(db: str, token: str) -> None:
+    import sqlite3
+    c = sqlite3.connect(db, timeout=60)
+    try:
+        c.execute("DELETE FROM meta WHERE key=? AND value LIKE ?", (BACKUP_LOCK, f'%"token": "{token}"%'))
+        c.commit()
+    finally:
+        c.close()
+
+
 def backup_store(db: str, dest_dir: str | None = None, keep: int = 7) -> str:
     """A consistent copy of the store, taken while the site runs (SQLite's online backup reads one snapshot), gzipped
-    into a backups folder beside it; the oldest beyond `keep` are removed. Returns the file written."""
+    into a backups folder beside it; the oldest beyond `keep` are removed. Returns the file written. The copy is written
+    under a .part name and renamed only once it is whole, so a copy cut short (a deploy, a reboot) is never taken for a
+    backup; what one left behind is removed by the next. One copy at a time: BackupBusy when another is being made."""
     import gzip
     import shutil
     import sqlite3
     dest_dir = dest_dir or os.environ.get("REMITWATCH_BACKUP_DIR") or os.path.join(os.path.dirname(os.path.abspath(db)), "backups")
     os.makedirs(dest_dir, mode=0o700, exist_ok=True)
     os.chmod(dest_dir, 0o700)             # copies of patient data: the owner only
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    raw = os.path.join(dest_dir, f"remitwatch-{stamp}.sqlite")
-    src, dst = sqlite3.connect(db, timeout=60), sqlite3.connect(raw)
+    token = _take_backup_lock(db)
     try:
-        src.backup(dst)
+        for f in os.listdir(dest_dir):    # no other copy is being made now (the lock), so these were cut short
+            if _BACKUP_LEFTOVER.match(f):
+                os.remove(os.path.join(dest_dir, f))
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        final = os.path.join(dest_dir, f"remitwatch-{stamp}.sqlite.gz")
+        raw, part = final[:-3] + ".part", final + ".part"
+        src, dst = sqlite3.connect(db, timeout=60), sqlite3.connect(raw)
+        try:
+            src.backup(dst)
+            dst.execute("DELETE FROM meta WHERE key=?", (BACKUP_LOCK,))     # the copy's own lock is not part of it
+            dst.commit()
+        finally:
+            dst.close()
+            src.close()
+        fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with open(raw, "rb") as fi, gzip.open(os.fdopen(fd, "wb"), "wb", compresslevel=6) as fo:
+            shutil.copyfileobj(fi, fo, 8 << 20)
+        os.replace(part, final)
+        os.remove(raw)
+        old = sorted(f for f in os.listdir(dest_dir) if f.startswith("remitwatch-") and f.endswith(".sqlite.gz"))
+        for f in old[:-keep] if keep > 0 else []:
+            os.remove(os.path.join(dest_dir, f))
+        return final
     finally:
-        dst.close()
-        src.close()
-    fd = os.open(raw + ".gz", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with open(raw, "rb") as fi, gzip.open(os.fdopen(fd, "wb"), "wb", compresslevel=6) as fo:
-        shutil.copyfileobj(fi, fo, 8 << 20)
-    os.remove(raw)
-    old = sorted(f for f in os.listdir(dest_dir) if f.startswith("remitwatch-") and f.endswith(".sqlite.gz"))
-    for f in old[:-keep] if keep > 0 else []:
-        os.remove(os.path.join(dest_dir, f))
-    return raw + ".gz"
+        _drop_backup_lock(db, token)
 
 
 def _daily_backup(db: str) -> dict:
@@ -210,7 +274,10 @@ def _daily_backup(db: str) -> dict:
         c.close()
     if last[:10] == today:
         return {"skipped": f"made today ({last})"}
-    path = backup_store(db, keep=int(os.environ.get("REMITWATCH_BACKUP_KEEP", "7") or 7))
+    try:
+        path = backup_store(db, keep=int(os.environ.get("REMITWATCH_BACKUP_KEEP", "7") or 7))
+    except BackupBusy as exc:
+        return {"skipped": str(exc)}
     c = sqlite3.connect(db, timeout=60)
     try:
         c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('backup:last', ?)", (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),))
@@ -221,7 +288,11 @@ def _daily_backup(db: str) -> dict:
 
 
 def cmd_backup(args: argparse.Namespace) -> int:
-    path = backup_store(args.db, args.dir, args.keep)
+    try:
+        path = backup_store(args.db, args.dir, args.keep)
+    except BackupBusy as exc:
+        print(f"{exc} Run this again when it has finished.")
+        return 1
     print(json.dumps({"file": path, "mb": round(os.path.getsize(path) / 1048576, 1)}))
     return 0
 
@@ -403,6 +474,7 @@ def _cloud_image(st, log=print):
         return None, {}
     journal = cloud.read_actions(st)
     done, left, _ = cloud.apply_actions(store.conn, journal) if journal else ([], [], False)
+    waiting = [(n, a) for n, a in journal if n in set(left)]
     conn = store.conn
     marks = cloud._read_json(st, cloud.MARKS)
     mailed = 0
@@ -415,8 +487,16 @@ def _cloud_image(st, log=print):
     if figures:
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ASSUMPTIONS_KEY, figures.decode()))
     conn.commit()
-    return store, {"journal_applied": len(done), "journal_waiting": len(left), "alerts_marked_mailed": mailed,
-                   "last_report": marks.get("last_report"), "practice_figures": bool(figures)}
+    return store, {"journal_applied": len(done), "journal_waiting": len(left), "waiting": [_waiting_line(n, a) for n, a in waiting],
+                   "alerts_marked_mailed": mailed, "last_report": marks.get("last_report"), "practice_figures": bool(figures)}
+
+
+def _waiting_line(name: str, a: dict) -> str:
+    """A journal entry still waiting for its item, in one line: when, what, which items (their ids), who. Never the note."""
+    what = str(a.get("kind") or "?") + (f" {a.get('status')}" if a.get("status") else "") + (f" {a.get('event')}" if a.get("event") else "")
+    ids = [str(i) for i in (a.get("ids") or [a.get("finding_id")]) if i]
+    when = str(a.get("at") or name.rsplit("/", 1)[-1][:15])[:19]
+    return f"{when}  {what}  {', '.join(ids[:5])}{' and more' if len(ids) > 5 else ''}  by {a.get('actor') or 'someone'}"
 
 
 def _baseline(conn) -> dict:
@@ -474,8 +554,12 @@ def cmd_import_cloud(args: argparse.Namespace) -> int:
             except Exception:
                 live = False
         if live and not args.force:
-            print("A run is going on this server's store. Stop the app (docker compose stop app), then run this again "
-                  "(add --force if the app is stopped and this still shows).")
+            # never a hint at --force here when the store holds data: that would replace the server's own work
+            print("A run is going on this server's store, and the server already keeps its own data. The move from Vercel is "
+                  "only for the first deploy and the cutover (docs/SERVER_RUNBOOK.md); for those, stop the app first "
+                  "(sudo docker compose stop app), then run this again." if data else
+                  "A run is going on this server's store. Stop the app (sudo docker compose stop app), then run this again. "
+                  "A run the stop cut short leaves its lock for up to 15 minutes.")
             return 1
         if data and not args.force:
             print(f"There is already a store with data at {args.db}. Add --force to replace it with the one from the state folder.")
@@ -487,6 +571,18 @@ def cmd_import_cloud(args: argparse.Namespace) -> int:
     store, details = _cloud_image(st, log=lambda *a: print(*a, flush=True))
     if store is None:
         print("The state folder has no store yet: nothing to move. Start this server with an empty store instead.")
+        return 1
+    waiting = details.pop("waiting", [])
+    if waiting and not args.drop_waiting:
+        # what people did on the Vercel site for an item its store does not hold yet: the site keeps trying these for a week,
+        # but the server would never see them, so the move stops rather than lose them without a word
+        store.close()
+        print(f"{len(waiting)} thing{'s' if len(waiting) != 1 else ''} people did on the Vercel site still wait{'s' if len(waiting) == 1 else ''} "
+              "for an item its store does not hold yet, so the move would leave them behind:")
+        for line in waiting:
+            print("  " + line)
+        print("The Vercel site's next run usually adds those items: press Sync and analyse now there, let the run finish, then "
+              "run this again. To move without them (they are listed above, to be done again by hand), add --drop-waiting.")
         return 1
     os.makedirs(os.path.dirname(os.path.abspath(args.db)) or ".", exist_ok=True)
     tmp = args.db + ".importing"
@@ -545,7 +641,8 @@ def cmd_import_cloud(args: argparse.Namespace) -> int:
     os.replace(tmp, args.db)
     from .api import ensure_server_schema
     ensure_server_schema(args.db)           # the dashboard's own tables, where the old store had none yet
-    print(json.dumps(dict(details, store=args.db, packets_moved=packets, reports_moved=reports, dropbox_position=bool(cur), **base), indent=1))
+    print(json.dumps(dict(details, store=args.db, packets_moved=packets, reports_moved=reports, dropbox_position=bool(cur),
+                          journal_left_behind=waiting, **base), indent=1))
     return 0
 
 
@@ -585,6 +682,9 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
         b = (mine.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone() or [None])[0]
         bad += a != b
         rows.append((f"meta {key}", int(a is not None), int(b is not None), "same" if a == b else "DIFFERENT"))
+    waiting = details.get("journal_waiting") or 0     # applied to neither store: the Vercel site still waits for their items
+    bad += bool(waiting)
+    rows.append(("journal entries still waiting", waiting, 0, "same" if not waiting else "DIFFERENT"))
     want = sum(1 for m in st.list(cloud.PACKETS) if m["name"].endswith(".json"))
     have = mine.execute("SELECT COUNT(*) FROM appeal_packets").fetchone()[0] if mine.execute(
         "SELECT 1 FROM sqlite_master WHERE name='appeal_packets'").fetchone() else 0
@@ -594,7 +694,7 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
     print(f"{'table'.ljust(width)}  {'Vercel':>9}  {'server':>9}")
     for t, a, b, verdict in rows:
         print(f"{t.ljust(width)}  {str(a):>9}  {str(b):>9}  {verdict}")
-    print(json.dumps({"different": bad, "vercel": _baseline(theirs), "server": _baseline(mine)}, indent=1))
+    print(json.dumps({"different": bad, "vercel": _baseline(theirs), "server": _baseline(mine), "waiting": details.get("waiting") or []}, indent=1))
     mine.close()
     store.close()
     return 0 if not bad else 2
@@ -630,7 +730,10 @@ def main(argv: list[str] | None = None) -> int:
     sa.set_defaults(fn=cmd_send_appeals)
     sub.add_parser("fax-cycle").set_defaults(fn=cmd_fax_cycle)
     ic = sub.add_parser("import-cloud", help="move the store and packets from the Vercel site's Dropbox state folder to this server")
-    ic.add_argument("--force", action="store_true", help="replace a store already on this server"); ic.set_defaults(fn=cmd_import_cloud)
+    ic.add_argument("--force", action="store_true", help="replace a store already on this server")
+    ic.add_argument("--drop-waiting", action="store_true",
+                    help="move even though some of what people did on Vercel still waits for its item (listed; it is left behind)")
+    ic.set_defaults(fn=cmd_import_cloud)
     sub.add_parser("compare-cloud", help="prove a move: the Vercel site's state against this server's store, table by table").set_defaults(fn=cmd_compare_cloud)
     bk = sub.add_parser("backup", help="a consistent, gzipped copy of the store, taken while the site runs")
     bk.add_argument("--dir", default=None, help="where (default: a backups folder beside the store)")

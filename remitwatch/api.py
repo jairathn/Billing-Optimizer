@@ -985,9 +985,17 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
     # the faxes sent for it and the payer's faxes tied to it (remitwatch.fax)
     out["faxes"] = []
     if has_table("faxes"):
-        for x in rows("""SELECT fax_key, direction, number, purpose, level, status, pages, error, created_at, sent_at, doc FROM faxes
-                         WHERE finding_id=? ORDER BY created_at DESC LIMIT 50""", (finding_id,)):
-            d = json.loads(x.pop("doc") or "{}")
+        # a payer's letter about several items of one claim is filed under the first of them and lists the rest as tied
+        for x in rows("""SELECT fax_key, finding_id, direction, number, purpose, level, status, pages, error, created_at, sent_at, doc FROM faxes
+                         WHERE finding_id=? OR (direction='in' AND doc LIKE ?) ORDER BY created_at DESC LIMIT 50""",
+                      (finding_id, f'%"{finding_id}"%')):
+            try:
+                d = json.loads(x.pop("doc") or "{}")
+            except ValueError:
+                d = {}
+            if x.pop("finding_id") != finding_id and finding_id not in (d.get("tied") or [] if isinstance(d, dict) else []):
+                continue
+            d = d if isinstance(d, dict) else {}
             x.update(summary=d.get("summary") if x["direction"] == "in" else d.get("subject"), decision=d.get("decision"))
             out["faxes"].append(x)
         sent = [x["created_at"] for x in out["faxes"] if x["direction"] == "out" and x["status"] != "failed"]
@@ -1958,7 +1966,7 @@ def activity_asc_rule(months: int = Query(12, ge=3, le=24),
 
 
 @app.get("/api/activity/asc_rates")
-def activity_asc_rates(q: str = Query("", max_length=400), state: str = Query("", pattern=r"^[A-Za-z]{0,2}$"),
+def activity_asc_rates(q: str = Query("", max_length=2400), state: str = Query("", pattern=r"^[A-Za-z]{0,2}$"),
                        county: str = Query("", max_length=60), offset: int = Query(0, ge=0, le=20000),
                        limit: int = Query(100, ge=1, le=500), _: str = Depends(require_owner)):
     """ASCA's rate calculator: Medicare's ASC amounts for the codes a search names (whole codes, the start of a code, a
@@ -2759,14 +2767,21 @@ def _wake_cycle(trigger: str = "upload") -> None:
 
 
 @app.post("/api/uploads", dependencies=[Depends(require_xhr)])
-async def uploads_post(request: Request, name: str = Query(..., min_length=1, max_length=300),
+async def uploads_post(request: Request, name: Optional[str] = Query(None, max_length=300),
                        finding_id: Optional[str] = Query(None, max_length=160), user: str = Depends(require_auth)):
     """One file as the request's body (the page sends each file on its own): an EMA export, a remittance or claim file,
     a zip of those, or a visit note (with finding_id: attached to that item). Its bytes go straight into the upload
     folder beside the store; the answer says what it holds, what is new, what RemitWatch has already, and what was left
-    out and why. An export or a remittance file goes in with the next cycle, which this wakes."""
+    out and why. An export or a remittance file goes in with the next cycle, which this wakes. The file's name comes in
+    the X-File-Name header (URL-encoded), so that a note saved under the patient's name is not written to the access
+    log as part of the address; the `name` query is still read from a page that does not send the header yet."""
     _uploads_here()
+    from urllib.parse import unquote
     from . import uploads
+    header = request.headers.get("x-file-name")
+    name = (unquote(header).strip()[:300] if header else (name or "").strip()) or None
+    if not name:
+        raise HTTPException(400, "The file's name is missing (X-File-Name).")
     if finding_id and not re.fullmatch(FAX_KEY, finding_id):
         raise HTTPException(400, "finding_id is not valid")
     tmp = uploads.incoming(DB_PATH)
@@ -2811,6 +2826,7 @@ def uploads_list(_: str = Depends(require_auth)):
     last = json.loads(meta.get(LAST_KEY) or "{}")
     lock = json.loads(meta.get(LOCK_KEY) or "{}")
     return {"server": True, "items": items, "queued": queued, "notes": notes, "show_phi": SHOW_PHI,
+            "name_header": True,         # the page sends a file's name in X-File-Name, not in the address
             "cycle": {"running": bool(lock), "since": lock.get("started"), "last_finished": last.get("finished"),
                       "last_error": last.get("error"), "next": SCHEDULER.next_run if SCHEDULER.is_alive() else None}}
 
@@ -2857,16 +2873,18 @@ def uploads_note_match(note_id: str, body: dict = Body(default={}), _: str = Dep
     try:
         n = uploads.choose(conn, note_id, pick=int(body["pick"]) if str(body.get("pick", "")).isdigit() else None,
                            finding_id=str(fid) if fid else None)
+        # read before the store closes: the answer's confirm flag compares the note's identifiers with the claim's
+        return {"note": uploads._note_public(n, SHOW_PHI, conn), "lines": uploads._note_lines(n, SHOW_PHI, conn)}
     except uploads.Rejected as exc:
         raise HTTPException(400, str(exc))
     finally:
         conn.close()
-    return {"note": uploads._note_public(n, SHOW_PHI), "lines": uploads._note_lines(n, SHOW_PHI)}
 
 
 @app.post("/api/uploads/notes/{note_id}/remove", dependencies=[Depends(require_xhr)])
 def uploads_note_remove(note_id: str, _: str = Depends(require_auth)):
-    """Take an uploaded note back (the wrong file, or the wrong visit). A packet already built from it stays."""
+    """Take an uploaded note back (the wrong file, or the wrong visit). A packet built from it stays with its item for the
+    record, but it is never faxed: the next appeal builds it again (_packet_problem)."""
     _uploads_here()
     from . import uploads
     if not re.fullmatch(r"[0-9a-f]{24}", note_id):
