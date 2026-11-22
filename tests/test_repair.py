@@ -263,6 +263,13 @@ def test_srfax_answers_are_retried_but_a_send_whose_fate_is_unknown_never_is(tmp
     with pytest.raises(FaxError):
         safe.send("5025550100", b"%PDF")
     assert fx.calls == 4
+    assert safe.send == fx.send                                   # a send is never even wrapped
+    reads = repair.resilient(FlakySRFax([http_error(503)]), "srfax", registry=reg, sleep=Waits(), only=("status",))
+    assert reads.status("F2")["sent"] and reads._client.calls == 2
+    reads._client.failures = [http_error(503)]
+    reads.check = None                                            # (an attribute set on the wrapper stays on the wrapper)
+    with pytest.raises(requests.HTTPError):
+        repair.resilient(FlakySRFax([http_error(503)]), "srfax", only=("check",)).status("F3")   # not in `only`: not retried
     store.close()
 
 

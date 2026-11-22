@@ -367,16 +367,23 @@ def retry_call(fn: Callable, *args: Any, remedy: str = "network", target: str = 
     raise Held(remedy, target, None, n)         # n == 0
 
 
+# calls that send something that must go once: never tried again by a wrapper, whatever the error (the fax line keeps
+# its own send reservation and its own retries; an upload of the store is the cycle's to repeat)
+NEVER_RETRIED = frozenset({"send", "send_fax", "send_packet", "upload", "upload_chunks", "put", "put_chunks", "move", "delete",
+                           "delete_many"})
+
+
 class _Resilient:
     """A client whose calls go through retry_call. A call that returns an iterator (a listing, a download in chunks) is
-    tried again only until its first item arrives: once data has flowed, a failure is the caller's to handle."""
+    tried again only until its first item arrives: once data has flowed, a failure is the caller's to handle. Calls in
+    NEVER_RETRIED, and any call outside `only` when it is given, pass straight through."""
 
-    def __init__(self, client: Any, target: str, opts: dict):
-        self._client, self._target, self._opts = client, target, opts
+    def __init__(self, client: Any, target: str, opts: dict, only: frozenset | None = None):
+        self._client, self._target, self._opts, self._only = client, target, opts, only
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._client, name)
-        if name.startswith("_") or not callable(attr):
+        if name.startswith("_") or not callable(attr) or name in NEVER_RETRIED or (self._only is not None and name not in self._only):
             return attr
         opts, target = self._opts, self._target
 
@@ -401,13 +408,15 @@ def _chain(head: Any, rest: Any):
 
 
 def resilient(client: Any, target: str, *, registry: Registry | None = None, run: Any = None, deadline: float | None = None,
-              sleep: Callable[[float], None] = time.sleep, attempts: int | None = None, delays: Iterable[float] | None = None) -> Any:
-    """Wrap a Dropbox, TriZetto or SRFax client so each call is tried again after a transient failure. Never wrap a
-    call that sends something that must go once (a fax): the fax line keeps its own send reservation and retries."""
+              sleep: Callable[[float], None] = time.sleep, attempts: int | None = None, delays: Iterable[float] | None = None,
+              only: Iterable[str] | None = None) -> Any:
+    """Wrap a Dropbox, TriZetto or SRFax client so each call is tried again after a transient failure. `only` names the
+    calls to wrap (for the fax line: status, inbox, fetch, check, find_sent); a call that sends something that must go
+    once (NEVER_RETRIED: a fax, an upload, a move) is never wrapped."""
     if client is None or isinstance(client, _Resilient):
         return client
     return _Resilient(client, target, {"registry": registry, "run": run, "deadline": deadline, "sleep": sleep,
-                                       "attempts": attempts, "delays": delays})
+                                       "attempts": attempts, "delays": delays}, frozenset(only) if only is not None else None)
 
 
 def read_file(key: str, fn: Callable, *args: Any, registry: Registry, kind: str = "file", **kwargs: Any) -> Any:

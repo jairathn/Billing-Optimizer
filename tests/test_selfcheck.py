@@ -876,3 +876,112 @@ def test_scoreboard_figures_for_the_results_tab(store):
     s = sc.scoreboard(c, today=TODAY)
     assert s["at_risk_14"] == {"n": 1, "cents": 4000}
     assert set(s) >= {"given_up", "lost_to_deadlines", "audit", "track"}
+
+
+# ================================================================================================ more edges
+def test_vanished_items_leave_by_a_fold_or_a_superseded_remittance_without_a_gap(store):
+    c = store.conn
+    lk = remit(c, "2026-10-20", "ZZ00T0005C001", [("99213", 150, 0, [("CO", "197", 150)])])[0]
+    tk = c.execute("SELECT transaction_key FROM lines WHERE line_key=?", (lk,)).fetchone()[0]
+    add_item(c, "F-folded", line_key="Lx")
+    add_item(c, "F-super", line_key=lk, transaction_key=tk, patient_control_number="ZZ00T0005C001")
+    add_item(c, "F-carrier", line_key="Ly")
+    run(c, None, "r1")
+
+    def save(cn):
+        cn.execute("DELETE FROM findings WHERE finding_id IN ('F-folded', 'F-super')")
+        cn.execute("UPDATE findings SET evidence=? WHERE finding_id='F-carrier'",
+                   (json.dumps({"folded": [{"finding_id": "F-folded"}]}),))
+        cn.execute("UPDATE transactions SET superseded=1 WHERE transaction_key=?", (tk,))
+    out = run(c, save, "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert van["status"] == "ok" and out["kept"] == 0 and van["info"]["routes"] == {"folded": 1, "superseded": 1}
+
+
+def test_stale_ema_reports_make_the_app_say_what_it_cannot_see(store):
+    c = store.conn
+    remit(c, "2026-11-18", "ZZ00T0001C001", [("99213", 150, 80)])
+    c.execute("""INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, svc_lo, svc_hi, scope)
+                 VALUES ('p1', 'production', 'current', '2026-10-01', '2026-10-02', '2025-01-01', '2026-09-30', 'service'),
+                        ('a1', 'ar_report', 'current', '2026-10-01', '2026-10-02', '2026-01-01', '2026-09-30', 'service')""")
+    c.commit()
+    add_item(c, "F-1", shortfall_cents=7000)
+    b = sc.blindness(c, today=TODAY)
+    srcs = {s["source"]: s for s in b["sources"]}
+    assert set(srcs) >= {"production"} and srcs["production"]["cents"] == 7000 and "cannot see" in srcs["production"]["text"]
+    assert sc.check_feed_ema(c, TODAY)["status"] == "fail"
+
+
+def test_serverless_housekeeping_keeps_the_newest_and_held_copies(tmp_path):
+    from remitwatch.state import LocalState
+    import time as _t
+    state = LocalState(str(tmp_path / "state"))
+    s = _new("compact", tmp_path)
+    for name, fid, st in (("u1__p.csv", "f-old", "applied"), ("u2__p.csv", "f-new", "applied"), ("u3__h.csv", "f-held", "held")):
+        state.put(f"intake/done/{name}", b"invented")
+        state.put(f"intake/done/{name}.json", json.dumps({"sha256": fid, "result": {"status": st, "file_id": fid}}).encode())
+    s.conn.executemany("INSERT INTO ema_report_files (file_id, report, status, received_at) VALUES (?, 'production', ?, ?)",
+                       [("f-old", "superseded", "2026-01-01"), ("f-new", "current", "2026-02-01"), ("f-held", "held", "2026-02-02")])
+    s.conn.commit()
+    out = sc.housekeeping(mode="serverless", state=state, conn=s.conn, now=_t.time() + 40 * 86400)
+    names = {e["name"] for e in state.list("intake/done/")}
+    assert out["kept_copies"]["removed"] == 1 and "u1__p.csv" not in names
+    assert {"u1__p.csv.json", "u2__p.csv", "u3__h.csv"} <= names
+    s.close()
+
+
+def test_a_pattern_rule_that_fails_is_reported_as_a_pattern_error(store, monkeypatch):
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("invented failure")
+    monkeypatch.setattr(sc, "_pw_batch", boom)
+    got = sc.pattern_watch(store.conn, today=TODAY)
+    assert any(a["kind"] == "PATTERN_ERROR" for a in got)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_randomized_postings_always_add_up_to_their_charges(tmp_path, seed):
+    """Invented Production postings at random (charges, insurance and patient payments, contractual and denial
+    write-offs, patient adjustments, refunds as negative payments): every cell adds up, and the totals equal the sums of
+    what was generated."""
+    import random
+    rnd = random.Random(seed)
+    P, D = F.PAYERS, F.D
+    rows, tot = [], {"charges": 0, "ins": 0, "pat": 0, "adj": 0}
+    for n in range(1, 25):
+        svc = D(2026, rnd.randint(1, 9), rnd.randint(1, 28))
+        payer = rnd.choice([P["bcbs"], P["medicare"], P["commercial"]])
+        charge = rnd.randint(50, 400)
+        rows.append(F.production_row(posted=svc + F.dt.timedelta(days=2), svc=svc, link=F.link_no(n), charges=float(charge),
+                                     payer=payer, cpt=rnd.choice(["99213", "99214", "11102"])))
+        tot["charges"] += charge * 100
+        cpt = rows[-1]["CPT/Product"]
+        for _k in range(rnd.randint(0, 3)):
+            ins = rnd.choice([0, rnd.randint(1, charge), -rnd.randint(1, 30)])
+            contr = rnd.randint(0, 50)
+            nonc = rnd.choice([0, 0, rnd.randint(1, 80)])
+            reason = rnd.choice(["CO-45", "CO-197", "CO-97", "PR-1", "CO-29", "OA-23"])
+            rows.append(F.production_row(posted=svc + F.dt.timedelta(days=rnd.randint(10, 60)), svc=svc, link=F.link_no(n),
+                                         ins_paid=float(ins), contractual=float(contr), noncontractual=float(nonc), reason=reason,
+                                         check=str(880000000 + n), payer=payer, cpt=cpt))
+            tot["ins"] += ins * 100
+            tot["adj"] += (contr + nonc) * 100
+        if rnd.random() < 0.5:
+            pat = rnd.randint(1, 40)
+            rows.append(F.production_row(posted=svc + F.dt.timedelta(days=70), svc=svc, link=F.link_no(n), pat_paid=float(pat),
+                                         payer=payer, cpt=cpt))
+            tot["pat"] += pat * 100
+    s = _new("file", tmp_path)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        res = er.ingest_file(s, F.write(str(tmp_path / "p.csv"), F.production_csv(rows)), via="test", ledger=lg, log=lambda *a: None)
+        assert res["status"] == "current", res
+        el.refresh(s, lg, log=lambda *a: None)
+        out = sc.check_ledger(s.conn, lg, today=TODAY)
+        assert check_of(out["checks"], "money_conservation")["status"] == "ok"
+        assert check_of(out["checks"], "ledger_store")["status"] == "ok"
+        t = out["conservation"]["totals_since"]
+        assert t["charges"] == tot["charges"] and t["ins_paid"] == tot["ins"] and t.get("pat_paid", 0) == tot["pat"]
+        assert t.get("contractual", 0) + t.get("wo_at_posting", 0) + t.get("wo_later", 0) + t.get("wo_timely", 0) == tot["adj"]
+    finally:
+        lg.close()
+        s.close()
