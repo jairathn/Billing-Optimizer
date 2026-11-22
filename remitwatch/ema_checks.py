@@ -2293,10 +2293,10 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
 def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None, ratio: Callable | None = None) -> list[dict]:
     """C7: one EMA_DENIAL_AS_CONTRACTUAL item per payer group x reason x posted year when EMA posted a payer's denial
     reason (non-routine, outside group PR) as a contractual adjustment for at least $1,000 on at least 10 lines. Outside
-    the money totals (no expected amount). Evidence: the top codes; the dollars split into lines under an item on file
-    (C2's marks), lines out by policy (G2211, 99024, $1 or less), lines no remittance covers (C5's ground) and other 835
-    lines no item lists; the part still inside its window; the value at the group's paid/charge ratio (45% when none).
-    High severity from $25,000."""
+    the money totals (no expected amount). Evidence: the top codes; the dollars split, in this order, into lines under an
+    item on file (C2's marks), lines no remittance covers (C5's ground), lines out by policy (G2211, 99024, $1 or less)
+    and other 835 lines no item lists; the part still inside its window; the value at the group's paid/charge ratio (45%
+    when none). High severity from $25,000."""
     _prepare(conn)
     t = _today(today)
     lags = _lags(conn)
@@ -2327,10 +2327,10 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
                   (nk is not None and not fac and (nk, svc, cpt) in nk835)
         if mapped and (bill, svc, cpt) in fkeys:
             part = "c2"
+        elif lk in ekeys or not covered:
+            part = "c5"                 # no remittance covers it: C5's ground (G2211 and 99024 lines among them are never items)
         elif cpt in POLICY_CODES or (charges or 0) <= 100:
             part = "policy"
-        elif lk in ekeys or not covered:
-            part = "c5"
         else:
             part = "other_835"
         it["split"][part] += contr
