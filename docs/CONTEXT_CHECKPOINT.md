@@ -22,7 +22,7 @@ Weekly automatic Dropbox pull. No new staff. Owner: the practice's physician-own
 - EMA export families (xlsx): "Encounter and Charge Lines" (42 cols, billed CPT per line),
   "ERA and Payment Line Adjustments" (24 cols), "Claim and Claim Status" (23 cols); annual
   2024/2025/2026 files live in Reports/; weekly pilot exports in dated folders.
-- Uploaded zip = scrape of a prior ChatGPT-built "ODA financial integrity" dashboard (Oct 12 2026).
+- Uploaded zip = scrape of a prior ChatGPT-built "the practice financial integrity" dashboard (Oct 12 2026).
   Extracted to scratchpad zip_extract/. Its findings: 33,615 RMT files -> 32,617 unique 835s,
   193,043 CLP claim events, 419,389 SVC lines; 835 CLP01 -> EMA Claim ID matches 94%;
   835 SVC -> EMA charge exact-composite 72% (90% in recent cohort);
@@ -50,7 +50,7 @@ Weekly automatic Dropbox pull. No new staff. Owner: the practice's physician-own
 - Parsed 31,627 unique 835 transactions, 188K claims, 409K lines in 59 s; 0 parse problems; 28 unbalanced txns.
 - Classic E/M downcoding (SVC06 original > SVC01 paid) = 155 lines, est. allowed shortfall ~$3.7K, 145 of them Anthem.
   Charge-amount inference (remitwatch/fees.py) agrees with SVC06 in 151/155 and finds only 1 hidden case. Rate-level
-  downcodes (allowed = lower level's rate) = 0. CONCLUSION: code-level downcoding is NOT the big leak at ODA.
+  downcodes (allowed = lower level's rate) = 0. CONCLUSION: code-level downcoding is NOT the big leak at the practice.
 - Big leaks found instead:
   1. Anthem commercial PPO (cfi 12, 42K claims, $3.4M paid) allows 99213 ~$51-53 and 99214 ~$64-66 in 2025 = 61-64% of
      KY Medicare; procedures at 106-109%, 88305 at 153%. UHC pays 108% of Medicare for 99214. Contract problem.
@@ -65,7 +65,7 @@ Weekly automatic Dropbox pull. No new staff. Owner: the practice's physician-own
 - Medicare below-usual-rate E/M lines are explained by PA/NP 85% payment, not underpayment (stratify by rendering NPI).
 - EMA exports: Claim ID (e.g. CB00ABCD1C017) == 835 CLP01. REF*6R is NOT the EMA Bill Item Identifier (different
   number ranges). Line matching must be composite (claim id + DOS + CPT + modifiers + units + charge).
-- Annual EMA exports (ODA - 2024/2025/2026.xlsx etc.) are NOT in Dropbox; only Jul 27 2026 onward exists. Missing data.
+- Annual EMA exports (the practice - 2024/2025/2026.xlsx etc.) are NOT in Dropbox; only Jul 27 2026 onward exists. Missing data.
 - 837 claim files exist: 87 PROFESSIONAL_Claims_*.txt in 10-5-26 - 10-9-26 (Oct 5-9 2026 only).
 
 ## Progress log
@@ -97,7 +97,7 @@ Weekly automatic Dropbox pull. No new staff. Owner: the practice's physician-own
 - Workflows wf_00156c6f-279 (domain) and wf_ee7fd1ce-70c (tech): write docs/RESEARCH_DOMAIN.md and docs/RESEARCH_TECH.md; then integrate
   deadlines/statutes into appeals.py and detect.py APPEAL_DAYS, update OPERATIONS.md hosting recommendation, commit.
 
-## Update after reading the prior app's source (ODA-Financial-Dashboard-Source)
+## Update after reading the prior app's source (the practice-Financial-Dashboard-Source)
 - Adopted: payload fingerprint excludes ST/SE control numbers; supersede key includes payment date; composite 835->EMA charge
   linkage (remitwatch/link.py: exact_composite / fallback_candidate / ambiguous / unmatched) and ERA handling join (line_handling);
   claim ids = 9-char bill id + suffix (C017/C024/C031 = submission sequence), so later-payment checks key on the bill prefix.
