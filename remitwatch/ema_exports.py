@@ -55,9 +55,16 @@ MONEY = ("charges", "payments", "adjustments", "insurance_payments", "insurance_
 DATES = ("service_date", "transaction_date", "posted_date", "bill_created", "claim_submission_date", "denial_date")
 
 
+KEY_COLUMNS = ("claim_id", "bill_id", "bill_item_id")      # one of these ties a row to a claim or a bill
+
+
 def detect_family(columns: list[str]) -> str:
+    """Which of EMA's three reports the columns are, or 'unknown'. A report whose rows name no claim or bill (an AR or
+    a production report also has a Claim Status column) is none of them."""
     cols = {c.lower().strip() for c in columns}
     canon = {CANON.get(c) for c in cols}
+    if not canon & set(KEY_COLUMNS):
+        return "unknown"
     if "adjustment_status" in canon or ("carc" in canon and "rarc" in canon and "activity_type" not in canon):
         return "era_lines"
     if "activity_type" in canon:
@@ -160,6 +167,13 @@ def export_created(path: str) -> str | None:
 
 
 HEADER_SCAN = 25        # rows searched for the column names (a report's title and filter lines sit above them)
+MAX_BLANK_RUN = 1000    # a sheet's rows end at this many blank lines in a row; anything filled in far below them is refused
+MAX_CELLS = 20_000_000  # cells read from one sheet at most (a year of charge lines is well under a tenth of this)
+MAX_SHEET_XML = 512 * 1024 * 1024       # a workbook's sheets, unpacked, at most
+
+
+class TooLarge(ValueError):
+    """The file is larger, or shaped to look larger, than the reader takes in one piece; the message says so plainly."""
 TEXT_EXPORTS = (".csv", ".tsv")
 # rows with none of these say nothing about a claim, a bill, a patient or a day: a totals line or a footer
 ROW_KEYS = ("claim_id", "bill_id", "bill_item_id", "patient_id", "service_date", "transaction_date", "posted_date", "bill_created",
@@ -239,13 +253,41 @@ def _raw_rows(path: str, data: bytes) -> list[list]:
     if is_text_export(path):
         return _csv_rows(data)
     import io
+    import zipfile
 
     import openpyxl
 
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            unpacked = sum(i.file_size for i in z.infolist() if i.filename.startswith("xl/worksheets/"))
+    except zipfile.BadZipFile:
+        unpacked = 0                    # openpyxl says what is wrong with it
+    if unpacked > MAX_SHEET_XML:
+        raise TooLarge("The workbook is too large to read in one piece once unpacked. Export a shorter date range.")
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     try:
         ws = wb.worksheets[0]
-        return [list(r) for r in ws.iter_rows(values_only=True)]
+        # the size a sheet declares can be far larger than what it holds (A1:XFD1048576): read only the cells there are
+        ws.reset_dimensions()
+        out: list[list] = []
+        blank = cells = 0
+        for r in ws.iter_rows(values_only=True):
+            if all(v is None or v == "" for v in r):
+                blank += 1          # kept only if something follows (a blank line inside the report is counted as one)
+                continue
+            if blank >= MAX_BLANK_RUN:
+                raise TooLarge(f"The sheet has something filled in below {blank:,} blank lines in a row, far under the report. "
+                               "Open it in Excel, delete what is below the report, and save it again.")
+            out += [[] for _ in range(blank)]
+            blank = 0
+            row = list(r)
+            while row and (row[-1] is None or row[-1] == ""):
+                row.pop()
+            cells += len(row)
+            if cells > MAX_CELLS:
+                raise TooLarge("The sheet holds more cells than RemitWatch reads at once. Export a shorter date range.")
+            out.append(row)
+        return out
     finally:
         wb.close()
 

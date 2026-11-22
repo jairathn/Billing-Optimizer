@@ -1021,8 +1021,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         # run (nothing new in Dropbox, nothing recorded by people) uploads neither.
         alerts_changed = bool((out.get("alerts") or {}).get("new") or (out.get("alerts") or {}).get("cleared"))
         progressed = ingested or (ingest.get("from_archive") or 0) > 0
-        # a TriZetto sign-in hold set or ended is on Today's data checks: the dashboard's copy is made again
-        shown_changed = bool(ran_detect or ran_activity or folded or alerts_changed or (progressed and not existed) or tz.get("hold_changed"))
+        # a TriZetto sign-in hold set or ended is on Today's data checks, and the /setup test reads the server's key from the
+        # dashboard's copy (trust on first use): either makes the copy again
+        shown_changed = bool(ran_detect or ran_activity or folded or alerts_changed or (progressed and not existed)
+                             or tz.get("hold_changed") or tz.get("hostkey"))
         if shown_changed:
             data_rev = str(int(data_rev or 0) + 1)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
@@ -1324,13 +1326,38 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
         (f"set: faxes go out from {fx_line}, and letters give it for the payer's answer; press Test the fax line below"
          if fx_line and env("SRFAX_SENDER_EMAIL") else "set, but SRFAX_CALLER_ID (the line's own number) or SRFAX_SENDER_EMAIL is missing")
         if fx_on else "not set: appeal packets are downloaded and sent by hand. To fax them, follow docs/OPERATIONS.md, Faxing appeals",
-        "Set SRFAX_CALLER_ID to the SRFax fax number and SRFAX_SENDER_EMAIL to the address SRFax sends its notices to, then redeploy.")
+        f"Set SRFAX_CALLER_ID to the SRFax fax number and SRFAX_SENDER_EMAIL to the address SRFax sends its notices to {where}, {apply}.")
     out["fax"] = {"configured": fx_on}
-    tz_on = bool(env("TRIZETTO_SFTP_USER") and env("TRIZETTO_SFTP_PASSWORD"))
-    add("trizetto", "TriZetto direct: remittances from the clearinghouse, no Dropbox needed (optional)", tz_on or None,
-        "set: press Test the TriZetto connection below" if tz_on else
-        "not set: remittances come only from the Dropbox folder. To read them straight from TriZetto, follow docs/OPERATIONS.md, TriZetto direct")
-    out["trizetto"] = {"configured": tz_on}
+    # TriZetto is read by one site only: the server, or a serverless host switched on for it (trizetto.here), because each
+    # site keeps its own hold on a refused password and its own reminder before the password expires
+    tz_set = bool(env("TRIZETTO_SFTP_USER") and env("TRIZETTO_SFTP_PASSWORD"))
+    tz_here = trizetto.here()
+    tz_on = tz_set and tz_here
+    if tz_on:
+        from .insights import password_days
+        raw_days = (env("TRIZETTO_SFTP_PASSWORD_DAYS") or "").strip()
+        days = password_days(raw_days)
+        if days is None:
+            reminder = (". TRIZETTO_SFTP_PASSWORD_DAYS is not a number of days, so no reminder comes before the password "
+                        f"expires: enter it again {where}")
+        elif days == 0 and raw_days:
+            reminder = "; TRIZETTO_SFTP_PASSWORD_DAYS says the password never expires, so no reminder is due"
+        elif not (env("TRIZETTO_SFTP_PASSWORD_SET") and days):
+            reminder = (". No reminder comes before the password expires until TRIZETTO_SFTP_PASSWORD_SET (the day it was set, "
+                        f"YYYY-MM-DD) and TRIZETTO_SFTP_PASSWORD_DAYS (how many days TriZetto lets it last) are set {where}")
+        else:
+            reminder = ""
+        tz_detail = "set: press Test the TriZetto connection below" + reminder
+    elif tz_set:
+        tz_detail = ("set, but this site does not read TriZetto: the server does, so only one site signs in with the login "
+                     "(docs/OPERATIONS.md, TriZetto direct)")
+    else:
+        tz_detail = ("not set: remittances come only from the Dropbox folder. To read them straight from TriZetto, follow "
+                     "docs/OPERATIONS.md, TriZetto direct" + ("; the server reads TriZetto, not this site" if not tz_here else ""))
+    add("trizetto", "TriZetto direct: remittances from the clearinghouse, no Dropbox needed (optional)", tz_on or None, tz_detail,
+        f"Remove the TRIZETTO_SFTP_ settings {where}, {apply}. Set {trizetto.SERVERLESS_SETTING}=1 instead only if no server "
+        "reads TriZetto with this login." if tz_set and not tz_here else "")
+    out["trizetto"] = {"configured": tz_on, "set": tz_set, "here": tz_here}
     missing = [k for k in ("PRACTICE_NAME", "PRACTICE_ADDRESS", "PRACTICE_TIN", "PRACTICE_NPI", "PRACTICE_PHONE", "PRACTICE_EMAIL") if not env(k)]
     if not (env("SRFAX_CALLER_ID") or env("PRACTICE_FAX")):
         missing.append("PRACTICE_FAX (or SRFAX_CALLER_ID)")
@@ -1341,7 +1368,7 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
     add("owner_password", "Owner's password for the Providers tab (optional)", (not owner_bad) if owner else None,
         ("on: what each clinician is doing opens only after the owner's password is typed into the Providers tab" if not owner_bad else f"set, but it {owner_bad}")
         if owner else "off: everyone who can sign in sees the Providers tab",
-        "Replace REMITWATCH_OWNER_PASSWORD in Vercel with 12 or more plain letters and digits and redeploy. Leave the dashboard password as it is. "
+        f"Replace REMITWATCH_OWNER_PASSWORD {where} with 12 or more plain letters and digits, {apply}. Leave the dashboard password as it is. "
         "Until then the Providers tab is closed to everyone.")
     if base_url:
         out["webhook_url"] = f"{base_url.rstrip('/')}/api/dropbox/webhook"

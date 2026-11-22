@@ -401,49 +401,119 @@ def denial_causes(conn: sqlite3.Connection, newest: str | None) -> list[dict]:
     return out
 
 
-def password_days(value: str | None) -> int:
-    """How long a password lasts, in days, however it was written: '90', '90 days', '8 weeks', '6 months', '1 year',
-    'annually'; 0 (no reminder) for nothing, 'never' or anything without a number or a unit."""
+_NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                 "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "eighteen": 18, "twenty": 20, "thirty": 30, "forty": 40,
+                 "forty five": 45, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+
+
+def _unit_days(unit: str) -> int:
+    return {"d": 1, "w": 7, "m": 30}.get(unit[:1], 365)
+
+
+def password_days(value: str | None) -> int | None:
+    """How long a password lasts, in days, however TriZetto's answer puts it: '90', '90 days', '8 weeks', '6 months',
+    '1 year', '1 yr', 'six months', 'annually', 'quarterly', 'twice a year'. A number goes with the unit right after it,
+    and a day count wins over another unit ('365 days (1 year)' is 365). 0 (no reminder) for nothing, 0 or 'never'; None
+    when it cannot be read (the data checks then say so)."""
     import re
-    v = (value or "").strip().lower()
-    m = re.search(r"\d+", v)
-    n = int(m.group(0)) if m else None
-    for words, per in (("year|annual", 365), ("month", 30), ("week", 7)):
-        if re.search(words, v):
-            return (n if n is not None else 1) * per
-    return n or 0
+    v = " ".join(re.sub(r"[-_/,;()]", " ", (value or "").lower()).split())
+    if not v:
+        return 0
+    if re.search(r"\bnever\b|\bnone\b|\bno expir|\bnot expire|n't expire", v):
+        return 0
+    if re.search(r"\bsemi ?annual|\btwice (a|per) year|\bhalf (a )?year|\bevery other quarter", v):
+        return 182
+    if re.search(r"\bbi ?(annual|ennial|yearly)", v):
+        return None                     # twice a year, or every two years: ask
+    if re.search(r"\bquarter", v):
+        return 90
+    for word, n in sorted(_NUMBER_WORDS.items(), key=lambda kv: -len(kv[0])):
+        v = re.sub(rf"\b{word}\b", str(n), v)
+    units = r"(days?|d|weeks?|wks?|w|months?|mos?|mths?|years?|yrs?|y)"
+    pairs = re.findall(rf"(\d+) ?{units}\b", v)
+    if pairs:
+        days = [int(n) for n, unit in pairs if unit.startswith("d")]
+        return days[0] if days else int(pairs[0][0]) * _unit_days(pairs[0][1])
+    if re.fullmatch(r"\d+", v):
+        return int(v)
+    number = re.search(r"\d+", v)
+    for unit in ("day", "week", "month", "year"):       # a number and a unit apart ("90 calendar days")
+        if re.search(rf"\b{unit}s?\b", v):
+            return (int(number.group(0)) if number else 1) * _unit_days(unit)
+    if re.search(r"annual|yearly", v):
+        return 365
+    if re.search(r"monthly", v):
+        return 30
+    if re.search(r"weekly", v):
+        return 7
+    return None
+
+
+def _who_enters() -> tuple[str, str]:
+    """Who puts a new TriZetto password into this site, and how: the server's configure.sh, or Vercel's settings when a
+    serverless host reads TriZetto itself (trizetto.here)."""
+    from . import runtime
+    if runtime.serverless():
+        return ("whoever looks after the site in Vercel, who replaces TRIZETTO_SFTP_PASSWORD there (and TRIZETTO_SFTP_PASSWORD_SET, "
+                "the day) and redeploys", "in Vercel, then redeploy")
+    return "whoever runs the server, who enters it with configure.sh", "with configure.sh"
 
 
 def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = None) -> list[dict]:
-    """The TriZetto feed's sign-in, which nothing else watches: a password TriZetto refused (the feed holds off for a day so
+    """The TriZetto feed's sign-in, which nothing else watches: a sign-in TriZetto refused (the feed holds off for a day so
     the login is never locked: remitwatch.trizetto), and a password about to expire (TriZetto makes it expire, every 60
-    days to a year by vendors' accounts). Changed late, the feed stops, and so does everything else that signs in with it."""
+    days to a year by vendors' accounts). Changed late, the feed stops. Said only by the site that reads TriZetto
+    (trizetto.here: the server, unless a serverless host is switched on for it), and in line with docs/TRIZETTO_REQUEST.md:
+    requests to TriZetto in writing, passwords never by email, the Site ID's own password never touched for RemitWatch."""
     import os
+
+    from . import trizetto
     e = os.environ if env is None else env
-    if not (e.get("TRIZETTO_SFTP_USER") and e.get("TRIZETTO_SFTP_PASSWORD")):
+    if not trizetto.configured(e):
         return []
+    enters, how = _who_enters()
     out = []
-    held = _meta(conn, "trizetto:signin_refused")
+    held = _meta(conn, trizetto.REFUSED_META)
+    test_once = "Whoever runs the site: press Test the TriZetto connection on /setup once."
+    reset = ("the TriZetto administrator asks TriZetto in writing (the portal's Contact Us) to reset the RemitWatch login's "
+             "password. Change it yourself only on a page that shows the RemitWatch login's username, never the Site ID's. "
+             f"The new password goes by phone or in person, never by email, to {enters}; it is tried at once. If the feed uses "
+             "the Site ID's own login (shared with ModMed), reset nothing: get the current password from whoever changed it, "
+             "with ModMed.")
     if held and held.get("at") and held.get("unclear"):
         out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
                     "title": f"TriZetto's sign-in did not finish twice in a row on {held['at'][:10]}",
-                    "detail": "The feed waits 6 hours before it tries again, so the login is never locked (ModMed may sign in with it "
-                              "too). TriZetto may have been down; if it keeps happening, the password may be refused without a clear answer.",
-                    "who": "Whoever runs the server: press Test the TriZetto connection on /setup; if it is refused, the TriZetto "
-                           "administrator sets a new SFTP password in the portal."})
-    elif held and held.get("at"):
+                    "detail": "The feed waits 6 hours before it tries again, so the login is never locked. TriZetto may have "
+                              "been down. If it keeps happening, the password may be refused without a clear answer.",
+                    "who": f"{test_once} If it says TriZetto refused the sign-in, {reset}"})
+    elif held and held.get("at") and held.get("kind") == "method":
         out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
-                    "title": f"TriZetto refused the feed's password on {held['at'][:10]}",
-                    "detail": "No remittances come straight from TriZetto until it is fixed. The feed tries the same password only once a "
-                              "day, so the login is never locked (ModMed may sign in with it too).",
-                    "who": "TriZetto administrator: set a new SFTP password in the TriZetto portal (My Account, Manage Products, Manage "
-                           "SFTP Password) and give it by phone to whoever runs the server, who enters it with configure.sh."})
-    import re
+                    "title": f"TriZetto would not take a password for the feed's login on {held['at'][:10]}",
+                    "detail": "TriZetto's server asked for another way to sign in, so no remittances come straight from TriZetto. "
+                              "The feed tries again once a day.",
+                    "who": "TriZetto administrator: ask TriZetto in writing (the portal's Contact Us) for the RemitWatch login to "
+                           "sign in with a password. Change nothing in the portal."})
+    elif held and held.get("at"):
+        # "the password" only when TriZetto refused a password sent by the password method (trizetto.SignInRefused.kind)
+        what = "password" if held.get("kind") == "password" else "sign-in"
+        out.append({"key": "trizetto_signin", "ok": False, "at": held["at"][:10],
+                    "title": f"TriZetto refused the feed's {what} on {held['at'][:10]}",
+                    "detail": "No remittances come straight from TriZetto until it is fixed. The feed tries the same password only "
+                              "once a day, so the login is never locked.",
+                    "who": f"{test_once} If TriZetto still refuses it, {reset}"})
+    raw = (e.get("TRIZETTO_SFTP_PASSWORD_DAYS") or "").strip()
+    days = password_days(raw)
+    if days is None:
+        out.append({"key": "trizetto_password", "ok": False,
+                    "title": "How long TriZetto's SFTP password lasts could not be read",
+                    "detail": f"TRIZETTO_SFTP_PASSWORD_DAYS is \"{raw[:40]}\", which is not a number of days, so no reminder "
+                              "comes before the password expires.",
+                    "who": f"Whoever runs the site: enter it again as a number of days (0 if it never expires) {how}."})
+        return out
     try:
         set_on = date.fromisoformat((e.get("TRIZETTO_SFTP_PASSWORD_SET") or "")[:10])
     except ValueError:
         set_on = None
-    days = password_days(e.get("TRIZETTO_SFTP_PASSWORD_DAYS"))
     if set_on and days > 0:
         due = set_on + timedelta(days=days)
         left = (due - date.fromisoformat(today)).days
@@ -451,10 +521,12 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
             out.append({"key": "trizetto_password", "ok": False, "due": due.isoformat(), "days_left": left,
                         "title": (f"TriZetto's SFTP password expires on {due.isoformat()}" if left >= 0 else
                                   f"TriZetto's SFTP password expired on {due.isoformat()}"),
-                        "detail": "Change it before then, the same day everywhere it is used: the remittance feed stops on the old one.",
-                        "who": "TriZetto administrator: set a new SFTP password in the TriZetto portal (My Account, Manage Products, Manage "
-                               "SFTP Password), and give it by phone to whoever runs the server (configure.sh) and to anything else that "
-                               "signs in with that login."})
+                        "detail": "Change it before then: the remittance feed stops on the old one.",
+                        "who": "TriZetto administrator: ask TriZetto in writing (the portal's Contact Us) for a new password for "
+                               "the RemitWatch login, or set it yourself only on a page that shows the RemitWatch login's username, "
+                               f"never the Site ID's. Give it by phone or in person, never by email, to {enters}, the same day. "
+                               "If the feed uses the Site ID's own login (shared with ModMed), change it only together with "
+                               "ModMed, the same day."})
     return out
 
 

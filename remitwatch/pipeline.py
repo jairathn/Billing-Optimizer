@@ -136,9 +136,19 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         new_files: list[str] = []
         if sync:
             if dropbox_configured():
-                st = dropbox_sync(store, full=full, log=beat_log)
-                new_files = st.pop("new_files", [])
-                out["sync"] = st
+                # a Dropbox failure (a revoked token, an outage) must not stop TriZetto, the uploads, the analysis, the
+                # backup or the faxes: it is noted, and shown as the cycle's error once the rest is done
+                try:
+                    st = dropbox_sync(store, full=full, log=beat_log)
+                    new_files = st.pop("new_files", [])
+                    out["sync"] = st
+                except Exception as exc:
+                    new_files = list(getattr(exc, "new_files", None) or [])     # what it fetched before it failed
+                    out["sync"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+                    try:
+                        store.conn.rollback()
+                    except Exception:
+                        pass
             else:
                 out["sync"] = {"skipped": "Dropbox credentials are not configured"}
         if local:
@@ -210,6 +220,8 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                                                      ingest_stats=ingested, detail=True), report_dir)
             out["report_emailed"] = email_report(text) if email else False
             _meta_set(store.conn, REPORT_KEY, _now())
+        if isinstance(out.get("sync"), dict) and out["sync"].get("error"):
+            out["error"] = "Dropbox: " + out["sync"]["error"]          # the rest ran; the feed's failure still shows
         out["finished"] = _now()
         return out
     except Exception as exc:
@@ -342,14 +354,19 @@ DAILY_MINUTES = 24 * 60
 
 def start_scheduler_from_env(db_path: str) -> bool:
     """The background cycles on a server: every REMITWATCH_SYNC_INTERVAL_MINUTES (60 is a good value), and at least once
-    a day whenever a feed is set up (Dropbox or TriZetto), as Vercel's daily scheduled call does; Dropbox's webhook and
-    the dashboard's Sync now add cycles in between. Each cycle also looks after the fax line (cli.cmd_cycle)."""
-    from . import trizetto
+    a day whenever a feed is set up (Dropbox or TriZetto) or the fax line is, as Vercel's daily scheduled calls do;
+    Dropbox's webhook and the dashboard's Sync now add cycles in between. Each cycle also looks after the fax line
+    (cli.cmd_cycle): its follow-ups, retries and the payers' faxes."""
+    from . import fax, trizetto
     try:
         interval = int(os.environ.get("REMITWATCH_SYNC_INTERVAL_MINUTES", "0") or 0)
     except ValueError:
         interval = 0
-    feed = bool(os.environ.get("DROPBOX_APP_SECRET") or dropbox_configured() or trizetto.configured())
+    try:
+        faxing = bool(fax.configured())
+    except Exception:
+        faxing = False
+    feed = bool(os.environ.get("DROPBOX_APP_SECRET") or dropbox_configured() or trizetto.configured() or faxing)
     if interval <= 0 and not feed:
         return False
     SCHEDULER.start(db_path, interval if interval > 0 else DAILY_MINUTES)

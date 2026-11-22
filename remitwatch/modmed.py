@@ -27,24 +27,28 @@ Settings (environment):
 
 Finding the note for a claim (find_note). What is checked, and nothing more is promised:
 
-  The patient. The candidates are the patient EMA's own patient ID on the claim's EMA rows names (as a FHIR id, then as
-  an identifier), the patient the medical record number the payer echoed names, and the patients with the claim's name.
-  A patient whose family name disagrees with the claim's is never a candidate. A note is attached by itself only when
-  exactly one patient is tied to the claim by two independent identifiers that agree: EMA's patient ID, the medical
-  record number, the member ID on the patient's coverage, the full name. A name alone is never enough, because two
-  patients can share a name and a visit day. Then a person picks, and the choices show who each patient is where names
-  are switched on. Where names are off the choices cannot be told apart, so the note is attached by hand instead.
+  The patient. First the patient EMA's own patient ID on the claim's EMA rows names (as a FHIR id, then as an
+  identifier) and the patient the medical record number the payer echoed names; only when those find nobody, the
+  patients with the claim's name. A patient whose family name disagrees with the claim's is never a candidate. A note
+  is attached by itself only when exactly one patient is identified by two of the claim's identifiers that agree: EMA's
+  patient ID, the medical record number, the full name (the same family name and first name). A name alone, or a name
+  and a date, is never enough: two patients can share a name and a visit day. The member ID is not used, because a
+  payer can give one ID to a whole family and the 835 carries no birth date. Anything weaker comes back for a person to
+  pick, and the choices show who each patient is (name, birth date, identifiers) where names are switched on. Where
+  names are off and more than one patient fits, the choices cannot be told apart, so the note is attached by hand.
 
-  The note. Current and signed only. It must be a clinical note in a form that can be read (PDF, HTML, text, RTF, Word),
-  and it must be for the date of service: tied to a visit of that day, or carrying that day as its clinical date, or,
-  with neither, written on that day. A note written later that names no visit may belong to a later visit. That one, and
-  a document that is not a clinical note, are never attached by themselves: a person can pick them.
+  The note. Current and signed only. It must be a clinical note in a form that can be read (PDF, HTML, text, RTF,
+  Word), and it must be for the date of service: tied to a visit of that day, or carrying that day as its clinical
+  date, or, with neither, written on that day. A note written later that names no visit may belong to a later visit.
+  That one, and a document that is not a clinical note, are never attached by themselves: a person can pick them.
 
-  More than one note that day: the one written by the clinician who rendered the service (NPI), then a progress note
-  before other kinds, else the person picks.
+  More than one note that day for the identified patient: the one written by the clinician who rendered the service
+  (NPI), then a progress note before other kinds, else the person picks.
 
 Where ModMed allows the app no searches, the same lookups run over a Bulk FHIR export. The two exports share one time
-budget, and an export that is still running when the budget ends is picked up by the next lookup, not started again.
+budget (on a serverless host, short enough to leave time for the review). An export still running when the budget
+ends is asked about again by the next lookup in the same process, not started again, and lookups made together wait
+for one export.
 
 Read only: nothing is written to EMA. What is read stays in memory or in the appeal packet, as with an uploaded note.
 """
@@ -53,6 +57,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import threading
@@ -799,9 +804,8 @@ PERSON = "a person"         # what identifies the patient when a person chose th
 
 
 def _nid(v: Any) -> str:
-    """An identifier as compared: letters and digits, upper case; one shorter than four characters says too little."""
-    s = re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
-    return s if len(s) >= 4 else ""
+    """An identifier as compared: letters and digits, upper case."""
+    return re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
 
 
 def _agree(p: dict, key: ClaimKey) -> list[str]:
@@ -851,7 +855,8 @@ def _usable(d: dict) -> bool:
 
 def _ties(d: dict, dos: str, encounter_ids: set[str]) -> str | None:
     """How the note belongs to the visit: 'encounter' (it names one of the day's visits), 'period' (its clinical date is
-    the day), 'date' (no link: written that day or within NOTE_AFTER_DAYS after), or None."""
+    the day), 'date' (no link: written that day), 'after' (no link: written within NOTE_AFTER_DAYS after the day, so it
+    may be a later visit's note: only a person can choose it), or None."""
     ctx = d.get("context") or {}
     refs = {_ref_id(e.get("reference")) for e in ctx.get("encounter") or [] if isinstance(e, dict)}
     if refs & encounter_ids:
@@ -862,9 +867,38 @@ def _ties(d: dict, dos: str, encounter_ids: set[str]) -> str | None:
     if start:
         return "period" if start == dos else None
     written = _day(d.get("date"))
-    if written and dos <= written <= (date.fromisoformat(dos) + timedelta(days=NOTE_AFTER_DAYS)).isoformat():
+    if written == dos:
         return "date"
+    if written and dos < written <= (date.fromisoformat(dos) + timedelta(days=NOTE_AFTER_DAYS)).isoformat():
+        return "after"
     return None
+
+
+def _ctype(att: dict) -> str:
+    return (att.get("contentType") or "").split(";")[0].strip().lower()
+
+
+def _attachments(d: dict) -> list[dict]:
+    atts = [c.get("attachment") or {} for c in d.get("content") or []]
+    atts = [a for a in atts if a.get("url") or a.get("data")]
+    return sorted(atts, key=lambda a: CONTENT_PREF.index(_ctype(a)) if _ctype(a) in CONTENT_PREF else len(CONTENT_PREF))
+
+
+def _is_note(d: dict) -> bool:
+    """A clinical note: one of the note types appeals use (NOTE_TYPES), or, with no LOINC type at all, filed as a
+    clinical note. A photo, a consent form, a pathology or imaging report, an outside record: not one."""
+    if _note_type(d)[0]:
+        return True
+    if any(cd.get("code") and (cd.get("system") or "http://loinc.org") == "http://loinc.org" for cd in (d.get("type") or {}).get("coding") or []):
+        return False                # a LOINC type that is not a visit note
+    return any(cd.get("code") == "clinical-note" for c in d.get("category") or [] for cd in (c or {}).get("coding") or [])
+
+
+def _readable(d: dict) -> bool:
+    """The note comes in a form the review and the packet read (CONTENT_PREF). A file that does not say what it is, or a
+    picture, is left to a person."""
+    atts = _attachments(d)
+    return bool(atts) and _ctype(atts[0]) in CONTENT_PREF
 
 
 def _author_npis(src: LiveSource, d: dict) -> set[str]:
@@ -882,104 +916,199 @@ def _author_label(d: dict) -> str:
     return ", ".join(filter(None, ((a or {}).get("display") for a in d.get("author") or []))) or ""
 
 
-def _candidate(d: dict, tie: str) -> dict:
-    code, label = _note_type(d)
-    return {"id": d.get("id"), "date": _doc_date(d), "written": _day(d.get("date")), "type": label, "loinc": code,
-            "author": _author_label(d), "tie": tie, "status": d.get("docStatus") or "final"}
+def _who(p: dict) -> dict:
+    """What tells one patient from another, for a person picking between them (only where names are shown)."""
+    n = next(iter(_names(p)), {})
+    name = " ".join(filter(None, [" ".join(x for x in n.get("given") or [] if x), n.get("family") or ""])).strip() or n.get("text") or ""
+    ids = [str(i.get("value")) for i in p.get("identifier") or [] if isinstance(i, dict) and i.get("value")]
+    return {"name": name.title() if name.isupper() or name.islower() else name, "birth_date": p.get("birthDate") or None, "ids": ids[:4]}
 
 
-def _patients(src: LiveSource, key: ClaimKey) -> tuple[list[dict], str]:
-    """The EMA patients the claim can belong to, and how they were found. Only a patient whose family name agrees with
-    the claim's is ever taken."""
-    for pid in key.ema_patient_ids:
-        p = src.patient(pid)
-        if p and _family_ok(p, key.family):
-            return [p], "EMA patient ID"
-        hits = [x for x in src.patients_by_identifier(pid) if _family_ok(x, key.family)]
-        if hits:
-            return hits, "EMA patient ID"
-    if key.mrn:
-        hits = [x for x in src.patients_by_identifier(key.mrn) if _family_ok(x, key.family)]
-        if hits:
-            return hits, "medical record number"
-    if key.family:
-        hits = [x for x in src.patients_by_name(key.family, key.given) if _family_ok(x, key.family) and _given_ok(x, key.given)]
-        return hits, "name"
-    return [], "name"
+class _Row:
+    __slots__ = ("n", "p", "d", "tie")
+
+    def __init__(self, n: int, p: dict, d: dict, tie: str):
+        self.n, self.p, self.d, self.tie = n, p, d, tie
+
+    @property
+    def auto(self) -> bool:
+        """The note may be taken without a person: tied to the day itself, a clinical note, in a form that reads."""
+        return self.tie in ("encounter", "period", "date") and _is_note(self.d) and _readable(self.d)
 
 
-def find_note(src: LiveSource, key: ClaimKey, pick: str | None = None) -> dict:
-    """The note for a claim: {'status': 'found' | 'ambiguous' | 'not_found', 'reason', 'found_by', 'candidates',
-    and with 'found': 'note' {id, type, date, author, filename, content_type, data}}. `pick` chooses one of the
-    candidates by its id (and only one of them)."""
-    if not key.dos or not key.family:
-        return {"status": "not_found", "reason": "The claim has no patient name or date of service to look up.", "candidates": []}
-    patients, how = _patients(src, key)
-    if not patients:
-        return {"status": "not_found", "reason": f"No patient in EMA matches this claim's name ({how}).", "candidates": [], "found_by": how}
-    rows: list[tuple[int, dict, dict, str]] = []          # (rank, document, patient, tie)
-    for p in patients[:5]:
-        pid = p.get("id") or ""
-        enc_ids = {e.get("id") for e in src.encounters(pid, key.dos) if e.get("id")}
-        for d in src.documents(pid, key.dos):
-            if not _usable(d):
-                continue
-            tie = _ties(d, key.dos, enc_ids)
-            if tie:
-                rows.append(({"encounter": 0, "period": 1, "date": 2}[tie], d, p, tie))
-    if not rows:
-        return {"status": "not_found", "found_by": how, "candidates": [],
-                "reason": f"EMA has no signed note for {key.dos} for this patient." + (" (More than one patient has this name; none had a note that day.)" if len(patients) > 1 else "")}
-    every = list(rows)
-    if pick:
-        chosen = [r for r in rows if r[1].get("id") == pick]
-        if not chosen:
-            return {"status": "ambiguous", "found_by": how, "reason": "That note is not one of this claim's.", "candidates": [_candidate(r[1], r[3]) for r in rows]}
-        rows = chosen
-    best = min(r[0] for r in rows)
-    rows = [r for r in rows if r[0] == best]
-    if len({r[2].get("id") for r in rows}) > 1:
-        return {"status": "ambiguous", "found_by": how, "reason": "More than one patient with this name has a note that day; pick the note.",
-                "candidates": [_candidate(r[1], r[3]) for r in rows]}
-    if len(rows) > 1 and key.npi:
-        mine = [r for r in rows if key.npi in _author_npis(src, r[1])]
-        rows = mine or rows
-    if len(rows) > 1:
-        # a progress or procedure note before other kinds; still more than one: the person picks
-        order = list(NOTE_TYPES)
-        rank = lambda r: order.index(_note_type(r[1])[0]) if _note_type(r[1])[0] in order else len(order)      # noqa: E731
-        top = min(rank(r) for r in rows)
-        rows = [r for r in rows if rank(r) == top]
-    if len(rows) > 1:
-        return {"status": "ambiguous", "found_by": how, "reason": f"EMA has {len(rows)} notes for {key.dos}; pick the one for this claim.",
-                "candidates": [_candidate(r[1], r[3]) for r in rows]}
-    d = rows[0][1]
-    atts = [c.get("attachment") or {} for c in d.get("content") or []]
-    atts = [a for a in atts if a.get("url") or a.get("data")]
-    pref = lambda a: CONTENT_PREF.index((a.get("contentType") or "").split(";")[0].strip().lower()) \
-        if (a.get("contentType") or "").split(";")[0].strip().lower() in CONTENT_PREF else len(CONTENT_PREF)     # noqa: E731
-    att = sorted(atts, key=pref)[0]
+def _candidate(r: _Row, ids: list[str], reveal: bool) -> dict:
+    code, label = _note_type(r.d)
+    c = {"id": r.d.get("id"), "date": _doc_date(r.d), "written": _day(r.d.get("date")), "type": label, "loinc": code,
+         "author": _author_label(r.d), "tie": r.tie, "status": r.d.get("docStatus") or "final",
+         "patient_n": r.n + 1, "identified_by": ids, "pick_only": not r.auto}
+    if reveal:
+        c["patient"] = _who(r.p)
+    return c
+
+
+def _patients(src: LiveSource, key: ClaimKey) -> tuple[list[dict], str, bool, bool]:
+    """The EMA patients the claim can belong to: (patients, how they were found, whether the list is whole, whether an
+    identifier on the claim found nobody or someone of another family name). EMA's patient ID on the claim's EMA rows
+    and the medical record number the payer echoed come first; only when they find nobody is the name searched. A
+    patient whose family name disagrees with the claim's is never one of them."""
+    found: dict[str, dict] = {}
+    how = ""
+    missed = False
+    for label, vals in (("EMA patient ID", key.ema_patient_ids), ("medical record number", [key.mrn] if key.mrn else [])):
+        for v in vals:
+            p = src.patient(v) if label == "EMA patient ID" else None
+            hits = [p] if p else list(src.patients_by_identifier(v))
+            if not hits:
+                missed = True
+            for x in hits:
+                if _family_ok(x, key.family):
+                    found.setdefault(x.get("id") or v, x)
+                    how = how or label
+                else:
+                    missed = True
+    if found:
+        return list(found.values()), how, True, missed
+    if not _first(key.given):
+        return [], "name", True, missed
+    hits = src.patients_by_name(key.family, key.given)
+    by_name = {x.get("id") or str(i): x for i, x in enumerate(hits) if _family_ok(x, key.family) and _given_ok(x, key.given)}
+    return list(by_name.values()), "name", not getattr(hits, "truncated", False), missed
+
+
+def _found(src: LiveSource, key: ClaimKey, how: str, ids: list[str], row: _Row, others: list[_Row], reveal: bool) -> dict:
+    d = row.d
+    att = _attachments(d)[0]
     data, ctype = src.content(att)
-    ext = EXTENSIONS.get(ctype) or (".pdf" if data[:5] == b"%PDF-" else ".txt")
-    cand = _candidate(d, rows[0][3])
-    # the same patient's other notes that day, so the person can switch (a procedure note instead of the visit note)
-    others = [_candidate(r[1], r[3]) for r in every if r[2].get("id") == rows[0][2].get("id") and r[1].get("id") != d.get("id")]
-    return {"status": "found", "found_by": how, "reason": "", "candidates": [cand], "others": others,
+    ext = EXTENSIONS.get(ctype) or (".pdf" if data[:5] == b"%PDF-" else ".txt" if ctype.startswith("text/")
+                                    else mimetypes.guess_extension(ctype or "") or ".bin")
+    cand = _candidate(row, ids, reveal)
+    return {"status": "found", "found_by": how, "identified_by": ids, "reason": "", "candidates": [cand],
+            "others": [_candidate(o, ids, reveal) for o in others],
             "note": dict(cand, filename=f"ema-note-{key.dos}-{re.sub(r'[^A-Za-z0-9]', '', d.get('id') or 'x')[:24]}{ext}",
                          content_type=ctype, data=data)}
 
 
-def note_for_claim(mm: ModMed, key: ClaimKey, pick: str | None = None, budget: float = 240.0, since: str | None = None) -> dict:
+ATTACH_BY_HAND = "Save the visit note from EMA and attach it to the item."
+
+
+def find_note(src: LiveSource, key: ClaimKey, pick: str | None = None, reveal: bool = False) -> dict:
+    """The note for a claim: {'status': 'found' | 'ambiguous' | 'not_found', 'reason', 'found_by', 'identified_by',
+    'candidates', and with 'found': 'note' {id, type, date, author, filename, content_type, data} and 'others' (the same
+    patient's other documents that day)}.
+
+    A note is taken without a person only when exactly one patient is identified by two of the claim's identifiers that
+    agree (EMA's patient ID, the medical record number, the full name), or by a person (a note attached to the item),
+    and the note is a signed clinical note of the date of service. Everything weaker comes back 'ambiguous' for a person
+    to pick, and whether more than one patient is involved is decided over every candidate before anything is narrowed.
+    `pick` chooses one of the candidates by its id. Between two patients a person can pick only where the choices show
+    who each patient is (`reveal`, the site's names switch); otherwise the note is attached by hand."""
+    if not key.dos or not key.family:
+        return {"status": "not_found", "reason": "The claim has no patient name or date of service to look up.", "candidates": []}
+    src = src.for_claim(key)
+    patients, how, whole, missed = _patients(src, key)
+    if not patients:
+        why = "The claim has no first name to look the patient up by." if how == "name" and not _first(key.given) \
+            else f"No patient in EMA matches this claim ({how})."
+        return {"status": "not_found", "reason": why, "candidates": [], "found_by": how}
+    if not whole or len(patients) > MAX_CANDIDATES:
+        return {"status": "ambiguous", "found_by": how, "candidates": [],
+                "reason": "So many patients in EMA have a name like this claim's that they cannot all be looked through here. " + ATTACH_BY_HAND}
+    rows: list[_Row] = []
+    for n, p in enumerate(patients):
+        pid = p.get("id") or ""
+        enc_ids = {e.get("id") for e in src.encounters(pid, key.dos) if e.get("id")}
+        for d in src.documents(pid, key.dos):
+            if _usable(d):
+                tie = _ties(d, key.dos, enc_ids)
+                if tie:
+                    rows.append(_Row(n, p, d, tie))
+    if not rows:
+        return {"status": "not_found", "found_by": how, "candidates": [],
+                "reason": f"EMA has no signed note for {key.dos} for this patient." + (" (More than one patient has this name; none had a note that day.)" if len(patients) > 1 else "")}
+    # every candidate patient, with what identifies each, before anything is narrowed
+    with_rows = sorted({r.n for r in rows})
+    ids = {n: src.identify(patients[n], key) for n in with_rows}
+    strong = [n for n in with_rows if _enough(ids[n])]
+    several = len(patients) > 1         # more than one patient fits the claim, whether or not each has a note that day
+    cands = lambda rs: [_candidate(r, ids[r.n], reveal) for r in rs]      # noqa: E731
+
+    def by_hand(reason: str) -> dict:
+        return {"status": "ambiguous", "found_by": how, "candidates": [], "reason": reason + " " + ATTACH_BY_HAND}
+    if pick:
+        chosen = [r for r in rows if r.d.get("id") == pick]
+        if not chosen:
+            if several and not reveal:
+                return by_hand("That note is not one of this claim's, and more than one patient who fits the claim has a note that day.")
+            return {"status": "ambiguous", "found_by": how, "reason": "That note is not one of this claim's.", "candidates": cands(rows)}
+        r = chosen[0]
+        if not reveal and strong != [r.n] and (several or not ids[r.n]):
+            return by_hand("More than one patient in EMA fits this claim, or the name agrees only in part, and names are switched "
+                           "off here, so the person cannot be checked.")
+        return _found(src, key, how, [x for x in ids[r.n] if x != PERSON] + [PERSON], r, [o for o in rows if o.n == r.n and o is not r], reveal)
+    if len(strong) == 1:
+        n = strong[0]
+        mine = [r for r in rows if r.n == n]
+        auto = [r for r in mine if r.auto]
+        if not auto:
+            return {"status": "ambiguous", "found_by": how, "identified_by": ids[n], "candidates": cands(mine),
+                    "reason": f"EMA has no signed visit note tied to {key.dos} for this patient. These documents may be it: "
+                              "a later note with no visit named, or a document that is not a visit note. Pick one only if it is this visit's note."}
+        best = min(TIE_RANK[r.tie] for r in auto)
+        top = [r for r in auto if TIE_RANK[r.tie] == best]
+        if len(top) > 1 and key.npi:
+            top = [r for r in top if key.npi in _author_npis(src, r.d)] or top
+        if len(top) > 1:
+            # a progress or procedure note before other kinds; still more than one: the person picks
+            order = list(NOTE_TYPES)
+            rank = lambda r: order.index(_note_type(r.d)[0]) if _note_type(r.d)[0] in order else len(order)      # noqa: E731
+            low = min(rank(r) for r in top)
+            top = [r for r in top if rank(r) == low]
+        if len(top) > 1:
+            return {"status": "ambiguous", "found_by": how, "identified_by": ids[n], "candidates": cands(mine),
+                    "reason": f"EMA has {len(top)} notes for {key.dos} for this patient; pick the one for this claim."}
+        return _found(src, key, how, ids[n], top[0], [r for r in mine if r is not top[0]], reveal)
+    if len(strong) > 1 or several:
+        if not reveal:
+            return by_hand("More than one patient in EMA fits this claim, and names are switched off here, so they cannot be told apart.")
+        return {"status": "ambiguous", "found_by": how, "candidates": cands(rows),
+                "reason": ("More than one patient who fits the claim has a note that day. Check who each is, then pick the note."
+                           if len(with_rows) > 1 else "More than one patient in EMA fits this claim, and one of them has a note that "
+                           "day. Check that it is this claim's patient, then pick the note.")}
+    n = with_rows[0]
+    if not reveal and not ids[n]:
+        return by_hand("The name in EMA agrees with the claim's only in part, and names are switched off here, so it cannot be checked.")
+    return {"status": "ambiguous", "found_by": how, "identified_by": ids[n], "candidates": cands(rows),
+            "reason": ("The claim's EMA patient ID or record number did not lead to a patient of this name in EMA, so the patient "
+                       "was found by name. "
+                       if missed and how == "name" else "") + _said(ids[n])
+            + " A note goes out by itself only when two identifiers agree. Check that the note is this patient's, then pick it."}
+
+
+def _said(ids: list[str]) -> str:
+    if ids == ["name"]:
+        return "Only the name agrees with the claim."
+    if ids:
+        return f"Only the {ids[0]} agrees with the claim; the first name differs or is missing."
+    return "The name agrees only in part (the first name differs, or one is the start of the other)."
+
+
+def note_for_claim(mm: ModMed, key: ClaimKey, pick: str | None = None, budget: float = 240.0, since: str | None = None,
+                   reveal: bool = False) -> dict:
     """find_note over live searches, or over an export where ModMed lets this app only export (`since`: the first day
-    the export must cover, for a batch the earliest date of service in it; default a week before this claim's)."""
+    the export must cover, for a batch the earliest date of service in it; default a week before this claim's).
+    `budget` is the time the export may take in all; on a serverless host it is kept short enough to leave the function
+    time for the review and the packet (runtime.max_seconds less SERVERLESS_RESERVE)."""
     try:
-        return find_note(LiveSource(mm), key, pick)
+        return find_note(LiveSource(mm), key, pick, reveal)
     except Forbidden:
         if not key.dos:
             raise
+        from . import runtime
+        if runtime.serverless():
+            budget = min(budget, max(30.0, runtime.max_seconds() - SERVERLESS_RESERVE))
         since = min(since or key.dos, key.dos)
         since = (date.fromisoformat(since) - timedelta(days=7)).isoformat()
-        out = find_note(ExportSource(mm, since, budget), key, pick)
+        out = find_note(ExportSource(mm, since, budget), key, pick, reveal)
         out["source"] = "export"
         return out
 
@@ -987,7 +1116,8 @@ def note_for_claim(mm: ModMed, key: ClaimKey, pick: str | None = None, budget: f
 # --------------------------------------------------------------------------- the connection check
 def check(settings: Settings | None = None, session: Any = None) -> dict:
     """What works, step by step, for /setup: the settings, the key, discovery, the token, the server, a search. Nothing
-    about a patient is read or returned (the search asks for a count only)."""
+    about a patient is returned. The search asks for a count only; a server that refuses a count search is asked for
+    one patient's id alone (no name, no birth date), which is dropped."""
     s = settings or Settings.from_env()
     steps: list[dict] = []
 
@@ -1037,7 +1167,7 @@ def check(settings: Settings | None = None, session: Any = None) -> dict:
         except ModMedError as exc:
             if exc.status != 400:
                 raise
-            mm.get_json("Patient", {"_count": 1})          # read and dropped: only whether the search works is kept
+            mm.get_json("Patient", {"_count": 1, "_elements": "id"})      # an id at most, dropped: only whether the search works is kept
         mode = "search"
         step("Search", True, "patients can be searched: notes are looked up claim by claim")
     except Forbidden as exc:

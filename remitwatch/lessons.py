@@ -116,7 +116,14 @@ def summarize(conn: sqlite3.Connection, with_providers: bool = True) -> dict:
         return {"codes": [], "n": 0, "cents": 0}
     conn.row_factory = sqlite3.Row
     groups: dict[str, dict] = {}
-    for r in conn.execute("SELECT * FROM note_lessons ORDER BY created_at DESC"):
+    seen: set[str] = set()
+    for r in conn.execute("SELECT * FROM note_lessons ORDER BY created_at DESC, lesson_key DESC"):
+        # an item's packet built again (or from another note of that day) is the same note falling short once: its newest
+        # review counts, not one per packet
+        if r["finding_id"]:
+            if r["finding_id"] in seen:
+                continue
+            seen.add(r["finding_id"])
         fam = family(r["code"], r["signal"])
         key = f"{fam}:{r['code'] or ''}" if fam != "mod25" else "mod25"
         g = groups.setdefault(key, {"key": key, "family": fam, "label": ELEMENTS[fam]["label"], "code": r["code"] if fam != "mod25" else None,
@@ -191,4 +198,11 @@ def write_template(group: dict, client: Any = None) -> dict:
         message = stream.get_final_message()
     if message.stop_reason == "refusal":
         raise RuntimeError("The model declined to write this template.")
-    return json.loads(next(b.text for b in message.content if b.type == "text"))
+    if message.stop_reason == "max_tokens":
+        raise RuntimeError("The template was cut off before it was finished.")
+    from .notes import schema_problems
+    out = json.loads(next(b.text for b in message.content if b.type == "text"))
+    bad = schema_problems(out, TEMPLATE_SCHEMA)
+    if bad:
+        raise RuntimeError(f"The template was not in the expected form ({bad[0]}).")
+    return out

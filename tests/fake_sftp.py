@@ -1,6 +1,9 @@
 """
 A stand-in for TriZetto's SFTP server, for the tests: a real SSH server (paramiko) on a local port, one password, a
-folder on disk as its file system, read only. `refuse_password` and a second host key test the sign-in and the key check.
+folder on disk as its file system, read only. `refuse_password` and a second host key test the sign-in and the key check;
+`ecdsa=True` gives the server a second key type, as a real server has one key per type. Every request that would change
+something there (a write, a delete, a rename, a new folder, new times or modes, a link) is refused and recorded in
+`writes`, so a test can say nothing was touched.
 """
 from __future__ import annotations
 
@@ -10,15 +13,21 @@ import threading
 
 import paramiko
 from paramiko import SFTPAttributes, SFTPHandle, SFTPServer, SFTPServerInterface, ServerInterface
-from paramiko.sftp import SFTP_NO_SUCH_FILE, SFTP_OK, SFTP_PERMISSION_DENIED
+from paramiko.sftp import SFTP_NO_SUCH_FILE, SFTP_PERMISSION_DENIED
 
-_KEYS: dict[int, paramiko.RSAKey] = {}
+_KEYS: dict = {}
 
 
 def host_key(n: int = 0) -> paramiko.RSAKey:
     if n not in _KEYS:
         _KEYS[n] = paramiko.RSAKey.generate(2048)
     return _KEYS[n]
+
+
+def ecdsa_key(n: int = 0) -> paramiko.ECDSAKey:
+    if ("ecdsa", n) not in _KEYS:
+        _KEYS[("ecdsa", n)] = paramiko.ECDSAKey.generate()
+    return _KEYS[("ecdsa", n)]
 
 
 class _Server(ServerInterface):
@@ -40,6 +49,14 @@ class _Server(ServerInterface):
 class _Handle(SFTPHandle):
     def stat(self):
         return SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+
+    def chattr(self, attr):
+        self.fake.writes.append(("chattr", self.filename))
+        return SFTP_PERMISSION_DENIED
+
+    def write(self, offset, data):
+        self.fake.writes.append(("write", self.filename))
+        return SFTP_PERMISSION_DENIED
 
 
 class _SFTP(SFTPServerInterface):
@@ -80,6 +97,7 @@ class _SFTP(SFTPServerInterface):
 
     def open(self, path, flags, attr):
         if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC):
+            self.fake.writes.append(("open for writing", self.canonicalize(path)))
             return SFTP_PERMISSION_DENIED          # read only, like the account RemitWatch is given
         try:
             fh = open(self._real(path), "rb")
@@ -89,6 +107,7 @@ class _SFTP(SFTPServerInterface):
         h = _Handle(flags)
         h.readfile = fh
         h.filename = self._real(path)
+        h.fake = self.fake
         return h
 
     def remove(self, path):
@@ -99,24 +118,37 @@ class _SFTP(SFTPServerInterface):
         self.fake.writes.append(("rename", oldpath))
         return SFTP_PERMISSION_DENIED
 
+    def posix_rename(self, oldpath, newpath):
+        self.fake.writes.append(("posix_rename", oldpath))
+        return SFTP_PERMISSION_DENIED
+
     def mkdir(self, path, attr):
+        self.fake.writes.append(("mkdir", path))
         return SFTP_PERMISSION_DENIED
 
     def rmdir(self, path):
+        self.fake.writes.append(("rmdir", path))
         return SFTP_PERMISSION_DENIED
 
     def chattr(self, path, attr):
-        return SFTP_OK
+        self.fake.writes.append(("chattr", path))
+        return SFTP_PERMISSION_DENIED
+
+    def symlink(self, target_path, path):
+        self.fake.writes.append(("symlink", path))
+        return SFTP_PERMISSION_DENIED
 
 
 class FakeSFTP:
-    def __init__(self, root: str, user: str = "SITE123", password: str = "pw-123", key: int = 0):
+    def __init__(self, root: str, user: str = "SITE123", password: str = "pw-123", key: int = 0, ecdsa: bool = False):
         self.root, self.user, self.password = root, user, password
         self.key = host_key(key)
+        self.extra_keys = [ecdsa_key(key)] if ecdsa else []
         self.refuse_password = False
         self.logins: list[str] = []
         self.reads: list[str] = []
         self.writes: list[tuple] = []
+        self.connections = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", 0))
@@ -131,11 +163,14 @@ class FakeSFTP:
                 conn, _ = self.sock.accept()
             except OSError:
                 return
+            self.connections += 1
             threading.Thread(target=self._one, args=(conn,), daemon=True).start()
 
     def _one(self, conn) -> None:
         t = paramiko.Transport(conn)
         t.add_server_key(self.key)
+        for k in self.extra_keys:
+            t.add_server_key(k)
         server = _Server(self)
         t.set_subsystem_handler("sftp", SFTPServer, _SFTP)
         try:

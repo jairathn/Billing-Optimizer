@@ -22,8 +22,8 @@ from remitwatch.x12_837 import parse_837_bytes  # noqa: E402
 
 def remit(claims: str, bpr: str, payer="ANTHEM", payer_id="ANTHM", seg_count=20, isa_ctrl="000000001", plb: str = "", pay_date="20251124") -> bytes:
     body = (
-        f"ISA*00*          *00*          *ZZ*{payer_id:<15}*ZZ*3LDA           *260904*0909*^*00501*{isa_ctrl:>9}*0*P*:~"
-        f"GS*HP*{payer_id}*3LDA*20260904*0909*1*X*005010X221A1~ST*835*000000001~"
+        f"ISA*00*          *00*          *ZZ*{payer_id:<15}*ZZ*SITE           *260904*0909*^*00501*{isa_ctrl:>9}*0*P*:~"
+        f"GS*HP*{payer_id}*SITE*20260904*0909*1*X*005010X221A1~ST*835*000000001~"
         f"BPR*I*{bpr}*C*ACH*CCP*01*999999992*DA*123*999**01*999999989*DA*555*{pay_date}~TRN*1*TRACE{isa_ctrl}*1350781558~"
         f"REF*EV*FEP~DTM*405*20251120~N1*PR*{payer}~N3*1 MAIN ST~N4*CINCINNATI*OH*45209~REF*2U*{payer_id}~PER*BL*PORTAL*TE*8005551212~"
         f"N1*PE*TEST DERMATOLOGY*XX*1777777772~N3*2 MAIN ST~N4*ANYTOWN*KY*40000~REF*TJ*999999999~LX*1~"
@@ -42,6 +42,14 @@ CLAIM_BUNDLED = (
     "SVC*HC:17110*177.56*91.31**1~DTM*472*20260407~CAS*PR*2*18.26~CAS*CO*45*67.99~REF*6R*2002~AMT*B6*109.57~"
 )
 
+
+
+def test_the_835_fixture_names_an_invented_receiver():
+    """The repository is public: the test remittances name an invented receiver (ISA08, GS03), never the practice's TriZetto
+    Site ID, which is the user name of its SFTP login. ISA08 stays 15 characters wide."""
+    data = remit(CLAIM_DOWNCODE, "77.60", seg_count=20).decode()
+    isa = data.split("~")[0].split("*")
+    assert isa[8] == "SITE".ljust(15) and "GS*HP*ANTHM*SITE*" in data
 
 def test_parse_basic_remit_balances():
     data = remit(CLAIM_DOWNCODE + CLAIM_BUNDLED, "168.91", seg_count=41, plb="PLB*999999999*20261231*CS:ZELIS TRANSACTION FEE*1.50~")

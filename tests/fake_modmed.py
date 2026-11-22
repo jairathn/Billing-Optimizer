@@ -36,9 +36,11 @@ class FakeModMed:
         self.server: ThreadingHTTPServer | None = None
 
     # ---- data
-    def add_patient(self, pid: str, family: str, given: str, identifiers: tuple = ()) -> dict:
+    def add_patient(self, pid: str, family: str, given: str, identifiers: tuple = (), birth_date: str | None = None) -> dict:
         p = {"resourceType": "Patient", "id": pid, "name": [{"family": family, "given": [given]}],
              "identifier": [{"system": "urn:ema:mrn", "value": v} for v in identifiers], "meta": {"lastUpdated": "2025-01-01T00:00:00Z"}}
+        if birth_date:
+            p["birthDate"] = birth_date
         self.patients[pid] = p
         return p
 
@@ -56,7 +58,7 @@ class FakeModMed:
 
     def add_note(self, did: str, pid: str, written: str, body: bytes, ctype: str = "application/pdf", *, encounter: str | None = None,
                  period: str | None = None, loinc: str = "11506-3", status: str = "current", doc_status: str = "final",
-                 author: str | None = None, inline: bool = False, url: str | None = None) -> dict:
+                 author: str | None = None, inline: bool = False, url: str | None = None, category: str | None = "clinical-note") -> dict:
         att: dict = {"contentType": ctype}
         if inline:
             att["data"] = base64.b64encode(body).decode()
@@ -67,7 +69,8 @@ class FakeModMed:
             att["url"] = f"Binary/b-{did}"
         d = {"resourceType": "DocumentReference", "id": did, "status": status, "docStatus": doc_status,
              "type": {"coding": [{"system": "http://loinc.org", "code": loinc, "display": "note"}]},
-             "category": [{"coding": [{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category", "code": "clinical-note"}]}],
+             "category": [{"coding": [{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category", "code": category}]}]
+             if category else [],
              "subject": {"reference": f"Patient/{pid}"}, "date": f"{written}T17:00:00Z", "content": [{"attachment": att}],
              "meta": {"lastUpdated": f"{written}T17:00:00Z"}}
         ctx: dict = {}
@@ -259,6 +262,8 @@ class FakeModMed:
             if self.reject_category and "category" in q:
                 return self._send(h, 400, self._oo("Unknown search parameter 'category'"))
             rows = [d for d in self.docs.values() if d["subject"]["reference"] == f"Patient/{one('patient')}"]
+            if one("category"):             # as a FHIR server does: only the documents filed under that category
+                rows = [d for d in rows if any(cd.get("code") == one("category") for c in d.get("category") or [] for cd in c.get("coding") or [])]
             for cond in q.get("date") or []:
                 op, day = cond[:2], cond[2:]
                 rows = [d for d in rows if (d["date"][:10] >= day if op == "ge" else d["date"][:10] <= day)]

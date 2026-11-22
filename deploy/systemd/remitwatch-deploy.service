@@ -9,5 +9,6 @@ Requires=docker.service
 Type=oneshot
 User=root
 WorkingDirectory=/opt/remitwatch
-ExecStart=/bin/bash /opt/remitwatch/deploy/auto-deploy.sh
+# the copy install-auto-deploy.sh made, not the checkout's file: a commit cannot change what runs here as root
+ExecStart=/bin/bash /usr/local/lib/remitwatch/auto-deploy.sh
 TimeoutStartSec=50min

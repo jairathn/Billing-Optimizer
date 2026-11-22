@@ -158,27 +158,44 @@ def test_never_another_patients_chart(fake):
     fake.add_encounter("e9", "p9", DOS)
     fake.add_note("d9", "p9", DOS, b"another patient", "text/plain", encounter="e9")
     mm = M.ModMed(settings(fake))
-    # an EMA patient ID that points at someone with another family name is not taken: the name search finds Joan Rivers
+    # an EMA patient ID that points at someone with another family name is not taken. The name finds Joan Rivers, but a
+    # name alone never sends a note: a person confirms it
     r = M.note_for_claim(mm, key(ema_patient_ids=["p9"]))
-    assert r["status"] == "found" and r["found_by"] == "name" and r["note"]["id"] == "d1"
+    assert r["status"] == "ambiguous" and r["found_by"] == "name" and {c["id"] for c in r["candidates"]} == {"d1", "d2"}
+    assert "d9" not in json.dumps(r) and "Only the name agrees" in r["reason"] and "did not lead to" in r["reason"]
+    assert M.note_for_claim(mm, key(ema_patient_ids=["p9"]), pick="d1")["note"]["id"] == "d1"        # the person's pick
     assert M.note_for_claim(mm, M.ClaimKey(family="NOBODY", given="X", dos=DOS))["status"] == "not_found"
-    # the medical record number the payer echoed
-    assert M.note_for_claim(mm, key(mrn="MRN100"))["found_by"] == "medical record number"
+    # the medical record number the payer echoed, and the full name: two identifiers agree
+    r = M.note_for_claim(mm, key(mrn="MRN100"))
+    assert r["status"] == "found" and r["found_by"] == "medical record number" and r["identified_by"] == ["medical record number", "name"]
 
 
 def test_two_patients_with_one_name(fake):
-    fake.add_patient("a1", "Smith", "Ann")
-    fake.add_patient("a2", "Smith", "Ann")
+    fake.add_patient("a1", "Smith", "Ann", birth_date="1950-01-01")
+    fake.add_patient("a2", "Smith", "Ann", birth_date="1990-02-02")
     fake.add_encounter("ea", "a1", DOS)
     fake.add_note("na", "a1", DOS, b"note a", "text/plain", encounter="ea")
     mm = M.ModMed(settings(fake))
     k = M.ClaimKey(family="SMITH", given="ANN", dos=DOS)
-    assert M.note_for_claim(mm, k)["note"]["id"] == "na"          # only one of them was seen that day
+    # only one of them was seen that day, but the name cannot say she is the claim's patient: two Ann Smiths fit. With
+    # names off nothing on the page could tell them apart, so the note is attached by hand; with names on, the person
+    # sees who she is
+    off = M.note_for_claim(mm, k)
+    assert off["status"] == "ambiguous" and off["candidates"] == [] and "attach it to the item" in off["reason"]
+    on = M.note_for_claim(mm, k, reveal=True)
+    assert on["status"] == "ambiguous" and [c["id"] for c in on["candidates"]] == ["na"]
+    assert on["candidates"][0]["patient"] == {"name": "Ann Smith", "birth_date": "1950-01-01", "ids": []}
     fake.add_encounter("eb", "a2", DOS)
     fake.add_note("nb", "a2", DOS, b"note b", "text/plain", encounter="eb")
-    r = M.note_for_claim(mm, k)
+    r = M.note_for_claim(mm, k, reveal=True)
     assert r["status"] == "ambiguous" and {c["id"] for c in r["candidates"]} == {"na", "nb"}
-    assert M.note_for_claim(mm, k, pick="nb")["note"]["data"] == b"note b"
+    assert {c["patient"]["birth_date"] for c in r["candidates"]} == {"1950-01-01", "1990-02-02"}       # told apart
+    assert {c["patient_n"] for c in r["candidates"]} == {1, 2}
+    assert M.note_for_claim(mm, k, pick="nb", reveal=True)["note"]["data"] == b"note b"
+    # with names off, a pick between the two is refused: the rows would look the same
+    refused = M.note_for_claim(mm, k, pick="nb")
+    assert refused["status"] == "ambiguous" and "note" not in refused and refused["candidates"] == []
+    assert "patient" not in json.dumps(M.note_for_claim(mm, k)["candidates"])
 
 
 def test_several_notes_that_day_by_npi_then_kind(fake):
@@ -189,10 +206,12 @@ def test_several_notes_that_day_by_npi_then_kind(fake):
     fake.add_note("v1", "p1", DOS, b"A's note", "text/plain", encounter="e1", author="pr1", loinc="28570-0")
     fake.add_note("v2", "p1", DOS, b"B's note", "text/plain", encounter="e1", author="pr2")
     mm = M.ModMed(settings(fake))
-    assert M.note_for_claim(mm, key(npi=NPI_A))["note"]["id"] == "v1"        # the rendering clinician's
-    assert M.note_for_claim(mm, key())["note"]["id"] == "v2"                 # no NPI: the progress note before a procedure note
+    ids = ["p1"]                    # EMA's patient ID on the claim's EMA rows, and the name: the patient is identified
+    assert M.note_for_claim(mm, key(npi=NPI_A, ema_patient_ids=ids))["note"]["id"] == "v1"        # the rendering clinician's
+    assert M.note_for_claim(mm, key(ema_patient_ids=ids))["note"]["id"] == "v2"         # no NPI: the progress note first
     fake.add_note("v3", "p1", DOS, b"another progress note", "text/plain", encounter="e1", author="pr2")
-    assert M.note_for_claim(mm, key())["status"] == "ambiguous"
+    r = M.note_for_claim(mm, key(ema_patient_ids=ids))
+    assert r["status"] == "ambiguous" and {c["id"] for c in r["candidates"]} == {"v1", "v2", "v3"}      # one patient: a pick is fine
 
 
 def test_the_forms_a_note_comes_in(fake):
@@ -203,17 +222,18 @@ def test_the_forms_a_note_comes_in(fake):
         other.binaries["far"] = ("text/plain", b"stored elsewhere")
         fake.add_note("in", "p1", DOS, b"inline text", "text/plain", encounter="e1", inline=True)
         mm = M.ModMed(settings(fake))
-        assert M.note_for_claim(mm, key())["note"]["data"] == b"inline text"
+        k = key(ema_patient_ids=["p1"])
+        assert M.note_for_claim(mm, k)["note"]["data"] == b"inline text"
         fake.docs.clear()
         fake.add_note("far", "p1", DOS, b"", "text/plain", encounter="e1", url=f"{other.fhir_base}/Binary/far")
-        got = M.note_for_claim(mm, key())
+        got = M.note_for_claim(mm, k)
         assert got["status"] == "found"
         # the token is never handed to another host, even one that answers for the note
         assert [r["auth"] for r in other.requests] == [None]
         fake.docs.clear()
         fake.binary_as_json = True
         fake.add_note("js", "p1", DOS, b"%PDF-1.4 wrapped", "application/pdf", encounter="e1")
-        n = M.note_for_claim(mm, key())["note"]
+        n = M.note_for_claim(mm, k)["note"]
         assert n["data"] == b"%PDF-1.4 wrapped" and n["content_type"] == "application/pdf"
     finally:
         other.stop()

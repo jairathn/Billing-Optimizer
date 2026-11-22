@@ -32,7 +32,7 @@ a{color:var(--accent)}
 <body>
 <main>
   <h1>RemitWatch setup</h1>
-  <div class="muted">Every setting this site needs, checked live. Work from the top. After you change anything in Vercel, redeploy, then press Check again.</div>
+  <div class="muted">Every setting this site needs, checked live. Work from the top. After you change a setting, apply it (on the server, with configure.sh; on Vercel, redeploy), then press Check again.</div>
 
   <div class="panel"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Checklist</h2><button id="recheck">Check again</button></div>
     <table id="checks"><tr><td class="muted">checking…</td></tr></table>
@@ -67,27 +67,29 @@ a{color:var(--accent)}
   <div class="panel" id="modmed" style="display:none"><h2>ModMed EMA</h2>
     <div class="small">Reads the visit note behind each appeal straight from EMA, through ModMed's certified FHIR API. Read only: nothing is written to EMA.</div>
     <ol class="small">
-      <li>Make the app's key: <code>python -m remitwatch.cli modmed-key</code>. Put the private key in the host's settings as <code>MODMED_PRIVATE_KEY</code> and redeploy.</li>
+      <li>Make the app's key: <code>python -m remitwatch.cli modmed-key</code>. Put the private key in the host's settings as <code>MODMED_PRIVATE_KEY</code> (on the server, with configure.sh; on Vercel, then redeploy).</li>
       <li>Register the app with ModMed (portal.api.modmed.com) as a Bulk FHIR backend app. Give it the public key printed with the private one, or this address: <span class="val" id="jwksUrl"></span> <button data-copy="jwksUrl">Copy</button></li>
-      <li>In EMA: Admin, Manage Bulk FHIR, add the app's client ID. Then set <code>MODMED_CLIENT_ID</code> and redeploy.</li>
+      <li>In EMA: Admin, Manage Bulk FHIR, add the app's client ID. Then set <code>MODMED_CLIENT_ID</code> the same way.</li>
     </ol>
     <div class="row"><button class="primary" id="mmTest">Test the ModMed connection</button><span id="mmMsg" class="small muted"></span></div>
     <table id="mmSteps"></table>
   </div>
 
   <div class="panel" id="tzp" style="display:none"><h2>TriZetto direct</h2>
-    <div class="small">Reads the payers' remittances straight from TriZetto every few hours, so nobody has to copy files into Dropbox and paid claims leave the lists within hours. Read only: nothing on TriZetto's server is moved or deleted.</div>
+    <div class="small">Reads the payers' remittances straight from TriZetto every hour, with a login of RemitWatch's own, so nobody has to copy files into Dropbox and paid claims leave the lists within hours. Read only: nothing on TriZetto's server is moved or deleted.</div>
     <ol class="small">
-      <li>Call TriZetto support with the practice's Site ID and ask them to turn on SFTP for it. They give a password (usually within two days).</li>
-      <li>In TriZetto's portal, under Remittance Advice Settings, turn on <b>Auto Generate Remittances</b>.</li>
-      <li>Set <code>TRIZETTO_SFTP_USER</code> (the Site ID) and <code>TRIZETTO_SFTP_PASSWORD</code> in the host's settings and redeploy. <code>TRIZETTO_SFTP_HOST</code> only if TriZetto names a server other than sftp.gatewayedi.com.</li>
+      <li>Send TriZetto the written request in <code>docs/TRIZETTO_REQUEST.md</code>, through the portal's Contact Us. No phone call. It asks for a second SFTP login for RemitWatch.</li>
+      <li>Change nothing in TriZetto's portal for this. Leave the Remittance Advice Settings (Auto Generate Remittances) as they are. Never reset the Site ID's SFTP password: ModMed may sign in with it.</li>
+      <li>When TriZetto answers in writing, enter the new login on the server with <code>configure.sh</code>, TriZetto section: <code>TRIZETTO_SFTP_USER</code> (the login TriZetto issued for RemitWatch, not the Site ID), <code>TRIZETTO_SFTP_PASSWORD</code> (given by phone or in person, never by email), how many days it lasts, <code>TRIZETTO_SFTP_DIRS</code> (the folder TriZetto named) and <code>TRIZETTO_SFTP_HOSTKEY</code> (every fingerprint TriZetto gave). <code>TRIZETTO_SFTP_HOST</code> only if TriZetto names a server other than sftp.gatewayedi.com.</li>
+      <li>Press the button below. If TriZetto refuses the sign-in, nothing signs in with that password again for a day. Ask TriZetto in writing to reset the RemitWatch login's password. Change it yourself only on a page that shows the RemitWatch login's username.</li>
     </ol>
+    <div class="small muted">The server reads TriZetto. A site on Vercel does not, unless <code>TRIZETTO_SFTP_SERVERLESS=1</code> is set there, and then no server may read it with the same login.</div>
     <div class="row"><button class="primary" id="tzTest">Test the TriZetto connection</button><span id="tzMsg" class="small muted"></span></div>
     <table id="tzSteps"></table>
   </div>
 
   <div class="panel" id="faxp" style="display:none"><h2>Fax line</h2>
-    <div class="small">Faxes each appeal to the payer, reads what payers fax back, and follows up every week until each claim is paid or decided. The service is SRFax: pick a plan for healthcare, sign its business associate agreement, then set these in the host's settings and redeploy.</div>
+    <div class="small">Faxes each appeal to the payer, reads what payers fax back, and follows up every week until each claim is paid or decided. The service is SRFax: pick a plan for healthcare, sign its business associate agreement, then set these in the host's settings (on the server, with configure.sh; on Vercel, then redeploy).</div>
     <ol class="small">
       <li><code>SRFAX_ACCESS_ID</code> (the account number) and <code>SRFAX_ACCESS_PWD</code> (the account password).</li>
       <li><code>SRFAX_CALLER_ID</code>: the fax number SRFax gives the account. Letters give it as the practice's fax, so payers answer to it and their answers are read here.</li>
@@ -128,7 +130,7 @@ async function tzTest(){
     $('#tzSteps').innerHTML = r.steps.map(x => { const cls = x.ok===true?'ok':(x.ok===false?'no':'opt'); const mark = x.ok===true?'✓':(x.ok===false?'✗':'–');
       return `<tr><td class="mark ${cls}">${mark}</td><td><b>${esc(x.step)}</b><div class="small muted">${esc(x.detail||'')}</div></td></tr>`; }).join('');
     $('#tzMsg').innerHTML = r.ok ? '<span class="ok">Connected: the next run reads the remittances.</span>'
-      : '<span class="no">Not connected yet: fix the first ✗.</span>' + (r.held ? `<div class="small">TriZetto refused this user name and password on ${esc(String(r.held.at).slice(0,16).replace('T',' '))} UTC, so the scheduled runs do not sign in with them again until ${esc(String(r.held.retry_at).replace('T',' '))} UTC: a login TriZetto locks may be the one ModMed uses too. Enter the new password on the server and it is tried at once.</div>` : '');
+      : '<span class="no">Not connected yet: fix the first ✗.</span>' + (r.held ? `<div class="small">${esc(r.held.text || ('The scheduled runs do not sign in with this login and password until ' + String(r.held.retry_at).replace('T',' ') + ' UTC, so the login is never locked. A new password is tried at once.'))}</div>` : '');
   } catch(e){ $('#tzMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; }
   b.disabled = false;
 }

@@ -11,9 +11,13 @@ is known by its SHA-256, a row of an export by its content, a remittance by its 
 A visit note is kept the same way and becomes one more place the matching behind appeals looks (modmed.find_note, here
 over UploadSource): an appeal reads an uploaded note exactly as it reads one from EMA's API. Each note is tied to its
 visit by the patient's name and the date of service it states, checked against the claims RemitWatch holds, or by the
-person who attaches it to an item.
+person who attaches it to an item. As with EMA's API, an appeal takes the note by itself only when a second identifier
+agrees as well (EMA's patient ID or the record number, stated on the note), or a person attached it; otherwise a person
+confirms it in the item first.
 
-Nothing here goes anywhere else: the files stay in the upload folder, owner-only, outside the repository.
+The files stay in the upload folder, owner-only, outside the repository, and are never emailed. An export or a
+remittance file never leaves the server. A visit note leaves it only inside the appeal packet built from it (faxed to
+the payer, or emailed where the practice allows that) and for the note review, when the review is switched on.
 """
 from __future__ import annotations
 
@@ -24,13 +28,17 @@ import re
 import shutil
 import sqlite3
 import zipfile
+import zlib
 from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from . import ema_exports, modmed
 
-MAX_BYTES = 250 * 1024 * 1024           # one file: a year of Encounter & Charge Lines runs to tens of MB
+MAX_BYTES = 240 * 1024 * 1024           # one upload (a zip of remittances can be large); under Caddy's 260 MB (260,000,000 bytes)
+EXPORT_MAX_BYTES = 60 * 1024 * 1024     # one EMA export, as cloud.MAX_FILE_BYTES: a year of Encounter & Charge Lines is tens of MB,
+                                        # and reading one takes ten to twenty times its size in memory
+INCOMING_MAX_AGE = 24 * 60 * 60         # a file left in .incoming this long (a request cut off) is removed
 NOTE_MAX_BYTES = 15 * 1024 * 1024       # as a note read from EMA's API (modmed.MAX_NOTE_BYTES)
 ZIP_MAX_MEMBERS = 500
 ZIP_MAX_TOTAL = 1024 * 1024 * 1024
@@ -75,7 +83,10 @@ CREATE TABLE IF NOT EXISTS uploaded_notes (
     uploaded_at TEXT, uploaded_by TEXT,
     status TEXT,                            -- matched, choose (more than one visit fits: a person picks), unmatched
     reason TEXT, patient_last TEXT, patient_first TEXT, ema_patient_id TEXT, service_date TEXT, note_type TEXT, loinc TEXT,
-    matched_by TEXT, matched_at TEXT, candidates TEXT, claims TEXT
+    matched_by TEXT, matched_at TEXT, candidates TEXT, claims TEXT,
+    ids_stated TEXT,                        -- the claim's identifiers (EMA patient ID, record number) the note itself states, or
+                                            -- that a person's attaching it settled: JSON; NULL = not worked out yet
+    birth_date TEXT                         -- the birth date the note states, to tell two patients of one name apart
 );
 CREATE INDEX IF NOT EXISTS ix_unotes_dos ON uploaded_notes(service_date);
 """
@@ -91,6 +102,11 @@ def _now() -> str:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(uploaded_notes)")}
+    for col in ("ids_stated", "birth_date"):            # a store made before these columns
+        if col not in have:
+            conn.execute(f"ALTER TABLE uploaded_notes ADD COLUMN {col} TEXT")
+    conn.commit()
 
 
 def upload_dir(db_path: str) -> str:
@@ -107,9 +123,25 @@ def incoming(db_path: str) -> str:
     """A new, owner-only file in the upload folder for a file arriving now (the request's bytes go straight to the disk
     the store is on, never to a temporary folder elsewhere)."""
     d = _private_dir(os.path.join(upload_dir(db_path), ".incoming"))
+    _sweep(d)
     name = os.path.join(d, hashlib.sha256(os.urandom(16)).hexdigest()[:20])
     os.close(os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     return name
+
+
+def _sweep(folder: str) -> None:
+    """Remove what a request cut off (a dropped connection, a stopped server) left in .incoming a day ago or more."""
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        for f in os.listdir(folder):
+            p = os.path.join(folder, f)
+            try:
+                if os.path.isfile(p) and now - os.path.getmtime(p) > INCOMING_MAX_AGE:
+                    os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def safe_name(name: str) -> str:
@@ -210,6 +242,11 @@ def preview_export(conn: sqlite3.Connection, path: str) -> dict:
     family = acct.get("family") or "unknown"
     if family == "unknown":
         cols = [c for c in acct.get("columns") or [] if not c.startswith("Unnamed")]
+        canon = set(acct.get("canon") or [])
+        if canon & {"claim_status", "denial_amount", "charges", "payments"} and not canon & set(ema_exports.KEY_COLUMNS):
+            raise Rejected("This report's rows name no claim or bill: it has no Claim ID, Bill ID or Bill Item Identifier column "
+                           "(an AR or production report looks like this). RemitWatch reads Encounter & Charge Lines, ERA & Payment "
+                           "Lines and Claim & Claim Status, whose rows name the claim. The file is not kept.")
         raise Rejected("RemitWatch cannot tell which EMA report this is: it reads Encounter & Charge Lines, ERA & Payment Lines and "
                        "Claim & Claim Status. " + (f"The columns found: {', '.join(cols[:12])}{'…' if len(cols) > 12 else ''}."
                                                     if cols else "No row of column names was found."))
@@ -311,6 +348,7 @@ def accept(db_path: str, tmp: str, name: str, user: str, sha: str | None = None,
             out = _take_note(conn, db_path, tmp, name, sha, user, finding_id, parent, base)
             out["lines"] = out.get("lines") or _note_lines(out["note"], reveal)
             out["note"] = _note_public(out["note"], reveal)
+            out["name"] = shown_name(name, "note", sha, reveal)          # a note is often saved under the patient's name
             return out
         seen = _already(conn, sha)
         if seen:
@@ -325,6 +363,9 @@ def accept(db_path: str, tmp: str, name: str, user: str, sha: str | None = None,
                            "claim (837) files, a .zip of those, and visit notes (PDF, Word or text).")
         stem, ext = os.path.splitext(name)
         if kind == "ema":
+            if size > EXPORT_MAX_BYTES:
+                raise Rejected(f"An EMA export can be at most {EXPORT_MAX_BYTES // (1024 * 1024)} MB here. Export a shorter date range "
+                               "(a quarter at a time, say).")
             ext = ext if ext.lower() in (".xlsx",) + ema_exports.TEXT_EXPORTS else (".xlsx" if _is_xlsx(tmp) else ".csv")
             work = tmp + ext                        # the loader tells a CSV from a workbook by its ending
             os.rename(tmp, work)
@@ -333,6 +374,8 @@ def accept(db_path: str, tmp: str, name: str, user: str, sha: str | None = None,
                 summary = preview_export(conn, work)
             except Rejected:
                 raise
+            except ema_exports.TooLarge as exc:
+                raise Rejected(str(exc)) from exc
             except Exception as exc:
                 raise Rejected(f"The file could not be read as a spreadsheet ({type(exc).__name__}). Export it from EMA again.") from exc
         else:
@@ -342,7 +385,8 @@ def accept(db_path: str, tmp: str, name: str, user: str, sha: str | None = None,
             if lead:            # the loader reads a file that starts with ISA
                 with open(tmp, "wb") as fh:
                     fh.write(data[lead:])
-            ext = ext or ".835"
+            if not ext or ext.lower() in (".xlsx", ".zip") + ema_exports.TEXT_EXPORTS:
+                ext = ".835"        # the loader sends a .csv, .tsv or .xlsx to the EMA reader: kept as what it is
             folder = os.path.join(upload_dir(db_path), "remittances")
             try:
                 summary = preview_x12(conn, tmp)
@@ -360,7 +404,8 @@ def accept(db_path: str, tmp: str, name: str, user: str, sha: str | None = None,
         if base.get("upload_id"):
             _record(conn, base["upload_id"], kind=base.get("kind"), name=name, path=None, size=base.get("size"), uploaded_at=_now(),
                     uploaded_by=user, status="rejected", summary={"reason": str(exc)}, done_at=_now(), parent=parent)
-        return dict(base, status="rejected", reason=str(exc), lines=[str(exc)])
+        return dict(base, name=shown_name(name, base.get("kind"), base.get("upload_id"), reveal), status="rejected", reason=str(exc),
+                    lines=[str(exc)])
     finally:
         for f in {tmp, work}:
             if os.path.exists(f):
@@ -402,11 +447,21 @@ def _already_line(seen: dict) -> str:
     return f"This exact file was already uploaded{when}{(' by ' + seen['by']) if seen.get('by') else ''}: nothing changed."
 
 
+ZIP_UNREADABLE = ("This file in the zip could not be read (the zip is damaged, or the file is locked with a password): "
+                  "upload it on its own.")
+
+
 def _take_zip(conn, db_path: str, tmp: str, name: str, sha: str, user: str, base: dict, reveal: bool = False) -> dict:
-    """Each file in a zip is taken as if uploaded on its own (one level: a zip inside is not opened)."""
+    """Each file in a zip is taken as if uploaded on its own (one level: a zip inside is not opened). A file in it that
+    cannot be unpacked is said so on its own line, and nothing of it is left behind."""
     out = []
-    with zipfile.ZipFile(tmp) as z:
-        members = [i for i in z.infolist() if not i.is_dir() and not os.path.basename(i.filename).startswith((".", "~$"))
+    try:
+        z = zipfile.ZipFile(tmp)
+        infos = z.infolist()
+    except (zipfile.BadZipFile, OSError, EOFError, ValueError) as exc:
+        raise Rejected("The zip could not be read: upload its files on their own.") from exc
+    with z:
+        members = [i for i in infos if not i.is_dir() and not os.path.basename(i.filename).startswith((".", "~$"))
                    and "__MACOSX/" not in i.filename]
         if len(members) > ZIP_MAX_MEMBERS:
             raise Rejected(f"The zip holds {len(members)} files; upload at most {ZIP_MAX_MEMBERS} at a time.")
@@ -414,14 +469,21 @@ def _take_zip(conn, db_path: str, tmp: str, name: str, sha: str, user: str, base
             raise Rejected("The zip is too large once unpacked. Upload its files a few at a time.")
         for i in members:
             dest = incoming(db_path)
-            with z.open(i) as src, open(dest, "wb") as fh:
-                shutil.copyfileobj(src, fh, 1 << 20)
+            member = safe_name(i.filename)
             try:
-                if sniff(dest, i.filename) == "zip":
-                    r = {"name": safe_name(i.filename), "status": "rejected", "reason": "A zip inside a zip is not opened: upload it on its own.",
-                         "lines": ["A zip inside a zip is not opened: upload it on its own."]}
+                try:
+                    with z.open(i) as src, open(dest, "wb") as fh:
+                        shutil.copyfileobj(src, fh, 1 << 20)
+                except (zipfile.BadZipFile, zlib.error, RuntimeError, EOFError, OSError, NotImplementedError, ValueError):
+                    r = {"name": shown_name(member, "file", None, reveal), "status": "rejected", "reason": ZIP_UNREADABLE,
+                         "lines": [ZIP_UNREADABLE]}
                 else:
-                    r = accept(db_path, dest, i.filename, user, parent=sha, conn=conn, reveal=reveal)
+                    if sniff(dest, i.filename) == "zip":
+                        r = {"name": shown_name(member, "zip", _sha(dest), reveal), "status": "rejected",
+                             "reason": "A zip inside a zip is not opened: upload it on its own.",
+                             "lines": ["A zip inside a zip is not opened: upload it on its own."]}
+                    else:
+                        r = accept(db_path, dest, i.filename, user, parent=sha, conn=conn, reveal=reveal)
             finally:
                 if os.path.exists(dest):
                     os.remove(dest)
@@ -430,8 +492,18 @@ def _take_zip(conn, db_path: str, tmp: str, name: str, sha: str, user: str, base
     summary = dict(base, members=len(out), counts=dict(counts))
     _record(conn, sha, kind="zip", name=name, path=None, size=base["size"], uploaded_at=_now(), uploaded_by=user, status="done",
             summary=summary, done_at=_now(), parent=None)
-    return dict(summary, status="zip", queued=any(r["status"] == "queued" for r in out), files=out,
+    return dict(summary, name=shown_name(name, "zip", sha, reveal), status="zip", queued=any(r["status"] == "queued" for r in out), files=out,
                 lines=[f"A zip of {len(out)} file{'s' if len(out) != 1 else ''}: " + ", ".join(f"{n} {STATUS_WORDS.get(s, s)}" for s, n in counts.items()) + "."])
+
+
+def shown_name(name: str, kind: str | None, upload_id: str | None, reveal: bool) -> str:
+    """The name a file is shown under. A visit note, a zip, or a file that was not read is often saved under the
+    patient's name: with names switched off it is shown by its kind and a short id (as a note's download is named)."""
+    if reveal or kind in ("ema", "x12"):
+        return name
+    label = {"note": "Visit note", "zip": "Zip"}.get(kind or "", "File")
+    ext = os.path.splitext(name or "")[1].lower()[:6]
+    return f"{label} {str(upload_id or '')[:8]}".strip() + ext
 
 
 STATUS_WORDS = {"queued": "to be added", "already": "already in RemitWatch", "rejected": "not read", "matched": "visit notes matched",
@@ -572,14 +644,22 @@ def describe(s: dict, status: str, reveal: bool = False, note: dict | None = Non
     return [x for x in out if x]
 
 
+def _confirm(n: dict) -> bool:
+    """Whether an appeal waits for a person before it uses this note: matched by name and date alone, with no identifier
+    on the note agreeing with the claim's."""
+    return n.get("status") == "matched" and n.get("matched_by") != "person" and not json.loads(n.get("ids_stated") or "[]")
+
+
 def _note_lines(n: dict, reveal: bool) -> list[str]:
     who = f"{(n.get('patient_first') or '').title()} {(n.get('patient_last') or '').title()}".strip() if reveal else ""
     kind = n.get("note_type") or "Note"
     if n.get("status") == "matched":
         how = "attached by hand" if n.get("matched_by") == "person" else f"matched by {n.get('matched_by') or 'name and date of service'}"
         claims = json.loads(n.get("claims") or "[]")
+        then = ("Only the name and the date agree with the claim, so its appeal uses it once a person confirms it in the item "
+                "(or attaches it there)." if _confirm(n) else "Appeals for that visit use it as a note read from EMA.")
         return [f"{kind} for the visit of {_day(n.get('service_date'))}{(' (' + who + ')') if who else ''}, {how}"
-                f"{': claim ' + ', '.join(claims[:3]) if claims else ''}. Appeals for that visit use it as a note read from EMA."]
+                f"{': claim ' + ', '.join(claims[:3]) if claims else ''}. {then}"]
     if n.get("status") == "choose":
         return [f"{kind}: more than one visit fits it. Pick the right one below."]
     return [f"{kind}: {n.get('reason') or 'not matched to a visit yet.'}"]
@@ -596,6 +676,11 @@ DATE_RES = [
 ]
 SERVICE_LABEL = re.compile(r"(date\s+of\s+service|service\s+date|\bdos\b|visit\s+date|date\s+of\s+visit|encounter\s+date|"
                            r"appointment\s+date|appt\.?\s+date|exam\s+date|date\s+seen)", re.I)
+BIRTH_LABEL = re.compile(r"(\bdob\b|\bd\.o\.b\.?|date\s+of\s+birth|birth\s*date|\bborn\b)", re.I)
+# the labels an identifier follows on a note ("Patient ID: 12345", "MRN 12345"): a number anywhere else (an address, a
+# dose) is never taken for one
+ID_LABEL = re.compile(r"(patient\s*(?:id\b|#|no\b|number)|\bmrn\b|medical\s+record|chart\s*(?:#|no\b|number)|"
+                      r"account\s*(?:#|no\b|number)|\bpms\s*(?:id\b|#)|person\s*(?:id\b|#))", re.I)
 
 
 def _iso(kind: str, m: re.Match) -> str | None:
@@ -635,6 +720,29 @@ def _words(text: str) -> str:
     return " " + re.sub(r"[^A-Z0-9]+", " ", (text or "").upper()).strip() + " "
 
 
+def birth_date(text: str) -> str | None:
+    """The birth date a note states (the first date just after "DOB" or "Date of Birth"), or None."""
+    for m in BIRTH_LABEL.finditer(text or ""):
+        window = text[m.end(): m.end() + 40]
+        for rx, kind in DATE_RES:
+            d = next((x for x in (_iso(kind, mm) for mm in rx.finditer(window)) if x), None)
+            if d:
+                return d
+    return None
+
+
+def stated_ids(text: str, values) -> list[str]:
+    """Which of these identifiers (EMA's patient ID, a record number) the note states, each just after a label such as
+    "Patient ID" or "MRN"."""
+    near = [_words(text[m.end(): m.end() + 40]) for m in ID_LABEL.finditer(text or "")]
+    out = []
+    for v in sorted({str(v) for v in values if v}):
+        w = _words(v).strip()
+        if w and any(f" {w} " in chunk for chunk in near):
+            out.append(v)
+    return out
+
+
 def _name_in(name: str | None, words: str, first_word: bool = False) -> bool:
     n = re.sub(r"[^A-Z0-9]+", " ", (name or "").upper()).strip()
     if first_word:
@@ -660,7 +768,7 @@ def _visits_on(conn: sqlite3.Connection, days: set[str]) -> list[dict]:
         return []
     ds = sorted(days)
     q = f"""SELECT f.finding_id, f.claim_key, f.patient_control_number pcn, f.payer_group,
-                   COALESCE(f.service_date, c.statement_from) dos,
+                   COALESCE(f.service_date, c.statement_from) dos, c.medical_record_number mrn,
                    c.patient_last, c.patient_first, c.corrected_patient_last, c.corrected_patient_first
             FROM findings f JOIN claims c ON c.claim_key = f.claim_key
             WHERE f.claim_key IS NOT NULL AND COALESCE(f.service_date, c.statement_from) IN ({','.join('?' * len(ds))})"""
@@ -683,9 +791,10 @@ def _ema_ids(conn: sqlite3.Connection, pcns: list[str]) -> dict[str, set[str]]:
 
 def match_text(conn: sqlite3.Connection, text: str) -> dict:
     """The visit a note is for: a claim RemitWatch holds items for whose patient (family and first name) the note names
-    and whose date of service it states, preferring the date it gives as the date of service. Two patients of one name
-    that day are told apart by EMA's patient ID when the note states it. Returns {'status': 'matched' | 'choose' |
-    'unmatched', ...}."""
+    and whose date of service it states. A note that labels its date of service is for that date only, never for an
+    earlier visit it mentions. Two patients of one name that day are told apart by EMA's patient ID when the note states
+    it. The identifiers of the visit's claims that the note states are kept (ids_stated): an appeal takes the note by
+    itself only when one agrees as well as the name. Returns {'status': 'matched' | 'choose' | 'unmatched', ...}."""
     days, labeled = note_dates(text)
     if not days:
         return {"status": "unmatched", "reason": "The note states no date RemitWatch can read."}
@@ -696,10 +805,11 @@ def match_text(conn: sqlite3.Connection, text: str) -> dict:
         first = next((x for x in (v["patient_first"], v["corrected_patient_first"]) if _name_in(x, words, first_word=True)), None)
         if last and first:
             hits.append(dict(v, last=last, first=first))
-    if labeled and any(h["dos"] in labeled for h in hits):
+    if labeled:             # the note says which visit it is for: never another date it only mentions
         hits = [h for h in hits if h["dos"] in labeled]
     if not hits:
-        return {"status": "unmatched", "reason": "No item in RemitWatch is for a patient this note names on a date it states. "
+        said = f" (its date of service, {_day(min(labeled))})" if labeled else ""
+        return {"status": "unmatched", "reason": f"No item in RemitWatch is for a patient this note names on the date it is for{said}. "
                                                  "It is kept and matched again as new remittances arrive; or attach it to its item."}
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for h in hits:
@@ -713,7 +823,7 @@ def match_text(conn: sqlite3.Connection, text: str) -> dict:
                 people[pid].append(h)
         named = [p for p in people if p]
         if len(named) > 1:
-            stated = [p for p in named if f" {_words(p).strip()} " in words]
+            stated = stated_ids(text, named)
             if len(stated) != 1:
                 for p in named:
                     visits.append(_visit(people[p] + people.get("", []), dos, p))
@@ -721,6 +831,11 @@ def match_text(conn: sqlite3.Connection, text: str) -> dict:
             hs = people[stated[0]] + people.get("", [])
             named = stated
         visits.append(_visit(hs, dos, named[0] if named else ""))
+    dob = birth_date(text)
+    for v in visits:
+        known = ({v["ema_patient_id"]} if v.get("ema_patient_id") else set()) | set(v.pop("mrns", []))
+        v["ids_stated"] = stated_ids(text, known)
+        v["birth_date"] = dob
     if len(visits) == 1:
         return dict(visits[0], status="matched", how="patient name and date of service"
                     + (" (the date the note gives as the date of service)" if visits[0]["service_date"] in labeled else ""))
@@ -731,7 +846,7 @@ def _visit(hs: list[dict], dos: str, ema_id: str) -> dict:
     h = hs[0]
     return {"patient_last": h["last"], "patient_first": h["first"], "service_date": dos, "ema_patient_id": ema_id or None,
             "claims": sorted({x["pcn"] for x in hs if x.get("pcn")}), "payers": sorted({x["payer_group"] for x in hs if x.get("payer_group")}),
-            "findings": len({x["finding_id"] for x in hs})}
+            "findings": len({x["finding_id"] for x in hs}), "mrns": sorted({x["mrn"] for x in hs if x.get("mrn")})}
 
 
 def match_finding(conn: sqlite3.Connection, finding_id: str) -> dict:
@@ -746,8 +861,11 @@ def match_finding(conn: sqlite3.Connection, finding_id: str) -> dict:
         raise Rejected("That item's claim has no patient name or date of service, so a note cannot be tied to its visit.")
     ids = _ema_ids(conn, [r[1]] if r[1] else [])
     pid = sorted(ids.get(r[1], set()))
+    mrn = conn.execute("SELECT medical_record_number FROM claims WHERE claim_key=?", (r[0],)).fetchone()
+    # the person tied the note to this claim: its identifiers are the note's from now on
     return {"status": "matched", "how": "person", "patient_last": r[4], "patient_first": r[5], "service_date": r[3],
-            "ema_patient_id": pid[0] if len(pid) == 1 else None, "claims": [r[1]] if r[1] else [], "payers": [r[2]] if r[2] else []}
+            "ema_patient_id": pid[0] if len(pid) == 1 else None, "claims": [r[1]] if r[1] else [], "payers": [r[2]] if r[2] else [],
+            "ids_stated": sorted(set(pid if len(pid) == 1 else []) | ({mrn[0]} if mrn and mrn[0] else set()))}
 
 
 def _note_row(conn: sqlite3.Connection, **where) -> dict | None:
@@ -759,10 +877,14 @@ def _note_row(conn: sqlite3.Connection, **where) -> dict | None:
 
 def _set_match(conn: sqlite3.Connection, note_id: str, m: dict, by: str | None = None) -> None:
     if m["status"] == "matched":
+        stated = m.get("ids_stated") or []
+        if by == "person" and m.get("ema_patient_id"):     # a person picked this visit: its EMA patient is the note's
+            stated = sorted(set(stated) | {m["ema_patient_id"]})
         conn.execute("""UPDATE uploaded_notes SET status='matched', reason=NULL, patient_last=?, patient_first=?, ema_patient_id=?,
-                        service_date=?, matched_by=?, matched_at=?, candidates=NULL, claims=? WHERE note_id=?""",
+                        service_date=?, matched_by=?, matched_at=?, candidates=NULL, claims=?, ids_stated=?,
+                        birth_date=COALESCE(?, birth_date) WHERE note_id=?""",
                      (m["patient_last"], m["patient_first"], m.get("ema_patient_id"), m["service_date"],
-                      by or m.get("how"), _now(), json.dumps(m.get("claims") or []), note_id))
+                      by or m.get("how"), _now(), json.dumps(m.get("claims") or []), json.dumps(stated), m.get("birth_date"), note_id))
     else:
         conn.execute("UPDATE uploaded_notes SET status=?, reason=?, candidates=?, matched_at=? WHERE note_id=?",
                      (m["status"], m.get("reason"), json.dumps(m.get("candidates") or []), _now(), note_id))
@@ -848,66 +970,126 @@ def remove_note(conn: sqlite3.Connection, note_id: str) -> bool:
     return True
 
 
-def rematch(conn: sqlite3.Connection, limit: int = 300) -> dict:
-    """Notes not matched yet, matched again (new remittances bring new items): run at the end of each cycle."""
+def _note_text(path: str) -> str | None:
     from .notes import extract_text
+    try:
+        with open(path, "rb") as fh:
+            text, _k = extract_text(os.path.basename(path), fh.read())
+    except (OSError, ValueError):
+        return None
+    return text if (text or "").strip() else None
+
+
+def rematch(conn: sqlite3.Connection, limit: int = 300) -> dict:
+    """Notes not matched yet, matched again (new remittances bring new items): run at the end of each cycle. A note
+    matched by its text before RemitWatch kept which identifiers it states has them worked out now."""
     ensure_schema(conn)
     out = Counter()
     for note_id, path in conn.execute("""SELECT note_id, path FROM uploaded_notes WHERE status='unmatched'
                                          ORDER BY uploaded_at DESC LIMIT ?""", (limit,)).fetchall():
-        try:
-            with open(path, "rb") as fh:
-                text, _k = extract_text(os.path.basename(path), fh.read())
-        except (OSError, ValueError):
-            continue
-        if not (text or "").strip():
+        text = _note_text(path)
+        if text is None:
             continue
         m = match_text(conn, text)
         if m["status"] != "unmatched":
             _set_match(conn, note_id, m)
             out[m["status"]] += 1
+    for note_id, path, claims, ema_id, by in conn.execute("""SELECT note_id, path, claims, ema_patient_id, matched_by FROM uploaded_notes
+                                                             WHERE status='matched' AND ids_stated IS NULL LIMIT ?""", (limit,)).fetchall():
+        text = _note_text(path) or ""
+        pcns = json.loads(claims or "[]")
+        known = {ema_id} if ema_id else set()
+        if pcns and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'").fetchone():
+            known |= {r[0] for r in conn.execute(f"SELECT DISTINCT medical_record_number FROM claims WHERE patient_control_number IN "
+                                                 f"({','.join('?' * len(pcns))}) AND medical_record_number IS NOT NULL", pcns)}
+        stated = sorted(known) if by == "person" else stated_ids(text, known)       # a person settled them, or the note states them
+        conn.execute("UPDATE uploaded_notes SET ids_stated=?, birth_date=COALESCE(birth_date, ?) WHERE note_id=?",
+                     (json.dumps(stated), birth_date(text), note_id))
+        out["identifiers"] += 1
+    conn.commit()
     return dict(out)
 
 
 class UploadSource(modmed.LiveSource):
-    """The uploaded notes, offered to modmed.find_note as EMA's records are: each matched note a DocumentReference of its
-    visit's date, under a patient with the name (and EMA patient ID) of the claim it was matched to. find_note's rules
-    then decide as they do for EMA's API: the right patient only, the note of that day, a progress note before others,
-    a person's pick when they still tie."""
+    """The uploaded notes, offered to modmed.find_note as EMA's records are: each matched note a clinical note of its
+    visit's date, under a patient record that carries only what the note itself establishes. find_note's rules then
+    decide as they do for EMA's API.
 
-    def __init__(self, conn: sqlite3.Connection):            # noqa: D107  (no ModMed client: nothing is fetched)
-        ensure_schema(conn)
+    Who a note's patient is: the EMA patient ID or record number the note states (or a person's attaching it to an
+    item settled), else the name and birth date it states. Notes of one patient so identified share a record; notes
+    that state no identifier share one only by name and birth date, and that never identifies a patient by itself. A
+    note attached to an item by a person is that claim's by the person's choice.
+
+    for_claim narrows the notes to the ones that can be a claim's: tied to it, or of its EMA patient; a note tied to
+    another EMA patient is never offered, and a note with no EMA patient ID only to a claim with none either."""
+
+    def __init__(self, conn: sqlite3.Connection | None, notes: list[dict] | None = None):     # noqa: D107  (nothing is fetched)
         self._pract = {}
-        cur = conn.execute("SELECT * FROM uploaded_notes WHERE status='matched' AND service_date IS NOT NULL")
-        cols = [d[0] for d in cur.description]
-        self.notes = [dict(zip(cols, r)) for r in cur.fetchall()]
+        if notes is None:
+            ensure_schema(conn)
+            cur = conn.execute("SELECT * FROM uploaded_notes WHERE status='matched' AND service_date IS NOT NULL")
+            cols = [d[0] for d in cur.description]
+            notes = [dict(zip(cols, r)) for r in cur.fetchall()]
+        self.notes = notes
         self.people: dict[str, dict] = {}
         self.docs: dict[str, list[dict]] = defaultdict(list)
         self.paths: dict[str, tuple[str, str]] = {}
         for n in self.notes:
-            pid = "u" + hashlib.sha256(f"{modmed._norm(n['patient_last'])}|{modmed._norm((n['patient_first'] or '').split(' ')[0])}".encode()).hexdigest()[:16]
-            p = self.people.setdefault(pid, {"resourceType": "Patient", "id": pid, "identifier": [],
-                                             "name": [{"family": n["patient_last"], "given": [n["patient_first"] or ""]}]})
-            if n.get("ema_patient_id") and {"value": n["ema_patient_id"]} not in p["identifier"]:
-                p["identifier"].append({"value": n["ema_patient_id"]})
+            stated = json.loads(n.get("ids_stated") or "[]")
+            claims = json.loads(n.get("claims") or "[]")
+            person = n.get("matched_by") == "person"
+            ema = n.get("ema_patient_id") if n.get("ema_patient_id") in stated else None
+            if ema:
+                k = f"e|{ema}"
+            elif stated:
+                k = "s|" + "|".join(sorted(stated))
+            elif person:
+                k = "p|" + ",".join(sorted(claims))
+            else:
+                k = f"n|{modmed._norm(n['patient_last'])}|{modmed._norm((n['patient_first'] or '').split(' ')[0])}|{n.get('birth_date') or ''}"
+            pid = "u" + hashlib.sha256(k.encode()).hexdigest()[:16]
+            p = self.people.setdefault(pid, {"resourceType": "Patient", "id": pid, "identifier": [], "birthDate": n.get("birth_date"),
+                                             "name": [{"family": n["patient_last"], "given": [n["patient_first"] or ""]}], "_by_person": set()})
+            for v in stated:
+                if {"value": v} not in p["identifier"]:
+                    p["identifier"].append({"value": v})
+            if person:
+                p["_by_person"].update(claims)
             doc_id = DOC_PREFIX + n["note_id"]
             self.docs[pid].append({
                 "resourceType": "DocumentReference", "id": doc_id, "status": "current", "docStatus": "final",
                 "type": {"coding": [{"code": n["loinc"], "display": n["note_type"]}] if n.get("loinc") else [], "text": n.get("note_type") or "Visit note"},
+                "category": [{"coding": [{"code": "clinical-note"}]}],
                 "date": n["service_date"], "context": {"period": {"start": n["service_date"]}},
                 "author": [{"display": "uploaded by " + (n.get("uploaded_by") or "a person")}],
                 "subject": {"reference": f"Patient/{pid}"},
                 "content": [{"attachment": {"contentType": n["content_type"], "url": f"upload:{n['note_id']}", "title": n["name"]}}]})
             self.paths[n["note_id"]] = (n["path"], n["content_type"])
 
+    def for_claim(self, key: modmed.ClaimKey) -> "UploadSource":
+        ids = set(key.ema_patient_ids or ())
+
+        def ok(n: dict) -> bool:
+            if key.claim_id and key.claim_id in json.loads(n.get("claims") or "[]"):
+                return True
+            if n.get("ema_patient_id"):
+                return n["ema_patient_id"] in ids
+            return not ids
+        return UploadSource(None, [n for n in self.notes if ok(n)])
+
+    def identify(self, p: dict, key: modmed.ClaimKey) -> list[str]:
+        if key.claim_id and key.claim_id in p.get("_by_person", ()):
+            return [modmed.PERSON]
+        return modmed._agree(p, key)
+
     def patient(self, pid: str) -> dict | None:
-        return self.people.get(pid) or next(iter(self.patients_by_identifier(pid)), None)
+        return self.people.get(pid)             # an EMA patient ID is looked for among the identifiers, every record that has it
 
     def patients_by_identifier(self, value: str) -> list[dict]:
         return [p for p in self.people.values() if any(i.get("value") == value for i in p["identifier"])]
 
     def patients_by_name(self, family: str, given: str) -> list[dict]:
-        return [p for p in self.people.values() if modmed._family_ok(p, family) and (not given or modmed._given_ok(p, given))]
+        return [p for p in self.people.values() if modmed._family_ok(p, family) and modmed._given_ok(p, given)]
 
     def encounters(self, pid: str, dos: str) -> list[dict]:
         return []
@@ -925,21 +1107,24 @@ class UploadSource(modmed.LiveSource):
             return fh.read(), ctype
 
 
-def find_note(conn: sqlite3.Connection, key: modmed.ClaimKey, pick: str | None = None) -> dict:
+def find_note(conn: sqlite3.Connection, key: modmed.ClaimKey, pick: str | None = None, reveal: bool = False,
+              src: UploadSource | None = None) -> dict:
     """The uploaded note for a claim, with modmed.find_note's answer: found, ambiguous (a person picks) or not_found. A
-    pick that is not an uploaded note's id is EMA's, and is not looked for here."""
+    pick that is not an uploaded note's id is EMA's, and is not looked for here. `src`: the notes already read, for a
+    caller that looks up many claims. The note's own file name is given only where names are shown (`reveal`)."""
     if pick and not str(pick).startswith(DOC_PREFIX):
         return {"status": "not_found", "reason": NO_NOTE, "candidates": [], "source": "upload"}
-    src = UploadSource(conn)
+    src = src or UploadSource(conn)
     if not src.notes:
         return {"status": "not_found", "reason": NO_NOTE, "candidates": [], "source": "upload"}
-    res = modmed.find_note(src, key, pick)
+    res = modmed.find_note(src, key, pick, reveal)
     res["source"] = "upload"
     if res["status"] == "not_found":
         res["reason"] = NO_NOTE
     elif res["status"] == "found":
         nid = res["note"]["id"][len(DOC_PREFIX):]
-        res["note"]["uploaded_name"] = next((n["name"] for n in src.notes if n["note_id"] == nid), None)
+        n = next((n for n in src.notes if n["note_id"] == nid), None)
+        res["note"]["uploaded_name"] = shown_name(n["name"], "note", n["sha256"], reveal) if n else None
     return res
 
 
@@ -969,7 +1154,8 @@ def history(conn: sqlite3.Connection, reveal: bool = False, limit: int = 100) ->
             lines = ["Taken back: the note was removed."]
         else:
             lines = describe(s, u["status"], reveal, note=note)
-        item = {"upload_id": u["upload_id"], "name": u["name"], "kind": u["kind"], "status": u["status"], "uploaded_at": u["uploaded_at"],
+        item = {"upload_id": u["upload_id"], "name": shown_name(u["name"], u["kind"], u["upload_id"], reveal), "kind": u["kind"],
+                "status": u["status"], "uploaded_at": u["uploaded_at"],
                 "uploaded_by": u["uploaded_by"], "done_at": u["done_at"], "lines": lines, "parent": u["parent"]}
         if note:
             item["note"] = _note_public(note, reveal)
@@ -980,6 +1166,7 @@ def history(conn: sqlite3.Connection, reveal: bool = False, limit: int = 100) ->
 def _note_public(n: dict, reveal: bool) -> dict:
     out = {k: n.get(k) for k in ("note_id", "status", "service_date", "note_type", "matched_by", "kind")}
     out["claims"] = json.loads(n.get("claims") or "[]")
+    out["confirm"] = _confirm(n)
     if reveal:
         out["patient"] = f"{(n.get('patient_first') or '').title()} {(n.get('patient_last') or '').title()}".strip()
     cands = json.loads(n.get("candidates") or "[]")

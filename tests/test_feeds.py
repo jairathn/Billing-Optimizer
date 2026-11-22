@@ -3,17 +3,28 @@ appeal faxed while the remittances are behind, and a reason hidden for a payer (
 that")."""
 from __future__ import annotations
 
+import json
 import os
+import re
+import threading
 import time
 
 import pytest
 
 from remitwatch import trizetto
-from tests.fake_sftp import FakeSFTP
 from tests.test_features import NPI, build_store, claim, clean_visits, svc
 from tests.test_remitwatch import remit
 
 XHR = {"X-Requested-With": "remitwatch"}
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _fake_sftp():
+    """The stand-in SFTP server (tests/fake_sftp.py) needs paramiko. Imported here, not at the top, so that without
+    paramiko only the tests that need a server are skipped, not every test in this file."""
+    pytest.importorskip("paramiko")
+    from tests import fake_sftp
+    return fake_sftp
 
 
 def _remits(root, n: int = 2, start: int = 500, pay_date: str = "20261118", folder: str = "remits") -> list[str]:
@@ -35,7 +46,7 @@ def _remits(root, n: int = 2, start: int = 500, pay_date: str = "20261118", fold
 def sftp(tmp_path):
     root = tmp_path / "trizetto"
     root.mkdir()
-    f = FakeSFTP(str(root))
+    f = _fake_sftp().FakeSFTP(str(root))
     yield f
     f.stop()
 
@@ -79,7 +90,7 @@ def test_a_server_with_another_key_or_a_wrong_password_gets_nothing(tmp_path, sf
     _remits(sftp.root, 1)
     store = Store(str(tmp_path / "s.sqlite"))
     trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + 60, settings=trizetto.Settings.from_env(sftp.env()), log=lambda *a: None)
-    other = FakeSFTP(sftp.root, key=1)          # someone else answering at TriZetto's address
+    other = _fake_sftp().FakeSFTP(sftp.root, key=1)          # someone else answering at TriZetto's address
     try:
         with pytest.raises(trizetto.TriZettoError, match="not the one seen before"):
             trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + 60, settings=trizetto.Settings.from_env(other.env()), log=lambda *a: None)
@@ -92,8 +103,9 @@ def test_a_server_with_another_key_or_a_wrong_password_gets_nothing(tmp_path, sf
     finally:
         other.stop()
     sftp.refuse_password = True
-    with pytest.raises(trizetto.TriZettoError, match="Site ID"):
+    with pytest.raises(trizetto.SignInRefused, match="refused the password") as err:
         trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + 60, settings=trizetto.Settings.from_env(sftp.env()), log=lambda *a: None)
+    assert err.value.kind == "password" and "Site ID" not in str(err.value)
     store.close()
 
 
@@ -150,14 +162,20 @@ def test_a_refused_password_is_not_tried_again_so_the_login_is_never_locked(tmp_
 def test_the_setup_check_walks_every_step(sftp):
     assert trizetto.check({})["steps"][0]["ok"] is False
     empty = trizetto.check(sftp.env())
-    assert empty["ok"] is False and "Auto Generate Remittances" in empty["steps"][-1]["detail"]
+    # an empty folder on a new login: check the folder TriZetto named, and change nothing in the portal (ModMed's settings)
+    told = empty["steps"][-1]["detail"]
+    assert empty["ok"] is False and "TRIZETTO_SFTP_DIRS" in told and "in writing" in told
+    assert "Do not change the Remittance Advice Settings" in told and "turn on" not in told
     _remits(sftp.root, 2)
     ok = trizetto.check(sftp.env())
     assert ok["ok"] is True and [s["step"] for s in ok["steps"]] == ["Settings", "Server", "Sign-in", "Files", "Read"]
     assert "2 files (2 remittances)" in ok["steps"][3]["detail"] and ok["hostkey"].startswith("SHA256:")
+    assert "Site ID" not in ok["steps"][0]["detail"] + ok["steps"][2]["detail"]
     sftp.refuse_password = True
     bad = trizetto.check(sftp.env())
-    assert bad["ok"] is False and "Site ID" in bad["steps"][-1]["detail"]
+    said = bad["steps"][-1]["detail"]
+    assert bad["ok"] is False and bad["refused_kind"] == "password" and "refused the password" in said
+    assert "in writing" in said and "RemitWatch login's username, never the Site ID's" in said and "never by email" in said
 
 
 def test_a_serverless_run_reads_trizetto_without_dropbox(tmp_path, sftp, monkeypatch):
@@ -292,7 +310,9 @@ def test_the_data_checks_warn_before_the_trizetto_password_expires_and_while_a_s
     assert trizetto_health(conn, "2026-11-21", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="365")) == []
     soon = trizetto_health(conn, "2026-11-21", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="60"))
     assert [(h["key"], h["due"], h["days_left"]) for h in soon] == [("trizetto_password", "2026-11-30", 9)]
-    assert "Manage SFTP Password" in soon[0]["who"]
+    who = soon[0]["who"]
+    assert "in writing" in who and "RemitWatch login's username" in who and "never the Site ID's" in who and "never by email" in who
+    assert "Manage SFTP Password" not in who and "configure.sh" in who
     gone = trizetto_health(conn, "2026-12-05", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="60"))
     assert gone[0]["title"] == "TriZetto's SFTP password expired on 2026-11-30"
     conn.execute("INSERT INTO meta VALUES (?, ?)", (trizetto.REFUSED_META, json.dumps({"who": "h", "at": "2026-11-20T08:00:00+00:00"})))
@@ -304,7 +324,7 @@ def test_a_slow_or_dropped_sign_in_is_the_network_not_a_refused_password(tmp_pat
     """A sign-in TriZetto is slow to answer (past the client's timeout) says nothing about the password: no hold, and the next
     run reads the files."""
     from remitwatch.store import Store
-    from tests.fake_sftp import _Server
+    _Server = _fake_sftp()._Server
     _remits(sftp.root, 1)
     store = Store(str(tmp_path / "s.sqlite"))
     slow = {"on": True}
@@ -329,11 +349,10 @@ def test_a_slow_or_dropped_sign_in_is_the_network_not_a_refused_password(tmp_pat
 def test_a_serverless_run_keeps_the_hold_so_a_refused_password_is_sent_once_a_day(tmp_path, monkeypatch):
     from remitwatch import cloud
     from remitwatch.state import DropboxState
-    from tests.fake_sftp import FakeSFTP
     from tests.fakes import FakeDropbox
     root = tmp_path / "trizetto"
     root.mkdir()
-    f = FakeSFTP(str(root))
+    f = _fake_sftp().FakeSFTP(str(root))
     try:
         monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
         for k, v in f.env().items():
@@ -358,7 +377,7 @@ def test_a_keyboard_style_sign_in_is_judged_the_same_way_and_a_refused_file_serv
     import paramiko
 
     from remitwatch.store import Store
-    from tests.fake_sftp import _Server
+    _Server = _fake_sftp()._Server
     _remits(sftp.root, 1)
     store = Store(str(tmp_path / "s.sqlite"))
     slow = {"on": True}
@@ -385,9 +404,10 @@ def test_a_keyboard_style_sign_in_is_judged_the_same_way_and_a_refused_file_serv
     assert not isinstance(err.value, trizetto.SignInRefused) and trizetto.refusal(store.conn, trizetto.Settings.from_env(sftp.env())) is None
     slow["on"] = False
     sftp.refuse_password = True
-    with pytest.raises(trizetto.SignInRefused):                 # refused by the typed-answer route too: held
+    with pytest.raises(trizetto.SignInRefused) as err:          # refused by the typed-answer route too: held
         pull()
-    assert trizetto.refusal(store.conn, trizetto.Settings.from_env(sftp.env())) is not None
+    held = trizetto.refusal(store.conn, trizetto.Settings.from_env(sftp.env()))
+    assert held is not None and err.value.kind == held["kind"] == "interactive"     # the sign-in, not "the password"
     # TriZetto switches the login on but refuses the file service: the sign-in works, so the hold ends
     sftp.refuse_password = False
     monkeypatch.setattr(_Server, "check_channel_request", lambda self, kind, chanid: paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED)
@@ -418,7 +438,7 @@ def test_two_unclear_sign_ins_in_a_row_hold_for_six_hours(tmp_path, sftp, monkey
     row holds the feed for 6 hours, and Today says what happened (not that TriZetto refused it)."""
     from remitwatch.insights import trizetto_health
     from remitwatch.store import Store
-    from tests.fake_sftp import _Server
+    _Server = _fake_sftp()._Server
     _remits(sftp.root, 1)
     store = Store(str(tmp_path / "s.sqlite"))
     orig_init, orig_auth = trizetto.Session.__init__, _Server.check_auth_password
@@ -437,3 +457,448 @@ def test_two_unclear_sign_ins_in_a_row_hold_for_six_hours(tmp_path, sftp, monkey
     assert held and held["unclear"] and pull()["skipped"].startswith("The sign-in to TriZetto did not finish twice in a row")
     assert [h["title"][:44] for h in trizetto_health(store.conn, "2026-11-21", sftp.env())] == ["TriZetto's sign-in did not finish twice in a"]
     store.close()
+
+
+# --------------------------------------------------------------------------- review fixes: the feed's sign-in and its limits
+def _pull(store, env: dict, secs: float = 60):
+    return trizetto.pull(store.conn, _ingest_into(store), deadline=time.time() + secs, settings=trizetto.Settings.from_env(env),
+                         log=lambda *a: None)
+
+
+def test_a_server_that_stops_answering_cannot_hold_the_run_past_its_deadline(tmp_path, sftp, monkeypatch):
+    """Signed in, then TriZetto stops answering (a folder listing or a file that never comes): a watchdog closes the line at
+    the pull's deadline, the run goes on with what was read by then, and the next run reads the rest."""
+    from remitwatch.store import Store
+    fs = _fake_sftp()
+    _remits(sftp.root, 3)
+    store = Store(str(tmp_path / "s.sqlite"))
+    release = threading.Event()
+    stall = {"list": False, "read": ""}
+    orig_list, orig_read = fs._SFTP.list_folder, fs._Handle.read
+
+    def list_folder(self, path):
+        if stall["list"]:
+            release.wait(60)
+        return orig_list(self, path)
+
+    def read(self, offset, length):
+        if stall["read"] and self.filename.endswith(stall["read"]):
+            release.wait(60)
+        return orig_read(self, offset, length)
+    monkeypatch.setattr(fs._SFTP, "list_folder", list_folder)
+    monkeypatch.setattr(fs._Handle, "read", read)
+    try:
+        stall["list"] = True
+        t0 = time.time()
+        out = _pull(store, sftp.env(), secs=2)
+        assert time.time() - t0 < 2 + trizetto.WATCHDOG_GRACE + 4, "the stalled listing held the run past its deadline"
+        assert "stopped answering" in out["error"] and out["downloaded"] == 0 and out["remaining"] == 0
+        assert out["hostkey"] and out["seen_changed"]           # what changed before the stall is reported, so it is saved
+        stall["list"], stall["read"] = False, "remit_501.RMT"
+        t0 = time.time()
+        out = _pull(store, sftp.env(), secs=2)
+        assert time.time() - t0 < 2 + trizetto.WATCHDOG_GRACE + 4, "the stalled read held the run past its deadline"
+        assert out["remits"] == 1 and "1 of 3 new files were read" in out["error"] and out["remaining"] == 0
+    finally:
+        release.set()
+    stall["read"] = ""
+    out = _pull(store, sftp.env())
+    assert out["remits"] == 2 and "error" not in out
+    store.close()
+
+
+def test_the_deadline_is_checked_before_each_file(tmp_path, sftp, monkeypatch):
+    """A run that reaches its deadline mid-way stops before the next file, not at the end of a batch of 40."""
+    from remitwatch.store import Store
+    fs = _fake_sftp()
+    _remits(sftp.root, 3)
+    store = Store(str(tmp_path / "s.sqlite"))
+    deadline = time.time() + 3
+    orig_read = fs._Handle.read
+    first = {"done": False}
+
+    def read(self, offset, length):          # the first file takes until just past the deadline
+        if not first["done"]:
+            first["done"] = True
+            time.sleep(max(0.0, deadline + 0.3 - time.time()))
+        return orig_read(self, offset, length)
+    monkeypatch.setattr(fs._Handle, "read", read)
+    out = trizetto.pull(store.conn, _ingest_into(store), deadline=deadline, settings=trizetto.Settings.from_env(sftp.env()),
+                        log=lambda *a: None)
+    assert (out["downloaded"], out["remaining"]) == (1, 2) and "error" not in out
+    assert store.conn.execute("SELECT COUNT(*) FROM trizetto_seen").fetchone()[0] == 1
+    store.close()
+
+
+def test_a_notice_before_the_password_prompt_does_not_take_the_password(tmp_path, sftp, monkeypatch):
+    """A typed-answer sign-in may start with a notice that asks nothing (RFC 4256). The password goes to the first real
+    question, once; no empty password is sent and nothing is held."""
+    import paramiko
+
+    from remitwatch.store import Store
+    fs = _fake_sftp()
+    _remits(sftp.root, 1)
+    got = []
+
+    def check_auth_interactive(self, username, submethods):
+        self._user, self._round = username, 0
+        self.fake.logins.append(username)
+        return paramiko.InteractiveQuery("Notice", "Authorized use only.")
+
+    def check_auth_interactive_response(self, responses):
+        self._round += 1
+        got.append(["<the password>" if r == self.fake.password else r for r in responses])
+        if self._round == 1:
+            return paramiko.InteractiveQuery("", "", ("Password: ", False))
+        ok = self._user == self.fake.user and responses and responses[0] == self.fake.password
+        return paramiko.AUTH_SUCCESSFUL if ok else paramiko.AUTH_FAILED
+    monkeypatch.setattr(fs._Server, "get_allowed_auths", lambda self, username: "keyboard-interactive")
+    monkeypatch.setattr(fs._Server, "check_auth_password", lambda self, username, password: paramiko.AUTH_FAILED)
+    monkeypatch.setattr(fs._Server, "check_auth_interactive", check_auth_interactive, raising=False)
+    monkeypatch.setattr(fs._Server, "check_auth_interactive_response", check_auth_interactive_response, raising=False)
+    store = Store(str(tmp_path / "s.sqlite"))
+    out = _pull(store, sftp.env())
+    assert out["remits"] == 1 and got == [[], ["<the password>"]]
+    assert store.conn.execute("SELECT 1 FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone() is None
+    store.close()
+
+
+def test_today_says_what_trizetto_refused_and_asks_for_the_fix_in_writing(tmp_path, sftp, monkeypatch):
+    """Today follows docs/TRIZETTO_REQUEST.md: press Test once, then ask TriZetto in writing to reset the RemitWatch login's
+    password; change it only on a page that shows that login's username, never the Site ID's (ModMed may use it); never by
+    email. It says "refused the password" only when TriZetto refused a password sent by the password method."""
+    import paramiko
+    from datetime import datetime, timezone
+
+    from remitwatch.insights import trizetto_health
+    from remitwatch.store import Store
+    fs = _fake_sftp()
+    _remits(sftp.root, 1)
+    today = datetime.now(timezone.utc).date().isoformat()
+    sftp.refuse_password = True
+    n = [0]
+
+    def refused(**server) -> dict:
+        n[0] += 1
+        store = Store(str(tmp_path / f"s{n[0]}.sqlite"))
+        with monkeypatch.context() as m:
+            for name, fn in server.items():
+                m.setattr(fs._Server, name, fn, raising=False)
+            with pytest.raises(trizetto.SignInRefused):
+                _pull(store, sftp.env())
+        items = trizetto_health(store.conn, today, sftp.env())
+        store.close()
+        assert [i["key"] for i in items] == ["trizetto_signin"]
+        return items[0]
+
+    item = refused()
+    assert item["title"].startswith("TriZetto refused the feed's password on")
+    who = item["who"]
+    for said in ("Test the TriZetto connection", "once", "in writing", "Contact Us", "reset the RemitWatch login's password",
+                 "RemitWatch login's username, never the Site ID's", "never by email", "configure.sh", "ModMed"):
+        assert said in who, said
+    assert "Manage SFTP Password" not in who and "set a new SFTP password" not in who
+    # asked as a typed answer and refused: TriZetto refused the sign-in (it may not have been asking for the password)
+    item = refused(get_allowed_auths=lambda self, username: "keyboard-interactive",
+                   check_auth_interactive=lambda self, username, submethods: paramiko.InteractiveQuery("", "", ("Password: ", False)),
+                   check_auth_interactive_response=lambda self, responses: paramiko.AUTH_FAILED)
+    assert item["title"].startswith("TriZetto refused the feed's sign-in on") and "password on" not in item["title"]
+    # a server that takes no password for the login: a new password would not help, so nobody is sent to reset one
+    item = refused(get_allowed_auths=lambda self, username: "publickey")
+    assert "would not take a password" in item["title"] and "reset" not in item["who"] and "in writing" in item["who"]
+
+
+def test_the_setup_test_does_not_send_a_held_password_again_unless_told_to(tmp_path, sftp):
+    """While a refused password is held, the /setup test says so and does not sign in with it again (that is how a login gets
+    locked); told to (override), it tries once. A new password is tried at once."""
+    from remitwatch.store import Store
+    _remits(sftp.root, 1)
+    store = Store(str(tmp_path / "s.sqlite"))
+    sftp.refuse_password = True
+    with pytest.raises(trizetto.SignInRefused):
+        _pull(store, sftp.env())
+    before = len(sftp.logins)
+    out = trizetto.check(sftp.env(), conn=store.conn)
+    last = out["steps"][-1]
+    assert len(sftp.logins) == before and out["held"]["kind"] == "password" and "refused" not in out
+    assert last["step"] == "Sign-in" and last["ok"] is False
+    assert last["detail"].startswith("Not tried now. TriZetto refused this user name and password on") and " until " in last["detail"]
+    out = trizetto.check(sftp.env(), conn=store.conn, override=True)
+    assert len(sftp.logins) == before + 1 and out["refused_kind"] == "password"
+    sftp.refuse_password, sftp.password = False, "a-new-password-from-trizetto"
+    out = trizetto.check(sftp.env(TRIZETTO_SFTP_PASSWORD="a-new-password-from-trizetto"), conn=store.conn)
+    assert len(sftp.logins) == before + 2 and ("Sign-in", True) in [(x["step"], x["ok"]) for x in out["steps"]]
+    store.close()
+
+
+def _serving_conn(tmp_path, state):
+    """The dashboard's copy as the serverless site reads it."""
+    import gzip
+    import sqlite3
+
+    from remitwatch import cloud
+    path = tmp_path / f"serving-{time.time_ns()}.sqlite"
+    path.write_bytes(gzip.decompress(state.get(cloud.SERVING)))
+    return sqlite3.connect(str(path))
+
+
+def test_a_new_password_that_works_ends_the_hold_in_the_saved_store_and_on_today(tmp_path, monkeypatch):
+    """Serverless: a hold for a refused password is saved; once a new password works, the next run saves the store without
+    it, even with no new remittance, so Today stops telling anyone to reset the password."""
+    from remitwatch import cloud
+    from remitwatch.insights import trizetto_health
+    from remitwatch.state import DropboxState
+    from tests.fakes import FakeDropbox
+    root = tmp_path / "trizetto"
+    root.mkdir()
+    f = _fake_sftp().FakeSFTP(str(root))
+    try:
+        monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
+        for k, v in f.env().items():
+            monkeypatch.setenv(k, v)
+        _remits(str(root), 2)
+        state = DropboxState(FakeDropbox(str(tmp_path / "dbx")), "/RemitWatch-state")
+        run = lambda: cloud.run_cloud_cycle(state, None, budget_s=600, email=False, log=lambda *a: None)    # noqa: E731
+        held_in_store = lambda: cloud.load_raw(state)[0].conn.execute(                                       # noqa: E731
+            "SELECT 1 FROM meta WHERE key=?", (trizetto.REFUSED_META,)).fetchone() is not None
+        today = lambda: trizetto_health(_serving_conn(tmp_path, state), time.strftime("%Y-%m-%d"), f.env())  # noqa: E731
+        assert run()["trizetto"]["remits"] == 2
+        f.refuse_password = True
+        assert "error" in run()["trizetto"] and held_in_store() and [h["key"] for h in today()] == ["trizetto_signin"]
+        f.refuse_password, f.password = False, "the-new-one-from-trizetto"
+        monkeypatch.setenv("TRIZETTO_SFTP_PASSWORD", f.password)
+        out = run()
+        assert out["trizetto"]["new"] == 0 and "error" not in out["trizetto"]
+        assert not held_in_store() and today() == []
+    finally:
+        f.stop()
+
+
+def test_the_dashboards_copy_carries_the_servers_key_after_a_first_pull_with_nothing_new(tmp_path, monkeypatch):
+    """Serverless: the /setup test reads the server's key from the dashboard's copy. A first pull that finds only files read
+    from Dropbox before still makes the copy again, so the test never trusts another key."""
+    from remitwatch import cloud
+    from remitwatch.state import DropboxState
+    from tests.fakes import FakeDropbox
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "TRIZETTO_SFTP_USER", "TRIZETTO_SFTP_PASSWORD"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
+    body = remit("".join(clean_visits(1, 25, "99214", "223.65", "117.60")), "100.00", seg_count=99, pay_date="20261110")
+    data = tmp_path / "dbx" / "Trizetto Data"
+    data.mkdir(parents=True)
+    (data / "r1.RMT").write_bytes(body)
+    state = DropboxState(FakeDropbox(str(tmp_path / "state")), "/RemitWatch-state")
+    run = lambda: cloud.run_cloud_cycle(state, FakeDropbox(str(tmp_path / "dbx")), budget_s=600, email=False, log=lambda *a: None)  # noqa: E731
+    run()
+    root = tmp_path / "trizetto" / "remits"
+    root.mkdir(parents=True)
+    (root / "r1.RMT").write_bytes(body)                 # TriZetto holds the same file
+    f = _fake_sftp().FakeSFTP(str(tmp_path / "trizetto"))
+    try:
+        for k, v in f.env().items():
+            monkeypatch.setenv(k, v)
+        out = run()
+        assert out["trizetto"]["hostkey"] and out["trizetto"]["remits"] == 0
+        kept = _serving_conn(tmp_path, state).execute("SELECT value FROM meta WHERE key=?", (trizetto.HOSTKEY_META,)).fetchone()
+        assert kept and kept[0] == out["trizetto"]["hostkey"]
+    finally:
+        f.stop()
+
+
+def test_a_serverless_host_reads_trizetto_only_when_switched_on(tmp_path, sftp, monkeypatch):
+    """Both sites run the same code, but only one should sign in with the login: each keeps its own hold and its own
+    password reminder. A serverless host (Vercel) reads TriZetto only with TRIZETTO_SFTP_SERVERLESS=1; the server always does."""
+    import sqlite3
+
+    from remitwatch import cloud
+    from remitwatch.insights import trizetto_health
+    from remitwatch.state import DropboxState
+    from tests.fakes import FakeDropbox
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "SMTP_HOST", "REPORT_TO", "TRIZETTO_SFTP_SERVERLESS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    for k, v in sftp.env(TRIZETTO_SFTP_PASSWORD_SET="2026-01-01", TRIZETTO_SFTP_PASSWORD_DAYS="30").items():
+        monkeypatch.setenv(k, v)
+    _remits(sftp.root, 1)
+    state = DropboxState(FakeDropbox(str(tmp_path / "dbx")), "/RemitWatch-state")
+    run = lambda: cloud.run_cloud_cycle(state, None, budget_s=600, email=False, log=lambda *a: None)    # noqa: E731
+    out = run()
+    assert "trizetto" not in out and sftp.connections == 0 and trizetto.configured() is False
+    test = trizetto.check()
+    assert test["not_here"] and "TRIZETTO_SFTP_SERVERLESS=1" in test["steps"][0]["detail"] and sftp.connections == 0
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    assert trizetto_health(conn, "2026-12-25") == []       # the password reminder is the server's to give
+    line = {c["key"]: c for c in cloud.setup_status(probe=False)["checks"]}["trizetto"]
+    assert line["ok"] is None and "does not read TriZetto" in line["detail"] and "in Vercel" in line["fix"]
+    monkeypatch.setenv("TRIZETTO_SFTP_SERVERLESS", "1")
+    assert run()["trizetto"]["remits"] == 1 and trizetto.configured() is True
+    assert [h["key"] for h in trizetto_health(conn, "2026-12-25")] == ["trizetto_password"]
+    assert "in Vercel" in trizetto_health(conn, "2026-12-25")[0]["who"]
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.delenv("TRIZETTO_SFTP_SERVERLESS")
+    assert trizetto.configured() is True and "configure.sh" in trizetto_health(conn, "2026-12-25")[0]["who"]
+
+
+def test_the_hold_keeps_a_salted_slow_hash_not_a_quick_one():
+    """A copy of the store (a backup, the dashboard's copy) must not let anyone test password guesses quickly."""
+    import hashlib
+    s = trizetto.Settings(user="rw-login", password="short", host="sftp.example.test", port=22)
+    a, b = trizetto.credential_tag(s), trizetto.credential_tag(s)
+    assert a != b and trizetto.same_credentials(a, s) and trizetto.same_credentials(b, s)
+    assert not trizetto.same_credentials(a, trizetto.Settings(user="rw-login", password="other", host="sftp.example.test", port=22))
+    fast = hashlib.sha256("sftp.example.test\x0022\x00rw-login\x00short".encode()).hexdigest()
+    assert a.startswith(("scrypt$", "pbkdf2$")) and fast[:16] not in a and fast not in a
+    assert not trizetto.same_credentials(fast[:16], s) and not trizetto.same_credentials("", s)
+
+
+def test_a_host_key_setting_that_cannot_be_read_stops_before_connecting(tmp_path, sftp):
+    """TRIZETTO_SFTP_HOSTKEY holding something other than fingerprints (a whole key, 'SHA256 abc' with a space) is not taken
+    as 'no key given': the feed stops before it connects, so nothing is sent to whoever answers."""
+    from remitwatch.store import Store
+    store = Store(str(tmp_path / "s.sqlite"))
+    for bad in ("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7xyz", "SHA256 abcdefghijk", "SHA1:0123456789"):
+        with pytest.raises(trizetto.TriZettoError, match="no fingerprint that can be read"):
+            _pull(store, sftp.env(TRIZETTO_SFTP_HOSTKEY=bad))
+        out = trizetto.check(sftp.env(TRIZETTO_SFTP_HOSTKEY=bad))
+        assert [(x["step"], x["ok"]) for x in out["steps"]] == [("Settings", False)]
+    assert sftp.connections == 0 and sftp.logins == []
+    store.close()
+
+
+def test_a_listed_fingerprint_of_any_key_type_is_found(tmp_path):
+    """A server has one key per type and offers its favourite first. A fingerprint TriZetto gave for another of its key
+    types is still found (each type is asked for before the key is called wrong), and so is the key kept on first use after
+    TriZetto adds a key type. No password goes to a key that matches nothing."""
+    from remitwatch.store import Store
+    fs = _fake_sftp()
+    root = tmp_path / "trizetto"
+    root.mkdir()
+    _remits(str(root), 1)
+    rsa = trizetto.fingerprint(fs.host_key(0))
+    both = fs.FakeSFTP(str(root), ecdsa=True)          # offers ECDSA first, then RSA
+    try:
+        for given in (f"RSA {rsa}", rsa):
+            with trizetto.Session(trizetto.Settings.from_env(both.env(TRIZETTO_SFTP_HOSTKEY=given))) as ses:
+                assert ses.key_fp == rsa
+        with pytest.raises(trizetto.TriZettoError, match="not the one set in TRIZETTO_SFTP_HOSTKEY"):
+            with trizetto.Session(trizetto.Settings.from_env(both.env(TRIZETTO_SFTP_HOSTKEY="SHA256:neither-of-them"))):
+                pass
+        assert len(both.logins) == 2
+    finally:
+        both.stop()
+    store = Store(str(tmp_path / "s.sqlite"))
+    only_rsa = fs.FakeSFTP(str(root))
+    try:
+        assert _pull(store, only_rsa.env())["hostkey"] == rsa
+    finally:
+        only_rsa.stop()
+    both = fs.FakeSFTP(str(root), ecdsa=True)           # TriZetto adds a key type; its RSA key is unchanged
+    try:
+        out = _pull(store, both.env())
+        assert out["listed"] == 1 and out["new"] == 0 and "hostkey" not in out
+    finally:
+        both.stop()
+    store.close()
+
+
+def test_the_stand_in_server_records_anything_that_would_change_its_files(tmp_path, sftp):
+    """The read-only tests say `writes == []`: that only means something if every kind of change is recorded."""
+    import paramiko
+    _remits(sftp.root, 1)
+    t = paramiko.Transport(("127.0.0.1", sftp.port))
+    t.connect(username=sftp.user, password=sftp.password)
+    c = paramiko.SFTPClient.from_transport(t)
+    p = "/remits/remit_500.RMT"
+    calls = (lambda: c.chmod(p, 0o600), lambda: c.utime(p, (1, 1)), lambda: c.mkdir("/new"), lambda: c.rmdir("/remits"),
+             lambda: c.open("/copy.RMT", "wb"), lambda: c.symlink(p, "/link"), lambda: c.posix_rename(p, "/moved"),
+             lambda: c.remove(p), lambda: c.rename(p, "/renamed"))
+    for call in calls:
+        with pytest.raises(OSError):
+            call()
+    t.close()
+    assert [w[0] for w in sftp.writes] == ["chattr", "chattr", "mkdir", "rmdir", "open for writing", "symlink", "posix_rename",
+                                          "remove", "rename"]
+    assert os.path.exists(os.path.join(sftp.root, "remits", "remit_500.RMT"))
+
+
+def test_how_long_the_password_lasts_is_read_however_trizetto_writes_it():
+    """A number goes with the unit right after it, a day count wins, and what cannot be read is said, not taken as 'never'."""
+    from remitwatch.insights import password_days, trizetto_health
+    said = {"365 days (1 year)": 365, "180 days (6 months)": 180, "every 90 days, or 3 months": 90, "90 days / 3 months": 90,
+            "1 yr": 365, "1y": 365, "six months": 180, "sixty days": 60, "semi-annually": 182, "twice a year": 182,
+            "quarterly": 90, "90 calendar days": 90, "1 (one) year": 365, "8 wks": 56, "Passwords expire every 60 days.": 60,
+            "It does not expire": 0, "0": 0, "": 0, "never": 0, "biannually": None, "ask TriZetto": None}
+    assert {k: password_days(k) for k in said} == said
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    env = {"TRIZETTO_SFTP_USER": "rw-login", "TRIZETTO_SFTP_PASSWORD": "x", "TRIZETTO_SFTP_PASSWORD_SET": "2026-01-01"}
+    soon = trizetto_health(conn, "2026-12-25", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="365 days (1 year)"))
+    assert [(h["key"], h["due"]) for h in soon] == [("trizetto_password", "2027-01-01")]
+    unread = trizetto_health(conn, "2026-12-25", dict(env, TRIZETTO_SFTP_PASSWORD_DAYS="ask TriZetto"))
+    assert [h["key"] for h in unread] == ["trizetto_password"] and "could not be read" in unread[0]["title"]
+
+
+def test_setup_and_the_settings_file_follow_the_written_trizetto_request():
+    """No phone call, no change in TriZetto's portal (Remittance Advice Settings, the Site ID's password), RemitWatch's own
+    login entered with configure.sh; and the settings file gives each block its own heading."""
+    page = open(os.path.join(ROOT, "remitwatch", "static", "setup.html"), encoding="utf-8").read()
+    panel = page[page.index('id="tzp"'):page.index('id="faxp"')]
+    for gone in ("Call TriZetto", "turn on <b>Auto Generate", "(the Site ID)", "—"):
+        assert gone not in panel, gone
+    for said in ("docs/TRIZETTO_REQUEST.md", "No phone call", "Change nothing in TriZetto's portal", "configure.sh",
+                 "TRIZETTO_SFTP_DIRS", "TRIZETTO_SFTP_HOSTKEY", "never by email", "RemitWatch login's username"):
+        assert said in panel, said
+    heading, under = "", {}
+    for line in open(os.path.join(ROOT, ".env.example"), encoding="utf-8"):
+        if line.startswith("# ----"):
+            heading = line
+        m = re.match(r"([A-Z][A-Z0-9_]*)=", line)
+        if m:
+            under[m.group(1)] = heading
+    assert all("TriZetto" in under[k] for k in under if k.startswith("TRIZETTO_"))
+    assert all("Fax" in under[k] for k in under if k.startswith("SRFAX_"))
+    assert all("Letterhead" in under[k] for k in under if k.startswith("PRACTICE_"))
+    assert all("ModMed" in under[k] for k in under if k.startswith("MODMED_"))
+    assert "Appeal packets" in under["REMITWATCH_NOTE_MODEL"] and "Appeal packets" in under["APPEAL_EMAIL_TO"]
+    assert "Site ID; TriZetto support" not in open(os.path.join(ROOT, ".env.example"), encoding="utf-8").read()
+
+
+def test_the_setup_checks_give_the_steps_for_the_host_they_run_on(tmp_path, monkeypatch):
+    """The server is told about its .env and a restart, Vercel about its settings and a redeploy; a TriZetto login with no
+    expiry date is flagged, since no reminder can come before the password expires."""
+    from remitwatch import cloud
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "SRFAX_CALLER_ID", "SRFAX_SENDER_EMAIL",
+              "TRIZETTO_SFTP_PASSWORD_SET", "TRIZETTO_SFTP_PASSWORD_DAYS", "TRIZETTO_SFTP_SERVERLESS", "REMITWATCH_STATE_DIR"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("REMITWATCH_DB", str(tmp_path / "s.sqlite"))
+    monkeypatch.setenv("SRFAX_ACCESS_ID", "100")
+    monkeypatch.setenv("SRFAX_ACCESS_PWD", "x")
+    monkeypatch.setenv("REMITWATCH_PASSWORD", "a-dashboard-password-1")
+    monkeypatch.setenv("REMITWATCH_OWNER_PASSWORD", "short")
+    monkeypatch.setenv("TRIZETTO_SFTP_USER", "rw-login")
+    monkeypatch.setenv("TRIZETTO_SFTP_PASSWORD", "x")
+    checks = lambda: {c["key"]: c for c in cloud.setup_status(probe=False)["checks"]}       # noqa: E731
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    by = checks()
+    assert ".env" in by["fax"]["fix"] and "redeploy" not in by["fax"]["fix"]
+    assert ".env" in by["owner_password"]["fix"] and "Vercel" not in by["owner_password"]["fix"]
+    assert by["trizetto"]["ok"] is True and "No reminder comes before the password expires" in by["trizetto"]["detail"]
+    monkeypatch.setenv("TRIZETTO_SFTP_PASSWORD_SET", "2026-11-01")
+    monkeypatch.setenv("TRIZETTO_SFTP_PASSWORD_DAYS", "90 days")
+    assert checks()["trizetto"]["detail"] == "set: press Test the TriZetto connection below"
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    by = checks()
+    assert "in Vercel" in by["fax"]["fix"] and "redeploy" in by["fax"]["fix"] and "in Vercel" in by["owner_password"]["fix"]
+    assert by["trizetto"]["ok"] is None and "the server does" in by["trizetto"]["detail"]
+
+
+def test_these_tests_load_without_paramiko():
+    """Without paramiko, only the tests that need the stand-in SFTP server are skipped; the file itself still loads."""
+    import subprocess
+    import sys
+    code = "import sys; sys.modules['paramiko'] = None; import tests.test_feeds as t; print(len([n for n in dir(t) if n.startswith('test_')]))"
+    r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and int(r.stdout.strip()) > 20, r.stderr[-2000:]

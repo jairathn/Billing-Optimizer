@@ -7,7 +7,7 @@
       pays the ASC a share of Medicare's rate, which starts at what that kind pays the practice's surgeons against
       Medicare and can be changed here; the practice's share of the ASC turns the ASC's figures into the practice's.
    2. ASCA's rate calculator: Medicare's ASC amounts for any code in any county, national and local, before and after
-      sequestration, with the copayment (/api/activity/asc_rates, worked out as ASCA's workbook does, to the cent).
+      sequestration, with the copayment (/api/activity/asc_rates: CMS's own rates, worked out as ASCA's workbook does).
 
    Settings here last for the visit; the lab's ASC card is where they are saved with a scenario, and its figures (the
    practice's share, the plans' share of Medicare's ASC rates, quality reporting) are where these start. */
@@ -274,7 +274,7 @@ async function ascLookDraw(v){
   const counties = st => (P.counties || {})[st] || [];
   const countyOpts = st => counties(st).map(([c]) => `<option value="${esc(c)}" ${c === L.county ? 'selected' : ''}>${esc(ascTitle(c))}</option>`).join('');
   box.innerHTML = `<h2>ASC rate calculator</h2>
-    <div class="small muted">Medicare's payment to an ASC for any code on CMS's ASC addenda, nationally and in a county, worked out as ASCA's rate calculator works it out (to the cent): the ${esc(P.rule_year)} final rule, against ${esc(P.prior_year)}. A code: 14040; the start of one: 1404; a range: 11600-11646; several, with spaces or commas. Empty: every code.</div>
+    <div class="small muted">Medicare's payment to an ASC for any code on CMS's ASC addenda, nationally and in a county: the ${esc(P.rule_year)} final rule, against ${esc(P.prior_year)}. The rates are CMS's own. They are worked out as ASCA's rate calculator works them out, except that skin substitute supplies (S2) are not wage-adjusted, as CMS pays them. A code: 14040; the start of one: 1404; a range: 11600-11646; several, with spaces or commas. Empty: every code.</div>
     <div class="filters" style="margin-top:8px;gap:8px;flex-wrap:wrap">
       <select id="ascState" aria-label="State">${(P.states || []).map(([st, n]) => `<option value="${esc(st)}" ${st === L.state ? 'selected' : ''}>${esc(ascTitle(n))}</option>`).join('')}</select>
       <select id="ascCounty" aria-label="County">${countyOpts(L.state)}</select>

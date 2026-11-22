@@ -11,8 +11,8 @@ out, so a code looked up here agrees with it to the cent wherever the workbook h
     local          Medicare's payment and the copayment each wage-adjusted, half of each by the county's ASC wage index
                    (42 CFR 416.172), Medicare's rounded to the cent; the indicators the calculator leaves as they stand
                    (drugs, brachytherapy sources, pass-through devices and the like) are not adjusted, and neither are
-                   skin substitute supplies (S2), which CMS pays at the OPPS rate without the wage index (90 FR 53843;
-                   the workbook's version 77 adjusts them)
+                   skin substitute supplies (S2), which CMS pays at the OPPS rate without the wage index (90 FR 53843
+                   and 53887-53888; the workbook's version 77 adjusts them)
     sequestration  2% off Medicare's payment, rounded to the cent; the copayment is not reduced
 
 Medicare's own pricer adjusts the whole rate before taking the coinsurance from it (remitwatch.ascfs.asc_amount, which the

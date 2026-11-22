@@ -83,9 +83,9 @@ details summary{cursor:pointer;font-weight:600}
     <h3>When remittances stop coming</h3>
     <div class="small">The Data tab says when the newest remittance is days old. Download the missing ERA (835) files for those dates from TriZetto's portal and drop them here (a .zip of them is fine). A remittance RemitWatch has already is recognised by its content and not counted twice.</div>
     <h3>Visit notes, as items need them</h3>
-    <div class="small">For each row under "Visit notes appeals are waiting for": in EMA open the patient's visit on that date of service, and print or save the signed note as a PDF (one PDF per visit). Drop the PDFs here together; each is matched by the patient's name and the date of service it states, and the summary says which visit it went to. A scanned page (a picture, no text) cannot be read that way: attach it with the row's Attach note button. When a note fits more than one visit, pick the right one under Uploaded. Then the item's appeal goes as it would with a note from EMA: open it, or use Appeal everything appealable.</div>
+    <div class="small">For each row under "Visit notes appeals are waiting for": in EMA open the patient's visit on that date of service, and print or save the signed note as a PDF (one PDF per visit). Drop the PDFs here together; each is matched by the patient's name and the date of service it states, and the summary says which visit it went to. A note that states the patient's EMA Patient ID (or record number) goes into the appeal by itself. One that matches only by name and date waits for a person: two patients can share a name and a visit day, so open the item and confirm the note there, or attach it with the row's Attach note button. A scanned page (a picture, no text) cannot be read either way: attach it with the row's Attach note button. When a note fits more than one visit, pick the right one under Uploaded. Then the item's appeal goes as it would with a note from EMA: open it, or use Appeal everything appealable.</div>
     <h3>What happens to the files</h3>
-    <div class="small">Each file is kept on the practice's server, in the same protected place as RemitWatch's store, and is never emailed or sent elsewhere. Exports and remittance files are read by the next cycle, which starts within about a minute; the worklist updates when its analysis finishes (a few minutes). Uploading the same file again changes nothing.</div>
+    <div class="small">Each file is kept on the practice's server, in the same protected place as RemitWatch's store. The files themselves are never emailed. Exports and remittance files never leave the server. A visit note leaves it only inside the appeal packet built from it: faxed to the payer, or emailed where the practice has allowed that. When the note review is switched on, the note is also read by that review. Exports and remittance files are read by the next cycle, which starts within about a minute; the worklist updates when its analysis finishes (a few minutes). Uploading the same file again changes nothing.</div>
   </div>
 </main>
 <script>
@@ -105,12 +105,14 @@ async function api(path, opts){
   return j;
 }
 
-// one file at a time, its bytes as the body: a large export shows how far it has got
+// one file at a time, its bytes as the body: a large export shows how far it has got. The file's name (often the
+// patient's, for a note) goes in a header where the server reads one, so it is never in an address a log keeps.
 function send(file, findingId){
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
-    const q = new URLSearchParams({name: file.name}); if(findingId) q.set('finding_id', findingId);
-    x.open('POST', '/api/uploads?' + q.toString());
+    const q = new URLSearchParams(info.name_header ? {} : {name: file.name}); if(findingId) q.set('finding_id', findingId);
+    x.open('POST', '/api/uploads' + (q.toString() ? '?' + q.toString() : ''));
+    if(info.name_header) x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
     x.setRequestHeader('X-Requested-With', 'remitwatch');
     x.setRequestHeader('Content-Type', 'application/octet-stream');
     x.upload.onprogress = e => { if(e.lengthComputable && send.onprogress) send.onprogress(e.loaded / e.total); };
@@ -183,7 +185,8 @@ async function refresh(){
       <span class="muted small" style="font-weight:400">${esc(when(u.uploaded_at))}${u.uploaded_by ? ' by ' + esc(u.uploaded_by) : ''}${u.parent ? ' · from a zip' : ''}</span></div>${linesHtml(u.lines)}${u.status === 'removed' ? '' : noteTools(u.note)}</div>`).join('')
     : '<div class="muted">Nothing uploaded yet.</div>';
   bindNoteTools($('#hist'));
-  if(h.queued) setTimeout(refresh, 15000);
+  clearTimeout(refresh.t);                       // one wait at a time, however often the page asks again
+  refresh.t = h.queued ? setTimeout(refresh, 15000) : null;
   needed();
 }
 
@@ -196,7 +199,7 @@ async function needed(){
     <div style="overflow-x:auto"><table><thead><tr><th>Closes</th><th>Visit</th><th>Claim ID</th>${phi ? '<th>Patient</th>' : ''}<th class="hide-sm">Payer</th><th class="hide-sm">Code</th><th class="num">Amount</th><th>Note</th></tr></thead>
     <tbody>${n.items.map(i => `<tr><td>${esc(day(i.appeal_deadline)) || '<span class="muted">unknown</span>'}</td><td>${esc(day(i.service_date))}</td><td>${esc(i.claim_id || '')}</td>${phi ? `<td>${esc(i.patient || '')}</td>` : ''}
       <td class="hide-sm">${esc(i.payer_group || '')}</td><td class="hide-sm">${esc(i.code || '')}</td><td class="num">${money(i.cents)}</td>
-      <td>${i.note === 'found' ? '<span class="ok">uploaded</span>' : i.note === 'ambiguous' ? '<span class="warn">more than one: pick in the item</span>'
+      <td>${i.note === 'found' ? '<span class="ok">uploaded</span>' : i.note === 'ambiguous' ? '<span class="warn">uploaded: confirm or pick it in the item</span>'
         : `<span class="attach"><button class="small">Attach note</button><input type="file" data-fid="${esc(i.finding_id)}" accept=".pdf,.docx,.txt,.rtf,.html,.htm" aria-label="Attach the visit note for claim ${esc(i.claim_id || '')}"></span>`}</td></tr>`).join('')}</tbody></table></div>`;
   $('#needed').querySelectorAll('input[data-fid]').forEach(inp => inp.onchange = async () => {
     const f = inp.files[0]; if(!f) return;

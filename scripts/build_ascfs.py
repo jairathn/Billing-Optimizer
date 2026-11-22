@@ -86,9 +86,11 @@ OFFICES = {"newburgh": "18173", "owensboro": "21059", "henderson": "21101"}
 # workbook's formula cannot be read
 NOT_WAGE_ADJUSTED = ("H2", "J7", "K2", "K5", "K7", "L6")
 # Skin substitute supplies (S2) are paid at the OPPS rate and are not subject to the ASC wage index: CY 2026 OPPS/ASC
-# final rule, 90 FR 53843 ("payment for these skin substitute products would not be subject to the ASC wage index"),
-# kept for CY 2027 (91 FR 70652: "at the same rate as is provided under the OPPS"). The contractor's ASC fee files show
-# it: one S2 amount in every CBSA. ASCA's calculator (version 77) wage-adjusts them; the tables follow CMS.
+# final rule, 90 FR 53843 ("payment for these skin substitute products would not be subject to the ASC wage index") and
+# 90 FR 53887-53888 ("these prospective rates would not be subject to the ASC wage index adjustment ... we are finalizing
+# as proposed"), kept for CY 2027 (91 FR 70652: "at the same rate as is provided under the OPPS"). The contractor's ASC
+# fee files show it: its January 2026 files pay every S2 code one amount in four CBSAs whose wage indexes run from 0.8565
+# to 1.0022. ASCA's calculator (version 77) wage-adjusts them; the tables follow CMS.
 CMS_NOT_WAGE_ADJUSTED = ("S2",)
 CODE = re.compile(r"^[A-Z0-9]{5}$")
 MONTHS = {"Jan": "January", "Apr": "April", "Jul": "July", "Oct": "October"}

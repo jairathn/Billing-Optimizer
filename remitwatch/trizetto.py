@@ -555,7 +555,7 @@ def pull(conn, handle: Callable[[list[tuple]], dict], deadline: float, settings:
         out["seen_changed"] = out["hold_changed"] = True
     row = conn.execute("SELECT value FROM meta WHERE key=?", (HOSTKEY_META,)).fetchone()
     ses = Session(s, known=row[0] if row else None)
-    ses.arm(max(1.0, deadline - time.time()) + WATCHDOG_GRACE)
+    pass
     try:
         try:
             ses.__enter__()

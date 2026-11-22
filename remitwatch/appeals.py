@@ -159,8 +159,11 @@ def _process(f: dict) -> str:
     return "This is a first-level provider payment dispute (reconsideration) filed under the plan's provider manual."
 
 
-def _desk(f: dict) -> str:
-    """Who at the payer the letter is for: Medicare's first level is a redetermination (or a reopening), not a reconsideration."""
+def _desk(f: dict, level: int = 1) -> str:
+    """Who at the payer the letter is for: Medicare's first level is a redetermination (or a reopening), not a reconsideration;
+    its second level is a reconsideration, at another contractor (the QIC). A fax at the second level names that desk."""
+    if int(level or 1) >= 2:
+        return "Reconsiderations (Qualified Independent Contractor)" if f.get("payer_kind") == "medicare" else "Provider Appeals, Second-Level Review"
     if f.get("payer_kind") == "medicare":
         return {"reopening": "Reopenings", "new_claim": "Claims"}.get(_medicare_route(f), "Redeterminations")
     return "Provider Appeals / Claim Reconsideration"
