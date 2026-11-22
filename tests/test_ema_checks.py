@@ -260,6 +260,18 @@ def test_a_misnumbered_check_is_paired_with_its_835_and_c4_lists_neither(store, 
     assert ec.unposted_remits(store.conn, today=TODAY) == []
 
 
+def test_c1_counts_payments_posted_with_no_check_number_on_their_own_line(store, ledger, tmp_path):
+    rows = [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 60, posted=D(2026, 3, 10)), charge(F.link_no(2), patient=1),
+            pay(F.link_no(2), None, 45, patient=1, posted=D(2026, 3, 20)),
+            charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1))]
+    load(store, ledger, tmp_path, rows)
+    ec.classify_checks(store.conn)
+    s = ec.c1_summary(store.conn, "2026-03-01", "2026-03-31")
+    assert s["no_check_cents"] == 4500 and s["posted_cents"] == 10500
+    # the line is kept by whole months: a range that starts mid-month gives the same figure
+    assert ec.c1_summary(store.conn, "2026-03-25", "2026-03-31")["no_check_cents"] == 4500
+
+
 def test_c1_data_health_and_the_feed_gap_alert(store):
     c = store.conn
     remit(store, trace="000001", paid_on="2026-01-02", claims=[{"pcn": F.claim_id(50), "lines": [(S, "99213", 100, 10)]}])

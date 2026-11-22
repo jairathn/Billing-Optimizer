@@ -715,16 +715,19 @@ def c1_summary(conn: sqlite3.Connection, date_from: str | None = None, date_to: 
         cc["cents"] += cents
         p = out["payers"].setdefault(grp or "Unknown", {})
         p[key] = p.get(key, 0) + cents
-    # insurance payments EMA posted with no check number at all: no remittance can be matched to them
-    mw, margs = ["measure = 'ins_paid'"], []
+    # insurance payments EMA posted with no check number at all: no remittance can be matched to them. ema_months holds
+    # whole months, so both sides are taken over the whole months the range touches
+    mw, cw, margs = ["measure = 'ins_paid'"], ["first_posted IS NOT NULL"], []
     if date_from:
         mw.append("month >= ?")
+        cw.append("substr(first_posted, 1, 7) >= ?")
         margs.append(date_from[:7])
     if date_to:
         mw.append("month <= ?")
+        cw.append("substr(first_posted, 1, 7) <= ?")
         margs.append(date_to[:7])
     all_paid = conn.execute(f"SELECT COALESCE(SUM(cents), 0) FROM ema_months WHERE {' AND '.join(mw)}", margs).fetchone()[0]
-    on_checks = conn.execute(f"SELECT COALESCE(SUM(ins_paid), 0) FROM ema_checks WHERE {w}", args).fetchone()[0]
+    on_checks = conn.execute(f"SELECT COALESCE(SUM(ins_paid), 0) FROM ema_checks WHERE {' AND '.join(cw)}", margs).fetchone()[0]
     out["no_check_cents"] = (all_paid or 0) - (on_checks or 0)
     out["posted_cents"] = all_paid or 0
     return out
