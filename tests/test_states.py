@@ -722,3 +722,127 @@ def test_each_ema_outcome_gives_its_state(store, ledger, tmp_path, oc, extra, wa
         assert st["state_basis"].startswith("Not paid and nobody has worked it") and basis in st["state_basis"], st["state_basis"]
     else:
         assert st["state_basis"].startswith(basis), st["state_basis"]
+
+
+# ================================================================================================ the payer's own limit, the new signals, the archive's hints
+def test_the_payers_own_limit_keeps_an_item_open_past_its_safe_date(store):
+    """Detection keeps the safe date in appeal_deadline and the payer's own later limit in legal_deadline: an item expires
+    only 30 days past the later of the two."""
+    tk = denied(store)
+    item(store, appeal_deadline="2026-04-01", legal_deadline="2026-06-30", line_key=line_key(store, tk), claim_key=f"{tk}-0",
+         transaction_key=tk)
+    st = state(store, today="2026-05-10")
+    assert (st["work_state"], st["rule"], st["legal_deadline"]) == ("work_now", "open", "2026-06-30")
+    st = state(store, today="2026-08-05")
+    assert (st["work_state"], st["closed_on"], st["closed_basis"]) == ("expired", "2026-06-30", "the payer's own limit")
+    assert st["state_basis"].startswith("Every window closed (the last on Jun 30, 2026) more than 30 days ago")
+
+
+def test_a_credit_balance_is_a_refund_to_decide_and_never_expires(store):
+    item(store, signal="CREDIT_BALANCE", category="refund", payer_group="Medicare Part B", payer_kind="medicare", carc=None,
+         expected_cents=4500, shortfall_cents=4500, appeal_deadline="2026-05-30", deadline_basis="Medicare expects it back within 60 days",
+         evidence={"credit_cents": 4500, "overpaid_by": "Medicare Part B"})
+    for today in ("2026-05-03", "2027-01-15"):
+        st = state(store, today=today)
+        assert (st["work_state"], st["rule"], st["appeal_block"], st["credit_cents"]) == ("work_now", "credit_refund", "credit", 4500)
+    assert st["state_basis"] == ("EMA shows a credit of $45.00 on this claim: Medicare Part B paid more than it was owed; decide refund or "
+                                 "recoupment (owner). Medicare expects it back by May 30, 2026.")
+
+
+def _secondary_world(store, ledger, tmp_path, *, paid_by_second=False, crossover=False, answered_again=False):
+    """Blue Cross paid $80 on 99213 and left $20 of coinsurance; the second plan on file (Testcare) was never billed, and EMA
+    wrote the $20 off. paid_by_second: Testcare's $20 posted later. answered_again: Blue Cross sent the same answer again on
+    a later remittance (its own money, never the second payer's)."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+        "lines": [ln("99213", 150, 80, [("CO", "45", 50), ("PR", "2", 20)], lcn="1")]}])
+    if answered_again:
+        remit(store, trace=F.check_no(3), paid_on="2026-04-15", claims=[{"pcn": F.claim_id(1, sub=2), "pccn": "PCN-B", "received": "2026-04-01",
+            "lines": [ln("99213", 150, 80, [("CO", "45", 50), ("PR", "2", 20)], lcn="1")]}])
+    second = er.payer_group_of(store.conn, P["commercial"])[0]
+    item(store, signal="SECONDARY_NOT_BILLED", category="denial", actionable="review", carc=None, paid_cents=8000, expected_cents=2000,
+         shortfall_cents=2000, appeal_deadline="2026-09-24", deadline_basis=f"{second}'s filing limit", line_key=line_key(store, tk),
+         claim_key=f"{tk}-0", transaction_key=tk,
+         evidence={"first_payer": BCBS, "second_payer": second, "share": "coinsurance", "crossover": crossover, "ema_wrote_off_share": True})
+    rows = [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 80), adj(F.link_no(1), "CO-45", 50, contractual=True),
+            adj(F.link_no(1), "OA-23", 20)]
+    if paid_by_second:
+        rows.append(pay(F.link_no(1), "SEC01", 20, posted=D(2026, 4, 20), payer=P["commercial"]))
+    load(store, ledger, tmp_path, rows + [later()])
+    return second
+
+
+def test_a_second_payer_never_billed_is_work_now_until_it_pays_and_the_first_payers_money_never_closes_it(store, ledger, tmp_path):
+    second = _secondary_world(store, ledger, tmp_path, answered_again=True)
+    st = state(store)
+    # EMA's line is settled at $0 (the share written off) and the first payer paid more than the $20: no denial rule closes it
+    assert (st["work_state"], st["rule"]) == ("work_now", "open") and st["proof"] is None
+    assert st["state_basis"].startswith(f"Nothing from {second} on file: bill it for the share the first payer left;")
+    assert st["state_basis"].endswith("; act by Sep 24, 2026")
+
+
+def test_a_second_payer_that_paid_closes_it(store, ledger, tmp_path):
+    second = _secondary_world(store, ledger, tmp_path, paid_by_second=True)
+    st = state(store)
+    assert (st["work_state"], st["rule"]) == ("done", "second_payer_paid")
+    assert st["state_basis"] == (f"Paid by {second}: EMA shows $20.00 from it from Apr 20, 2026 (check ending EC01), against the $20.00 the "
+                                 "first payer left")
+
+
+def test_contractual_denials_the_owner_accepted_are_accepted(store):
+    item(store, signal="EMA_DENIAL_AS_CONTRACTUAL", category="contract", carc="97", expected_cents=None, shortfall_cents=None,
+         evidence={"reason": "CO-97", "top_codes": [["17311", 120000], ["17312", 30000]], "written_off_cents": 150000})
+    assert (state(store)["work_state"], state(store)["rule"]) == ("work_now", "owner_decision")
+    pol = {f"{BCBS}|17311||CO-97": {"decision": "accept", "by": "Owner One", "at": "2026-04-02T10:00:00"}}
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:writeoff_policy', ?)", (json.dumps(pol),))
+    store.conn.commit()
+    assert state(store)["rule"] == "owner_decision"                  # one of its two codes accepted: still the owner's
+    pol[f"{BCBS}|||CO-97"] = {"decision": "accept", "by": "Owner One", "at": "2026-04-03T10:00:00"}
+    store.conn.execute("UPDATE meta SET value=? WHERE key='ema:writeoff_policy'", (json.dumps(pol),))
+    store.conn.commit()
+    st = state(store)
+    assert (st["work_state"], st["rule"]) == ("accepted", "policy")
+    assert st["state_basis"] == f"The owner's write-off policy accepts {BCBS}|||CO-97 (set by Owner One on Apr 3, 2026)"
+
+
+def test_the_archive_rules_hints_decide_a_proven_done_and_a_waiting_and_never_close_a_likely_one(store):
+    tk = denied(store)
+    proof = [{"date": "2026-03-28", "source": "835", "kind": "payment", "text": "Paid $90.00 on the claim's other copy", "decisive": True}]
+    hint = {"rule": "same_day_answers", "reclass": "answered_same_day", "label": "Answered on another claim the same day",
+            "hint": "The same remittance paid this line on the claim's other copy.", "state_hint": "done", "strength": "proven", "proof": proof}
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, evidence={"archive_rule": hint})
+    st = state(store)
+    assert (st["work_state"], st["rule"]) == ("done", "archive_answered_same_day")
+    assert st["state_basis"] == "Answered on another claim the same day: the same remittance paid this line on the claim's other copy"
+    assert st["evidence"][0]["text"] == "Paid $90.00 on the claim's other copy"
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, evidence={"archive_rule": dict(hint, strength="likely")})
+    st = state(store)
+    assert (st["work_state"], st["rule"]) == ("work_now", "open")
+    assert "Answered on another claim the same day: the same remittance paid this line on the claim's other copy; check it before" in st["state_basis"]
+    rev = {"rule": "same_day_answers", "reclass": "reversed_no_answer", "label": "Reversed by the payer, no new answer yet",
+           "hint": "Blue Cross reversed this payment on 2026-04-10 and no new answer is on file.", "state_hint": "waiting", "strength": "proven",
+           "proof": [{"date": "2026-04-10", "source": "835", "kind": "reversal", "text": "reversal", "decisive": True}]}
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, evidence={"archive_rule": rev})
+    st = state(store, today="2026-04-20")
+    # no answers on file to measure: the 45-day default from the reversal
+    assert (st["work_state"], st["rule"], st["follow_up_on"], st["appeal_block"]) == ("waiting", "archive_waiting", "2026-05-25", "waiting")
+    st = state(store, today="2026-06-01")
+    assert (st["work_state"], st["rule"], st["follow_up_on"]) == ("work_now", "follow_up_due", "2026-05-25")
+
+
+def test_work_first_seen_on_a_later_production_report_waits_for_the_payers_answer(store, ledger, tmp_path):
+    """Two pulls: the first Production report has no claim action on the line; the next one, three weeks later, shows
+    'Initial Appeal Electronic'. The appeal is dated by the report that first showed it, so the item waits for the payer's
+    answer, then turns back to work now."""
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Denied"), pay(F.link_no(1), F.check_no(1), 0, status="Denied"), later()])
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Denied", action="Initial Appeal Electronic"),
+                                   pay(F.link_no(1), F.check_no(1), 0, status="Denied", action="Initial Appeal Electronic"),
+                                   later(posted=D(2026, 5, 20))])
+    st = state(store, today="2026-05-25")
+    work = [e for e in states.work_evidence(store.conn, dict(store.conn.execute("SELECT * FROM findings").fetchone())) if e["kind"] == "appeal"]
+    assert work and work[0]["dated_by"] == "first_seen", work
+    assert (st["work_state"], st["rule"]) == ("waiting", "work_waiting"), st["state_basis"]
+    assert st["follow_up_on"] > "2026-05-25" and "first seen on the Production report of" in st["state_basis"]
+    st = state(store, today=states._add(st["follow_up_on"], 1))
+    assert (st["work_state"], st["rule"]) == ("work_now", "follow_up_due")

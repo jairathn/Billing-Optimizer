@@ -62,6 +62,7 @@ INFO_ONLY = ("MIPS_ADJUSTMENT", "SEQUESTRATION")
 CONTRACT = ("CONTRACT_RATE_GAP", "MA_BELOW_MEDICARE", "MPPR_POLICY", "CHARGE_BELOW_RATE", "SECOND_RATE",
             "EMA_DENIAL_AS_CONTRACTUAL", "G2211_DENIED")
 FEES = ("FEE_SKIM", "TAKEBACK")
+OWN_RULES = ("SECONDARY_NOT_BILLED", "CREDIT_BALANCE")    # items whose money no denial rule judges: they have their own
 DUP_CARCS = frozenset({"18", "B13"})
 SHORT = ("downcoding", "underpayment")
 PATIENT_SHARE = frozenset({"1", "2", "3"})               # PR deductible, coinsurance, copay: the patient's share
@@ -1247,6 +1248,24 @@ def _deadline(f: dict) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _last_window(f: dict, deadline: str | None) -> str | None:
+    """The last day any window is open: the item's safe deadline, or the payer's own limit when detection found a later
+    one (legal_deadline). An item expires only past this, plus the grace."""
+    legal = str(f.get("legal_deadline") or "")[:10]
+    if legal and (not deadline or legal > str(deadline)):
+        return legal
+    return deadline
+
+
+def _archive_hint(f: dict) -> dict | None:
+    """What the 835 archive's rules (remitwatch.archive_rules, before save) said of the item: evidence['archive_rule']
+    with a state_hint ('done', 'work_now', 'waiting') and a strength ('proven', 'likely'), or None."""
+    a = _ev(f).get("archive_rule")
+    if not isinstance(a, dict) or a.get("state_hint") not in ("done", "work_now", "waiting"):
+        return None
+    return a
+
+
 def _ema_line_totals(fx: dict) -> dict:
     t = {"charges": 0, "ins_paid": 0, "contractual": 0, "noncontractual": 0, "pat_paid": 0, "pat_adj": 0, "balance": 0, "n": 0,
          "several": False, "facility": False}
@@ -1507,13 +1526,15 @@ def _decide(fx: dict, today: str) -> dict:
                  "credit_cents": 0, "closed_on": None, "closed_basis": None}
     deadline, dbasis = _deadline(f)
     res["deadline"], res["deadline_basis"] = deadline, dbasis
+    lastw = _last_window(f, deadline)       # expiry counts from the payer's own limit when it is later than the safe date
+    res["legal_deadline"] = lastw if lastw != deadline else None
 
     def put(state: str, rule: str, basis: str, rows: list | None = None, follow: str | None = None) -> dict:
         res.update(work_state=state, rule=rule, state_basis=basis[:300], follow_up_on=follow)
         res["evidence"] = list(rows or [])
         return res
-    proof = paid_proof(fx) if (cat in MONEY or sig in EMA_ONLY) else None
-    credit = credit_of(fx) if cat in MONEY else 0
+    proof = paid_proof(fx) if (cat in MONEY or sig in EMA_ONLY) and sig not in OWN_RULES else None
+    credit = credit_of(fx) if cat in MONEY and sig not in OWN_RULES else 0
     res["proof"], res["credit_cents"] = proof, credit
     reproc = any(x["status"] == "22" and (x["date"] or "") > (f.get("payment_date") or "") for x in fx["r835"]["rows"])
     # ------------------------------------------------------------------ a person's status wins
@@ -1557,16 +1578,33 @@ def _decide(fx: dict, today: str) -> dict:
     # ------------------------------------------------------------------ automatic states
     if sig in INFO_ONLY:
         return put("accepted", "info_only", "For information: nothing to recover")
+    if sig == "EMA_DENIAL_AS_CONTRACTUAL":
+        pol, pats = _c7_policy(f, ctx)
+        if pol:
+            return put("accepted", "policy", f"The owner's write-off policy accepts {pats}" + (f" (set by {pol.get('by')} on {day(pol.get('at'))})"
+                                                                                             if pol.get("by") else ""))
     if sig in CONTRACT:
         return put("work_now", "owner_decision", "A contract or billing-policy question for the owner, not a claim to appeal")
     if sig in FEES:
-        if deadline and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"):
-            res["closed_on"], res["closed_basis"] = deadline, dbasis
-            return put("expired", "expired", f"The payer's window to dispute it closed on {day(deadline)}, more than {EXPIRE_GRACE_DAYS} days ago")
+        if lastw and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"):
+            res["closed_on"], res["closed_basis"] = lastw, dbasis
+            return put("expired", "expired", f"The payer's window to dispute it closed on {day(lastw)}, more than {EXPIRE_GRACE_DAYS} days ago")
         return put("work_now", "fees", "A takeback to match to the payer's overpayment letter, and to dispute if it was not owed"
                    if sig == "TAKEBACK" else "A payment fee the payer's vendor took: ask for standard EFT with no fee")
     if sig == "REMIT_NOT_POSTED":
         return put("work_now", "post_payment", "The 835 paid this and EMA has not posted it: post it in EMA")
+    if sig == "CREDIT_BALANCE":
+        e = _ev(f)
+        res["appeal_block"] = "credit"
+        res["credit_cents"] = int(e.get("credit_cents") or f.get("shortfall_cents") or 0)
+        due = f" Medicare expects it back by {day(deadline)}." if deadline and f.get("payer_kind") == "medicare" else ""
+        return put("work_now", "credit_refund", f"EMA shows a credit of {usd(res['credit_cents'])} on this claim: {e.get('overpaid_by') or 'someone'} "
+                                                f"paid more than it was owed; decide refund or recoupment (owner).{due}")
+    if sig == "SECONDARY_NOT_BILLED":
+        got = _second_payer_paid(fx)
+        if got:
+            res["proof"] = got
+            return put("done", got["rule"], got["text"], [{"source": got["source"], "kind": "proof", "date": got.get("date"), "text": got["text"]}])
     if proof and not credit and proof["rule"] != "moved_to_patient_open":
         res["appeal_block"] = "paid"
         rows = [{"source": proof["source"], "kind": "proof", "date": proof.get("date"), "text": proof["text"]}]
@@ -1600,6 +1638,11 @@ def _decide(fx: dict, today: str) -> dict:
                or (e["kind"] in ("appeal", "corrected", "records", "reprocess", "secondary", "call", "resubmitted")
                    and e.get("dated_by") == "first_report")]
     work_ev = [e for e in work_ev if not (e["source"] == "remitwatch" and reopened and (e.get("date") or "") <= reopened)]
+    if sig == "SECONDARY_NOT_BILLED":
+        # only work that reached the second payer counts: the first payer answering again is not that work
+        second = _ev(f).get("second_payer")
+        work_ev = [e for e in work_ev if e["kind"] in ("secondary", "sent", "fax", "call")
+                   or (e["kind"] == "resubmitted" and second and _same_payer(e.get("payer_group"), second))]
     if work_ev and (cat in MONEY or sig in EMA_ONLY):
         # work with a known date first: an undated note or action (dated only by the first report that showed it) most
         # often records the same work a payer's received date or a person's mark dates exactly
@@ -1609,17 +1652,31 @@ def _decide(fx: dict, today: str) -> dict:
                 "secondary": "secondary", "call": "call", "sent": "sent", "fax": "fax"}.get(last["kind"], "appeal")
         # work whose own date nobody knows (already in the first report) cannot hold an item past every window: nothing
         # shows it was done in time, or that anything is still pending (C59)
-        if all(e.get("dated_by") == "first_report" for e in work_ev) and deadline \
-                and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"):
-            res["closed_on"], res["closed_basis"] = deadline, dbasis
-            return put("expired", "expired", f"Every window closed (the last on {day(deadline)}) more than {EXPIRE_GRACE_DAYS} days ago. "
+        if all(e.get("dated_by") == "first_report" for e in work_ev) and lastw \
+                and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"):
+            res["closed_on"], res["closed_basis"] = lastw, (dbasis if lastw == deadline else "the payer's own limit")
+            return put("expired", "expired", f"Every window closed (the last on {day(lastw)}) more than {EXPIRE_GRACE_DAYS} days ago. "
                                              f"{last['text']}; nothing shows that work was done in time or is still pending", [last])
         return _follow(res, fx, ev, last.get("date"), work, last["text"], today, deadline, confirmed=bool(last.get("confirmed")),
                        conflict="", person=False, put=put, ev_row=last)
+    hint = _archive_hint(f)
+    if hint and hint["state_hint"] == "done" and hint.get("strength") == "proven" and not credit:
+        rows = [{"source": r.get("source") or "835", "kind": r.get("kind") or "proof", "date": r.get("date"), "text": r.get("text")}
+                for r in hint.get("proof") or [] if r.get("decisive")]
+        return put("done", "archive_" + str(hint.get("reclass") or hint.get("rule") or "rule"),
+                   _hint_text(hint) or "The 835 archive shows it settled", rows)
+    if hint and hint["state_hint"] == "waiting":
+        since = max((str(r.get("date") or "")[:10] for r in hint.get("proof") or [] if r.get("date")), default="") or f.get("payment_date")
+        follow = _add(since, _wait_of(fx, "claim", None)) if since else None
+        basis = _hint_text(hint) or "The payer reversed its answer and has not answered again"
+        if follow and follow >= today:
+            res["appeal_block"] = "waiting"
+            return put("waiting", "archive_waiting", basis + f"; check on {day(follow)} if no new answer comes", follow=follow)
+        return put("work_now", "follow_up_due", basis + f"; no new answer by {day(follow)}: ask the payer where it stands", follow=follow)
     # past every window
-    if deadline and (cat in MONEY or sig in EMA_ONLY) and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"):
-        res["closed_on"], res["closed_basis"] = deadline, dbasis
-        return put("expired", "expired", f"Every window closed (the last on {day(deadline)}) more than {EXPIRE_GRACE_DAYS} days ago, "
+    if lastw and (cat in MONEY or sig in EMA_ONLY) and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"):
+        res["closed_on"], res["closed_basis"] = lastw, (dbasis if lastw == deadline else "the payer's own limit")
+        return put("expired", "expired", f"Every window closed (the last on {day(lastw)}) more than {EXPIRE_GRACE_DAYS} days ago, "
                                          "with no work pending")
     # no source can show the answer
     cc = _cant_check(fx, today)
@@ -1668,8 +1725,9 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
             ar_ = appeal_rule(ag, ak)
             closes = _add(a["date"], ar_["days"])
             other = bool(ag) and bool(grp) and not _same_payer(ag, grp)
+            lastw = _last_window(f, deadline)
             if closes and today > (_add(closes, EXPIRE_GRACE_DAYS) or "9999") and (
-                    other or (deadline and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"))):
+                    other or (lastw and today > (_add(lastw, EXPIRE_GRACE_DAYS) or "9999"))):
                 res["appeal_block"] = None
                 res["closed_on"], res["closed_basis"] = closes, ar_["label"]
                 return put("expired", "expired", f"{lead}. {ag or 'The payer'}'s window to dispute that answer closed on {day(closes)}, more "
@@ -1754,6 +1812,57 @@ def _covered(ctx: dict, svc: Any) -> bool:
     return any(b.get("scope") == "posted" for b in ctx.get("boxes") or [])
 
 
+def _hint_text(hint: dict) -> str:
+    """The archive rule's label and sentence as one basis ("Already paid by this payer, denied again: ...")."""
+    label, text = str(hint.get("label") or "").strip(), str(hint.get("hint") or "").strip().rstrip(".")
+    return (f"{label}: {_lower(text)}" if label and text else (label or text))[:240]
+
+
+def _lower(t: str) -> str:
+    return t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t
+
+
+def _second_payer_paid(fx: dict) -> dict | None:
+    """A SECONDARY_NOT_BILLED item the second payer (or the patient) settled: EMA shows its payment after the first payer's
+    remittance for at least half of what was owed."""
+    f = fx["item"]
+    e = _ev(f)
+    owed = int(f.get("shortfall_cents") or 0)
+    second = e.get("second_payer")
+    since = f.get("payment_date") or ""
+    if owed <= 0:
+        return None
+    pays = [p for p in fx["ema"]["pays"] if (p["cents"] or 0) > 0 and (p["posted"] or "") >= since
+            and second and _same_payer(p.get("group") or row_group({"payer": p.get("payer")})[0], second)]
+    cents = sum(p["cents"] for p in pays)
+    if cents * 2 >= owed:
+        p0 = pays[0]
+        return {"rule": "second_payer_paid", "cents": cents, "date": p0["posted"], "payer": p0["payer"], "check_tail": p0["check_tail"],
+                "source": "production", "text": f"Paid by {second}: EMA shows {usd(cents)} from it from {day(p0['posted'])} (check ending "
+                                                f"{p0['check_tail'] or '?'}), against the {usd(owed)} the first payer left"}
+    tot = _ema_line_totals(fx)
+    if tot["n"] and tot["pat_paid"] * 2 >= owed and tot["balance"] <= 0:
+        return {"rule": "moved_to_patient", "cents": 0, "date": None, "payer": None, "source": "production",
+                "text": f"Settled by the patient: EMA shows {usd(tot['pat_paid'])} paid by the patient and the line closed"}
+    return None
+
+
+def _c7_policy(f: dict, ctx: dict) -> tuple[dict | None, str]:
+    """The owner's 'accept' for a C7 item (a payer group x reason): the group-wide pattern 'group|||reason', or every top
+    code's pattern 'group|code||reason' accepted."""
+    pol = ctx.get("policy") or {}
+    e = _ev(f)
+    grp, reason = f.get("payer_group") or "", str(e.get("reason") or f.get("carc") or "")
+    wide = pol.get(f"{grp}|||{reason}")
+    if wide and wide.get("decision") == "accept":
+        return wide, f"{grp}|||{reason}"
+    codes = [c for c, _v in e.get("top_codes") or []]
+    got = [pol.get(f"{grp}|{c}||{reason}") for c in codes]
+    if codes and all(g and g.get("decision") == "accept" for g in got):
+        return got[0], ", ".join(f"{grp}|{c}||{reason}" for c in codes)
+    return None, ""
+
+
 def _open_basis(fx: dict) -> str:
     f = fx["item"]
     o = fx.get("outcome") or {}
@@ -1770,10 +1879,16 @@ def _open_basis(fx: dict) -> str:
              "paid_after_other": "another payer paid part of it since",
              "paid_before": "EMA shows the line paid before this denial: check whether the denial still matters",
              "open": "EMA shows it open", "action": "EMA shows a claim action on it"}
+    second = _ev(f).get("second_payer") or "the second payer"
     head = {"NO_ANSWER": "No answer from the payer on file", "REJECTED_PRE_PAYER": "Never reached the payer",
-            "NOT_SENT": "Never left EMA", "EMA_DENIED": "Denied in EMA, no remittance on file"}.get(f.get("signal") or "",
-                                                                                                   "Not paid and nobody has worked it")
+            "NOT_SENT": "Never left EMA", "EMA_DENIED": "Denied in EMA, no remittance on file",
+            "SECONDARY_NOT_BILLED": f"Nothing from {second} on file: bill it for the share the first payer left"}.get(f.get("signal") or "",
+                                                                                                                 "Not paid and nobody has worked it")
     tail_ = f"; {words[oc]}" if oc in words else ""
+    hint = _archive_hint(f)
+    if hint and f.get("signal") not in CLAIM_SIGNALS and _hint_text(hint):
+        # the 835 archive's reading of the item (a likely 'done' is never done without a person: check it first)
+        tail_ = "; " + _hint_text(hint) + ("; check it before working the item" if hint["state_hint"] == "done" else "") + tail_
     return head + tail_ + (f"; act by {day(deadline)}" if deadline else "")
 
 

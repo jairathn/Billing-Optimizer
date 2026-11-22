@@ -751,7 +751,8 @@ def test_an_upload_read_by_a_run_that_died_before_its_saves_stays_in_intake_and_
     it in intake/, and the next run repairs the store and finds the file read ('already'), never twice."""
     root, client, state = vercel
     monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
-    cycle(state, client)                                       # the first load: a store in the state folder
+    write(root / DATA / "Reports" / "AR 2026.xlsx", F.ar_xlsx(ar_rows()))
+    cycle(state, client)                    # the first load, with an A/R: a store in the state folder, with its key salt
     data = F.production_csv(prod_rows())
     pair = _pair(root / "RemitWatch-state" / "intake", "2026 Production.csv", data, gz=True)
     real_save = cloud.save_raw
@@ -771,8 +772,10 @@ def test_an_upload_read_by_a_run_that_died_before_its_saves_stays_in_intake_and_
     assert json.loads(state.get(f"intake/done/{pair}.json"))["result"]["status"] in ("already", "applied")
     conn = state_store(state)
     assert catalog(conn)[sha(data)] == "current"
-    origin, kind = conn.execute("SELECT origin, source_kind FROM ema_report_files WHERE file_id=?", (sha(data),)).fetchone()
-    assert json.loads(origin)["state_path"] == f"intake/done/{pair}" and kind == "upload"      # the kept copy is known again
+    origin, kind, why = conn.execute("SELECT origin, source_kind, status_reason FROM ema_report_files WHERE file_id=?",
+                                     (sha(data),)).fetchone()
+    assert why.startswith("Restored from the posting ledger")                   # the row came back from the ledger ...
+    assert json.loads(origin)["state_path"] == f"intake/done/{pair}" and kind == "upload"      # ... with its kept copy
     h = el.LedgerHandle(state, tmp_dir=str(root.parent / "look"))
     try:
         assert h.open().conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 12       # read once, never twice

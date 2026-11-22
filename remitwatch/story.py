@@ -676,6 +676,28 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
                        "not_found": "this line is not tied to its EMA claim", "shared_line": "the claim carries this code more than once"}.get(
                     o.get("outcome") or "", "EMA's postings for this line are not on file here")
                 out["checks"].append({"source": "production", "agrees": None, "why": why})
+        elif any(not x.get("line_key") for x in own):
+            # a whole-claim answer with no service lines: the claim's own money balances instead
+            x = max((r for r in own if not r.get("line_key") and r["status"] != "22"), default=None,
+                    key=lambda r: (r["date"] or "", r.get("claim_key") or "")) or max(
+                (r for r in own if not r.get("line_key")), key=lambda r: (r["date"] or "", r.get("claim_key") or ""))
+            co = sum(a for g, c, a in x["cadj"] if g == "CO" and c in ("45", "253", "144", "59", "131", "94", "237", "2", "23"))
+            pr = sum(a for g, c, a in x["cadj"] if g == "PR")
+            other = sum(a for g, c, a in x["cadj"]) - co - pr
+            charge, paid = x.get("claim_charge") or 0, x.get("claim_paid") or 0
+            out.update(basis="835_claim", as_of=x["date"], charge_cents=charge, insurer_paid_cents=paid, contractual_cents=co,
+                       written_off_cents=0, patient_paid_cents=0)
+            out["patient_owes_cents"], out["denied_cents"] = pr, other
+            out["open_cents"] = charge - paid - co - pr
+            gap = charge - paid - sum(a for _g, _c, a in x["cadj"])
+            out["checks"].append({"source": "835", "agrees": gap == 0})
+            if gap:
+                gaps.append((gap, f"the 835's answer of {day(x['date'])} to the whole claim does not balance: billed {usd(charge)}, paid "
+                                  f"{usd(paid)}, adjusted {usd(sum(a for _g, _c, a in x['cadj']))}"))
+        elif (f.get("signal") or "") in S.CLAIM_SIGNALS and (f.get("charge_cents") or 0) > 0:
+            # no payer answered the claim and no EMA posting is tied to it: all of its charge is open
+            out.update(basis="unanswered", as_of=None, charge_cents=f["charge_cents"], open_cents=f["charge_cents"])
+            out["checks"].append({"source": "production", "agrees": None, "why": "no EMA posting is tied to this claim"})
         else:
             out["basis"] = "none"
     out["gap_cents"] = sum(g for g, _w in gaps)
@@ -699,6 +721,13 @@ def _balance_text(b: dict) -> str:
         head = (f"Charge {usd(b['charge_cents'])} = paid {usd(b['insurer_paid_cents'])} + contractual {usd(b['contractual_cents'])} + "
                 f"patient's share {usd(b.get('patient_owes_cents'))} + denied {usd(b.get('denied_cents'))} (the 835 of {day(b['as_of'])}; "
                 "EMA's postings for it are not on file).")
+    elif b["basis"] == "835_claim":
+        head = (f"Claim charge {usd(b['charge_cents'])} = paid {usd(b['insurer_paid_cents'])} + contractual {usd(b['contractual_cents'])} + "
+                f"patient's share {usd(b.get('patient_owes_cents'))} + denied {usd(b.get('denied_cents'))} (the 835 of {day(b['as_of'])} "
+                "answered the whole claim; EMA's postings for it are not on file).")
+    elif b["basis"] == "unanswered":
+        return (f"Charge {usd(b['charge_cents'])}, all of it open: no payer's answer to this claim is on file, and no EMA posting is tied "
+                "to it.")
     else:
         return "No line of money to balance: this item is about a payer, a rate or a fee, not one service."
     if b["reconciles"]:
@@ -1049,10 +1078,15 @@ def _clean(s: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", s).strip()
 
 
-def _window(deadline: str | None, today: str) -> str:
+def _window(deadline: str | None, today: str, legal: str | None = None) -> str:
+    """The appeal window in one sentence. legal: the payer's own limit when detection found it later than the safe date."""
     if not deadline:
         return ""
-    return f" You can still appeal until {day(deadline)}." if deadline >= today else f" The appeal window closed on {day(deadline)}."
+    if deadline >= today:
+        return f" You can still appeal until {day(deadline)}."
+    if legal and legal >= today:
+        return f" The safe date to appeal passed on {day(deadline)}; the payer's own limit is {day(legal)}, so it can still be sent."
+    return f" The appeal window closed on {day(legal if legal and legal > deadline else deadline)}."
 
 
 def _same_day_lines(conn: sqlite3.Connection, f: dict) -> list[dict]:
@@ -1140,7 +1174,7 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
     sig = f.get("signal") or ""
     deadline = st.get("deadline")
     ns: list[int] = []
-    window = _window(deadline, today)
+    window = _window(deadline, today, st.get("legal_deadline"))
     resolved = str(o.get("status") or "").lower().startswith("resolved") or o.get("status_class") in ("paid", "settled")
     carcs = _carcs(fx)
     wo = usd(o.get("written_off") or o.get("contractual_routine"))
@@ -1269,7 +1303,7 @@ def _short_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, t
         ns += en
         ema = f" A person wrote the difference off in EMA on {day(o.get('outcome_on'))} {_refs(en)}."
     chk = _short_check(conn, fx)
-    window = _window(st.get("deadline"), today)
+    window = _window(st.get("deadline"), today, st.get("legal_deadline"))
     if chk and chk["kind"] == "reduced":
         return (f"Check first: {chk['text']}. {head}{ema}", ns, "inferred", "a same-day procedure or the facility rate may explain the cut")
     if chk and chk["kind"] == "top_cut":
@@ -1298,7 +1332,7 @@ def _cob_sentence(fx: dict, story: dict, st: dict, today: str) -> tuple[str, lis
         parts.append(f"The patient has paid {usd(pat)} on this line.")
     if rev and tot["n"] and tot["balance"] <= 0:
         parts.append("EMA never posted the reversal, so it still shows the line settled.")
-    parts.append("This is a task to find the plan that pays first, not an appeal." + _window(st.get("deadline"), today))
+    parts.append("This is a task to find the plan that pays first, not an appeal." + _window(st.get("deadline"), today, st.get("legal_deadline")))
     return " ".join(parts), ns, "one_source", None
 
 
@@ -1590,8 +1624,8 @@ def _timely_proof(conn: sqlite3.Connection, f: dict, fx: dict) -> dict:
 
 
 def _route_for(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> str:
-    """The kind of work the item takes: appeal, corrected, call, post, bill_patient, refund, contract, fees, eob_first,
-    cob, rate, decide, wait, nothing."""
+    """The kind of work the item takes: appeal, corrected, call, post, bill_patient, bill_secondary, refund, contract, fees,
+    eob_first, cob, rate, decide, wait, nothing."""
     state = st["work_state"]
     sig = f.get("signal") or ""
     if state in ("done", "accepted", "expired"):
@@ -1601,10 +1635,12 @@ def _route_for(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> str:
     if state == "cant_check":
         return "call"
     rule = st.get("rule") or ""
-    if rule == "credit_refund":
+    if rule == "credit_refund" or sig == "CREDIT_BALANCE" or f.get("category") == "refund":
         return "refund"
     if rule == "bill_patient":
         return "bill_patient"
+    if sig == "SECONDARY_NOT_BILLED" and rule in ("open", "stored"):
+        return "bill_secondary"         # a stored state on the dashboard's copy keeps the signal's own work
     if rule in ("work_answered", "work_stale", "follow_up_due", "forwarded_late"):
         return "call"
     if rule == "post_payment" or sig == "REMIT_NOT_POSTED":
@@ -1778,8 +1814,9 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         who = "Billing lead; owner decides"
         buttons += ["copy_instructions", "log_outcome"]
         expected = 0
-        deadline = None
-        basis = "Commercial plans usually ask for an identified overpayment back within 30 days; Medicare within 60 days of finding it"
+        if not (sig == "CREDIT_BALANCE" and deadline):
+            deadline = None
+            basis = "Commercial plans usually ask for an identified overpayment back within 30 days; Medicare within 60 days of finding it"
     elif route == "bill_patient":
         pr = proof.get("patient_cents") or bal.get("open_cents") or 0
         owed = bal.get("open_cents") if (bal.get("open_cents") or 0) > 0 else pr
@@ -1790,6 +1827,29 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         who = "Patient accounts"
         buttons += ["mark_billed", "copy_instructions"]
         expected = max(0, bal.get("open_cents") or 0)
+    elif route == "bill_secondary":
+        ev = S._ev(f)
+        second = ev.get("second_payer") or "the second payer"
+        first_payer = ev.get("first_payer") or grp
+        owed = int(f.get("shortfall_cents") or 0)
+        share = ev.get("share") or "the patient's share"
+        if ev.get("crossover"):
+            action = (f"Ask {second} for its payment: {first_payer} paid on {day(f.get('payment_date'))} and forwarded the claim, and nothing from "
+                      f"{second} is on file ({usd(owed)}, {share}).")
+            steps.append(f"Check {second}'s portal or call about the claim; if it has no record of it, bill it from EMA with {first_payer}'s "
+                         "remittance attached.")
+        else:
+            action = (f"Bill {second} for {usd(owed)} ({share}): {first_payer} paid on {day(f.get('payment_date'))} and left it, and {second} is "
+                      "on file and was never billed.")
+            steps.append(f"Send the claim to {second} from EMA with {first_payer}'s remittance (its EOB) attached"
+                         + (f", before {day(deadline)}" if deadline else "") + "; keep the acceptance report as proof of timely filing.")
+        if ev.get("ema_wrote_off_share"):
+            steps.append(f"EMA wrote the share off: reverse that write-off so the line shows {usd(owed)} open until {second} answers.")
+        if f.get("payer_kind") == "medicaid" or ev.get("second_payer_kind") == "medicaid":
+            steps.append("Medicaid pays last: never bill the patient for what Medicaid covers.")
+        who = "Biller"
+        buttons += ["copy_instructions", "mark_billed"]
+        expected = owed
     elif route == "post":
         ev = S._ev(f)
         action = (f"Post the payment in EMA: {grp} paid {usd(f.get('shortfall_cents'))} on {day(f.get('payment_date'))} "
@@ -1881,9 +1941,18 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             steps.append(rs)
         if deadline:
             left = S._days(t, deadline)
-            if left is not None and left < 0:
-                action = (f"The window closed on {day(deadline)}, {-left} days ago ({_short(basis)}). File today only if the payer counts it "
-                          "from a later date (some count from when the remittance was received); otherwise mark it Lost. " + action)
+            legal = st.get("legal_deadline")
+            if left is not None and left < 0 and legal and legal >= t:
+                lleft = S._days(t, legal) or 0
+                action = (f"The safe date passed on {day(deadline)}, but {grp}'s own limit is {day(legal)} ({lleft} day{'s' if lleft != 1 else ''} "
+                          "left): send it now. " + action)
+            elif left is not None and left < 0:
+                closed = legal if legal and legal > deadline else deadline
+                gone = -(S._days(t, closed) or 0)
+                closed_why = _short(basis) if closed == deadline else "the payer's own limit"
+                action = (f"The window closed on {day(closed)}, {gone} days ago ({closed_why}). "
+                          "File today only if the payer counts it from a later date (some count from when the remittance was received); otherwise "
+                          "mark it Lost. " + action)
                 if "let_go" not in buttons:
                     buttons.append("let_go")
             elif left is not None and left <= 7:
@@ -1907,8 +1976,9 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                      "A single item is let go only by a person, with a reason.")
     if st["work_state"] == "work_now" and "let_go" not in buttons:
         buttons.append("let_go")
+    last_day = max(d for d in (deadline, st.get("legal_deadline")) if d) if (deadline or st.get("legal_deadline")) else None
     appeal_ok = route in ("appeal", "rate") and st["work_state"] == "work_now" and not appeal_block and not (
-        deadline and deadline < t)
+        last_day and last_day < t)
     instructions = _instructions(f, fx, action, steps, needs, deadline, basis)
     btn = []
     for b in buttons:

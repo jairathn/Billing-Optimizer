@@ -17,8 +17,8 @@ import pytest
 from remitwatch import cloud, ema_checks as ec, ema_ledger as el, ema_reports as er, states, story
 from remitwatch.store import Store
 from tests import ema_fixtures as F
-from tests.test_states import (BCBS, S, SVC, TODAY, adj, charge, denied, event, item, later, line_key, ln, load, new_store, pay,
-                               patient_pay, remit)
+from tests.test_states import (BCBS, S, SVC, TODAY, _secondary_world, adj, charge, denied, event, item, later, line_key, ln, load,
+                               new_store, pay, patient_pay, remit)
 
 D = dt.date
 P = F.PAYERS
@@ -636,3 +636,119 @@ def test_a_date_of_service_emas_reports_do_not_cover_is_said_plainly(store, monk
     out = story.explain(store.conn, "F1", today=TODAY)
     assert any(n.startswith("EMA's Production reports do not cover this date of service") for n in out["story"]["notes"])
     assert out["story"]["balance"]["basis"] == "835" and "EMA's postings for it are not on file" in out["story"]["balance"]["text"]
+
+
+# ================================================================================================ the second payer, the payer's own limit, a credit
+def test_a_second_payer_never_billed_is_billed_with_the_first_payers_remittance(store, ledger, tmp_path):
+    second = _secondary_world(store, ledger, tmp_path)
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    n = out["next_step"]
+    assert (n["route"], n["expected_cents"], n["who"]) == ("bill_secondary", 2000, "Biller")
+    assert n["action"] == (f"Bill {second} for $20.00 (coinsurance): {BCBS} paid on Mar 28, 2026 and left it, and {second} is on file and was "
+                           "never billed.")
+    assert any(s_.startswith(f"Send the claim to {second} from EMA with {BCBS}'s remittance (its EOB) attached, before Sep 24, 2026") for s_ in n["steps"])
+    assert f"EMA wrote the share off: reverse that write-off so the line shows $20.00 open until {second} answers." in n["steps"]
+    assert "mark_billed" in n["buttons"] and not n["appeal_ok"]
+    plain(out)
+
+
+def test_a_claim_the_first_payer_forwarded_asks_the_second_payer_for_its_payment(store, ledger, tmp_path):
+    second = _secondary_world(store, ledger, tmp_path, crossover=True)
+    n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert n["action"].startswith(f"Ask {second} for its payment: {BCBS} paid on Mar 28, 2026 and forwarded the claim")
+
+
+def test_the_payers_own_limit_is_named_when_the_safe_date_passed(store):
+    tk = denied(store)
+    item(store, appeal_deadline="2026-04-01", legal_deadline="2026-06-30", line_key=line_key(store, tk), claim_key=f"{tk}-0",
+         transaction_key=tk)
+    out = story.explain(store.conn, "F1", today="2026-05-10")
+    assert "The safe date to appeal passed on Apr 1, 2026; the payer's own limit is Jun 30, 2026, so it can still be sent." in out["verdict"]["sentence"]
+    n = out["next_step"]
+    assert n["action"].startswith(f"The safe date passed on Apr 1, 2026, but {BCBS}'s own limit is Jun 30, 2026 (51 days left): send it now.")
+    assert n["appeal_ok"] and n["route"] == "appeal"
+    plain(out)
+    # past both: the window that closed last is named, the step offers Lost, and no bulk appeal takes it
+    n = story.next_step(store.conn, "F1", today="2026-07-10")
+    assert n["action"].startswith("The window closed on Jun 30, 2026, 10 days ago (the payer's own limit).") and "let_go" in n["buttons"]
+    assert not n["appeal_ok"]
+
+
+def test_a_credit_balance_keeps_medicares_date(store):
+    item(store, signal="CREDIT_BALANCE", category="refund", payer_group="Medicare Part B", payer_kind="medicare", carc=None,
+         expected_cents=4500, shortfall_cents=4500, appeal_deadline="2026-05-30",
+         deadline_basis="Medicare expects an overpayment back within 60 days of finding it", evidence={"credit_cents": 4500, "overpaid_by": "Medicare Part B"})
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert (n["route"], n["deadline"], n["expected_cents"]) == ("refund", "2026-05-30", 0)
+    assert n["action"].startswith("Overpaid by $45.00: decide whether to refund it") and n["basis"].startswith("Medicare expects")
+
+
+def test_the_archive_rules_proof_is_the_verdict(store):
+    tk = denied(store)
+    hint = {"rule": "same_day_answers", "reclass": "dropped_on_correction", "label": "Dropped on the corrected claim",
+            "hint": "The corrected claim of Apr 2 no longer bills this line.", "state_hint": "done", "strength": "proven", "proof": []}
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, evidence={"archive_rule": hint})
+    out = story.explain(store.conn, "F1", today=TODAY)
+    assert out["verdict"]["sentence"] == "Dropped on the corrected claim: the corrected claim of Apr 2 no longer bills this line."
+    assert out["next_step"]["route"] == "nothing" and not out["next_step"]["appeal_ok"]
+    plain(out)
+
+
+# ================================================================================================ claims with no service lines
+def _whole_claim(store, *, adj, charge=300, paid=0, paid_on="2026-03-28"):
+    """A payer's answer to a whole claim with no service lines (a CO-29 timely-filing denial): claim-level reasons only."""
+    c = store.conn
+    c.execute("INSERT INTO transactions (transaction_key, trace_number, payment_date, payer_name, superseded, payment_method, "
+              "claim_paid_total_cents, payment_amount_cents) VALUES ('TXW1','TRW1',?, 'BLUE CROSS TEST', 0, 'ACH', ?, ?)",
+              (paid_on, paid * 100, paid * 100))
+    c.execute("""INSERT INTO claims (claim_key, transaction_key, patient_control_number, patient_last, patient_first, payment_date,
+                 trace_number, statement_from, claim_status_code, charge_cents, paid_cents, payer_name, claim_filing_indicator,
+                 payer_claim_control_number, received_date, claim_frequency_code, patient_id)
+                 VALUES ('TXW1-0','TXW1',?, 'TESTPATIENT','ALPHA',?, 'TRW1', ?, '4', ?, ?, 'BLUE CROSS TEST', '12', 'PCN-W', '2026-03-10', '1',
+                         'MEMBER-TEST-1')""", (F.claim_id(1), paid_on, S, charge * 100, paid * 100))
+    for g, r, amt in adj:
+        c.execute("INSERT INTO adjustments (transaction_key, claim_key, line_key, level, group_code, reason_code, amount_cents) "
+                  "VALUES ('TXW1','TXW1-0',NULL,'claim',?,?,?)", (g, r, amt * 100))
+    c.commit()
+    item(store, signal="CLAIM_DENIED_UNPAID", carc="29", procedure_code=None, billed_code=None, charge_cents=charge * 100,
+         expected_cents=charge * 100, shortfall_cents=charge * 100, line_key=None, claim_key="TXW1-0", transaction_key="TXW1")
+
+
+def test_a_whole_claim_answer_balances_at_the_claim(store):
+    _whole_claim(store, adj=[("CO", "29", 300)])
+    b = story.item_story(store.conn, "F1", today=TODAY)["balance"]
+    assert (b["basis"], b["reconciles"], b["denied_cents"], b["open_cents"]) == ("835_claim", True, 30000, 30000)
+    assert b["text"] == ("Claim charge $300.00 = paid $0.00 + contractual $0.00 + patient's share $0.00 + denied $300.00 (the 835 of Mar 28, 2026 "
+                         "answered the whole claim; EMA's postings for it are not on file). It reconciles to the cent.")
+
+
+def test_a_whole_claim_answer_that_does_not_add_up_shows_the_gap(store):
+    _whole_claim(store, adj=[("CO", "29", 250)])
+    st = story.item_story(store.conn, "F1", today=TODAY)
+    assert not st["reconciles"] and st["gap_cents"] == 5000
+    assert ("the 835's answer of Mar 28, 2026 to the whole claim does not balance: billed $300.00, paid $0.00, adjusted $250.00"
+            in st["balance"]["gap_cause"])
+
+
+def test_an_unanswered_claim_with_no_ema_posting_shows_its_whole_charge_open(store):
+    item(store, signal="NO_ANSWER", category="denial", carc=None, payment_date=None, charge_cents=15000)
+    b = story.item_story(store.conn, "F1", today=TODAY)["balance"]
+    assert (b["basis"], b["open_cents"], b["reconciles"]) == ("unanswered", 15000, True)
+    assert b["text"] == ("Charge $150.00, all of it open: no payer's answer to this claim is on file, and no EMA posting is tied to it.")
+
+
+def test_a_credit_or_a_second_payer_item_keeps_its_own_route_when_the_stored_state_stands_alone(store, monkeypatch):
+    """On the dashboard's copy a stored state can differ from what the copy works out (rule 'stored'): a credit is still a
+    refund to decide and never an appeal, and a second payer never billed is still billed."""
+    item(store, signal="CREDIT_BALANCE", category="refund", payer_group="Medicare Part B", payer_kind="medicare", carc=None,
+         expected_cents=4500, shortfall_cents=4500, evidence={"credit_cents": 4500, "overpaid_by": "Medicare Part B"})
+    item(store, finding_id="F2", signal="SECONDARY_NOT_BILLED", category="denial", carc=None, expected_cents=2000, shortfall_cents=2000,
+         evidence={"first_payer": BCBS, "second_payer": "Testcare Health", "share": "coinsurance"})
+    real = story._state_of
+
+    def stored(conn, fx, today):
+        return dict(real(conn, fx, today), rule="stored", work_state="work_now")
+    monkeypatch.setattr(story, "_state_of", stored)
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert n["route"] == "refund" and not n["appeal_ok"]
+    assert story.next_step(store.conn, "F2", today=TODAY)["route"] == "bill_secondary"

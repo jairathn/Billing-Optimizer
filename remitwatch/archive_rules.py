@@ -2095,7 +2095,8 @@ def _det_rate(det) -> Callable[[str, str, str], tuple[int, str] | None]:
 
 
 def run_on_detector(det, *, rules: Iterable[str] | None = None, hide_rules: Sequence[Mapping] | None = None) -> dict:
-    """Every rule in one call (the alternative to the three hooks below): evaluate the rules on det.findings with the
+    """Every rule in one call (the alternative to the three hooks below, at the hook_archive_rules call site, with
+    hook_expected and hook_fold left as no-ops): evaluate the rules on det.findings with the
     Detector's own ledger and usual rates, and apply the result in memory. Returns the evaluation's summary."""
     res = evaluate(det.conn, list(det.findings.values()), standing=getattr(det, "standing", None), rate=_det_rate(det), rules=rules,
                    hide_rules=hide_rules if hide_rules is not None else [])
@@ -2113,9 +2114,10 @@ def hook_expected(det) -> dict:
 
 
 def hook_archive_rules(det) -> dict:
-    """Detector.hook_archive_rules, after resolve_elsewhere: rules 1 to 8 on the items still open. Closures with proof,
-    reclassifications and raised items apply now; the folds wait for hook_fold (det.archive_folds), so the EMA outcomes
-    in between see every item. Returns the evaluation's summary with what was applied."""
+    """Detector.hook_archive_rules, between emit_second_rates and resolve_elsewhere (amendment 4.5 step 9: the archive
+    branches first, before every EMA closure): rules 1 to 8 on the items still open. Closures with proof,
+    reclassifications and raised items apply now; the folds wait for hook_fold (det.archive_folds), so the closures and
+    EMA outcomes in between see every item. Returns the evaluation's summary with what was applied."""
     rules = [r for r in RULES if r not in (R_DRUG, R_HIDE)]
     res = evaluate(det.conn, list(det.findings.values()), standing=getattr(det, "standing", None), rate=_det_rate(det), rules=rules,
                    hide_rules=[])
