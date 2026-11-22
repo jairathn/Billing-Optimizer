@@ -1646,7 +1646,7 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
     if not answers and first and not person and work in ("appeal", "reprocess", "records", "corrected", "resubmitted", "call"):
         # work whose date is unknown, and the payer answered the same claim again with the same reason before the report
         # that first showed the work: most likely its answer to that work (an appeal upheld), C26
-        rep = None
+        rep = _repeat_answer(fx, anchor)
         if rep:
             answers = [rep]
     if answers:

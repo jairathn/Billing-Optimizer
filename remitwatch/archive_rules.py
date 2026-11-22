@@ -1261,7 +1261,8 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
     if not (f.get("paid_cents") or 0):
         before = [x for x in ans if live(x) and _same_payer(x, a) and x.standing > 0 and x.status in PAYMENT_STATUSES
                   and _before(x, a) and tag[x.line_key] != "other"]
-        if before and _units_covered(a, before, gm) >= need:
+        before_own = [x for x in before if tag[x.line_key] == "own"]
+        if before and ((before_own and _units_paid(before_own) >= a.billed_units) or _units_covered(a, before, gm) >= need):
             return None                 # the payer's earlier payment of the line still stands: rule 1's (paid before)
     # the payer's answers since the reversal: on its remittance, and any it sent later (a re-answer a week on), but not a
     # later denial of a copy (a duplicate submission denied as such is about the copy, not the service: C11, C12, C57)
