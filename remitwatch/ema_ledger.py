@@ -1209,6 +1209,7 @@ def sync_catalog(store: Any, ledger: Ledger, file_ids: Iterable[str] | None = No
             er._catalog_put(conn, f["file_id"], report="production", source_name=f.get("source_name"), via=f.get("via"),
                             received_at=f.get("received_at"), applied_at=f.get("applied_at"), created_at=f.get("created_at"),
                             rows_read=f.get("rows_read"), rows_kept=f.get("rows"), links=f.get("links"),
+                            source_kind=f.get("source_kind"), content_id=f.get("content_id"),
                             status_reason="Restored from the posting ledger after an interrupted run.", **want)
             n += 1
         elif any(row.get(k) != v for k, v in want.items()):

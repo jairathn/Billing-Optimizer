@@ -246,16 +246,32 @@ def _ledger_postings(conn: sqlite3.Connection, ledger: Any, fx: dict) -> tuple[l
 
 
 def _check_in_835(conn: sqlite3.Connection, checks: Sequence[tuple]) -> dict:
+    """{(check, payer): (its money is in an 835, the trace of the 835 a number no 835 carries stands for, that 835's date)}
+    from the checks table: a number EMA posted that no 835 carries, paired one to one with an 835 EMA has under no number
+    (C1 'misnumbered'), is that 835's payment."""
     out: dict = {}
     if not S._table(conn, "ema_checks"):
         return out
     for chk, payer in set(checks):
         if not chk:
             continue
-        r = conn.execute("SELECT match, cause FROM ema_checks WHERE check_no=? AND payer=?", (chk, payer or "")).fetchone()
+        r = conn.execute("SELECT c.match, c.cause, c.pair_trace, t.payment_date FROM ema_checks c LEFT JOIN transactions t "
+                         "ON t.transaction_key = c.pair_trace WHERE c.check_no=? AND c.payer=?", (chk, payer or "")).fetchone()
         if r:
-            out[(chk, payer or "")] = r[0] in ("exact", "loose") or r[1] == "misnumbered"
+            mis = r[1] == "misnumbered" and bool(r[2])
+            out[(chk, payer or "")] = (r[0] in ("exact", "loose") or mis, r[2] if mis else None, r[3] if mis else None)
     return out
+
+
+def _carried(pay_835: dict, chk: str | None, payer: str | None, in_835: Any) -> tuple[bool, str]:
+    """(its money is in an 835, the words for it) for one EMA payment row."""
+    got = pay_835.get((chk, payer or "")) if chk else None
+    if got and got[1]:
+        return True, (f"no 835 carries this number; it is the 835 payment of {day(got[2])}, posted under another number" if got[2]
+                      else "no 835 carries this number; it is an 835 payment posted under another number")
+    if (got and got[0]) or in_835:
+        return True, "an 835 is on file for this check"
+    return False, "no 835 is on file for this check"
 
 
 def _rows_production(conn: sqlite3.Connection, fx: dict, ledger: Any) -> tuple[list[dict], dict, list[str]]:
@@ -316,8 +332,7 @@ def _rows_production(conn: sqlite3.Connection, fx: dict, ledger: Any) -> tuple[l
                                     amount=r["charges"], tags=["charge"], line=label))
             if r["ins_paid"] or r["check_no"]:
                 itemized["ins_paid"] += r["ins_paid"] or 0
-                in835 = pay_835.get((r["check_no"], r["payer"] or ""))
-                has = "an 835 is on file for this check" if in835 else "no 835 is on file for this check"
+                in835, has = _carried(pay_835, r["check_no"], r["payer"], False)
                 kind = "payment" if (r["ins_paid"] or 0) > 0 else ("takeback" if (r["ins_paid"] or 0) < 0 else "zero_answer")
                 verb = {"payment": f"paid {usd(r['ins_paid'])}", "takeback": f"took back {usd(-(r['ins_paid'] or 0))}",
                         "zero_answer": "answered $0.00"}[kind]
@@ -365,16 +380,17 @@ def _rows_production(conn: sqlite3.Connection, fx: dict, ledger: Any) -> tuple[l
                                 f"Charged {label}: {usd(ln['charges'])}" + (f", {ln['units']:g} units" if ln.get("units") and ln["units"] != 1 else "")
                                 + (f"; primary payer {ln['primary_payer']}" if ln.get("primary_payer") else "") + ".",
                                 amount=ln["charges"], tags=["charge"], line=label))
+        pay_835 = _check_in_835(conn, [(p.get("check"), p.get("payer") or "") for p in fx["ema"]["pays"] if p.get("check")])
         for p in fx["ema"]["pays"]:
             label = _line_label(p["cpt"], p["svc"])
             itemized["ins_paid"] += p["cents"] or 0
-            has = "an 835 is on file for this check" if p["in_835"] else "no 835 is on file for this check"
+            in835, has = _carried(pay_835, p.get("check"), p.get("payer"), p["in_835"])
             kind = "payment" if (p["cents"] or 0) > 0 else ("takeback" if (p["cents"] or 0) < 0 else "zero_answer")
             verb = {"payment": f"paid {usd(p['cents'])}", "takeback": f"took back {usd(-(p['cents'] or 0))}", "zero_answer": "answered $0.00"}[kind]
             out.append(_row(p["posted"], "production", kind, f"{p['payer'] or 'Insurance'} {verb} on {label}, posted {day(p['posted'])} "
                             f"(check ending {p['check_tail'] or '?'}; {has}).", payer=p["payer"], amount=p["cents"] or 0,
-                            tags=[f"pay:{p['posted']}:{p['check_tail']}", "pay_no835" if not p["in_835"] else "pay_835"], line=label,
-                            check_tail=p["check_tail"], in_835=bool(p["in_835"])))
+                            tags=[f"pay:{p['posted']}:{p['check_tail']}", "pay_no835" if not in835 else "pay_835"], line=label,
+                            check_tail=p["check_tail"], in_835=in835))
         listed = {"contractual": 0, "noncontractual": 0}
         for z in fx["ema"]["reasons"]:
             label = _line_label(z["cpt"], z["svc"])
@@ -589,12 +605,26 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
             else:
                 out["checks"].append({"source": "ar", "as_of": as_of, "open_cents": ar_open, "agrees": None,
                                       "why": f"postings after the A/R of {day(as_of)}"})
-        # every 835 payment of the service should be in EMA under its check
-        posted_checks = {p["check_tail"] for p in fx["ema"]["pays"]}
-        posted_traces = {p.get("trace_key") for p in fx["ema"]["pays"] if p.get("trace_key")}
-        for x in S.standing_rows(fx["r835"]["rows"]):
+        # every 835 payment of the service should be in EMA: under its check, under a number no 835 carries that the checks
+        # table pairs with it (C1 'misnumbered'), or, as the checks' "posted elsewhere" count takes it, as a payment of its
+        # amount (within $1) on the line under a number no 835 carries, from 7 days before to 120 days after the 835's date
+        pays = fx["ema"]["pays"]
+        posted_checks = {p["check_tail"] for p in pays}
+        mis = _check_in_835(conn, [(p.get("check"), p.get("payer") or "") for p in pays if p.get("check")])
+        posted_traces = {p.get("trace_key") for p in pays if p.get("trace_key")} | {v[1] for v in mis.values() if v[1]}
+        spare = [p for p in pays if (p["cents"] or 0) > 0 and not p.get("in_835") and not (mis.get((p.get("check"), p.get("payer") or "")) or (False,))[0]]
+        for x in sorted(S.standing_rows(fx["r835"]["rows"]), key=lambda r: (r["date"] or "", r.get("line_key") or "")):
             if (x["paid"] or 0) > 0 and x.get("line_key") and x.get("check_tail") and x.get("tk") not in posted_traces \
                     and x["check_tail"] not in posted_checks and str(x.get("method") or "").upper() != "NON":
+                lo, hi = S._add(x["date"], -7) or "", S._add(x["date"], 120) or ""
+                hit = next((p for p in spare if abs((p["cents"] or 0) - x["paid"]) <= 100 and lo <= (p["posted"] or "") <= hi), None)
+                if hit is not None:
+                    spare.remove(hit)
+                    out["checks"].append({"source": "835_elsewhere", "agrees": True,
+                                          "why": f"the 835 of {day(x['date'])} paid {usd(x['paid'])} on {x['code']} (check ending {x['check_tail']}); "
+                                                 f"EMA posted {usd(hit['cents'])} on {day(hit['posted'])} under check ending {hit['check_tail'] or '?'}, "
+                                                 "a number no 835 carries"})
+                    continue
                 gaps.append((x["paid"], f"the 835 of {day(x['date'])} paid {usd(x['paid'])} on {x['code']} (check ending {x['check_tail']}), "
                                         "and EMA has not posted it"))
         if tot["several"]:
@@ -2131,6 +2161,8 @@ def _era_request(conn: sqlite3.Connection, fx: dict, proof: dict) -> str | None:
     pay = next((p for p in fx["ema"]["pays"] if p["check_tail"] == proof.get("check_tail") and not p["in_835"]), None)
     if pay is None:
         return None
+    if pay.get("check") and (_check_in_835(conn, [(pay["check"], pay.get("payer") or "")]).get((pay["check"], pay.get("payer") or "")) or (False,))[0]:
+        return None             # a number no 835 carries that stands for an 835 on file: there is no ERA to ask for
     total, claims = None, None
     if S._table(conn, "ema_checks") and pay.get("check"):
         r = conn.execute("SELECT ins_paid, links FROM ema_checks WHERE check_no=? AND (payer=? OR ?='')",

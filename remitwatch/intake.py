@@ -305,6 +305,21 @@ def _supersede_twins(store, hashes: Hashes, file_id: str) -> None:
         pass
 
 
+def _fill_origin(conn, file_id: str, origin: dict) -> None:
+    """A catalog row with no origin (restored from the posting ledger after a run that saved the ledger and died before
+    saving the store) takes the upload's: where its kept copy is, who sent it. Committed with the run's next write."""
+    try:
+        row = conn.execute("SELECT origin, source_kind FROM ema_report_files WHERE file_id=?", (file_id,)).fetchone()
+    except Exception:       # noqa: BLE001  (no catalog: nothing to fill)
+        return
+    if row is None:
+        return
+    if not row[0]:
+        conn.execute("UPDATE ema_report_files SET origin=? WHERE file_id=?", (json.dumps(origin, sort_keys=True), file_id))
+    if not row[1]:
+        conn.execute("UPDATE ema_report_files SET source_kind='upload' WHERE file_id=?", (file_id,))
+
+
 def _mark_uploads_row(conn, sha: str, done_path: str | None) -> None:
     """An upload sent in one piece also has a row in the uploads table (status 'ready'): it is read now."""
     try:
@@ -436,6 +451,7 @@ def _server_pair(store, src: str, dest: str, sc: dict, *, ledger, deadline, log)
         return _result("refused", [f"Not read: the file could not be read ({type(exc).__name__}). Upload it again, or "
                                    "export it again from EMA."])
     _supersede_twins(store, h, h.sha256())
+    _fill_origin(store.conn, h.sha256(), origin)
     _mark_uploads_row(store.conn, h.sha256(), dest)
     return _summarise(res)
 
@@ -612,6 +628,7 @@ def _state_pair(store, state, pair: str, sc: dict, work: str, *, production, led
     if res.get("status") == "later":
         return res
     _supersede_twins(store, h, h.sha256())
+    _fill_origin(store.conn, h.sha256(), origin)
     _mark_uploads_row(store.conn, h.sha256(), None)
     return _summarise(res)
 

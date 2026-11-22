@@ -680,3 +680,40 @@ def test_work_evidence_lists_dated_work_oldest_first(store):
     ev = states.work_evidence(store.conn, f, today=TODAY)
     assert [(e["kind"], e["dated_by"]) for e in ev] == [("sent", "event"), ("resubmitted", "payer")]
     assert ev[1]["date"] == "2026-04-15" and "received a corrected claim" in ev[1]["text"]
+
+
+# ================================================================================================ every EMA outcome
+def _written_off_world(store, ledger, tmp_path):
+    """The item's denial written off in EMA the day the remittance posted (the line settled at $0)."""
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 0), adj(F.link_no(1), "CO-197", 150), later()])
+    return dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone())
+
+
+@pytest.mark.parametrize("oc, extra, want", [
+    ("paid_after", {"paid_after_same": 9000, "first_paid_after": {"date": "2026-04-20", "payer": "Blue Cross", "check_tail": "0042"}},
+     ("done", "paid_later_ema")),
+    ("paid_after_other", {"paid_after_other": 9000, "first_paid_after": {"date": "2026-04-20", "payer": "Testcare", "check_tail": "0043"}},
+     ("done", "rebilled_paid")),
+    ("patient", {"patient_after": 15000, "outcome_on": "2026-04-15"}, ("done", "moved_to_patient")),
+    ("written_off_by_policy", {"pattern": "Anthem / BCBS|99213||CO-197"}, ("accepted", "policy")),
+    ("auto_written_off", {}, ("work_now", "open")),
+    ("written_off_while_pending", {}, ("work_now", "open")),
+    ("lost_to_timely_filing", {}, ("work_now", "open")),
+    ("written_off_later", {}, ("work_now", "open")),
+    ("paid_after_partial", {"paid_after_same": 2000}, ("work_now", "open")),
+    ("paid_before", {"paid_before": 0}, ("work_now", "open")),
+    ("action", {}, ("work_now", "open")),
+    ("open", {}, ("work_now", "open")),
+    ("not_covered", {}, ("work_now", "open")),
+])
+def test_each_ema_outcome_gives_its_state(store, ledger, tmp_path, oc, extra, want):
+    f = _written_off_world(store, ledger, tmp_path)
+    base = ec.line_outcomes(store.conn, [f], code_once=lambda x: True, today=TODAY)[f["finding_id"]]
+    st = states.states_of(store.conn, [f], outcomes={"F1": dict(base, outcome=oc, **extra)}, today=TODAY)["F1"]
+    assert (st["work_state"], st["rule"]) == want
+    if oc == "written_off_by_policy":
+        assert st["state_basis"].startswith("The owner's write-off policy accepts Anthem / BCBS|99213||CO-197")
+    if oc == "patient":
+        assert st["state_basis"].startswith("Settled by the patient: EMA shows $150.00 paid by the patient after the denial")

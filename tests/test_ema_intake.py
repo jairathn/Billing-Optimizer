@@ -646,6 +646,7 @@ def test_an_upload_handed_to_the_server_is_read_moved_to_done_and_says_what_beca
     try:
         origin = json.loads(s.conn.execute("SELECT origin FROM ema_report_files WHERE file_id=?", (sha(ar),)).fetchone()[0])
         assert origin["upload_id"] and origin["user"] == "staff" and origin["path"] == os.path.join(done, p_ar)
+        assert origin["pair"] == p_ar
         assert origin["content_hash"] == dropbox_sync.content_hash_bytes(ar)
         assert s.conn.execute("SELECT via FROM ema_report_files WHERE file_id=?", (sha(ar),)).fetchone()[0] == "upload"
     finally:
@@ -743,6 +744,40 @@ def test_a_kept_upload_copy_goes_once_newer_files_replace_it_whole_on_vercel(ver
     assert cat[sha(new)] == "current" and cat[sha(old)] in ("replaced", "superseded")
     assert state.meta(f"intake/done/{pa}") is None and state.meta(f"intake/done/{pa}.json") is not None
     assert state.meta(f"intake/done/{pb}") is not None
+
+
+def test_an_upload_read_by_a_run_that_died_before_its_saves_stays_in_intake_and_is_read_once(vercel, monkeypatch):
+    """The pair moves to intake/done/ only after the store image is saved: a run that dies after saving the ledger leaves
+    it in intake/, and the next run repairs the store and finds the file read ('already'), never twice."""
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    cycle(state, client)                                       # the first load: a store in the state folder
+    data = F.production_csv(prod_rows())
+    pair = _pair(root / "RemitWatch-state" / "intake", "2026 Production.csv", data, gz=True)
+    real_save = cloud.save_raw
+
+    def die(*a, **k):
+        raise Killed()
+    monkeypatch.setattr(cloud, "save_raw", die)
+    with pytest.raises(Killed):
+        cycle(state, client)
+    monkeypatch.setattr(cloud, "save_raw", real_save)
+    names = {m["name"] for m in state.list("intake")}
+    assert f"intake/{pair}" in names and f"intake/{pair}.json" in names and f"intake/done/{pair}" not in names
+    out = cycle(state, client)
+    assert out["ema_repair"]["repaired"] is True and out["intake"]["read"] == 1
+    names = {m["name"] for m in state.list("intake")}
+    assert f"intake/{pair}" not in names and f"intake/done/{pair}.json" in names
+    assert json.loads(state.get(f"intake/done/{pair}.json"))["result"]["status"] in ("already", "applied")
+    conn = state_store(state)
+    assert catalog(conn)[sha(data)] == "current"
+    origin, kind = conn.execute("SELECT origin, source_kind FROM ema_report_files WHERE file_id=?", (sha(data),)).fetchone()
+    assert json.loads(origin)["state_path"] == f"intake/done/{pair}" and kind == "upload"      # the kept copy is known again
+    h = el.LedgerHandle(state, tmp_dir=str(root.parent / "look"))
+    try:
+        assert h.open().conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 12       # read once, never twice
+    finally:
+        h.discard()
 
 
 # ================================================================================================ de-duplication

@@ -311,6 +311,13 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
     if kind == "hide_rule":
         apply_hide_rule(conn, action)
         return True
+    if kind == "ema_report_decision":
+        # a person's decision on a held EMA report: 'discard' closes it, 'apply' lets the next run read it again
+        # (remitwatch.ema_reports.decide; a replay of a decision already made changes nothing)
+        from . import ema_reports
+        res = ema_reports.decide(conn, str(action.get("file_id") or ""), str(action.get("decision") or ""),
+                                 str(action.get("actor") or ""))
+        return "error" not in res
     if kind == "trizetto_hold":
         # the /setup test on a serverless host: a sign-in that worked ends the hold, a refusal starts one (remitwatch.trizetto)
         from . import trizetto

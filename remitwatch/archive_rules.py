@@ -571,7 +571,11 @@ def _group_of(a: Ans, x: Ans, gm: tuple) -> tuple | None:
     k = next((k for k, v in groups.items() if any(y is x for y in v)), None)
     if k is None and x.lcn and ("L", x.lcn) in groups:
         k = ("L", x.lcn)
-        if groups[k][0].sig() != x.sig():
+        # a payer that leaves every unit-making modifier off its answer of the code (17263-76 answered as 17263 on each
+        # line) keeps the line numbers: the number decides, where the line it names was billed at x's charge
+        stripped = not x.sig() and not any(y.sig() for y in x.claim.lines if y.billed_code == x.billed_code and y.dos == x.dos)
+        same_charge = abs((groups[k][0].charge or 0) - (x.charge or 0)) <= 100
+        if groups[k][0].sig() != x.sig() and not (stripped and same_charge):
             # a resubmission numbers its lines anew: where x's unit-making modifiers name exactly one other billed line,
             # that line is x's (a modifier added on a corrected claim, with no line carrying it before, keeps the number)
             by_sig = [k2 for k2, v in groups.items() if v[0].sig() == x.sig()]
@@ -1257,10 +1261,13 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
         # line with no charge, no payment and no adjustment is the payer voiding the claim it replaced, not an answer
         return (x.status != REVERSAL_STATUS and x.line_key != a.line_key and x.line_key not in cancelled
                 and (_same_payer(x, a) or _same_payer_loose(x, r)) and not _void(x))
-    tag = {x.line_key: _attribute(a, x, gm) for x in ans if live(x)}
+    def paying(x: Ans) -> bool:
+        # a payment of the payer's that still stands, whichever reversal the ledger netted (its standing is the money)
+        return (x.line_key != a.line_key and x.status in PAYMENT_STATUSES and x.standing > 0
+                and (_same_payer(x, a) or _same_payer_loose(x, r)))
+    tag = {x.line_key: _attribute(a, x, gm) for x in ans if x.line_key != a.line_key and x.status != REVERSAL_STATUS}
     if not (f.get("paid_cents") or 0):
-        before = [x for x in ans if live(x) and _same_payer(x, a) and x.standing > 0 and x.status in PAYMENT_STATUSES
-                  and _before(x, a) and tag[x.line_key] != "other"]
+        before = [x for x in ans if paying(x) and _same_payer(x, a) and _before(x, a) and tag[x.line_key] != "other"]
         before_own = [x for x in before if tag[x.line_key] == "own"]
         if before and ((before_own and _units_paid(before_own) >= a.billed_units) or _units_covered(a, before, gm) >= need):
             return None                 # the payer's earlier payment of the line still stands: rule 1's (paid before)
@@ -1276,7 +1283,7 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
     # the payer's processed re-answer decides; a denied copy on the same remittance (a duplicate submission, or CO-129 "the
     # adjustment request was processed" on a corrected claim) is about the copy, not the service (C12, C57)
     mine = [x for x in mine if x.status in PAYMENT_STATUSES] or mine
-    pays = [x for x in ans if live(x) and x.standing > 0 and x.status in PAYMENT_STATUSES and not _before(x, a)]
+    pays = [x for x in ans if paying(x) and not _before(x, a)]
     own_pays = [x for x in pays if tag[x.line_key] == "own"]
     other_pays = [x for x in pays if tag[x.line_key] == "other"]
     unknown_pays = [x for x in pays if tag[x.line_key] == ""]
@@ -1319,8 +1326,11 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
             per = _per_unit([x for x in other_pays if x.status in PRIMARY_STATUSES] or other_pays,
                             exp / max(a.billed_units, 1) or None)
             size = _cap(per * a.billed_units, f) if per else f.get("shortfall_cents")
-            hint = (f"{who} reversed this answer on {r.paid_on} and answered the claim again: it paid the other line of {a.billed_code}, "
-                    f"not this one" + (f", worth about {_usd(size)} at its own rate per unit." if per else "."))
+            n_other = len({x.lcn or x.line_key for x in other_pays})
+            hint = (f"{who} reversed this answer on {r.paid_on} and answered the claim again: it paid "
+                    + (f"the other line of {a.billed_code}" if n_other == 1 else
+                       f"{n_other} other lines of {a.billed_code} ({_units_text(_units_paid(other_pays))} of {need:g})")
+                    + ", not this one" + (f", worth about {_usd(size)} at its own rate per unit." if per else "."))
             return _reclass(R_SAME_DAY, f, "units_on_reanswer", "Reversed, the other line paid", hint, size, "work_now", proof)
     if not mine:
         hint = (f"{who} reversed this answer on {r.paid_on} and no new answer for this line is on file: the payer is reprocessing it. "
@@ -2067,19 +2077,58 @@ def evaluate(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing: Ma
 
 
 # --------------------------------------------------------------------------------------------- applying to a Detector
-def run_on_detector(det, *, rules: Iterable[str] | None = None, hide_rules: Sequence[Mapping] | None = None) -> dict:
-    """The one call the detection wiring makes (Detector.run, after emit_second_rates and before resolve_elsewhere):
-    evaluate the rules on det.findings with the Detector's own ledger and usual rates, and apply the result in memory.
-    Returns the evaluation's summary."""
+def _det_rate(det) -> Callable[[str, str, str], int | None]:
+    """The Detector's usual rate for a payer group, code and year (an office visit of an unknown provider tier)."""
     def rate(group: str, code: str, year: str) -> int | None:
         try:
             return det.usual_rate({"payer_group": group, "year": year or "", "provider_tier": "unknown", "pos_class": "office"}, code)[0]
         except Exception:
             return None
-    res = evaluate(det.conn, list(det.findings.values()), standing=getattr(det, "standing", None), rate=rate, rules=rules,
+    return rate
+
+
+def run_on_detector(det, *, rules: Iterable[str] | None = None, hide_rules: Sequence[Mapping] | None = None) -> dict:
+    """Every rule in one call (the alternative to the three hooks below): evaluate the rules on det.findings with the
+    Detector's own ledger and usual rates, and apply the result in memory. Returns the evaluation's summary."""
+    res = evaluate(det.conn, list(det.findings.values()), standing=getattr(det, "standing", None), rate=_det_rate(det), rules=rules,
                    hide_rules=hide_rules if hide_rules is not None else [])
     res["summary"]["applied_counts"] = apply_actions(det, res["actions"])
     return res["summary"]
+
+
+# The Detector's hook points (detect.py: hook_expected, hook_archive_rules, hook_fold; hook_hide is after save and
+# calls hide_match through actions.apply_hide_rules). Each takes the Detector and returns what it applied.
+def hook_expected(det) -> dict:
+    """Detector.hook_expected, after the line and claim rules: rule 10, the payer's own price for drug and
+    skin-substitute items that have no expected amount."""
+    acts = drug_expected(det.conn, list(det.findings.values()), standing=getattr(det, "standing", None))
+    return apply_actions(det, acts)
+
+
+def hook_archive_rules(det) -> dict:
+    """Detector.hook_archive_rules, after resolve_elsewhere: rules 1 to 8 on the items still open. Closures with proof,
+    reclassifications and raised items apply now; the folds wait for hook_fold (det.archive_folds), so the EMA outcomes
+    in between see every item. Returns the evaluation's summary with what was applied."""
+    rules = [r for r in RULES if r not in (R_DRUG, R_HIDE)]
+    res = evaluate(det.conn, list(det.findings.values()), standing=getattr(det, "standing", None), rate=_det_rate(det), rules=rules,
+                   hide_rules=[])
+    det.archive_folds = [a for a in res["actions"] if a["action"] == "fold_into"]
+    res["summary"]["applied_counts"] = apply_actions(det, [a for a in res["actions"] if a["action"] != "fold_into"])
+    det.archive_summary = res["summary"]
+    return res["summary"]
+
+
+def hook_fold(det) -> dict:
+    """Detector.hook_fold, before save: the folds hook_archive_rules found, for items still open whose carrier is still
+    listed (an item closed in between keeps its own closure)."""
+    folds = []
+    for a in getattr(det, "archive_folds", None) or []:
+        f, into = det.findings.get(a.get("finding_id")), det.findings.get(a.get("into"))
+        if f is None or into is None or f.get("auto_status"):
+            continue
+        folds.append(a)
+    det.archive_folds = []
+    return apply_actions(det, folds)
 
 
 def _merge_evidence(f: dict, key: str, value: Any) -> None:
@@ -2119,7 +2168,9 @@ def apply_actions(det, actions: Iterable[Mapping]) -> dict:
                 f["shortfall_cents"] = act["shortfall_cents"]
             _merge_evidence(f, "archive_rule", {k: act.get(k) for k in ("rule", "reclass", "label", "state_hint", "strength", "proof",
                                                                         "possible_overpayment_cents", "paid_by", "units_billed",
-                                                                        "units_paid", "patient_share_left_cents") if act.get(k) is not None})
+                                                                        "units_paid", "patient_share_left_cents", "patient_share_cents",
+                                                                        "prior_payer_cents", "secondary_paid_cents")
+                                                if act.get(k) is not None})
             n[kind] += 1
         elif kind == "fold_into" and f is not None:
             into = det.findings.get(act["into"])

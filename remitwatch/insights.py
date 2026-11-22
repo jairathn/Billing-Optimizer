@@ -60,13 +60,13 @@ _WORK_OF = {
     "chase": {"NO_ANSWER", "FORWARDED_TO_CARRIER"},
     "bill": {"SECONDARY_NOT_BILLED"},
     "post": {"REMIT_NOT_POSTED"},
-    "auth": {"DENIED_AUTH"},
+    "auth": {"DENIED_AUTH", "DENIED_REFERRAL"},
     "note": {"EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24", "DENIED_MEDICAL_NECESSITY", "DENIED_FREQUENCY", "DENIED_LEVEL_OF_SERVICE",
              "DOWNCODE_SVC06", "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE", "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED"},
     "rule": {"PROCEDURE_BUNDLED", "ADDON_BUNDLED"},
-    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS"},
+    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS", "DENIED_CONTRACT_RATE"},
     "check": {"DENIED_NONCOVERED", "DENIED_DUPLICATE_UNPAID", "DENIED_PROVIDER", "DENIED_TIMELY_FILING", "DENIED_OTHER", "DENIED_MISSING_PRIMARY",
-              "CODE_CHANGED", "EMA_DENIAL_AS_CONTRACTUAL", "CREDIT_BALANCE"},
+              "CODE_CHANGED", "EMA_DENIAL_AS_CONTRACTUAL", "CREDIT_BALANCE", "DENIED_COVERAGE_DATES", "DENIED_PLAN_EXCLUSION"},
 }
 SIGNAL_WORK = {sig: key for key, sigs in _WORK_OF.items() for sig in sigs}
 # A whole claim denied takes the work its reason needs: fixed and sent again when the detector says so, else by the
@@ -134,6 +134,10 @@ SIGNAL_LABELS: dict[str, tuple[str, str]] = {
     "EMA_DENIAL_AS_CONTRACTUAL": ("EMA writes off this payer's denials as contractual",
                                   "Have EMA post this reason as a denial, not a contractual adjustment, so it reaches the denial queue."),
     "FORWARDED_TO_CARRIER": ("Sent on by the payer to another carrier", "Expect the other carrier's payment; ask it for the claim if none comes by the follow-up date."),
+    "DENIED_REFERRAL": ("Denied: no referral on file", "Get the referral from the patient's primary care doctor, then send the claim again."),
+    "DENIED_COVERAGE_DATES": ("Denied: not covered on the date of service", "Check the patient's coverage on that date and bill the plan that covered it, else the patient."),
+    "DENIED_PLAN_EXCLUSION": ("Denied: the plan excludes this service", "Check the plan's exclusion; bill the patient only if the plan allows it (never a Medicaid member)."),
+    "DENIED_CONTRACT_RATE": ("Denied: no contracted rate for this clinician", "Ask the payer to load the clinician on the agreement, then have the claim paid at the contracted rate."),
     "SECONDARY_NOT_BILLED": ("Second payer never billed", "Send the claim to the second payer with the first payer's remittance."),
     "CREDIT_BALANCE": ("Insurance paid more than was owed", "Decide with the owner: refund the payer, or let it recoup. Medicare credits are due back within 60 days."),
 }
@@ -159,6 +163,8 @@ SHORT_LABELS: dict[str, str] = {
     "SEQUESTRATION": "Federal 2 percent reduction", "NOT_SENT": "Not sent from EMA", "EMA_DENIED": "EMA denial, no 835",
     "REMIT_NOT_POSTED": "Payment not posted", "EMA_DENIAL_AS_CONTRACTUAL": "Denials posted as contractual",
     "FORWARDED_TO_CARRIER": "Sent on to another carrier", "SECONDARY_NOT_BILLED": "Second payer never billed",
+    "DENIED_REFERRAL": "No referral", "DENIED_COVERAGE_DATES": "Not covered that day", "DENIED_PLAN_EXCLUSION": "Plan excludes it",
+    "DENIED_CONTRACT_RATE": "No contracted rate",
     "CREDIT_BALANCE": "Credit to refund or recoup",
 }
 

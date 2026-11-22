@@ -10,8 +10,6 @@ Every row is invented (tests/ema_fixtures.py, and the builders of tests/test_sta
 from __future__ import annotations
 
 import datetime as dt
-import json
-import re
 import sqlite3
 
 import pytest
@@ -102,7 +100,7 @@ def auto_writeoff_world(store, ledger, tmp_path, *, handled=None, status="Resolv
 
 # ================================================================================================ the story
 def test_the_story_lists_every_source_in_date_order_with_codes_and_meanings(store, ledger, tmp_path):
-    tk = auto_writeoff_world(store, ledger, tmp_path)
+    auto_writeoff_world(store, ledger, tmp_path)
     ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), svc=SVC, cpt="99213", current=150, denial=150, status="Denied",
                    note="Test note: called the payer", aging=D(2026, 4, 28))]
     load(store, ledger, tmp_path, [], ar_rows=ar)
@@ -545,3 +543,45 @@ def test_every_route_keeps_to_the_plan_buttons_and_plain_words(store, ledger, tm
             assert out["verdict"]["strength"] in ("proven", "one_source", "inferred")
             assert out["verdict"]["state"] in states.STATES and out["verdict"]["sentence"]
             plain(out)
+
+
+# ================================================================================================ every outcome's sentence
+@pytest.mark.parametrize("oc, extra, phrase", [
+    ("auto_written_off", {}, "EMA shows this claim as Resolved, but nobody worked this line. EMA's posting rule wrote off the denial (CO-197, $150.00)"),
+    ("written_off_while_pending", {"carcs": ["CO-16"]}, "EMA wrote this off the day it posted, but the payer had not finished: it asked for information."),
+    ("lost_to_timely_filing", {}, "This was written off for late filing. The payer first denied it for CO-197; it ran out of time before anyone fixed it."),
+    ("written_off_at_posting", {}, "EMA wrote off CO-197 ($150.00) the day the remittance posted"),
+    ("contractual_at_posting", {"written_off": 0, "contractual_routine": 15000},
+     "EMA closed this line with a routine contractual adjustment ($150.00) the day the remittance posted"),
+    ("written_off_later", {"outcome_on": "2026-04-25"}, "A person wrote this off in EMA on Apr 25, 2026 (CO-197, $150.00), on a day with no remittance posted"),
+    ("contractual_later", {"outcome_on": "2026-04-25"}, "A person wrote this off in EMA on Apr 25, 2026"),
+    ("paid_after_partial", {"paid_after_same": 2000}, "Partly paid: EMA shows $20.00 paid since"),
+    ("paid_before", {"paid_before": 9000}, "Check first: this line was paid before this denial"),
+    ("open", {}, "Unpaid and nobody has worked it: Anthem / BCBS answered CO-197"),
+    ("action", {}, "Unpaid and nobody has worked it: Anthem / BCBS answered CO-197"),
+    ("closed_unexplained", {}, "Unpaid and nobody has worked it"),
+    ("shared_line", {}, "Unpaid and nobody has worked it"),
+    ("not_found", {}, "Unpaid and nobody has worked it"),
+])
+def test_each_outcome_has_its_sentence(store, ledger, tmp_path, monkeypatch, oc, extra, phrase):
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 0), adj(F.link_no(1), "CO-197", 150), later()])
+    real = states._outcomes
+
+    def forced(conn, items, t):
+        got = real(conn, items, t)
+        return {k: dict(v, outcome=oc, **extra) for k, v in got.items()}
+    monkeypatch.setattr(states, "_outcomes", forced)
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert out["verdict"]["sentence"].startswith(phrase), out["verdict"]["sentence"]
+    plain(out)
+
+
+def test_a_date_of_service_emas_reports_do_not_cover_is_said_plainly(store, monkeypatch):
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    monkeypatch.setattr(states, "_outcomes", lambda conn, items, t: {f["finding_id"]: {"outcome": "not_covered"} for f in items})
+    out = story.explain(store.conn, "F1", today=TODAY)
+    assert any(n.startswith("EMA's Production reports do not cover this date of service") for n in out["story"]["notes"])
+    assert out["story"]["balance"]["basis"] == "835" and "EMA's postings for it are not on file" in out["story"]["balance"]["text"]

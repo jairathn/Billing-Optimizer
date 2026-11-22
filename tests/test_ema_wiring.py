@@ -499,3 +499,18 @@ def test_the_weekly_report_and_the_data_checks_say_what_emas_reports_add(store, 
     assert "Written off automatically by EMA and still appealable: 1 items" in text
     keys = {h["key"] for h in insights.data_health(store.conn, insights.newest_payment(store.conn), TODAY)}
     assert {"ema_reports_missing", "ema_report_held", "remits_missing", "credits"} <= keys
+
+
+def test_a_decision_on_a_held_report_recorded_on_a_serverless_host_is_applied_from_the_journal(store):
+    from remitwatch import actions
+    er.ensure_schema(store.conn)
+    er._catalog_put(store.conn, "HELD1", commit=True, status="held")
+    er._catalog_put(store.conn, "HELD2", commit=True, status="held")
+    assert actions.apply(store.conn, {"kind": "ema_report_decision", "file_id": "HELD1", "decision": "discard", "actor": "biller"})
+    assert actions.apply(store.conn, {"kind": "ema_report_decision", "file_id": "HELD2", "decision": "apply", "actor": "biller"})
+    rows = dict(store.conn.execute("SELECT file_id, status || '/' || decision FROM ema_report_files").fetchall())
+    assert rows == {"HELD1": "discarded/discard", "HELD2": "held/apply"}
+    # a replay of a decision already made, or a report not on file, changes nothing
+    assert not actions.apply(store.conn, {"kind": "ema_report_decision", "file_id": "HELD1", "decision": "apply", "actor": "biller"})
+    assert not actions.apply(store.conn, {"kind": "ema_report_decision", "file_id": "NOPE", "decision": "discard", "actor": "biller"})
+    assert store.conn.execute("SELECT status FROM ema_report_files WHERE file_id='HELD1'").fetchone()[0] == "discarded"

@@ -3284,8 +3284,9 @@ class Detector:
         return None
 
     def hook_archive_rules(self) -> None:
-        """After resolve_elsewhere's own closures and before the EMA outcomes, so a closure the 835 archive proves comes
-        first: closures with proof, reclassifications and items the archive raises (archive_rules.evaluate)."""
+        """Between the second rates and resolve_elsewhere, before every EMA closure, so a closure the 835 archive proves
+        comes first: closures with proof, reclassifications, folds, PR-group items and drug expected amounts
+        (archive_rules.run_on_detector, the one hook needs_B2 asks for)."""
         return None
 
     def hook_fold(self) -> None:
@@ -3331,6 +3332,8 @@ class Detector:
         items = [r for r in rows if r.get("finding_id")]
         if not items:
             return
+        # each payer group's usual answer time, measured once per run (meta states:response_days; the copy reads it)
+        self._ema_step("response_days", states.save_response_days, self.conn)
         got = self._ema_step("states", states.states_of, self.conn, items, outcomes=self.ema_outcomes if self.ema_on else {},
                              today=self.today) or {}
         for r in items:
@@ -3879,8 +3882,8 @@ class Detector:
         self.run_aggregate_rules()      # 7
         self.run_ema_contractual()      #    denials posted as contractual (C7)
         self.emit_second_rates()        # 8
-        self.resolve_elsewhere()        # 9: closures from the archive first
-        self.hook_archive_rules()
+        self.hook_archive_rules()       # 9: the archive-only branches first (needs_B2: before resolve_elsewhere)
+        self.resolve_elsewhere()        #    then the archive's own closures
         self.run_ema_outcomes()         #    the line outcomes, once; paid in EMA (C6)
         self.run_ema_unposted()         # 10: 835 payments EMA never posted (C4)
         self.run_ema_writeoffs()        # 11: written off in EMA (C2) and the overlays (W2)
