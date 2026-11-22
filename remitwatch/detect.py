@@ -3078,6 +3078,256 @@ class Detector:
                     continue
                 f[k] = v
 
+    def run_more_rules(self) -> None:
+        """The rules the practice-manager trace and the independent answer key found missing, which need EMA's reports:
+        a secondary never billed, credit balances to refund, and short payments on checks no 835 carries."""
+        if not self.ema_on:
+            return
+        self._ema_step("secondary_not_billed", self.run_secondary_not_billed)
+        self._ema_step("credit_balances", self.run_credit_balances)
+        self._ema_step("ema_underpaid", self.run_ema_underpaid)
+
+    def _ema_lines_for(self, keys: list[tuple]) -> dict[tuple, dict]:
+        """EMA's line for each (bill, date, code) of a remittance, through the map (no conflict, never the ASC's facility
+        claim): {key: {link, secondary_payer, primary_payer, payer_group, balance, pat_paid, charges, other_paid}}, where
+        other_paid is what payers other than the line's primary posted on it."""
+        from . import ema_checks as ec
+        out: dict[tuple, dict] = {}
+        keys = sorted(set(keys))
+        for i in range(0, len(keys), 400):
+            part = keys[i:i + 400]
+            self.conn.execute("DROP TABLE IF EXISTS temp.dt_keys")
+            self.conn.execute("CREATE TEMP TABLE dt_keys (bill TEXT, svc TEXT, cpt TEXT)")
+            self.conn.executemany("INSERT INTO temp.dt_keys VALUES (?,?,?)", part)
+            self.conn.execute("CREATE INDEX temp.ix_dt_keys ON dt_keys(bill)")
+            rows = self.conn.execute("""SELECT k.bill, k.svc, k.cpt, l.link, l.secondary_payer, l.primary_payer, l.payer_group, l.balance,
+                                               COALESCE(l.pat_paid_joined, 0), l.charges
+                                        FROM temp.dt_keys k JOIN ema_link_map m ON m.bill = k.bill AND COALESCE(m.conflict,0) = 0
+                                             AND COALESCE(m.facility,0) = 0
+                                        JOIN ema_lines l ON l.link = m.link AND l.svc = k.svc AND l.cpt = k.cpt
+                                        WHERE (COALESCE(l.flags,0) & 17) = 0 AND COALESCE(l.facility,0) = 0""").fetchall()
+            pays: dict[tuple, list] = defaultdict(list)
+            if rows:
+                self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
+                self.conn.execute("CREATE TEMP TABLE dt_links (link INTEGER, svc TEXT, cpt TEXT)")
+                self.conn.executemany("INSERT INTO temp.dt_links VALUES (?,?,?)", {(r[3], r[1], r[2]) for r in rows})
+                for lk, svc, cpt, grp, cents in self.conn.execute(
+                        """SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0) FROM temp.dt_links d
+                           JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
+                    pays[(lk, svc, cpt)].append((grp, cents))
+                self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
+            for b, svc, cpt, lk, sec, prim, grp, bal, pat, chg in rows:
+                other = sum(c for g, c in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
+                out.setdefault((b, svc, cpt), {"link": lk, "secondary_payer": sec, "primary_payer": prim, "payer_group": grp,
+                                               "balance": bal or 0, "pat_paid": pat or 0, "charges": chg or 0, "other_paid": other})
+            self.conn.execute("DROP TABLE IF EXISTS temp.dt_keys")
+        return out
+
+    def run_secondary_not_billed(self) -> None:
+        """The primary paid and left the patient's share (deductible, coinsurance, copay), a second insurer is on file in
+        EMA, and nothing came from it: no remittance as second payer, no payment by another payer in EMA, the patient has
+        not paid the share, and EMA still shows a balance. One item per line, sized at the share left (at most EMA's
+        balance), dated by the second payer's filing limit counted from the first payer's remittance. A claim the first
+        payer forwarded itself (claim status 19, or a carrier named) is listed only once that second payer's usual time
+        has passed, to be chased rather than billed."""
+        from . import ema_reports as er
+        from . import ema_checks as ec
+        cands: dict[tuple, Line] = {}
+        other_paid: set[tuple] = set()
+        for l in self.lines:
+            code, dos = l.get("procedure_code"), l.get("service_date")
+            if not code or not dos or code in ("99024", "G2211"):
+                continue
+            key = (er.bill_of_claim(l["patient_control_number"]), dos, code)
+            st = l.get("claim_status_code")
+            if st in ("2", "3", "20", "21") and (self.standing.get(l["line_key"]) or 0) > 0:
+                other_paid.add(key)         # a second payer's remittance paid it
+                continue
+            if st not in ("1", "19") or not (self.standing.get(l["line_key"]) or 0) or l.get("payer_kind") == "supplement":
+                continue
+            pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
+            if pr <= 100:
+                continue
+            was = cands.get(key)
+            if was is None or (l.get("payment_date") or "") > (was.get("payment_date") or ""):
+                cands[key] = l
+        # a second line of the code on the bill and date paid by another payer: something came from another payer
+        for l in self.lines:
+            key = (er.bill_of_claim(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code"))
+            c = cands.get(key)
+            if c is not None and (self.standing.get(l["line_key"]) or 0) > 0 and l["line_key"] != c["line_key"] \
+                    and (l.get("payer_id") or l.get("payer_name")) != (c.get("payer_id") or c.get("payer_name")):
+                other_paid.add(key)
+        keys = [k for k in cands if k not in other_paid]
+        if not keys:
+            return
+        ema = self._ema_lines_for(keys)
+        groups: dict[str, tuple] = {}
+        for key in keys:
+            e = ema.get(key)
+            l = cands[key]
+            if not e or not (e["secondary_payer"] or "").strip() or e["other_paid"] > 0:
+                continue
+            sec = " ".join(str(e["secondary_payer"]).split())
+            if SELF_PAY.search(sec):
+                continue
+            if sec not in groups:
+                groups[sec] = er.payer_group_of(self.conn, sec)
+            sgrp, skind = groups[sec]
+            if not sgrp or ec._same_payer(sgrp, l["payer_group"]) or ec._same_payer(sgrp, e["payer_group"]):
+                continue                    # the second payer on file is the first payer itself
+            pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
+            owed = min(pr, e["balance"]) - max(0, e["pat_paid"])
+            if owed <= 100 or e["balance"] <= 100:
+                continue                    # the patient paid the share, or EMA shows the line settled
+            paid_on = l.get("payment_date") or l.get("txn_payment_date") or ""
+            crossed = l.get("claim_status_code") == "19" or bool(self.crossover_carrier(l["claim_key"]))
+            if crossed and (_days_between(paid_on, self.today) or 0) < 45:
+                continue                    # forwarded by the first payer: its usual time has not passed yet
+            rule = filing_rule(sgrp, skind)
+            deadline = _add_days(paid_on, rule["days"])
+            if deadline and deadline < (_add_days(self.today, -30) or ""):
+                continue                    # past the second payer's limit (and a month's grace): a loss, not work
+            share = ", ".join(w for rc, w in (("1", "deductible"), ("2", "coinsurance"), ("3", "copay"))
+                              if any(g == "PR" and c == rc for g, c, _a in self.adj.get(l["line_key"], [])))
+            title = (f"{code}: crossed over to {sgrp}, nothing paid by it yet ({_usd(owed)} {share})" if crossed else
+                     f"{code}: {l['payer_group']} paid and left {_usd(owed)} ({share}); {sgrp} is on file and was never billed")
+            ev = {"first_payer": l["payer_group"], "first_paid_cents": self.standing.get(l["line_key"]), "patient_share_cents": pr,
+                  "share": share, "second_payer": sgrp, "second_payer_kind": skind, "ema_balance_cents": e["balance"],
+                  "ema_patient_paid_cents": e["pat_paid"], "crossover": crossed, "ema_link": e["link"],
+                  "basis": "the patient's share the first payer left, less what the patient paid, at most EMA's balance"}
+            self._emit("SECONDARY_NOT_BILLED", "denial", "medium" if owed >= 5000 else "low", "review", title, l, owed, owed, None, None, ev)
+            f = self.findings.get(_fid("SECONDARY_NOT_BILLED", l["line_key"]))
+            if f is None:
+                continue
+            f["appeal_deadline"] = deadline
+            f["deadline_basis"] = (f"{sgrp}'s filing limit, counted from {l['payer_group']}'s remittance ({paid_on}): {rule['label']}"
+                                   + ("" if rule["verified"] else ", not confirmed against the payer's current manual"))
+            f["ema_link"], f["source"] = e["link"], "835"
+            f["hint"] = (f"Ask {sgrp} for its payment: the first payer forwarded the claim" if crossed else
+                         f"Bill {sgrp} with {l['payer_group']}'s remittance")
+            self.ema_counts["SECONDARY_NOT_BILLED"] += 1
+
+    def run_credit_balances(self) -> None:
+        """Credit balances (C8 as items): an EMA claim whose lines hold more than they were owed after every payment and
+        write-down, by more than $1 on the claim as a whole (a line's credit that another line of the claim absorbs is a
+        posting to the wrong line, not a refund). One item per EMA claim: who overpaid (the payer whose money exceeds what
+        was owed, else the patient), how much, the lines. A Medicare credit is due back within 60 days of being found."""
+        from . import ema_reports as er
+        rows = self.conn.execute("""SELECT link, MIN(svc), SUM(COALESCE(balance,0)), SUM(COALESCE(charges,0)), SUM(COALESCE(ins_paid,0)),
+                                           SUM(COALESCE(pat_paid_joined,0)), MAX(payer_group), MAX(payer_kind), MAX(primary_payer),
+                                           MAX(claim_id), MAX(bill), MAX(as_of), MIN(COALESCE(balance,0)), MAX(last_posted)
+                                    FROM ema_lines WHERE (COALESCE(flags,0) & 17) = 0
+                                    GROUP BY link HAVING SUM(COALESCE(balance,0)) < -100 AND MIN(COALESCE(balance,0)) < -100""").fetchall()
+        for lk, svc, bal, chg, ins, pat, grp, kind, payer, cid, bill, as_of, _mn, last in rows:
+            credit = -bal
+            lines = [list(r) for r in self.conn.execute("""SELECT cpt, svc, COALESCE(balance,0), COALESCE(ins_paid,0) FROM ema_lines
+                                                            WHERE link=? AND COALESCE(balance,0) < 0 ORDER BY svc, cpt""", (lk,))]
+            pays = self.conn.execute("""SELECT payer_group, payer, SUM(COALESCE(ins_paid,0)), MAX(posted), COUNT(DISTINCT check_no)
+                                        FROM ema_line_payments WHERE link=? AND COALESCE(ins_paid,0) > 0 GROUP BY payer_group, payer
+                                        ORDER BY 3 DESC""", (lk,)).fetchall()
+            insurance = ins > 0 and ins >= credit
+            who = (pays[0][0] or pays[0][1]) if (insurance and pays) else "the patient"
+            age = _days_between(last, as_of) if last and as_of else None
+            medicare = kind == "medicare" and insurance
+            title = (f"Credit of {_usd(credit)}: {who} paid more than this claim was owed"
+                     + (f" ({age} days since the last posting)" if age is not None else ""))
+            claim = {"patient_control_number": cid or bill, "payer_name": who, "payer_group": grp if insurance else "Patient",
+                     "payer_kind": kind if insurance else "other", "service_date": svc, "year": (svc or "")[:4] or None,
+                     "procedure_code": max(lines, key=lambda x: -x[2])[0] if lines else None, "charge_cents": chg or None}
+            ev = {"credit_cents": credit, "lines": lines, "overpaid_by": who, "insurance_paid_cents": ins, "patient_paid_cents": pat,
+                  "payers": [[p[0] or p[1], p[2], p[3], p[4]] for p in pays[:5]], "ema_as_of": as_of, "ema_link": lk,
+                  "days_since_last_posting": age,
+                  "next_step": ("A refund or a recoupment is the owner's decision (with the compliance lead): check the payments, "
+                                "then refund the payer, or let it take the money back from a later payment.")}
+            self._emit("CREDIT_BALANCE", "refund", "high" if (medicare and (age or 0) > 60) or credit >= 50000 else "medium", "review",
+                       title, None, credit, credit, None, None, ev, key_parts=(lk,), claim=claim)
+            f = self.findings.get(_fid("CREDIT_BALANCE", lk))
+            if f is None:
+                continue
+            f["ema_link"], f["source"] = lk, "ema"
+            if medicare:
+                f["appeal_deadline"] = _add_days(as_of or self.today, 60)
+                f["deadline_basis"] = ("Medicare expects an overpayment back within 60 days of finding it (42 CFR 401.305); counted "
+                                       "from the report that shows it")
+            self.ema_counts["CREDIT_BALANCE"] += 1
+
+    def run_ema_underpaid(self) -> None:
+        """Short payments EMA posted on checks no 835 carries (the underpayment rule, run on EMA's postings where no
+        remittance exists): a line of one unit paid by one payer, every payment of it under a check with no 835, whose
+        allowed amount is below the payer's own consistent rate for the code (its lowest across provider types and
+        places of service, at least 20 lines and a 40 percent share; a second surgical procedure of the day at the
+        payer's usual reduction) by at least $2 and 5 percent, and not the charge itself."""
+        from . import ema_checks as ec
+        rows = self.conn.execute("""SELECT l.link, l.svc, l.cpt, l.allowed, l.ins_paid, l.charges, l.units, l.payer_group, l.payer_kind,
+                                           l.claim_id, l.bill, l.as_of, l.balance
+                                    FROM ema_lines l
+                                    WHERE (COALESCE(l.flags,0) & 17) = 0 AND COALESCE(l.facility,0) = 0 AND COALESCE(l.ins_paid,0) > 0
+                                      AND COALESCE(l.allowed,0) > 0 AND COALESCE(l.ins_paid_no835,0) >= COALESCE(l.ins_paid,0)
+                                      AND COALESCE(l.units,1) BETWEEN 0.5 AND 1.5 AND l.svc >= ?""",
+                                 (_add_days(self.today, -800) or "",)).fetchall()
+        if not rows:
+            return
+        best: dict[tuple, int] = {}         # the payer's lowest consistent rate for a code and year
+        for (grp, year, code, _tier, _pos), r in self.rates.items():
+            if r["n"] >= 20 and r["share"] >= 0.4:
+                k = (grp, year, code)
+                best[k] = min(best.get(k, r["mode"]), r["mode"])
+        from .ema_reports import bill_of_claim
+        lags = ec._lags(self.conn)
+        on_835 = {(bill_of_claim(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code")) for l in self.lines}
+        by_day: dict[tuple, list] = defaultdict(list)
+        for r in rows:
+            if (r[10], r[1], r[2]) in on_835:
+                continue                    # a remittance carries this line: the 835's own rules judge it
+            by_day[(r[0], r[1])].append(r)
+        for (lk, svc), day_rows in by_day.items():
+            priced = []
+            for r in day_rows:
+                rate = best.get((r[7], (svc or "")[:4], r[2]))
+                if rate:
+                    priced.append((r, rate))
+            surg = sorted((x for x in priced if is_surgical(x[0][2])), key=lambda x: -x[1])
+            rank = {x[0][2]: i + 1 for i, x in enumerate(surg)}
+            for r, rate in priced:
+                _lk, _svc, cpt, allowed, paid, chg, _u, grp, kind, cid, bill, as_of, bal = r
+                if allowed >= (chg or 0) and chg:
+                    continue                # paid the charge: the fee is below the rate, nothing to appeal
+                exp = rate
+                if rank.get(cpt, 0) >= 2 and cpt not in ADD_ON_CODES:
+                    exp = int(round(rate * self.mppr_pct({"payer_group": grp, "surg_rank": rank[cpt]})[0]))
+                short = exp - allowed
+                if short < max(200, 0.05 * exp):
+                    continue
+                pay = self.conn.execute("""SELECT MIN(posted), MAX(payer), COUNT(DISTINCT payer_group) FROM ema_line_payments
+                                           WHERE link=? AND svc=? AND cpt=? AND COALESCE(ins_paid,0) > 0""", (lk, svc, cpt)).fetchone()
+                if not pay or (pay[2] or 0) != 1:
+                    continue                # two payers on the line: the second one's share is not an underpayment
+                posted = pay[0]
+                rule = appeal_rule(grp, kind)
+                start = _add_days(posted, -ec._lag(lags, grp, "p95")) if posted else None
+                claim = {"patient_control_number": cid or bill, "payer_name": (pay[1] if pay else None) or grp, "payer_group": grp,
+                         "payer_kind": kind, "service_date": svc, "year": (svc or "")[:4], "procedure_code": cpt, "charge_cents": chg,
+                         "allowed_cents": allowed, "paid_cents": paid, "payment_date": posted}
+                ev = {"usual_cents": exp, "allowed_cents": allowed, "paid_cents": paid, "basis": (f"{grp}'s own consistent rate for {cpt} "
+                      f"in {svc[:4]} (its lowest across provider types and places of service)" + (" at its usual second-procedure share"
+                                                                                                    if exp != rate else "")),
+                      "ema_link": lk, "no_835": True, "posted": posted, "ema_as_of": as_of}
+                self._emit("EMA_UNDERPAID", "underpayment", "medium", "appeal",
+                           f"{cpt} allowed {_usd(allowed)} vs usual {_usd(exp)} ({grp}, EMA posting with no 835)", None, exp, short,
+                           None, None, ev, key_parts=(lk, svc, cpt), claim=claim)
+                f = self.findings.get(_fid("EMA_UNDERPAID", lk, svc, cpt))
+                if f is None:
+                    continue
+                f["appeal_deadline"] = _add_days(start, rule["days"]) if start else None
+                f["deadline_basis"] = (f"{rule['label']}" + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
+                                       + f". Counted from EMA's posting ({posted}) less its usual delay; the EOB's date can be earlier") if start else None
+                legal = legal_deadline(start, rule) if start else None
+                f["legal_deadline"] = legal if legal and legal != f["appeal_deadline"] else None
+                f["ema_link"], f["source"] = lk, "ema"
+                f["hint"] = "No remittance on file for this payment: get the EOB from the payer's portal before asking for the usual rate"
+                self.ema_counts["EMA_UNDERPAID"] += 1
+
     # ------------------------------------------------------------------ hooks for the archive-only rules (unit B2)
     # remitwatch.archive_rules acts on the run's items at these four points; each is a no-op until its hook is wired.
     def hook_expected(self) -> None:

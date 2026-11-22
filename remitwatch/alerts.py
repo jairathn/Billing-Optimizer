@@ -17,6 +17,9 @@ RATE_CUT           a payer's usual allowed amount for a code dropped
 NEW_REASON_CODE    a payer started using an adjustment reason code it never used before
 DEADLINE           open appealable money that reaches its filing deadline in the next 30 days (one alert per payer per week)
 STALE_FEED         no new remittance files have arrived
+REMITS_MISSING     a payer group's checks in one posted month that EMA posted and no 835 carries, though the payer's 835
+                   series shows the remittances exist ($2,000 on at least 2 checks; remitwatch.ema_checks)
+EMA_STALE          EMA's A/R or Production report is more than 8 days old (it clears itself when a newer one arrives)
 
 An alert keeps one row for as long as the condition holds. When the condition
 ends it is marked cleared, and if it comes back it is raised again as new.
@@ -364,7 +367,23 @@ class AlertEngine:
             self.new_code_rule()
             self.deadline_rule()
         self.stale_rule()
+        if "ema_report_files" in tables:
+            self.ema_rule()
         return self.active
+
+    def ema_rule(self) -> None:
+        """REMITS_MISSING and EMA_STALE, from EMA's reports (remitwatch.ema_checks.alert_candidates), once the practice
+        sends them."""
+        try:
+            if not self.conn.execute("SELECT 1 FROM ema_report_files LIMIT 1").fetchone():
+                return
+            from . import ema_checks as ec
+            cands = ec.alert_candidates(self.conn, today=self.today)
+        except (sqlite3.Error, ImportError, KeyError, TypeError, ValueError):
+            return
+        for a in cands:
+            self._raise(a["kind"], a.get("severity") or "medium", a["title"], {"detail": a.get("detail"), "n": a.get("n"), "cents": a.get("cents")},
+                        a.get("payer_group"), "ema", None, None, None, a.get("n"), a.get("cents"), key=tuple(a["key"]))
 
     def run(self) -> dict:
         self.evaluate()

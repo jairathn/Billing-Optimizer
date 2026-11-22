@@ -481,14 +481,14 @@
     const who = h.at ? `Saved ${esc(when(h.at))}${h.name ? ' by ' + esc(h.name) : ''}${h.by ? ' (signed in as ' + esc(h.by) + ')' : ''}.` : '';
     return `<div class="export" data-key="${esc(e.key)}">
       <div>
-        <div class="top"><h3>${esc(e.title)}</h3>${chip(e.overdue ? 'overdue' : 'fresh')}</div>
+        <div class="top"><h3>${esc(e.title)}</h3>${chip(e.waiting ? 'waiting' : e.overdue ? 'overdue' : 'fresh')}</div>
         <div class="big" style="margin-top:4px">${esc(e.purpose)}</div>
         <dl>
           <dt>Filters</dt><dd><ul>${e.filters.map(f => `<li>${esc(f)}</li>`).join('')}</ul></dd>
           <dt>Columns</dt><dd>${esc(e.columns_note || '')} <details><summary class="small">The ${e.columns.length} columns it must have (checked when you drop it)</summary><ul class="cols">${cols}</ul></details></dd>
           <dt>Format</dt><dd>${esc(e.format)}</dd>
           <dt>How often</dt><dd>${esc(e.cadence)}</dd>
-          <dt>Last arrived</dt><dd><div>${esc(e.last_line)}</div><div class="status-line ${e.overdue ? 'no' : 'ok'}">${esc(e.state_line)}</div></dd>
+          <dt>Last arrived</dt><dd><div>${esc(e.last_line)}</div><div class="status-line ${e.waiting ? 'warn' : e.overdue ? 'no' : 'ok'}">${esc(e.state_line)}</div></dd>
         </dl>
       </div>
       <div>
@@ -510,10 +510,26 @@
     catch (e) { $('#exports').innerHTML = `<div class="no small" style="margin-top:10px">${esc(e.message)}</div>`; return; }
     info.show_phi = EX.show_phi;
     $('#exports').innerHTML = EX.exports.map(exportRow).join('');
-    const late = EX.exports.filter(e => e.overdue).length;
+    const late = EX.exports.filter(e => e.overdue).length;           // a report received and waiting to be read is not late
     $('#exportsNote').textContent = late ? `${late} of 5 overdue` : 'All five up to date';
     if (EX.mode === 'serverless') $('#dropHint').textContent = "EMA's reports and exports (Excel or CSV, any size), remittance (835) and claim (837) files and a .zip of those. Visit notes are uploaded on the practice's own server.";
     $('#exports').querySelectorAll('.export').forEach(bindExportRow);
+  }
+
+  // after an upload: each row's chip, last arrival and state again, leaving the rows (and the upload cards in them) in place
+  async function refreshRows() {
+    let ex;
+    try { ex = await apiCall('/api/ema/exports'); } catch (e) { return; }
+    EX = Object.assign(EX || {}, ex);
+    ex.exports.forEach(e => {
+      const el = document.querySelector(`.export[data-key="${e.key}"]`);
+      if (!el) return;
+      el.querySelector('.top .chip').outerHTML = chip(e.waiting ? 'waiting' : e.overdue ? 'overdue' : 'fresh');
+      const dd = el.querySelector('.status-line').parentNode;
+      dd.innerHTML = `<div>${esc(e.last_line)}</div><div class="status-line ${e.waiting ? 'warn' : e.overdue ? 'no' : 'ok'}">${esc(e.state_line)}</div>`;
+    });
+    const late = ex.exports.filter(e => e.overdue).length;
+    $('#exportsNote').textContent = late ? `${late} of 5 overdue` : 'All five up to date';
   }
 
   function bindExportRow(el) {
@@ -589,6 +605,7 @@
       catch (e) { console.error(e); }
     }
     refresh();
+    refreshRows();
   }
 
   const titleOf = key => { const e = EX && EX.exports.find(x => x.key === key); return e ? e.title : key; };
@@ -792,7 +809,7 @@
       let s;
       try { s = await apiCall(`/api/uploads/${uid}/status`); } catch (e) { continue; }
       showResult(ui, s, warn);
-      if (s.applied || s.state !== 'finished') return;
+      if (s.applied || s.state !== 'finished') { refreshRows(); return; }
     }
   }
 

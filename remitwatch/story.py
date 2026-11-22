@@ -119,7 +119,7 @@ def _rows_835(fx: dict) -> list[dict]:
     out = []
     own_line = f.get("line_key")
     for x in fx["r835"]["rows"]:
-        grp = S._grp_kind(x["payer"])[0]
+        grp = S.row_group(x)[0]
         label = _line_label(x["code"], x["svc"], x.get("modifiers")) if x.get("line_key") else f"the claim of {day(x['svc'])}"
         parts = []
         if x["status"] == "22":

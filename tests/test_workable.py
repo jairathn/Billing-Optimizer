@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 
 import pytest
@@ -252,7 +253,12 @@ def test_the_page_counts_them_and_today_points_at_them(open_claims, monkeypatch)
     today = open(os.path.join(root, "remitwatch", "static", "today.js")).read()
     assert "title:'Chase claims the payer never answered'" in today and "go:{kind:'chase', sort:'deadline'}" in today
     desk = open(os.path.join(root, "remitwatch", "static", "desk.js")).read()
-    assert "const NEVER_HIDDEN = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER']);" in desk and desk.count("NEVER_HIDDEN.has(") == 2
+    # the page mirrors the server's list (actions.NEVER_HIDDEN, which the server enforces): every signal it names is on it,
+    # and the two claim chases always are (the list grew with EMA's reports: NOT_SENT, REMIT_NOT_POSTED, ...)
+    from remitwatch.actions import NEVER_HIDDEN
+    m = re.search(r"const NEVER_HIDDEN = new Set\(\[([^\]]*)\]\);", desk)
+    on_page = set(re.findall(r"'([A-Z_]+)'", m.group(1))) if m else set()
+    assert {"NO_ANSWER", "REJECTED_PRE_PAYER"} <= on_page <= NEVER_HIDDEN and desk.count("NEVER_HIDDEN.has(") == 2
 
 
 def test_a_stopped_feed_does_not_make_newer_claims_look_unanswered(tmp_path):

@@ -529,7 +529,7 @@ def _route_report(store, path: str, name: str, *, via: str, origin: dict | None,
     remitwatch.ema_reports.ingest_file decides and records it. None when it is no report."""
     from . import ema_reports as er
 
-    extra = {"wait_reason": wait_reason} if wait_reason else {}
+    extra = {"wait_reason": wait_reason} if wait_reason and _takes(er.ingest_file, "wait_reason") else {}
     if er.is_plain_zip(path):
         return er.ingest_file(store, path, via=via, origin=origin, ledger=ledger, deadline=deadline, log=log, **extra)
     try:

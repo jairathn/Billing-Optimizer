@@ -1376,6 +1376,12 @@ def _size_words(n: int) -> str:
     return f"{max(n, 0) / 1024:,.0f} KB" if n >= 1024 else f"{n:,} bytes"
 
 
+def _next_read() -> str:
+    """What reads an upload next, in the words of this host: a server's cycle, a serverless host's run."""
+    from . import runtime
+    return "run" if runtime.serverless() else "cycle"
+
+
 class PieceRefused(Exception):
     """What an upload cannot take (a start, a piece or a finish), with the HTTP status for it and a message in plain
     words. `next_index` is the piece the upload waits for, when the page should carry on from there."""
@@ -1649,7 +1655,7 @@ class ServerUploads:
         except ImportError:             # no file locks here: a single process takes the requests one at a time anyway
             yield
             return
-        with open(os.path.join(self.sessions, uid + ".lock"), "a+b") as fh:
+        with os.fdopen(os.open(os.path.join(self.sessions, uid + ".lock"), os.O_RDWR | os.O_CREAT, 0o600), "r+b") as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             try:
                 yield
@@ -2172,7 +2178,7 @@ def known_file(conn: sqlite3.Connection | None, sha256: str, pending: Iterable[d
         if sc.get("sha256") == sha256 and sc.get("pair") != skip_pair:
             return {"how": "upload", "status": "waiting", "at": sc.get("received_at"),
                     "line": f"Already have this; nothing changed. This exact file was uploaded on {_day(sc.get('received_at'))} "
-                            "and waits for the next cycle."}
+                            f"and waits for the next {_next_read()}."}
     return None
 
 
@@ -2299,10 +2305,9 @@ def record_view(rec: dict, *, conn: sqlite3.Connection | None = None, pair: tupl
             lines.append(f"Read on {_day(seen['at'])}." if seen and seen.get("at") else "Read by the cycle.")
             applied = "read"
         else:
-            from . import runtime
             sent = f" (sent compressed: {_size_words(rec.get('bytes') or 0)})" if rec.get("gz") else ""
             lines.append(f"Received and checked on {_day(rec.get('finished_at'))}: {_size_words(rec.get('size') or 0)}{sent}. "
-                         f"It waits for the next {'run' if runtime.serverless() else 'cycle'} to read it.")
+                         f"It waits for the next {_next_read()} to read it.")
     out.update(lines=lines, checks=checks, applied=applied)
     return out
 
@@ -2405,17 +2410,25 @@ def _howto_public(box: dict | None) -> dict:
             "versions": len(box.get("history") or [])}
 
 
-def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None, today: date | None = None) -> list[dict]:
-    """The five rows of the checklist (GET /api/ema/exports)."""
+def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None, today: date | None = None,
+                     pending: Iterable[dict] = ()) -> list[dict]:
+    """The five rows of the checklist (GET /api/ema/exports). `pending`: the sidecars of uploads waiting in the intake
+    folder; one of an export makes its row "received, waiting to be read" rather than overdue."""
     today = today or datetime.now(timezone.utc).date()
     seen = arrivals(conn)
     howto = howto or {}
+    waiting: dict = {}
+    for sc in pending:
+        key = {"ar_report": "ar"}.get(sc.get("report_hint"), sc.get("report_hint"))
+        if key in EXPORT_KEYS and str(sc.get("received_at") or "") > str((waiting.get(key) or {}).get("received_at") or ""):
+            waiting[key] = sc
     rows = []
     for e in EXPORTS:
         a = seen.get(e["key"]) or {}
         fresh = _iso_day(a.get("as_of")) or _iso_day(a.get("arrived"))
         age = (today - fresh).days if fresh else None
-        overdue = age is None or age > e["overdue_days"]
+        up = waiting.get(e["key"])
+        overdue = not up and (age is None or age > e["overdue_days"])
         box = howto.get(e["key"]) or {}
         if a:
             via = {"upload": "uploaded here", "dropbox": "from the Dropbox folder", "mirror": "from the Dropbox folder",
@@ -2426,8 +2439,12 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
             last += "."
         else:
             last = "Has not arrived yet."
-        if overdue:
-            state = (f"Overdue: the newest is {age} days old, and it is due every {e['overdue_days']} days at most. Pull it now."
+        if up:                           # an upload waiting for the cycle is the newest arrival
+            last = (f"Last arrived {_day(up.get('received_at'))} (uploaded here)."
+                    + (f" The one before it, read already, arrived {_day(a['arrived'])}." if a.get("arrived") else ""))
+            state = f"Waiting to be read: the next {_next_read()} reads it, then this row says what it held."
+        elif overdue:
+            state = (f"Overdue: the newest is {age} days old (it should be no more than {e['overdue_days']}). Pull it now."
                      if age is not None else "Overdue: RemitWatch has none yet. Pull it now.")
         else:
             state = f"Up to date: the newest is {_n(age, 'day')} old."
@@ -2438,7 +2455,7 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
                      "purpose": e["purpose"], "filters": list(e["filters"]), "columns_note": e["columns_note"],
                      "columns": export_columns(e), "format": e["format"], "cadence": e["cadence"],
                      "overdue_days": e["overdue_days"], "arrived": a.get("arrived"), "as_of": a.get("as_of"), "via": a.get("via"),
-                     "age_days": age, "overdue": overdue, "last_line": last, "state_line": state,
+                     "age_days": age, "overdue": overdue, "waiting": bool(up), "last_line": last, "state_line": state,
                      "howto": _howto_public(box), "ask": ask})
     return rows
 

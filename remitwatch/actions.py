@@ -157,9 +157,11 @@ CREATE TABLE IF NOT EXISTS hide_rules (
 );
 """
 HIDE_ACTOR = "hide rule"
-# Never hidden wholesale for a payer: a claim no payer answered (or one rejected before reaching the payer) is not a
-# reason the payer won't pay. It is money nobody has asked for yet, so each one is let go only by a person, one at a time.
-NEVER_HIDDEN = frozenset({"NO_ANSWER", "REJECTED_PRE_PAYER"})
+# Never hidden wholesale for a payer: a claim no payer answered (or one rejected before reaching the payer, or one that
+# never left EMA) is not a reason the payer won't pay; neither is a payment EMA never posted, a second payer nobody
+# billed, or a credit to refund. Each is money nobody has asked for yet (or owed back), so each one is let go only by a
+# person, one at a time.
+NEVER_HIDDEN = frozenset({"NO_ANSWER", "REJECTED_PRE_PAYER", "NOT_SENT", "REMIT_NOT_POSTED", "SECONDARY_NOT_BILLED", "CREDIT_BALANCE"})
 # What decided an item's status last, for SQL over `findings f`: a line in its history that changes no status (a payer's
 # fax read, a follow-up faxed) does not count, so an item the payer wrote about is still the rule's to bring back.
 DECIDING_KINDS = "('manual','hidden','unhidden','paid_on_later_remit','reopened')"

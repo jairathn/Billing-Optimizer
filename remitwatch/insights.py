@@ -42,32 +42,44 @@ WORK_TYPES: list[dict] = [
      "how": "EMA shows the claim sent and unpaid, and no answer from the payer has come back. Look it up on the payer's portal "
             "(or call). Not on file: send it again within the first-filing limit (see the filing window on the item). Rejected: "
             "correct it in EMA and send it again. Denied or paid: get the remittance or the EOB and work it here."},
+    {"key": "bill", "label": "Bill the second payer", "needs": "The first payer's remittance and the second payer's details in EMA",
+     "short": "Send the claim to the second payer.",
+     "how": "The first payer paid and left a share a second payer on file should pay, and nothing has come from it. Send the "
+            "claim to the second payer with the first payer's remittance before the date shown, then press Mark billed."},
+    {"key": "post", "label": "Post the payment", "needs": "The 835 (or the payer's portal) and EMA's posting screen",
+     "short": "Post the payment or the denial in EMA.",
+     "how": "The payer's remittance is on file but EMA never posted it (or posted less). Find the deposit, post the payment or "
+            "the denial in EMA under the trace shown, then press Mark posted."},
     {"key": "check", "label": "Check first", "needs": "A look at the claim",
      "short": "Decide: other payer, the patient, appeal, or let go.",
      "how": "Something a person has to decide: bill another payer or the patient, fix an enrollment, find an earlier payment, or let it go."},
 ]
 _WORK_OF = {
     "fix": {"DENIED_MISSING_MODIFIER", "DENIED_CODING", "DENIED_MISSING_INFO", "EM_BUNDLED_NO_MODIFIER", "EM_BUNDLED_MOD57_MINOR",
-            "REJECTED_PRE_PAYER"},
-    "chase": {"NO_ANSWER"},
+            "REJECTED_PRE_PAYER", "NOT_SENT"},
+    "chase": {"NO_ANSWER", "FORWARDED_TO_CARRIER"},
+    "bill": {"SECONDARY_NOT_BILLED"},
+    "post": {"REMIT_NOT_POSTED"},
     "auth": {"DENIED_AUTH"},
     "note": {"EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24", "DENIED_MEDICAL_NECESSITY", "DENIED_FREQUENCY", "DENIED_LEVEL_OF_SERVICE",
              "DOWNCODE_SVC06", "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE", "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED"},
     "rule": {"PROCEDURE_BUNDLED", "ADDON_BUNDLED"},
-    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS"},
+    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS", "EMA_UNDERPAID"},
     "check": {"DENIED_NONCOVERED", "DENIED_DUPLICATE_UNPAID", "DENIED_PROVIDER", "DENIED_TIMELY_FILING", "DENIED_OTHER", "DENIED_MISSING_PRIMARY",
-              "CODE_CHANGED"},
+              "CODE_CHANGED", "EMA_DENIAL_AS_CONTRACTUAL", "CREDIT_BALANCE"},
 }
 SIGNAL_WORK = {sig: key for key, sigs in _WORK_OF.items() for sig in sigs}
 # A whole claim denied takes the work its reason needs: fixed and sent again when the detector says so, else by the
 # reason (the same groups detect.py uses for lines), else a person checks it first.
 CLAIM_DENIAL = "CLAIM_DENIED_UNPAID"
+# a denial only EMA saw (no remittance on file) is worked like a whole claim denied: by its action, else by its reason
+CLAIM_DENIALS = (CLAIM_DENIAL, "EMA_DENIED")
 CLAIM_KIND_CARCS = {
     "auth": {"197", "198", "15", "39", "210", "243"},
     "note": {"50", "B12", "B22", "167", "56", "A1", "B5", "272", "58", "216", "150", "186", "151", "119", "222", "273", "B14", "35"},
     "rule": {"97", "B10", "236", "234", "231", "M15"},
 }
-WORK_SIGNALS = set(SIGNAL_WORK) | {CLAIM_DENIAL}
+WORK_SIGNALS = set(SIGNAL_WORK) | set(CLAIM_DENIALS)
 
 # What each finding is, in plain words, and the next step. Reason codes stay on the finding as detail.
 SIGNAL_LABELS: dict[str, tuple[str, str]] = {
@@ -116,6 +128,15 @@ SIGNAL_LABELS: dict[str, tuple[str, str]] = {
     "G2211_DENIED": ("G2211 denied on most visits by this payer", "Decide whether to keep billing G2211 to this payer. From 2027 it becomes modifier B1."),
     "MIPS_ADJUSTMENT": ("Medicare quality program (MIPS) adjustment", "For information."),
     "SEQUESTRATION": ("Federal 2 percent Medicare reduction", "For information; not recoverable."),
+    "NOT_SENT": ("Claim never left EMA", "Fix what holds it in EMA (or print it) and send it before the date shown."),
+    "EMA_DENIED": ("Denied in EMA, no remittance on file", "Get the EOB from the payer's portal, then work the denial like any other."),
+    "REMIT_NOT_POSTED": ("Paid by 835, not posted in EMA", "Find the deposit and post the payment in EMA under the trace shown."),
+    "EMA_DENIAL_AS_CONTRACTUAL": ("EMA writes off this payer's denials as contractual",
+                                  "Have EMA post this reason as a denial, not a contractual adjustment, so it reaches the denial queue."),
+    "FORWARDED_TO_CARRIER": ("Sent on by the payer to another carrier", "Expect the other carrier's payment; ask it for the claim if none comes by the follow-up date."),
+    "SECONDARY_NOT_BILLED": ("Second payer never billed", "Send the claim to the second payer with the first payer's remittance."),
+    "EMA_UNDERPAID": ("Paid below this payer's usual rate (no 835)", "Get the EOB from the payer's portal, then ask the payer to reprocess at its usual rate."),
+    "CREDIT_BALANCE": ("Insurance paid more than was owed", "Decide with the owner: refund the payer, or let it recoup. Medicare credits are due back within 60 days."),
 }
 STATUS_LABELS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
 # The same findings in six words or fewer, for list rows and the recurring causes; the full label above is the tooltip and
@@ -136,12 +157,15 @@ SHORT_LABELS: dict[str, str] = {
     "MPPR_EXCESS": "Multiple-procedure cut too deep", "FEE_SKIM": "Payment fee", "TAKEBACK": "Money taken back",
     "CONTRACT_RATE_GAP": "Far below Medicare", "MA_BELOW_MEDICARE": "Below Medicare", "MPPR_POLICY": "Later procedures cut below half",
     "CHARGE_BELOW_RATE": "Your fee below the payer's rate", "G2211_DENIED": "G2211 usually denied", "MIPS_ADJUSTMENT": "MIPS adjustment",
-    "SEQUESTRATION": "Federal 2 percent reduction",
+    "SEQUESTRATION": "Federal 2 percent reduction", "NOT_SENT": "Not sent from EMA", "EMA_DENIED": "EMA denial, no 835",
+    "REMIT_NOT_POSTED": "Payment not posted", "EMA_DENIAL_AS_CONTRACTUAL": "Denials posted as contractual",
+    "FORWARDED_TO_CARRIER": "Sent on to another carrier", "SECONDARY_NOT_BILLED": "Second payer never billed",
+    "EMA_UNDERPAID": "Paid short, no 835", "CREDIT_BALANCE": "Credit to refund or recoup",
 }
 
 
 def work_type(signal: str | None, actionable: str | None, carc: str | None = None) -> str:
-    if signal == CLAIM_DENIAL:
+    if signal in CLAIM_DENIALS:
         if actionable == "correct_and_resubmit":
             return "fix"
         return next((k for k, carcs in CLAIM_KIND_CARCS.items() if (carc or "") in carcs), "check")
@@ -157,7 +181,7 @@ def kind_sql(kind: str) -> tuple[str, list]:
     if named:
         parts.append(f"signal IN ({','.join('?' * len(named))})")
         params += named
-    whole = f"signal='{CLAIM_DENIAL}'"
+    whole = "signal IN (" + ",".join(f"'{x}'" for x in CLAIM_DENIALS) + ")"
     if kind == "fix":
         parts.append(f"({whole} AND actionable='correct_and_resubmit')")
     elif kind in CLAIM_KIND_CARCS:
@@ -581,10 +605,15 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
                       "detail": "The date shown is a default for that payer type, or the appeal window where a corrected claim's limit is "
                                 "set by the payer agreement (often 90 days from the date of service, so it can be earlier).",
                       "who": "Practice administrator: check the windows in the payer agreements, Anthem and UnitedHealthcare first."})
-    # a claim no payer answered has no remittance line, so no ERA row in EMA can ever describe it: left out of both counts
-    h = conn.execute(f"""SELECT COUNT(*), SUM(ema_handling IS NOT NULL) FROM findings WHERE status IN ({','.join('?' * len(TODO))})
+    # a claim no payer answered has no remittance line, so no ERA row in EMA can ever describe it: left out of both counts.
+    # EMA's side is known from its ERA export (ema_handling) or from Production's postings on the item's own line
+    # (ema_outcome, when the line was found)
+    fcols = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    known = ("(ema_handling IS NOT NULL OR (ema_outcome IS NOT NULL AND ema_outcome NOT IN ('not_found','not_covered','shared_line')))"
+             if "ema_outcome" in fcols else "ema_handling IS NOT NULL")
+    h = conn.execute(f"""SELECT COUNT(*), SUM({known}) FROM findings WHERE status IN ({','.join('?' * len(TODO))})
                          AND COALESCE(stale,0)=0 AND appeal_deadline >= ? AND category IN ('denial','bundling','downcoding','underpayment')
-                         AND signal NOT IN ('NO_ANSWER','REJECTED_PRE_PAYER')""",
+                         AND signal NOT IN ('NO_ANSWER','REJECTED_PRE_PAYER','NOT_SENT','EMA_DENIED')""",
                      TODO + (today,)).fetchone()
     if h[0]:
         share = (h[1] or 0) / h[0]
@@ -593,7 +622,24 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
                           "title": f"EMA's side is known for {share:.0%} of the open work",
                           "detail": "For the rest the site cannot tell whether a biller already wrote it off, moved it to the patient or resent it.",
                           "who": "Practice administrator: export ERA & Payment Line Adjustments every week (and once from November 2024)."})
+    items += ema_health(conn, today)
     return items
+
+
+def ema_health(conn: sqlite3.Connection, today: str) -> list[dict]:
+    """EMA's report items for the list (remitwatch.ema_checks.data_health: the reports on file and how old, held reports,
+    missing columns, the map, payments with no remittance, credits, unknown status words), once a report has reached the
+    site (its catalog, which the dashboard's copy holds too, so both hosts list the same items). On the copy they come
+    from what the run stored; nothing is created or written here."""
+    if "ema_report_files" not in _tables(conn):
+        return []
+    try:
+        if not conn.execute("SELECT 1 FROM ema_report_files LIMIT 1").fetchone():
+            return []
+        from . import ema_checks as ec
+        return ec.data_health(conn, today=today)
+    except (sqlite3.Error, ImportError, KeyError, TypeError, ValueError):
+        return []
 
 
 MONEY_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")

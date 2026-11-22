@@ -15,6 +15,8 @@
                                                          move the Vercel site's store and packets to this server, once
     python -m remitwatch.cli compare-cloud               prove it: the Vercel site's state against this server, table by table
     python -m remitwatch.cli backup [--dir D] [--keep N] a consistent copy of the store while the site runs (also made daily)
+    python -m remitwatch.cli ema-reports [--status | --summarize | --reread FILE_ID|all | --decide FILE_ID apply|discard]
+                                                         EMA's A/R and Production reports and the posting ledger
 """
 from __future__ import annotations
 
@@ -53,9 +55,9 @@ def cmd_ingest_835(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest_ema(args: argparse.Namespace) -> int:
-    import hashlib
-
-    from .ema_exports import export_created, iter_export_paths, iter_rows
+    from . import ema_ledger, ema_reports
+    from .dropbox_sync import file_sha256
+    from .ema_exports import export_created, is_report_file, iter_export_paths, iter_rows
     from .store import Store
 
     store = Store(args.db)
@@ -65,29 +67,131 @@ def cmd_ingest_ema(args: argparse.Namespace) -> int:
             paths.extend(iter_export_paths(p))
         else:
             paths.append(p)
-    total = {"files": 0, "skipped_seen": 0, "rows": 0, "inserted": 0, "errors": 0}
-    for p in sorted(paths):
-        total["files"] += 1
-        with open(p, "rb") as fh:
-            sha = hashlib.sha256(fh.read()).hexdigest()
-        if store.file_seen(sha):
-            total["skipped_seen"] += 1
-            continue
-        try:
-            rows = list(iter_rows(p))
-            r = store.ingest_ema_rows(rows)
-            fam = rows[0]["family"] if rows else "unknown"
-            store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
-            store.record_export(os.path.basename(p), sha, fam, export_created(p), len(rows))
-            total["rows"] += len(rows)
-            total["inserted"] += r["inserted"]
-            print(f"  {fam:12s} rows={len(rows):6d} new={r['inserted']:6d}  {os.path.basename(p)}", file=sys.stderr)
-        except Exception as exc:
-            total["errors"] += 1
-            store.record_file(sha, p, kind="ema:error", status=f"error: {type(exc).__name__}: {exc}"[:200])
-            print(f"  ERROR {os.path.basename(p)}: {exc}", file=sys.stderr)
+    total = {"files": 0, "skipped_seen": 0, "rows": 0, "inserted": 0, "errors": 0, "reports": 0}
+    lg_box: list = []
+
+    def ledger():                       # opened only when a Production report comes
+        if not lg_box:
+            lg_box.append(ema_ledger.Ledger.open(ema_ledger.ledger_path(args.db)))
+        return lg_box[0]
+    try:
+        for p in sorted(paths):
+            if is_report_file(p):
+                # EMA's A/R or Production report: its own reader (the export reader below refuses it)
+                total["files"] += 1
+                total["reports"] += 1
+                try:
+                    res = ema_reports.ingest_file(store, p, via="cli", origin={"path": os.path.abspath(p)}, ledger=ledger,
+                                                  log=lambda *a: print(*a, file=sys.stderr))
+                except Exception as exc:        # never the message: a converter's message can hold a cell
+                    total["errors"] += 1
+                    print(f"  ERROR {os.path.basename(p)}: {type(exc).__name__}", file=sys.stderr)
+                    continue
+                for m in (res.get("members") if res.get("status") == "zip" else [res]) or []:
+                    print(f"  {m.get('report') or '?':12s} {m.get('status'):10s} rows={int(m.get('rows_applied') or 0):7d}  "
+                          f"{os.path.basename(p)}", file=sys.stderr)
+            else:
+                _ingest_export(store, p, total, file_sha256, export_created, iter_rows)
+        if lg_box:
+            r = ema_ledger.refresh(store, lg_box[0], log=lambda *a: print(*a, file=sys.stderr))
+            total["ema_summaries"] = {"part_a": bool(r.get("part_a")), "part_b": bool(r.get("part_b"))}
+    finally:
+        for lg in lg_box:
+            lg.close()
     print(json.dumps(total, indent=1))
     return 0
+
+
+def _ingest_export(store, p: str, total: dict, file_sha256, export_created, iter_rows) -> None:
+    """One of the three weekly exports, read whole as before (a file already read is skipped)."""
+    total["files"] += 1
+    sha = file_sha256(p)
+    if store.file_seen(sha):
+        total["skipped_seen"] += 1
+        return
+    try:
+        rows = list(iter_rows(p))
+        r = store.ingest_ema_rows(rows)
+        fam = rows[0]["family"] if rows else "unknown"
+        store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
+        store.record_export(os.path.basename(p), sha, fam, export_created(p), len(rows))
+        total["rows"] += len(rows)
+        total["inserted"] += r["inserted"]
+        print(f"  {fam:12s} rows={len(rows):6d} new={r['inserted']:6d}  {os.path.basename(p)}", file=sys.stderr)
+    except Exception as exc:
+        total["errors"] += 1
+        store.record_file(sha, p, kind="ema:error", status=f"error: {type(exc).__name__}: {exc}"[:200])
+        print(f"  ERROR {os.path.basename(p)}: {exc}", file=sys.stderr)
+
+
+def cmd_ema_reports(args: argparse.Namespace) -> int:
+    """EMA's A/R and Production reports on this server: --status (the catalog, what the reports cover, the posting
+    ledger), --summarize (the summaries made again from the ledger, Part A and B), --reread <file id|all> (a Production
+    file taken out of the ledger, to be read again from its kept copy by the next cycle), --decide <file id> apply|discard
+    (a held report). The last three take the cycle's lock: they wait for no cycle and change nothing while one runs."""
+    from . import ema_ledger, ema_reports
+    from .pipeline import acquire_lock, release_lock
+    from .store import Store
+    store = Store(args.db)
+    conn = store.conn
+    lpath = ema_ledger.ledger_path(args.db)
+    try:
+        if args.status or not (args.summarize or args.reread or args.decide):
+            cat = ema_reports.catalog(conn)
+            files = [{k: f.get(k) for k in ("file_id", "report", "source_name", "status", "as_of", "rows_read", "rows_applied",
+                                            "live_rows", "scope", "status_reason")} for f in cat["files"]]
+            stats = None
+            if os.path.exists(lpath):
+                c = __import__("sqlite3").connect(lpath, timeout=60)
+                try:
+                    n, lo, hi = c.execute("SELECT COUNT(*), MIN(svc), MAX(posted) FROM postings").fetchone()
+                    stats = {"rows": n, "svc_lo": lo, "posted_hi": hi, "bytes": os.path.getsize(lpath),
+                             "files": c.execute("SELECT COUNT(*) FROM ledger_files").fetchone()[0],
+                             "seq": (c.execute("SELECT value FROM ledger_meta WHERE key='seq'").fetchone() or [None])[0]}
+                finally:
+                    c.close()
+            cov = (conn.execute("SELECT value FROM meta WHERE key=?", (ema_ledger.META_MAP_COVERAGE,)).fetchone() or [None])[0]
+            print(json.dumps({"files": files, "held": len(cat["held"]), "waiting": cat["waiting"], "switch": cat["switch"],
+                              "coverage": cat["coverage"], "ledger": stats, "ledger_path": lpath,
+                              "map_coverage": json.loads(cov) if cov else None}, indent=1, default=str))
+            return 0
+        token = acquire_lock(conn)
+        if not token:
+            print("A cycle is running. Run this again when it has finished.")
+            return 1
+        try:
+            if args.decide:
+                fid, decision = args.decide
+                out = ema_reports.decide(conn, fid, decision, "cli")
+                print(json.dumps(out, indent=1, default=str))
+                return 0 if "error" not in out else 1
+            if args.reread:
+                if args.reread == "all":
+                    if os.path.exists(lpath):
+                        aside = f"{lpath}.aside-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
+                        for suffix in ("-wal", "-shm"):
+                            if os.path.exists(lpath + suffix):
+                                os.remove(lpath + suffix)
+                        os.replace(lpath, aside)
+                        print(f"The ledger was moved aside to {aside}.")
+                    with ema_ledger.Ledger.open(lpath) as lg:
+                        n = ema_ledger.sync_catalog(store, lg)
+                    print(json.dumps({"marked_to_read_again": n}))
+                    return 0
+                with ema_ledger.Ledger.open(lpath) as lg:
+                    gone = lg.forget(args.reread)
+                    ema_ledger.sync_catalog(store, lg)
+                row = conn.execute("SELECT status FROM ema_report_files WHERE file_id=?", (args.reread,)).fetchone()
+                print(json.dumps({"postings_removed": gone, "status": row[0] if row else None}))
+                return 0
+            with ema_ledger.Ledger.open(lpath) as lg:
+                r = ema_ledger.refresh(store, lg, parts="AB", log=lambda *a: print(*a, file=sys.stderr))
+            print(json.dumps({k: r.get(k) for k in ("published", "retained", "seconds")}, indent=1, default=str))
+            return 0
+        finally:
+            release_lock(conn, token)
+    finally:
+        store.close()
 
 
 def cmd_link(args: argparse.Namespace) -> int:
@@ -187,7 +291,7 @@ def cmd_cycle(args: argparse.Namespace) -> int:
 BACKUP_LOCK = "backup:lock"
 BACKUP_LOCK_STALE_MINUTES = 60          # a lock nobody released for this long was left by a copy that was cut short
 # what a copy cut short leaves in the backups folder (the raw copy, its journal, a gzip not finished): never a backup
-_BACKUP_LEFTOVER = re.compile(r"^remitwatch-\d{8}-\d{6}\.sqlite(?:\.part|\.gz\.part)?(?:-journal|-wal|-shm)?$")
+_BACKUP_LEFTOVER = re.compile(r"^(?:remitwatch|ema_ledger)-\d{8}-\d{6}\.sqlite(?:\.part|\.gz\.part)?(?:-journal|-wal|-shm)?$")
 
 
 class BackupBusy(Exception):
@@ -266,12 +370,42 @@ def backup_store(db: str, dest_dir: str | None = None, keep: int = 7) -> str:
             shutil.copyfileobj(fi, fo, 8 << 20)
         os.replace(part, final)
         os.remove(raw)
-        old = sorted(f for f in os.listdir(dest_dir) if f.startswith("remitwatch-") and f.endswith(".sqlite.gz"))
-        for f in old[:-keep] if keep > 0 else []:
-            os.remove(os.path.join(dest_dir, f))
+        _backup_ledger(db, dest_dir, stamp)
+        for prefix in ("remitwatch-", "ema_ledger-"):
+            old = sorted(f for f in os.listdir(dest_dir) if f.startswith(prefix) and f.endswith(".sqlite.gz"))
+            for f in old[:-keep] if keep > 0 else []:
+                os.remove(os.path.join(dest_dir, f))
         return final
     finally:
         _drop_backup_lock(db, token)
+
+
+def _backup_ledger(db: str, dest_dir: str, stamp: str) -> str | None:
+    """The posting ledger of EMA's Production report (remitwatch.ema_ledger), copied beside the store's copy with
+    SQLite's online backup and gzipped the same way; nothing when this server has no ledger. Opened as a plain reader:
+    never through Ledger.open, which tidies files a cycle that is running may be using."""
+    import gzip
+    import shutil
+    import sqlite3
+
+    from .ema_ledger import ledger_path
+    src_path = ledger_path(db)
+    if not os.path.exists(src_path):
+        return None
+    final = os.path.join(dest_dir, f"ema_ledger-{stamp}.sqlite.gz")
+    raw, part = final[:-3] + ".part", final + ".part"
+    src, dst = sqlite3.connect(src_path, timeout=60), sqlite3.connect(raw)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(raw, "rb") as fi, gzip.open(os.fdopen(fd, "wb"), "wb", compresslevel=6) as fo:
+        shutil.copyfileobj(fi, fo, 8 << 20)
+    os.replace(part, final)
+    os.remove(raw)
+    return final
 
 
 def _daily_backup(db: str) -> dict:
@@ -540,6 +674,61 @@ def _fingerprint(conn, table: str, cols: list[str] | None) -> tuple[int, str] | 
     return n, h.hexdigest()[:16]
 
 
+EMA_SKIP_COLUMNS = ("mapped_at",)          # when the map was made: each host's own
+
+
+def _ema_fingerprint(conn, table: str) -> tuple[int, str] | None:
+    """Rows of an EMA report table and a hash of the sum of each number column, leaving out the keys and keyed hashes
+    (ema_reports.KEY_COLUMNS) and when the map was made: two hosts with the same reports hold the same figures."""
+    import hashlib
+
+    from .ema_reports import KEY_COLUMNS
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+        return None
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")
+            if r[1] not in KEY_COLUMNS and r[1] not in EMA_SKIP_COLUMNS and (r[2] or "").upper() in ("INTEGER", "REAL")]
+    n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    sums = conn.execute(f"SELECT {', '.join(f'TOTAL({c})' for c in cols)} FROM {table}").fetchone() if cols else ()
+    return n, hashlib.sha256(repr((cols, tuple(sums or ()))).encode()).hexdigest()[:16]
+
+
+def _ledger_sums(c) -> tuple[int, str]:
+    import hashlib
+    n, paid, charges, adj = c.execute("SELECT COUNT(*), TOTAL(ins_paid), TOTAL(charges), TOTAL(contractual) FROM postings").fetchone()
+    files = sorted(tuple(r) for r in c.execute("SELECT file_id, status, live_rows FROM ledger_files"))
+    return n, hashlib.sha256(repr((paid, charges, adj, files)).encode()).hexdigest()[:16]
+
+
+def _ledger_fingerprint_file(db: str) -> tuple[int, str] | None:
+    import sqlite3
+
+    from .ema_ledger import ledger_path
+    p = ledger_path(db)
+    if not os.path.exists(p):
+        return None
+    c = sqlite3.connect(p, timeout=60)
+    try:
+        return _ledger_sums(c)
+    finally:
+        c.close()
+
+
+def _ledger_fingerprint_state(st) -> tuple[int, str] | None:
+    import shutil
+    import tempfile
+
+    from . import ema_ledger
+    if not st.meta(ema_ledger.STATE_NAME):
+        return None
+    tmp = tempfile.mkdtemp(prefix="compare-ledger-")
+    h = ema_ledger.LedgerHandle(st, tmp_dir=tmp)
+    try:
+        return _ledger_sums(h.open().conn)
+    finally:
+        h.discard()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def cmd_import_cloud(args: argparse.Namespace) -> int:
     """Move from the serverless site (Vercel) to this server, once (see the table above): the state folder's store with
     the journal applied, its packets, its Dropbox position, the alert-mail record, the Practice figures and the saved
@@ -654,9 +843,35 @@ def cmd_import_cloud(args: argparse.Namespace) -> int:
     os.replace(tmp, args.db)
     from .api import ensure_server_schema
     ensure_server_schema(args.db)           # the dashboard's own tables, where the old store had none yet
+    ledger = _import_ledger(st, args.db)
     print(json.dumps(dict(details, store=args.db, packets_moved=packets, reports_moved=reports, dropbox_position=bool(cur),
-                          journal_left_behind=waiting, **base), indent=1))
+                          journal_left_behind=waiting, posting_ledger=ledger, **base), indent=1))
     return 0
+
+
+def _import_ledger(st, db: str) -> dict | None:
+    """The posting ledger of EMA's Production report, kept gzipped in the state folder (ema_ledger.sqlite.gz), becomes
+    this server's ledger beside the store. The imported store keeps its key salt, so the two agree. None when the state
+    folder has no ledger."""
+    import shutil
+
+    from . import ema_ledger
+    if not st.meta(ema_ledger.STATE_NAME):
+        return None
+    tmp = os.path.join(os.path.dirname(os.path.abspath(db)) or ".", ".import-ledger")
+    h = ema_ledger.LedgerHandle(st, tmp_dir=tmp)
+    try:
+        lg = h.open()
+        dest = ema_ledger.ledger_path(db)
+        for suffix in ("-wal", "-shm"):
+            if os.path.exists(dest + suffix):
+                os.remove(dest + suffix)
+        lg.backup(dest)
+        stats = {"rows": lg.conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0], "files": len(lg.files()), "path": dest}
+    finally:
+        h.discard()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return stats
 
 
 def cmd_compare_cloud(args: argparse.Namespace) -> int:
@@ -682,6 +897,13 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
     for t in tables:
         if t == "meta":
             continue        # the server keeps its own run records there; the keys that matter are checked below
+        if t.startswith("ema_") and t != "ema_rows" and t != "ema_sources":
+            # EMA's report tables: rows and the sum of every number, keys and keyed hashes left out
+            a, b = _ema_fingerprint(theirs, t), _ema_fingerprint(mine, t)
+            same = a == b
+            bad += not same
+            rows.append((t + " (rows and sums)", a[0] if a else None, b[0] if b else None, "same" if same else "DIFFERENT"))
+            continue
         cols = None
         if t in HASHED_TABLES:
             mine_cols = {r[1] for r in mine.execute(f"PRAGMA table_info({t})")}
@@ -690,6 +912,12 @@ def cmd_compare_cloud(args: argparse.Namespace) -> int:
         same = a == b
         bad += not same
         rows.append((t + (" (every row)" if cols else ""), a[0] if a else None, b[0] if b else None, "same" if same else "DIFFERENT"))
+    lg_a, lg_b = _ledger_fingerprint_state(st), _ledger_fingerprint_file(args.db)
+    if lg_a is not None or lg_b is not None:
+        same = lg_a == lg_b
+        bad += not same
+        rows.append(("posting ledger (rows and sums)", lg_a[0] if lg_a else None, lg_b[0] if lg_b else None,
+                     "same" if same else "DIFFERENT"))
     for key in ("calculator:assumptions", "pipeline:last_report"):
         a = (theirs.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone() or [None])[0]
         b = (mine.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone() or [None])[0]
@@ -732,6 +960,12 @@ def main(argv: list[str] | None = None) -> int:
         w.add_argument("--report-dir", default=None, help="where the weekly summaries are saved (default: a reports folder beside the store)")
         w.set_defaults(fn=fn)
     al = sub.add_parser("alerts"); al.add_argument("--notify", action="store_true"); al.set_defaults(fn=cmd_alerts)
+    er_ = sub.add_parser("ema-reports", help="EMA's A/R and Production reports: the catalog, the posting ledger, held files")
+    er_.add_argument("--status", action="store_true", help="the catalog, what the reports cover and the posting ledger (the default)")
+    er_.add_argument("--summarize", action="store_true", help="make the summaries again from the posting ledger")
+    er_.add_argument("--reread", metavar="FILE_ID|all", default=None, help="read a Production file again (all: every one)")
+    er_.add_argument("--decide", nargs=2, metavar=("FILE_ID", "apply|discard"), default=None, help="decide on a held report")
+    er_.set_defaults(fn=cmd_ema_reports)
     v = sub.add_parser("serve"); v.add_argument("--host", default="127.0.0.1"); v.add_argument("--port", type=int, default=8000); v.set_defaults(fn=cmd_serve)
     c = sub.add_parser("stats"); c.set_defaults(fn=cmd_stats)
     mk = sub.add_parser("modmed-key"); mk.add_argument("--rsa", action="store_true", help="an RSA key (RS384) instead of EC P-384 (ES384)")

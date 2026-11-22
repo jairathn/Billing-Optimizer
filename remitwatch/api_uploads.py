@@ -370,8 +370,12 @@ def _howto_doc(c) -> dict:
 def ema_exports_list(user: str = Depends(_user)):
     """The checklist of the five EMA exports, row by row, with what the page needs to recognise each one from its
     column names before it sends anything."""
+    try:
+        pending = _store().pending()        # an upload waiting for the cycle makes its row "received", not overdue
+    except Exception:
+        pending = []
     with _conn() as c:
-        rows = uploads.exports_overview(c, _howto_doc(c))
+        rows = uploads.exports_overview(c, _howto_doc(c), pending=pending)
     serverless = runtime.serverless()
     return {"exports": rows, "recognition": uploads.recognition(), "mode": "serverless" if serverless else "server",
             "chunk_bytes": uploads.CHUNK_BYTES, "chunk_from": uploads.CHUNK_FROM_BYTES, "max_bytes": uploads.max_upload_bytes(),

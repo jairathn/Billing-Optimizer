@@ -66,6 +66,7 @@ DUP_CARCS = frozenset({"18", "B13"})
 SHORT = ("downcoding", "underpayment")
 PATIENT_SHARE = frozenset({"1", "2", "3"})               # PR deductible, coinsurance, copay: the patient's share
 PAID_STATUS = ("1", "2", "3", "19", "20")                 # claim statuses that carry a payer's processing
+SECOND_STATUS = ("2", "3", "20", "21")                    # processed as the second or third payer
 
 # EMA's claim actions and statuses, as the work they show (EMA's own words: 'Initial Appeal Electronic', 'Submitted
 # Corrected Claim Portal', 'Sent Medical Records Fax', 'Claim Reprocessing', 'Claim Billed To Secondary Tertiary
@@ -193,6 +194,21 @@ def submission_no(pcn: Any) -> int:
 def _grp_kind(name: Any) -> tuple[str, str]:
     from .codes import normalize_payer
     return normalize_payer(name) if name else ("Unknown", "other")
+
+
+_GK_CACHE: dict = {}
+
+
+def row_group(x: dict) -> tuple[str, str]:
+    """An 835 row's payer group and kind, its claim filing indicator considered (codes.payer_group_kind: a company's
+    Medicare Advantage or Medicaid product is its own group, as the items name them)."""
+    k = (x.get("payer"), x.get("cfi"))
+    if k not in _GK_CACHE:
+        if len(_GK_CACHE) > 5000:
+            _GK_CACHE.clear()
+        from .codes import payer_group_kind
+        _GK_CACHE[k] = payer_group_kind(x.get("payer"), x.get("cfi")) if x.get("payer") else ("Unknown", "other")
+    return _GK_CACHE[k]
 
 
 def _family(group: Any) -> str:
@@ -563,25 +579,30 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
 
 
 def _pair_reversals(recs: list[dict]) -> None:
-    """Mark each status-22 line with the earlier line it reverses (same payer, code and charge; the newest such line with
-    the opposite payment first), and that line as reversed."""
+    """Mark each status-22 line with the line it reverses, and that line as reversed. A reversal repeats the received
+    date of the claim it reverses (or a later one, the date the payer received the request to reprocess), so a line the
+    payer received after the reversal's received date is never its pair (the new answer that often comes on the same
+    remittance); among the rest (same payer, code and charge, answered on or before the reversal): the same received
+    date first, then the line whose reasons the reversal negates exactly, then the opposite payment, then an earlier
+    remittance, then the newest. A reversal of a claim the archive does not hold stays unpaired."""
     for x in recs:
         x.setdefault("reversed_by", None)
         x.setdefault("reverses", None)
     for x in sorted((r for r in recs if r["status"] == "22"), key=lambda r: r["date"] or ""):
+        rx = x.get("received")
         cands = [o for o in recs if o is not x and o["status"] != "22" and not o.get("reversed_by")
-                 and (o["date"] or "") <= (x["date"] or "") and _same_payer(_grp_kind(o["payer"])[0], _grp_kind(x["payer"])[0])
+                 and (o["date"] or "") <= (x["date"] or "") and _same_payer(row_group(o)[0], row_group(x)[0])
                  and o["code"] == x["code"] and abs(o["charge"] or 0) == abs(x["charge"] or 0)
-                 and (o["pccn"] == x["pccn"] or not o["pccn"] or not x["pccn"] or o["pcn"] == x["pcn"])]
+                 and (o["pccn"] == x["pccn"] or not o["pccn"] or not x["pccn"] or o["pcn"] == x["pcn"])
+                 and not (rx and o.get("received") and o["received"] > rx)]
         if not cands:
             continue
         mirror = sorted((g, c, -a) for g, c, a in x["adj"])
 
         def score(o: dict) -> tuple:
-            # the answer whose reasons the reversal negates exactly, then the opposite payment, then an earlier remittance
-            # (a reversal undoes an earlier answer; the new answer often comes on the same remittance), then the newest
-            return (bool(mirror) and sorted(o["adj"]) == mirror, (o["paid"] or 0) == -(x["paid"] or 0),
-                    (o["date"] or "") < (x["date"] or ""), o["date"] or "", o["line_key"] or "")
+            return (bool(rx) and o.get("received") == rx, bool(mirror) and sorted(o["adj"]) == mirror,
+                    (o["paid"] or 0) == -(x["paid"] or 0), (o["date"] or "") < (x["date"] or ""), o["date"] or "",
+                    o["line_key"] or "")
         pick = max(cands, key=score)
         pick["reversed_by"] = x["line_key"] or x["claim_key"]
         x["reverses"] = pick["line_key"] or pick["claim_key"]
@@ -1005,7 +1026,7 @@ def _evidence(fx: dict) -> list[dict]:
         newer_sub = submission_no(x["pcn"]) > submission_no(f.get("patient_control_number"))
         if (x["date"] or "") > after and (x.get("freq") == "7" or newer_sub) and x["received"] >= (after or ""):
             out.append({"date": x["received"], "kind": "resubmitted", "source": "835", "dated_by": "payer", "confirmed": True,
-                        "text": f"{_grp_kind(x['payer'])[0]} received a {'corrected' if x.get('freq') == '7' else 'new'} claim on "
+                        "text": f"{row_group(x)[0]} received a {'corrected' if x.get('freq') == '7' else 'new'} claim on "
                                 f"{day(x['received'])} (its answer of {day(x['date'])})"})
     for x in fx["exports"]:
         if x.get("submitted") and after and x["submitted"] > after and submission_no(x["claim_id"]) > submission_no(f.get("patient_control_number")):
@@ -1068,25 +1089,40 @@ def _payer_answers_after(fx: dict, since: str | None) -> list[dict]:
     for x in fx["r835"]["rows"]:
         if (x["date"] or "") > since:
             out.append({"date": x["date"], "source": "835", "paid": x["paid"] or 0, "status": x["status"], "payer": x["payer"],
+                        "group": row_group(x)[0], "kind": row_group(x)[1],
                         "codes": [f"{g}-{c}" for g, c, _a in x["adj"] if g != "PR" or c not in PATIENT_SHARE]})
+    remit_days = set()
+    days_835 = sorted({x["date"] for x in fx["r835"]["rows"] if x["date"]})
     for p in fx["ema"]["pays"]:
+        if p["posted"] and (p["cents"] or p["check"]):
+            remit_days.add(p["posted"])
         if (p["posted"] or "") > since and (p["cents"] or p["check"]):
-            out.append({"date": p["posted"], "source": "production", "paid": p["cents"], "status": None, "payer": p["payer"], "codes": []})
+            # EMA's posting of a remittance whose 835 is on file repeats that 835's answer (posted a few days later)
+            if p.get("in_835") and any(0 <= (_days(d, p["posted"]) or 99) <= 14 for d in days_835):
+                continue
+            out.append({"date": p["posted"], "source": "production", "paid": p["cents"], "status": None, "payer": p["payer"],
+                        "group": p.get("group") or _grp_kind(p["payer"])[0], "codes": []})
     for z in fx["ema"]["reasons"]:
         if z["grp"] in ("", "PR") or z.get("cls") in ("routine", "none", "patient", "ema_kind"):
             continue
-        if (z["last"] or "") > since:
-            out.append({"date": z["last"], "source": "production", "paid": 0, "status": None, "payer": z["payer"],
-                        "codes": [f"{z['grp']}-{z['code']}"]})
+        # a reason EMA posted on a day a remittance was posted is the payer's; one posted on another day is a person's
+        # adjustment in EMA (a write-off), not an answer
+        days = sorted(d for d in {z["first"], z["last"]} if d and d in remit_days and d > since)
+        if days:
+            out.append({"date": days[-1], "source": "production", "paid": 0, "status": None, "payer": z["payer"],
+                        "group": _grp_kind(z["payer"])[0] if z["payer"] else None, "codes": [f"{z['grp']}-{z['code']}"]})
     return sorted(out, key=lambda a: (a["date"] or "", a.get("status") != "22", a["paid"]))
 
 
 def _last_payer_activity(fx: dict, before: str | None = None) -> str | None:
+    """The newest day the payer did anything on the item's services: an 835 answer, an insurance posting in EMA, or a
+    reason EMA posted on a day a remittance was posted (a reason posted on another day is a person's write-off)."""
     f = fx["item"]
+    remit_days = {p["posted"] for p in fx["ema"]["pays"] if p["posted"] and (p["cents"] or p["check"])}
     dates = [f.get("payment_date")]
     dates += [x["date"] for x in fx["r835"]["rows"]]
-    dates += [p["posted"] for p in fx["ema"]["pays"]]
-    dates += [z["last"] for z in fx["ema"]["reasons"] if z["grp"] not in ("", "PR")]
+    dates += list(remit_days)
+    dates += [d for z in fx["ema"]["reasons"] if z["grp"] not in ("", "PR") for d in (z["first"], z["last"]) if d in remit_days]
     dates = [d for d in dates if d and (before is None or d <= before)]
     return max(dates) if dates else None
 
@@ -1171,8 +1207,19 @@ def paid_proof(fx: dict) -> dict | None:
     # the detection run found fewer units paid than billed (its hint 'partly paid'): the 835 has decided it is short
     short_units = "partly_paid" in _ev(f)
     later_paid = [] if short_units else [x for x in stand if (x["date"] or "") > mine and (x["paid"] or 0) > 0 and same_line(x)]
+    denier = f.get("payer_group") or _grp_kind(f.get("payer_name"))[0]
     if later_paid and cat in MONEY:
         paid = sum(x["paid"] or 0 for x in later_paid)
+        # the payer that denied the claim sent to it as primary later paid the same line as the second payer, after the
+        # primary's answer (OA-23): it only owed its second-payer part, whatever the amount (C64)
+        second = [x for x in later_paid if x["status"] in SECOND_STATUS and any(g == "OA" and c == "23" for g, c, _a in x["adj"])
+                  and _same_payer(row_group(x)[0], denier)]
+        if cat not in SHORT and second and own and not any(x["status"] in SECOND_STATUS for x in own):
+            x = second[0]
+            return {"rule": "paid_as_secondary", "cents": sum(y["paid"] or 0 for y in second), "date": x["date"], "payer": x["payer"],
+                    "check_tail": x["check_tail"], "source": "835",
+                    "text": f"Paid as the second payer: {usd(sum(y['paid'] or 0 for y in second))} by {x['payer']} on {day(x['date'])}, after the "
+                            f"primary payer's answer (OA-23); this denial was of the claim sent to {denier} as if it were primary"}
         if cat in SHORT:
             # an underpayment or downcode is settled by a later payment of the shortfall (95%)
             need = int(0.95 * (f.get("shortfall_cents") or 0))
@@ -1198,26 +1245,52 @@ def paid_proof(fx: dict) -> dict | None:
             if not tot["n"] or tot["balance"] <= 0 or tot["several"]:
                 return {"rule": "moved_to_patient", "cents": 0, "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
                         "source": "835", "patient_cents": pr,
-                        "text": f"{_grp_kind(x['payer'])[0]} reversed the denial and reprocessed it on {day(x['date'])}: {usd(pr)} to the "
+                        "text": f"{row_group(x)[0]} reversed the denial and reprocessed it on {day(x['date'])}: {usd(pr)} to the "
                                 f"patient's {what}, nothing owed by the payer" + ("; EMA shows the patient paid" if tot["n"] and tot["balance"] <= 0
                                                                                   and tot["pat_paid"] else "")}
             return {"rule": "moved_to_patient_open", "cents": 0, "date": x["date"], "payer": x["payer"], "check_tail": x["check_tail"],
                     "source": "835", "patient_cents": pr, "patient_open": tot["balance"],
-                    "text": f"{_grp_kind(x['payer'])[0]} reprocessed it on {day(x['date'])}: {usd(pr)} to the patient's {what}; "
+                    "text": f"{row_group(x)[0]} reprocessed it on {day(x['date'])}: {usd(pr)} to the patient's {what}; "
                             f"EMA shows {usd(tot['balance'])} still open"}
     if oc == "patient" and tot["n"] and tot["balance"] <= 0:
         return {"rule": "moved_to_patient", "cents": 0, "date": o.get("outcome_on"), "payer": None, "source": "production",
                 "text": f"Settled by the patient: EMA shows {usd(o.get('patient_after'))} paid by the patient after the denial and the line closed"}
+    # forwarded to another carrier (CO-B11), and EMA shows the line paid and settled: the carrier paid (C08); its payment
+    # can come before the remittance that says the claim was forwarded
+    fwd = _forwarded(fx)
+    if fwd and cat in MONEY and tot["n"] and tot["balance"] <= 0 and tot["ins_paid"] > 0:
+        pays = [p for p in fx["ema"]["pays"] if (p["cents"] or 0) > 0]
+        p = pays[-1] if pays else {}
+        return {"rule": "forwarded_paid", "cents": tot["ins_paid"], "date": p.get("posted"), "payer": p.get("payer"),
+                "check_tail": p.get("check_tail"), "source": "production",
+                "text": f"Forwarded to {fwd['carrier']} and paid: EMA shows {usd(tot['ins_paid'])} from insurance on this line"
+                        + (f" (posted {day(p.get('posted'))}, check ending {p.get('check_tail') or '?'}"
+                           + ("" if p.get("in_835") else ", no 835") + ")" if p else "") + ", and the line settled"}
     # paid before this denial, by another plan or the same one (a duplicate, or the denial of a replacement claim)
     if cat in ("denial", "bundling") and not (f.get("paid_cents") or 0):
         before = [x for x in stand if (x["date"] or "") < mine and (x["paid"] or 0) > 0 and (once or (lcns and x.get("lcn") in lcns))]
-        denier = f.get("payer_group") or _grp_kind(f.get("payer_name"))[0]
         carc = str(f.get("carc") or "")
+        # a duplicate denial restating a payment EMA posted before it: the payer split the paid line into its payment and
+        # its adjustments, each marked previously paid (B13 with PR-3, CO-45 and CO-253 lines adding up to the charge), C07
+        if carc in DUP_CARCS and tot["n"] and tot["balance"] <= 0 and own:
+            prior = [p for p in fx["ema"]["pays"] if (p["posted"] or "") <= mine and (p["cents"] or 0) > 0
+                     and (not p.get("group") or _same_payer(p.get("group"), denier))]
+            own_charge = sum(abs(x["charge"] or 0) for x in own if x.get("line_key"))
+            pieces = [x for x in rows if x["claim_key"] == own[0]["claim_key"] and x.get("line_key") and x["svc"] == own[0]["svc"]
+                      and x["status"] != "22"]
+            hit = next((p for p in prior if p["cents"] == own_charge), None)
+            if prior and (hit or (len(pieces) > 1 and sum(abs(x["charge"] or 0) for x in pieces) == tot["charges"])):
+                p = hit or prior[-1]
+                return {"rule": "paid_before_duplicate", "cents": p["cents"], "date": p["posted"], "payer": p["payer"],
+                        "check_tail": p["check_tail"], "source": "production", "watch": False,
+                        "text": f"Already paid: EMA shows {usd(p['cents'])} by {p['payer'] or 'the payer'} posted {day(p['posted'])} (check ending "
+                                f"{p['check_tail'] or '?'}" + ("" if p["in_835"] else ", no 835") + "), before this duplicate denial, and the line "
+                                "settled; the payer's later answer restates that payment"}
         replacement = any(x.get("freq") == "7" for x in own)
         as_primary = any(x["status"] in ("1", "4", "19") for x in own) or not own
         if before:
             x = max(before, key=lambda r: r["date"] or "")
-            same = _same_payer(_grp_kind(x["payer"])[0], denier)
+            same = _same_payer(row_group(x)[0], denier)
             settled = not tot["n"] or tot["balance"] <= 0
             # another plan's answer owes nothing only when it processed the claim as primary after another plan paid as
             # primary (two plans each taking itself for primary: the right one paid); a second payer's denial of the
@@ -1234,6 +1307,16 @@ def paid_proof(fx: dict) -> dict | None:
                                  "claim and has not taken the payment back: watch for a takeback" if replacement else
                                  f"Already paid {usd(x['paid'])} on {day(x['date'])} (check ending {x['check_tail']}); this denial is "
                                  "of a duplicate")}
+            # the same payer paid this service before, the payment still stands (no reversal, no takeback naming the
+            # claim) and brought at least what this line should: the later denial answers another copy of the claim (a
+            # superseded original after the corrected claim was paid, C62), whatever its reason
+            takeback = any(p["reason"] in ("WO", "72") and (p["date"] or "") >= (x["date"] or "") for p in fx["r835"].get("plb") or [])
+            if same and settled and (x["paid"] or 0) >= thr and not takeback:
+                return {"rule": "paid_before_same_payer", "cents": x["paid"], "date": x["date"], "payer": x["payer"],
+                        "check_tail": x["check_tail"], "source": "835", "watch": True,
+                        "text": f"Already paid: {usd(x['paid'])} by {x['payer']} on {day(x['date'])} (check ending {x['check_tail']}), and the "
+                                "payment still stands; this later denial answers another copy of the claim, so nothing more is owed: "
+                                "watch for a takeback"}
         pb = o.get("paid_before_first") or {}
         if (o.get("paid_before") or 0) > 0 and tot["n"] and tot["balance"] <= 0 and pb:
             same = _same_payer(_grp_kind(pb.get("payer"))[0], denier) if pb.get("payer") else True
@@ -1404,6 +1487,13 @@ def _decide(fx: dict, today: str) -> dict:
         last = max(work_ev, key=lambda e: (e.get("date") or "", e["source"]))
         work = {"appeal": "appeal", "records": "records", "reprocess": "reprocess", "corrected": "corrected", "resubmitted": "resubmitted",
                 "secondary": "secondary", "call": "call", "sent": "sent", "fax": "fax"}.get(last["kind"], "appeal")
+        # work whose own date nobody knows (already in the first report) cannot hold an item past every window: nothing
+        # shows it was done in time, or that anything is still pending (C59)
+        if all(e.get("dated_by") == "first_report" for e in work_ev) and deadline \
+                and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"):
+            return put("expired", "expired", f"Past its last window ({day(deadline)}: {dbasis or 'the payer window'}) by more than "
+                                             f"{EXPIRE_GRACE_DAYS} days. {last['text']}; nothing shows it was done in time or is still pending",
+                       [last])
         return _follow(res, fx, ev, last.get("date"), work, last["text"], today, deadline, confirmed=bool(last.get("confirmed")),
                        conflict="", person=False, put=put, ev_row=last)
     # past every window
@@ -1438,6 +1528,23 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
         what = (f"paid {usd(a['paid'])}" if a["paid"] > 0 else
                 ("reversed its answer" if a.get("status") == "22" else
                  ("answered " + (", ".join(a["codes"]) if a["codes"] else "with $0.00"))))
+        # the newest answer to the work is a denial whose own window closed more than 30 days ago: expired, when the
+        # item's own window has closed too or the answer came from another payer (the claim was rebilled to the right
+        # one: the first denial no longer matters), C60. A person's Sent status keeps it for that person to read.
+        if not person and a["paid"] <= 0 and a.get("status") != "22":
+            ag = a.get("group") or (_grp_kind(a["payer"])[0] if a.get("payer") else None) or grp
+            ak = a.get("kind") or (_grp_kind(a["payer"])[1] if a.get("payer") else None) or kind
+            from .codes import appeal_rule
+            ar_ = appeal_rule(ag, ak)
+            closes = _add(a["date"], ar_["days"])
+            other = bool(ag) and bool(grp) and not _same_payer(ag, grp)
+            if closes and today > (_add(closes, EXPIRE_GRACE_DAYS) or "9999") and (
+                    other or (deadline and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"))):
+                res["appeal_block"] = None
+                return put("expired", "expired", f"{text}; {ag or 'the payer'} answered on {day(a['date'])} ({what}), and its window to "
+                                                 f"dispute that answer closed on {day(closes)} ({ar_['label']}), more than "
+                                                 f"{EXPIRE_GRACE_DAYS} days ago", rows + [{"source": a["source"], "kind": "answer",
+                                                                                          "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
         return put("work_now", "work_answered", f"{text}; the payer answered on {day(a['date'])} ({what}): work its answer"
                    + (f".{conflict}" if conflict else ""), rows + [{"source": a["source"], "kind": "answer", "date": a["date"],
                                                                      "text": f"answer of {day(a['date'])}: {what}"}])

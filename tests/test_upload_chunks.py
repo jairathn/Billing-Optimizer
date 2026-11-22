@@ -481,8 +481,9 @@ def test_the_same_file_again_changes_nothing(site):
     # waiting for the cycle: the same bytes again are not sent
     r = Up(site, raw, gz=True).start()
     assert r.status_code == 200 and r.json()["status"] == "already"
+    word = "run" if site.mode != "server" else "cycle"          # in the host's own words
     assert r.json()["lines"] == [f"Already have this; nothing changed. This exact file was uploaded on "
-                                 f"{uploads._day(datetime.now(timezone.utc).date().isoformat())} and waits for the next cycle."]
+                                 f"{uploads._day(datetime.now(timezone.utc).date().isoformat())} and waits for the next {word}."]
     # sent without its checksum first (an older page): the finish finds it is the same file and keeps nothing more
     twin = Up(site, raw, gz=False, sha=False)
     assert twin.send().status_code == 200
@@ -599,6 +600,25 @@ def test_the_checklist_says_what_each_export_is_and_whether_it_is_overdue(site):
     rec = j["recognition"]
     assert rec["reports"]["production"]["core"] == list(ema_reports.PRODUCTION_CORE) and rec["header_scan"] == ema_reports.HEADER_SCAN
     assert j["chunk_bytes"] == uploads.CHUNK_BYTES and j["notes_here"] is (site.mode == "server")
+
+
+def test_a_report_received_and_waiting_to_be_read_is_not_called_overdue(site):
+    """Right after a person uploads a report, its row says it was received and the cycle reads it next: never "Pull it
+    now". The other rows are unchanged."""
+    before = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}
+    assert before["production"]["overdue"] and not before["production"]["waiting"]
+    assert Up(site, text_report(), hint="production").send().status_code == 200
+    rows = {e["key"]: e for e in site.c.get("/api/ema/exports").json()["exports"]}
+    today = uploads._day(datetime.now(timezone.utc).date().isoformat())
+    assert rows["production"]["waiting"] and not rows["production"]["overdue"]
+    word = "run" if site.mode != "server" else "cycle"
+    assert rows["production"]["last_line"] == f"Last arrived {today} (uploaded here)."
+    assert rows["production"]["state_line"] == f"Waiting to be read: the next {word} reads it, then this row says what it held."
+    assert rows["ar"]["overdue"] and not rows["ar"]["waiting"]
+    # once the cycle has moved it to done/, the row goes by what was read again
+    pair = next(k for k in site.intake() if not k.endswith(".json"))
+    site.done(pair, dict(json.loads(site.intake()[pair + ".json"]), result={"status": "applied", "lines": []}))
+    assert not next(e for e in site.c.get("/api/ema/exports").json()["exports"] if e["key"] == "production")["waiting"]
 
 
 def test_the_how_to_box_keeps_who_saved_it_when_and_the_versions_before(site, monkeypatch):
@@ -819,6 +839,62 @@ const U = require(process.argv[1]); const fs = require('fs');
     assert got["from"] == len(raw) - CH                                        # a plain file carries on where the server stopped
 
 
+def shared_strings_xlsx(header: list[str], rows: list[list]) -> bytes:
+    """A workbook as Excel and EMA save one: the cell text kept in xl/sharedStrings.xml (openpyxl writes it inline), one
+    string split into rich-text runs and one with a phonetic guide, so the page's reader is held to that path too."""
+    import zipfile
+    from xml.sax.saxutils import escape
+    strings: list[str] = []
+
+    def at(v: str) -> int:
+        if v not in strings:
+            strings.append(v)
+        return strings.index(v)
+
+    def col(i: int) -> str:
+        out = ""
+        i += 1
+        while i:
+            i, r = divmod(i - 1, 26)
+            out = chr(65 + r) + out
+        return out
+    sheet = []
+    for n, values in enumerate([header] + rows, start=1):
+        cells = "".join(f'<c r="{col(i)}{n}"><v>{v}</v></c>' if isinstance(v, (int, float)) else
+                        f'<c r="{col(i)}{n}" t="s"><v>{at(str(v))}</v></c>' for i, v in enumerate(values) if v is not None)
+        sheet.append(f'<row r="{n}">{cells}</row>')
+
+    def si(i: int, v: str) -> str:
+        if i == 1:
+            return f'<si><r><t>{escape(v[:3])}</t></r><r><rPr><b/></rPr><t xml:space="preserve">{escape(v[3:])}</t></r></si>'
+        if i == 2:
+            return f'<si><t>{escape(v)}</t><rPh sb="0" eb="1"><t>guide</t></rPh></si>'
+        return f"<si><t>{escape(v)}</t></si>"
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    parts = {
+        "[Content_Types].xml": '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
+        "_rels/.rels": f'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": f'<?xml version="1.0" encoding="UTF-8"?><workbook {ns} xmlns:r="{rel}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/>'
+        f'<Relationship Id="rId2" Type="{rel}/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
+        "xl/worksheets/sheet1.xml": f'<?xml version="1.0" encoding="UTF-8"?><worksheet {ns}><sheetData>{"".join(sheet)}</sheetData></worksheet>',
+        "xl/sharedStrings.xml": f'<?xml version="1.0" encoding="UTF-8"?><sst {ns} count="{len(strings)}" uniqueCount="{len(strings)}">'
+        + "".join(si(i, v) for i, v in enumerate(strings)) + "</sst>",
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, text in parts.items():
+            zf.writestr(name, text)
+    return out.getvalue()
+
+
 def _parity_files(folder) -> dict:
     """Invented files of every kind the page tells apart, with what the server's readers say of each."""
     import openpyxl
@@ -838,6 +914,8 @@ def _parity_files(folder) -> dict:
         "era.xlsx": F.weekly_xlsx("era_lines", []),
         "status.xlsx": F.weekly_xlsx("claim_status", []),
         "other.csv": b"Foo,Bar,Baz,Qux\r\n1,2,3,4\r\n",
+        "ar_shared.xlsx": shared_strings_xlsx(F.AR_COLUMNS, [[str(v) if v is not None else "-" for v in F.ar_row().values()]]),
+        "charge_shared.xlsx": shared_strings_xlsx(F.WEEKLY_COLUMNS["charge_lines"], [["11/01/2026"] * len(F.WEEKLY_COLUMNS["charge_lines"])]),
     }
     wb = openpyxl.Workbook()
     wb.active.append([c for c in F.WEEKLY_COLUMNS["claim_status"] if c != "Patient ID"])
@@ -885,6 +963,8 @@ const U = require(process.argv[1]); const fs = require('fs'); const path = requi
     assert names["prod_missing.csv"]["missing"] == ["check number", "patient dob"] and names["prod_twice.csv"]["twice"]
     assert names["status_no_patient.xlsx"] == {"hint": "claim_status", "missing": ["patient_id"], "twice": False}
     assert names["other.csv"]["hint"] is None and names["ar.xlsx"]["hint"] == "ar_report"
+    assert names["ar_shared.xlsx"] == {"hint": "ar_report", "missing": [], "twice": False}      # the shared-string path, as EMA saves
+    assert names["charge_shared.xlsx"] == {"hint": "charge_lines", "missing": [], "twice": False}
 
 
 def test_the_upload_page_serves_its_script_and_says_what_happens_to_the_files(build):
