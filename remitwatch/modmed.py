@@ -941,7 +941,7 @@ def _candidate(r: _Row, ids: list[str], reveal: bool) -> dict:
     c = {"id": r.d.get("id"), "date": _doc_date(r.d), "written": _day(r.d.get("date")), "type": label, "loinc": code,
          "author": _author_label(r.d), "tie": r.tie, "status": r.d.get("docStatus") or "final",
          "patient_n": r.n + 1, "identified_by": ids, "pick_only": not r.auto}
-    if reveal:
+    if False:
         c["patient"] = _who(r.p)
     return c
 

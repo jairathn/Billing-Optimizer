@@ -880,6 +880,12 @@ def test_the_page_and_its_guide_need_the_login(site, monkeypatch):
     assert site.c.get("/upload").status_code == 401
     assert site.c.get("/api/uploads").status_code == 401
     assert site.c.post("/api/uploads", params={"name": "x.csv"}, content=b"a", headers=XHR).status_code == 401
+    # where files go, said as it is: a visit note leaves the server inside its appeal packet (and for the review)
+    assert "A visit note leaves it only inside the appeal packet built from it" in page.text and "never emailed or sent elsewhere" not in page.text
+    # one wait at a time while files are queued, however often the page refreshes
+    assert "clearTimeout(refresh.t);" in page.text and "setTimeout(refresh, 15000);" not in page.text.replace("refresh.t = h.queued ? setTimeout(refresh, 15000)", "")
+    # the file's name goes in a header once the server says it reads one, never in the address a log keeps
+    assert "info.name_header ? {} : {name: file.name}" in page.text and "X-File-Name" in page.text
     # the dashboard links the page only where uploads are taken
     index = open(os.path.join(os.path.dirname(api.__file__), "static", "index.html")).read()
     assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !m.uploads;" in index
