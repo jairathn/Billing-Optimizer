@@ -694,3 +694,21 @@ Owner decisions still open:
   set `REMITWATCH_USER`, so each live site's settings come first.
 - Protecting main with a required review also makes the changes a Claude session pushes wait for an approval.
 - Package versions are not pinned: the two sites can run the same commit on different library versions.
+
+## Release of the review fixes, and what the EMA wiring still needs (November 22, 2026, evening)
+
+- Vercel's runtime reports Python 3.12.16 with SQLite 3.40.0 (`/api/health`, `runtime`). AWS and CI run Python 3.12 with
+  SQLite 3.45.1. The suite now runs under four interpreters before a release: Python 3.13 with SQLite 3.53, the newest
+  libraries, Python 3.12 with SQLite 3.45.1, and a standalone Python 3.11.1 build that carries SQLite 3.40.0 (it has no
+  `Connection.serialize`, so only the tests that serialize a store image cannot run there). SQLite 3.45 and older cannot
+  name the outer table inside a correlated subquery's `ORDER BY`; `ema_ledger._marks` compares inside a derived table instead.
+  No SQL newer than 3.40 is used (`unhex`, `concat`, `string_agg`, `jsonb_*`, an `ORDER BY` inside an aggregate).
+- Fixture workbooks are byte-stable (`tests/ema_fixtures.py`, `FIXED_SAVE_TIME`): openpyxl stamps every save with the
+  clock, so two tests that wrote the same rows a second apart used to fail about one run in three.
+- `remitwatch/ema_reports.py`, `ema_ledger.py` and `ema_checks.py` are in the tree, tested, and not yet part of the
+  cycle. Until the wiring lands, the Dropbox sync downloads no `.csv` file and leaves the A/R workbooks unread and
+  unrecorded; the Dropbox cursor moves past all four report files, so the wiring has to look for them again.
+- Three reviews of the modules (correctness, safety, scale on the real files in both modes) found problems to fix before
+  the wiring: a date that cannot be real must not empty the posting ledger, the ledger must stay inside Vercel's 512 MB
+  `/tmp`, and the dashboard's routes must read the figures the run stored instead of recomputing them from the
+  dashboard's copy. Measured on Vercel's limits: an apply run peaks at about 1.33 GB of 2.28 GB.
