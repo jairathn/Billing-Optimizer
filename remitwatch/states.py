@@ -397,6 +397,64 @@ def response_days(conn: sqlite3.Connection, payer_group: str | None, work: str |
     return base
 
 
+# ------------------------------------------------------------------------------- the payer's record for a pattern
+RECOVERY_MIN = 5                # fewer earlier items of a pattern than this: no rate
+_RECOVERY_CACHE: dict = {}
+
+
+def _pattern_key(item: dict) -> tuple:
+    """An item's pattern: payer group x code x reason (the CARC; the signal when the item has none, as for a short payment)."""
+    return (item.get("payer_group") or "", item.get("procedure_code") or "", str(item.get("carc") or item.get("signal") or ""))
+
+
+def recovery_table(conn: sqlite3.Connection) -> dict:
+    """RemitWatch's own record of every pattern (payer group x code x reason), from all the items it ever listed, open or
+    closed: {pattern: {'n', 'paid', 'lost'}}. 'paid': closed as paid (by the analysis on a later payment, or by a person
+    who recorded a recovery); 'lost': marked Lost or let go. Worked out once per store state."""
+    if not _table(conn, "findings"):
+        return {}
+    cols = _cols(conn, "findings")
+    if not {"payer_group", "procedure_code", "carc", "signal", "status"} <= cols:
+        return {}
+    stamp = conn.execute("SELECT COUNT(*), MAX(rowid) FROM findings").fetchone()
+    key = (id(conn), tuple(stamp))
+    if key in _RECOVERY_CACHE:
+        return _RECOVERY_CACHE[key]
+    auto = "auto_note" if "auto_note" in cols else "NULL"
+    rec = "recovered_cents" if "recovered_cents" in cols else "0"
+    out: dict = {}
+    for grp, code, carc, sig, cat, status, note, cents in conn.execute(
+            f"""SELECT payer_group, procedure_code, carc, signal, category, status, {auto}, {rec} FROM findings
+                WHERE category IN ('denial', 'bundling', 'downcoding', 'underpayment')"""):
+        k = (grp or "", code or "", str(carc or sig or ""))
+        d = out.setdefault(k, {"n": 0, "paid": 0, "lost": 0})
+        d["n"] += 1
+        if status == "resolved" and (note or (cents or 0) > 0):
+            d["paid"] += 1
+        elif status in ("lost", "dismissed"):
+            d["lost"] += 1
+    if len(_RECOVERY_CACHE) > 4:
+        _RECOVERY_CACHE.clear()
+    _RECOVERY_CACHE[key] = out
+    return out
+
+
+def recovery_of(conn: sqlite3.Connection, item: dict, table: dict | None = None) -> dict:
+    """The payer's record for the item's pattern, the item itself left out: {'n', 'paid', 'lost', 'rate' (None under
+    RECOVERY_MIN earlier items), 'basis'}. What the worklist multiplies an item's dollars by (non-negotiable 4)."""
+    t = table if table is not None else recovery_table(conn)
+    k = _pattern_key(item)
+    d = dict(t.get(k) or {"n": 0, "paid": 0, "lost": 0})
+    if d["n"] and item.get("status") not in ("resolved", "lost", "dismissed"):
+        d["n"] -= 1             # this item, still open
+    grp, code, reason = k
+    what = f"{grp or 'this payer'}, {code or 'this code'}, {reason}"
+    if d["n"] < RECOVERY_MIN:
+        return dict(d, rate=None, basis=f"Too few earlier items like this ({d['n']}: {what}) to give a rate")
+    rate = round(d["paid"] / d["n"], 3)
+    return dict(d, rate=rate, basis=f"{d['paid']} of the {d['n']} earlier items like this ({what}) were later paid")
+
+
 # ------------------------------------------------------------------------------------------------ gathering the facts
 def _list(v: Any) -> list:
     """An evidence value as a list: some items keep a count where others keep the rows."""
@@ -1114,6 +1172,35 @@ def _payer_answers_after(fx: dict, since: str | None) -> list[dict]:
     return sorted(out, key=lambda a: (a["date"] or "", a.get("status") != "22", a["paid"]))
 
 
+def _repeat_answer(fx: dict, before: str | None) -> dict | None:
+    """The newest $0 answer of the item's services that repeats an earlier answer of the same claim (the same payer claim
+    number, or the same claim id and received date) with the same reasons, dated on or before `before`: the payer
+    re-adjudicated the claim (an appeal or a reprocessing request answered and upheld). As _payer_answers_after's rows,
+    marked 'inferred'."""
+    rows = [x for x in standing_rows(fx["r835"]["rows"]) if x.get("line_key") and (x["paid"] or 0) <= 0]
+    best = None
+    for r in rows:
+        if before and (r["date"] or "") > before:
+            continue
+        rc = {(g, c) for g, c, _a in r["adj"] if g != "PR"}
+        if not rc:
+            continue
+        for e in rows:
+            if e is r or (e["date"] or "") >= (r["date"] or ""):
+                continue
+            same_claim = (bool(e.get("pccn")) and e.get("pccn") == r.get("pccn")) or (
+                e["pcn"] == r["pcn"] and bool(e.get("received")) and e.get("received") == r.get("received"))
+            if same_claim and {(g, c) for g, c, _a in e["adj"] if g != "PR"} == rc:
+                if best is None or (r["date"] or "") > (best["date"] or ""):
+                    best = r
+                break
+    if best is None:
+        return None
+    return {"date": best["date"], "source": "835", "paid": 0, "status": best["status"], "payer": best["payer"],
+            "group": row_group(best)[0], "kind": row_group(best)[1], "inferred": True,
+            "codes": [f"{g}-{c}" for g, c, _a in best["adj"] if g != "PR" or c not in PATIENT_SHARE]}
+
+
 def _last_payer_activity(fx: dict, before: str | None = None) -> str | None:
     """The newest day the payer did anything on the item's services: an 835 answer, an insurance posting in EMA, or a
     reason EMA posted on a day a remittance was posted (a reason posted on another day is a person's write-off)."""
@@ -1394,7 +1481,7 @@ def _decide(fx: dict, today: str) -> dict:
     ev = _evidence(fx)
     res: dict = {"work_state": None, "follow_up_on": None, "state_basis": None, "evidence": [], "rule": None, "person": False,
                  "proof": None, "deadline": None, "deadline_basis": None, "work": None, "answered": None, "appeal_block": None,
-                 "credit_cents": 0}
+                 "credit_cents": 0, "closed_on": None, "closed_basis": None}
     deadline, dbasis = _deadline(f)
     res["deadline"], res["deadline_basis"] = deadline, dbasis
 
@@ -1451,7 +1538,8 @@ def _decide(fx: dict, today: str) -> dict:
         return put("work_now", "owner_decision", "A contract or billing-policy question for the owner, not a claim to appeal")
     if sig in FEES:
         if deadline and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"):
-            return put("expired", "expired", f"Past the payer's window to dispute it ({day(deadline)}) by more than {EXPIRE_GRACE_DAYS} days")
+            res["closed_on"], res["closed_basis"] = deadline, dbasis
+            return put("expired", "expired", f"The payer's window to dispute it closed on {day(deadline)}, more than {EXPIRE_GRACE_DAYS} days ago")
         return put("work_now", "fees", "A takeback to match to the payer's overpayment letter, and to dispute if it was not owed"
                    if sig == "TAKEBACK" else "A payment fee the payer's vendor took: ask for standard EFT with no fee")
     if sig == "REMIT_NOT_POSTED":
@@ -1497,15 +1585,16 @@ def _decide(fx: dict, today: str) -> dict:
         # shows it was done in time, or that anything is still pending (C59)
         if all(e.get("dated_by") == "first_report" for e in work_ev) and deadline \
                 and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"):
-            return put("expired", "expired", f"Past its last window ({day(deadline)}: {dbasis or 'the payer window'}) by more than "
-                                             f"{EXPIRE_GRACE_DAYS} days. {last['text']}; nothing shows it was done in time or is still pending",
-                       [last])
+            res["closed_on"], res["closed_basis"] = deadline, dbasis
+            return put("expired", "expired", f"Every window closed (the last on {day(deadline)}) more than {EXPIRE_GRACE_DAYS} days ago. "
+                                             f"{last['text']}; nothing shows that work was done in time or is still pending", [last])
         return _follow(res, fx, ev, last.get("date"), work, last["text"], today, deadline, confirmed=bool(last.get("confirmed")),
                        conflict="", person=False, put=put, ev_row=last)
     # past every window
     if deadline and (cat in MONEY or sig in EMA_ONLY) and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"):
-        return put("expired", "expired", f"Past its last window ({day(deadline)}: {dbasis or 'the payer window'}) by more than "
-                                         f"{EXPIRE_GRACE_DAYS} days, with no work pending")
+        res["closed_on"], res["closed_basis"] = deadline, dbasis
+        return put("expired", "expired", f"Every window closed (the last on {day(deadline)}) more than {EXPIRE_GRACE_DAYS} days ago, "
+                                         "with no work pending")
     # no source can show the answer
     cc = _cant_check(fx, today)
     if cc:
@@ -1527,6 +1616,13 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
     res["work"] = ev_row or {"date": anchor, "kind": work, "text": text}
     res["appeal_block"] = "waiting"
     answers = _payer_answers_after(fx, anchor) if anchor else []
+    first = bool(ev_row) and ev_row.get("dated_by") == "first_report"
+    if not answers and first and not person and work in ("appeal", "reprocess", "records", "corrected", "resubmitted", "call"):
+        # work whose date is unknown, and the payer answered the same claim again with the same reason before the report
+        # that first showed the work: most likely its answer to that work (an appeal upheld), C26
+        rep = _repeat_answer(fx, anchor)
+        if rep:
+            answers = [rep]
     if answers:
         a = answers[-1]
         res["answered"] = a
@@ -1534,6 +1630,8 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
         what = (f"paid {usd(a['paid'])}" if a["paid"] > 0 else
                 ("reversed its answer" if a.get("status") == "22" else
                  ("answered " + (", ".join(a["codes"]) if a["codes"] else "with $0.00"))))
+        lead = (f"{text}. The payer answered the same claim again on {day(a['date'])} with the same reason ({', '.join(a['codes'])}): most "
+                "likely its answer to that work, upheld" if a.get("inferred") else f"{text}; the payer answered on {day(a['date'])} ({what})")
         # the newest answer to the work is a denial whose own window closed more than 30 days ago: expired, when the
         # item's own window has closed too or the answer came from another payer (the claim was rebilled to the right
         # one: the first denial no longer matters), C60. A person's Sent status keeps it for that person to read.
@@ -1547,19 +1645,17 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
             if closes and today > (_add(closes, EXPIRE_GRACE_DAYS) or "9999") and (
                     other or (deadline and today > (_add(deadline, EXPIRE_GRACE_DAYS) or "9999"))):
                 res["appeal_block"] = None
-                return put("expired", "expired", f"{text}; {ag or 'the payer'} answered on {day(a['date'])} ({what}), and its window to "
-                                                 f"dispute that answer closed on {day(closes)} ({ar_['label']}), more than "
-                                                 f"{EXPIRE_GRACE_DAYS} days ago", rows + [{"source": a["source"], "kind": "answer",
-                                                                                          "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
-        return put("work_now", "work_answered", f"{text}; the payer answered on {day(a['date'])} ({what}): work its answer"
-                   + (f".{conflict}" if conflict else ""), rows + [{"source": a["source"], "kind": "answer", "date": a["date"],
-                                                                     "text": f"answer of {day(a['date'])}: {what}"}])
+                res["closed_on"], res["closed_basis"] = closes, ar_["label"]
+                return put("expired", "expired", f"{lead}. {ag or 'The payer'}'s window to dispute that answer closed on {day(closes)}, more "
+                                                 f"than {EXPIRE_GRACE_DAYS} days ago", rows + [{"source": a["source"], "kind": "answer",
+                                                                                               "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
+        return put("work_now", "work_answered", f"{lead}: work its answer" + (f".{conflict}" if conflict else ""),
+                   rows + [{"source": a["source"], "kind": "answer", "date": a["date"], "text": f"answer of {day(a['date'])}: {what}"}])
     follow = _add(anchor, conn_free_wait) if anchor else None
     if not confirmed and deadline:
         cap = _add(deadline, -FOLLOW_UP_MARGIN)
         if follow and cap and cap < follow:
             follow = max(cap, anchor or cap)
-    first = bool(ev_row) and ev_row.get("dated_by") == "first_report"
     if first and not person:
         last_act = _last_payer_activity(fx, anchor)
         quiet = _days(last_act, anchor) if last_act and anchor else None

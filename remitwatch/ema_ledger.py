@@ -979,21 +979,165 @@ def _already(store: Any, ledger: Ledger, file_id: str) -> dict | None:
                    scope=have.get("scope"), box=box, as_of=have.get("as_of"))
 
 
+def _ledger_of(target: Any) -> "Ledger":
+    """A Ledger from what a caller holds: the ledger, a LedgerHandle (opened), or a zero-argument opener."""
+    if isinstance(target, Ledger):
+        return target
+    if isinstance(target, LedgerHandle):
+        return target.open()
+    if callable(target):
+        return target()
+    raise TypeError("apply_postings needs a Ledger, a LedgerHandle or a callable that opens one")
+
+
+def _bind(store: Any, ledger: Ledger, file_id: str | None, log: Any) -> None:
+    """Tie the ledger to the store's key salt; a ledger keyed for another store is emptied and its files read again."""
+    reread = ledger.bind_salt(er.salt_fingerprint(er.key_salt(store.conn)))
+    if reread:
+        _mark_reread(store.conn, [f for f in reread if f != file_id],
+                     "The posting ledger was keyed for another store; the file is read again.")
+        log(f"  EMA posting ledger: emptied (keyed for another store); {len(reread)} file(s) to read again")
+
+
+def _box_fields(box: Any) -> dict:
+    keys = ("scope", "svc_lo", "svc_hi", "posted_lo", "posted_hi", "as_of")
+    if isinstance(box, dict):
+        return {k: box.get(k) for k in keys}
+    return {k: getattr(box, k, None) for k in keys}
+
+
+def apply_postings(target: Any, source_id: str | None, box: Any, postings: Iterable[Any], *, source_kind: str, store: Any,
+                   source_name: str | None = None, via: str | None = None, account: Any = None, force: bool = False,
+                   deadline: float | None = None, serverless: bool = False, log: Any = print, fmt: str = "csv",
+                   dimension: int | None = None, created_at: str | None = None, resolve_id: Any = None) -> dict:
+    """The seam every source of postings goes through (amendment 10): apply an iterable of ema_reports.Posting for one
+    box, with the same replacement, holds and invariant as a file. The file readers are one adapter that calls this
+    (apply_production_file); an API pull would be another, with nothing else to change.
+
+    `target`: a Ledger, a LedgerHandle, or a zero-argument callable that opens one. `box`: None to take the box from the
+    postings (a file: service scope when it starts posting when its services start, else posted scope), or the range the
+    postings were asked for (a Box, or a dict of scope, svc_lo, svc_hi, posted_lo, posted_hi, as_of). `source_kind`:
+    'file', 'upload' or 'api', recorded on the applied batch with a content id (a hash of its postings in order): a batch
+    whose postings are those of a batch on file is 'already' and changes nothing (the same export saved again). Postings
+    are never de-duplicated one by one: two identical postings are two postings. `account`: the reader's counts (an
+    ema_reports.Account) when a reader made the postings. `resolve_id`: for a batch whose id is known only once it is
+    read (a stream), a callable that returns it after staging. Returns what apply_production_file returns, plus
+    'content_id' and 'source_kind'."""
+    if source_kind not in er.SOURCE_KINDS:
+        raise ValueError("source_kind is file, upload or api")
+    ledger = _ledger_of(target)
+    conn = store.conn
+    er.ensure_schema(conn)
+    _bind(store, ledger, source_id, log)
+    if source_id is not None:
+        done = _already(store, ledger, source_id)
+        if done is not None:
+            return done
+    acct = account if account is not None else er.Account()
+    digest = hashlib.sha256()
+
+    def hashed(rows: Iterable[Any]) -> Iterable[Any]:
+        for p in rows:
+            digest.update(repr(tuple(p)).encode())
+            yield p
+    t0 = time.time()
+    try:
+        stats = ledger.stage(hashed(postings), deadline=deadline)
+    except er.ReadTimeout:
+        ledger.drop_stage()
+        log("  EMA Production: stopped at the time limit; it is read again on the next run")
+        return _result("waiting", source_id, reason="Reading stopped at the time limit; it is read again on the next run.",
+                       rows_read=acct.get("rows_read") or 0)
+    except BaseException:
+        ledger.drop_stage()
+        raise
+    if resolve_id is not None:
+        source_id = resolve_id()
+        done = _already(store, ledger, source_id)
+        if done is not None:
+            ledger.drop_stage()
+            return done
+    content_id = digest.hexdigest()
+    dup = ledger.duplicate_of(content_id, source_id)
+    if dup is not None:
+        ledger.drop_stage()
+        reason = f"It holds the same postings as the export read on {_day(dup['applied_at'])} (saved again): nothing changed."
+        log("  EMA Production: already read (the same postings as a file on file)")
+        return _result("already", source_id, reason=reason, duplicate_of=dup["file_id"], content_id=content_id,
+                       rows_read=acct.get("rows_read") or stats.get("rows") or 0)
+    try:
+        rows_kept = acct.get("rows_kept") if account is not None else stats.get("rows")
+        if not rows_kept:
+            raise er.ReportRefused("empty", "It holds no posting with a posted date and a service date.", "production")
+        left = acct.get("left") or {}
+        stats.update(rows_read=acct.get("rows_read") or stats.get("rows") or 0, no_date=left.get("no_date") or 0,
+                     misaligned=left.get("misaligned") or 0, cut_short=bool(acct.get("cut_short")),
+                     damaged_checks=acct.get("damaged_checks") or 0, check_rows=acct.get("check_rows") or 0,
+                     identity_breaks=acct.get("identity_breaks") or stats.get("identity_breaks") or 0)
+        lo = {k: acct.get(k) or stats.get(k) for k in ("svc_lo", "svc_hi", "posted_lo", "posted_hi")}
+        if box is None:
+            scope = scope_of(lo["svc_lo"], lo["posted_lo"])
+            as_of = acct.get("as_of") or lo["posted_hi"]
+        else:
+            b = _box_fields(box)
+            scope = b["scope"] if b["scope"] in ("service", "posted") else scope_of(lo["svc_lo"], lo["posted_lo"])
+            lo.update({k: b[k] for k in ("svc_lo", "svc_hi", "posted_lo", "posted_hi") if b.get(k)})
+            as_of = b.get("as_of") or lo["posted_hi"]
+        meta = FileMeta(file_id=source_id, source_name=source_name or "postings", via=via or source_kind, scope=scope,
+                        svc_lo=lo["svc_lo"], svc_hi=lo["svc_hi"], posted_lo=lo["posted_lo"], posted_hi=lo["posted_hi"],
+                        as_of=as_of, created_at=created_at, received_at=_catalog_received(conn, source_id) or _now(),
+                        rows_read=stats["rows_read"], rows_kept=rows_kept, links=stats.get("links"), content_id=content_id,
+                        source_kind=source_kind)
+        acc = dict(acct)
+        acc.update(links=stats.get("links"), payers=stats.get("payers"), claim_lines=stats.get("lines"),
+                   charge_line_share=stats.get("charge_line_share"))
+        holds = [] if force else ledger.holds(meta, stats, serverless=serverless, fmt=fmt, dimension=dimension)
+        if holds:
+            reason = " ".join(m for _c, m in holds)
+            log(f"  EMA Production: held ({', '.join(c for c, _m in holds)})")
+            return _result("held", source_id, reason=reason, holds=[{"code": c, "message": m} for c, m in holds],
+                           rows_read=meta.rows_read, rows_kept=meta.rows_kept, scope=meta.scope, box=meta.box(), as_of=meta.as_of,
+                           account=acc, links=stats.get("links"), received_at=meta.received_at, content_id=content_id,
+                           source_kind=source_kind)
+        # retention first, as of the batch's own newest posting: the pages the old postings free are the ones its rows
+        # take, so the ledger file does not grow by a year of service on the day a new service year arrives (a
+        # serverless host's temporary folder holds it twice over during the refresh)
+        ledger.retain(newest=meta.posted_hi)
+        res = ledger.commit(meta)
+    finally:
+        ledger.drop_stage()
+    if getattr(acct, "status_words", None):
+        er.record_unknown_statuses(conn, acct.status_words)
+    secs = round(time.time() - t0, 1)
+    log(f"  EMA Production: {res['status']}, {res['rows_applied']:,} of {meta.rows_kept:,} rows applied ({meta.scope} scope, "
+        f"{secs} s)" + (f"; {len(res['replaced'])} older file(s) replaced in part or whole" if res["replaced"] else ""))
+    reason = None
+    if res["status"] == "superseded":
+        reason = "Newer exports on file cover every posting it holds."
+    elif res["live_rows"] < res["rows"]:
+        reason = f"{res['rows'] - res['live_rows']:,} of its postings fall where a newer export is on file."
+    return _result(res["status"], source_id, reason=reason, rows_read=meta.rows_read, rows_kept=meta.rows_kept,
+                   rows_applied=res["rows_applied"], live_rows=res["live_rows"], scope=meta.scope, box=res["box"],
+                   as_of=meta.as_of, replaced=res["replaced"], account=acc, links=stats.get("links"),
+                   received_at=meta.received_at, seq=ledger.seq(), seconds=secs, content_id=content_id, source_kind=source_kind)
+
+
 def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | None, via: str, origin: dict | None = None,
                           force: bool = False, ledger: Ledger, deadline: float | None = None, serverless: bool = False,
-                          log: Any = print, source_name: str | None = None) -> dict:
-    """Read one Production file into the ledger: stage it, check the holds, and apply it under the box invariant.
+                          log: Any = print, source_name: str | None = None, source_kind: str | None = None) -> dict:
+    """Read one Production file into the ledger: the file adapter of apply_postings (it reads the rows and hands them on).
     ema_reports.ingest_file calls this and writes the catalog, files and ema_sources rows from the result; it does not
     write them here (except a catalog row the ledger holds and the store lost: see sync_catalog).
 
-    `path` is a file on disk (CSV, xlsx or a zip member as `rec` says), or a binary stream of delimited text (a download
-    read as it arrives, never written anywhere). For a stream `file_id` may be None: the SHA-256 of the bytes read becomes
-    the file's id, and a file the ledger already holds is then left as it is ('already').
+    `path` is a file on disk (CSV, gzipped CSV, xlsx or a zip member as `rec` says), or a binary stream of delimited text
+    (a download read as it arrives, never written anywhere). For a stream `file_id` may be None: the SHA-256 of the bytes
+    read becomes the file's id, and a file the ledger already holds is then left as it is ('already').
 
     Result: {'status': 'current'|'superseded'|'held'|'waiting'|'already', 'reason', 'rows_read', 'rows_kept',
     'rows_applied', 'live_rows', 'scope', 'box', 'as_of', 'replaced': [(file_id, status)], 'account', 'links', 'holds',
-    'received_at', 'seq'}. A refusal raises ema_reports.ReportRefused (never applied, whatever `force` says). Past
-    `deadline` the file is left 'waiting' and the ledger is unchanged."""
+    'received_at', 'seq', 'content_id', 'source_kind'} ('duplicate_of' when the same postings are on file under another
+    file). A refusal raises ema_reports.ReportRefused (never applied, whatever `force` says). Past `deadline` the file is
+    left 'waiting' and the ledger is unchanged."""
     conn = store.conn
     er.ensure_schema(conn)
     salt = er.key_salt(conn)
@@ -1009,14 +1153,10 @@ def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | Non
         path = io.BufferedReader(hasher, 1 << 20)
     else:
         path = os.fspath(path)
-        source_name = source_name or (os.path.basename(rec.member) if getattr(rec, "member", None) else os.path.basename(path))
+        source_name = source_name or er._names_of(path, rec)[0]
         if file_id is None:
-            file_id = er._member_id(path, rec.member) if getattr(rec, "member", None) else er.file_id_of(path)
-    reread = ledger.bind_salt(er.salt_fingerprint(salt))
-    if reread:
-        _mark_reread(conn, [f for f in reread if f != file_id],
-                     "The posting ledger was keyed for another store; the file is read again.")
-        log(f"  EMA posting ledger: emptied (keyed for another store); {len(reread)} file(s) to read again")
+            file_id = er.report_id(path, rec)
+    _bind(store, ledger, file_id, log)
     if file_id is not None:
         done = _already(store, ledger, file_id)
         if done is not None:
@@ -1027,76 +1167,23 @@ def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | Non
         msg = (f"Save it as CSV: an Excel Production export of more than {XLSX_MAX_ROWS:,} rows is not read on this site.")
         log("  EMA Production: held (H6)")
         return _result("held", file_id, reason=msg, holds=[{"code": "H6", "message": msg}], rows_read=rec.dimension or 0)
-    acct = er.Account()
-    t0 = time.time()
-    try:
-        stats = ledger.stage(er.iter_production(path, rec, salt=salt, account=acct, deadline=deadline), deadline=deadline)
-    except er.ReadTimeout:
-        ledger.drop_stage()
-        log("  EMA Production: stopped at the time limit; it is read again on the next run")
-        return _result("waiting", file_id, reason="Reading stopped at the time limit; it is read again on the next run.",
-                       rows_read=acct.get("rows_read") or 0)
-    except BaseException:
-        ledger.drop_stage()
-        raise
-    if hasher is not None:
+    created = None
+    if hasher is None:
+        try:
+            created = er._created_at(path, rec)
+        except Exception:       # noqa: BLE001  (the workbook does not say when it was made)
+            created = None
+
+    def stream_id() -> str | None:
         while path.read(1 << 20):           # what the reader left (lines after the last row) is part of the file's bytes
             pass
-        file_id = file_id or hasher.sha.hexdigest()
-        done = _already(store, ledger, file_id)
-        if done is not None:
-            ledger.drop_stage()
-            return done
-    try:
-        if not acct.get("rows_kept"):
-            raise er.ReportRefused("empty", "It holds no posting with a posted date and a service date.", "production")
-        left = acct.get("left") or {}
-        stats.update(rows_read=acct.get("rows_read") or 0, no_date=left.get("no_date") or 0,
-                     misaligned=left.get("misaligned") or 0, cut_short=bool(acct.get("cut_short")),
-                     damaged_checks=acct.get("damaged_checks") or 0, check_rows=acct.get("check_rows") or 0,
-                     identity_breaks=acct.get("identity_breaks") or stats.get("identity_breaks") or 0)
-        created = None
-        if hasher is None:
-            try:
-                created = er._created_at(path, rec)
-            except Exception:       # noqa: BLE001  (the workbook does not say when it was made)
-                created = None
-        meta = FileMeta(file_id=file_id, source_name=source_name, via=via,
-                        scope=scope_of(acct["svc_lo"], acct["posted_lo"]), svc_lo=acct["svc_lo"], svc_hi=acct["svc_hi"],
-                        posted_lo=acct["posted_lo"], posted_hi=acct["posted_hi"], as_of=acct.get("as_of") or acct["posted_hi"],
-                        created_at=created, received_at=_catalog_received(conn, file_id) or _now(),
-                        rows_read=acct.get("rows_read") or 0, rows_kept=acct.get("rows_kept") or 0, links=stats.get("links"))
-        account = dict(acct)
-        account.update(links=stats.get("links"), payers=stats.get("payers"), claim_lines=stats.get("lines"),
-                       charge_line_share=stats.get("charge_line_share"))
-        holds = [] if force else ledger.holds(meta, stats, serverless=serverless, fmt=getattr(rec, "fmt", "csv"),
-                                              dimension=getattr(rec, "dimension", None))
-        if holds:
-            reason = " ".join(m for _c, m in holds)
-            log(f"  EMA Production: held ({', '.join(c for c, _m in holds)})")
-            return _result("held", file_id, reason=reason, holds=[{"code": c, "message": m} for c, m in holds],
-                           rows_read=meta.rows_read, rows_kept=meta.rows_kept, scope=meta.scope, box=meta.box(), as_of=meta.as_of,
-                           account=account, links=stats.get("links"), received_at=meta.received_at)
-        # retention first, as of the file's own newest posting: the pages the old postings free are the ones its rows
-        # take, so the ledger file does not grow by a year of service on the day a new service year arrives (a
-        # serverless host's temporary folder holds it twice over during the refresh)
-        ledger.retain(newest=meta.posted_hi)
-        res = ledger.commit(meta)
-    finally:
-        ledger.drop_stage()
-    er.record_unknown_statuses(conn, acct.status_words)
-    secs = round(time.time() - t0, 1)
-    log(f"  EMA Production: {res['status']}, {res['rows_applied']:,} of {meta.rows_kept:,} rows applied ({meta.scope} scope, "
-        f"{secs} s)" + (f"; {len(res['replaced'])} older file(s) replaced in part or whole" if res["replaced"] else ""))
-    reason = None
-    if res["status"] == "superseded":
-        reason = "Newer exports on file cover every posting it holds."
-    elif res["live_rows"] < res["rows"]:
-        reason = f"{res['rows'] - res['live_rows']:,} of its postings fall where a newer export is on file."
-    return _result(res["status"], file_id, reason=reason, rows_read=meta.rows_read, rows_kept=meta.rows_kept,
-                   rows_applied=res["rows_applied"], live_rows=res["live_rows"], scope=meta.scope, box=res["box"],
-                   as_of=meta.as_of, replaced=res["replaced"], account=account, links=stats.get("links"),
-                   received_at=meta.received_at, seq=ledger.seq(), seconds=secs)
+        return file_id or hasher.sha.hexdigest()
+    acct = er.Account()
+    return apply_postings(ledger, file_id, None, er.iter_production(path, rec, salt=salt, account=acct, deadline=deadline),
+                          source_kind=source_kind or er.source_kind_of(via), store=store, source_name=source_name, via=via,
+                          account=acct, force=force, deadline=deadline, serverless=serverless, log=log,
+                          fmt=getattr(rec, "fmt", "csv"), dimension=getattr(rec, "dimension", None), created_at=created,
+                          resolve_id=stream_id if hasher is not None else None)
 
 
 def sync_catalog(store: Any, ledger: Ledger, file_ids: Iterable[str] | None = None) -> int:

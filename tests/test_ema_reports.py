@@ -961,7 +961,7 @@ def fake_ledger(monkeypatch):
     calls = []
 
     def apply_production_file(store_, path, rec, *, file_id, via, origin=None, force=False, ledger, deadline=None,
-                              serverless=False, log=print):
+                              serverless=False, log=print, source_name=None, source_kind=None):
         acct = er.Account()
         rows = list(er.iter_production(path, rec, salt=er.key_salt(store_.conn), account=acct))
         calls.append((file_id, len(rows), ledger))

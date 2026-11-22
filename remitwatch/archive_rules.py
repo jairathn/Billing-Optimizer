@@ -203,13 +203,17 @@ class Ans:
 
 
 class Claim:
-    """One 835 claim (CLP) on an item's bill, with its remittance's date, trace and payer."""
+    """One 835 claim (CLP) on an item's bill, with its remittance's date, trace and payer. `halves` are the claims the payer
+    split the same submission into on the same remittance (MA15: the same claim id and trace); `same_id` are the payer's
+    other answers to the same claim id (another remittance, the same kind of submission)."""
     __slots__ = ("claim_key", "txn", "pcn", "bill", "status", "charge", "paid", "patient_resp", "pccn", "freq", "crossover",
-                 "payer", "payer_name", "group", "paid_on", "trace", "adj", "rem", "lines", "original_ref")
+                 "payer", "payer_name", "group", "paid_on", "trace", "adj", "rem", "lines", "original_ref", "halves", "same_id")
 
     def __init__(self, **kw):
         for k in self.__slots__:
             setattr(self, k, kw.get(k))
+        self.halves = self.halves or []
+        self.same_id = self.same_id or []
 
 
 class Archive:

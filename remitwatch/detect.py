@@ -3260,18 +3260,21 @@ class Detector:
 
     def run_ema_underpaid(self) -> None:
         """Short payments EMA posted on checks no 835 carries (the underpayment rule, run on EMA's postings where no
-        remittance exists): a line of one unit paid by one payer, every payment of it under a check with no 835, whose
-        allowed amount is below the payer's own consistent rate for the code (its lowest across provider types and
-        places of service, at least 20 lines and a 40 percent share; a second surgical procedure of the day at the
-        payer's usual reduction) by at least $2 and 5 percent, and not the charge itself."""
+        remittance exists): a line of one unit, paid by one payer, every payment of it under a check with no 835, on no
+        remittance line at all, whose allowed amount is below the payer's own consistent rate for the code (its lowest
+        across provider types and places of service, from at least 20 lines with a 40 percent share; a second surgical
+        procedure of the day at the payer's usual reduction) by at least $2 and 5 percent, and not paid its charge. EMA's
+        report gives no allowed amount per payer answer, so the allowed amount is taken as the larger of what was paid plus
+        the sequestration and the charge less the payer's fee-schedule reduction (CO-45): on lines an 835 also carries,
+        that flags 1,058 lines the 835 shows short against 3 it does not."""
         from . import ema_checks as ec
-        rows = self.conn.execute("""SELECT l.link, l.svc, l.cpt, l.allowed, l.ins_paid, l.charges, l.units, l.payer_group, l.payer_kind,
-                                           l.claim_id, l.bill, l.as_of, l.balance
+        from .ema_reports import bill_of_claim
+        rows = self.conn.execute("""SELECT l.link, l.svc, l.cpt, l.ins_paid, l.charges, l.payer_group, l.payer_kind, l.claim_id, l.bill,
+                                           l.as_of
                                     FROM ema_lines l
                                     WHERE (COALESCE(l.flags,0) & 17) = 0 AND COALESCE(l.facility,0) = 0 AND COALESCE(l.ins_paid,0) > 0
-                                      AND COALESCE(l.allowed,0) > 0 AND COALESCE(l.ins_paid_no835,0) >= COALESCE(l.ins_paid,0)
-                                      AND COALESCE(l.units,1) BETWEEN 0.5 AND 1.5 AND l.svc >= ?""",
-                                 (_add_days(self.today, -800) or "",)).fetchall()
+                                      AND COALESCE(l.ins_paid_no835,0) >= COALESCE(l.ins_paid,0) AND COALESCE(l.units,1) BETWEEN 0.5 AND 1.5
+                                      AND l.svc >= ?""", (_add_days(self.today, -800) or "",)).fetchall()
         if not rows:
             return
         best: dict[tuple, int] = {}         # the payer's lowest consistent rate for a code and year
@@ -3279,25 +3282,34 @@ class Detector:
             if r["n"] >= 20 and r["share"] >= 0.4:
                 k = (grp, year, code)
                 best[k] = min(best.get(k, r["mode"]), r["mode"])
-        from .ema_reports import bill_of_claim
-        lags = ec._lags(self.conn)
         on_835 = {(bill_of_claim(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code")) for l in self.lines}
+        rows = [r for r in rows if (r[8], r[1], r[2]) not in on_835 and best.get((r[5], (r[1] or "")[:4], r[2]))]
+        if not rows:
+            return
+        cuts: dict[tuple, list] = defaultdict(lambda: [0, 0])      # (link, svc, cpt) -> [sequestration, CO-45 reduction]
+        keys = sorted({(r[0], r[1], r[2]) for r in rows})
+        for i in range(0, len(keys), 300):
+            part = keys[i:i + 300]
+            q = " OR ".join("(link=? AND svc=? AND cpt=?)" for _k in part)
+            for lk, svc, cpt, grp, code, contr, nonc in self.conn.execute(
+                    f"SELECT link, svc, cpt, grp, code, contractual, noncontractual FROM ema_line_reasons WHERE {q}", [x for k in part for x in k]):
+                if code == "253":
+                    cuts[(lk, svc, cpt)][0] += (contr or 0) + (nonc or 0)
+                elif grp == "CO" and code == "45":
+                    cuts[(lk, svc, cpt)][1] += contr or 0
+        lags = ec._lags(self.conn)
         by_day: dict[tuple, list] = defaultdict(list)
         for r in rows:
-            if (r[10], r[1], r[2]) in on_835:
-                continue                    # a remittance carries this line: the 835's own rules judge it
             by_day[(r[0], r[1])].append(r)
         for (lk, svc), day_rows in by_day.items():
-            priced = []
-            for r in day_rows:
-                rate = best.get((r[7], (svc or "")[:4], r[2]))
-                if rate:
-                    priced.append((r, rate))
+            priced = [(r, best[(r[5], (svc or "")[:4], r[2])]) for r in day_rows]
             surg = sorted((x for x in priced if is_surgical(x[0][2])), key=lambda x: -x[1])
             rank = {x[0][2]: i + 1 for i, x in enumerate(surg)}
             for r, rate in priced:
-                _lk, _svc, cpt, allowed, paid, chg, _u, grp, kind, cid, bill, as_of, bal = r
-                if allowed >= (chg or 0) and chg:
+                _lk, _svc, cpt, paid, chg, grp, kind, cid, bill, as_of = r
+                seq, co45 = cuts.get((lk, svc, cpt), (0, 0))
+                allowed = max(paid + seq, (chg or 0) - co45 if co45 else 0)
+                if chg and allowed >= chg:
                     continue                # paid the charge: the fee is below the rate, nothing to appeal
                 exp = rate
                 if rank.get(cpt, 0) >= 2 and cpt not in ADD_ON_CODES:
@@ -3312,12 +3324,13 @@ class Detector:
                 posted = pay[0]
                 rule = appeal_rule(grp, kind)
                 start = _add_days(posted, -ec._lag(lags, grp, "p95")) if posted else None
-                claim = {"patient_control_number": cid or bill, "payer_name": (pay[1] if pay else None) or grp, "payer_group": grp,
-                         "payer_kind": kind, "service_date": svc, "year": (svc or "")[:4], "procedure_code": cpt, "charge_cents": chg,
+                claim = {"patient_control_number": cid or bill, "payer_name": pay[1] or grp, "payer_group": grp, "payer_kind": kind,
+                         "service_date": svc, "year": (svc or "")[:4], "procedure_code": cpt, "charge_cents": chg,
                          "allowed_cents": allowed, "paid_cents": paid, "payment_date": posted}
-                ev = {"usual_cents": exp, "allowed_cents": allowed, "paid_cents": paid, "basis": (f"{grp}'s own consistent rate for {cpt} "
-                      f"in {svc[:4]} (its lowest across provider types and places of service)" + (" at its usual second-procedure share"
-                                                                                                    if exp != rate else "")),
+                ev = {"usual_cents": exp, "allowed_cents": allowed, "paid_cents": paid,
+                      "allowed_basis": "the larger of what was paid plus the sequestration and the charge less the fee-schedule reduction (CO-45)",
+                      "basis": (f"{grp}'s own consistent rate for {cpt} in {svc[:4]} (its lowest across provider types and places of service)"
+                                + (" at its usual second-procedure share" if exp != rate else "")),
                       "ema_link": lk, "no_835": True, "posted": posted, "ema_as_of": as_of}
                 self._emit("EMA_UNDERPAID", "underpayment", "medium", "appeal",
                            f"{cpt} allowed {_usd(allowed)} vs usual {_usd(exp)} ({grp}, EMA posting with no 835)", None, exp, short,
