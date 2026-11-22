@@ -108,9 +108,13 @@ async function todayTab(v){
   const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED'].includes(a.kind) && a.severity!=='info').slice(0,3);
   const missed = b.missed || {};
   v.innerHTML = `${guideSeen() ? '' : guideHtml(b)}
+    <div id="tdBlind">${blind ? tdBlindHtml(td.blind) : ''}</div>
     ${bad.length ? `<div class="banner"><b>Before you start:</b> ${esc(bad[0].title)}. ${esc(bad[0].detail||'')} <a href="#data" class="go-data">How to fix</a>${bad.length>1?` · <a href="#data" class="go-data">${bad.length-1} more data ${bad.length-1===1?'check':'checks'}</a>`:''}</div>` : ''}
     <div class="today-head"><div><div class="muted small">${esc(day)}</div><h1 class="page-title">Today's plan</h1></div>
       <div class="donebox"><span>Moved on today <b>${done.today_n||0}</b></span><span>This week <b>${pl(done.week_n, 'item')}</b>, ${money(done.week_cents||0)} sent or paid</span>${(b.recovered||{}).year_cents ? `<span>Paid back in ${esc(b.recovered.year)} <b>${money(b.recovered.year_cents)}</b></span>` : ''}</div></div>
+    ${tdScoreHtml(sb)}
+    ${td ? tdStatesHtml(td) : ''}
+    ${td || ex ? tdEmaLine(td, ex) : ''}
     <div class="plan">${steps.map(s=>`<div class="step ${s.done?'is-done':''}"><div class="num">${s.done?'✓':s.n}</div><div class="body"><div class="title">${esc(s.title)}</div><div class="line">${s.line}</div>${s.chips?`<div class="chips">${s.chips}</div>`:''}</div>${s.btn?`<button class="${s.done?'':'primary'}" data-step="${s.n}">${esc(s.btn)}</button>`:''}</div>`).join('')}</div>
     <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.${smallLine(b)}</span></div>
       <div class="batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>

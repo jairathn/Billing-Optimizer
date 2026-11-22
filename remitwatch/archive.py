@@ -1279,9 +1279,7 @@ def before_ledger_retain(ledger: Any, cutoff: str, *, sink: Any = None, run_id: 
     c.execute(LEDGER_DDL)
     c.execute("INSERT OR REPLACE INTO archive_parts (name, svc_lo, svc_hi, rows, sha256, cutoff, at) VALUES (?,?,?,?,?,?,?)",
               (name, lo, hi, n_rows, sha, cutoff, _now()))
-    if not getattr(c, "in_transaction", False):
-        pass
-    else:
+    if c.in_transaction:        # Ledger.retain begins its own transaction next: nothing of ours may be left open
         c.commit()
     log(f"  archive: {n_rows:,} ledger postings (service {str(lo)[:7]} to {str(hi)[:7]}) to {name}")
     return {"rows": n_rows, "file": name, "gz_bytes": put["gz_bytes"], "written": put["written"]}
@@ -1407,28 +1405,36 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
 
 
 # ------------------------------------------------------------------------------------------------- finding it again
-_CACHE: dict[tuple, list[dict]] = {}
-_CACHE_ORDER: list[tuple] = []
-_CACHE_FILES = 3
+_LAST_FILE: dict = {}          # the last archive file read, uncompressed (a claim view often opens a few bills of one file)
 
 
-def _file_records(sink: Any, name: str) -> list[dict]:
-    """The records of one archive file, every record checked; the last few files read are kept for the next lookup."""
+def _file_bytes(sink: Any, name: str) -> bytes:
     key = (id(sink), getattr(sink, "root", None) or getattr(sink, "prefix", None), name)
-    if key in _CACHE:
-        return _CACHE[key]
-    recs = []
-    for obj in _read_lines(sink, name):
-        if obj.get("kind") == "header":
+    if _LAST_FILE.get("key") == key:
+        return _LAST_FILE["data"]
+    data = sink.get(name)
+    if data is None:
+        raise ArchiveError(f"{name} is not in the archive")
+    raw = _gunzip(data)
+    _LAST_FILE.clear()
+    _LAST_FILE.update(key=key, data=raw)
+    return raw
+
+
+def _find_record(raw: bytes, field: str, value: str) -> dict | None:
+    """The one record of a file whose `field` is `value` (the file is canonical JSON: the field is written exactly so),
+    checked against its digest. Only that line is parsed."""
+    needle = (f'"{field}":' + json.dumps(value, ensure_ascii=False)).encode("utf-8")
+    for ln in raw.split(b"\n"):
+        if needle not in ln:
             continue
-        if obj.get("digest") and _record_digest(obj) != obj["digest"]:
-            raise ArchiveError(f"a record of {name} reads back with other content")
-        recs.append(obj)
-    _CACHE[key] = recs
-    _CACHE_ORDER.append(key)
-    while len(_CACHE_ORDER) > _CACHE_FILES:
-        _CACHE.pop(_CACHE_ORDER.pop(0), None)
-    return recs
+        obj = json.loads(ln)
+        if obj.get(field) != value:
+            continue
+        if _record_digest(obj) != obj.get("digest"):
+            raise ArchiveError("an archived record reads back with other content")
+        return obj
+    return None
 
 
 def _record_of(conn: sqlite3.Connection, sink: Any, bill: str) -> tuple[dict, dict] | None:
@@ -1436,10 +1442,10 @@ def _record_of(conn: sqlite3.Connection, sink: Any, bill: str) -> tuple[dict, di
     if not row:
         return None
     name, digest, archived_at, lo, hi = row
-    for rec in _file_records(sink, name):
-        if rec.get("bill") == bill and rec.get("digest") == digest:
-            return rec, {"file": name, "archived_at": archived_at, "svc_lo": lo, "svc_hi": hi}
-    raise ArchiveError("an archived bill is not in the file its index names")
+    rec = _find_record(_file_bytes(sink, name), "bill", bill)
+    if rec is None or rec.get("digest") != digest:
+        raise ArchiveError("an archived bill is not in the file its index names")
+    return rec, {"file": name, "archived_at": archived_at, "svc_lo": lo, "svc_hi": hi}
 
 
 def resolve_bill(conn: sqlite3.Connection, text: str) -> str | None:
