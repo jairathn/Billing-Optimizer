@@ -28,7 +28,8 @@ FAKE_DOCKER = r'''#!/bin/bash
 # tag_caddy), the container of each service as "<id> <image>" (ctr_app, ctr_caddy; <svc>_stopped when stopped) and the
 # Caddy file Caddy loaded (caddy_loaded). Files in $FAKE make steps fail or change: fail_build, fail_pull_base, fail_up,
 # unhealthy (the app does not answer), busy (keys of the locks of runs going in the app; busy_left counts the checks
-# before they end), stale (locks of runs that ended), caddy_update (the image Caddy's name gets on the next pull).
+# before they end; busy_after_build, the same but from the build on), stale (locks of runs that ended), caddy_update
+# (the image Caddy's name gets on the next pull).
 echo "$*" >> "$FAKE/calls"
 get() { cat "$FAKE/$1" 2>/dev/null; }
 up() {   # service: made again when missing, stopped, or on another image than its name points at now
@@ -46,7 +47,9 @@ case "$1 $2" in
     git rev-parse HEAD >> "$FAKE/built"
     [ -f "$FAKE/fail_build" ] && { echo "build broke"; exit 1; }
     [ "${3:-}" = --pull ] && [ -f "$FAKE/fail_pull_base" ] && { echo "registry unreachable"; exit 1; }
-    echo "app-$(git rev-parse HEAD)" > "$FAKE/tag_app"; exit 0 ;;
+    echo "app-$(git rev-parse HEAD)" > "$FAKE/tag_app"
+    [ -f "$FAKE/busy_after_build" ] && mv "$FAKE/busy_after_build" "$FAKE/busy"     # a run that starts during the build
+    exit 0 ;;
   "compose pull")
     [ -f "$FAKE/caddy_update" ] && { cp "$FAKE/caddy_update" "$FAKE/tag_caddy"; rm -f "$FAKE/caddy_update"; }
     exit 0 ;;
@@ -205,6 +208,10 @@ class Box:
     def calls(self):
         return self.read("calls").splitlines()
 
+    def actions(self):
+        """The calls that change something (not the ones that only look: ps, exec, inspect)."""
+        return [c for c in self.calls() if not c.startswith(("compose ps", "compose exec", "inspect"))]
+
 
 @pytest.fixture()
 def box(tmp_path):
@@ -349,7 +356,7 @@ def test_a_failed_build_leaves_the_running_site_alone_and_is_not_retried_in_a_lo
 def test_docs_only_changes_are_checked_out_without_a_rebuild(box):
     new = box.commit("docs", {"docs/SERVER_RUNBOOK.md": "runbook 2\n", "README.md": "readme 2\n"})
     assert box.run().returncode == 0
-    assert box.calls() == [] and box.marker == new and box.head == new
+    assert box.actions() == [] and box.marker == new and box.head == new
     (line,) = box.log_lines()
     assert line.split("\t")[3] == "docs-only" and "2 docs file(s) changed" in line
     # a change beside docs rebuilds
@@ -390,8 +397,7 @@ def test_a_site_that_does_not_answer_through_caddy_is_rolled_back_to_the_images_
     assert box.read("built").split() == [bad]                                 # the previous commit is not rebuilt
     assert box.running == box.first and box.read("tag_app").strip() == f"app-{box.first}"
     assert box.marker == box.first and box.head == box.first
-    calls = box.calls()
-    assert calls[-1] != "compose restart caddy" and calls.count("compose restart caddy") == 2
+    assert box.calls().count("compose restart caddy") == 2                   # with the new file, then the old one again
     assert box.read("caddy_loaded") == before                                  # Caddy runs the old file again
     assert "answers again" in box.last()[4]
 
@@ -430,7 +436,7 @@ def test_an_app_stopped_on_purpose_stays_stopped(box):
     new = box.commit("code", {"remitwatch/api.py": "x = 42\n"})
     r = box.run()
     assert r.returncode == 0 and "app is stopped" in r.stdout
-    assert box.calls() == [] and box.log_lines() == [] and box.marker == box.first
+    assert box.actions() == [] and box.log_lines() == [] and box.marker == box.first
     (box.fake / "app_stopped").unlink()
     assert box.run().returncode == 0 and box.marker == new
 
@@ -439,7 +445,7 @@ def test_files_changed_by_hand_on_the_server_are_never_overwritten_and_logged_on
     (box.dir / "deploy" / "Caddyfile").write_text("hand edit\n")
     box.commit("code", {"remitwatch/api.py": "x = 7\n"})
     assert box.run().returncode == 1
-    assert box.calls() == [] and (box.dir / "deploy" / "Caddyfile").read_text() == "hand edit\n"
+    assert box.actions() == [] and (box.dir / "deploy" / "Caddyfile").read_text() == "hand edit\n"
     assert box.last()[3] == "refused" and "changed by hand" in box.last()[4] and "deploy/Caddyfile" in box.last()[4]
     for _ in range(4):
         r = box.run()
@@ -454,13 +460,10 @@ def test_a_commit_that_would_overwrite_a_file_git_does_not_track_here_is_refused
     (box.dir / "docker-compose.override.yml").write_text("# put here by hand on the server\n")
     box.commit("add an override", {"docker-compose.override.yml": "services: {app: {privileged: true}}\n"})
     assert box.run().returncode == 1 and box.last()[3] == "refused" and "docker-compose.override.yml" in box.last()[4]
-    assert (box.dir / "docker-compose.override.yml").read_text() == "# put here by hand on the server\n" and box.calls() == []
+    assert (box.dir / "docker-compose.override.yml").read_text() == "# put here by hand on the server\n" and box.actions() == []
     (box.dir / "docker-compose.override.yml").unlink()
     (box.dir / ".env").write_text("SECRET='kept'\n")
-    sh("git", "-C", str(box.dev), "add", "-f", ".env", env=box.env)          # a commit that carries an .env
-    (box.dev / ".env").write_text("SECRET='from the commit'\n")
-    sh("git", "add", "-f", ".env", cwd=box.dev, env=box.env)
-    box.commit("oops, an env file")
+    box.commit("oops, an env file", {".env": "SECRET='from the commit'\n"})
     assert box.run().returncode == 1 and ".env" in box.last()[4] and (box.dir / ".env").read_text() == "SECRET='kept'\n"
 
 
@@ -469,30 +472,26 @@ def test_no_swap_while_a_cycle_or_a_fax_run_is_going(box):
     box.write("busy", "fax:lock\n")
     box.commit("one", {"remitwatch/api.py": "x = 4\n"})
     r = box.run()
-    assert r.returncode == 0 and "fax:lock" in r.stdout and box.calls().count("compose build --pull") == 0 and box.log_lines() == []
-    # it ends while the deploy waits after its build: then the swap
-    box.write("busy_left", "2")                              # the check before the build, then the wait sees it end
-    box.env["REMITWATCH_DEPLOY_IDLE_WAIT"] = "60"
-    one = box.marker
-    box.run()
-    assert box.last()[3] == "deployed" and box.marker != one
-    # one that starts during the build and is still going after the wait: nothing is swapped, all is put back
+    assert r.returncode == 0 and "fax:lock" in r.stdout and "compose build --pull" not in box.calls() and box.log_lines() == []
+    # one that starts during the build and ends while the deploy waits: then the swap
+    (box.fake / "busy").unlink()
+    box.write("busy_after_build", "fax:lock\n")
     box.write("busy_left", "1")
-    box.write("busy", "pipeline:lock\n")
-    (box.fake / "busy_left").write_text("1")
+    box.env["REMITWATCH_DEPLOY_IDLE_WAIT"] = "60"
+    one = box.commit("two", {"remitwatch/api.py": "x = 5\n"})
+    assert box.run().returncode == 0 and box.last()[3] == "deployed" and box.marker == one and box.running == one
+    # one that starts during the build and is still going after the wait: nothing is swapped, all is put back
+    box.write("busy_after_build", "pipeline:lock\n")
     box.env["REMITWATCH_DEPLOY_IDLE_WAIT"] = "0"
-    before = box.marker
-    calls = len(box.calls())
-    box.write("busy_left", "99")
-    box.commit("two", {"remitwatch/api.py": "x = 5\n"})
-    (box.fake / "busy").unlink()                             # free at the check before the build...
-    os.environ_backup = None
-    script = box.lib / "auto-deploy.sh"
-    hooked = script.read_text().replace('BLOG="$STATE/builds/', 'printf "pipeline:lock\\n" > "$FAKE/busy"; BLOG="$STATE/builds/', 1)
-    script.write_text(hooked)                                # ...and going from the build on
-    r = box.run()
-    assert box.last()[3] == "waiting" and "pipeline:lock" in box.last()[4] and box.marker == before and box.head == before
-    assert "compose up -d" not in box.calls()[calls:] and box.running == before
+    n = len(box.calls())
+    box.commit("three", {"remitwatch/api.py": "x = 6\n"})
+    assert box.run().returncode == 0
+    assert box.last()[3] == "waiting" and "pipeline:lock" in box.last()[4]
+    assert box.marker == one and box.head == one and box.running == one and box.read("tag_app").strip() == f"app-{one}"
+    assert "compose up -d" not in box.calls()[n:]
+    # once it has ended, a later check deploys
+    (box.fake / "busy").unlink()
+    assert box.run().returncode == 0 and box.last()[3] == "deployed"
 
 
 def test_the_lock_of_a_run_that_ended_is_cleared_after_the_swap(box):

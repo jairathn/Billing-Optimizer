@@ -847,7 +847,7 @@ def test_setup_and_the_settings_file_follow_the_written_trizetto_request():
     login entered with configure.sh; and the settings file gives each block its own heading."""
     page = open(os.path.join(ROOT, "remitwatch", "static", "setup.html"), encoding="utf-8").read()
     panel = page[page.index('id="tzp"'):page.index('id="faxp"')]
-    for gone in ("Call TriZetto", "turn on <b>Auto Generate", "(the Site ID)", "—"):
+    for gone in ("Call TriZetto", "turn on <b>Auto Generate", "(the Site ID)", "\u2014"):
         assert gone not in panel, gone
     for said in ("docs/TRIZETTO_REQUEST.md", "No phone call", "Change nothing in TriZetto's portal", "configure.sh",
                  "TRIZETTO_SFTP_DIRS", "TRIZETTO_SFTP_HOSTKEY", "never by email", "RemitWatch login's username"):

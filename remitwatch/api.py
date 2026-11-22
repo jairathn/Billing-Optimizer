@@ -3308,7 +3308,15 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     number = _payer_number(f.get("payer_group"))
     if not number:
         return held("no_number", f"No appeal fax number is saved for {f.get('payer_group') or 'this payer'}. Add it on the Faxes page.")
-    if _faxes_out(fid):
+    live = _faxes_out(fid)
+    if live:
+        last = live[-1]
+        # its appeal went out but the item was never marked Sent (the run stopped between the two), and nobody changed it
+        # since: marked now, so its follow-ups start
+        if f.get("status") in ("open", "in_progress") and last.get("purpose") == "appeal" and has_table("finding_events") and \
+                not one("SELECT 1 FROM finding_events WHERE finding_id=? AND kind='manual' AND at >= ? LIMIT 1", (fid, (last.get("created_at") or "")[:19])):
+            _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(last.get('number'))} "
+                                              f"(fax {last.get('provider_id') or 'not settled yet'}).", None, user)
         return dict(out, status="skipped", reason="Its appeal was already faxed.")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
     use_ai = body.get("use_ai", True) not in (False, 0, "0")

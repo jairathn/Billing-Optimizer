@@ -38,11 +38,13 @@ def pdf_text(pdf: bytes, page: int | None = None) -> str:
 class FakeLine(fax.Provider):
     name = "fake"
 
-    def __init__(self, busy: set[str] | None = None):
+    def __init__(self, busy: set[str] | None = None, delay: float = 0.0):
         self.sent: dict[str, dict] = {}
         self.inbox_items: dict[str, dict] = {}
         self.busy = {fax.digits(b) for b in (busy or set())}
         self.n = 0
+        self.delay = delay              # seconds a send takes (SRFax's POST with a PDF in it): widens any race
+        self.outbox_down = False        # the outbox cannot be read: whether a fax went out cannot be told
 
     # what the code calls
     def send(self, to: str, pdf: bytes, filename: str) -> str:
@@ -51,10 +53,18 @@ class FakeLine(fax.Provider):
             raise fax.FaxError(f"{to!r} is not a US fax number.")
         if not pdf.startswith(b"%PDF-"):
             raise fax.FaxError("not a PDF")
+        if self.delay:
+            import time
+            time.sleep(self.delay)
         self.n += 1
         fid = f"F{self.n:04d}"
         self.sent[fid] = {"to": num, "pdf": pdf, "filename": filename, "state": "queued"}
         return fid
+
+    def find_sent(self, filename: str, number: str, since: str) -> str | None:
+        if self.outbox_down:
+            raise fax.FaxError("the outbox did not answer")
+        return next((k for k, v in self.sent.items() if v["filename"] == filename and v["to"] == fax.digits(number)), None)
 
     def status(self, provider_id: str) -> dict:
         s = self.sent[provider_id]
@@ -145,4 +155,10 @@ class FakeSRFax:
             if d.get("sDirection") != "IN" or name not in self.files:
                 return _Resp(200, {"Status": "Failed", "Result": "Fax not found"})
             return _Resp(200, {"Status": "Success", "Result": base64.b64encode(self.files[name]).decode()})
+        if a == "Get_Fax_Outbox":
+            if d.get("sPeriod") != "RANGE" or len(d.get("sStartDate", "")) != 8 or len(d.get("sEndDate", "")) != 8:
+                return _Resp(200, {"Status": "Failed", "Result": "Invalid period"})
+            return _Resp(200, {"Status": "Success", "Result": [
+                {"FileName": f"20261120101500-1-{fid}_0|{fid}", "SentStatus": self.statuses.get(fid, {}).get("SentStatus", "In Progress"),
+                 "ToFaxNumber": q["to"], "SubmittedFiles": q["name"]} for fid, q in self.queued.items()]})
         return _Resp(200, {"Status": "Failed", "Result": f"Unknown action {a}"})

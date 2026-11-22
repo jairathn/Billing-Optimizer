@@ -463,8 +463,8 @@ class _BulkOnly:
     """A stand-in for an export-only ModMed on a clock of its own: searches are refused, and each export is ready
     `ready_after` seconds after it starts (asked about every `retry` seconds)."""
 
-    def __init__(self, clock, ready_after, retry=30, real_delay=0.0):
-        self.clock, self.ready_after, self.retry, self.real_delay = clock, ready_after, retry, real_delay
+    def __init__(self, clock, ready_after, retry=30, real_delay=0.0, kick_delay=0.0):
+        self.clock, self.ready_after, self.retry, self.real_delay, self.kick_delay = clock, ready_after, retry, real_delay, kick_delay
         self.jobs: dict[str, tuple[float, str]] = {}
         self.lock = __import__("threading").Lock()
 
@@ -476,6 +476,8 @@ class _BulkOnly:
         if url.endswith("smart-configuration"):
             return _Resp(404, {})
         if url.endswith("$export"):
+            if self.kick_delay:
+                _t.sleep(self.kick_delay)
             with self.lock:
                 jid = str(len(self.jobs) + 1)
                 self.jobs[jid] = (self.clock(), (params or {}).get("_type"))
@@ -539,7 +541,7 @@ def test_lookups_made_together_share_one_export(monkeypatch):
     M._EXPORTS.clear()
     M._PENDING.clear()
     clock = _Clock()
-    bulk = _BulkOnly(clock, ready_after=0, real_delay=0.05)        # each status answer takes a moment, so the three overlap
+    bulk = _BulkOnly(clock, ready_after=0, real_delay=0.05, kick_delay=0.1)     # slow answers, so the three overlap
     mm = _bulk_mm(clock, bulk)
     go = threading.Barrier(3)
     errors = []

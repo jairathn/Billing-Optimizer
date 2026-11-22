@@ -574,6 +574,32 @@ def test_two_patients_notes_of_one_name_each_go_to_their_own_claim(site):
     assert b["status"] == "built" and b["note"]["id"] != a["note"]["id"] and b["others"] == []
 
 
+def test_notes_of_two_patients_of_one_name_with_no_patient_id_are_never_merged(site, monkeypatch):
+    """No EMA export yet, so no claim carries EMA's patient ID, and two Pat Samples were seen on 11/01. Their notes (with
+    different birth dates, no patient ID) are two patients' notes, not one patient's two: with names off neither is
+    offered, since the rows could not be told apart; with names on, each is shown with its birth date."""
+    conn = sqlite3.connect(site.db)
+    conn.execute("""INSERT INTO claims (claim_key, transaction_key, patient_control_number, patient_last, patient_first, statement_from)
+                    VALUES ('k-twin', 't-twin', 'CB0000999C017', 'SAMPLE', 'PAT', '2026-11-01')""")
+    conn.execute("""INSERT INTO findings (finding_id, signal, category, claim_key, patient_control_number, service_date, payer_group, status)
+                    VALUES ('f-twin', 'DENIED_MEDICAL_NECESSITY', 'denial', 'k-twin', 'CB0000999C017', '2026-11-01', 'Humana', 'open')""")
+    conn.commit()
+    conn.close()
+    a = [ln.replace("    Patient ID: EMA77", "") for ln in NOTE]
+    b = [ln.replace("    Patient ID: EMA77", "").replace("01/02/1960", "05/06/1990").replace("changing mole", "itchy rash") for ln in NOTE]
+    assert site.up("a.pdf", note_pdf(a))["status"] == "matched" and site.up("b.pdf", note_pdf(b))["status"] == "matched"
+    r = site.c.post("/api/appeals/from_ema", json={"finding_id": "f-twin", "use_ai": False}, headers=XHR).json()
+    assert r["status"] == "ambiguous" and r["candidates"] == [] and "cannot be told apart" in r["reason"]
+    from remitwatch import modmed
+    conn = sqlite3.connect(site.db)
+    conn.row_factory = sqlite3.Row
+    try:
+        on = uploads.find_note(conn, modmed.ClaimKey("SAMPLE", "PAT", "2026-11-01", claim_id="CB0000999C017"), reveal=True)
+    finally:
+        conn.close()
+    assert sorted(c["patient"]["birth_date"] for c in on["candidates"]) == ["1960-01-02", "1990-05-06"]
+
+
 def test_a_note_matched_by_name_and_date_alone_waits_for_a_person(site):
     """The claim has EMA's patient ID, the note states none: name and date are all that agree, so nothing goes out until
     a person confirms it in the item (a pick) or attaches it there."""
