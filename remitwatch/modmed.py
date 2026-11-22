@@ -17,19 +17,34 @@ Settings (environment):
                         SMART Backend Services (RFC 7523). Line breaks may be written as \\n, or the PEM base64-encoded
   MODMED_KEY_ID         the key's id as registered (kid); default its RFC 7638 thumbprint, as /.well-known/jwks.json shows
   MODMED_CLIENT_SECRET  instead of a key, where ModMed issued a client secret
-  MODMED_API_KEY        sent as the x-api-key header on every call, where ModMed issued one
+  MODMED_API_KEY        sent as the x-api-key header on calls to the FHIR server and the sign-in server, where ModMed
+                        issued one (never to another host)
   MODMED_FHIR_BASE      default https://fhirmp.mmi.prod.fhir.ema-api.com/fhir/r4
   MODMED_TOKEN_URL      default the server's own (its .well-known/smart-configuration), else ModMed's sso.ema.md endpoint
   MODMED_SCOPE          default system/*.read
   MODMED_AUDIENCE       the assertion's audience; default the token URL (the SMART standard), then the FHIR base if refused
   MODMED_GROUP_ID       the Group to export from, for an app ModMed allows only Bulk FHIR exports (no searches)
 
-Finding the note for a claim: the patient first by EMA's own patient ID on the claim's EMA rows (as a FHIR id, then as
-an identifier), then by the medical record number the payer echoed, then by name; a patient is only ever taken when
-the family name agrees with the claim's, so another patient's note can never be attached. Then that patient's visits
-on the date of service and the notes tied to them (or, failing a link, dated that day or after), current and signed
-only. More than one note that day: the one written by the clinician who rendered the service (NPI), else the person
-picks. Where ModMed allows the app no searches, the same lookups run over a Bulk FHIR export.
+Finding the note for a claim (find_note). What is checked, and nothing more is promised:
+
+  The patient. The candidates are the patient EMA's own patient ID on the claim's EMA rows names (as a FHIR id, then as
+  an identifier), the patient the medical record number the payer echoed names, and the patients with the claim's name.
+  A patient whose family name disagrees with the claim's is never a candidate. A note is attached by itself only when
+  exactly one patient is tied to the claim by two independent identifiers that agree: EMA's patient ID, the medical
+  record number, the member ID on the patient's coverage, the full name. A name alone is never enough, because two
+  patients can share a name and a visit day. Then a person picks, and the choices show who each patient is where names
+  are switched on. Where names are off the choices cannot be told apart, so the note is attached by hand instead.
+
+  The note. Current and signed only. It must be a clinical note in a form that can be read (PDF, HTML, text, RTF, Word),
+  and it must be for the date of service: tied to a visit of that day, or carrying that day as its clinical date, or,
+  with neither, written on that day. A note written later that names no visit may belong to a later visit. That one, and
+  a document that is not a clinical note, are never attached by themselves: a person can pick them.
+
+  More than one note that day: the one written by the clinician who rendered the service (NPI), then a progress note
+  before other kinds, else the person picks.
+
+Where ModMed allows the app no searches, the same lookups run over a Bulk FHIR export. The two exports share one time
+budget, and an export that is still running when the budget ends is picked up by the next lookup, not started again.
 
 Read only: nothing is written to EMA. What is read stays in memory or in the appeal packet, as with an uploaded note.
 """
@@ -56,14 +71,22 @@ ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 # LOINC types of the notes an appeal can use, best first
 NOTE_TYPES = {"11506-3": "Progress note", "28570-0": "Procedure note", "34133-9": "Summary of episode note", "11488-4": "Consult note",
               "34117-2": "History and physical note", "18842-5": "Discharge summary"}
-NOTE_AFTER_DAYS = 45            # a note is signed on or after its visit; one dated later than this belongs to another visit
-CONTENT_PREF = ("application/pdf", "text/html", "application/xhtml+xml", "text/plain", "text/rtf", "application/rtf")
+NOTE_AFTER_DAYS = 45            # how far past the visit EMA is searched: a note is often signed days after its visit
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+# the forms a note can be read in, best first; a document in no such form (a photo, a scan) is never used
+CONTENT_PREF = ("application/pdf", "text/html", "application/xhtml+xml", "text/plain", "text/rtf", "application/rtf", DOCX)
 EXTENSIONS = {"application/pdf": ".pdf", "text/html": ".html", "application/xhtml+xml": ".html", "text/plain": ".txt",
-              "text/rtf": ".rtf", "application/rtf": ".rtf"}
+              "text/rtf": ".rtf", "application/rtf": ".rtf", DOCX: ".docx"}
+UNTYPED = ("", "application/octet-stream", "binary/octet-stream")      # a file that does not say what it is: a person's pick only
+TIE_RANK = {"encounter": 0, "period": 1, "date": 2, "after": 3}
 TIMEOUT = (10, 60)
 MAX_PAGES = 20
 MAX_NOTE_BYTES = 15 * 1024 * 1024
-EXPORT_TTL = 30 * 60            # a Bulk FHIR export is reused this long, so a batch of notes takes one export
+MAX_CANDIDATES = 8              # patients looked through when none is tied to the claim by two identifiers
+EXPORT_TTL = 30 * 60            # a finished Bulk FHIR export is reused this long, so a batch of notes takes one export
+EXPORT_KEEP = 6 * 60 * 60       # an export still running is asked about again for this long before a new one is started
+SERVERLESS_RESERVE = 120        # seconds a serverless function keeps back after the lookup, for the review and the packet
+STILL_RUNNING = "ModMed's export is still running; try again in a few minutes."
 
 
 class ModMedError(Exception):
@@ -105,10 +128,10 @@ def _pem(text: str) -> str:
 @dataclass
 class Settings:
     client_id: str = ""
-    private_key: str = ""
+    private_key: str = field(default="", repr=False)        # the three secrets never appear when the settings are printed
     key_id: str = ""
-    client_secret: str = ""
-    api_key: str = ""
+    client_secret: str = field(default="", repr=False)
+    api_key: str = field(default="", repr=False)
     fhir_base: str = DEFAULT_BASE
     token_url: str = ""
     scope: str = DEFAULT_SCOPE
@@ -134,22 +157,33 @@ class Settings:
         return hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
 
 
+CURVES = {"secp384r1": ("ES384", "P-384"), "secp256r1": ("ES256", "P-256"), "secp521r1": ("ES512", "P-521")}
+WRONG_KEY_KIND = ("MODMED_PRIVATE_KEY must be an EC key (P-384, P-256 or P-521) or an RSA key. "
+                  "Make one with: python -m remitwatch.cli modmed-key")
+
+
 def load_private_key(pem: str):
+    """The app's private key. A key of a kind the sign-in cannot use (Ed25519, another curve) is refused here, in plain
+    words, so every caller hears it the same way."""
     from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
     try:
-        return serialization.load_pem_private_key(_pem(pem).encode(), password=None)
+        key = serialization.load_pem_private_key(_pem(pem).encode(), password=None)
     except Exception as exc:
         raise ModMedError(f"MODMED_PRIVATE_KEY is not a readable private key ({type(exc).__name__}). Paste the whole PEM, "
                           "including the BEGIN and END lines; line breaks may be written as \\n.") from exc
+    if isinstance(key, rsa.RSAPrivateKey) or (isinstance(key, ec.EllipticCurvePrivateKey) and key.curve.name in CURVES):
+        return key
+    raise ModMedError(WRONG_KEY_KIND)
 
 
 def key_alg(key) -> str:
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
-    if isinstance(key, ec.EllipticCurvePrivateKey):
-        return {"secp384r1": "ES384", "secp256r1": "ES256", "secp521r1": "ES512"}.get(key.curve.name) or "ES384"
+    if isinstance(key, ec.EllipticCurvePrivateKey) and key.curve.name in CURVES:
+        return CURVES[key.curve.name][0]
     if isinstance(key, rsa.RSAPrivateKey):
         return "RS384"
-    raise ModMedError("MODMED_PRIVATE_KEY must be an EC (P-384) or RSA key.")
+    raise ModMedError(WRONG_KEY_KIND)
 
 
 def _b64u(b: bytes) -> str:

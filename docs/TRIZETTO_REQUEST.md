@@ -92,7 +92,7 @@ Thank you!
 1. `sudo bash /opt/remitwatch/deploy/aws/configure.sh`, TriZetto section: the username, the password (given by phone or in
    person), how many days TriZetto lets it last, the folder the 835 files are in, and every host-key fingerprint TriZetto
    gave (separated by commas). Enter keeps every other setting.
-2. Open `https://originbilling.com/setup` and press "Test the TriZetto connection": the server and its key, the sign-in,
+2. Open the server's `/setup` page and press "Test the TriZetto connection": the server and its key, the sign-in,
    the files there and one remittance read. The next hourly run reads the remittances.
 3. If TriZetto could only offer the Site ID's own login (shared with ModMed), don't enter it until ModMed confirms that a
    second reader on that login is safe (nothing it does deletes or moves the files first) and that password changes will

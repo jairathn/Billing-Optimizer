@@ -551,7 +551,7 @@ template prompts are over 80 characters) and ignores the scrub's placeholders ([
 
 The owner reported that the practice manager found every item she checked had been paid, some after October 9 (the
 newest remittance in Dropbox: the TriZetto files stopped being copied there), and asked for the fullest ModMed
-integration, a TriZetto integration instead of Dropbox, and (from Alex, the biller) filters, e.g. modifier 57 on visits
+integration, a TriZetto integration instead of Dropbox, and (from the biller) filters, e.g. modifier 57 on visits
 for payers known not to pay it.
 
 Built:
@@ -576,7 +576,7 @@ fields are not documented; ask ModMed which financial resources a synapSYS key c
 
 ## The manual ModMed workflow: the Upload page (November 21, 2026)
 
-Kevin (Neil's assistant, running the AWS move; AWS account live, BAA signed, cutting over to originbilling.com) asked for
+The owner's assistant (running the AWS move; AWS account live, BAA signed, cutting over to the new domain) asked for
 a manual workflow while ModMed's Bulk FHIR app and synapSYS application are pending: what a person can export from EMA by
 hand, an upload page behind the login landing in the same pipeline and tables, idempotent, a plain summary per upload,
 an in-app guide, files kept under /data, tests, Vercel unbroken.
@@ -584,7 +584,7 @@ an in-app guide, files kept under /data, tests, Vercel unbroken.
 What EMA gives by hand (ModMed's own report documentation is behind its customer login; nothing public names the menu
 paths, so the guide names the reports the practice already saves to Dropbox): the three report families the code reads
 ("Encounter and Charge Lines" full layout, "ERA and Payment Line Adjustments", "Claim and Claim Status" with Patient ID),
-visit notes printed or saved as PDF, and ERA 835 files from TriZetto's portal. Neil said he would send example ModMed
+visit notes printed or saved as PDF, and ERA 835 files from TriZetto's portal. The owner promised example ModMed
 reports: check `ema_exports.header_row`, the totals/footer rule (`_row_kind`) and `uploads.WANT` against them, and make
 any test fixtures from their column layout only (made-up rows; never the real files).
 
@@ -604,8 +604,8 @@ Built (server only; Vercel answers 409 and the page says so; `/api/meta` has `up
 
 ## Auto-deploy on the AWS server, and standing items (November 21, 2026)
 
-Kevin: the migration is done (originbilling.com live on AWS, compare-cloud zero differences, Dropbox webhook re-pointed).
-Built at Neil's request: `deploy/auto-deploy.sh` + `deploy/systemd/remitwatch-deploy.{service,timer}` +
+The owner's assistant: the migration is done (the new domain live on AWS, compare-cloud zero differences, Dropbox webhook re-pointed).
+Built at the owner's request: `deploy/auto-deploy.sh` + `deploy/systemd/remitwatch-deploy.{service,timer}` +
 `deploy/install-auto-deploy.sh`: every 5 minutes as root from /opt/remitwatch, fetch main; docs-only diffs are checked out
 without a rebuild; otherwise build first and `up -d` only after a good build (waits up to 20 min for a running data
 cycle, clears the lock of one the swap ended, restarts Caddy when its file changed, health check on /robots.txt inside the
@@ -617,9 +617,9 @@ the sandbox (deploy, broken build, docs-only, never-answering version rolled bac
 Switch it on: `sudo bash -c 'cd /opt/remitwatch && git pull --ff-only && bash deploy/install-auto-deploy.sh'`.
 From then on every push to main deploys itself to the live site.
 
-STANDING ITEM, to remind Neil in every reply until done: the sample AR report (and a collections report) from the
+STANDING ITEM, to remind the owner in every reply until done: the sample AR report (and a collections report) from the
 practice, for the AR reconciliation (every open claim, why, next step) and write-offs checked against what the payer said.
-Next builds asked by Neil: (1) "written off but still workable" (findings whose disputed money EMA shows written off or
+Next builds asked by the owner: (1) "written off but still workable" (findings whose disputed money EMA shows written off or
 moved to the patient, still inside their window) and (2) "open in EMA, no answer from the payer" (claims EMA shows open
 with no remittance, past the payer's answer time and before its filing limit; rejected-before-the-payer claims). Plus an
 exact list for the practice's admin of what to request from TriZetto (SFTP access, auto-generated remittances, ERA

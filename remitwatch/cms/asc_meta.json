@@ -1,5 +1,17 @@
 {
+ "checked_against_cms": true,
+ "cms_release": "2026-11-10",
  "coinsurance": 0.2,
+ "files": {
+  "2026": [
+   "508-Version-Oct-2026-ASC-AA.csv",
+   "508-Version-Oct-2026-ASC-BB.csv"
+  ],
+  "2027": [
+   "2027 FR ASC Addenda- CY 2027 ASC AA.csv",
+   "2027 FR ASC Addenda- CY 2027 ASC BB.csv"
+  ]
+ },
  "labor_share": 0.5,
  "not_wage_adjusted": [
   "H2",
@@ -7,7 +19,8 @@
   "K2",
   "K5",
   "K7",
-  "L6"
+  "L6",
+  "S2"
  ],
  "offices": {
   "henderson": {
@@ -59,7 +72,7 @@
  "prior_year": "2026",
  "rule_year": "2027",
  "sequestration": 0.02,
- "source": "medicare-asc-final-rule-rate-calculator-2027-20261110.xlsx",
+ "source": "CMS's CY 2027 final rule addenda as posted on November 10, 2026",
  "states": {
   "AK": "ALASKA",
   "AL": "ALABAMA",

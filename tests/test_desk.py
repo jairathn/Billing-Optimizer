@@ -7,6 +7,8 @@ import os
 import sys
 from datetime import timedelta
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from remitwatch import insights  # noqa: E402
@@ -19,8 +21,9 @@ CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
 
 def _client(tmp_path, monkeypatch):
     """A store with a routine-rate pattern whose claims close ten days ago, in three days and in five months; whole
-    claims denied for five reasons; denied, bundled and underpaid lines; an item to decide, one sent long ago and one
-    whose window closed last week."""
+    claims denied for five reasons; denied, bundled and underpaid lines; two items to decide (one made here, and the
+    whole claim denied as filed too late, which the detector gives no filing date), one sent long ago and one whose
+    window closed last week."""
     from fastapi.testclient import TestClient
 
     from remitwatch import api
@@ -47,8 +50,14 @@ def _client(tmp_path, monkeypatch):
                             for i in range(4)], paid(20))
     st = Store(db)
     Detector(st, run_id="desk").run()
-    ids = [r[0] for r in st.query("SELECT finding_id FROM findings WHERE category IN ('denial','bundling','downcoding','underpayment') "
-                                  "AND signal != 'SECOND_RATE' ORDER BY finding_id")]
+    money = "category IN ('denial','bundling','downcoding','underpayment') AND signal != 'SECOND_RATE'"
+    # the detector gives one of these no filing date: the whole claim denied as filed too late (CO-29), an item to decide
+    assert [r[0] for r in st.query(f"SELECT carc FROM findings WHERE {money} AND appeal_deadline IS NULL")] == ["29"]
+    # The items changed below are picked among the dated ones, in an order that does not move with the day: the four denied
+    # lines by claim, then the whole claims by reason. (A finding's id is a hash of keys built from today's dates, so an
+    # order by id picked other items from one day to the next, and on some days the undated claim itself.)
+    ids = [r[0] for r in st.query(f"SELECT finding_id FROM findings WHERE {money} AND appeal_deadline IS NOT NULL "
+                                  "ORDER BY signal DESC, carc, patient_control_number")]
     assert len(ids) >= 6
     st.conn.execute("UPDATE findings SET appeal_deadline=? WHERE finding_id=?", ((today + timedelta(days=2)).isoformat(), ids[0]))       # this week
     st.conn.execute("UPDATE findings SET appeal_deadline=? WHERE finding_id=?", ((today - timedelta(days=6)).isoformat(), ids[1]))       # missed
@@ -104,7 +113,8 @@ def test_every_number_on_a_category_page_opens_a_list_of_exactly_that_many(tmp_p
                        ("missed", (b["missed"]["n"], b["missed"]["cents"])), ("followup", (b["follow_ups"]["n"], b["follow_ups"]["cents"]))):
         got = (sum(pages[c]["tiles"][tile]["n"] for c in CATEGORIES), sum(pages[c]["tiles"][tile]["cents"] for c in CATEGORIES))
         assert got == want == (pages[MONEY]["tiles"][tile]["n"], pages[MONEY]["tiles"][tile]["cents"]), (tile, got, want)
-    assert b["decide"]["n"] == 1 and b["missed"]["n"] >= 2 and b["follow_ups"]["n"] == 1
+    # to decide: the item the fixture left with no filing date, and the whole claim denied as filed too late
+    assert b["decide"]["n"] == 2 and b["missed"]["n"] >= 2 and b["follow_ups"]["n"] == 1
     # every item to do falls in exactly one of window open, to decide, older with no date, window closed
     for cat in CATEGORIES:
         t = pages[cat]["tiles"]
@@ -357,3 +367,211 @@ def test_overview_rows_are_one_per_signal_and_a_year_narrows_the_category_page(t
             p = {"category": MONEY, "live": 1, "limit": 1, "status": status, "year": y, **({"deadline": deadline} if deadline else {})}
             r = tc.get("/api/findings", params=p, auth=auth).json()
             assert (r["total"], r["shortfall_cents"] or 0) == (d["tiles"][name]["n"], d["tiles"][name]["cents"]), (y, name)
+
+
+# --------------------------------------------------------------------------- claims no payer answered: one at a time, with a note
+# The page's own code (desk.js, today.js, features.js and index.html's helpers) in node, on a stand-in for the page: the
+# rows as rowHtml draws them, the bar as bindBulk binds it, and the status changes of an item's own panel. It prints what
+# each step asked the person and what it sent. Usage: node <this file> <static dir>. Every item is invented.
+LET_GO_PAGE_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/, /const SIGNAL_HELP = \{[\s\S]*?\n\};/].map(re => grab(html, re)).join('\n')
+  + '\n' + grab(read('faxes.js'), /const FAX_KINDS = [^\n]*\n/);
+// what the page asks the person (answered from a script; unanswered, a question is refused) and what it sends
+const asked = [], sent = [];
+let answers = [];
+const ask = kind => text => { asked.push(kind + ': ' + text); const a = answers.length ? answers.shift() : (kind === 'prompt' ? null : false); return kind === 'alert' ? undefined : a; };
+const ctx = { console, alert: ask('alert'), confirm: ask('confirm'), prompt: ask('prompt'), state: { worklist: ['c1', 'c2'], wlTotal: 2 },
+  api: async (p, o) => { sent.push({ path: p, body: o && o.body ? JSON.parse(o.body) : null }); return { ok: true }; },
+  render: async () => {}, openDetail: () => {}, closeDetail: () => {}, appealByFax: ids => { sent.push({ fax: ids }); } };
+vm.createContext(ctx);
+for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js')]) vm.runInContext(src, ctx);
+// a stand-in for the page: elements that answer the selectors the code uses (tag, #id, .class, [data-x], [data-x="y"], :checked)
+class El {
+  constructor(tag, o = {}, parent = null) { Object.assign(this, { tag, id: o.id || '', cls: o.cls || [], dataset: o.data || {}, checked: false, value: o.value, hidden: !!o.hidden, textContent: '', disabled: false, parent, kids: [] }); if (parent) parent.kids.push(this); }
+  matches(sel) {
+    const tag = (sel.match(/^[a-z]+/) || [''])[0], id = (sel.match(/#([\w-]+)/) || [])[1], cls = [...sel.matchAll(/\.([\w-]+)/g)].map(m => m[1]);
+    const data = [...sel.matchAll(/\[data-([\w-]+)(?:="([^"]*)")?\]/g)];
+    return (!tag || tag === this.tag) && (!id || id === this.id) && cls.every(c => this.cls.includes(c)) && (!/:checked/.test(sel) || this.checked)
+      && data.every(([, k, val]) => k in this.dataset && (val === undefined || this.dataset[k] === val));
+  }
+  closest(sel) { for (let e = this; e; e = e.parent) if (e.matches(sel)) return e; return null; }
+  all() { return this.kids.flatMap(k => [k, ...k.all()]); }
+  querySelectorAll(sel) { return this.all().filter(e => e.matches(sel)); }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+}
+const item = (finding_id, signal, actionable) => ({ finding_id, signal, actionable, status: 'open', payer_group: 'Plan A', appeal_deadline: '2027-03-01', shortfall_cents: 11760 });
+const ITEMS = [item('c1', 'NO_ANSWER', 'review'), item('c2', 'REJECTED_PRE_PAYER', 'correct_and_resubmit'), item('d1', 'DENIED_MEDICAL_NECESSITY', 'appeal'), item('d2', 'DENIED_AUTH', 'appeal')];
+const BRIEF = { today: '2026-11-22', work_types: [], claim_kinds: {}, labels: { NO_ANSWER: { label: 'Sent, and the payer never answered', work: 'chase' },
+  REJECTED_PRE_PAYER: { label: 'Rejected before it reached the payer', work: 'fix' }, DENIED_MEDICAL_NECESSITY: { label: 'Denied as not medically necessary', work: 'note' },
+  DENIED_AUTH: { label: 'Denied: no authorization', work: 'auth' } } };
+function page() {             // the list as deskTab draws it: the bar, then one row per item with the attributes rowHtml gives it
+  const v = new El('main'), bar = new El('div', { id: 'bulk', cls: ['bulk'], hidden: true }, v);
+  new El('span', { id: 'bulkN' }, bar); new El('button', { id: 'bulkFax' }, bar);
+  for (const s of ['in_progress', 'appealed', 'dismissed', 'open']) new El('button', { data: { bulk: s } }, bar);
+  new El('span', { id: 'bulkLeftOut' }, bar); new El('input', { id: 'selAll' }, v);
+  for (const it of ITEMS) {
+    const tag = ctx.rowHtml(BRIEF, it, {}).match(/^<tr[^>]*>/)[0];
+    const tr = new El('tr', { cls: ['row'], data: Object.fromEntries([...tag.matchAll(/data-([\w-]+)="([^"]*)"/g)].map(m => [m[1], m[2]])) }, v);
+    new El('input', { cls: ['sel'], value: it.finding_id }, tr);
+  }
+  ctx.bindBulk(v);
+  const tick = ids => { v.querySelectorAll('.sel').forEach(cb => { cb.checked = ids.includes(cb.value); }); v.querySelector('.sel').onchange(); };
+  return { v, tick, press: sel => v.querySelector(sel).onclick() };
+}
+const drawer = f => { const d = new El('div'); for (const id of ['sentNext', 'letGoNext', 'prevItem', 'nextItem', 'todoErr']) new El('button', { id }, d); ctx.bindWhatToDo(f, d); return d; };
+const out = [];
+const step = async (name, say, fn) => { ctx.state.brief = BRIEF; asked.length = 0; sent.length = 0; answers = say.slice(); const got = await fn(); out.push({ name, got, asked: asked.slice(), sent: sent.slice() }); };
+(async () => {
+  const all = ITEMS.map(i => i.finding_id), text = (p, sel) => p.v.querySelector(sel).textContent;
+  let p = page();
+  await step('rows', [], async () => p.v.querySelectorAll('tr.row').map(tr => tr.dataset.signal));
+  await step('bar, all four ticked', [], async () => { p.tick(all); return { n: text(p, '#bulkN'), line: text(p, '#bulkLeftOut') }; });
+  await step('bar, the two denials ticked', [], async () => { p.tick(['d1', 'd2']); return { n: text(p, '#bulkN'), line: text(p, '#bulkLeftOut') }; });
+  await step('bulk let go, all four ticked', [true], async () => { p.tick(all); await p.press('[data-bulk="dismissed"]'); });
+  p = page();
+  await step('bulk let go, the two unanswered ticked', [true], async () => { p.tick(['c1', 'c2']); await p.press('[data-bulk="dismissed"]'); });
+  await step('bulk let go, the two denials ticked', [true], async () => { p.tick(['d1', 'd2']); await p.press('[data-bulk="dismissed"]'); });
+  p = page();
+  await step('bulk mark started, all four ticked', [], async () => { p.tick(all); await p.press('[data-bulk="in_progress"]'); });
+  p = page();
+  await step('fax, an unanswered claim ticked', [], async () => { p.tick(['c1']); await p.press('#bulkFax'); });
+  await step('fax, an unanswered claim and a denial ticked', [true], async () => { p.tick(['c1', 'd1']); await p.press('#bulkFax'); });
+  // an item's own panel: its status buttons (setFindingStatus) and "Let go and open the next" (bindWhatToDo)
+  const set = (id, status, signal) => ctx.setFindingStatus(id, status, 11760, signal);
+  await step('panel let go, unanswered, cancelled', [null], () => set('c1', 'dismissed', 'NO_ANSWER'));
+  await step('panel let go, unanswered, blank note', ['   '], () => set('c1', 'dismissed', 'NO_ANSWER'));
+  await step('panel let go, unanswered, with a note', [' no record at the payer, past its limit '], () => set('c1', 'dismissed', 'NO_ANSWER'));
+  await step('panel let go, rejected, with a note', ['billed to the patient'], () => set('c2', 'dismissed', 'REJECTED_PRE_PAYER'));
+  await step('panel lost, rejected, blank note', [''], () => set('c2', 'lost', 'REJECTED_PRE_PAYER'));
+  await step('panel lost, unanswered, with a note', ['proof of timely filing refused'], () => set('c1', 'lost', 'NO_ANSWER'));
+  await step('panel sent, unanswered', [], () => set('c1', 'appealed', 'NO_ANSWER'));
+  await step('panel let go, a denial, confirmed', [true], () => set('d2', 'dismissed', 'DENIED_AUTH'));
+  await step('panel let go, a denial, not confirmed', [false], () => set('d2', 'dismissed', 'DENIED_AUTH'));
+  await step('panel lost, a denial, blank note', [''], () => set('d2', 'lost', 'DENIED_AUTH'));
+  await step('let go and next, unanswered, blank note', [''], () => drawer(ITEMS[0]).querySelector('#letGoNext').onclick());
+  await step('let go and next, unanswered, with a note', ['a duplicate of a paid claim'], () => drawer(ITEMS[0]).querySelector('#letGoNext').onclick());
+  await step('let go and next, a denial, confirmed', [true], () => drawer(ITEMS[3]).querySelector('#letGoNext').onclick());
+  await step('texts', [], async () => ({ intro: vm.runInContext('DESKS.denials.intro', ctx), help: vm.runInContext('({NO_ANSWER: SIGNAL_HELP.NO_ANSWER, REJECTED_PRE_PAYER: SIGNAL_HELP.REJECTED_PRE_PAYER})', ctx) }));
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+@pytest.fixture(scope="module")
+def page_steps(tmp_path_factory):
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    script = tmp_path_factory.mktemp("page") / "let_go_page.js"
+    script.write_text(LET_GO_PAGE_JS, encoding="utf-8")
+    res = subprocess.run(["node", str(script), os.path.join(os.path.dirname(insights.__file__), "static")], capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr[-3000:]
+    return {s["name"]: s for s in json.loads(res.stdout)}
+
+
+def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_steps):
+    """A claim the payer never answered, or one rejected before reaching it, is money that may not have been asked for
+    yet: it is never hidden for a payer, and it is let go one at a time, with a note (docs/OPERATIONS.md). The list's Let
+    go leaves these claims out and the bar says so. Let go or Lost in the item's own panel asks why and sends the answer
+    as the note; without one nothing changes. Every other item, and every other button, works as before."""
+    s = page_steps
+    bulk = lambda ids, status: [{"path": "/api/findings/bulk-status", "body": {"ids": ids, "status": status}}]          # noqa: E731
+    one = lambda fid, **body: [{"path": f"/api/findings/{fid}/status", "body": body}]                                    # noqa: E731
+    left_out = "Let go leaves out 2 claims with no answer from the payer or rejected before the payer. Open each one to let it go, with a note."
+    # each row carries its reason; with such claims ticked the bar says what Let go will leave out
+    assert s["rows"]["got"] == ["NO_ANSWER", "REJECTED_PRE_PAYER", "DENIED_MEDICAL_NECESSITY", "DENIED_AUTH"]
+    assert s["bar, all four ticked"]["got"] == {"n": "4 selected", "line": left_out}
+    assert s["bar, the two denials ticked"]["got"] == {"n": "2 selected", "line": ""}
+    # the list's Let go: the two denials go, the two unanswered claims stay, and the question says so
+    mixed = s["bulk let go, all four ticked"]
+    assert mixed["sent"] == bulk(["d1", "d2"], "dismissed")
+    assert mixed["asked"] == ["confirm: Let go of 2 items? They leave the list and count as let go. " + left_out]
+    only = s["bulk let go, the two unanswered ticked"]
+    assert only["sent"] == [] and only["asked"] == ["alert: Nothing let go. " + left_out]
+    plain = s["bulk let go, the two denials ticked"]
+    assert plain["sent"] == bulk(["d1", "d2"], "dismissed") and plain["asked"] == ["confirm: Let go of 2 items? They leave the list and count as let go."]
+    assert s["bulk mark started, all four ticked"]["sent"] == bulk(["c1", "c2", "d1", "d2"], "in_progress")             # nothing else leaves them out
+    # the item's own panel: Let go and Lost ask why, and a blank answer changes nothing
+    for name in ("panel let go, unanswered, cancelled", "panel let go, unanswered, blank note", "panel lost, rejected, blank note",
+                 "let go and next, unanswered, blank note"):
+        assert s[name]["sent"] == [] and not s[name].get("got"), name
+        assert s[name]["asked"][0].startswith("prompt: ") and "Why (kept in the item's history):" in s[name]["asked"][0], name
+    for name in ("panel let go, unanswered, blank note", "panel lost, rejected, blank note", "let go and next, unanswered, blank note"):
+        assert s[name]["asked"][1:] == ["alert: Not changed. A claim with no answer from a payer needs a note that says why."], name
+    noted = s["panel let go, unanswered, with a note"]
+    assert noted["got"] is True and noted["sent"] == one("c1", status="dismissed", notes="no record at the payer, past its limit")
+    assert len(noted["asked"]) == 1 and noted["asked"][0].startswith("prompt: Let go of this claim?")                   # the one question
+    assert s["panel let go, rejected, with a note"]["sent"] == one("c2", status="dismissed", notes="billed to the patient")
+    lost = s["panel lost, unanswered, with a note"]
+    assert lost["sent"] == one("c1", status="lost", notes="proof of timely filing refused") and lost["asked"][0].startswith("prompt: Mark this claim lost?")
+    assert s["let go and next, unanswered, with a note"]["sent"] == one("c1", status="dismissed", notes="a duplicate of a paid claim")
+    assert s["panel sent, unanswered"]["sent"] == one("c1", status="appealed") and s["panel sent, unanswered"]["asked"] == []
+    # any other item: the plain confirmation, and Lost keeps its optional note
+    confirm = ["confirm: Let go of this item? It leaves the list and counts as let go."]
+    assert s["panel let go, a denial, confirmed"]["sent"] == one("d2", status="dismissed") and s["panel let go, a denial, confirmed"]["asked"] == confirm
+    assert s["panel let go, a denial, not confirmed"]["sent"] == [] and s["panel let go, a denial, not confirmed"]["got"] is False
+    assert s["panel lost, a denial, blank note"]["sent"] == one("d2", status="lost")
+    assert s["let go and next, a denial, confirmed"]["sent"] == one("d2", status="dismissed") and s["let go and next, a denial, confirmed"]["asked"] == confirm
+    # the page draws what the stand-in assumed: the bar holds the line, and the panel's status buttons pass the item's reason
+    static = os.path.join(os.path.dirname(insights.__file__), "static")
+    desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()
+    page = open(os.path.join(static, "index.html"), encoding="utf-8").read()
+    assert '<span id="bulkLeftOut" class="small muted" role="status"></span></div>' in desk
+    assert "await setFindingStatus(id, b.dataset.st, f.shortfall_cents, f.signal)" in page
+
+
+def test_appeal_by_fax_says_a_payer_to_chase_is_not_settled_by_a_letter(page_steps):
+    s = page_steps
+    none = s["fax, an unanswered claim ticked"]
+    assert none["sent"] == [] and len(none["asked"]) == 1 and none["asked"][0].startswith("alert: None of the ticked items")
+    assert "the payer has to be chased first" in none["asked"][0]
+    some = s["fax, an unanswered claim and a denial ticked"]
+    assert some["sent"] == [{"fax": ["d1"]}] and "the payer to chase first" in some["asked"][0] and some["asked"][0].endswith("Fax the other 1?")
+
+
+def test_the_note_given_for_a_claim_let_go_is_kept_in_its_history(tmp_path, monkeypatch):
+    """What the page sends for a claim no payer answered (the status and the note, to the item's own address) is kept:
+    the note shows on the item and in its history, and the claim leaves the chase count."""
+    import sqlite3
+
+    from remitwatch import api
+    tc, auth = _client(tmp_path, monkeypatch)
+    con = sqlite3.connect(api.DB_PATH)
+    for fid, signal, action in (("na1", "NO_ANSWER", "review"), ("rj1", "REJECTED_PRE_PAYER", "correct_and_resubmit")):
+        con.execute("""INSERT INTO findings (finding_id, signal, category, payer_group, shortfall_cents, status, stale, severity, actionable, title,
+                       appeal_deadline, patient_control_number)
+                       VALUES (?, ?, 'denial', 'Some plan', 11760, 'open', 0, 'medium', ?, 'no answer', date('now','+200 days'), ?)""",
+                    (fid, signal, action, "CB0000900C017" if fid == "na1" else "CB0000901C017"))
+    con.commit()
+    con.close()
+    xhr = {"X-Requested-With": "remitwatch"}
+    assert tc.get("/api/brief", auth=auth).json()["no_answer"]["chase"]["n"] == 1
+    listed = tc.get("/api/findings", params={"category": MONEY, "kind": "chase", "live": 1, "status": "open,in_progress"}, auth=auth).json()["items"]
+    assert [(r["finding_id"], r["signal"]) for r in listed] == [("na1", "NO_ANSWER")]                # the row's reason reaches the page
+    for fid, note in (("na1", "no record at the payer, past its limit"), ("rj1", "billed to the patient")):
+        r = tc.post(f"/api/findings/{fid}/status", json={"status": "dismissed", "notes": note}, headers=xhr, auth=auth)
+        assert r.status_code == 200, r.text
+        d = tc.get(f"/api/findings/{fid}", auth=auth).json()
+        assert d["finding"]["status"] == "dismissed" and d["finding"]["notes"] == note
+        assert [(e["to_status"], e["note"], e["actor"]) for e in d["events"]] == [("dismissed", note, "oda")]
+    assert tc.get("/api/brief", auth=auth).json()["no_answer"]["chase"]["n"] == 0
+
+
+def test_the_pages_say_what_the_two_reasons_with_no_payer_answer_are(page_steps):
+    """Unanswered and rejected claims sit on the Denials page though no payer denied them: its heading says so, the
+    Overview card that leaves them out says so, and both reasons have their help text (the Signals table, the page's
+    'What each label means' and an item's Technical details read it)."""
+    texts = page_steps["texts"]["got"]
+    assert "claims the payer never answered" in texts["intro"] and "rejected before they reached it" in texts["intro"]
+    assert texts["help"]["NO_ANSWER"].startswith("EMA shows the claim sent and unpaid") and "portal" in texts["help"]["NO_ANSWER"]
+    assert texts["help"]["REJECTED_PRE_PAYER"].startswith("EMA shows the claim rejected before it reached the payer")
+    for text in (texts["intro"], *texts["help"].values()):
+        assert "—" not in text
+    page = open(os.path.join(os.path.dirname(insights.__file__), "static", "index.html"), encoding="utf-8").read()
+    card = next(line for line in page.splitlines() if "kpi('Denied, never paid'" in line)
+    assert "sigRows(['NO_ANSWER','REJECTED_PRE_PAYER'])" in card and "not claims unanswered or rejected before the payer" in card

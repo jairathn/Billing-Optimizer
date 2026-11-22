@@ -304,6 +304,8 @@ const SIGNAL_HELP = {
   DENIED_DUPLICATE_UNPAID:'Denied as duplicate, but no remit ever paid this line. Find the original payment or reprocess.',
   DENIED_OTHER:'Paid $0 with another payer-responsibility reason code.',
   CLAIM_DENIED_UNPAID:'Whole claim denied (CLP02=4) and never paid later.',
+  NO_ANSWER:'EMA shows the claim sent and unpaid, and no remittance or ERA line answers it. Look it up on the payer\'s portal or call. If the payer has no record of it, send it again within the filing limit the item gives.',
+  REJECTED_PRE_PAYER:'EMA shows the claim rejected before it reached the payer (at the clearinghouse). Correct it in EMA and send it again before the filing date shown.',
   UNDERPAID_VS_OWN_RATE:'Allowed below the payer\'s own usual rate for this code and provider type, with no reduction reason reported.',
   MPPR_EXCESS:'Multiple-procedure reduction deeper than policy, or applied to an add-on code.',
   FEE_SKIM:'Payment fees withheld from the remittance (Zelis transaction fees, origination fees). Opt out: demand fee-free standard EFT.',
@@ -404,7 +406,7 @@ async function overview(v){
     ${kpi('Correctable billing errors', money(fix.shortfall_cents), (fix.n||0).toLocaleString()+' lines to resubmit', 'appeals')}
     ${kpi('Contract gap vs Medicare', money((cat.contract||0) - total(sigRows(['CHARGE_BELOW_RATE']))), 'commercial and MA rates', 'contracts')}
     ${kpi('Bundled away', money(cat.bundling), 'E/M, add-ons, Mohs stages', 'bundling')}
-    ${kpi('Denied, never paid', money((cat.denial||0) - total(sigRows(['NO_ANSWER','REJECTED_PRE_PAYER']))), 'lines and whole claims', 'denials')}
+    ${kpi('Denied, never paid', money((cat.denial||0) - total(sigRows(['NO_ANSWER','REJECTED_PRE_PAYER']))), 'lines and whole claims; not claims unanswered or rejected before the payer', 'denials')}
     ${kpi('Downcoded', money(cat.downcoding), 'code or level reduced', 'downcoding')}
     ${kpi('Fees and takebacks', money(cat.fees), 'PLB withholds', 'fees')}
     ${kpi('Due in 30 days', money((dl.due_30d||{}).shortfall_cents), ((dl.due_30d||{}).n||0)+' appeals · expired '+money((dl.expired||{}).shortfall_cents), 'appeals')}
@@ -615,8 +617,8 @@ async function openDetail(id){
   d.querySelector('#closeD').onclick=closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
   d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{
-    if(b.dataset.st === 'dismissed' && !confirm('Let go of this item? It leaves the list and counts as let go.')) return;
-    try { if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents)){ state.brief = null; state.dirty = true; openDetail(id); } }
+    // setFindingStatus asks what the change takes: to confirm a Let go, and for the note on a claim no payer answered (by its reason)
+    try { if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents, f.signal)){ state.brief = null; state.dirty = true; openDetail(id); } }
     catch(e){ const er = d.querySelector('.st-err'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; } });
   bindWhatToDo(f, d);
   const oc = d.querySelector('#openClaim'); if(oc) oc.onclick = e => { e.preventDefault(); openClaim(r.bill, id); };

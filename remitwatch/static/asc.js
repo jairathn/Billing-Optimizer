@@ -13,6 +13,10 @@
    practice's share, the plans' share of Medicare's ASC rates, quality reporting) are where these start. */
 
 const ASC_LOOK_PAGE = 100;
+// A search for the rate lookup: the route reads at most 200 codes or ranges (ascrates._match), 2,400 characters with
+// the spaces between them. The whole search is sent first; a server that still takes only 400 characters answers 422,
+// and is then sent the whole codes that fit in 400.
+const ASC_Q_CODES = 200, ASC_Q_WIDE = 2400, ASC_Q_MAX = 400;
 
 function ascStyle(){
   if(document.getElementById('ascStyle')) return;
@@ -50,14 +54,27 @@ async function ascDraw(v){
     A.data = d; A.s = fresh;
   }
   const d = A.data;
+  // the surgeons' fees at Medicare Advantage move with Medicare's schedule for the plans the Calculator has moving with it
+  // (its tick on each plan under Contracts), read at every visit to this view: all of them unless one is unticked there
+  const ma = AscModel.maFollowing((cs.data || {}).payers, (cs.x || {}).indexed);
+  A.s.kinds.medicare_advantage.pro_follows = ma == null ? 1 : ma;
   ascStyle();
+  // a copy of the figures built before the provider tables kept the ASC's cases has none to show: say so, with no
+  // tiles of $0 that would read as no case at the ASC
+  const counted = AscModel.counted(d);
   body.innerHTML = `<div class="asc">
-    <div class="panel" id="ascRule">${ascRuleHtml(d, A.s)}</div>
-    <div class="grid two"><div><div class="panel" id="ascTypes"></div></div><div><div class="panel" id="ascCodes"></div></div></div>
+    <div class="panel" id="ascRule">${counted ? ascRuleHtml(d, A.s) : ascNotCountedHtml(d)}</div>
+    ${counted ? `<div class="grid two"><div><div class="panel" id="ascTypes"></div></div><div><div class="panel" id="ascCodes"></div></div></div>` : ''}
     <div class="panel" id="ascLook"></div></div>`;
-  ascRuleWire(v);
-  ascRuleUpdate(v);
+  if(counted){ ascRuleWire(v); ascRuleUpdate(v); }
   await ascLookDraw(v);
+}
+
+const ASC_NOT_COUNTED = "The ASC's cases are not in these figures yet. They are counted the next time the provider tables are rebuilt: open the Data tab and press Sync and analyse now. Until then nothing is priced here, so that an empty count is not read as no case at the ASC.";
+
+function ascNotCountedHtml(d){
+  return `<h2>What ${esc(d.rule_year)} does to the ASC's cases</h2>
+    <div class="note">${esc(ASC_NOT_COUNTED)} The rate calculator below answers for any code.</div>`;
 }
 
 // the cases panel: the settings (drawn once) and the cells ascRuleUpdate fills
@@ -79,7 +96,7 @@ function ascRuleHtml(d, s){
   return `
     <h2>What ${esc(ry)} does to the ASC's cases</h2>
     <div class="small muted">${esc(site.label || 'The')} ASC: ${esc(ascTitle(site.county))} County, ${esc(site.state || '')} (CBSA ${esc(site.cbsa || '?')} ${esc(site.cbsa_name || '')}), ASC wage index ${esc(wi[py] != null ? wi[py] : '?')} in ${esc(py)} and ${esc(wi[ry] != null ? wi[ry] : '?')} in ${esc(ry)}.
-      The cases the practice's surgeons billed there in ${esc(d.from)} to ${esc(d.to)} (a closure after a Mohs the same day, or an excision with its repair, billed on the ASC's claim), at that pace for a year, priced at Medicare's ASC rates of ${esc(lab[py] || py)} and of ${esc(lab[ry] || ry)}${d.source ? ` (from ASCA's rate calculator, ${esc(d.source)})` : ''}. ${esc(from)}</div>
+      The cases the practice's surgeons billed there in ${esc(d.from)} to ${esc(d.to)} (a closure after a Mohs the same day, or an excision with its repair, billed on the ASC's claim), at that pace for a year, priced at Medicare's ASC rates of ${esc(lab[py] || py)} and of ${esc(lab[ry] || ry)}${d.source ? ` (${esc(d.source)})` : ''}. ${esc(from)}</div>
     <div class="grid kpis" style="margin-top:10px" id="ascTiles"></div>
     <table class="calc-cards" style="margin-top:10px" id="ascKinds">
       <thead><tr><th>Payer</th><th class="num">Cases a year</th><th class="num">Pays the ASC, as a share of Medicare's rate</th><th>Follows Medicare's yearly rates</th>
@@ -96,11 +113,19 @@ function ascRuleHtml(d, s){
     <div id="ascMedicare" class="small" style="margin-top:6px"></div>
     <h3 style="margin:14px 0 4px">The surgeons' fees for the same cases</h3>
     <table class="calc-cards" id="ascPro"><thead><tr><th>Payer</th><th class="num">${esc(py)}</th><th class="num">${esc(ry)}</th><th class="num">Change</th></tr></thead><tbody></tbody></table>
-    <div class="note">Medicare's physician fee schedule for ${esc(py)} and ${esc(ry)}: the Mohs in the clinic at the office amount, the closure at the ASC at the facility amount, the 50% rule across the two claims; Medicare Advantage at what it pays the surgeons against Medicare. Commercial and other plans pay the surgeons by their own contracts: the Calculator's waterfall has each plan's ${esc(ry)} change, and the ${esc(ry)} same-day visit rule, which is not counted here.</div>
+    <div class="note">Medicare's physician fee schedule for ${esc(py)} and ${esc(ry)}: the Mohs in the clinic at the office amount, the closure at the ASC at the facility amount, the 50% rule across the two claims; Medicare Advantage at what it pays the surgeons against Medicare. ${esc(ascMaNote(s, py, ry))} Commercial and other plans pay the surgeons by their own contracts: the Calculator's waterfall has each plan's ${esc(ry)} change, and the ${esc(ry)} same-day visit rule, which is not counted here.</div>
     <div class="note" id="ascNotes"></div>`;
 }
 
 function ascTitle(s){ return String(s || '').toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase()); }
+
+// what the Medicare Advantage surgeon fees follow: the Calculator's tick on each plan ("moves with Medicare")
+function ascMaNote(s, py, ry){
+  const f = ((s.kinds || {}).medicare_advantage || {}).pro_follows;
+  if(f == null || f >= 0.9995) return `A Medicare Advantage plan moves with Medicare's ${ry} schedule unless the Calculator has it unticked under Contracts ("moves with Medicare in ${ry}").`;
+  const held = Math.round((1 - f) * 100);
+  return `The Calculator has ${held < 1 ? 'under 1' : held}% of its Medicare Advantage money at plans unticked for "moves with Medicare in ${ry}": that share of the Medicare Advantage surgeon fees is held at the ${py} amount.`;
+}
 
 function ascRuleWire(v){
   const A = state.calc.asc, s = A.s, box = v.querySelector('#ascRule');
@@ -272,11 +297,21 @@ async function ascLookRun(v, offset){
   if(!out || !L) return;
   const n = (A.lookSeq = (A.lookSeq || 0) + 1);
   if(!offset) out.innerHTML = `<div class="note">Looking up…</div>`;
-  let r;
-  try { r = await api('/api/activity/asc_rates?' + qs({q: String(L.q || '').slice(0, 400), state: L.state, county: L.county, offset, limit: ASC_LOOK_PAGE})); }
+  // whole codes only: a search cut inside a code would look up the start of that code
+  const ask = fit => api('/api/activity/asc_rates?' + qs({q: fit.q, state: L.state, county: L.county, offset, limit: ASC_LOOK_PAGE}));
+  let r, fit = AscModel.fitQuery(L.q, L.narrow ? ASC_Q_MAX : ASC_Q_WIDE, ASC_Q_CODES);
+  try {
+    try { r = await ask(fit); }
+    catch(e){
+      if(e.status !== 422 || L.narrow || fit.q.length <= ASC_Q_MAX) throw e;
+      L.narrow = true;                                      // this server takes the shorter search only
+      fit = AscModel.fitQuery(L.q, ASC_Q_MAX, ASC_Q_CODES);
+      r = await ask(fit);
+    }
+  }
   catch(e){ if(n === A.lookSeq) out.innerHTML = `<div class="note">${esc(e.message)}</div>`; return; }
   if(n !== A.lookSeq || !out.isConnected) return;          // a later search, or another view, came first
-  L.res = r;
+  L.res = r; L.left = fit.left;
   L.rows = offset ? (L.rows || []).concat(r.rows) : r.rows;
   ascLookShow(v);
 }
@@ -306,7 +341,8 @@ function ascLookShow(v){
   const shown = (L.rows || []).length;
   out.innerHTML = `
     <div class="small">${p ? `${esc(where)}: ${p.cbsa_name ? `CBSA ${esc(p.cbsa)} ${esc(p.cbsa_name)}, ` : ''}ASC wage index ${esc(p.wi)} (${esc(ry)})${p.prior_wi ? `, ${esc(p.prior_wi)} in ${esc(py)}` : ''}.` : ''}
-      ${r.total.toLocaleString()} code${r.total === 1 ? '' : 's'}${shown < r.total ? `, the first ${shown.toLocaleString()} shown` : ''}. Half of each amount is wage-adjusted; codes marked ** are not (drugs, brachytherapy sources, pass-through devices). The copayment is not reduced by sequestration.</div>
+      ${r.total.toLocaleString()} code${r.total === 1 ? '' : 's'}${shown < r.total ? `, the first ${shown.toLocaleString()} shown` : ''}. Half of each amount is wage-adjusted; codes marked ** are not (drugs, brachytherapy sources, pass-through devices, skin substitute supplies). The copayment is not reduced by sequestration.${r.source ? ` Rates: ${esc(r.source)}.` : ''}</div>
+    ${L.left ? `<div class="note">The search was too long: the last ${L.left === 1 ? 'code' : L.left.toLocaleString() + ' codes'} in it ${L.left === 1 ? 'was' : 'were'} left out. Look ${L.left === 1 ? 'it' : 'them'} up in a second search.</div>` : ''}
     <div style="overflow-x:auto;margin-top:6px"><table class="mini">${head}<tbody>${rows.join('') || `<tr><td colspan="19" class="muted">No code matches.</td></tr>`}</tbody></table></div>
     ${shown < r.total ? `<button class="ghost" id="ascMore" style="margin-top:6px">Show the next ${Math.min(ASC_LOOK_PAGE, r.total - shown)}</button>` : ''}`;
   const more = out.querySelector('#ascMore');

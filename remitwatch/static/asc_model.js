@@ -16,7 +16,9 @@
    surgeons for these procedures against what Medicare pays them (payload kinds[k].ratio), or at the figure entered on
    the lab's ASC card. A payer that follows Medicare's yearly rates moves with them; one that does not is paid in the rule
    year what it was paid the year before. The surgeons' fees are shown for Medicare and Medicare Advantage, which follow
-   the physician fee schedule as the calculator takes them; the other plans' are set by their own contracts. */
+   the physician fee schedule as the calculator takes them: a Medicare Advantage plan unticked there ("moves with
+   Medicare") is held at the year before's amount, by its share of the Medicare Advantage money (maFollowing; the
+   settings' kinds.medicare_advantage.pro_follows). The other plans' are set by their own contracts. */
 (function (root) {
   'use strict';
   const LM = (typeof module !== 'undefined' && module.exports) ? require('./lab_model.js') : root.LabModel;
@@ -35,6 +37,43 @@
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   // 'code' or 'codexunits', space-separated, as the payload carries a case
   const caseCodes = s => String(s || '').split(/\s+/).filter(Boolean).map(t => { const [c, u] = t.split('x'); return [c, u ? +u : 1]; });
+
+  // Were the ASC's cases counted at all? Not on a copy of the figures built before the provider tables kept them
+  // (payload cases.from is null): then there is nothing to price, which is not the same as no case at the ASC.
+  const counted = d => ((d || {}).cases || {}).from != null;
+
+  // A search as the rate lookup is sent it: whole codes only. One longer than the route takes (max characters,
+  // maxCodes codes or ranges) is cut after the last code that fits, never inside one: half a code reads as the start of
+  // a code and brings in codes nobody asked for. left: how many codes were left out.
+  function fitQuery(q, max, maxCodes) {
+    const all = String(q == null ? '' : q).split(/[\s,]+/).filter(Boolean);
+    const kept = [];
+    let len = 0;
+    for (const t of all) {
+      const add = t.length + (kept.length ? 1 : 0);
+      if (len + add > max || (maxCodes && kept.length >= maxCodes)) break;
+      kept.push(t); len += add;
+    }
+    // a first word too long to be a code: sent cut, so that it finds nothing (an empty search would be every code)
+    if (!kept.length && all.length) kept.push(all[0].slice(0, max));
+    return { q: kept.join(' '), left: all.length - kept.length };
+  }
+
+  // The share of the Calculator's Medicare Advantage money at plans it has moving with Medicare's amounts next year (its
+  // tick on each plan, as CalcModel.isIndexed reads it): each plan by its share of the schedule's money, or evenly where
+  // no share is known. null where the Calculator's plan holds no Medicare Advantage payer.
+  function maFollowing(payers, indexed) {
+    let money = 0, moving = 0, plans = 0, on = 0;
+    for (const [g, p] of Object.entries(payers || {})) {
+      if (!p || p.kind !== 'medicare_advantage') continue;
+      const follows = indexed && indexed[g] != null ? !!indexed[g] : !!p.indexed;
+      const w = Math.max(0, +p.share || 0);
+      plans += 1; money += w;
+      if (follows) { on += 1; moving += w; }
+    }
+    if (!plans) return null;
+    return money > 0 ? moving / money : on / plans;
+  }
 
   // The settings to start from. lab: the lab's ASC card's settings where entered there ({own, commercial_pct, ascqr}).
   function defaults(d, lab) {
@@ -115,9 +154,13 @@
       const share = medicare ? 1 : clamp(num(ks.share) == null ? 1 : +ks.share, 0, SHARE_MAX);
       const follows = medicare || !!ks.follows;
       const ratio = medicare ? 1 : (num(((d.kinds || {})[r.kind] || {}).ratio) || 1);
+      // the share of this kind's surgeon fees that moves with Medicare's physician schedule (all of it unless the
+      // settings say less); the rest is paid in the rule year what it was paid the year before
+      const proMoves = medicare ? 1 : clamp(num(ks.pro_follows) == null ? 1 : +ks.pro_follows, 0, 1);
       for (const Y of years) {
-        k.fee[Y] += r.n * r.at[follows || Y === py ? Y : py].fee * share;
-        if (k.pro) k.pro[Y] += r.n * r.at[Y].pro * ratio;
+        const held = r.at[py] || r.at[Y];             // the year before (the year itself where the payload has no year before)
+        k.fee[Y] += r.n * (follows ? r.at[Y] : held).fee * share;
+        if (k.pro) k.pro[Y] += r.n * (proMoves * r.at[Y].pro + (1 - proMoves) * held.pro) * ratio;
         t.fee[Y] += r.n * r.at[Y].fee;
         t.pro[Y] += r.n * r.at[Y].pro;
       }
@@ -136,7 +179,7 @@
     };
   }
 
-  const api = { KINDS, LABEL, FOLLOWS, PRO_KINDS, TYPES, defaults, book, evaluate, medicarePrice, caseCodes };
+  const api = { KINDS, LABEL, FOLLOWS, PRO_KINDS, TYPES, defaults, book, evaluate, medicarePrice, caseCodes, counted, fitQuery, maFollowing };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AscModel = api;
 })(typeof window !== 'undefined' ? window : globalThis);

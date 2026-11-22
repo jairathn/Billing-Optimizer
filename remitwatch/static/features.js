@@ -346,9 +346,15 @@ function bindDrawerExtras(id, d){
     } catch(e){ out.innerHTML = `<div class="sev-high small">Could not build the packet: ${esc(e.message)}</div>`; }
   };
 }
-async function setFindingStatus(id, status, shortfall){
+// A status set from an item's own panel, with the questions it takes. False when the person backed out: nothing is sent.
+async function setFindingStatus(id, status, shortfall, signal){
   const body = {status};
   if(status==='resolved'){ const x = prompt('Amount recovered, in dollars. Leave blank to use the shortfall.', shortfall!=null ? (shortfall/100).toFixed(2) : ''); if(x===null) return false; if(x.trim()!=='' && !isNaN(parseFloat(x))) body.recovered_cents = Math.round(parseFloat(x)*100); }
-  if(status==='lost'){ const n = prompt('Why was it lost? (optional note)'); if(n===null) return false; if(n) body.notes = n; }
+  // a claim no payer answered is let go, or marked lost, only with a note (letGoNote in desk.js): asking for it is the confirmation
+  const why = letGoNote(signal, status);
+  if(why === null) return false;
+  if(why !== undefined) body.notes = why;
+  else if(status==='dismissed'){ if(!confirm('Let go of this item? It leaves the list and counts as let go.')) return false; }
+  else if(status==='lost'){ const n = prompt('Why was it lost? (optional note)'); if(n===null) return false; if(n) body.notes = n; }
   await post('/api/findings/'+id+'/status', body); return true;
 }

@@ -6,8 +6,22 @@
 
 // claims no payer answered are never hidden for a payer (actions.NEVER_HIDDEN): each is let go one at a time
 const NEVER_HIDDEN = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER']);
+// One at a time, and with a note: this money may not have been asked for yet. The list's Let go leaves these claims out
+// and says so (bindBulk). Let go or Lost in an item's own panel asks why and sends the answer as its note (letGoNote).
+const ONE_AT_A_TIME = NEVER_HIDDEN;
+const leftOutLine = n => `Let go leaves out ${pl(n, 'claim')} with no answer from the payer or rejected before the payer. Open ${n===1?'it':'each one'} to let it go, with a note.`;
+// The note for letting one of those claims go, or marking it lost. Returns the note; null when the person gave none
+// (nothing is changed then); undefined for every other item or status, which needs none.
+function letGoNote(signal, status){
+  if(!ONE_AT_A_TIME.has(signal) || !['dismissed','lost'].includes(status)) return undefined;
+  const typed = prompt(`${status === 'lost' ? 'Mark this claim lost' : 'Let go of this claim'}?\n\nNo answer from a payer is on file for it, so this money may not have been asked for yet. It leaves the list${status === 'lost' ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`);
+  if(typed === null) return null;
+  const note = typed.trim();
+  if(!note){ alert('Not changed. A claim with no answer from a payer needs a note that says why.'); return null; }
+  return note;
+}
 const DESKS = {
-  denials:    {cat:'denial', title:'Denials', intro:'Lines and whole claims the payer paid $0 and has not paid since.'},
+  denials:    {cat:'denial', title:'Denials', intro:'Lines and whole claims the payer paid $0 and has not paid since. Also claims the payer never answered, and claims rejected before they reached it.'},
   bundling:   {cat:'bundling', title:'Bundling & modifiers', intro:'Visits, procedures and add-ons paid $0 because the payer folded them into another service.'},
   downcoding: {cat:'downcoding', title:'Downcoding', intro:'Visits paid at a lower level than billed, and procedure codes the payer changed.'},
   contracts:  {cat:'underpayment', title:'Contracts & underpayment', intro:"Claims paid below the payer's own usual rate, and contract rates that sit below Medicare."},
@@ -163,7 +177,7 @@ async function deskTab(v, key){
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
     <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES,f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
-    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}</div>
+    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
     <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item shown"></th><th>Closes</th><th>Patient</th>${f.payer?'':'<th>Payer</th>'}<th>What happened</th><th class="num">Amount</th></tr></thead>
     <tbody>${res.items.map(r=>rowHtml(b, r, {oneKind, onePayer: !!f.payer, oneSignal: !!f.signal})).join('')}</tbody></table></div>
     ${res.items.length ? '' : `<div class="empty">Nothing here. ${chips.length ? 'Remove a filter above, or pick' : 'Pick'} another box at the top.</div>`}
@@ -239,14 +253,17 @@ function bindRows(v){
 function bindBulk(v){
   const bulk = v.querySelector('#bulk'), bulkN = v.querySelector('#bulkN'); if(!bulk) return;
   const picked = () => [...v.querySelectorAll('.sel:checked')].map(x=>x.value);
-  const sync = () => { const n = picked().length; bulk.hidden = !n; bulkN.textContent = n + ' selected'; };
+  // ticked claims that Let go leaves out: each is let go from its own panel, with a note (ONE_AT_A_TIME)
+  const leftOut = () => [...v.querySelectorAll('.sel:checked')].filter(x => { const tr = x.closest('tr.row'); return !!tr && ONE_AT_A_TIME.has(tr.dataset.signal); }).map(x=>x.value);
+  const sync = () => { const n = picked().length, out = leftOut().length, line = v.querySelector('#bulkLeftOut'); bulk.hidden = !n; bulkN.textContent = n + ' selected';
+    if(line) line.textContent = out ? leftOutLine(out) : ''; };
   v.querySelectorAll('.sel').forEach(cb=>cb.onchange=sync);
   const all = v.querySelector('#selAll'); if(all) all.onchange = e => { v.querySelectorAll('.sel').forEach(cb=>cb.checked = e.target.checked); sync(); };
   const fx = v.querySelector('#bulkFax');
   if(fx) fx.onclick = () => { const rows = [...v.querySelectorAll('.sel:checked')].map(x=>x.closest('tr.row')).filter(Boolean);
     const ok = rows.filter(tr => FAX_KINDS.has(tr.dataset.kind) && !tr.dataset.closed), out = rows.length - ok.length;
-    if(!ok.length){ alert('None of the ticked items is settled by an appeal letter inside its window (they are fixed in EMA, need a decision first, or their windows closed).'); return; }
-    if(out && !confirm(`${pl(out, 'ticked item')} ${out===1?'is':'are'} not settled by an appeal letter (fixed in EMA, a decision first, or the window closed) and will be left out. Fax the other ${ok.length}?`)) return;
+    if(!ok.length){ alert('None of the ticked items is settled by an appeal letter inside its window (they are fixed in EMA, need a decision first, the payer has to be chased first, or their windows closed).'); return; }
+    if(out && !confirm(`${pl(out, 'ticked item')} ${out===1?'is':'are'} not settled by an appeal letter (fixed in EMA, a decision first, the payer to chase first, or the window closed) and will be left out. Fax the other ${ok.length}?`)) return;
     if(!out && ok.length > 20 && !confirm(`Fax ${pl(ok.length, 'appeal')} now? Each takes about a minute; keep this page open.`)) return;
     appealByFax(ok.map(tr => tr.dataset.id), {after: render}); };
   v.querySelectorAll('[data-bulk]').forEach(bt=>bt.onclick=async()=>{ let ids = picked(); if(!ids.length) return;
@@ -256,7 +273,12 @@ function bindBulk(v){
       if(keep.length < ids.length && !confirm(`${pl(ids.length-keep.length, 'item')} ${ids.length-keep.length===1?'has':'have'} a closed filing window and will be left out: nothing to send there.${keep.length?'':' Nothing else is ticked.'}`)) return;
       ids = keep; if(!ids.length) return;
     }
-    if(bt.dataset.bulk==='dismissed' && !confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.`)) return;
+    if(bt.dataset.bulk==='dismissed'){
+      const out = new Set(leftOut());
+      ids = ids.filter(id=>!out.has(id));
+      if(!ids.length){ alert(`Nothing let go. ${leftOutLine(out.size)}`); return; }
+      if(!confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size) : ''}`)) return;
+    }
     if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
     bt.disabled = true;
     try { await post('/api/findings/bulk-status', {ids, status: bt.dataset.bulk}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
@@ -283,7 +305,7 @@ function rowHtml(b, r, o){
   const wo = r.written_off_cents ? `<div class="small"><span class="chip hint" title="${esc(money2(r.written_off_cents))} of the money in dispute is written off (or moved to the patient) in EMA${r.written_off_on ? ', as of ' + esc(r.written_off_on) : ''}">written off in EMA</span></div>` : '';
   const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
   const shut = live && due && daysUntil(due) < 0;
-  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-kind="${esc(kindFor(b, r))}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
+  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-kind="${esc(kindFor(b, r))}" data-signal="${esc(r.signal)}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
     <td class="day">${when}</td>
     <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
     ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}

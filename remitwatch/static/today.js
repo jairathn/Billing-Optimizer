@@ -195,9 +195,11 @@ function bindWhatToDo(f, d){
   };
   const go = async () => { const id = await next(); if(id) openDetail(id); else closeDetail(); };
   const decideAndGo = (bt, status) => async () => {
-    if(status === 'dismissed' && !confirm('Let go of this item? It leaves the list and counts as let go.')) return;
+    const why = letGoNote(f.signal, status);          // a claim no payer answered is let go only with a note (desk.js)
+    if(why === null) return;
+    if(why === undefined && status === 'dismissed' && !confirm('Let go of this item? It leaves the list and counts as let go.')) return;
     bt.disabled = true;
-    try { await post('/api/findings/'+f.finding_id+'/status', {status}); }
+    try { await post('/api/findings/'+f.finding_id+'/status', why === undefined ? {status} : {status, notes: why}); }
     catch(e){ bt.disabled = false; const er = d.querySelector('#todoErr'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; return; }
     state.brief = null; state.dirty = true; go(); };
   const sn = d.querySelector('#sentNext'); if(sn) sn.onclick = decideAndGo(sn, sn.dataset.to || 'appealed');
