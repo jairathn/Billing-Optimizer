@@ -1539,7 +1539,8 @@ def search(conn: sqlite3.Connection, text: str, *, limit: int = 25) -> list[dict
                     "claims": r[6], "lines": r[7], "claim_ids": ids, "exact": b == up or b == _bill_of(up), "archived": True})
         if len(out) >= limit:
             break
-    out.sort(key=lambda x: (not x["exact"], str(x["svc_hi"] or "")), reverse=False)
+    out.sort(key=lambda x: str(x["svc_hi"] or ""), reverse=True)      # the newest service first, the exact bill above all
+    out.sort(key=lambda x: not x["exact"])
     return out
 
 
