@@ -2390,7 +2390,9 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
          for that bill and date. A claim the map could not tie to a bill counts as having none only when none of its
          checks is an 835 trace and no 835 line exists for its patient, date and code (E17; the ASC's facility claims,
          whose twin carries that key, are judged by their own checks);
-      3. not paid since: insurance payments after the first denial posting are under half of what it is expected to bring.
+      3. not paid since: insurance payments after the first denial posting, and the denying payer's own payments posted that
+         same day (C6 counts them too: a line paid on the posting that carried the adjustment was paid, not denied), are
+         under half of what it is expected to bring.
     Left out: G2211, 99024 and charges of $1 or less, products, patient-side rows, voided lines, denials that net to 0.
     One EMA_DENIED item per (claim number, reason class). Expected: the usual rate x units, else EMA's allowed amount,
     else the charge x the group's paid/charge ratio, else 45% of the charge, capped at the charge; when another payer
@@ -2495,9 +2497,15 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         dgrp = dgrp or ln["payer_group"] or "Unknown"
         dkind = dkind or "other"
         # 3. not paid since; and what the line is expected to bring
-        prows = pays.get(key, [])
-        paid_after = sum(p[4] for p in prows if p[4] and first_denial and (p[1] or "") > first_denial)
-        paid_before = [p for p in prows if p[4] and first_denial and (p[1] or "") <= first_denial]
+        paid_after, paid_before = 0, []
+        for p in pays.get(key, []):
+            if not p[4] or not first_denial:
+                continue
+            day = p[1] or ""
+            if day > first_denial or (day == first_denial and _same_payer(p[3], dgrp)):
+                paid_after += p[4]
+            else:
+                paid_before.append(p)
         charge = ln["charges"] or 0
         units = ln["units"] or 1
         expected, basis = None, None

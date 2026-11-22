@@ -9,7 +9,6 @@ Every file is invented: report rows from tests/ema_fixtures.py, or bytes made up
 """
 from __future__ import annotations
 
-import csv
 import gzip
 import hashlib
 import io
@@ -24,7 +23,7 @@ import sys
 import time
 import types
 import zlib
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 

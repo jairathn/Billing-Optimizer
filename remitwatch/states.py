@@ -1084,8 +1084,9 @@ def _evidence(fx: dict) -> list[dict]:
         # the payer received the claim again after this item's remittance (a payer reprocessing on its own keeps the first
         # received date): a corrected or new claim somebody sent
         if (x["date"] or "") > after and x["received"] > after:
+            who = f.get("payer_group") if _same_payer(row_group(x)[0], f.get("payer_group")) else row_group(x)[0]
             out.append({"date": x["received"], "kind": "resubmitted", "source": "835", "dated_by": "payer", "confirmed": True,
-                        "text": f"{row_group(x)[0]} received a {'corrected' if x.get('freq') == '7' else 'new'} claim on "
+                        "text": f"{who or 'The payer'} received a {'corrected' if x.get('freq') == '7' else 'new'} claim on "
                                 f"{day(x['received'])} (its answer of {day(x['date'])})"})
     for x in fx["exports"]:
         if x.get("submitted") and after and x["submitted"] > after and submission_no(x["claim_id"]) > submission_no(f.get("patient_control_number")):
@@ -1586,7 +1587,10 @@ def _decide(fx: dict, today: str) -> dict:
                    and e.get("dated_by") == "first_report")]
     work_ev = [e for e in work_ev if not (e["source"] == "remitwatch" and reopened and (e.get("date") or "") <= reopened)]
     if work_ev and (cat in MONEY or sig in EMA_ONLY):
-        last = max(work_ev, key=lambda e: (e.get("date") or "", e["source"]))
+        # work with a known date first: an undated note or action (dated only by the first report that showed it) most
+        # often records the same work a payer's received date or a person's mark dates exactly
+        dated = [e for e in work_ev if e.get("dated_by") != "first_report"]
+        last = max(dated or work_ev, key=lambda e: (e.get("date") or "", e["source"]))
         work = {"appeal": "appeal", "records": "records", "reprocess": "reprocess", "corrected": "corrected", "resubmitted": "resubmitted",
                 "secondary": "secondary", "call": "call", "sent": "sent", "fax": "fax"}.get(last["kind"], "appeal")
         # work whose own date nobody knows (already in the first report) cannot hold an item past every window: nothing

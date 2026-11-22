@@ -999,21 +999,33 @@ def _window(deadline: str | None, today: str) -> str:
 
 
 def _same_day_lines(conn: sqlite3.Connection, f: dict) -> list[dict]:
-    """The other procedures of the item's bill on its date of service, as the 835s answered them (standing answers, the
-    best allowed amount of each code): what a multiple-procedure reduction ranks the item's code against."""
-    b = S.bill_of(f.get("patient_control_number"))
+    """The other procedures of the item's patient on its date of service, as the 835s answered them (the item's bill, and
+    the patient's other claims that day by the payer's member record; standing answers, the best allowed amount of each
+    code): what a multiple-procedure reduction ranks the item's code against. The member record is only matched, never
+    shown."""
     svc, code = f.get("service_date"), f.get("procedure_code")
-    if not b or not svc or not S._table(conn, "claims") or not S._table(conn, "lines"):
+    if not svc or not S._table(conn, "claims") or not S._table(conn, "lines"):
         return []
-    lcols = S._cols(conn, "lines")
+    lcols, ccols = S._cols(conn, "lines"), S._cols(conn, "claims")
     allowed = "l.allowed_cents" if "allowed_cents" in lcols else "NULL"
-    best: dict[str, dict] = {}
-    for pcn, st, cd, al, paid, chg in conn.execute(
-            f"""SELECT c.patient_control_number, c.claim_status_code, l.procedure_code, {allowed}, l.paid_cents, l.charge_cents
+    rows = []
+    b = S.bill_of(f.get("patient_control_number"))
+    if b:
+        rows += conn.execute(
+            f"""SELECT c.patient_control_number, c.claim_status_code, l.procedure_code, {allowed}, l.paid_cents, l.charge_cents, 1
                 FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key JOIN lines l ON l.claim_key = c.claim_key
                 WHERE c.patient_control_number >= ? AND c.patient_control_number < ? AND COALESCE(l.service_date, c.statement_from) = ?
-                  AND COALESCE(t.superseded, 0) = 0""", (b, b + "~", svc)):
-        if S.bill_of(pcn) != b or str(st) == "22" or not cd or cd == code:
+                  AND COALESCE(t.superseded, 0) = 0""", (b, b + "~", svc)).fetchall()
+    if "patient_id" in ccols and f.get("claim_key") and "service_date" in lcols:
+        pid = conn.execute("SELECT patient_id FROM claims WHERE claim_key = ?", (f["claim_key"],)).fetchone()
+        if pid and pid[0]:
+            rows += conn.execute(
+                f"""SELECT c.patient_control_number, c.claim_status_code, l.procedure_code, {allowed}, l.paid_cents, l.charge_cents, 0
+                    FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = c.transaction_key
+                    WHERE l.service_date = ? AND c.patient_id = ? AND COALESCE(t.superseded, 0) = 0""", (svc, pid[0])).fetchall()
+    best: dict[str, dict] = {}
+    for pcn, st, cd, al, paid, chg, same_bill in rows:
+        if (same_bill and S.bill_of(pcn) != b) or str(st) == "22" or not cd or cd == code:
             continue
         cur = best.get(cd)
         if cur is None or (al or 0) > (cur["allowed"] or 0):
@@ -1037,6 +1049,15 @@ def _short_check(conn: sqlite3.Connection, fx: dict) -> dict | None:
         higher = [d for d in others if (d["allowed"] or 0) > exp]
         tot = S._ema_line_totals(fx)
         facility = tot["several"] or bool(fx["ema"]["twins"]) or (f.get("pos_class") or "") == "facility"
+        visit = str(f.get("procedure_code") or "").startswith("99")
+        if visit:
+            # a visit is not reduced as a second procedure; on a surgery-center day the payer pays its lower facility rate
+            if facility:
+                out = {"kind": "reduced", "text": (f"this looks like a surgery-center day (EMA ties this patient, date and code to a second "
+                                                   f"claim, or the place of service is a facility), where {f.get('payer_group') or 'the payer'} "
+                                                   "pays its lower facility rate, so the difference may be smaller than shown")}
+            fx["_short_check"] = out
+            return out
         if higher and (facility or (ratio is not None and 0.4 <= ratio <= 0.6)):
             h = higher[0]
             text = (f"{h['code']} was billed the same day and is valued higher (allowed {usd(h['allowed'])}), so the payer pays "
@@ -1180,10 +1201,12 @@ def _short_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, t
         head = (f"Paid short: {grp} allowed {usd(f.get('allowed_cents'))} for {code} against its usual {usd(f.get('expected_cents'))} "
                 f"{_refs(ns)}, {usd(f.get('shortfall_cents'))} less.")
     ema = ""
+    reason = _carcs(fx)
+    reason = "as a contractual adjustment" if reason == "the denial" else f"({reason})"
     if oc in ("auto_written_off", "written_off_at_posting", "contractual_at_posting", "written_off_while_pending"):
         en = _mark(rows, "adj_at_posting")
         ns += en
-        ema = (f" EMA wrote the difference off ({_carcs(fx)}) the day the remittance posted {_refs(en)}: nobody asked the payer about it.")
+        ema = f" EMA wrote the difference off {reason} the day the remittance posted {_refs(en)}: nobody asked the payer about it."
     elif oc in ("written_off_later", "contractual_later"):
         en = _mark(rows, "adj_later")
         ns += en
@@ -1556,8 +1579,8 @@ def _unposted(fx: dict) -> dict | None:
     if not own:
         return None
     x = max(own, key=lambda r: r["date"] or "")
-    if str(x.get("method") or "").upper() == "NON":
-        return None
+    if str(x.get("method") or "").upper() == "NON" and (x["paid"] or 0) > 0:
+        return None             # an informational notice of a payment that comes on another remittance
     traces = {p.get("trace_key") for p in fx["ema"]["pays"] if p.get("trace_key")}
     tails = {p["check_tail"] for p in fx["ema"]["pays"] if p.get("check_tail")}
     if x.get("tk") in traces or (x.get("check_tail") and x["check_tail"] in tails):
@@ -1582,8 +1605,16 @@ def _recovery_step(f: dict, rec: dict) -> str | None:
     if not rec or rec.get("rate") is None:
         return None
     grp = f.get("payer_group") or "the payer"
-    what = f"{f.get('procedure_code') or 'this code'} with {f.get('carc') or f.get('signal')}"
+    short = f.get("category") in S.SHORT
+    what = (f"{f.get('procedure_code') or 'this code'}, " + ("paid short" if f.get("category") == "underpayment" else "paid at a lower level")
+            if short and not f.get("carc") else f"{f.get('procedure_code') or 'this code'} with {f.get('carc') or f.get('signal')}")
+    if rec["paid"] == 0 and rec["n"] >= 10 and short:
+        return (f"{grp} has paid none of {rec['n']} earlier items like this ({what}): unless this one differs, it is unlikely to change "
+                "the amount.")
     if rec["paid"] >= 2 and rec["rate"] >= 0.3:
+        if f.get("payer_kind") == "medicare":
+            return (f"{grp} later paid {rec['paid']} of {rec['n']} earlier items like this ({what}): the odds are good, so file it now, "
+                    "and file the others still open the same way.")
         return (f"{grp} later paid {rec['paid']} of {rec['n']} earlier items like this ({what}): ask it to reprocess this one the same way, "
                 "and list the others still open in the same request.")
     if rec["paid"] == 0 and rec["n"] >= 10:
@@ -1763,7 +1794,8 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                             f"{usd(un['paid'])}; {', '.join(f'{g}-{c} {usd(a)}' for g, c, a in un['adj']) or 'no reasons'}): EMA has not posted "
                             "it, so EMA's A/R still shows the claim as pending.")
             buttons.append("mark_posted")
-        if o.get("outcome") in WRITE_OFFS and route in ("appeal", "corrected", "rate", "call") and (o.get("written_off") or o.get("contractual_routine")):
+        if o.get("outcome") in WRITE_OFFS and route in ("appeal", "corrected", "call") and f.get("category") in ("denial", "bundling") \
+                and (o.get("written_off") or o.get("contractual_routine")):
             steps.append(f"When you send it, reverse EMA's write-off of {usd(o.get('written_off') or o.get('contractual_routine'))} "
                          f"({', '.join(o.get('carcs') or []) or 'the denial'}) so the line shows open until the payer answers.")
         rs = _recovery_step(f, rec) if route in ("appeal", "corrected", "rate", "decide") else None
@@ -1903,7 +1935,7 @@ def _work_fallback(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> str
     new = [c.split("-", 1) for c in a.get("codes") or [] if "-" in c]
     if new and not any(c == str(f.get("carc") or "") for _g, c in new):
         g, c = new[0]
-        f = dict(f, carc=c, rarc=None)
+        f = dict(f, carc=c, rarc=None, carc_group=g)
         if c in AUTH_CARCS:
             return _decide_step(conn, f, fx, st)[0] + " " + " ".join(_decide_step(conn, f, fx, st)[1])
     base = dict(st, work_state="work_now", rule="open", answered=None)
@@ -1923,12 +1955,12 @@ def _work_fallback(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> str
 def _cob_step(f: dict, fx: dict, story: dict, expected: int) -> tuple[str, list[str], str, int]:
     """A coordination-of-benefits task: find the plan that pays first, bill it, then send this payer the second claim."""
     grp = f.get("payer_group") or "the payer"
-    others = sorted({S.row_group(x)[0] for x in fx["r835"]["rows"]} - {grp, "Unknown"})
+    names = [S.row_group(x)[0] for x in fx["r835"]["rows"]]
     for ln in fx["ema"]["lines"]:
         for k in ("primary_payer", "secondary_payer"):
             if ln.get(k):
-                others.append(str(ln[k]))
-    others = sorted(set(others))
+                names.append(S._grp_kind(str(ln[k]))[0])
+    others = sorted({n for n in names if n and n != "Unknown" and not S._same_payer(n, grp)})
     earlier = [x for x in S.own_rows(fx) if x.get("allowed")] or [x for x in fx["r835"]["rows"] if x.get("allowed") and x["status"] != "22"]
     allowed = max((x["allowed"] or 0 for x in earlier), default=0)
     steps = [f"Check the patient's other coverage for the date of service (Availity or the payers' portals), and what other coverage {grp} "
@@ -2020,7 +2052,8 @@ def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple
                  "Neither: let it go with the reason, and tell the front desk which service needs it." +
                  (" A Medicaid member cannot be billed." if f.get("payer_kind") == "medicaid" else
                   " Do not bill the patient unless the payer's answer is final and the patient agreed in writing beforehand.")]
-        return (f"{grp} denied it because {what} ({_reason_words(fx)}): find the authorization or referral, or get one after the fact.", steps,
+        words = f"{f['carc_group']}-{carc}" if f.get("carc_group") else _reason_words(fx)
+        return (f"{grp} denied it because {what} ({words}): find the authorization or referral, or get one after the fact.", steps,
                 "Referral coordinator, then the biller")
     if sig == "DENIED_NONCOVERED":
         steps = ["Check the member's benefits for the service on the date (portal or call).",
@@ -2059,7 +2092,7 @@ def _era_request(conn: sqlite3.Connection, fx: dict, proof: dict) -> str | None:
     who = proof.get("payer") or pay.get("payer") or "the payer"
     fwd = S._forwarded(fx) if proof.get("rule") == "forwarded_paid" else None
     text = (f"Ask {who} (through its portal, or TriZetto's ERA re-send) for the ERA of the check ending {proof['check_tail']}, posted "
-            f"{day(pay.get('posted'))}" + (f", {usd(total)} in all for {claims} claims" if total is not None and claims else
+            f"{day(pay.get('posted'))}" + (f", {usd(total)} in all for {claims} claim{'s' if claims != 1 else ''}" if total is not None and claims else
                                            (f", {usd(total)} in all" if total is not None else "")) + ", so the archive has it: one request covers every claim on that check.")
     if fwd:
         text += (f" The claim was forwarded to {fwd['carrier']}: check that TriZetto is enrolled for that carrier's ERAs, so its next payments "
