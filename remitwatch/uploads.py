@@ -1073,7 +1073,7 @@ class UploadSource(modmed.LiveSource):
             claims = json.loads(n.get("claims") or "[]")
             person = n.get("matched_by") == "person"
             ema = n.get("ema_patient_id") if modmed._nid(n.get("ema_patient_id")) in stated else None
-            if False:
+            if ema:
                 k = f"e|{ema}"
             elif stated:
                 k = "s|" + "|".join(sorted(stated))
