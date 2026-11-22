@@ -278,11 +278,12 @@ To update at once instead of waiting for the night: `sudo systemctl start remitw
   ```
 
   The last line opens a root shell that holds the deploy lock, so no deploy starts the app halfway through (it first
-  waits for a deploy that is running to end). In that shell, with the copy's name in place of `<file>`:
+  waits for a deploy that is running to end). In that shell, with the copy's name as listed (it ends in `.sqlite.gz`)
+  in place of `<file>`:
 
   ```
   docker compose stop app
-  docker compose run --rm --no-deps app sh -c 'cd /data && rm -f remitwatch.sqlite-wal remitwatch.sqlite-shm && gunzip -c backups/<file>.sqlite.gz > restoring.sqlite && mv restoring.sqlite remitwatch.sqlite'
+  docker compose run --rm --no-deps app sh -c 'cd /data && gunzip -c backups/<file> > restoring.sqlite && rm -f remitwatch.sqlite-wal remitwatch.sqlite-shm && mv restoring.sqlite remitwatch.sqlite'
   docker compose run --rm --no-deps app python -c "import sqlite3; c = sqlite3.connect('/data/remitwatch.sqlite'); print(c.execute('PRAGMA integrity_check').fetchone()[0]); c.execute(\"DELETE FROM meta WHERE key LIKE '%:lock'\"); c.commit()"
   docker compose up -d
   exit
@@ -290,5 +291,6 @@ To update at once instead of waiting for the night: `sudo systemctl start remitw
 
   The `rm -f` of `remitwatch.sqlite-wal` and `remitwatch.sqlite-shm` matters. A run stopped halfway leaves its last
   changes in the `-wal` file, and SQLite would lay them over the restored copy the next time it opens the store: the
-  restore would then bring back the very changes it was meant to undo, or mix two states. The third line prints `ok`
-  when the restored store is whole, and removes the run locks the copy may hold, so the next cycle is not held up.
+  restore would then bring back the very changes it was meant to undo, or mix two states. It comes after the copy is
+  unpacked, so a mistyped name changes nothing. The third line prints `ok` when the restored store is whole, and
+  removes the run locks the copy may hold, so the next cycle is not held up.
