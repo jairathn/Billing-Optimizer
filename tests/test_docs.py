@@ -168,8 +168,8 @@ def test_every_command_the_docs_give_exists_with_its_options():
                     continue
                 flags = re.findall(r"--[a-z][a-z-]*", m.group(2))
                 if flags:
-                    help_text = _cli_help(cmd)
-                    bad += [f"{page}: {cmd} has no {f}" for f in flags if f not in help_text]
+                    known = set(re.findall(r"--[a-z][a-z-]*", _cli_help(cmd)))
+                    bad += [f"{page}: {cmd} has no {f}" for f in flags if f not in known]
     assert not bad, "\n".join(bad)
 
 
@@ -187,7 +187,7 @@ def _layout() -> str:
 
 def test_the_readme_layout_names_every_module_the_app_uses():
     layout = _layout()
-    missing = sorted(m for m in app_modules() if f"{m}.py" not in layout)
+    missing = sorted(m for m in app_modules() if not re.search(rf"(?<![A-Za-z0-9_]){m}\.py\b", layout))
     assert not missing, f"README.md's layout leaves out {missing}"
 
 

@@ -161,7 +161,7 @@ payer's portal or call; not on file, send it again within the first-filing limit
 rejected, correct and resend; denied or paid, get the remittance or EOB and work it here. A claim EMA calls rejected is
 listed at once, under "Fix and resubmit". A claim still in EMA's print batch ("Batched for Printing") with no submission
 date was never sent: it is listed under "Fix and resubmit" too ("In EMA's print batch, never sent"), once 30 days have
-passed since the bill was made, dated by the first-filing limit: print and mail it. A claim whose EMA status says closed or written off though no payer answered is
+passed since the bill was made, dated by the first-filing limit: print and mail it, or send it electronically. A claim whose EMA status says closed or written off though no payer answered is
 listed all the same, marked written off in EMA (no more than its charge, and not when the patient paid it; it is also
 under "Work what EMA wrote off"); none of the statuses in the practice's exports so far says that. A claim known only
 from the Claim & Claim Status report is listed too. With names shown, each shows the patient and the member ID from
@@ -174,7 +174,9 @@ spreadsheet's own creation time, or for a CSV the newest date among its rows.
 Claims are read as far back as an item can still be open (the longest first-filing limit and appeal window); one sent
 before the remittances on file begin is not judged. The date on each is the payer's limit for a first filing, counted from the date of service: Medicare's 1 year is the
 regulation's (42 CFR 424.44); CHAMPVA's 1 year is too (38 CFR 17.276); VA community care claims (EMA's payer IDs VACCN
-and TWVACCN, whatever name EMA gives the payer) take the VA network's 180 days; other payers' limits are the common ones
+and TWVACCN, whatever name EMA gives the payer) take the VA network's 180 days, and so does a claim with no payer ID of
+its own whose EMA payer name stands for the VA (at least 20 of that name's rows carry a payer ID, and 90 percent of those
+are the VA's); other payers' limits are the common ones
 and say so (the participation agreement's own limit applies). A payer the rules do not know is dated by the longest
 common limit (1 year), so a guess never makes its item expire, and the item names 90 days as the date to send it by
 where possible. A claim sent on time keeps its item after that date: the payer still owes a claim it has, and most take
@@ -187,7 +189,9 @@ before sending the claim again. The notes recorded on one go to exactly two plac
 brings, or the same bill's claim sent again to the same payer (its chase, or the items its first remittance brings). The
 payer is judged by its name's family (Anthem, Humana, Medicaid, ...), which does not change between runs; within a group
 that holds many payers (Medicare supplement carriers, the administrators of self-funded plans) only the payer's own name
-counts, so Medicare's work never goes to a Medigap carrier's claim. Each starts To
+counts, so Medicare's work never goes to a Medigap carrier's claim, and so it does for a payer the rules do not know (two
+such payers can share a first word). VA community care is known by its payer ID whatever name EMA gives it, so its work
+follows it to the VA's own remittance. Each starts To
 do (Started if someone was working the claim), never Sent, Paid or Let go: the payer's answer is a new matter. The earlier
 item stays (stale, out of every total) and, if its own claim id is listed again, comes back with its own status and notes.
 One a person marked Paid stays counted as a recovery and hands nothing on. Another payer's claim on the bill or a
