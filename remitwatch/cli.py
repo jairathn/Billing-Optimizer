@@ -383,6 +383,9 @@ def cmd_fax_cycle(args: argparse.Namespace) -> int:
 #   reports/            copies of the weekly summaries                                     -> the reports folder
 #   serving.sqlite.gz, serving.json, status.json, lock.json: the dashboard's copy, the last run's summary, the lock: made
 #   again by the server's own runs, nothing to carry
+#   fax-sends/, fax-lock.json   where the Vercel site was the one sending faxes (REMITWATCH_FAX_SENDER=serverless): a
+#                       marker per send, written before it, and its fax run's lock. The faxes themselves are in the store
+#                       and the journal; the server reserves its own sends in its store: nothing to carry
 # what people did and decided, compared row by row (every column both stores have); the rest by row count, since the move
 # is a copy of the same SQLite pages and those tables are the remittances themselves
 HASHED_TABLES = ("findings", "finding_events", "payer_fax", "faxes", "note_lessons", "hide_rules", "alerts", "detection_runs",

@@ -463,6 +463,32 @@ def test_on_a_serverless_host_the_appeal_goes_out_and_lasts(box, monkeypatch):
     assert conn.execute("SELECT number FROM payer_fax").fetchone()[0] == "8005550142"
     fresh = cloud.ServingCopy().connection()
     assert fresh.execute("SELECT COUNT(*) FROM faxes").fetchone()[0] == 1 and fresh.execute("SELECT COUNT(*) FROM payer_fax").fetchone()[0] == 1
+    # one fax run at a time across instances: a lock file in the state folder
+    with api.fax_run("a test"):
+        assert api._fax_lock_take("another instance") is None
+        assert tc.post("/api/faxes/refresh", headers=h).status_code == 409
+    assert state.get(api.FAX_LOCK_FILE) is None
+    # an instance whose copy has not read the journal yet prepares the same appeal: the marker only one instance can write
+    # stops it; once the marker is older than any send takes it is adopted, and that never sets the fax that went out back
+    import os
+    import time
+    stale = cloud.ServingCopy()
+    monkeypatch.setattr(cloud, "SERVING_COPY", stale)
+    c2 = sqlite3.connect(stale.ensure())
+    c2.execute("DELETE FROM faxes")
+    c2.commit()
+    c2.close()
+    f = tc.get(f"/api/findings/{fid}", headers=h).json()["finding"]
+    again = lambda: api._reserve(line, f, PAYER_FAX, packet_id=built["packet_id"], purpose="appeal", level=1, actor="x", subject="s", extra=None)   # noqa: E731
+    with pytest.raises(api.SendBlocked):
+        again()
+    old = time.time() - 11 * 60
+    os.utime(root / "RemitWatch-state" / state.list("fax-sends")[0]["name"], (old, old))
+    with pytest.raises(api.SendBlocked):
+        again()
+    assert "fax_new" in [json.loads(state.get(m["name"]))["kind"] for m in state.list(cloud.ACTIONS)]
+    cycle(state, client)
+    assert [tuple(r) for r in raw_conn(state).execute("SELECT status FROM faxes WHERE direction='out'")] == [("sent",)] and len(line.sent) == 1
 
 
 def test_the_reviewed_paragraphs_fill_the_letters_that_rest_on_the_note():

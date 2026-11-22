@@ -67,6 +67,14 @@ def apply_fax(conn: sqlite3.Connection, rec: dict) -> None:
     upsert_fax(conn, rec)
 
 
+def apply_fax_new(conn: sqlite3.Connection, rec: dict) -> None:
+    """Add a fax only where this copy has none under its key: a serverless send whose record was never written, found from
+    its marker (remitwatch.api._adopt_marker). A copy that has the fax already keeps it as it is."""
+    ensure_fax_tables(conn)
+    if not conn.execute("SELECT 1 FROM faxes WHERE fax_key=?", (rec["fax_key"],)).fetchone():
+        upsert_fax(conn, rec)
+
+
 def _history(raw: str | None, entry: dict) -> str:
     try:
         hist = json.loads(raw or "[]")
@@ -259,6 +267,9 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
         return True
     if kind == "fax":
         apply_fax(conn, action["record"])
+        return True
+    if kind == "fax_new":
+        apply_fax_new(conn, action["record"])
         return True
     if kind == "payer_fax":
         apply_payer_fax(conn, action)

@@ -99,8 +99,10 @@ esac
 exit 0
 '''
 FAKE_CURL = r'''#!/bin/bash
-# a stand-in for curl, for the check through Caddy: the site answers when Caddy runs a file that proxies and the app answers
+# a stand-in for curl. A post to the alert webhook (its address read with -K from standard input) is kept in
+# $FAKE/webhook; the check through Caddy answers when Caddy runs a file that proxies and the app answers
 echo "$*" >> "$FAKE/curl"
+case " $* " in *" -K - "*) { cat; echo "$*"; } >> "$FAKE/webhook"; exit 0 ;; esac
 [ -n "$(cat "$FAKE/ctr_caddy" 2>/dev/null)" ] || exit 7
 [ -f "$FAKE/unhealthy" ] && exit 22
 grep -q NOPROXY "$FAKE/caddy_loaded" 2>/dev/null && exit 22
@@ -428,6 +430,25 @@ def test_a_forced_try_that_fails_keeps_the_commit_held(box):
     n = box.calls().count("compose up -d")
     r = box.run()                                            # an ordinary tick, nobody asked
     assert "not deployed again by itself" in r.stdout and box.calls().count("compose up -d") == n
+
+
+def test_a_failure_also_reaches_the_alert_webhook_once_and_its_address_stays_secret(box):
+    (box.dir / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\nALERT_WEBHOOK_URL='https://hooks.example.org/T0K3N'\n")
+    box.write("fail_build", "")
+    box.commit("broken", {"remitwatch/api.py": "x = (\n"})
+    box.run()
+    box.run()                                                    # the second failure of the same commit: logged, not sent
+    posts = box.read("webhook").count('url = "https://hooks.example.org/T0K3N"')
+    assert posts == 1 and "build-failed" in box.read("webhook") and "T0K3N" not in box.read("curl")
+    (box.fake / "fail_build").unlink()
+    box.commit("fixed", {"remitwatch/api.py": "x = 2\n"})
+    box.run()
+    assert box.read("webhook").count("url = ") == 1                # a good deploy sends nothing
+    box.write("unhealthy", "")
+    box.commit("does not answer", {"remitwatch/api.py": "x = 3\n"})
+    box.run()
+    assert box.read("webhook").count("url = ") == 2 and "unhealthy" in box.read("webhook")
+    assert "remitwatch.example.com:443:127.0.0.1" in box.read("curl")     # the check went to the site's own address
 
 
 def test_an_app_stopped_on_purpose_stays_stopped(box):

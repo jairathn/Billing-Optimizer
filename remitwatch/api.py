@@ -3155,7 +3155,8 @@ def _adopt_marker(st, marker: str, key: str) -> None:
         if not have:
             rec = json.loads(st.get(marker) or b"{}")
             if rec.get("fax_key") == key:
-                _record_action({"kind": "fax", "record": rec})
+                # added only where no copy has it: an instance whose copy is behind must not set a fax that went out back
+                _record_action({"kind": "fax_new", "record": rec})
     except Exception:
         pass
 

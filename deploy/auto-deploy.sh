@@ -140,14 +140,27 @@ record() {      # result detail: one line in the log, and in the journal
   echo "deploy ${FROM:0:12} -> ${TO:0:12}: $1. $2"
 }
 
+alert() {       # result detail: a failure also goes to the practice's chat webhook (ALERT_WEBHOOK_URL in .env), so it is
+                # seen without a shell on the server. Commits and results only, nothing about patients.
+  local url text
+  url=$(grep -m1 '^ALERT_WEBHOOK_URL=' "$DIR/.env" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//; s/['\"]\$//")
+  [ -n "$url" ] || return 0
+  text=$(printf 'RemitWatch server, automatic deploy of %s: %s. %s' "${TO:0:12}" "$1" "$2" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g')
+  # the address is the secret: curl reads it on its standard input, never from its command line
+  printf 'url = "%s"\n' "$url" | curl -fsS -o /dev/null --max-time 10 -H 'Content-Type: application/json' \
+    --data "{\"text\": \"$text\"}" -K - >/dev/null 2>&1 || true
+}
+
 failed() {      # result detail [hold]: logged, and counted against this commit for the retry rule; a hold stays on the
-                # commit until a deploy of it succeeds (a forced try that fails keeps it)
+                # commit until a deploy of it succeeds (a forced try that fails keeps it). The first failure of a commit,
+                # and a hold, also go to the alert webhook.
   local sha="" count=0 when=0 hold=""
   [ -f "$STATE/failed" ] && read -r sha count when hold < "$STATE/failed"
   if [ "$sha" = "$TO" ]; then count=$((count + 1)); else count=1; hold=""; fi
   [ -n "${3:-}" ] && hold=$3
   echo "$TO $count $(date +%s) $hold" > "$STATE/failed"
   record "$1" "$2"
+  if [ "$count" = 1 ] || [ -n "${3:-}" ]; then alert "$1" "$2"; fi
 }
 
 holding() {     # whether this commit is to be left alone for now (a rollback, or three failed builds within the hour)
@@ -311,6 +324,7 @@ main() {
     fi
     echo "$TO" > "$STATE/refused"
     record refused "$why"
+    alert refused "$why"
     return 1
   fi
   rm -f "$STATE/refused"
