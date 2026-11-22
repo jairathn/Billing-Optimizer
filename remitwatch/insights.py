@@ -474,7 +474,8 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
     enters, how = _who_enters()
     out = []
     held = _meta(conn, trizetto.REFUSED_META)
-    test_once = "Whoever runs the site: press Test the TriZetto connection on /setup once."
+    test_once = ("Whoever runs the site: press Test the TriZetto connection on /setup once. It says whether the feed is waiting, "
+                 "and until when.")
     reset = ("the TriZetto administrator asks TriZetto in writing (the portal's Contact Us) to reset the RemitWatch login's "
              "password. Change it yourself only on a page that shows the RemitWatch login's username, never the Site ID's. "
              f"The new password goes by phone or in person, never by email, to {enters}; it is tried at once. If the feed uses "

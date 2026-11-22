@@ -261,6 +261,8 @@ class Session:
 
     def __enter__(self) -> "Session":
         import paramiko
+        if not self.s.configured():         # an empty password is never sent, so it can never be refused
+            raise TriZettoError("TRIZETTO_SFTP_USER and TRIZETTO_SFTP_PASSWORD are not both set; nothing was sent.")
         problem = hostkey_problem(self.s.hostkey)
         if problem:
             raise TriZettoError(problem)
