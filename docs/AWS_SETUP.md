@@ -65,7 +65,8 @@ The site's address will be a name under it, for example `remitwatch.yourpractice
    empty: once the server has its own data, the script never moves the Vercel site's data onto it again.
 4. It starts the site and prints what is left: open `https://<the address>/setup`, change the Dropbox webhook to the new
    address, give ModMed the new key address (`https://<the address>/.well-known/jwks.json`), and turn the Vercel
-   site off so two sites never send the same fax.
+   site off, so staff work on one site. Faxes go out from this server alone (`docs/SERVER_RUNBOOK.md`, the fax
+   settings).
 
 Run the script again any time to change a setting. It waits for a data cycle or fax run that is going to end (up to
 10 minutes), then starts the site again with the new settings.

@@ -76,12 +76,15 @@ against the server's, row by row for the work people did (findings, their events
 hidden reasons, alerts, runs) and by count for the remittance tables; it ends with `"different": 0` and exit code 0.
 
 Then open `https://<SITE_ADDRESS>/setup` (every required line green) and compare the site with Vercel page by page.
+While both sites run, only the server sends faxes (`REMITWATCH_FAX_SENDER`, above): the Vercel site shows its Faxes page
+and sends nothing, even with the SRFax settings in place there.
 
 ### Cutover
 
 1. Tell staff to stop working on the Vercel site.
 2. On the server: `sudo docker compose stop app`, then `import-cloud --force` and `compare-cloud` again (the forced move
-   replaces whatever the server did while it was being checked with Vercel's latest), then `sudo docker compose up -d`.
+   replaces whatever the server did while it was being checked with Vercel's latest, faxes it sent included: they stay
+   in SRFax's own record), then `sudo docker compose up -d`.
    This is the only time `--force` is used. Once staff work on the server, its store is the only one with their work:
    never move the Vercel site's data onto it again. `configure.sh` only offers the move while the server's store is
    empty.

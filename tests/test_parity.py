@@ -105,3 +105,33 @@ def test_the_meta_line_and_the_work_people_did_are_the_same(both):
     assert "in_progress" in st.values() and "dismissed" in st.values()
     assert len(server("/api/hide").json()["rules"]) == 1
     assert server("/api/faxes/payers").json()["payers"][0]["numbers"]["appeal"]["number"] == "(800) 555-0142"
+
+
+def test_with_the_fax_line_and_the_trizetto_login_on_both_sites_only_one_acts(both, monkeypatch):
+    """After the move both sites hold the same work, so both would find the same follow-ups due. With SRFax and the
+    TriZetto login set on both (the setup steps copy every setting across), exactly one site faxes and signs in to
+    TriZetto: by default the server. The other shows its Faxes page, says why it sends nothing, and never signs in, so
+    no fax goes out twice and TriZetto never sees two sign-ins on one login."""
+    from remitwatch import fax, trizetto
+    vercel, server, _items = both
+    for k, v in {"SRFAX_ACCESS_ID": "12345", "SRFAX_ACCESS_PWD": "invented-fax-pw", "TRIZETTO_SFTP_USER": "invented-user",
+                 "TRIZETTO_SFTP_PASSWORD": "invented-sftp-pw"}.items():
+        monkeypatch.setenv(k, v)
+    for k in ("REMITWATCH_FAX_SENDER", "TRIZETTO_SFTP_SERVERLESS"):
+        monkeypatch.delenv(k, raising=False)
+
+    def acts():
+        """Per site: whether its Faxes page says it sends, whether its own runs get a fax line, whether it reads TriZetto."""
+        out = {}
+        for name, get in (("vercel", vercel), ("server", server)):
+            page = get("/api/faxes").json()
+            out[name] = (page["fax"], fax.provider() is not None, trizetto.configured())
+            assert page["fax"] or page["not_here"], name        # a site that does not send says why
+        return out
+    assert acts() == {"vercel": (False, False, False), "server": (True, True, True)}
+    # the practice can name the Vercel site instead: then the server stops faxing (one sender either way)
+    monkeypatch.setenv("REMITWATCH_FAX_SENDER", "serverless")
+    got = acts()
+    assert got["vercel"][:2] == (True, True) and got["server"][:2] == (False, False)
+    monkeypatch.setenv("REMITWATCH_FAX_SENDER", "none")                 # faxing paused everywhere
+    assert [v[:2] for v in acts().values()] == [(False, False), (False, False)]

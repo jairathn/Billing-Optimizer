@@ -248,7 +248,8 @@ Next, in this order:
   2. Dropbox app console, Settings, Webhooks: replace the Vercel address with https://$site/api/dropbox/webhook
   3. ModMed: register (or change) the app's key address to https://$site/.well-known/jwks.json
   4. Turn the Vercel site off (Vercel, the project, Settings, delete it, or remove its environment variables), so that
-     two sites never send the same fax.
+     staff work on one site. Faxes go out from this server alone, unless Vercel has REMITWATCH_FAX_SENDER=serverless:
+     remove that there.
 Not asked here (copy any that Vercel has into $PWD/.env as NAME='value', then run this script again):
   MODMED_CLIENT_SECRET, MODMED_API_KEY, MODMED_FHIR_BASE, MODMED_TOKEN_URL, MODMED_SCOPE, MODMED_AUDIENCE, MODMED_KEY_ID,
   MODMED_GROUP_ID, REMITWATCH_STATE_PATH, and the tuning names listed in docs/SERVER_RUNBOOK.md.
