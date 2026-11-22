@@ -501,13 +501,15 @@ def _waiting_line(name: str, a: dict) -> str:
 
 def _baseline(conn) -> dict:
     """The numbers to check a move against (the Vercel site's first load: 32,718 remittance files, 17,446 findings)."""
+    from .actions import rules_in_force
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     n = lambda sql: conn.execute(sql).fetchone()[0] if all(t in have for t in re.findall(r"FROM (\w+)", sql)) else 0     # noqa: E731
     return {"remittance_files": n("SELECT COUNT(*) FROM files WHERE kind='835'"), "remits": n("SELECT COUNT(*) FROM transactions"),
             "findings": n("SELECT COUNT(*) FROM findings"), "findings_current": n("SELECT COUNT(*) FROM findings WHERE COALESCE(stale,0)=0"),
             "decisions": n("SELECT COUNT(*) FROM finding_events WHERE kind IN ('manual','hidden','unhidden','fax')"),
             "not_open": n("SELECT COUNT(*) FROM findings WHERE status != 'open'"), "payer_fax_numbers": n("SELECT COUNT(*) FROM payer_fax"),
-            "faxes": n("SELECT COUNT(*) FROM faxes"), "lessons": n("SELECT COUNT(*) FROM note_lessons"), "hidden_reasons": n("SELECT COUNT(*) FROM hide_rules"),
+            "faxes": n("SELECT COUNT(*) FROM faxes"), "lessons": n("SELECT COUNT(*) FROM note_lessons"),
+            "hidden_reasons": n(f"SELECT COUNT(*) FROM hide_rules WHERE {rules_in_force(conn)}"),     # a removed one stays, dated
             "packets": n("SELECT COUNT(*) FROM appeal_packets")}
 
 
