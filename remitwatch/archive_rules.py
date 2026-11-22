@@ -1560,7 +1560,7 @@ def _pr_words(reason: str, kind: str | None) -> tuple[str, str]:
 
 
 def pr_group_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
-                     standing: Mapping[str, int] | None = None, rate: Callable[[str, str, str], int | None] | None = None) -> list[dict]:
+                     standing: Mapping[str, int] | None = None, rate: Callable[[str, str, str], Any] | None = None) -> list[dict]:
     """Lines whose payer answered with a patient-group reason that is not the patient's deductible, coinsurance or copay
     (PR-288 referral absent, PR-27 coverage ended, PR-26 before coverage, PR-200 lapse, PR-49 routine service, PR-204 not
     covered by the plan), or with CO-147 (the clinician's contracted rate is not on file), that no item lists. detect.py
@@ -1568,7 +1568,8 @@ def pr_group_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, arch
     payer answered as primary, paid nothing (CO-147: or less than it allows), no item lists the line, the payer has not
     reversed or answered the line again, no payer has paid the service since, and the payments that stand do not already
     pay every unit billed (another payer paid it as primary: the patient's share is rule 2's question). Sized at the
-    amount the payer would allow: `rate(payer_group, code, year)` (the Detector's usual rate), else the line's own allowed
+    amount the payer would allow: `rate(payer_group, code, year)`, cents or (cents, basis) (the Detector's usual rate,
+    which falls back to Medicare's fee schedule or the cross-payer typical amount, and says so), else the line's own allowed
     amount when it is below the charge (a priced amount), else nothing. A CO-147 line the payer priced (paid, or put the
     allowed amount on the patient's deductible) is sized at the gap between its usual rate and that allowed amount, and
     left out when there is none; with no usual rate its size is unknown."""
@@ -1614,7 +1615,8 @@ def pr_group_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, arch
         signal, severity, actionable, _who, _fix = PR_REASONS[reason]
         who, fix = _pr_words(reason, kind)
         year = (a.dos or "")[:4]
-        usual = rate(a.group, a.code, year) if rate else None
+        got = rate(a.group, a.code, year) if rate else None
+        usual, usual_basis = got if isinstance(got, tuple) else (got, None)
         # the line's own allowed amount is a price only below the charge: a payer that denies PR-204 often reports the
         # whole charge as allowed (the patient's), which is no amount it would pay
         priced = (a.allowed or 0) if 0 < (a.allowed or 0) < (a.charge or 0) - 100 else None
@@ -1634,7 +1636,8 @@ def pr_group_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, arch
                  "49": "routine service not covered", "204": "not covered by the plan", "147": "clinician not on the payer's contract"}[reason]
         title = f"{a.code} {label} ({g}-{reason}, {a.group})"
         rarc = ",".join(a.rem) if a.rem else None
-        ev = {"basis": (f"{a.group}'s usual {year} rate for {a.code}" if usual else "the payer's allowed amount on the line" if priced else
+        ev = {"basis": ((usual_basis or f"{a.group}'s usual {year} rate for {a.code}") if usual else
+                        "the payer's allowed amount on the line" if priced else
                         "no baseline for this code"),
               "carc_group": g, "who_should_pay": who, "what_to_fix": fix, "archive_rule": R_PR}
         hint = f"Who should pay: {who}. What to fix: {fix}"
@@ -1984,7 +1987,7 @@ RULE_FUNCS: dict[str, Callable] = {
 
 
 def evaluate(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing: Mapping[str, int] | None = None,
-             rate: Callable[[str, str, str], int | None] | None = None, rules: Iterable[str] | None = None,
+             rate: Callable[[str, str, str], Any] | None = None, rules: Iterable[str] | None = None,
              hide_rules: Sequence[Mapping] | None = None, worked: set[str] | None = None) -> dict:
     """Run the rules on the run's items and settle what happens to each:
       - one primary action per item, by PRECEDENCE (a closure the archive proves, then the payer's replacement of the
@@ -2077,13 +2080,17 @@ def evaluate(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing: Ma
 
 
 # --------------------------------------------------------------------------------------------- applying to a Detector
-def _det_rate(det) -> Callable[[str, str, str], int | None]:
-    """The Detector's usual rate for a payer group, code and year (an office visit of an unknown provider tier)."""
-    def rate(group: str, code: str, year: str) -> int | None:
+def _det_rate(det) -> Callable[[str, str, str], tuple[int, str] | None]:
+    """The Detector's usual rate for a payer group, code and year (an office visit of an unknown provider tier), with its
+    basis: the payer's own rate, or the fallback Detector.usual_rate names (Medicare's fee schedule, the cross-payer
+    typical amount)."""
+    def rate(group: str, code: str, year: str) -> tuple[int, str] | None:
         try:
-            return det.usual_rate({"payer_group": group, "year": year or "", "provider_tier": "unknown", "pos_class": "office"}, code)[0]
+            cents, basis, _r = det.usual_rate({"payer_group": group, "year": year or "", "provider_tier": "unknown",
+                                               "pos_class": "office"}, code)
         except Exception:
             return None
+        return (cents, basis) if cents else None
     return rate
 
 

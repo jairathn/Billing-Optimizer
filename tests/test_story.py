@@ -177,6 +177,54 @@ def test_a_gap_is_shown_with_its_amount_and_cause_when_ema_never_posted_an_835_p
     assert "It does not reconcile: $30.00 apart, because" in b["text"]
 
 
+def test_an_835_payment_ema_posted_under_a_number_no_835_carries_is_not_a_gap(store, ledger, tmp_path):
+    """The payer's reprocessing paid $30 on 835 trace MISNO835; EMA posted $30 two days later under EMATYPO1, a number no
+    835 carries. The checks table pairs the two (C1 'misnumbered'); without that pairing, the payment of its amount on the
+    line, from 7 days before to 120 days after the 835, is the same money (the checks' "posted elsewhere" count)."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+        "lines": [ln("99213", 150, 0, [("CO", "197", 150)], lcn="1")]}])
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    remit(store, trace="MISNO835", paid_on="2026-04-10", claims=[{"pcn": F.claim_id(1, sub=2), "pccn": "PCN-B", "received": "2026-04-01",
+                                                                 "lines": [ln("99213", 150, 30, [("CO", "45", 120)], lcn="1")]}])
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 0),
+                                   pay(F.link_no(1), "EMATYPO1", 30, posted=D(2026, 4, 12)),
+                                   adj(F.link_no(1), "CO-45", 120, contractual=True, posted=D(2026, 4, 12)), later()])
+    assert tuple(store.conn.execute("SELECT cause, pair_trace IS NOT NULL FROM ema_checks WHERE check_no='EMATYPO1'").fetchone()) == ("misnumbered", 1)
+    for paired in (True, False):
+        if not paired:
+            store.conn.execute("UPDATE ema_checks SET cause=NULL, pair_trace=NULL WHERE check_no='EMATYPO1'")
+        out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+        b = out["story"]["balance"]
+        assert out["story"]["reconciles"] and b["gap_cents"] == 0, b["gap_cause"]
+        row = next(r for r in out["story"]["rows"] if r["source"] == "production" and r["kind"] == "payment")
+        if paired:
+            assert "no 835 carries this number; it is the 835 payment of Apr 10, 2026, posted under another number" in row["text"]
+            assert row["in_835"] and not any(c["source"] == "835_elsewhere" for c in b["checks"])
+            # the serverless dashboard's copy keeps the checks table: the same words and the same balance from the summaries
+            mem = dashboard_copy(store, tmp_path)
+            out2 = story.explain(mem.conn, "F1", ledger=None, today=TODAY)
+            mem.close()
+            assert out2["story"]["mode"] == "summary" and out2["story"]["reconciles"] and out2["story"]["balance"]["text"] == b["text"]
+            assert any("it is the 835 payment of Apr 10, 2026, posted under another number" in r["text"] for r in out2["story"]["rows"])
+        else:
+            assert "no 835 is on file for this check" in row["text"] and not row["in_835"]
+            el_ = next(c for c in b["checks"] if c["source"] == "835_elsewhere")
+            assert el_["why"].endswith("EMA posted $30.00 on Apr 12, 2026 under check ending YPO1, a number no 835 carries")
+        plain(out)
+
+
+def test_no_era_is_asked_for_a_number_that_stands_for_an_835_on_file(store, ledger, tmp_path):
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 0),
+                                   pay(F.link_no(1), "NOERA01", 90, posted=D(2026, 4, 20)), later()])
+    fx = states.facts_of(store.conn, [dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone())], today=TODAY)["F1"]
+    proof = {"check_tail": "RA01", "payer": P["bcbs"], "rule": "claim_paid_in_ema"}
+    assert story._era_request(store.conn, fx, proof).startswith(f"Ask {P['bcbs']} (through its portal, or TriZetto's ERA re-send) for the ERA")
+    store.conn.execute("UPDATE ema_checks SET cause='misnumbered', pair_trace=? WHERE check_no='NOERA01'", (tk,))
+    assert story._era_request(store.conn, fx, proof) is None
+
+
 def test_the_facility_twin_is_shown_apart_and_never_counted_on_the_line(store, ledger, tmp_path):
     """The surgery center's claim for the same patient, date and code: its payment is not this line's."""
     tk = denied(store, code="17311", charge_=500, reason=("CO", "97"))
@@ -546,7 +594,7 @@ def test_every_route_keeps_to_the_plan_buttons_and_plain_words(store, ledger, tm
 
 
 # ================================================================================================ every outcome's sentence
-@pytest.mark.parametrize("oc, extra, phrase", [
+OUTCOME_SENTENCES = [
     ("auto_written_off", {}, "EMA shows this claim as Resolved, but nobody worked this line. EMA's posting rule wrote off the denial (CO-197, $150.00)"),
     ("written_off_while_pending", {"carcs": ["CO-16"]}, "EMA wrote this off the day it posted, but the payer had not finished: it asked for information."),
     ("lost_to_timely_filing", {}, "This was written off for late filing. The payer first denied it for CO-197; it ran out of time before anyone fixed it."),
@@ -562,7 +610,10 @@ def test_every_route_keeps_to_the_plan_buttons_and_plain_words(store, ledger, tm
     ("closed_unexplained", {}, "Unpaid and nobody has worked it"),
     ("shared_line", {}, "Unpaid and nobody has worked it"),
     ("not_found", {}, "Unpaid and nobody has worked it"),
-])
+]
+
+
+@pytest.mark.parametrize("oc, extra, phrase", OUTCOME_SENTENCES, ids=[c[0] for c in OUTCOME_SENTENCES])
 def test_each_outcome_has_its_sentence(store, ledger, tmp_path, monkeypatch, oc, extra, phrase):
     tk = denied(store)
     item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)

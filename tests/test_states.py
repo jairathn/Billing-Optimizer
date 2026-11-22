@@ -691,29 +691,34 @@ def _written_off_world(store, ledger, tmp_path):
     return dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone())
 
 
-@pytest.mark.parametrize("oc, extra, want", [
+OUTCOME_STATES = [
     ("paid_after", {"paid_after_same": 9000, "first_paid_after": {"date": "2026-04-20", "payer": "Blue Cross", "check_tail": "0042"}},
-     ("done", "paid_later_ema")),
+     ("done", "paid_later_ema"), "Paid later: $90.00 by Blue Cross on a check with no 835 (Apr 20, 2026, check ending 0042)"),
     ("paid_after_other", {"paid_after_other": 9000, "first_paid_after": {"date": "2026-04-20", "payer": "Testcare", "check_tail": "0043"}},
-     ("done", "rebilled_paid")),
-    ("patient", {"patient_after": 15000, "outcome_on": "2026-04-15"}, ("done", "moved_to_patient")),
-    ("written_off_by_policy", {"pattern": "Anthem / BCBS|99213||CO-197"}, ("accepted", "policy")),
-    ("auto_written_off", {}, ("work_now", "open")),
-    ("written_off_while_pending", {}, ("work_now", "open")),
-    ("lost_to_timely_filing", {}, ("work_now", "open")),
-    ("written_off_later", {}, ("work_now", "open")),
-    ("paid_after_partial", {"paid_after_same": 2000}, ("work_now", "open")),
-    ("paid_before", {"paid_before": 0}, ("work_now", "open")),
-    ("action", {}, ("work_now", "open")),
-    ("open", {}, ("work_now", "open")),
-    ("not_covered", {}, ("work_now", "open")),
-])
-def test_each_ema_outcome_gives_its_state(store, ledger, tmp_path, oc, extra, want):
+     ("done", "rebilled_paid"), "Rebilled to Testcare, paid: $90.00 on Apr 20, 2026 (check ending 0043, no 835); EMA shows the line settled"),
+    ("patient", {"patient_after": 15000, "outcome_on": "2026-04-15"}, ("done", "moved_to_patient"),
+     "Settled by the patient: EMA shows $150.00 paid by the patient after the denial and the line closed"),
+    ("written_off_by_policy", {"pattern": "Anthem / BCBS|99213||CO-197"}, ("accepted", "policy"),
+     "The owner's write-off policy accepts Anthem / BCBS|99213||CO-197"),
+    ("auto_written_off", {}, ("work_now", "open"), "; EMA's posting rule wrote it off the day the remittance posted; nobody worked it;"),
+    ("written_off_while_pending", {}, ("work_now", "open"), "; EMA wrote it off the day it posted, while the payer was still waiting for information;"),
+    ("lost_to_timely_filing", {}, ("work_now", "open"), "; written off for late filing after an earlier denial;"),
+    ("written_off_later", {}, ("work_now", "open"), "; a person wrote it off in EMA later, on a day with no remittance;"),
+    ("paid_after_partial", {"paid_after_same": 2000}, ("work_now", "open"), "; EMA shows part of it paid since;"),
+    ("paid_before", {"paid_before": 0}, ("work_now", "open"), "; EMA shows the line paid before this denial: check whether the denial still matters;"),
+    ("action", {}, ("work_now", "open"), "; EMA shows a claim action on it;"),
+    ("open", {}, ("work_now", "open"), "; EMA shows it open;"),
+    ("not_covered", {}, ("work_now", "open"), "Not paid and nobody has worked it; act by "),
+]
+
+
+@pytest.mark.parametrize("oc, extra, want, basis", OUTCOME_STATES, ids=[c[0] for c in OUTCOME_STATES])
+def test_each_ema_outcome_gives_its_state(store, ledger, tmp_path, oc, extra, want, basis):
     f = _written_off_world(store, ledger, tmp_path)
     base = ec.line_outcomes(store.conn, [f], code_once=lambda x: True, today=TODAY)[f["finding_id"]]
     st = states.states_of(store.conn, [f], outcomes={"F1": dict(base, outcome=oc, **extra)}, today=TODAY)["F1"]
     assert (st["work_state"], st["rule"]) == want
-    if oc == "written_off_by_policy":
-        assert st["state_basis"].startswith("The owner's write-off policy accepts Anthem / BCBS|99213||CO-197")
-    if oc == "patient":
-        assert st["state_basis"].startswith("Settled by the patient: EMA shows $150.00 paid by the patient after the denial")
+    if want[0] == "work_now":
+        assert st["state_basis"].startswith("Not paid and nobody has worked it") and basis in st["state_basis"], st["state_basis"]
+    else:
+        assert st["state_basis"].startswith(basis), st["state_basis"]

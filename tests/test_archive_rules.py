@@ -361,6 +361,10 @@ def test_rule8_a_plan_exclusion_raises_an_item_saying_who_pays_and_what_to_fix(s
     assert (a["action"], a["signal"], a["carc"], a["carc_group"], a["expected_cents"], a["shortfall_cents"]) == \
         ("raise_item", "DENIED_PLAN_EXCLUSION", "204", "PR", 3767, 3767)
     assert a["who_should_pay"].startswith("the patient") and "Who should pay" in a["hint"] and "What to fix" in a["hint"]
+    assert a["evidence"]["basis"] == "Acme Health Plan's usual 2026 rate for 11900"
+    # a fallback rate says where it came from (the Detector's usual_rate names Medicare's fee schedule, say)
+    b = only(ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: (4100, "Medicare 2026 rate for 11900 (physician)")))
+    assert (b["shortfall_cents"], b["evidence"]["basis"]) == (4100, "Medicare 2026 rate for 11900 (physician)")
     # with no usual rate, the whole charge the payer put down as 'allowed' is no price: no size
     assert only(ar.pr_group_denials(store.conn, []))["shortfall_cents"] is None
 
