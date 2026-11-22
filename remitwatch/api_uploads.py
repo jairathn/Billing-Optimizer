@@ -288,7 +288,7 @@ def upload_finish(upload_id: str, request: Request, body: dict = Body(default={}
             rec.update(state="refused", finished_at=now, updated_at=now,
                        message=f"The file did not arrive whole, so it was not kept: {bad} Choose it again to send it again.")
             _save_end(store, rec, version)
-            return JSONResponse(dict(uploads.record_view(rec, reveal=_reveal()), detail=rec["message"]), status_code=422)
+            return _finished(store, rec, woke=None)
         with _conn() as c:
             seen = uploads.known_file(c, sha, store.pending(), skip_pair=rec["pair"])
         if seen:
@@ -329,10 +329,14 @@ def _wake(store, request: Request) -> bool:
         return False
 
 
-def _finished(store, rec: dict, woke: bool | None) -> dict:
+def _finished(store, rec: dict, woke: bool | None):
+    """The answer to a finish, the same however often it is sent: the upload as the page shows it; a file that did not
+    arrive whole is a 422."""
     pair = store.pair_state(rec["pair"]) if rec.get("state") == "finished" else None
     with _conn() as c:
         view = uploads.record_view(rec, conn=c, pair=pair, reveal=_reveal())
+    if rec.get("state") == "refused":
+        return JSONResponse(dict(view, detail=rec.get("message") or "Not taken."), status_code=422)
     if rec.get("state") == "finished" and woke is not None and pair and pair[0] == "waiting":
         if store.serverless:
             view["lines"].append("The next run was asked to start now; it reads the file first." if woke else

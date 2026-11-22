@@ -1043,7 +1043,10 @@ def test_a_serverless_refresh_lets_the_ledger_go_before_part_b_and_sorts_in_memo
     Part B and the publish need nothing from the ledger: the routine reasons of a line with an item are still kept."""
     monkeypatch.setenv("REMITWATCH_MODE", "serverless")
     monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
-    store = memory_store()
+    store = Store(":memory:", compact=True)                 # the serverless host's in-memory store (no image needed here)
+    er.ensure_schema(store.conn)
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (SALT_HEX,))
+    store.conn.commit()
     state = LocalState(str(tmp_path / "state"))
     tmp = tmp_path / "tmp"
     h = el.LedgerHandle(state, tmp_dir=str(tmp))

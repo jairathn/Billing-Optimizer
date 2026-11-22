@@ -1240,7 +1240,6 @@ CREATE INDEX IF NOT EXISTS ix_el_bill ON ema_lines(bill, svc);
 CREATE TABLE IF NOT EXISTS ema_line_payments (link INTEGER, svc TEXT, cpt TEXT, check_no TEXT, posted TEXT, payer TEXT,
   payer_group TEXT, role TEXT, ins_paid INTEGER, rows INTEGER, allowed INTEGER, name_key INTEGER, in_835 INTEGER,
   trace_key TEXT, PRIMARY KEY (link, svc, cpt, check_no, posted, payer)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS ix_elp_check ON ema_line_payments(check_no);
 CREATE TABLE IF NOT EXISTS ema_line_reasons (link INTEGER, svc TEXT, cpt TEXT, grp TEXT, code TEXT, reason_class TEXT,
   payer TEXT, contractual INTEGER, noncontractual INTEGER, rows INTEGER, first_posted TEXT, last_posted TEXT,
   PRIMARY KEY (link, svc, cpt, grp, code)) WITHOUT ROWID;
@@ -1256,6 +1255,9 @@ CREATE INDEX IF NOT EXISTS ix_elm_bill ON ema_link_map(bill);
 CREATE TABLE IF NOT EXISTS ema_link_events (link INTEGER, kind TEXT, value TEXT, first_seen TEXT,
   PRIMARY KEY (link, kind, value)) WITHOUT ROWID;
 """
+# indexes an earlier build made that no query uses (8 MB of a serverless host's in-memory store for the payments' check
+# numbers: every lookup goes through a line's key)
+DROPPED_INDEXES = ("ix_elp_check",)
 EMA_TABLES = ("ema_report_files", "ema_ar", "ema_ar_items", "ema_claim_links", "ema_lines", "ema_line_payments",
               "ema_line_reasons", "ema_checks", "ema_months", "ema_link_map", "ema_link_events")
 # columns that hold keys or keyed hashes: never in the dashboard's copy, never shown
@@ -1290,6 +1292,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                     conn.execute("UPDATE ema_ar_items SET absent_since = gone_since")
     conn.commit()
     conn.executescript(";\n".join(x for x in statements if x.upper().startswith("CREATE INDEX")) + ";")
+    for ix in DROPPED_INDEXES:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (ix,)).fetchone():
+            conn.execute(f"DROP INDEX {ix}")
     conn.commit()
 
 

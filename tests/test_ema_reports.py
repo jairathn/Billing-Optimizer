@@ -8,6 +8,7 @@ Every row is invented (tests/ema_fixtures.py); claim links use a host under a re
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import io
 import json
 import os
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tracemalloc
 import types
+import zipfile
 
 import pytest
 
@@ -422,6 +424,51 @@ def test_the_dashboard_copy_has_no_salt_and_no_keys(store, tmp_path, monkeypatch
 
 
 # ------------------------------------------------------------------------------------------- 5. the repository holds no tenant host
+HOST = re.compile(r"(?<![a-z0-9-])([a-z0-9-]+(?:\.[a-z0-9-]+)*)\." + re.escape("ema") + r"\." + re.escape("md") + r"\b", re.I)
+VENDOR_LABELS = {"sso"}                 # ModMed's own public sign-in service, not a practice's system
+CONTAINERS = (".xlsx", ".xlsm", ".docx", ".pptx", ".zip")
+
+
+def _tenant_hosts(data: bytes, name: str, depth: int = 0) -> set[str]:
+    """The labels under the vendor's domain written anywhere in a file: as a URL or bare (prose, JSON, an .env line, a
+    protocol-relative address), and inside the members of a zip-based file (a workbook, a document) or a gzip."""
+    low = name.lower()
+    found: set[str] = set()
+    if depth < 2 and (low.endswith(CONTAINERS) or data[:4] == b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for info in zf.infolist():
+                    if not info.is_dir() and info.file_size <= 64 << 20:
+                        found |= _tenant_hosts(zf.read(info), info.filename, depth + 1)
+            return found
+        except zipfile.BadZipFile:
+            pass
+    if depth < 2 and (low.endswith(".gz") or data[:2] == b"\x1f\x8b"):
+        try:
+            return _tenant_hosts(gzip.decompress(data), name[:-3] if low.endswith(".gz") else name, depth + 1)
+        except (OSError, EOFError):
+            pass
+    text = data.decode("utf-8", "replace") if b"\x00" not in data[:4096] else data.decode("latin-1")
+    for m in HOST.finditer(text):
+        label = m.group(1).lower().rsplit(".", 1)[-1]
+        if label not in VENDOR_LABELS:
+            found.add(label)
+    return found
+
+
+def test_the_host_scan_finds_a_tenant_written_any_way():
+    tenant = "acme" + "-derm"                # an invented label, kept apart so this file holds no host
+    dom = "." + "ema" + "." + "md"
+    for text in (f"https://{tenant}{dom}/ema/ws/v9/qlikRedirect/claim/1", f"{tenant}{dom}", f'{{"host": "{tenant}{dom}"}}',
+                 f"EMA_HOST={tenant}{dom}", f"//{tenant}{dom}/x", f"see {tenant.upper()}{dom.upper()} today"):
+        assert _tenant_hosts(text.encode(), "a.txt") == {tenant}, text
+    assert _tenant_hosts(f"https://sso{dom}/login".encode(), "a.txt") == set()
+    assert _tenant_hosts(f"<tenant>{dom} and the domain{dom[0]} {dom[1:]}".encode(), "a.txt") == set()
+    assert _tenant_hosts(F.zipped("r.csv", f"x,{tenant}{dom}".encode()), "r.zip") == {tenant}
+    assert _tenant_hosts(gzip.compress(f"{tenant}{dom}".encode()), "r.csv.gz") == {tenant}
+    assert _tenant_hosts(F.ar_xlsx([F.ar_row(note=f"https://{tenant}{dom}/x")]), "a.xlsx") == {tenant}
+
+
 def test_no_ema_tenant_host_anywhere_in_the_repository():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
@@ -430,22 +477,18 @@ def test_no_ema_tenant_host_anywhere_in_the_repository():
     except (OSError, subprocess.SubprocessError):
         files = [os.path.relpath(os.path.join(dp, f), root) for dp, ds, fs in os.walk(root)
                  for f in fs if not any(x in dp for x in (".git", "__pycache__", "node_modules", os.sep + "data"))]
-    host = re.compile(r"[a-z]+://([a-z0-9-]+(?:\.[a-z0-9-]+)*)\." + re.escape("ema") + r"\." + re.escape("md") + r"\b", re.I)
-    vendor = {"sso"}                    # ModMed's own public sign-in service, not a practice's system
-    found = []
+    found = {}
     for rel in filter(None, files):
         p = os.path.join(root, rel)
         try:
             with open(p, "rb") as fh:
-                data = fh.read(4 << 20)
+                data = fh.read(64 << 20)
         except OSError:
             continue
-        if b"\x00" in data[:4096]:
-            continue
-        for m in host.finditer(data.decode("utf-8", "replace")):
-            if m.group(1).lower() not in vendor:
-                found.append(rel)
-    assert not found, f"a URL under the vendor's domain names a practice's EMA system in: {sorted(set(found))}"
+        labels = _tenant_hosts(data, rel)
+        if labels:
+            found[rel] = len(labels)
+    assert not found, f"a host under the vendor's domain names a practice's EMA system in: {sorted(found)}"
 
 
 # ------------------------------------------------------------------------------------------------------ 6. the claim address
@@ -734,10 +777,15 @@ def test_schema_is_safe_on_every_start_and_adds_missing_columns(tmp_path):
     c = sqlite3.connect(str(tmp_path / "old.sqlite"))
     c.execute("CREATE TABLE ema_ar_items (item_key TEXT PRIMARY KEY, gone_since TEXT)")
     c.execute("INSERT INTO ema_ar_items VALUES ('I|x|1', '2026-01-01')")
+    c.execute("CREATE TABLE ema_line_payments (link INTEGER, svc TEXT, cpt TEXT, check_no TEXT, posted TEXT, payer TEXT, "
+              "PRIMARY KEY (link, svc, cpt, check_no, posted, payer)) WITHOUT ROWID")
+    c.execute("CREATE INDEX ix_elp_check ON ema_line_payments(check_no)")      # an earlier build's index no query used
     c.commit()
     er.ensure_schema(c)
     er.ensure_schema(c)
     assert c.execute("SELECT absent_since FROM ema_ar_items").fetchone()[0] == "2026-01-01"
+    assert c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='ix_elp_check'").fetchone()[0] == 0
+    assert "bucket" in {r[1] for r in c.execute("PRAGMA table_info(ema_ar)")}
     tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert set(er.EMA_TABLES) <= tables
     lines = {r[1] for r in c.execute("PRAGMA table_info(ema_lines)")}

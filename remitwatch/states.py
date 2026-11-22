@@ -575,8 +575,14 @@ def _pair_reversals(recs: list[dict]) -> None:
                  and (o["pccn"] == x["pccn"] or not o["pccn"] or not x["pccn"] or o["pcn"] == x["pcn"])]
         if not cands:
             continue
-        exact = [o for o in cands if (o["paid"] or 0) == -(x["paid"] or 0)]
-        pick = max(exact or cands, key=lambda o: (o["date"] or "", o["line_key"] or ""))
+        mirror = sorted((g, c, -a) for g, c, a in x["adj"])
+
+        def score(o: dict) -> tuple:
+            # the answer whose reasons the reversal negates exactly, then the opposite payment, then an earlier remittance
+            # (a reversal undoes an earlier answer; the new answer often comes on the same remittance), then the newest
+            return (bool(mirror) and sorted(o["adj"]) == mirror, (o["paid"] or 0) == -(x["paid"] or 0),
+                    (o["date"] or "") < (x["date"] or ""), o["date"] or "", o["line_key"] or "")
+        pick = max(cands, key=score)
         pick["reversed_by"] = x["line_key"] or x["claim_key"]
         x["reverses"] = pick["line_key"] or pick["claim_key"]
 
@@ -655,12 +661,14 @@ def _ema(conn: sqlite3.Connection, items: list[dict], outcomes: dict) -> dict[st
         _temp(conn, "st_ek", ["link INTEGER", "svc TEXT", "cpt TEXT"], part)
         if pcols:
             in835 = "y.in_835" if "in_835" in pcols else "0"
-            for lk, svc, cpt, chk, posted, payer, grp, cents, i8, role in conn.execute(
+            tkey = "y.trace_key" if "trace_key" in pcols else "NULL"
+            for lk, svc, cpt, chk, posted, payer, grp, cents, i8, role, tk in conn.execute(
                     f"""SELECT y.link, y.svc, y.cpt, y.check_no, y.posted, y.payer, y.payer_group, y.ins_paid, {in835},
-                               {'y.role' if 'role' in pcols else 'NULL'}
+                               {'y.role' if 'role' in pcols else 'NULL'}, {tkey}
                         FROM temp.st_ek k JOIN ema_line_payments y ON y.link = k.link AND y.svc = k.svc AND y.cpt = k.cpt"""):
                 pays.setdefault((lk, svc, cpt), []).append({"check": chk or "", "check_tail": tail(chk), "posted": posted, "payer": payer or "",
-                                                           "group": grp, "cents": cents or 0, "in_835": bool(i8), "role": role})
+                                                           "group": grp, "cents": cents or 0, "in_835": bool(i8), "role": role,
+                                                           "trace_key": tk})
         if _table(conn, "ema_line_reasons"):
             for lk, svc, cpt, grp, code, cls, payer, contr, nonc, first, last in conn.execute(
                     """SELECT z.link, z.svc, z.cpt, z.grp, z.code, z.reason_class, z.payer, z.contractual, z.noncontractual,
@@ -1070,7 +1078,7 @@ def _payer_answers_after(fx: dict, since: str | None) -> list[dict]:
         if (z["last"] or "") > since:
             out.append({"date": z["last"], "source": "production", "paid": 0, "status": None, "payer": z["payer"],
                         "codes": [f"{z['grp']}-{z['code']}"]})
-    return sorted(out, key=lambda a: a["date"] or "")
+    return sorted(out, key=lambda a: (a["date"] or "", a.get("status") != "22", a["paid"]))
 
 
 def _last_payer_activity(fx: dict, before: str | None = None) -> str | None:

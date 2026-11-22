@@ -1125,10 +1125,13 @@ def test_the_page_and_its_guide_need_the_login(site, monkeypatch):
     assert site.c.post("/api/uploads", params={"name": "x.csv"}, content=b"a", headers=XHR).status_code == 401
     # where files go, said as it is: a visit note leaves the server inside its appeal packet (and for the review)
     assert "A visit note leaves it only inside the appeal packet built from it" in page.text and "never emailed or sent elsewhere" not in page.text
+    # the page's script (static/upload.js) is served like the page, and the page loads it
+    js = site.c.get("/static/upload.js")
+    assert js.status_code == 200 and '<script src="/static/upload.js"></script>' in page.text
     # one wait at a time while files are queued, however often the page refreshes
-    assert "clearTimeout(refresh.t);" in page.text and "setTimeout(refresh, 15000);" not in page.text.replace("refresh.t = h.queued ? setTimeout(refresh, 15000)", "")
+    assert "clearTimeout(refresh.t);" in js.text and "setTimeout(refresh, 15000);" not in js.text.replace("refresh.t = h.queued ? setTimeout(refresh, 15000)", "")
     # the file's name goes in a header once the server says it reads one, never in the address a log keeps
-    assert "info.name_header ? {} : {name: file.name}" in page.text and "X-File-Name" in page.text
+    assert "info.name_header ? {} : {name: file.name}" in js.text and "X-File-Name" in js.text
     # the dashboard links the page only where uploads are taken
     index = open(os.path.join(os.path.dirname(api.__file__), "static", "index.html")).read()
     assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !m.uploads;" in index
@@ -1158,7 +1161,7 @@ def test_taking_a_note_back_says_its_packet_is_not_faxed(site):
     """The confirmation used to say a packet built from the note "stays with its item", and the appeal then faxed it with
     the note taken back. Such a packet is no longer faxed (test_notes_are_matched_by_patient_and_date_or_by_a_person,
     tests/test_fax.py), and the page says so."""
-    page = site.c.get("/upload").text
+    page = site.c.get("/static/upload.js").text          # the page's script asks before a note is taken back
     assert ("Take this note back? Its file is deleted from the server. A packet built from it is not faxed from now on. "
             "The next appeal builds it again from the note in its place.") in page
     assert "stays with its item" not in page
