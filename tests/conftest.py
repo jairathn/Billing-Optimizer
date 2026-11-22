@@ -8,3 +8,6 @@ tests/test_cloud.py's `site` fixture does for the deployed Vercel site it stands
 import os
 
 os.environ.setdefault("REMITWATCH_ALLOW_OPEN", "1")
+# the bulk appeal paths are on in tests (production leaves them off until EMA payments are read); tests of the default
+# turn it off themselves
+os.environ.setdefault("REMITWATCH_BULK_APPEAL", "1")

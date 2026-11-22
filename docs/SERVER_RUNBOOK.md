@@ -49,6 +49,8 @@ The same as on Vercel, wherever Vercel has them:
   `REMITWATCH_ALERT_BASELINE_DAYS`, `REMITWATCH_NOTE_MODEL`, `REMITWATCH_NOTE_SCRUB`, `REMITWATCH_NOTE_SEND_SCANS`,
   `REMITWATCH_EMA_CLOSES`, `REMITWATCH_STALE_APPEAL_DAYS`, `REMITWATCH_FRESHEN_HOURS`, `REMITWATCH_WEBHOOK_DEBOUNCE_SECONDS`,
   `REMITWATCH_NO_ANSWER_DAYS`
+- `REMITWATCH_BULK_APPEAL`: leave it unset. Faxing many appeals at once stays off until RemitWatch reads EMA's payments;
+  one appeal a person opens and checks still goes.
 
 Server only (optional): `REMITWATCH_BACKUP_KEEP` (daily copies kept, default 7; 0 turns them off), `REMITWATCH_BACKUP_DIR`
 (default `/data/backups`), `REMITWATCH_UPLOAD_DIR` (default `/data/uploads`: leave it unset).

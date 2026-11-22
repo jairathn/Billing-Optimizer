@@ -84,11 +84,11 @@ async function appealByFax(ids, opts){
       if(!shown()){ stopped = 'the window was closed'; break; }
       const id = ids[next++];
       let r;
-      try { r = await post('/api/appeals/send', {finding_id: id, stale_ok: !!opts.staleOk}); }
+      try { r = await post('/api/appeals/send', {finding_id: id, stale_ok: !!opts.staleOk, bulk: true}); }
       catch(e){ r = {finding_id: id, status: 'held', code: 'failed', reason: e.message}; if([401,403,429].includes(e.status)) stopped = e.message; }
       res.push(r);
       // a hold that every item would hit: say it once instead of running through the rest
-      if(r.code === 'practice' || r.code === 'no_fax' || r.code === 'stale') stopped = r.reason;
+      if(r.code === 'practice' || r.code === 'no_fax' || r.code === 'stale' || r.code === 'bulk_paused') stopped = r.reason;
       tally();
     }
   }
@@ -148,6 +148,7 @@ async function appealEverything(opts){
   let a;
   try { a = await api('/api/appeals/appealable' + (opts.payer ? '?payer=' + encodeURIComponent(opts.payer) : '')); }
   catch(e){ box.querySelector('.muted').textContent = 'Could not count them: ' + e.message; return; }
+  if(a.paused){ box.querySelector('.muted').textContent = a.paused; return; }
   const ready = a.items.filter(i => i.ready), all$ = a.items.reduce((s,i)=>s+i.cents,0), ready$ = ready.reduce((s,i)=>s+i.cents,0);
   const needNote = a.items.filter(i => i.kind !== 'rate').length;
   const warn = [];
