@@ -158,6 +158,7 @@ def assert_clean(files: dict[str, bytes], words=PLANTED) -> None:
     (f"EMA ERROR /Trizetto Data/uploads/{UNI} AR 2026.xlsx: bad", [UNI, "/Trizetto Data/uploads"], ["EMA ERROR", ".xlsx"]),
     ("ssn 123-45-6789 and member W123456789", ["123-45-6789", "W123456789"], []),
     ("first name: Zelphine; last name = Orbwick", ["Zelphine", "Orbwick"], []),
+    ("KeyError: 'Brindlewood'", ["Brindlewood"], ["KeyError"]),          # one capitalized word: the quote rule alone
 ])
 def test_free_text_loses_every_identifier(text, gone, kept):
     out = runlog.scrub_text(text)

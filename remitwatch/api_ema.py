@@ -351,6 +351,16 @@ def today(user: str = Depends(_user)):
         # last month's payments with no remittance, as the run judged them (ema_checks data health remits_missing)
         out["remits_missing"] = rec.get("remits_missing") if isinstance(rec, dict) and _reports_arrived(c) else None
         out["fresh"] = _freshness(c)
+        # reports that wait (a raw CSV this site cannot read, a second Production file in one run) or need a decision, with
+        # the catalog's own words for what to do
+        out["reports_waiting"], out["reports_held"] = [], 0
+        if _reports_arrived(c):
+            for rep, name, status, reason in c.execute("""SELECT report, source_name, status, status_reason FROM ema_report_files
+                                                          WHERE status IN ('waiting','reread','held') ORDER BY received_at DESC"""):
+                if status == "held":
+                    out["reports_held"] += 1
+                elif len(out["reports_waiting"]) < 10:
+                    out["reports_waiting"].append({"report": rep, "source_name": name, "status": status, "reason": reason})
         wiring = _meta(c, "ema:wiring", {}) or {}
         out["wiring_errors"] = len(wiring.get("errors") or []) if isinstance(wiring, dict) else 0
         has_outcome = "ema_outcome" in fcols
@@ -642,7 +652,7 @@ def policy_table(c: sqlite3.Connection) -> dict:
             pats[key] = {"pattern": key, "items": n, "cents": cents, "appealable": appealable or 0, "appealable_cents": appealable_cents or 0,
                          "auto": auto or 0, "at_posting": at_posting or 0, "rule_proven": proven or 0, "by_policy": by_policy or 0,
                          "open": open_n or 0, "upper_cents": upper or 0}
-    for key, d in {}.items():          # a pattern decided earlier that has no item now stays listed, so it can be changed back
+    for key, d in decided.items():          # a pattern decided earlier that has no item now stays listed, so it can be changed back
         if key not in pats and isinstance(d, dict):
             pats[key] = {"pattern": key, "items": 0, "cents": 0, "appealable": 0, "appealable_cents": 0, "auto": 0, "at_posting": 0,
                          "rule_proven": 0, "by_policy": 0, "open": 0, "upper_cents": 0}

@@ -389,12 +389,19 @@ for _k in ("carc", "rarc", "reason", "carc_group"):
     KEY_SHAPES[_k] = re.compile(r"(?:[A-Z]{2}-)?[A-Z]{0,2}\d{1,4}[A-Z]?|[A-Z]{2}")
 for _k in ("step", "event", "level", "rule", "rule_version", "kind", "signal", "category", "status", "work_state", "outcome",
            "host_mode", "mode", "trigger", "report", "via", "source", "remedy", "target", "state", "action", "strength",
-           "how", "type", "function", "detect_rules", "version", "python", "sqlite", "ema_outcome", "origin", "result",
-           "section", "where", "unit", "decision"):
+           "how", "type", "detect_rules", "version", "python", "sqlite", "ema_outcome", "origin", "result",
+           "section", "unit", "decision"):
     KEY_SHAPES[_k] = _IDENT
 for _k in ("payer_group", "payer", "payer_kind"):
     KEY_SHAPES[_k] = _PAYER
+# a stack frame's place in the code (error_info): a file of the repository or a library, a function, file:line in function
+KEY_SHAPES["file"] = re.compile(r"(?:(?:remitwatch|tests|api|scripts|site-packages)/)?[\w./-]{1,120}\.py")
+KEY_SHAPES["function"] = re.compile(r"<?[A-Za-z_][\w.]{0,80}>?")
+KEY_SHAPES["where"] = re.compile(r"[\w./-]{1,120}\.py:\d+ in <?[A-Za-z_][\w.]{0,80}>?")
 for _k in ("month", "service_month"):
+    KEY_SHAPES[_k] = re.compile(r"\d{4}-\d{2}")
+# an item's own dates, once cut to their month (coarse_dates, for a bundle): a month is kept, a day is not
+for _k in ("follow_up_on", "appeal_deadline", "legal_deadline", "service_date", "payment_date", "recovered_date", "ema_outcome_on"):
     KEY_SHAPES[_k] = re.compile(r"\d{4}-\d{2}")
 for _k in ("newest_payment", "newest_payment_date", "last_payment", "first_payment", "as_of", "asof", "last_file_ingested", "day",
            "window_start", "window_end", "horizon", "pruned_on"):

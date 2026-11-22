@@ -159,7 +159,10 @@ async function appealEverything(opts){
     ? `${pl(needNote, 'item')} need${needNote===1?'s':''} the visit note: the ones whose note was uploaded from EMA (the Upload page) go; the others are held until it is. The rate ones still go.`
     : `${pl(needNote, 'item')} need${needNote===1?'s':''} the visit note and EMA is not connected: those are held. The rate ones still go.`);
   if(needNote && !a.review) warn.push('Claude\'s review is off (ANTHROPIC_API_KEY): letters that rest on the note keep their blanks and are held.');
-  const body = `<div class="small" style="margin:6px 0"><b>${pl(a.items.length, 'item')}</b> · ${money(all$)}: every open item a letter settles (the visit note, the coding rules, or the payer's own rate), inside its filing window and not faxed yet.</div>
+  // what the list leaves out and why (paid, waiting, a credit, reprocessed): one click lists them, each opening its own panel
+  const lo = a.left_out || {};
+  const body = `<div class="small" style="margin:6px 0"><b>${pl(a.items.length, 'item')}</b> · ${money(all$)}: every open item to work now that a letter settles (the visit note, the coding rules, or the payer's own rate), inside its filing window and not faxed yet. Each is checked again against its own next step when it is sent.</div>
+    ${lo.n ? `<div class="small" style="margin:4px 0"><a href="#" id="fxLeft">${esc(lo.line)}</a><span class="muted">: never appealed in bulk.</span></div><div id="fxLeftList"></div>` : ''}
     ${warn.map(w=>`<div class="small sev-medium">${esc(w)}</div>`).join('')}
     <table class="small" style="margin-top:8px"><thead><tr><th>Payer</th><th class="num">Items</th><th>Appeal fax number</th></tr></thead><tbody>
     ${a.payers.map(p=>`<tr><td>${esc(p.payer_group||'(no payer)')}</td><td class="num">${num(p.n)} · ${money(p.cents)}</td>
@@ -178,6 +181,10 @@ async function appealEverything(opts){
     catch(e){ msg.textContent = e.message; msg.className = 'small sev-high'; }
   });
   box.querySelector('#fxCancel').onclick = () => $('#modal').classList.remove('open');
+  const lf = box.querySelector('#fxLeft');
+  if(lf) lf.onclick = e => { e.preventDefault(); const el = box.querySelector('#fxLeftList'); if(el.innerHTML){ el.innerHTML = ''; return; }
+    el.innerHTML = `<table class="small"><tbody>${(lo.items||[]).map(x=>`<tr class="row" tabindex="0" data-left="${esc(x.finding_id)}"><td>${esc(x.payer_group||'')}</td><td>${esc(x.words||x.reason)}</td><td class="num">${money2(x.cents)}</td></tr>`).join('')}</tbody></table>${lo.n > (lo.items||[]).length ? `<div class="small muted">The first ${num((lo.items||[]).length)} of ${num(lo.n)}.</div>` : ''}`;
+    el.querySelectorAll('[data-left]').forEach(tr => tr.onclick = () => { $('#modal').classList.remove('open'); openDetail(tr.dataset.left); }); };
   box.querySelector('#fxGo').onclick = () => {
     if(ready.length > 20 && !confirm(`Fax ${pl(ready.length, 'appeal')} now? Each takes about a minute; keep this page open.`)) return;
     appealByFax(ready.map(i => i.finding_id), {title: 'Appealing everything appealable', after: opts.after});

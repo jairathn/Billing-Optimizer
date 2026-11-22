@@ -103,10 +103,12 @@ def test_a_server_bundle_has_every_part_and_nothing_that_identifies_a_patient(se
     errs = json.loads(files["errors.json"])["errors"]
     e = next(x for x in errs if x["type"] == "ValueError")
     assert e["stack"] and e["where"].startswith("tests/test_diagnose.py:") and e["step"] == "ema_waiting" and e["contained"] is True
+    assert any(f["file"] == "tests/test_diagnose.py" and f["function"] == "server_world" for f in e["stack"])   # not masked as a path
     # the failing check's example item with its decision log, dates cut to the month
     ex = json.loads(files["examples/closures_have_proof.json"])
     item = ex["items"][0]
     assert item["finding_id"] == server_world["fid"] and item["decisions"][0]["rule"] == "paid_later:later_payment"
+    assert re.fullmatch(r"\d{4}-\d{2}", item["appeal_deadline"])                # the month of its deadline, not the day
     assert not re.search(r"\b\d{4}-\d{2}-\d{2}\b(?!T)", files["examples/closures_have_proof.json"].decode())
     # repairs, decisions, store layout, meta values only where safe, settings by name
     rep = json.loads(files["repairs.json"])
@@ -156,6 +158,8 @@ def test_a_part_another_unit_registers_is_scrubbed_and_a_failing_one_is_named(se
                                                       "finding_id": "0123456789abcdef01234567"})
     diagnose.register_part("archive", lambda conn: 1 / 0)
     files = members(diagnose.build_bundle(db_path=server_world["db"], days=2, known=PLANTED))
+    bundle = json.loads(files["bundle.json"])
+    assert bundle["scan"]["masked_on_second_pass"] == 0                         # the first pass did the scrubbing
     sc = json.loads(files["selfcheck.json"])
     assert sc["audit"]["gaps"] == 2 and sc["finding_id"] == "0123456789abcdef01234567" and "1960" not in files["selfcheck.json"].decode()
     assert json.loads(files["archive.json"])["error"]["type"] == "ZeroDivisionError"

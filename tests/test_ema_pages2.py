@@ -337,8 +337,14 @@ def test_the_counts_hold_with_a_list_filter_that_does_not_take_state_or_ema_yet(
     """Before the Worklist's filter takes state= and ema= (an older api.py), Today counts with the same rule itself
     (api_ema.condition, the SQL needs_C2.md gave unit C1): the same numbers."""
     import remitwatch.api as api
-    c = server.c
+    c, db = server.c, server.db
+    # one item waits on the payer and its follow-up day has come: Work now holds it, Waiting holds it too
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET work_state='waiting', follow_up_on=? WHERE signal='DENIED_MISSING_INFO'", (iso(1),))
+    conn.commit()
+    conn.close()
     want = c.get("/api/ema/today").json()
+    assert (want["states"]["todo"]["n"], want["states"]["followup_due"]["n"], want["states"]["waiting"]["n"]) == (2, 1, 1)
     real = api._filters
 
     def older(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra=None,
@@ -498,6 +504,24 @@ def test_the_data_tab_gets_the_runs_figures_in_one_call(server):
     assert set(d["cause_words"]) >= {"feed_gap", "after_feed", "no_era", "no_era_va", "separate_payee", "misnumbered", "other"}
 
 
+def test_a_report_that_waits_or_is_held_says_so_on_today_with_what_to_do(server):
+    c, db = server.c, server.db
+    assert (c.get("/api/ema/today").json()["reports_waiting"], c.get("/api/ema/today").json()["reports_held"]) == ([], 0)
+    conn = sqlite3.connect(db)
+    reason = "Too big to read on this site: upload it on the Upload page (it compresses it), or put a zipped copy in the same folder."
+    conn.execute("""INSERT INTO ema_report_files (file_id, report, source_name, via, status, status_reason, received_at)
+                    VALUES ('waitfile', 'production', '2026 Production.csv', 'dropbox', 'waiting', ?, ?)""", (reason, iso(1)))
+    conn.execute("""INSERT INTO ema_report_files (file_id, report, source_name, via, status, status_reason, received_at)
+                    VALUES ('heldfile', 'ar_report', 'AR.xlsx', 'upload', 'held', 'Fewer lines than the one on file.', ?)""", (iso(1),))
+    conn.commit()
+    conn.close()
+    t = c.get("/api/ema/today").json()
+    assert t["reports_held"] == 1
+    assert t["reports_waiting"] == [{"report": "production", "source_name": "2026 Production.csv", "status": "waiting", "reason": reason}]
+    d = c.get("/api/ema/data").json()
+    assert [f["status_reason"] for f in d["catalog"]["files"] if f["status"] == "waiting"] == [reason]
+
+
 def test_a_failed_run_step_reaches_the_data_tab(server):
     c, db = server.c, server.db
     conn = sqlite3.connect(db)
@@ -566,6 +590,8 @@ def test_the_checks_list_adds_up_to_the_summary_and_makes_the_request(server):
         assert (r["count"], r["cents"]) == (x["checks"], x["cents"]), cause
         total += r["cents"]
     assert total == rec["c1"]["unmatched_cents"]
+    every = c.get("/api/ema/checks").json()                   # the checks no 835 carries, and only those
+    assert every["count"] == sum(x["checks"] for x in rec["c1"]["causes"].values()) == 4 and every["cents"] == total
     r = c.get("/api/ema/checks", params={"cause": "no_era", "month": iso(5)[:7], "payer": "Testcare Health"}).json()
     assert r["rows"] == [{"check_number": "777000555", "first_posted": iso(5), "payer": "Testcare Health", "payer_group": "Testcare Health",
                           "cents": 8000, "cause": "no_era", "claims": 1}]
@@ -831,6 +857,7 @@ const click = async el => { if (!el) throw new Error('nothing to click'); await 
   const held = v.querySelector('[data-decide="apply"]');
   out.decide_button = held ? held.dataset.file : null;
   out.file_rows = v.querySelector('tbody#dtFiles') ? 'table' : (v.querySelector('div#dtFiles') ? 'list' : null);
+  out.file_items = v.querySelectorAll('div.check').length;
   out.ask_buttons = v.querySelectorAll('.dtAsk').length;
   v = new El('main'); calls.length = 0;
   await ctx.policyTab(v);
@@ -968,8 +995,21 @@ def test_at_phone_width_each_main_action_stays_on_screen(page_run):
     decision are in each row's own block, not off to the right of a table that scrolls."""
     out, ans = page_run({"__narrow": True})
     assert out["file_rows"] == "list" and out["ask_buttons"] == len(ans["/api/ema/data"]["resend"])
+    assert out["file_items"] == len(ans["/api/ema/data"]["catalog"]["files"]) == 3
     assert out["policy_cards"] == len(ans["/api/ema/policy"]["patterns"]) == 2
     assert [b[1] for b in out["policy_buttons"]] == ["pursue", "accept", "pursue", "accept"]
     assert "1 item</b>, $90" in out["items_html"] and out["items_open"]          # the items as a list, each one opens
     wide, _ = page_run()
     assert wide["file_rows"] == "table" and wide["policy_cards"] == 0
+
+
+def test_today_says_which_report_waits_and_what_to_do(page_run):
+    out, ans = page_run()
+    reason = "Too big to read on this site: upload it on the Upload page (it compresses it), or put a zipped copy in the same folder."
+    today = dict(ans["/api/ema/today"], reports_held=1,
+                 reports_waiting=[{"report": "production", "source_name": "x.csv", "status": "waiting", "reason": reason}],
+                 remits_missing={"key": "remits_missing", "ok": False, "title": "Payments without a remittance in 2026-10: $12,345"})
+    out, _ = page_run({"/api/ema/today": today})
+    h = out["today_html"]
+    assert "A Production report waits: " + reason.replace("'", "&#39;") in h
+    assert "1 EMA report waits for a decision</a>" in h and "Payments without a remittance in 2026-10: $12,345</a>" in h

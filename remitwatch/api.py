@@ -383,6 +383,19 @@ def _trizetto_here() -> bool:
     return trizetto.configured()
 
 
+_ROUTES_SEEN: dict[str, bool] = {}
+
+
+def _route_here(path: str) -> bool:
+    """Whether this build answers GET `path` (a route another unit's router adds, included at the end of this file):
+    the page asks for it only then, so a build without it shows no error. Worked out once per path."""
+    if path not in _ROUTES_SEEN:
+        from starlette.routing import Match
+        scope = {"type": "http", "path": path, "method": "GET", "root_path": "", "headers": [], "query_string": b""}
+        _ROUTES_SEEN[path] = any(getattr(r, "matches", None) and r.matches(scope)[0] == Match.FULL for r in app.router.routes)
+    return _ROUTES_SEEN[path]
+
+
 @app.get("/api/meta")
 def meta(_: str = Depends(require_auth)):
     out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server",
@@ -399,7 +412,9 @@ def meta(_: str = Depends(require_auth)):
                            "uploads": not runtime.serverless(),
                            # whether EMA's A/R and Production reports and the weekly exports can be uploaded (remitwatch.api_uploads):
                            # both hosts, in pieces (the page shows its Upload link when either is true)
-                           "report_uploads": True}
+                           "report_uploads": True,
+                           # whether this build has the run's decision log for an item ("Why did this change?" in its panel)
+                           "decisions": _route_here("/api/findings/probe/decisions")}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -1650,8 +1665,9 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
     ids = sorted(set(pcns) | set(ema_ids))      # with the submissions no payer has answered: their items are on the bill too
     if ids:
         qp = ",".join("?" * len(ids))
+        state_cols = ", f.work_state, f.follow_up_on, f.state_basis" if "work_state" in _columns() else ""
         findings = [dict(f, via="line") for f in rows(f"""SELECT f.finding_id, f.signal, f.category, f.status, f.shortfall_cents, f.appeal_deadline, f.procedure_code,
-                                                                f.claim_key, f.line_key, f.stale, c.payment_date remit_date, c.payer_name remit_payer
+                                                                f.claim_key, f.line_key, f.stale, c.payment_date remit_date, c.payer_name remit_payer{state_cols}
                                                          FROM findings f LEFT JOIN claims c ON c.claim_key = f.claim_key
                                                          WHERE f.patient_control_number IN ({qp}) ORDER BY f.payment_date, f.finding_id""", tuple(ids))]
     plb, takebacks, patterns = _bill_extras(pcns, {r["payer_claim_control_number"] for r in rem if r.get("payer_claim_control_number")},
@@ -2676,12 +2692,17 @@ def cron_cycle(request: Request, trigger: str = "cron", delay: int = 0, full: in
         # it to the daily run. Notifications start nothing in the meantime, so without this the file would wait a day.
         if hop < 2:
             out["continued"] = cloud.trigger_cycle(base_url(request), "retry", delay=90, hop=hop + 1)
-    elif client is not None and not out.get("skipped") and not out.get("more"):
-        try:        # files that landed while this cycle ran
-            if cloud.has_new_files(st, client):
+    elif not out.get("skipped") and not out.get("more"):
+        # files that landed while this cycle ran: new in the Dropbox folder, or an upload finished into the state folder's
+        # intake/ (its own cron call was skipped while this run held the lock), so it is read now, not by tomorrow's run
+        try:
+            from .intake import state_pending
+            late = "uploads" if state_pending(st) else ("files" if client is not None and cloud.has_new_files(st, client) else None)
+            if late:
                 out["continued"] = cloud.trigger_cycle(base_url(request), "continue", delay=30, hop=hop + 1)
-        except Exception:
-            pass
+                out["continued_for"] = late
+        except Exception as exc:        # noqa: BLE001  (the daily run reads them; the answer says why none was started)
+            out["continue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     return out
 
 
@@ -4981,17 +5002,7 @@ def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends
 from . import api_uploads  # noqa: E402  (unit A2: large files in pieces and the EMA export checklist, remitwatch/api_uploads.py)
 app.include_router(api_uploads.router)
 
-
-def _unit_here(name: str) -> bool:
-    """Whether a page unit's module is in this build (it is being written while this one is). Only its absence is passed
-    over: an error inside the module, or in one it reads, is raised as it is."""
-    from importlib.util import find_spec
-    return find_spec(f"{__package__}.{name}") is not None
-
-
-if _unit_here("api_ema"):
-    from . import api_ema  # noqa: E402  (unit C2: Today's EMA figures, the Data tab, the owner's write-off policy table)
-    app.include_router(api_ema.router)
-if _unit_here("api_results"):
-    from . import api_results  # noqa: E402  (unit R: the Results tab, the scoreboard Today shows, the daily spot checks)
-    app.include_router(api_results.router)
+from . import api_ema  # noqa: E402  (unit C2: Today's EMA figures, the Data tab, the owner's write-off policy table)
+app.include_router(api_ema.router)
+from . import api_results  # noqa: E402  (unit R: the Results tab, the scoreboard Today shows, the daily spot checks)
+app.include_router(api_results.router)

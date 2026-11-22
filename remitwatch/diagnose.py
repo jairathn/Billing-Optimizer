@@ -174,7 +174,7 @@ def _examples(conn: sqlite3.Connection, ids: list[str]) -> list[dict]:
         row = cur.execute(f"SELECT {', '.join(cols)} FROM findings WHERE finding_id=?", (fid,)).fetchone() if cols else None
         item = dict(zip(cols, row)) if row else {"finding_id": fid, "missing": True}
         item["decisions"] = runlog.decisions_for(conn, fid, limit=30)["items"]
-        out.append(runlog.coarse_dates(runlog.scrub(item)))
+        out.append(runlog.scrub(runlog.coarse_dates(item)))         # days become months first: a month survives the scrub
     return out
 
 

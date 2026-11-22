@@ -548,6 +548,19 @@ def record_did(conn: sqlite3.Connection, did: dict) -> None:
     meta_set(conn, K_REGULATE, reg)
 
 
+def archive_budget_state(plan: dict) -> dict:
+    """What unit E's archive.run takes as `budget_state`: the last run's memory figures, with the share raised to the 80%
+    mark when this run's plan says to archive at the tighter end of the horizon (archive.effective_horizon then takes six
+    months more, never below its floor or the windows open items need), and the measured share otherwise (so a calm run
+    lets the horizon relax)."""
+    p = (plan or {}).get("pressure") or {}
+    share = p.get("memory")
+    if (plan or {}).get("archive_tight"):
+        share = max(float(share or 0), PRESSURE_SHARE)
+    return {"peak_mb": p.get("peak_mb"), "budget_mb": SERVERLESS_MEMORY_BUDGET_MB if p.get("peak_mb") else None, "share": share,
+            "level": (plan or {}).get("level", 0), "why": p.get("text")}
+
+
 def regulation(conn: sqlite3.Connection) -> dict:
     """The regulation state for the panel and the alert."""
     reg = meta_get(conn, K_REGULATE, {}) or {}
@@ -1118,8 +1131,9 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
         if r.get("claim_key") and (r["claim_key"], r.get("procedure_code")) in claim_codes:
             routes["same_claim_code"] += 1
             continue
-        if r.get("patient_control_number") and (bill_of(r["patient_control_number"]), r.get("service_date"), r.get("procedure_code")) in service:
-            routes["same_service"] += 1
+        if not r.get("line_key") and r.get("patient_control_number") and \
+                (bill_of(r["patient_control_number"]), r.get("service_date"), r.get("procedure_code")) in service:
+            routes["same_service"] += 1         # a claim-level item (no remittance line) carried on by an item for its service
             continue
         if fid in folded:
             routes["folded"] += 1
@@ -2340,14 +2354,8 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
     gaps: list[dict] = []
     lines_needing: list[dict] = []
     notes: list[str] = []
-    for fn in (_cov_denials, _cov_auto_writeoffs, _cov_unanswered, _cov_unposted, _cov_secondary, _cov_short_pay):
-        try:
-            got, note = fn(conn, t, idx)
-        except sqlite3.Error as exc:
-            got, note = [], f"{fn.__name__[5:]}: could not run ({type(exc).__name__})"
-        lines_needing.extend(got)
-        if note:
-            notes.append(note)
+    got, notes = _cov_all(conn, t, idx)
+    lines_needing.extend(got)
     seen: set[str] = set()
     uniq = []
     for ln in sorted(lines_needing, key=lambda x: CATEGORY_ORDER.index(x["category"]) if x["category"] in CATEGORY_ORDER else 99):
@@ -2434,65 +2442,6 @@ def _by(rows: list[dict], key: str) -> list[dict]:
     return [{key: k, "n": v[0], "cents": v[1]} for k, v in sorted(agg.items(), key=lambda kv: -kv[1][1])]
 
 
-def _cov_denials(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, str | None]:
-    """Gate-1 rule set, denials: a 2025+ line its primary payer denied (nothing paid, a denial reason) that no later
-    answer paid or moved to the patient, still inside the payer's window from the denial, worth the payer's usual amount
-    for the code."""
-    if not _has_table(conn, "lines"):
-        return [], "denials: no remittances"
-    bill = _bill_sql("l.patient_control_number")
-    conn.execute("DROP TABLE IF EXISTS temp.sc_den")
-    conn.execute("""CREATE TEMP TABLE sc_den AS SELECT a.line_key AS line_key, MAX(a.reason_code) AS carc
-                    FROM adjustments a WHERE a.line_key IS NOT NULL AND a.group_code IN ('CO','OA','PI') AND a.amount_cents > 0
-                      AND a.reason_code NOT IN (""" + ",".join(f"'{c}'" for c in sorted(ROUTINE_CARCS | {"209", "246", "24"})) + """)
-                    GROUP BY a.line_key""")
-    conn.execute("CREATE INDEX temp.ix_sc_den ON sc_den(line_key)")
-    conn.execute("DROP TABLE IF EXISTS temp.sc_ans2")
-    conn.execute(f"""CREATE TEMP TABLE sc_ans2 AS
-                     SELECT {bill} AS bill, l.service_date AS svc, COALESCE(l.original_procedure_code, l.procedure_code) AS code,
-                            l.payment_date AS paid_on, COALESCE(l.paid_cents, 0) AS paid, l.line_key AS line_key
-                     FROM lines l JOIN transactions t ON t.transaction_key = l.transaction_key
-                     WHERE COALESCE(t.superseded, 0) = 0 AND l.service_date >= ?""", (SERVICE_FROM,))
-    conn.execute("CREATE INDEX temp.ix_sc_ans2 ON sc_ans2(bill, svc, code)")
-    conn.execute("DROP TABLE IF EXISTS temp.sc_pr")
-    conn.execute("""CREATE TEMP TABLE sc_pr AS SELECT line_key, SUM(amount_cents) AS pr FROM adjustments
-                    WHERE line_key IS NOT NULL AND group_code = 'PR' AND reason_code IN ('1','2','3') GROUP BY line_key""")
-    conn.execute("CREATE INDEX temp.ix_sc_pr ON sc_pr(line_key)")
-    usual = _usual_rates(conn)
-    out = []
-    for lk, pcn, b, svc, code, paid_on, name, cfi, carc, charge in conn.execute(
-            f"""SELECT l.line_key, l.patient_control_number, {bill}, l.service_date, COALESCE(l.original_procedure_code, l.procedure_code),
-                       l.payment_date, l.payer_name, c.claim_filing_indicator, d.carc, COALESCE(l.charge_cents, 0)
-                FROM lines l JOIN sc_den d ON d.line_key = l.line_key JOIN claims c ON c.claim_key = l.claim_key
-                JOIN transactions t ON t.transaction_key = l.transaction_key
-                WHERE COALESCE(t.superseded, 0) = 0 AND l.claim_status_code IN ('1','19') AND COALESCE(l.paid_cents, 0) = 0
-                  AND COALESCE(l.charge_cents, 0) > 0 AND l.service_date >= ?""", (SERVICE_FROM,)).fetchall():
-        if is_facility(pcn):
-            continue
-        later = conn.execute("""SELECT s.paid_on, s.paid, COALESCE(p.pr, 0) FROM sc_ans2 s LEFT JOIN sc_pr p ON p.line_key = s.line_key
-                                WHERE s.bill = ? AND s.svc = ? AND s.code = ? AND s.paid_on >= ? AND s.line_key <> ?""",
-                             (b, svc, code, paid_on, lk)).fetchall()
-        grp, kind = _group_kind(name, cfi)
-        exp = usual.get((grp, code)) or int(charge * 0.4)
-        paid_after = sum(p for d2, p, _pr in later if d2 > paid_on)
-        moved = sum(pr for _d2, _p, pr in later)
-        if paid_after >= SETTLED_SHARE * exp or moved >= 0.8 * exp:
-            continue
-        appeal_days, _filing = _windows(grp, kind)
-        deadline = _add(paid_on, appeal_days)
-        if not deadline or deadline < today:
-            continue
-        cents = max(0, min(int(charge), int(exp) - max(0, paid_after)))
-        if cents <= 0:
-            continue
-        held = _covered(idx["service"].get((bill_of(pcn), str(svc)[:10], code)))
-        out.append({"key": f"835:{lk}", "category": "denial_in_window", "reason": str(carc), "payer_group": grp,
-                    "month": str(svc)[:7], "cents": cents, "deadline": deadline, "held": held})
-    for tb in ("sc_den", "sc_ans2", "sc_pr"):
-        conn.execute(f"DROP TABLE IF EXISTS temp.{tb}")
-    return out, None
-
-
 def _usual_rates(conn: sqlite3.Connection, since: str | None = "default") -> dict:
     """What each payer group usually allows for a code: the median allowed amount of its paid one-unit lines (from
     `since`, by default the year before the gates' population), with at least 3 lines. {(payer group, code): cents}."""
@@ -2519,137 +2468,334 @@ def _usual_rates(conn: sqlite3.Connection, since: str | None = "default") -> dic
     return out
 
 
-def _cov_auto_writeoffs(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, str | None]:
-    """Gate-1 rule set, EMA's automatic write-offs: a 2025+ EMA line whose denial EMA wrote off on the day the payer's
-    answer posted, with no insurance money after it, still inside the payer's window from that day."""
-    if not _has_table(conn, "ema_lines"):
-        return [], "automatic write-offs: no EMA lines"
+EXCLUDED_DENIAL_CARCS = frozenset({"209", "246", "24", "29"})   # Medicaid cost share, reporting codes, capitation, timely filing
+
+
+class _Facts:
+    """What the self-audit reads once, by service (bill, date of service, code), from the raw tables: EMA's lines (the
+    store's lean summaries), the 835 answers of 2025+ service, each payer group's pay share and usual amount per code."""
+
+    def __init__(self, conn: sqlite3.Connection, today: str):
+        self.conn, self.today = conn, today
+        self.ema: dict[tuple, dict] = {}
+        # an EMA claim number's bill: from the map (835 claims) and from the A/R's claim ids (claims no 835 answered)
+        self.bill_of_link: dict[int, str] = {}
+        for table in ("ema_claim_links", "ema_link_map"):
+            if _has_table(conn, table):
+                for link, bill in conn.execute(f"SELECT link, bill FROM {table} WHERE link IS NOT NULL AND bill IS NOT NULL"):
+                    self.bill_of_link[int(link)] = bill
+        if _has_table(conn, "ema_lines"):
+            for (bill, link, svc, cpt, grp, kind, second, charges, ins_charges, ins, bal, nonroutine, den_first, first_ans,
+                 last_paid, status_class, fac, answers, first_charge) in conn.execute(
+                    """SELECT bill, link, svc, cpt, payer_group, payer_kind, secondary_payer, COALESCE(charges, 0),
+                              COALESCE(ins_charges, 0), COALESCE(ins_paid, 0), COALESCE(balance, 0), COALESCE(nonroutine, 0),
+                              denial_first_posted, first_ins_posting, last_ins_paid, status_class, COALESCE(facility, 0),
+                              COALESCE(ins_answer_rows, 0), first_charge_posted
+                       FROM ema_lines WHERE svc >= ?""", (SERVICE_FROM,)):
+                key = (bill or self.bill_of_link.get(int(link)) or f"link:{link}", str(svc)[:10], cpt or "")
+                e = self.ema.get(key)
+                if e is None:
+                    e = self.ema[key] = {"links": [], "group": grp, "kind": kind, "second": second, "charges": 0, "ins_charges": 0,
+                                         "ins_paid": 0, "balance": 0, "nonroutine": 0, "den_first": None, "first_ans": None,
+                                         "last_paid": None, "status": set(), "facility": False, "answers": 0, "first_charge": None}
+                e["links"].append(link)
+                for k, v in (("charges", charges), ("ins_charges", ins_charges), ("ins_paid", ins), ("balance", bal),
+                             ("nonroutine", nonroutine), ("answers", answers)):
+                    e[k] += v or 0
+                e["den_first"] = min(x for x in (e["den_first"], den_first) if x) if (e["den_first"] or den_first) else None
+                e["first_ans"] = min(x for x in (e["first_ans"], first_ans) if x) if (e["first_ans"] or first_ans) else None
+                e["last_paid"] = max(x for x in (e["last_paid"], last_paid) if x) if (e["last_paid"] or last_paid) else None
+                e["first_charge"] = min(x for x in (e["first_charge"], first_charge) if x) if (e["first_charge"] or first_charge) else None
+                e["status"].add(status_class)
+                e["facility"] = e["facility"] or bool(fac)
+        self.reasons: dict[tuple, set] = defaultdict(set)
+        if _has_table(conn, "ema_line_reasons") and _has_table(conn, "ema_lines"):
+            for bill, link, svc, cpt, code, cls in conn.execute(
+                    """SELECT l.bill, r.link, r.svc, r.cpt, r.code, r.reason_class FROM ema_line_reasons r
+                       JOIN ema_lines l ON l.link = r.link AND l.svc = r.svc AND l.cpt = r.cpt
+                       WHERE r.svc >= ? AND r.reason_class NOT IN ('routine', 'patient', 'none')""", (SERVICE_FROM,)):
+                self.reasons[(bill or self.bill_of_link.get(int(link)) or f"link:{link}", str(svc)[:10], cpt or "")].add((str(code), cls))
+        self.has_835 = _has_table(conn, "lines") and _has_table(conn, "claims")
+        bill = _bill_sql("l.patient_control_number")
+        if self.has_835:
+            conn.execute("DROP TABLE IF EXISTS temp.sc_svc")
+            conn.execute(f"""CREATE TEMP TABLE sc_svc AS
+                             SELECT {bill} AS bill, l.service_date AS svc, COALESCE(l.original_procedure_code, l.procedure_code) AS code,
+                                    l.payment_date AS paid_on, COALESCE(l.paid_cents, 0) AS paid, l.claim_status_code AS st,
+                                    c.payer_name AS payer, c.claim_filing_indicator AS cfi, l.line_key AS line_key,
+                                    l.patient_control_number AS pcn, COALESCE(l.charge_cents, 0) AS charge
+                             FROM lines l JOIN claims c ON c.claim_key = l.claim_key
+                             JOIN transactions t ON t.transaction_key = l.transaction_key
+                             WHERE COALESCE(t.superseded, 0) = 0 AND l.service_date >= ?""", (SERVICE_FROM,))
+            conn.execute("CREATE INDEX temp.ix_sc_svc ON sc_svc(bill, svc, code)")
+            conn.execute("DROP TABLE IF EXISTS temp.sc_pr")
+            conn.execute("""CREATE TEMP TABLE sc_pr AS SELECT a.line_key AS line_key, SUM(a.amount_cents) AS pr FROM adjustments a
+                            WHERE a.line_key IS NOT NULL AND a.group_code = 'PR' AND a.reason_code IN ('1','2','3') GROUP BY a.line_key""")
+            conn.execute("CREATE INDEX temp.ix_sc_pr ON sc_pr(line_key)")
+        self.usual = _usual_rates(conn) if self.has_835 else {}
+        # each payer group's pay share for a code over its answered 2025+ primary lines (the answer key's policy rule R9)
+        self.share: dict[tuple, tuple] = {}
+        if self.has_835:
+            agg: dict[tuple, list] = defaultdict(lambda: [0, 0])
+            for payer, cfi, code, n, paid_n in conn.execute(
+                    """SELECT payer, cfi, code, COUNT(*), SUM(paid > 0) FROM temp.sc_svc WHERE st IN ('1','19')
+                       GROUP BY payer, cfi, code"""):
+                a = agg[(_group_kind(payer, cfi)[0], code)]
+                a[0] += n
+                a[1] += paid_n or 0
+            self.share = {k: (v[0], v[1]) for k, v in agg.items()}
+
+    def policy(self, group: str, code: str) -> bool:
+        n, paid = self.share.get((group, code), (0, 0))
+        return n >= 20 and paid <= 0.05 * n
+
+    def answers(self, key: tuple) -> list[tuple]:
+        if not self.has_835:
+            return []
+        return self.conn.execute("""SELECT s.paid_on, s.paid, s.st, s.payer, s.cfi, COALESCE(p.pr, 0), s.line_key FROM temp.sc_svc s
+                                    LEFT JOIN temp.sc_pr p ON p.line_key = s.line_key
+                                    WHERE s.bill = ? AND s.svc = ? AND s.code = ?""", key).fetchall()
+
+    def close(self) -> None:
+        for tb in ("sc_svc", "sc_pr"):
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{tb}")
+
+
+def _cov_all(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, list[str]]:
+    """Gate-1 rule set over every 2025+ service (bill, date of service, code), one category per service (most actionable
+    first, the answer key's R20): an 835 payment EMA never posted, an automatic write-off still appealable, a denial in
+    window, a short payment, a second payer never billed, an unanswered claim."""
+    facts = _Facts(conn, today)
+    notes: list[str] = []
+    found: list[dict] = []
+    try:
+        for fn in (_cov_denials, _cov_auto_writeoffs, _cov_unanswered, _cov_secondary, _cov_short_pay):
+            try:
+                found.extend(fn(facts, idx))
+            except sqlite3.Error as exc:
+                _caught(exc, fn.__name__)
+                notes.append(f"{fn.__name__[5:]}: could not run ({type(exc).__name__})")
+        try:
+            found.extend(_cov_unposted(facts, idx))
+        except sqlite3.Error as exc:
+            _caught(exc, "unposted")
+            notes.append(f"unposted: could not run ({type(exc).__name__})")
+    finally:
+        facts.close()
+    if not facts.ema:
+        notes.append("EMA's lines are not on file: automatic write-offs, unanswered claims and second payers are not checked")
+    return found, notes
+
+
+def _held(idx: dict, key: tuple) -> str | None:
+    return _covered(idx["service"].get(key))
+
+
+def _cov_denials(facts: _Facts, idx: dict) -> list[dict]:
+    """Denials (answer key R2, R3, R9, R10, R19, simplified): a 2025+ service whose primary payer's newest answer denies it
+    (nothing paid, a denial reason other than cost share, reporting, capitation or timely filing), with no money for it
+    since or before from any payer (835 or EMA) reaching half its usual amount, not moved to the patient, not a code the
+    payer never pays (5% of 20 answers), inside the payer's window from that answer, worth the usual amount less what
+    came in."""
+    if not facts.has_835:
+        return []
+    conn = facts.conn
+    excluded = ",".join(f"'{c}'" for c in sorted(ROUTINE_CARCS | EXCLUDED_DENIAL_CARCS))
+    conn.execute("DROP TABLE IF EXISTS temp.sc_den")
+    conn.execute(f"""CREATE TEMP TABLE sc_den AS SELECT a.line_key AS line_key, MAX(a.reason_code) AS carc
+                     FROM adjustments a WHERE a.line_key IS NOT NULL AND a.group_code IN ('CO','OA','PI') AND a.amount_cents > 0
+                       AND a.reason_code NOT IN ({excluded}) GROUP BY a.line_key""")
+    conn.execute("CREATE INDEX temp.ix_sc_den ON sc_den(line_key)")
+    latest: dict[tuple, tuple] = {}
+    for b, svc, code, paid_on, payer, cfi, carc, charge, pcn in conn.execute(
+            """SELECT s.bill, s.svc, s.code, s.paid_on, s.payer, s.cfi, d.carc, s.charge, s.pcn FROM temp.sc_svc s
+               JOIN temp.sc_den d ON d.line_key = s.line_key WHERE s.st IN ('1','19') AND s.paid = 0 AND s.charge > 0"""):
+        key = (b, str(svc)[:10], code)
+        if is_facility(pcn):
+            continue
+        if key not in latest or str(paid_on) > str(latest[key][0]):
+            latest[key] = (paid_on, payer, cfi, carc, charge)
+    conn.execute("DROP TABLE IF EXISTS temp.sc_den")
     out = []
-    for link, svc, cpt, grp, kind, nonroutine, ins, denial_on, first_ans, last_paid, charges, fac in conn.execute(
-            """SELECT link, svc, cpt, payer_group, payer_kind, COALESCE(nonroutine, 0), COALESCE(ins_paid, 0), denial_first_posted,
-                      first_ins_posting, last_ins_paid, COALESCE(charges, 0), COALESCE(facility, 0)
-               FROM ema_lines WHERE svc >= ? AND COALESCE(nonroutine, 0) > 0 AND denial_first_posted IS NOT NULL""", (SERVICE_FROM,)):
-        if fac or (last_paid and denial_on and last_paid > denial_on):
+    for key, (paid_on, payer, cfi, carc, charge) in latest.items():
+        grp, kind = _group_kind(payer, cfi)
+        if facts.policy(grp, key[2]):
             continue
-        if ins > 0:
-            continue                    # something was paid: a short payment, not a write-off of the whole line
-        if not first_ans or denial_on != first_ans:
-            continue                    # written off on a later day: a person's decision (not EMA's posting rule)
+        exp = facts.usual.get((grp, key[2])) or int(charge * 0.4)
+        ans = facts.answers(key)
+        r835 = sum(p for _d, p, st, _py, _c, _pr, _lk in ans if st in ("1", "2", "3", "19", "20", "21", "22"))
+        moved = sum(pr for d2, _p, _st, _py, _c, pr, _lk in ans if str(d2) > str(paid_on))
+        e = facts.ema.get(key) or {}
+        got = max(r835, int(e.get("ins_paid") or 0))
+        if got >= SETTLED_SHARE * exp or moved >= 0.8 * exp or "paid" in (e.get("status") or set()):
+            continue
         appeal_days, _f = _windows(grp, kind)
-        deadline = _add(denial_on, appeal_days)
-        if not deadline or deadline < today:
+        deadline = _add(paid_on, appeal_days)
+        if not deadline or deadline < facts.today:
             continue
-        cents = min(int(nonroutine), int(charges)) if charges > 0 else int(nonroutine)
-        held = _covered(idx["link"].get((int(link), str(svc)[:10], cpt)))
-        out.append({"key": f"ema:{link}|{svc}|{cpt}", "category": "auto_written_off_appealable", "reason": "posting_rule",
-                    "payer_group": grp, "month": str(svc)[:7], "cents": cents, "deadline": deadline, "held": held})
-    return out, None
+        cents = max(0, min(int(charge), int(exp) - max(0, got)))
+        if cents <= 0:
+            continue
+        out.append({"key": "|".join(key), "category": "denial_in_window", "reason": str(carc), "payer_group": grp,
+                    "month": key[1][:7], "cents": cents, "deadline": deadline, "held": _held(idx, key)})
+    return out
 
 
-def _cov_unanswered(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, str | None]:
-    """Gate-1 rule set, unanswered claims: a 2025+ EMA line billed to insurance with no insurance answer posted, older
-    than the payer's answer time (at least 30 days), still inside its first-filing limit (plus the payer's dispute window
-    for a claim sent in time, as the answer key allows)."""
-    if not _has_table(conn, "ema_lines"):
-        return [], "unanswered claims: no EMA lines"
-    turn = meta_get(conn, "ema:turnaround", {}) or {}
+def _cov_auto_writeoffs(facts: _Facts, idx: dict) -> list[dict]:
+    """EMA's automatic write-offs (answer key R4, R9, simplified): a 2025+ EMA line whose denial EMA wrote off on the day
+    the payer's first answer posted (its posting rule, not a person), with no insurance money reaching half its usual
+    amount, the reasons not only cost share, reporting, capitation or timely filing, not a code the payer never pays, inside
+    the payer's window from that day, worth what was written off."""
+    out = []
+    for key, e in facts.ema.items():
+        if e["facility"] or e["nonroutine"] <= 0 or not e["den_first"] or e["den_first"] != e["first_ans"]:
+            continue
+        codes = {c for c, _cls in facts.reasons.get(key, set())}
+        if codes and codes <= EXCLUDED_DENIAL_CARCS:
+            continue
+        if any(cls == "timely" for _c, cls in facts.reasons.get(key, set())) and len(codes) <= 1:
+            continue
+        grp, kind = e["group"], e["kind"]
+        if facts.policy(grp, key[2]):
+            continue
+        exp = facts.usual.get((grp, key[2])) or e["nonroutine"]
+        if e["ins_paid"] >= SETTLED_SHARE * exp or (e["last_paid"] and e["last_paid"] > e["den_first"]):
+            continue
+        appeal_days, _f = _windows(grp, kind)
+        deadline = _add(e["den_first"], appeal_days)
+        if not deadline or deadline < facts.today:
+            continue
+        cents = min(int(e["nonroutine"]), int(e["charges"])) if e["charges"] > 0 else int(e["nonroutine"])
+        if cents <= 0:
+            continue
+        out.append({"key": "|".join(key), "category": "auto_written_off_appealable", "reason": ",".join(sorted(codes)) or "posting_rule",
+                    "payer_group": grp, "month": key[1][:7], "cents": cents, "deadline": deadline, "held": _held(idx, key)})
+    return out
+
+
+def _cov_unanswered(facts: _Facts, idx: dict) -> list[dict]:
+    """Unanswered claims (answer key R7, R11, simplified): a 2025+ EMA line billed to insurance with no answer in EMA or in
+    the 835 archive, older than the payer's answer time (at least 30 days), still inside the first-filing limit plus the
+    payer's window for a claim sent in time."""
+    turn = meta_get(facts.conn, "ema:turnaround", {}) or {}
     groups = (turn.get("groups") or {}) if isinstance(turn, dict) else {}
     out = []
-    for link, svc, cpt, grp, kind, charges, ins_charges, first_charge, answers, bal, fac, status in conn.execute(
-            """SELECT link, svc, cpt, payer_group, payer_kind, COALESCE(charges, 0), COALESCE(ins_charges, 0), first_charge_posted,
-                      COALESCE(ins_answer_rows, 0), COALESCE(balance, 0), COALESCE(facility, 0), status_class
-               FROM ema_lines WHERE svc >= ? AND COALESCE(ins_answer_rows, 0) = 0 AND COALESCE(ins_charges, 0) > 0""", (SERVICE_FROM,)):
-        if fac or bal <= 0 or not first_charge:
+    for key, e in facts.ema.items():
+        if e["facility"] or e["answers"] > 0 or e["ins_charges"] <= 0 or e["balance"] <= 0 or not e["first_charge"]:
             continue
-        g = groups.get(grp) or {}
+        if e["status"] & {"paid", "settled", "void", "gave_up"}:
+            continue
+        if facts.answers(key):
+            continue                    # the payer answered it in an 835: not unanswered
+        g = groups.get(e["group"]) or {}
         wait = max(30, int(g.get("svc_p95") or g.get("p95") or 45)) if isinstance(g, dict) else 45
-        if (_days(first_charge, today) or 0) < wait:
+        if (_days(e["first_charge"], facts.today) or 0) < wait:
             continue
-        appeal_days, filing_days = _windows(grp, kind)
-        deadline = _add(svc, filing_days + appeal_days)
-        if not deadline or deadline < today:
+        appeal_days, filing_days = _windows(e["group"], e["kind"])
+        deadline = _add(key[1], filing_days + appeal_days)
+        if not deadline or deadline < facts.today:
             continue
-        cents = min(int(bal), int(charges)) if charges > 0 else int(bal)
-        entries = list(idx["link"].get((int(link), str(svc)[:10], cpt)) or [])
-        held = _covered(entries)
-        out.append({"key": f"ema:{link}|{svc}|{cpt}", "category": "unanswered_in_filing_limit", "reason": str(status or "no_answer"),
-                    "payer_group": grp, "month": str(svc)[:7], "cents": cents, "deadline": deadline, "held": held})
-    return out, None
+        cents = min(int(e["balance"]), int(e["charges"])) if e["charges"] > 0 else int(e["balance"])
+        held = _held(idx, key) or _covered(idx["bill"].get(key[0]))
+        out.append({"key": "|".join(key), "category": "unanswered_in_filing_limit", "reason": ",".join(sorted(x for x in e["status"] if x)),
+                    "payer_group": e["group"], "month": key[1][:7], "cents": cents, "deadline": deadline, "held": held})
+    return out
 
 
-def _cov_unposted(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, str | None]:
-    """Gate-1 rule set, 835 money never posted: a funded 2025+ remittance (not a $0 or informational one) older than three
-    weeks whose check number EMA never posted for that payer, by its claims."""
+def _cov_unposted(facts: _Facts, idx: dict) -> list[dict]:
+    """835 money never posted (answer key R12, simplified to whole checks): a funded 2025+ remittance (not $0, not
+    informational) at least three weeks older than the newest EMA posting, inside the span EMA's Production covers, that
+    no EMA check was matched to (ema_checks.trace_key). Partial postings of a check are not seen here."""
+    conn = facts.conn
     if not (_has_table(conn, "transactions") and _has_table(conn, "ema_checks")):
-        return [], "unposted 835 payments: no EMA checks"
-    if not conn.execute("SELECT 1 FROM ema_checks LIMIT 1").fetchone():
-        return [], "unposted 835 payments: no EMA checks"
-    posted = {_digits(c) for (c,) in conn.execute("SELECT check_no FROM ema_checks")}
-    newest_prod = conn.execute("SELECT MAX(last_posted) FROM ema_checks").fetchone()[0] or today
-    cut = _add(min(today, newest_prod), -21)
-    out = []
+        return []
+    lo, hi = conn.execute("SELECT MIN(first_posted), MAX(last_posted) FROM ema_checks").fetchone()
+    if not lo or not hi:
+        return []
+    matched = {tk for (tk,) in conn.execute("SELECT DISTINCT trace_key FROM ema_checks WHERE trace_key IS NOT NULL")}
+    cut = _add(min(facts.today, hi), -21)
     unposted = []
-    for tk, trace, paid_on, cents, method, payer in conn.execute(
-            """SELECT transaction_key, trace_number, payment_date, COALESCE(payment_amount_cents, 0), payment_method, payer_name
-               FROM transactions WHERE COALESCE(superseded, 0) = 0 AND payment_date >= ? AND payment_date <= ?
-                 AND COALESCE(payment_amount_cents, 0) > 0 AND COALESCE(payment_method, '') <> 'NON'""", (SERVICE_FROM, cut)):
-        if _digits(trace) not in posted:
+    for tk, paid_on, cents, payer in conn.execute(
+            """SELECT transaction_key, payment_date, COALESCE(payment_amount_cents, 0), payer_name FROM transactions
+               WHERE COALESCE(superseded, 0) = 0 AND payment_date >= ? AND payment_date <= ? AND payment_date >= ?
+                 AND COALESCE(payment_amount_cents, 0) > 0 AND COALESCE(payment_method, '') <> 'NON'""", (SERVICE_FROM, cut, lo)):
+        if tk not in matched:
             unposted.append((tk, paid_on, cents, payer))
-    held_of: dict[str, str | None] = {}
-    if unposted:
-        conn.execute("DROP TABLE IF EXISTS temp.sc_tk")
-        conn.execute("CREATE TEMP TABLE sc_tk (tk TEXT PRIMARY KEY)")
-        conn.executemany("INSERT OR IGNORE INTO temp.sc_tk VALUES (?)", [(u[0],) for u in unposted])
-        for tk, pcn, svc, code in conn.execute(
-                """SELECT c.transaction_key, c.patient_control_number, l.service_date, COALESCE(l.original_procedure_code, l.procedure_code)
-                   FROM temp.sc_tk k JOIN claims c ON c.transaction_key = k.tk JOIN lines l ON l.claim_key = c.claim_key
-                   WHERE COALESCE(l.paid_cents, 0) > 0"""):
-            h = _covered(idx["service"].get((bill_of(pcn), str(svc)[:10], code)))
-            if h == "listed" or (h and not held_of.get(tk)):
-                held_of[tk] = h
-        conn.execute("DROP TABLE IF EXISTS temp.sc_tk")
-    for tk, paid_on, cents, payer in unposted:
-        out.append({"key": f"check:{tk}", "category": "era_payment_not_posted", "reason": "check_not_posted",
-                    "payer_group": _group_kind(payer)[0], "month": str(paid_on)[:7], "cents": int(cents), "deadline": None,
-                    "held": held_of.get(tk)})
-    return out, None
-
-
-def _cov_secondary(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, str | None]:
-    """Gate-1 rule set, second payer never billed: a 2025+ EMA line whose primary paid more than 30 days ago, with a second
-    payer on file (not Medicaid), no money or answer from any other payer, and a balance left on it."""
-    if not (_has_table(conn, "ema_lines") and _has_table(conn, "ema_line_payments")):
-        return [], "second payers: no EMA lines"
     out = []
-    for link, svc, cpt, grp, second, ins, bal, last_paid, fac in conn.execute(
-            """SELECT link, svc, cpt, payer_group, secondary_payer, COALESCE(ins_paid, 0), COALESCE(balance, 0), last_ins_paid,
-                      COALESCE(facility, 0)
-               FROM ema_lines WHERE svc >= ? AND secondary_payer IS NOT NULL AND secondary_payer NOT IN ('', 'None')
-                 AND COALESCE(ins_paid, 0) > 0 AND COALESCE(balance, 0) > 0""", (SERVICE_FROM,)):
-        if fac or re.search(r"MEDICAID|PASSPORT|WELLCARE OF KENTUCKY|HUMANA HEALTHY", str(second).upper()):
+    if not unposted:
+        return out
+    conn.execute("DROP TABLE IF EXISTS temp.sc_tk")
+    conn.execute("CREATE TEMP TABLE sc_tk (tk TEXT PRIMARY KEY)")
+    conn.executemany("INSERT OR IGNORE INTO temp.sc_tk VALUES (?)", [(u[0],) for u in unposted])
+    per: dict[str, list] = defaultdict(list)
+    for tk, pcn, svc, code, paid in conn.execute(
+            """SELECT c.transaction_key, c.patient_control_number, l.service_date, COALESCE(l.original_procedure_code, l.procedure_code),
+                      COALESCE(l.paid_cents, 0)
+               FROM temp.sc_tk k JOIN claims c ON c.transaction_key = k.tk JOIN lines l ON l.claim_key = c.claim_key
+               WHERE COALESCE(l.paid_cents, 0) > 0 AND l.service_date >= ?""", (SERVICE_FROM,)):
+        per[tk].append((bill_of(pcn), str(svc)[:10], code, paid))
+    conn.execute("DROP TABLE IF EXISTS temp.sc_tk")
+    for tk, paid_on, cents, payer in unposted:
+        for b, svc, code, paid in per.get(tk, []):
+            key = (b, svc, code)
+            out.append({"key": "|".join(key), "category": "era_payment_not_posted", "reason": "check_not_posted",
+                        "payer_group": _group_kind(payer)[0], "month": svc[:7], "cents": int(paid), "deadline": None,
+                        "held": _held(idx, key)})
+    return out
+
+
+def _cov_secondary(facts: _Facts, idx: dict) -> list[dict]:
+    """Second payer never billed (answer key R5, simplified): a 2025+ EMA line whose primary paid more than 30 days ago,
+    with a second payer on file (not Medicaid), no money or answer from any other payer in EMA or the 835s, and a balance
+    left, inside the second payer's filing limit from that payment."""
+    conn = facts.conn
+    if not _has_table(conn, "ema_line_payments"):
+        return []
+    out = []
+    for key, e in facts.ema.items():
+        second = e["second"]
+        if e["facility"] or not second or second in ("", "None") or e["ins_paid"] <= 0 or e["balance"] <= 0:
             continue
-        if not last_paid or (_days(last_paid, today) or 0) < 30:
+        if re.search(r"MEDICAID|PASSPORT|HEALTHY HORIZONS", str(second).upper()) or _group_kind(second)[1] == "medicaid":
             continue
-        roles = {r for (r,) in conn.execute("SELECT DISTINCT role FROM ema_line_payments WHERE link=? AND svc=? AND cpt=?",
-                                            (link, svc, cpt))}
+        if not e["last_paid"] or (_days(e["last_paid"], facts.today) or 0) < 30:
+            continue
+        roles = set()
+        for link in e["links"]:
+            roles |= {r for (r,) in conn.execute("SELECT DISTINCT role FROM ema_line_payments WHERE link = ? AND svc = ? AND cpt = ?",
+                                                 (link, key[1], key[2]))}
         if roles - {"primary"}:
             continue
-        _a, filing_days = _windows(second, "supplement")
-        deadline = _add(last_paid, filing_days)
-        if not deadline or deadline < today:
+        own_group = e["group"]
+        ans = facts.answers(key)
+        if any(st in ("2", "3", "20", "21") or (_group_kind(py, cfi)[0] != own_group and p > 0)
+               for _d, p, st, py, cfi, _pr, _lk in ans):
             continue
-        held = _covered(idx["link"].get((int(link), str(svc)[:10], cpt)))
-        out.append({"key": f"ema:{link}|{svc}|{cpt}", "category": "secondary_not_billed", "reason": "second_payer",
-                    "payer_group": grp, "month": str(svc)[:7], "cents": int(bal), "deadline": deadline, "held": held})
-    return out, None
+        crossed = any(st == "19" for _d, _p, st, _py, _cfi, _pr, _lk in ans)
+        if crossed and (_days(e["last_paid"], facts.today) or 0) < 45:
+            continue
+        _a, filing_days = _windows(second, "supplement")
+        deadline = _add(e["last_paid"], filing_days)
+        if not deadline or deadline < facts.today:
+            continue
+        out.append({"key": "|".join(key), "category": "open_balance_in_window" if crossed else "secondary_not_billed",
+                    "reason": "crossover_no_answer" if crossed else "second_payer", "payer_group": own_group,
+                    "month": key[1][:7], "cents": int(e["balance"]), "deadline": deadline, "held": _held(idx, key)})
+    return out
 
 
-def _cov_short_pay(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, str | None]:
-    """Gate-1 rule set, short payments: a 2025+ one-unit CPT line its payer paid below the payer's own consistent rate for
-    the code (the most frequent allowed amount, held by at least 60% of at least 8 lines that year) by more than
-    max($2, 3%) and less than 85% of it is not the reason (a non-physician rate), still inside the window."""
-    if not _has_table(conn, "lines"):
-        return [], "short payments: no remittances"
+def _cov_short_pay(facts: _Facts, idx: dict) -> list[dict]:
+    """Short payments (answer key R8, simplified): a 2025+ one-unit CPT line its payer paid, with no modifier, below the
+    payer's own consistent rate for the code that year (the most frequent allowed amount, at least 60% of at least 8 lines)
+    by more than max($2, 3%), where the amount paid is not one the payer pays regularly (10% of its lines: another
+    schedule) and not a known cut (the non-physician 85%, a multiple-procedure 50%, 75% or 25%), inside the window."""
+    conn = facts.conn
+    if not facts.has_835:
+        return []
+    try:
+        from .codes import MPPR_CODES as mppr
+    except ImportError:
+        mppr = frozenset()
     modes: dict[tuple, Counter] = defaultdict(Counter)
     rows = conn.execute("""SELECT l.line_key, l.patient_control_number, l.service_date, l.procedure_code, l.payment_date, l.payer_name,
                                   c.claim_filing_indicator, COALESCE(l.allowed_cents, 0), COALESCE(l.paid_cents, 0), l.modifiers
@@ -2658,33 +2804,37 @@ def _cov_short_pay(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[lis
                              AND COALESCE(l.paid_units, 1) = 1 AND l.service_date >= ? AND l.procedure_code GLOB '[0-9][0-9][0-9][0-9][0-9]'""",
                         (SERVICE_FROM,)).fetchall()
     for _lk, _pcn, svc, code, _pd, name, cfi, allowed, _paid, mods in rows:
-        if allowed > 0 and not mods:
+        if allowed > 0 and not (mods and mods not in ("[]", "")):
             modes[(_group_kind(name, cfi)[0], code, str(svc)[:4])][allowed] += 1
     usual = {}
     for k, cnt in modes.items():
         n = sum(cnt.values())
         top, m = cnt.most_common(1)[0]
         if n >= 8 and m / n >= 0.6:
-            usual[k] = top
+            usual[k] = (top, cnt, n)
     out = []
     for lk, pcn, svc, code, paid_on, name, cfi, allowed, paid, mods in rows:
-        if mods or is_facility(pcn):
+        if (mods and mods not in ("[]", "")) or is_facility(pcn) or allowed <= 0:
             continue
         grp, kind = _group_kind(name, cfi)
-        rate = usual.get((grp, code, str(svc)[:4]))
-        if not rate or allowed <= 0:
+        u = usual.get((grp, code, str(svc)[:4]))
+        if not u:
             continue
+        rate, cnt, n = u
         short = rate - allowed
-        if short <= max(200, int(rate * 0.03)) or abs(allowed - int(rate * 0.85)) <= max(200, int(rate * 0.03)):
+        if short <= max(200, int(rate * 0.03)) or cnt.get(allowed, 0) >= 0.10 * n:
+            continue
+        ratio = allowed / rate
+        if any(abs(ratio - r) <= 0.02 for r in (0.85, 0.5, 0.75, 0.25)) and (code in mppr or abs(ratio - 0.85) <= 0.02):
             continue
         appeal_days, _f = _windows(grp, kind)
         deadline = _add(paid_on, appeal_days)
-        if not deadline or deadline < today:
+        if not deadline or deadline < facts.today:
             continue
-        held = _covered(idx["service"].get((bill_of(pcn), str(svc)[:10], code)))
-        out.append({"key": f"835:{lk}", "category": "short_vs_payer_rate", "reason": "below_own_rate", "payer_group": grp,
-                    "month": str(svc)[:7], "cents": int(short), "deadline": deadline, "held": held})
-    return out, None
+        key = (bill_of(pcn), str(svc)[:10], code)
+        out.append({"key": "|".join(key), "category": "short_vs_payer_rate", "reason": "below_own_rate", "payer_group": grp,
+                    "month": key[1][:7], "cents": int(short), "deadline": deadline, "held": _held(idx, key)})
+    return out
 
 
 def _precision(conn: sqlite3.Connection, today: str) -> list[dict]:

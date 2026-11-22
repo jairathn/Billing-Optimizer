@@ -1103,9 +1103,9 @@ def summary(conn: sqlite3.Connection) -> dict:
     by_kind = {k: {"files": n, "gz_bytes": b} for k, n, b in conn.execute(
         "SELECT kind, COUNT(*), COALESCE(SUM(gz_bytes),0) FROM archive_files GROUP BY kind")}
     b = conn.execute("SELECT COUNT(*), COALESCE(SUM(claims),0), COALESCE(SUM(lines),0) FROM archive_bills").fetchone()
-    states = {str(ws or st or "unknown"): {"n": n, "cents": c} for ws, st, n, c in conn.execute(
-        """SELECT work_state, status, COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM archive_findings
-           GROUP BY work_state, status""")}
+    states = {str(k): {"n": n, "cents": c} for k, n, c in conn.execute(
+        """SELECT COALESCE(work_state, status, 'unknown') k, COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM archive_findings
+           GROUP BY k ORDER BY k""")}
     years = [{"year": y, "bills": n} for y, n in conn.execute(
         "SELECT substr(svc_hi,1,4) y, COUNT(*) FROM archive_bills GROUP BY y ORDER BY y")]
     recovered = conn.execute("SELECT COALESCE(SUM(recovered_cents),0) FROM archive_findings").fetchone()[0]
@@ -1616,11 +1616,22 @@ def claim_db(conn: sqlite3.Connection, claim_or_bill: str, *, sink: Any) -> sqli
                                                          "AND key NOT LIKE 'sync:cursor%' AND length(value) < 400000")])
     except sqlite3.Error:
         pass
-    for table in ("payer_rates", "detection_runs"):
+    for table in ("payer_rates", "detection_runs", "ema_report_files"):
         if _have(conn, table) and _have(db, table):
             cols = [c for c in _cols(conn, table) if c in set(_cols(db, table))]
             db.executemany(f"INSERT OR IGNORE INTO {table} ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                            conn.execute(f"SELECT {','.join(cols)} FROM {table}").fetchall())
+    # the payers' provider-level adjustments that name one of the bill's claim ids (takebacks, held money): they stay in
+    # the store with the remittances, and the claim view and the story read them by reference
+    if _have(conn, "plb") and _have(db, "plb") and "reference" in _cols(conn, "plb"):
+        ids = {str(r.get("patient_control_number")) for t in ("claims", "claims_837") for r in got["tables"].get(t, [])
+               if r.get("patient_control_number")} | {str(r.get("claim_id")) for r in got["tables"].get("ema_rows", []) if r.get("claim_id")}
+        ids = {i for i in ids if len(i) >= 3}
+        cols = _cols(conn, "plb")
+        refs = cols.index("reference")
+        hits = [r for r in conn.execute(f"SELECT {','.join(cols)} FROM plb WHERE reference IS NOT NULL")
+                if any(i in str(r[refs]) for i in ids)]
+        db.executemany(f"INSERT OR IGNORE INTO plb ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [tuple(r) for r in hits])
     db.commit()
     return db
 

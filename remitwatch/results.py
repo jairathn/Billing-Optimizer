@@ -69,6 +69,7 @@ REGISTER_CATEGORIES = RETURN_CATEGORIES + ("fees", "refund")               # ite
 STATE_CATEGORIES = ("downcoding", "bundling", "denial", "underpayment", "fees", "contract")   # = api.MONEY_CATEGORIES
 FOUND_SIGNALS = ("SECONDARY_NOT_BILLED", "REMIT_NOT_POSTED", "NOT_SENT")
 OPEN_STATES = ("work_now", "waiting")
+BOOK_STATES = OPEN_STATES + ("cant_check",)     # an item in one of these joins the open book (it was still unresolved)
 CLOSED_STATES = ("done", "accepted", "expired")
 GIVEN_UP_FROM = "2025-01-01"                # written off on service from this day on (the owner's "2025+")
 AT_RISK_DAYS = 14
@@ -249,6 +250,17 @@ def _drop(conn: sqlite3.Connection, *names: str) -> None:
         conn.execute(f"DROP TABLE IF EXISTS temp.{n}")
 
 
+FINDINGS_NEEDED = frozenset({"finding_id", "signal", "category", "status", "stale", "first_seen", "payer_group", "payer_kind",
+                             "procedure_code", "shortfall_cents", "evidence", "work_state", "state_basis", "appeal_deadline",
+                             "auto_note", "recovered_cents", "recovered_date", "status_changed_at", "written_off_cents"})
+
+
+def _fx(conn: sqlite3.Connection) -> bool:
+    """Whether the findings table is there with the columns the figures read (a store the analysis has brought up to the
+    current schema). Without them every figure is empty, never an error."""
+    return _table(conn, "findings") and FINDINGS_NEEDED <= _cols(conn, "findings")
+
+
 def _pct(k: int, n: int) -> float | None:
     return round(k / n, 4) if n else None
 
@@ -410,7 +422,7 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
     for r in conn.execute("""SELECT finding_id, first_flagged, last_state, expired_on, lost_on, lost_cents, ever_open, flagged_cents,
                                     gone_on, flag_info FROM results_items"""):
         have[r[0]] = r
-    if not _table(conn, "findings"):
+    if not _fx(conn):
         return {"listed": 0, "new": 0, "gone": 0, "lost": 0}
     fc = _cols(conn, "findings")
     sel = [c for c in FINDING_FIELDS if c in fc]
@@ -426,13 +438,13 @@ def update_registry(conn: sqlite3.Connection, today: Any = None) -> dict:
         prev = have.get(fid)
         if prev is None:
             n_new += 1
-            ever_open = first if ws in OPEN_STATES else None
+            ever_open = first if ws in BOOK_STATES else None
             expired_on = lost_on = lost_cents = None
             flagged = f.get("shortfall_cents")
             info = _flag_info(f)
         else:
             first = min(prev[1] or first, first)
-            ever_open = prev[6] or (t if ws in OPEN_STATES else None)
+            ever_open = prev[6] or (t if ws in BOOK_STATES else None)
             expired_on, lost_on, lost_cents = prev[3], prev[4], prev[5]
             flagged = prev[7] if prev[7] is not None else f.get("shortfall_cents")
             info = prev[9] or _flag_info(f)
@@ -870,7 +882,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     # a person who marked an item Paid, where no payment record of its group shows money: their amount, on their day (one
     # mark per group, the earliest-raised item's, so two people marking the same line Paid count it once)
     marks: dict[str, tuple] = {}
-    if _table(conn, "findings"):
+    if _fx(conn):
         resolved = [fid for fid, r in reg.items() if r.get("last_status") == "resolved" and r["F"]]
         for part in _chunks(sorted(resolved)):
             _temp_ids(conn, "rs_pm", part)
@@ -1032,7 +1044,8 @@ def _money(conn: sqlite3.Connection, reg: dict, att: dict, lf: dict, today: str)
     # the qualifier: Z of the dollars flagged on the items whose money is in (c), at most (c)
     c_flagged = sum(int(reg[f].get("flagged_cents") or 0) for f, it in rows if it["c"] > 0 and f in reg)
     z = lf.get("z")
-    y = min(int(round((z or 0) * c_flagged)), tot["c"]) if z is not None else None
+    # the exact share (paid / n), not the rounded rate shown, so the dollars are not off by the rounding
+    y = min(int(round(lf["z_paid"] * c_flagged / lf["z_n"])), tot["c"]) if z is not None and lf.get("z_n") else None
     by_payer = _sum_rows(rows, lambda f, it: (reg.get(f) or {}).get("payer_group") or "Unknown")
     by_signal = _sum_rows(rows, lambda f, it: (reg.get(f) or {}).get("signal") or "")
     for r in by_payer:
@@ -1094,7 +1107,7 @@ def _work_done(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tu
     lists = {f"work:{k}": [[f, 0] for f in sorted(v["items"])] for k, v in by_kind.items()}
     lists.update({f"work:person:{k}": [[f, 0] for f in sorted(v["items"])] for k, v in by_person.items()})
     let_go, policy = [], []
-    if _table(conn, "findings"):
+    if _fx(conn):
         has_ev = _table(conn, "finding_events")
         cats = ",".join("?" * len(RETURN_CATEGORIES))
         if has_ev:
@@ -1156,7 +1169,7 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
     again, and the win rate by kind of work and by pattern."""
     book = {fid: r for fid, r in reg.items() if r.get("ever_open") and (r["returnable"])}
     cur: dict[str, dict] = {}
-    if book and _table(conn, "findings"):
+    if book and _fx(conn):
         fc = _cols(conn, "findings")
         sel = [c for c in ("finding_id", "work_state", "status", "state_basis", "ema_outcome", "follow_up_on") if c in fc]
         for part in _chunks(sorted(book)):
@@ -1177,7 +1190,8 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
             basis = str(f.get("state_basis") or "No reason recorded")
             cant[re.split(r"[:.(]", basis, maxsplit=1)[0].strip()[:80] or "No reason recorded"].append(fid)
         ws = att["work"].get(fid) or []
-        if ws and f and f.get("work_state") in OPEN_STATES and not money.get(fid):
+        # worked and still open with nothing back yet; an item denied again after the work had its answer (counted apart)
+        if ws and f and f.get("work_state") in OPEN_STATES and not money.get(fid) and fid not in att["denied_again"]:
             waiting_no_money.append(fid)
             waited.append(_days(ws[-1]["date"], today))
     n = len(book)
@@ -1221,7 +1235,7 @@ def _hours_counts(conn: sqlite3.Connection, att: dict, today: str) -> tuple[dict
     faxes sent, and repeat listings folded into one item."""
     lists: dict[str, list] = {}
     invest: list = []
-    if _table(conn, "findings") and "work_state" in _cols(conn, "findings"):
+    if _fx(conn) and "work_state" in _cols(conn, "findings"):
         w, p = live_sql("hours:investigate", today)
         invest = [r[0] for r in conn.execute(f"SELECT finding_id FROM findings f WHERE {w} ORDER BY finding_id", p)]
     packets: set = set()
@@ -1240,7 +1254,7 @@ def _hours_counts(conn: sqlite3.Connection, att: dict, today: str) -> tuple[dict
     faxed = sorted({f for f, ws in att["work"].items() for w in ws if w["kind"] == "fax"})
     n_fax = sum(1 for ws in att["work"].values() for w in ws if w["kind"] == "fax")
     folded_n, carriers = 0, []
-    if _table(conn, "findings"):
+    if _fx(conn) and "evidence" in _cols(conn, "findings"):
         for fid, ev in conn.execute("SELECT finding_id, evidence FROM findings WHERE evidence LIKE '%\"folded\"%'"):
             k = len(_json(ev).get("folded") or [])
             if k:
@@ -1274,7 +1288,7 @@ def _ai_calls(conn: sqlite3.Connection) -> dict:
 
 def _credits(conn: sqlite3.Connection, today: str) -> dict:
     """Credits to refund (CREDIT_BALANCE items): open, settled, and the Medicare ones open more than 60 days (compliance)."""
-    if not _table(conn, "findings"):
+    if not _fx(conn):
         return {}
     out = {"open_n": 0, "open_cents": 0, "settled_n": 0, "settled_cents": 0, "medicare_overdue_n": 0}
     fc = _cols(conn, "findings")
@@ -1443,7 +1457,7 @@ def _fix_markers(conn: sqlite3.Connection) -> list[dict]:
     """Fixes people recorded on items: a line in an item's history of kind 'fix', or a person's note that names a
     credentialing, authorization or coding fix. Each with its day, the item's payer group and the kind of fix (the note
     itself is not copied)."""
-    if not (_table(conn, "finding_events") and _table(conn, "findings")):
+    if not (_table(conn, "finding_events") and _fx(conn)):
         return []
     out, seen = [], set()
     for fid, at, kind, note, actor, grp, sig in conn.execute(
@@ -1502,7 +1516,7 @@ def live_figures(conn: sqlite3.Connection, today: Any = None) -> dict:
     the next 14 days, money given up without a decision (with the part still inside its window)."""
     t = _today(today)
     out: dict = {"states": {}, "at_risk": {"n": 0, "cents": 0}, "given_up": {"n": 0, "cents": 0}}
-    if not _table(conn, "findings"):
+    if not _fx(conn):
         return out
     fc = _cols(conn, "findings")
     if "work_state" not in fc:
@@ -1538,7 +1552,7 @@ def _given_up_selfcheck(conn: sqlite3.Connection, today: str) -> dict | None:
 
 
 def _given_up_weeks(conn: sqlite3.Connection, today: str) -> list[dict]:
-    if not _table(conn, "findings") or not _table(conn, "finding_events") or "written_off_on" not in _cols(conn, "findings"):
+    if not _fx(conn) or not _table(conn, "finding_events") or "written_off_on" not in _cols(conn, "findings"):
         return []
     w, p = live_sql("given_up", today)
     agg: dict = defaultdict(lambda: [0, 0])
@@ -1864,7 +1878,7 @@ def list_rows(conn: sqlite3.Connection, key: str, *, today: Any = None, page: in
     part = entries[page * per:(page + 1) * per]
     ids = [e[0] for e in part]
     found: dict[str, dict] = {}
-    if ids and _table(conn, "findings"):
+    if ids and _fx(conn):
         fc = _cols(conn, "findings")
         sel = [c for c in ("finding_id", "signal", "category", "payer_group", "procedure_code", "service_date", "shortfall_cents",
                            "work_state", "status", "appeal_deadline", "state_basis", "patient_control_number", "first_seen") if c in fc]
@@ -1988,7 +2002,7 @@ def spot_candidates(conn: sqlite3.Connection, day: str, recent_ids: set) -> dict
     """The items each stratum may pick from: open items in Work now, items Waiting, items Done (proved settled while
     still open), and items RemitWatch closed on a payment in the last 30 days. Never one checked in the last 90 days."""
     out: dict[str, list[dict]] = {k: [] for k, _n in SPOT_STRATA}
-    if not _table(conn, "findings") or "work_state" not in _cols(conn, "findings"):
+    if not _fx(conn) or "work_state" not in _cols(conn, "findings"):
         return out
     since = _add(day, -SPOT_RECENT_DAYS)
     scope = ",".join(f"'{c}'" for c in RETURN_CATEGORIES)

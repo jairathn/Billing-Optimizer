@@ -249,7 +249,6 @@ async function deskTab(v, key){
   if(state.focusQ){ const q = v.querySelector('input[data-f="q"]'); if(q) q.focus(); state.focusQ = false; }
   v.querySelector('#moreF').onclick = () => { state.moreF = Object.assign({}, state.moreF, {[key]: !moreOpen}); const m = v.querySelector('.more-f'); m.hidden = moreOpen; v.querySelector('#moreF').setAttribute('aria-expanded', String(!moreOpen)); };
   v.querySelector('#wlClear').onclick = () => { state.filt[key] = {}; state.lim[key] = ROWS; render(); };
-  if(typeof wlKeysBind === 'function') wlKeysBind(v, res.items);
   v.querySelectorAll('.go-data').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab='data'; location.hash='data'; render(); });
   v.querySelectorAll('.go-wins').forEach(a=>a.onclick=e=>{ e.preventDefault(); goWins(a.dataset.anchor); });
   v.querySelectorAll('.seeA').forEach(a=>a.onclick=e=>{ e.preventDefault(); const x = (state.alertsNew||[]).find(y=>y.alert_id===a.dataset.id); if(x && typeof seeAlert==='function') seeAlert(x); });

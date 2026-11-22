@@ -113,6 +113,18 @@ button:disabled{opacity:.5;cursor:default}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .k-fix{color:#9ec0ff}:root:not([data-theme="light"]) .k-auth{color:#c7a8ff}:root:not([data-theme="light"]) .k-note{color:#6fdcb6}:root:not([data-theme="light"]) .k-rule{color:#a9b0ff}:root:not([data-theme="light"]) .k-rate{color:#f5b878}:root:not([data-theme="light"]) .k-check{color:#c0c9d4}:root:not([data-theme="light"]) .k-chase{color:#ff9c8a}}
 :root[data-theme="dark"] .k-fix{color:#9ec0ff}:root[data-theme="dark"] .k-auth{color:#c7a8ff}:root[data-theme="dark"] .k-note{color:#6fdcb6}:root[data-theme="dark"] .k-rule{color:#a9b0ff}:root[data-theme="dark"] .k-rate{color:#f5b878}:root[data-theme="dark"] .k-check{color:#c0c9d4}:root[data-theme="dark"] .k-chase{color:#ff9c8a}
 .due-now{color:var(--bad);font-weight:650}.due-soon{color:var(--warn);font-weight:600}
+.k-bill{background:rgba(14,122,92,.10);color:#0e7a5c}.k-post{background:rgba(31,95,191,.10);color:#1849a9}
+/* an item's state and what EMA did to its line: the same words everywhere (remitwatch.states) */
+.xs{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;background:var(--chip);color:var(--ink)}
+.xs-now{background:rgba(180,35,24,.12);color:var(--bad)}.xs-wait{background:rgba(31,95,191,.13);color:var(--accent)}.xs-done{background:rgba(6,118,71,.14);color:var(--good)}
+.xs-quiet{background:var(--soft);color:var(--muted)}.xs-warn{background:rgba(181,71,8,.13);color:var(--warn)}
+.st-done{background:rgba(6,118,71,.14)}.st-accepted,.st-expired{background:var(--soft)}.st-cant_check{background:rgba(181,71,8,.13)}
+.xp-verdict{margin:6px 0 2px;font-weight:550}.xp-steps{margin:4px 0}.xp-steps ol{margin:4px 0;padding-left:20px}.xp-steps li{margin:3px 0}
+.xp-more{display:inline-block;vertical-align:top}.xp-more>summary{display:inline-block;padding:6px 8px;list-style:none}.xp-more[open]>summary{color:var(--ink)}
+.xp-log label{display:block;margin:3px 0}table.xp-story tr.has-item{background:var(--chip)}table.xp-story td{vertical-align:top}
+a.see-state.on{font-weight:650;color:var(--ink)}
+.keys{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px}.keys kbd{font:12px ui-monospace,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;background:var(--soft)}
+@media(max-width:640px){#keysBtn{display:none}}
 .panel-head{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;margin-bottom:6px}.panel-head h2{margin:0}
 .batch{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
 .batch:last-child{border-bottom:0}
@@ -239,6 +251,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
   <div class="fresh"><div id="feedChip"></div><div id="fresh">loading…</div></div>
   <input id="claimFind" type="search" maxlength="200" placeholder="Find a claim" aria-label="Find a claim by its claim ID or the payer's claim number" title="A claim ID as EMA shows it, or the payer's claim number: opens every remittance for it, line by line">
   <button id="guideBtn" class="ghost" title="What this site does and how to use it">How this works</button>
+  <button id="keysBtn" class="ghost" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
   <a id="uploadLink" href="/upload" hidden class="small" title="Bring EMA's exports, remittance files and visit notes in by hand">Upload from EMA</a>
   <button id="bellBtn" title="alerts">Alerts</button>
   <label class="small">Year <select id="yearSel"><option value="">All</option></select></label>
@@ -356,6 +369,7 @@ function initNav(){
   $('#bellBtn').onclick = ()=>{ state.tab='alerts'; location.hash='alerts'; render(); };
   $('#feedChip').onclick = ()=>{ state.tab='data'; location.hash='data'; render(); };
   $('#guideBtn').onclick = ()=>openGuide();
+  $('#keysBtn').onclick = ()=>keysSheet();
   $('#claimFind').onkeydown = e=>{ if(e.key==='Enter'){ e.preventDefault(); findClaim(e.target.value); } };
 }
 async function loadMeta(){
@@ -579,6 +593,35 @@ function closeDetail(){
   if(back && back.isConnected) back.focus();
 }
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
+// Keyboard shortcuts for working a list (shown by ? and the ? button): j and k move through the list, or through the items
+// with an item open; Enter or o opens one; s marks it sent; l lets it go (it asks why); / goes to the search box.
+const KEYS = [['j','Next item'],['k','Previous item'],['Enter or o','Open the item'],['s','Mark it sent'],['l','Let it go (asks why)'],['/','Search the list'],['Esc','Close the item'],['?','These shortcuts']];
+function keysSheet(){
+  $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">Keyboard shortcuts</h2><button id="closeM" aria-label="Close">✕</button></div>
+    <div class="keys" style="margin-top:10px">${KEYS.map(([k, w])=>`<span>${k.split(' or ').map(x=>`<kbd>${esc(x)}</kbd>`).join(' or ')}</span><span>${esc(w)}</span>`).join('')}</div>`;
+  $('#modal').classList.add('open'); $('#closeM').onclick = ()=>$('#modal').classList.remove('open'); $('#closeM').focus();
+}
+document.addEventListener('keydown', e=>{
+  if(e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target, typing = t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable);
+  if(typing || $('#modal').classList.contains('open')) return;
+  const open = $('#drawer').classList.contains('open'), d = $('#drawer');
+  const press = sel => { const b = d.querySelector(sel); if(b && !b.disabled){ b.click(); return true; } return false; };
+  if(e.key === '?'){ e.preventDefault(); keysSheet(); return; }
+  if(e.key === '/'){ const q = [...document.querySelectorAll('#view input[data-f="q"]')].find(x=>x.offsetParent!==null) || $('#claimFind'); if(q){ e.preventDefault(); q.focus(); } return; }
+  if(open){
+    if(e.key === 'j'){ e.preventDefault(); press('#nextItem'); }
+    else if(e.key === 'k'){ e.preventDefault(); press('#prevItem'); }
+    else if(e.key === 's'){ e.preventDefault(); press('[data-xp="mark_sent"]') || press('#sentNext'); }
+    else if(e.key === 'l'){ e.preventDefault(); press('[data-xp="let_go"]') || press('#letGoNext'); }
+    return;
+  }
+  const rows = [...document.querySelectorAll('#view tr.row[data-id]')]; if(!rows.length) return;
+  const i = rows.indexOf(document.activeElement);
+  if(e.key === 'j'){ e.preventDefault(); (rows[Math.min(rows.length - 1, i + 1)] || rows[0]).focus(); }
+  else if(e.key === 'k'){ e.preventDefault(); (rows[Math.max(0, i - 1)] || rows[0]).focus(); }
+  else if(e.key === 'o' && i >= 0){ e.preventDefault(); openDetail(rows[i].dataset.id); }
+});
 // The first rows of an item's Claim details: who the claim is about, then its claim IDs. A claim no payer has answered is
 // known only from EMA's rows (from_ema): it has no remittance, so no payer claim number, and the line above the fold
 // already gives its EMA claim ID, so its Claim row is left out.
@@ -694,7 +737,7 @@ function xpFill(f, r, x, d, id){
     const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => walk();
   }
   d.querySelector('#xpEmaSlot').innerHTML = xpEmaHtml(x.ema_block) + (x.ema_block_error ? `<div class="small muted">${esc(x.ema_block_error)}</div>` : '');
-  xpDecisions(id, d.querySelector('#xpWhy'));
+  if(state.meta && state.meta.decisions) xpDecisions(id, d.querySelector('#xpWhy'));      // the run's decision log, where this build keeps one
 }
 // #item=<finding id>: the item's panel, over whatever page is open (a finding id in a message is one click away)
 function itemFromHash(){ const m = /^#item=([A-Za-z0-9_-]{1,80})$/.exec(location.hash); return m ? m[1] : null; }

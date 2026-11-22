@@ -195,8 +195,15 @@ function tdEmaLine(td, ex){
     else if(e.overdue) parts.push(`<span class="sev-high">${esc(e.title)}: ${e.age_days == null ? 'never arrived' : esc(pl(e.age_days, 'day')) + ' old'}</span>`); });
   const rm = td && td.remits_missing;
   const missing = rm && rm.ok === false ? `<a href="#data" class="go-data">${esc(rm.title)}</a>` : '';
-  if(!parts.length && !missing) return ex && (ex.exports||[]).length ? `<div class="oneline">EMA's exports are up to date (A/R within 8 days, Production within 14, the weekly exports within 8).</div>` : '';
-  return `<div class="oneline">${parts.length ? `EMA's exports: ${parts.join(' · ')}. <a href="/upload">Upload</a>` : ''}${parts.length && missing ? ' · ' : ''}${missing}</div>`;
+  // a report that waits says why and what to do (the catalog's own words); a held one needs a person's decision
+  const names = {ar_report: 'The A/R report', production: 'A Production report'};
+  const waits = ((td && td.reports_waiting) || []).map(w => `${esc(names[w.report] || 'A report')} waits: ${esc(w.reason || 'the next run reads it')}`)
+    .filter((t, i, a) => a.indexOf(t) === i);
+  const held = td && td.reports_held ? `<a href="#data" class="go-data">${esc(pl(td.reports_held, 'EMA report'))} ${td.reports_held === 1 ? 'waits' : 'wait'} for a decision</a>` : '';
+  const extra = [held].concat(waits).filter(Boolean);
+  if(!parts.length && !missing && !extra.length) return ex && (ex.exports||[]).length ? `<div class="oneline">EMA's exports are up to date (A/R within 8 days, Production within 14, the weekly exports within 8).</div>` : '';
+  return `<div class="oneline">${parts.length ? `EMA's exports: ${parts.join(' · ')}. <a href="/upload">Upload</a>` : ''}${parts.length && missing ? ' · ' : ''}${missing}`
+    + `${extra.length ? `${parts.length || missing ? ' · ' : ''}${extra.join(' · ')}` : ''}</div>`;
 }
 function tdBind(v, td, sb){
   const st = (td && td.states) || {}, other = (td && td.other) || {};
@@ -349,6 +356,7 @@ const MORE_PAGES = [
   ['alerts','Alerts','Payers behaving differently from their own past, new and acknowledged.'],
   ['progress','Progress','What came back after a fix or appeal, and what is being worked.', 'mid-only'],
   ['data','Data','Whether the numbers can be trusted, and who fixes what.', 'mid-only'],
+  ['policy','Write-off policy','Denials EMA writes off by itself, by payer, code and reason: pursue or accept each pattern.'],
   ['providers','Providers','What each clinician is doing, behind the owner\'s password where one is set.', 'mid-only'],
 ];
 async function moreTab(v){
