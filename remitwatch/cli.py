@@ -419,7 +419,7 @@ def cmd_send_appeals(args: argparse.Namespace) -> int:
     n: Counter = Counter()
     for it in q["items"]:
         if not it["ready"]:
-            n["no_number"] += 1
+            n["by_hand" if it.get("by_hand") else "no_number"] += 1     # a group of many insurers: faxed by hand
             continue
         try:
             r = api.appeals_send({"finding_id": it["finding_id"]}, "cli")

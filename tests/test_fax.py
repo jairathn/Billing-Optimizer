@@ -604,6 +604,14 @@ def test_one_site_sends_the_faxes():
     assert fax.provider(dict(creds, REMITWATCH_FAX_SENDER="serverless")) is None          # and then the server sends nothing
     for v in ("none", "servr"):                                  # paused, or a typo: nobody sends
         assert fax.provider(dict(creds, REMITWATCH_FAX_SENDER=v)) is None and "paused" in fax.not_here(dict(creds, REMITWATCH_FAX_SENDER=v))
+    # a preview build of another branch (Vercel gives a setting to every environment unless told otherwise) never sends,
+    # whatever it is told; the production build does
+    sender = dict(vercel, REMITWATCH_FAX_SENDER="serverless")
+    for env in ("preview", "development"):
+        e = dict(sender, VERCEL_ENV=env)
+        assert fax.provider(e) is None and not fax.configured(e) and "preview deployment" in fax.not_here(e)
+        assert isinstance(fax.line(e), fax.SRFax)            # it can still open a fax that came in
+    assert isinstance(fax.provider(dict(sender, VERCEL_ENV="production")), fax.SRFax) and fax.configured(dict(sender, VERCEL_ENV="production"))
 
 
 def test_a_site_that_does_not_send_sends_nothing(site, monkeypatch):
@@ -769,6 +777,63 @@ def test_a_person_settles_a_send_the_line_cannot_tell_about(site, monkeypatch):
     assert _send(c, rate)["status"] == "sent" and len(line.sent) == 1              # the item never went: it goes now, once
 
 
+def test_an_appeal_found_to_have_gone_out_marks_its_item_sent(site, monkeypatch):
+    """SRFax takes the appeal but its answer is lost: the press is held, the item stays open. When SRFax's outbox shows
+    the fax later, or a person says it went out, the item is marked Sent, so its follow-ups start and the batch leaves it
+    out. Not when a person changed the item meanwhile."""
+    c, line = site.c, site.line
+    rate, note_id = site.ids["UNDERPAID_VS_OWN_RATE"], site.ids["DENIED_MEDICAL_NECESSITY"]
+    _number(c, PAYER_FAX)
+    real = line.send
+
+    def lost_answer(to, pdf, filename):
+        real(to, pdf, filename)                      # SRFax queued it, and its answer never came
+        raise fax.FaxError("SRFax did not answer (ReadTimeout).", maybe_sent=True)
+    monkeypatch.setattr(line, "send", lost_answer)
+    assert _send(c, rate)["code"] == "fax_error"
+    monkeypatch.setattr(line, "send", real)
+    status = lambda fid: c.get(f"/api/findings/{fid}").json()["finding"]["status"]     # noqa: E731
+    assert status(rate) == "open" and len(line.sent) == 1
+    _age(site.db, minutes=11)
+    assert c.post("/api/faxes/refresh", headers=XHR).json()["settled"] == 1
+    assert status(rate) == "appealed" and len(line.sent) == 1
+    ev = c.get(f"/api/findings/{rate}").json()["events"][0]
+    assert ev["to_status"] == "appealed" and "(fax F0001)" in ev["note"]
+    assert rate not in [i["finding_id"] for i in c.get("/api/appeals/appealable").json()["items"]]
+    line.deliver_all()
+    c.post("/api/faxes/refresh", headers=XHR)
+    _age(site.db, days=40)
+    assert [d["action"] for d in c.get("/api/faxes").json()["due"] if d["finding_id"] == rate] == ["second_request"]
+    # a person says a send that never settled went out: the same
+    monkeypatch.setattr(line, "send", _stops_before_the_line)
+    with pytest.raises(RunStopped):
+        _send(c, note_id)
+    monkeypatch.setattr(line, "send", real)
+    key = _rows(site.db, "SELECT fax_key FROM faxes WHERE finding_id=?", (note_id,))[0][0]
+    assert status(note_id) == "open"
+    assert c.post("/api/faxes/settle", json={"fax_key": key, "went": True}, headers=XHR).json()["ok"] is True
+    assert status(note_id) == "appealed"
+
+
+def test_an_appeal_found_later_leaves_a_persons_change_alone(site, monkeypatch):
+    c, line = site.c, site.line
+    rate = site.ids["UNDERPAID_VS_OWN_RATE"]
+    _number(c, PAYER_FAX)
+    real = line.send
+
+    def lost_answer(to, pdf, filename):
+        real(to, pdf, filename)
+        raise fax.FaxError("SRFax did not answer (ReadTimeout).", maybe_sent=True)
+    monkeypatch.setattr(line, "send", lost_answer)
+    assert _send(c, rate)["code"] == "fax_error"
+    monkeypatch.setattr(line, "send", real)
+    # the person looked at it meanwhile and put it in progress themselves: their status stands
+    assert c.post(f"/api/findings/{rate}/status", json={"status": "in_progress"}, headers=XHR).status_code == 200
+    _age(site.db, minutes=11)
+    assert c.post("/api/faxes/refresh", headers=XHR).json()["settled"] == 1
+    assert c.get(f"/api/findings/{rate}").json()["finding"]["status"] == "in_progress"
+
+
 # --------------------------------------------------------------------------- whose letter it is
 def test_a_letter_about_another_patient_of_the_same_name_is_never_tied_or_forwarded(site, monkeypatch):
     c, line = site.c, site.line
@@ -822,6 +887,123 @@ def test_member_id_with_the_date_ties_and_the_bill_alone_does_not(site, monkeypa
     got = {r["fax_key"].split(":")[-1]: r for r in c.get("/api/faxes").json()["received"]}
     assert got["in-m"]["finding_id"] == note_id and got["in-m"]["tied_by"] == "member_and_date"
     assert got["in-b"]["finding_id"] is None and "nine characters" in got["in-b"]["needs"]
+
+
+def _member_claim(i: int, last: str, first: str, member: str, lines: str, dos: str, subscriber: tuple | None = None) -> str:
+    """One claim for an invented patient with this member ID; a dependent's claim names the subscriber too, with the same
+    ID (a payer that gives the whole family one ID)."""
+    from tests.test_features import NPI
+    il = f"NM1*IL*1*{subscriber[0]}*{subscriber[1]}****MI*{member}~" if subscriber else ""
+    return (f"CLP*CB{i:07d}C017*1*500.00*100.00*0.00*12*PC{i}*11~NM1*QC*1*{last}*{first}****MI*{member}~{il}"
+            f"NM1*82*2*TEST PROVIDER*****XX*{NPI}~REF*CE*PPO~DTM*232*{dos}~{lines}")
+
+
+def test_a_member_id_a_family_shares_ties_a_letter_to_its_own_patient_only(site, tmp_path, monkeypatch):
+    """A payer gives a parent and a child one member ID, and both were seen and appealed on the same day. A letter about
+    the child, from the payer's own number, answers the child's item only: never the parent's, whose next-level fax would
+    otherwise carry the child's letter. Invented family and numbers."""
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    from tests.test_features import clean_visits, svc
+    fam = "W000000555"
+    under = lambda: svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~", dos="20261101")    # noqa: E731
+    db = _store_from(tmp_path, [("AETNA", "AETNA", clean_visits(1, 25, "99214", "223.65", "117.60")
+                                 + [_member_claim(701, "ROE", "JOHN", fam, under(), "20261101"),
+                                    _member_claim(702, "ROE", "EMMA", fam, under(), "20261101", subscriber=("ROE", "JOHN"))])])
+    monkeypatch.setattr(api, "DB_PATH", db)
+    c, line = TestClient(api.app), site.line
+    ids = {i["patient_control_number"]: i["finding_id"] for i in c.get("/api/findings?status=all&limit=500").json()["items"]}
+    parent, child = ids["CB0000701C017"], ids["CB0000702C017"]
+    who = {parent: "parent", child: "child"}
+    assert _number(c, "(800) 555-0131", payer="Aetna").status_code == 200
+    for fid in (parent, child):
+        assert _send(c, fid)["status"] == "sent"
+    line.deliver_all()
+    c.post("/api/faxes/refresh", headers=XHR)
+
+    def letter(key: str, **read) -> dict:
+        monkeypatch.setattr(fax, "classify", lambda pdf, client=None: _read(decision="upheld", **read))
+        line.receive(key, pdf_of("Appeal decision: upheld."), caller="8005550131")
+        c.post("/api/faxes/refresh", headers=XHR)
+        return next(r for r in c.get("/api/faxes").json()["received"] if r["fax_key"].endswith(key))
+    # a letter about a third member of the family, who has no item: the parent's and the child's names are not on it
+    r = letter("in-other", claim_numbers=["AET-ICN-55501"], member_ids=[fam], patient_last="ROE", patient_first="LIAM",
+               service_dates=["2026-11-01"])
+    assert r["tied"] == [] and "another patient's name" in r["needs"] and {s["finding_id"] for s in r["suggested"]} == {parent, child}
+    # the family's ID and the date with no first name fit both patients: a person matches it
+    r = letter("in-both", member_ids=[fam], service_dates=["2026-11-01"])
+    assert r["tied"] == [] and "more than one patient" in r["needs"] and {s["finding_id"] for s in r["suggested"]} == {parent, child}
+    # the child's claim named outright, with the family's ID and the date and no name: the child's item; the parent's,
+    # which only the ID and the date fit, is left to a person (the parent's tie list names the fax)
+    r = letter("in-claim", claim_numbers=["CB0000702C017"], member_ids=[fam], service_dates=["2026-11-01"])
+    assert [who[i] for i in r["tied"]] == ["child"] and r["tied_by"] == "claim_id"
+    assert [who[s["finding_id"]] for s in r["suggested"]] == ["parent"]
+    # the member ID, the date and the child's name: the child's item only
+    r = letter("in-name", member_ids=[fam], patient_last="ROE", patient_first="EMMA", service_dates=["2026-11-01"])
+    assert [who[i] for i in r["tied"]] == ["child"] and r["tied_by"] == "member_and_date"
+    events = lambda fid: [e["note"] or "" for e in c.get(f"/api/findings/{fid}").json()["events"]]     # noqa: E731
+    assert not any(n.startswith("Fax from the payer") for n in events(parent))
+    due = {d["finding_id"]: d["action"] for d in c.get("/api/faxes").json()["due"]}
+    assert due.get(child) == "next_level" and parent not in due
+    before = set(line.sent)
+    c.post("/api/faxes/follow_up", json={}, headers=XHR)
+    assert [line.sent[k]["filename"].split("-")[0] for k in set(line.sent) - before] == ["next_level"]      # the child's only
+
+
+def test_a_group_of_many_insurers_keeps_no_fax_number(site, tmp_path, monkeypatch):
+    """Two Medigap carriers fall in one payer group. One fax number for the group would send both insurers' appeals, each
+    with its patient's record, to one company's line: no number is kept for such a group, one saved before is not used,
+    and its appeals are held to be faxed by hand. Its faxes in are matched by a person. Invented insurers and numbers."""
+    import sqlite3 as _sql
+
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    from remitwatch.detect import MANY_PAYER_GROUPS
+    from tests.test_features import clean_visits, svc
+    assert set(MANY_PAYER_GROUPS) <= set(fax.SHARED_GROUPS)
+    assert fax.shared_group("Self-funded plan TPAs Medicare Advantage") and fax.shared_group("Unknown")
+    assert not fax.shared_group("Aetna") and not fax.shared_group("Medicare KY (CGS J15)") and not fax.shared_group(None)
+    under = lambda: svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~", dos="20261101")    # noqa: E731
+    db = _store_from(tmp_path, [("MUTUAL OF OMAHA", "MOO01", clean_visits(1, 25, "99214", "223.65", "117.60")
+                                 + [_named(801, "POE", "ANNA", under(), "20261101")]),
+                                ("GLOBE LIFE", "GLB01", clean_visits(100, 25, "99214", "223.65", "117.60")
+                                 + [_named(802, "LOE", "BERT", under(), "20261101")])])
+    monkeypatch.setattr(api, "DB_PATH", db)
+    c, line = TestClient(api.app), site.line
+    mine = {i["patient_control_number"]: i for i in c.get("/api/findings?status=all&limit=500").json()["items"]
+            if i.get("patient_control_number") in ("CB0000801C017", "CB0000802C017")}
+    assert {i["payer_group"] for i in mine.values()} == {"Medicare Supplement carriers"}
+    r = _number(c, "(800) 555-0177", payer="Medicare Supplement carriers")
+    assert r.status_code == 400 and "many insurers" in r.json()["detail"]
+    # a number saved before this rule (straight into the store) is not used for anything
+    from remitwatch.actions import ensure_fax_tables
+    conn = _sql.connect(db)
+    ensure_fax_tables(conn)
+    conn.execute("""INSERT INTO payer_fax (payer_group, purpose, number, confirmed_by, confirmed_at)
+                    VALUES ('Medicare Supplement carriers', 'appeal', '8005550177', 'someone', '2026-11-01T00:00:00+00:00')""")
+    conn.commit()
+    conn.close()
+    payers = {p["payer_group"]: p for p in c.get("/api/faxes/payers").json()["payers"]}
+    assert payers["Medicare Supplement carriers"]["numbers"] == {} and "by hand" in payers["Medicare Supplement carriers"]["by_hand"]
+    a = c.get("/api/appeals/appealable").json()
+    assert [(p["payer_group"], p["number"], bool(p["by_hand"])) for p in a["payers"]] == [("Medicare Supplement carriers", "", True)]
+    assert all(not i["ready"] and i["by_hand"] for i in a["items"])
+    for it in mine.values():
+        out = _send(c, it["finding_id"])
+        assert out["status"] == "held" and out["code"] == "by_hand" and "by hand" in out["reason"]
+    assert line.to("(800) 555-0177") == [] and line.sent == {}
+    assert c.post("/api/faxes/payer/confirm", json={"payer_group": "Medicare Supplement carriers", "number": "8005550177"},
+                  headers=XHR).status_code == 400
+    conn = _sql.connect(db)
+    try:
+        assert fax.number_for(conn, "Medicare Supplement carriers", "supplement", 1)["number"] == ""
+        assert "8005550177" not in fax.known_senders(conn)
+        f = {"payer_group": "Medicare Supplement carriers", "payer_kind": "supplement"}
+        assert "by hand" in fax.number_hold(conn, f, 1, [])[1]
+    finally:
+        conn.close()
 
 
 def _named(i: int, last: str, first: str, lines: str, dos: str) -> str:

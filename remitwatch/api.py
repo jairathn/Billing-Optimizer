@@ -3073,10 +3073,11 @@ def _appealable_cond() -> tuple[str, list]:
 
 
 def _payer_number(payer_group: str | None, purpose: str = "appeal") -> str:
-    """The number saved now for a payer and purpose: '' when there is none (or it was removed)."""
-    if not payer_group or not has_table("payer_fax"):
-        return ""
+    """The number saved now for a payer and purpose: '' when there is none (or it was removed), and for a group that holds
+    many insurers (fax.shared_group), whatever was saved for it before."""
     from . import fax
+    if not payer_group or not has_table("payer_fax") or fax.shared_group(payer_group):
+        return ""
     return fax.digits((one("SELECT number FROM payer_fax WHERE payer_group=? AND purpose=?", (payer_group, purpose)) or {}).get("number"))
 
 
@@ -3199,6 +3200,26 @@ def _faxes_out(finding_id: str, live: bool = True) -> list[dict]:
         return []
     return rows("SELECT * FROM faxes WHERE finding_id=? AND direction='out'" + (" AND COALESCE(status,'')!='failed'" if live else "")
                 + " ORDER BY created_at", (finding_id,))
+
+
+def _mark_sent_appeal(r: dict, actor: str) -> bool:
+    """An item whose appeal went out by fax but was never marked Sent, because the send did not settle at once (SRFax took
+    it but its answer was lost, or the run stopped between the send and its record): marked now, as the send would have
+    done, so its follow-ups start. Not when a person changed the item's status since the fax was reserved, or the item is
+    no longer open. r: the fax's row (purpose 'appeal'). Returns whether it was marked."""
+    from . import fax
+    fid = r.get("finding_id")
+    if r.get("purpose") != "appeal" or not fid:
+        return False
+    f = one("SELECT status, payer_group FROM findings WHERE finding_id=?", (fid,))
+    if not f or f.get("status") not in ("open", "in_progress"):
+        return False
+    if has_table("finding_events") and one("SELECT 1 FROM finding_events WHERE finding_id=? AND kind='manual' AND at >= ? LIMIT 1",
+                                           (fid, (r.get("created_at") or "")[:19])):
+        return False
+    _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(r.get('number'))} "
+                                      f"(fax {r.get('provider_id') or 'not settled yet'}).", None, actor)
+    return True
 
 
 def _fax_doc(prov, f: dict, number: str, packet_pdf: bytes, subject: str | None, front: bytes | None = None,
@@ -3508,17 +3529,15 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     if prov is None:
         return held("no_fax", fax.not_here() or "The fax line is not set up yet: SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD in the host's settings.")
     number = _payer_number(f.get("payer_group"))
+    if not number and fax.shared_group(f.get("payer_group")):
+        return held("by_hand", fax.shared_why(f.get("payer_group")))
     if not number:
         return held("no_number", f"No appeal fax number is saved for {f.get('payer_group') or 'this payer'}. Add it on the Faxes page.")
     live = _faxes_out(fid)
     if live:
-        last = live[-1]
         # its appeal went out but the item was never marked Sent (the run stopped between the two), and nobody changed it
         # since: marked now, so its follow-ups start
-        if f.get("status") in ("open", "in_progress") and last.get("purpose") == "appeal" and has_table("finding_events") and \
-                not one("SELECT 1 FROM finding_events WHERE finding_id=? AND kind='manual' AND at >= ? LIMIT 1", (fid, (last.get("created_at") or "")[:19])):
-            _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(last.get('number'))} "
-                                              f"(fax {last.get('provider_id') or 'not settled yet'}).", None, user)
+        _mark_sent_appeal(live[-1], user)
         return dict(out, status="skipped", reason="Its appeal was already faxed.")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
     use_ai = body.get("use_ai", True) not in (False, 0, "0")
@@ -3616,7 +3635,8 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
     items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings WHERE {where}
                      ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
                   (*params, *([payer] if payer else []), limit))
-    numbers = {r["payer_group"]: fax.digits(r["number"]) for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")} if has_table("payer_fax") else {}
+    numbers = {r["payer_group"]: fax.digits(r["number"]) for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")
+               if not fax.shared_group(r["payer_group"])} if has_table("payer_fax") else {}
     sent = {r["finding_id"] for r in rows("SELECT DISTINCT finding_id FROM faxes WHERE direction='out' AND COALESCE(status,'')!='failed'")} if has_table("faxes") else set()
     by: dict[str, dict] = {}
     out = []
@@ -3625,11 +3645,15 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
             continue
         k = work_type(i["signal"], i["actionable"], i["carc"])
         pg = i["payer_group"] or ""
-        b = by.setdefault(pg, {"payer_group": pg, "n": 0, "cents": 0, "number": fax.pretty(numbers.get(pg)) if numbers.get(pg) else "", "kinds": {}})
+        # a group of many insurers keeps no number: its appeals are faxed by hand (fax.shared_group)
+        by_hand = fax.shared_why(pg) if fax.shared_group(pg) else None
+        b = by.setdefault(pg, {"payer_group": pg, "n": 0, "cents": 0, "number": fax.pretty(numbers.get(pg)) if numbers.get(pg) else "", "kinds": {},
+                               "by_hand": by_hand})
         b["n"] += 1
         b["cents"] += i["shortfall_cents"] or 0
         b["kinds"][k] = b["kinds"].get(k, 0) + 1
-        out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0, "ready": bool(numbers.get(pg))})
+        out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0, "ready": bool(numbers.get(pg)),
+                    "by_hand": bool(by_hand)})
     return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "not_here": fax.not_here(),
             "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
@@ -3716,8 +3740,10 @@ def fax_payers(_: str = Depends(require_auth)):
     out = []
     for pg in sorted(set(open_) | set(saved), key=lambda g: -((open_.get(g) or {}).get("cents") or 0)):
         o = open_.get(pg) or {}
+        # a group of many insurers keeps no number (one saved before is not used): its appeals are faxed by hand
+        shared = fax.shared_group(pg)
         out.append({"payer_group": pg, "payer_kind": o.get("payer_kind"), "n": o.get("n") or 0, "cents": o.get("cents") or 0,
-                    "numbers": saved.get(pg, {}), **contact.get(pg, {})})
+                    "numbers": {} if shared else saved.get(pg, {}), "by_hand": fax.shared_why(pg) if shared else None, **contact.get(pg, {})})
     return {"payers": out, "owner": bool(OWNER_PASSWORD)}
 
 
@@ -3739,6 +3765,8 @@ def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_ow
         raise HTTPException(400, "payer_group and purpose ('appeal' or 'level_2') are required")
     if number and not fax.digits(number):
         raise HTTPException(400, "That is not a US fax number (ten digits).")
+    if number and fax.shared_group(pg):
+        raise HTTPException(400, fax.shared_why(pg))
     before = _payer_number(pg, purpose)
     if not one("SELECT 1 FROM findings WHERE payer_group=? LIMIT 1", (pg,)) and not before:
         raise HTTPException(404, "No payer by that name.")
@@ -3754,6 +3782,8 @@ def fax_payer_confirm(body: dict = Body(default={}), user: str = Depends(require
     pg, purpose = str(body.get("payer_group") or "").strip(), str(body.get("purpose") or "appeal")
     if not pg or purpose not in FAX_PURPOSES:
         raise HTTPException(400, "payer_group and purpose ('appeal' or 'level_2') are required")
+    if fax.shared_group(pg):
+        raise HTTPException(400, fax.shared_why(pg))
     cur = _payer_number(pg, purpose)
     if not cur or fax.digits(str(body.get("number") or "")) != cur:
         raise HTTPException(409, "That is no longer the number saved. Open the Faxes page again.")
@@ -3851,6 +3881,8 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
             continue
         if pid:
             _settle(r, status="queued", provider_id=pid, error=None)
+            # the appeal did go out: its item is marked Sent now, as the send would have done (the person who pressed it)
+            _mark_sent_appeal(dict(r, provider_id=pid), doc.get("actor") or "fax")
         else:
             _settle(r, status="failed", error="SRFax has no record of it: the run stopped before it went out.")
         out["settled"] += 1
@@ -4176,6 +4208,8 @@ def faxes_settle(body: dict = Body(default={}), user: str = Depends(require_auth
     doc = dict(json.loads(r["doc"] or "{}"), settled_by=user)
     if body["went"]:
         _settle(r, status="sent", sent_at=_fax_now(), error=None, doc=doc)
+        # an appeal that went out: its item is marked Sent, so its follow-ups start
+        _mark_sent_appeal(dict(r, provider_id=r.get("provider_id") or "checked in SRFax by a person"), user)
     else:
         _settle(r, status="failed", error="Not sent: a person checked SRFax's sent faxes.", doc=doc)
     if r["finding_id"]:

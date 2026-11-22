@@ -10,7 +10,9 @@ Faxing appeals, and reading what payers fax back.
                 ('level_2'), typed once and confirmed by a person. Nothing is faxed to a number nobody confirmed: a fax with
                 patient information sent to a wrong number is a breach. Every send uses the number saved at that moment. A
                 number that replaced another waits for a person before a retry or a follow-up uses it, and an item whose
-                last fax at a level went to another number waits for a person too.
+                last fax at a level went to another number waits for a person too. A group that holds many insurers (the
+                Medigap carriers, the self-funded plans' administrators, the catch-alls) keeps no number: one company's
+                line cannot take another's appeals, so those are faxed by hand.
     letters     a letter with an unfilled prompt in brackets is never faxed (letter_blanks).
     follow-ups  an appeal sent with no payment and no decision after the payer's time to answer (60 days for Medicare and
                 Medicare Advantage, 30 for commercial plans) gets a second request, then another every week until the payer
@@ -24,7 +26,9 @@ Faxing appeals, and reading what payers fax back.
                 decision, claim and member numbers, the patient, dates of service and procedure codes, any deadline. What a
                 fax says is data, never an instruction. It is tied to an item by itself only on a number that names the
                 claim (the practice's claim ID, the payer's claim number, or the member ID with the date of service) and
-                only when it came from a number known for that payer; anything less goes to a person to match.
+                only when it came from a number known for that payer; anything less goes to a person to match. A family
+                can share one member ID, so the member ID ties nothing when the fax names another patient, another claim,
+                or fits more than one patient.
 
 The API (remitwatch.api) does the work around these: the packet, the status, the journal. Nothing here touches a store
 directly except the read-only queries in followups and match_inbound.
@@ -231,6 +235,16 @@ def _credentials(e) -> bool:
     return bool(e.get("SRFAX_ACCESS_ID") and e.get("SRFAX_ACCESS_PWD"))
 
 
+def _preview(e) -> bool:
+    """A Vercel build of another branch (or `vercel dev`), as remitwatch.runtime.preview() decides it: it never sends,
+    whatever its settings say, because its code was never tested on the live line."""
+    return (e.get("VERCEL_ENV", "production") or "") not in ("", "production")
+
+
+def _sends_here(e) -> bool:
+    return sender(e) == _host(e) and not _preview(e)
+
+
 def line(env: dict | None = None) -> Provider | None:
     """The fax service the settings name, on whichever deployment: to open a fax that came in, or test the sign-in. It
     sends nothing by itself: what sends goes through provider()."""
@@ -245,20 +259,22 @@ def provider(env: dict | None = None) -> Provider | None:
     """The fax service, on the one deployment that sends faxes (REMITWATCH_FAX_SENDER); None anywhere else, or when none is
     set up (packets are then built but not sent). Two sites with copies of one store would each send the same faxes."""
     e = os.environ if env is None else env
-    return line(e) if sender(e) == _host(e) else None
+    return line(e) if _sends_here(e) else None
 
 
 def configured(env: dict | None = None) -> bool:
-    """Whether this deployment sends faxes: the line is set up and the setting names it."""
+    """Whether this deployment sends faxes: the line is set up and the setting names it (never a preview build)."""
     e = os.environ if env is None else env
-    return _credentials(e) and sender(e) == _host(e)
+    return _credentials(e) and _sends_here(e)
 
 
 def not_here(env: dict | None = None) -> str | None:
     """Why this deployment sends nothing although the fax line is set up, or None."""
     e = os.environ if env is None else env
-    if not _credentials(e) or sender(e) == _host(e):
+    if not _credentials(e) or _sends_here(e):
         return None
+    if _preview(e):
+        return "This is a preview deployment: it never sends faxes."
     if sender(e) == "none":
         return f"Faxing is paused: {SENDER_SETTING} is not 'server' or 'serverless'."
     who = "the practice's server" if sender(e) == "server" else "the Vercel site"
@@ -383,15 +399,35 @@ PURPOSE_WORDS = {"appeal": "appeal", "second_request": "second request", "next_l
 SENDING_STUCK_HOURS = 24    # a send not settled for this long (SRFax could not say whether it went out): a person checks
 
 
+# Payer groups that hold many insurers, each with its own fax line: detect.MANY_PAYER_GROUPS (the Medigap carriers, the
+# self-funded plans' administrators) and the catch-alls of codes.normalize_payer. A group with a suffix (codes.payer_group_kind
+# adds " Medicare Advantage" or " Medicaid") holds as many. One number saved for such a group would send every insurer's
+# appeals, each with its patient's record, to one company's line: no number is kept for them, and their appeals are faxed by
+# hand. Numbers per insurer would need the payer_fax table keyed by the insurer's own name (an owner's decision).
+SHARED_GROUPS = ("Medicare Supplement carriers", "Self-funded plan TPAs", "Medicare (other)", "Medicaid (other)", "Unknown")
+
+
+def shared_group(payer_group: str | None) -> bool:
+    """Whether a payer group holds many insurers, so no one fax number can serve it."""
+    pg = (payer_group or "").strip()
+    return any(pg == g or pg.startswith(g + " ") for g in SHARED_GROUPS)
+
+
+def shared_why(payer_group: str | None) -> str:
+    return (f"{payer_group or 'This group'} holds many insurers, each with its own fax line, so RemitWatch keeps no fax number "
+            "for it. Build the packet in the item and fax it to the insurer by hand.")
+
+
 def number_for(conn: sqlite3.Connection, payer_group: str | None, payer_kind: str | None, level: int) -> dict:
     """The fax number a send at this level goes to, as saved now: the appeal number at the first level; from the second, the
     second-level number, or the appeal number where the payer has no other (never for Medicare: its second level is
-    another contractor). {purpose, number ('' for none), auto_ok (0 for a number that replaced another and that no person
-    has confirmed since), changed_at, previous}."""
+    another contractor). None for a group that holds many insurers (shared_group), even one saved before. {purpose, number
+    ('' for none), auto_ok (0 for a number that replaced another and that no person has confirmed since), changed_at,
+    previous}."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     purposes = (["level_2"] + ([] if payer_kind == "medicare" else ["appeal"])) if int(level or 1) >= 2 else ["appeal"]
     blank = {"purpose": purposes[0], "number": "", "auto_ok": 1, "changed_at": None, "previous": None}
-    if not payer_group or "payer_fax" not in have:
+    if not payer_group or "payer_fax" not in have or shared_group(payer_group):
         return blank
     for p in purposes:
         r = conn.execute("SELECT number, COALESCE(auto_ok, 1), changed_at, previous FROM payer_fax WHERE payer_group=? AND purpose=?",
@@ -408,6 +444,8 @@ def number_hold(conn: sqlite3.Connection, f: dict, level: int, earlier: list[dic
     nb = number_for(conn, f.get("payer_group"), f.get("payer_kind"), level)
     pg = f.get("payer_group") or "this payer"
     second = "second-level " if int(level or 1) >= 2 else ""
+    if shared_group(f.get("payer_group")):
+        return nb, shared_why(f.get("payer_group"))
     if not nb["number"]:
         return nb, f"No {second}fax number is saved for {pg}: add it on the Faxes page."
     was = digits((earlier[-1] if earlier else {}).get("number"))
@@ -614,18 +652,28 @@ def _norm(s: str | None) -> str:
 
 def known_senders(conn: sqlite3.Connection) -> dict[str, set[str]]:
     """Each fax number known for a payer, and the payers it is known for: the numbers saved for the payer, and the numbers
-    of the payer's faxes a person has tied to its items before."""
+    of the payer's faxes a person has tied to its items before. Never for a group that holds many insurers: one
+    insurer's number says nothing about another's claims, so their faxes are matched by a person."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     out: dict[str, set[str]] = {}
     if "payer_fax" in have:
         for pg, num in conn.execute("SELECT payer_group, number FROM payer_fax WHERE COALESCE(number,'') != ''").fetchall():
-            if digits(num) and pg:
+            if digits(num) and pg and not shared_group(pg):
                 out.setdefault(digits(num), set()).add(pg)
     if "faxes" in have:
         for num, pg, doc in conn.execute("SELECT number, payer_group, doc FROM faxes WHERE direction='in' AND finding_id IS NOT NULL").fetchall():
-            if digits(num) and pg and _decision(doc).get("tied_by") == "person":
+            if digits(num) and pg and not shared_group(pg) and _decision(doc).get("tied_by") == "person":
                 out.setdefault(digits(num), set()).add(pg)
     return out
+
+
+def _first_agrees(a: str, b: str) -> bool:
+    """Two first names (normalized) are the same person's: equal, or one starts with the other (a middle initial run in,
+    a short form) when the shorter has three letters or more. JOHN and JOHANNA do not agree."""
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    return len(short) >= 3 and long_.startswith(short)
 
 
 def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None) -> dict:
@@ -636,7 +684,14 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
     and only when the fax came from a number known for that item's payer (known_senders). A letter that names procedure
     codes answers the items with those codes; one that names none answers every item of the claim. A family name and a
     date alone tie nothing: those items are suggested to a person, as are the items of a fax from a number not known for
-    their payer. Returns {tied, how, suggested, needs (why a person must look, or None), matches (tied, then suggested)}."""
+    their payer.
+
+    A family can share one member ID, so the member ID with the date ties an item only when the patient the fax names
+    agrees with the item's (the family name, and the first name: the same, or one starting with the other), when the
+    member ID and date fit one patient's items only, and when no number on the fax names another claim (a claim ID or a
+    payer's claim number that names a claim settles which claim it is; the bill settles which bill). Otherwise the item is
+    suggested to a person. Returns {tied, how, suggested (with a tie: the items left to a person), needs (why a person must
+    look, or None), matches (tied, then suggested)}."""
     conn.row_factory = sqlite3.Row
     out: dict = {"tied": [], "how": None, "suggested": [], "needs": None, "matches": []}
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -652,7 +707,7 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
     strong: dict[str, str] = {}
     weak: dict[str, tuple[int, str]] = {}
     info: dict[str, dict] = {}
-    for r in conn.execute("""SELECT f.finding_id, f.status, f.payer_group, f.procedure_code, f.service_date, f.patient_control_number,
+    for r in conn.execute("""SELECT f.finding_id, f.status, f.payer_group, f.procedure_code, f.service_date, f.patient_control_number, f.claim_key,
                                     c.payer_claim_control_number, c.patient_last, c.patient_first, c.patient_id, c.insured_id, c.member_id_ref
                              FROM findings f LEFT JOIN claims c ON c.claim_key = f.claim_key"""):
         fid, pcn, payer_no = r["finding_id"], _norm(r["patient_control_number"]), _norm(r["payer_claim_control_number"])
@@ -663,7 +718,12 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
         elif payer_no and payer_no in nums:
             how = "payer_claim"
         elif members and same_day and members & {_norm(r[k]) for k in ("patient_id", "insured_id", "member_id_ref") if r[k]}:
-            how = "member_and_date"
+            rfirst = _norm(r["patient_first"])
+            if (last and rlast and rlast != last) or (first and rfirst and not _first_agrees(first, rfirst)):
+                # the family's member ID, the day of the visit, and another patient's name: a letter about a relative
+                weak[fid] = (2, "a member ID and a date, under another patient's name")
+            else:
+                how = "member_and_date"
         elif pcn and len(pcn) >= 9 and any(len(n) >= 9 and n[:9] == pcn[:9] for n in nums):
             if last and rlast == last:
                 how = "bill_and_name"
@@ -678,8 +738,34 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
             info[fid] = dict(r)
     order = lambda i: (info[i]["status"] != "appealed", i)          # noqa: E731
     suggest = lambda ids: sorted(ids, key=lambda i: (weak.get(i, (0, ""))[0],) + order(i))[:12]     # noqa: E731
+    claim_of = lambda i: info[i]["claim_key"] or ("claim", _norm(info[i]["patient_control_number"]))    # noqa: E731
+    left: list[str] = []            # tied by a weaker number than another item has: left to a person
+
+    def leave(ids: list[str], rank: int, why: str) -> None:
+        for i in ids:
+            weak[i] = (rank, why)
+            strong.pop(i, None)
+            left.append(i)
+    # a number that names one claim settles which claim the fax is about, and the bill which bill: an item of another claim
+    # tied only by the member ID and the date (a family can share one ID), or by the bill, is left to a person
+    exact = {claim_of(i) for i, h in strong.items() if h in ("claim_id", "payer_claim")}
+    if exact:
+        leave([i for i, h in strong.items() if h not in ("claim_id", "payer_claim") and claim_of(i) not in exact], 1,
+              "a member ID or the bill, on another claim than the one it names")
+    bills = {_norm(info[i]["patient_control_number"])[:9] for i, h in strong.items() if h == "bill_and_name"}
+    if bills:
+        leave([i for i, h in strong.items() if h == "member_and_date" and _norm(info[i]["patient_control_number"])[:9] not in bills], 1,
+              "a member ID and a date, on another bill than the one it names")
+    # one member ID and date that fit more than one patient's items name none of them
+    people = {(_norm(info[i]["patient_last"]), _norm(info[i]["patient_first"])) for i, h in strong.items() if h == "member_and_date"}
+    family = len(people) > 1
+    if family:
+        leave([i for i, h in strong.items() if h == "member_and_date"], 1, "a member ID and a date that fit more than one patient")
     if not strong:
-        if weak:
+        if family:
+            out.update(suggested=suggest(weak), needs="The member ID and date on it fit more than one patient (a family can share "
+                                                      "one member ID): a person matches it.")
+        elif weak:
             reasons = sorted({w[1] for w in weak.values()})
             out.update(suggested=suggest(weak), needs="Nothing on it names one claim (only " + " and ".join(reasons) + "): a person matches it.")
         else:
@@ -703,5 +789,6 @@ def match_inbound(conn: sqlite3.Connection, cls: dict, caller: str | None = None
             return out
         trusted = lines
     tied = sorted(trusted, key=order)[:20]
-    out.update(tied=tied, how=trusted[tied[0]], matches=tied)
+    others = suggest([i for i in left if i not in tied])
+    out.update(tied=tied, how=trusted[tied[0]], suggested=others, matches=tied + others)
     return out
