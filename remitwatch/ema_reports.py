@@ -1340,7 +1340,8 @@ def serving_tables(conn: sqlite3.Connection | None = None) -> list[tuple[str, st
         ("ema_line_payments", keep("ema_line_payments"), links),
         ("ema_line_reasons", keep("ema_line_reasons"), links),
         ("ema_link_events", keep("ema_link_events"), links),
-        ("ema_checks", keep("ema_checks"), "match = 'none'"),
+        # the checks no 835 carries (C1's list), and the checks of the payments the copy holds (a line's outcome reads them)
+        ("ema_checks", keep("ema_checks"), f"match = 'none' OR check_no IN (SELECT check_no FROM main.ema_line_payments WHERE {links})"),
         ("ema_months", keep("ema_months"), None),
     ]
 

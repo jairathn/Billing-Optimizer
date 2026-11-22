@@ -139,6 +139,56 @@ class FakeDropbox:
     def upload_chunks(self, path: str, chunks: Iterable[bytes], part: int = 32 << 20) -> dict:
         return self.upload(path, b"".join(chunks))
 
+    # ------------------------------------------------------------ upload sessions (DropboxClient._content_call)
+    def _content_call(self, endpoint: str, arg: dict, data: bytes) -> dict:
+        """The content endpoints the chunked upload uses, as Dropbox answers them: a session is started with the first
+        part, each later part is appended at the offset the caller says (a wrong offset is refused with the right one,
+        as Dropbox does), and finish commits the parts to a path ('add' refuses to replace a file). Every body's size is
+        kept in `bodies`, so a test can check that none was over Vercel's limit."""
+        import json as _json
+        import secrets as _secrets
+        self._count(endpoint)
+        self.bodies = getattr(self, "bodies", [])
+        self.bodies.append(len(data))
+        sessions = self.__dict__.setdefault("sessions", {})
+        for part, exc in self.broken.items():           # tests: make chosen calls fail
+            if part == endpoint:
+                raise exc
+
+        def refused(tag: str, **more) -> RuntimeError:
+            body = {"error_summary": f"lookup_failed/{tag}/", "error": {".tag": "lookup_failed", "lookup_failed": dict({".tag": tag}, **more)}}
+            return RuntimeError(f"Dropbox {endpoint} failed 409: {_json.dumps(body)}")
+        if endpoint == "files/upload_session/start":
+            sid = "fake-session-" + _secrets.token_hex(8)
+            sessions[sid] = {"data": bytearray(data), "closed": bool(arg.get("close"))}
+            return {"session_id": sid}
+        if endpoint in ("files/upload_session/append_v2", "files/upload_session/finish"):
+            cur = arg["cursor"]
+            s = sessions.get(cur["session_id"])
+            if s is None:
+                raise refused("not_found")
+            if s["closed"] and endpoint.endswith("append_v2"):
+                raise refused("closed")
+            if cur["offset"] != len(s["data"]):
+                raise refused("incorrect_offset", correct_offset=len(s["data"]))
+            s["data"] += data
+            if endpoint.endswith("append_v2"):
+                s["closed"] = bool(arg.get("close"))
+                return {}
+            commit = arg["commit"]
+            p = self._local(commit["path"])
+            if commit.get("mode", "add") == "add" and os.path.isfile(p):
+                raise DropboxConflict("path/conflict/file/")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p + ".part", "wb") as fh:
+                fh.write(bytes(s.pop("data")))
+            os.replace(p + ".part", p)
+            del sessions[cur["session_id"]]
+            return self._entry(p)
+        if endpoint == "files/upload":
+            return self.upload(arg["path"], data, mode=arg.get("mode") if isinstance(arg.get("mode"), str) else "overwrite")
+        raise RuntimeError(f"fake Dropbox: unsupported endpoint {endpoint}")
+
     def delete(self, path: str) -> bool:
         self._count("delete")
         p = self._local(path)

@@ -1031,3 +1031,368 @@ def test_a_serverless_compact_store_gives_the_same_answers_as_a_server(store, le
     finally:
         lg2.close()
         mem.close()
+
+
+# ======================================================================================== the line outcome: review fixes
+def test_a_payment_the_items_own_remittance_took_back_is_not_paid_before(store, ledger, tmp_path):
+    """Blue Cross paid the line $90 on trace 1, then re-adjudicated it on trace 2 (the item's own remittance): it took the
+    $90 back and denied the line. EMA posted both. Nothing paid before the denial still stands: no paid-before outcome,
+    no hint about a duplicate, and the write-off at posting reads as what it is."""
+    remit(store, trace=F.check_no(1), paid_on="2026-03-10", claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 90)]}])
+    tk2 = remit(store, trace=F.check_no(2), paid_on="2026-03-28",
+                claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 0, [("CO", "197", 150)])], "status": "4"}])
+    rows = [charge(F.link_no(1)),
+            pay(F.link_no(1), F.check_no(1), 90, posted=D(2026, 3, 12)),
+            adj(F.link_no(1), "CO-45", 60, contractual=True, posted=D(2026, 3, 12)),
+            pay(F.link_no(1), F.check_no(2), -90, posted=D(2026, 3, 31)),             # the takeback, under the item's own trace
+            adj(F.link_no(1), "CO-45", -60, contractual=True, posted=D(2026, 3, 31)),
+            adj(F.link_no(1), "CO-197", 150, posted=D(2026, 3, 31)),
+            charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1), status="Payment Pending")]
+    load(store, ledger, tmp_path, rows)
+    ec.classify_checks(store.conn)
+    f = finding(tk2)
+    o = outcomes(store, [f])["F1"]
+    got = ec.paid_in_ema(store.conn, [f], {"F1": o}).get("F1") or {}
+    assert o["paid_before"] == 0 and o["taken_back"] == 9000 and o["paid_before_first"] is None
+    assert o["outcome"] in ("auto_written_off", "written_off_at_posting") and got.get("action") != "hint_paid_before"
+
+
+def test_a_takeback_after_the_denial_cancels_what_was_paid_before_it_or_after_it(store, ledger, tmp_path):
+    """A takeback posted after the item cancels a later payment first (a payment taken back never closes an item), and
+    otherwise the payment made before the item (so it no longer reads as paid before)."""
+    tk = denial_world(store, ledger, tmp_path, [
+        pay(F.link_no(1), "PRIM-1", 90, posted=D(2026, 3, 20), payer=P["medicare"]),       # before the denial
+        pay(F.link_no(1), "PRIM-2", -90, posted=D(2026, 4, 12), payer=P["medicare"])])     # taken back after it
+    f = finding(tk)
+    o = outcomes(store, [f])["F1"]
+    assert o["paid_before"] == 0 and o["taken_back"] == 9000 and o["outcome"] != "paid_before"
+    assert ec.paid_in_ema(store.conn, [f], {"F1": o}).get("F1", {}).get("action") != "hint_paid_before"
+
+
+def test_a_later_payment_taken_back_never_closes_the_item(store, ledger, tmp_path):
+    tk = denial_world(store, ledger, tmp_path, [pay(F.link_no(1), "PAPER-1", 150, posted=D(2026, 4, 10)),
+                                                 pay(F.link_no(1), "PAPER-2", -150, posted=D(2026, 4, 20))])
+    f = finding(tk)
+    o = outcomes(store, [f])["F1"]
+    assert o["paid_after_same"] == 0 and o["paid_before"] == 0 and o["taken_back"] == 0
+    assert "F1" not in ec.paid_in_ema(store.conn, [f], {"F1": o})
+
+
+def test_an_items_own_payment_posted_under_a_mistyped_number_never_closes_it(store, ledger, tmp_path):
+    """One 835 pays claim 2 $50 and claim 1 $60; claim 1 has an underpayment item ($20 short). EMA posted claim 2 under
+    the trace and claim 1's $60 under a mistyped number. C1 pairs that check with the 835's missing part (misnumbered),
+    so C4 does not call the 835 posted short, and the $60 is the item's own payment, never a later one."""
+    keep(store, F.claim_id(1))
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28",
+               claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 60)]},
+                       {"pcn": F.claim_id(2), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "99213", 150, 50)]}])
+    remit(store, trace=F.check_no(99), paid_on="2026-04-28", claims=[{"pcn": F.claim_id(99), "last": "FIXTURE", "first": "DELTA",
+                                                                       "lines": [("2026-03-20", "99212", 90, 40)]}])
+    rows = [charge(F.link_no(1)), pay(F.link_no(1), "88O000001", 60, posted=D(2026, 4, 1)),        # letter O for zero
+            adj(F.link_no(1), "CO-45", 90, contractual=True, posted=D(2026, 4, 1)),
+            charge(F.link_no(2), patient=1), pay(F.link_no(2), F.check_no(1), 50, patient=1, posted=D(2026, 3, 31)),
+            charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1)),
+            pay(F.link_no(99), F.check_no(99), 40, cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 4, 30))]
+    load(store, ledger, tmp_path, rows)
+    out = ec.classify_checks(store.conn)
+    assert one(store.conn, "SELECT match, cause, pair_trace FROM ema_checks WHERE check_no='88O000001'") == ("none", "misnumbered", tk)
+    assert out["pairs_in_part"] == 1
+    assert [i for i in ec.unposted_remits(store.conn, today=TODAY) if i["key_parts"] == (tk,)] == []
+    f = finding(tk, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, paid_cents=6000, expected_cents=8000,
+                shortfall_cents=2000)
+    o = outcomes(store, [f])["F1"]
+    assert o["anchor_basis"] == "own_posting" and o["paid_after_same"] == 0
+    assert ec.paid_in_ema(store.conn, [f], {"F1": o}).get("F1", {}).get("action") != "close"
+
+
+def test_an_own_payment_found_only_by_its_amount_never_closes_an_underpayment(store, ledger, tmp_path):
+    """EMA keyed the item's own $60 under a mistyped number and another payer's name, so C1 cannot pair it: an EMA-only
+    payment of exactly the item's own paid amount, within the usual posting delay, is taken for the item's own."""
+    keep(store, F.claim_id(1))
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 60)]}])
+    rows = [charge(F.link_no(1)), pay(F.link_no(1), "88O000001", 60, posted=D(2026, 4, 1), payer=P["commercial"]),
+            adj(F.link_no(1), "CO-45", 90, contractual=True, posted=D(2026, 4, 1)),
+            charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1))]
+    load(store, ledger, tmp_path, rows)
+    ec.classify_checks(store.conn)
+    f = finding(tk, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, paid_cents=6000, expected_cents=8000,
+                shortfall_cents=2000)
+    o = outcomes(store, [f])["F1"]
+    assert o["anchor_basis"] == "remit_plus_lag" and o.get("own_by_amount") and o["paid_after_same"] + o["paid_after_other"] == 0
+    assert "F1" not in ec.paid_in_ema(store.conn, [f], {"F1": o})
+
+
+def test_a_payment_under_a_check_a_spreadsheet_damaged_never_closes_an_item(store, ledger, tmp_path):
+    tk = denial_world(store, ledger, tmp_path, [pay(F.link_no(1), "9.00001E+11", 150, posted=D(2026, 4, 10))])
+    f = finding(tk)
+    o = outcomes(store, [f])["F1"]
+    assert o["paid_after_same"] == 0 and o["paid_after_835"] == 15000
+    assert "F1" not in ec.paid_in_ema(store.conn, [f], {"F1": o})
+
+
+def test_the_items_own_payer_under_emas_name_is_learned_from_checks_that_match_its_traces(store, ledger, tmp_path):
+    """The 835 names the payer UMR; EMA posts its checks under a Wausau plan, which groups apart. Three checks EMA posted
+    under exactly the payer's own trace numbers teach that the two are one payer: a later payment under EMA's name closes
+    the item instead of reading as another payer's."""
+    keep(store, F.claim_id(1))
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", payer="UMR TEST",
+               claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 0, [("CO", "197", 150)])]}])
+    ema = "Wausau Test Plan"
+    rows = [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 0, posted=D(2026, 3, 31), payer=ema),
+            adj(F.link_no(1), "CO-197", 150, posted=D(2026, 3, 31), payer=ema),
+            pay(F.link_no(1), "PAPER-9", 150, posted=D(2026, 4, 20), payer=ema),
+            charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1))]
+    for i in range(2, 5):
+        remit(store, trace=F.check_no(i), paid_on="2026-03-14", payer="UMR TEST",
+              claims=[{"pcn": F.claim_id(10 + i), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "99213", 150, 50)]}])
+        rows += [charge(F.link_no(10 + i), patient=1), pay(F.link_no(10 + i), F.check_no(i), 50, patient=1, payer=ema,
+                                                           posted=D(2026, 3, 17))]
+    load(store, ledger, tmp_path, rows)
+    f = finding(tk, payer_group="UMR", payer_name="UMR TEST")
+    assert not ec._same_payer(er.payer_group_of(store.conn, ema)[0], "UMR")
+    store.conn.execute("DELETE FROM meta WHERE key=?", (ec.EQUIV_KEY,))
+    before = ec.paid_in_ema(store.conn, [f], outcomes(store, [f]))["F1"]
+    assert before["action"] == "hint_other_payer"
+    ec.classify_checks(store.conn)
+    assert ec._meta(store.conn, ec.EQUIV_KEY) == {"UMR TEST": [er.payer_group_of(store.conn, ema)[0]]}
+    after = ec.paid_in_ema(store.conn, [f], outcomes(store, [f]))["F1"]
+    assert after["action"] == "close" and "check ending" in after["note"]
+
+
+def test_a_payer_seen_on_fewer_than_three_matched_checks_is_not_learned(store):
+    remit(store, trace="T1", paid_on="2026-03-14", payer="UMR TEST", claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 50)]}])
+    store.conn.execute("""INSERT INTO ema_checks (check_no, payer, payer_group, match, trace_key, first_posted, ins_paid)
+                          SELECT 'T1', 'Wausau Test Plan', 'UHC Integrated Services (Wausau)', 'exact', transaction_key, '2026-03-17', 5000
+                          FROM transactions""")
+    store.conn.commit()
+    assert ec.learn_payer_equivalence(store.conn) == {}
+
+
+# ================================================================================================ C5 and C2: review fixes
+def test_an_ema_denial_is_dated_from_its_own_reason_not_an_earlier_reversed_one(store, ledger, tmp_path):
+    """CO-16 posted January 15 and reversed February 1 (the claim was corrected), then CO-197 posted April 10. The item is
+    the CO-197 denial: its window counts from April 10 less the posting lag, never from January."""
+    payer = "Humana Medicare Advantage Test"
+    rows = [charge(F.link_no(2), patient=1, payer=payer, primary=payer),
+            adj(F.link_no(2), "CO-16", 150, patient=1, posted=D(2026, 1, 15), payer=payer, primary=payer),
+            adj(F.link_no(2), "CO-16", -150, patient=1, posted=D(2026, 2, 1), payer=payer, primary=payer),
+            adj(F.link_no(2), "CO-197", 150, patient=1, posted=D(2026, 4, 10), payer=payer, primary=payer)]
+    denial_world(store, ledger, tmp_path, rows)
+    items = [i for i in c5(store, rate=lambda g, c, y: 7000) if i["key_parts"][0] == F.link_no(2)]
+    assert len(items) == 1 and items[0]["evidence"]["first_denial_posted"] == "2026-04-10"
+    lag = items[0]["evidence"]["posting_lag_days"]
+    assert items[0]["appeal_deadline"] > ec._add("2026-04-10", -lag)
+    f = dict(finding(None, finding_id="E1"), signal="EMA_DENIED", ema_link=F.link_no(2), payment_date=None,
+             evidence=json.dumps(items[0]["evidence"]))
+    assert outcomes(store, [f])["E1"]["anchor"] == "2026-04-10"
+
+
+def test_a_payment_before_the_denial_never_reads_as_paid_since(store, ledger, tmp_path):
+    payer = "Humana Medicare Advantage Test"
+    rows = [charge(F.link_no(2), patient=1, payer=payer, primary=payer),
+            adj(F.link_no(2), "CO-16", 150, patient=1, posted=D(2026, 1, 15), payer=payer, primary=payer),
+            adj(F.link_no(2), "CO-16", -150, patient=1, posted=D(2026, 2, 1), payer=payer, primary=payer),
+            pay(F.link_no(2), "SUPP0001", 70, patient=1, posted=D(2026, 3, 1), payer=payer, primary=payer),
+            adj(F.link_no(2), "CO-197", 150, patient=1, posted=D(2026, 4, 10), payer=payer, primary=payer)]
+    denial_world(store, ledger, tmp_path, rows)
+    assert [i for i in c5(store, rate=lambda g, c, y: 7000) if i["key_parts"][0] == F.link_no(2)]
+
+
+def test_a_write_off_on_an_item_with_no_shortfall_is_capped_by_its_value(store, ledger, tmp_path):
+    tk = denial_world(store, ledger, tmp_path)
+    f = finding(tk, shortfall_cents=None, expected_cents=4000)
+    w = ec.written_off_in_ema(store.conn, [f], outcomes(store, [f]))["F1"]
+    assert (w["written_off_cents"], w["written_off_basis"]) == (4000, "expected")
+    f2 = finding(tk, shortfall_cents=None, expected_cents=None)                   # an item detect could not price
+    w2 = ec.written_off_in_ema(store.conn, [f2], outcomes(store, [f2]))["F1"]
+    assert (w2["written_off_cents"], w2["written_off_basis"]) == (15000, "charge_less_paid")
+    f3 = finding(tk, shortfall_cents=None, expected_cents=None, paid_cents=10000)  # part of the charge was paid already
+    assert ec.written_off_in_ema(store.conn, [f3], outcomes(store, [f3]))["F1"]["written_off_cents"] == 5000
+
+
+# ============================================================================================ C3a and C4: review fixes
+def test_a_same_day_ar_status_wins_the_tie_over_the_claim_status_export(store):
+    """The A/R (as_of 2026-11-20) says Denied; a Claim & Claim Status export made the same day at 09:00 says Payment
+    Pending. A tie is decided by the day: the A/R first, as documented."""
+    c = store.conn
+    cid = F.claim_id(7)
+    c.execute("INSERT INTO ema_ar (file_id, row_no, as_of, svc_year, claim_id, link, claim_status, status_class, party) "
+              "VALUES ('AR1', 1, '2026-11-20', '2026', ?, ?, 'Denied', 'denied', 'Insurance')", (cid, F.link_no(7)))
+    c.execute("INSERT INTO ema_sources (source_name, sha256, family, created_at, rows, recorded_at) "
+              "VALUES ('status.xlsx', 'SHA1', 'claim_status', '2026-11-20T09:00:00Z', 1, '2026-11-20T10:00:00Z')")
+    c.execute("INSERT INTO ema_rows (row_fingerprint, family, source_sha256, claim_id, claim_status) "
+              "VALUES ('R1', 'claim_status', 'SHA1', ?, 'Payment Pending')", (cid,))
+    c.commit()
+    st = ec.claim_statuses(c, claim_ids=[cid])[cid]
+    assert (st["source"], st["status"]) == ("ar", "Denied")
+    ov = ec.overlays(c, [finding(None, patient_control_number=cid, ema_link=F.link_no(7))], {})
+    assert ov["F1"]["ema_status"] == "Denied" and ov["F1"]["ema_status_src"] == "ar"
+    c.execute("UPDATE ema_sources SET created_at='2026-11-21T08:00:00Z'")       # a day later, the export is newer
+    c.commit()
+    assert ec.claim_statuses(c, claim_ids=[cid])[cid]["source"] == "export"
+
+
+def test_an_835_emas_spreadsheet_damaged_check_may_hold_is_never_called_unposted(store, ledger, tmp_path):
+    """The practice saved Production in Excel: five 12-digit EFT traces EMA posted read 9.00000E+11 and the like. C4 does
+    not call those payments unposted (it counts them apart); a trace whose digits cannot be the damaged number is."""
+    tks = []
+    rows = []
+    for i in range(1, 6):
+        trace = f"9{i:011d}"
+        tks.append(remit(store, trace=trace, paid_on="2026-03-28", claims=[{"pcn": F.claim_id(i), "lines": [(S, "99213", 150, 80)]}]))
+        rows += [charge(F.link_no(i)), pay(F.link_no(i), f"{float(trace):.5E}", 80)]
+    other = remit(store, trace="777000000001", paid_on="2026-03-28", claims=[{"pcn": F.claim_id(9), "lines": [(S, "99213", 150, 80)]}])
+    rows += [charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1))]
+    p = F.write(str(tmp_path / "prod.csv"), F.production_csv(rows))
+    assert er.ingest_file(store, p, via="test", ledger=ledger, log=Log())["status"] == "current"      # five: under H7's floor
+    el.refresh(store, ledger, parts="AB", log=Log())
+    ec.classify_checks(store.conn)
+    items = ec.unposted_remits(store.conn, today=TODAY)
+    assert [i["key_parts"] for i in items] == [(other,)]
+    summary = ec._meta(store.conn, ec.UNPOSTED_KEY)
+    assert summary["damaged_n"] == 5 and summary["damaged_cents"] == 5 * 8000
+    assert ec._sci_could_be("9.00001E+11", "900001234567") and not ec._sci_could_be("9.00001E+11", "900011234567")
+    assert not ec._sci_could_be("9.00001E+11", "90000123456") and not ec._sci_could_be("ABC", "900001234567")
+
+
+# =========================================================================================== the dashboard's copy
+def serving_copy(store, path, monkeypatch):
+    """The dashboard's copy as cloud.build_serving makes it with the EMA tables wired in (needs_ema_reports): every serving
+    table, the EMA tables of ema_reports.serving_tables (no keys, only the lines the pages show) and the meta filter
+    that leaves out the key salt."""
+    from remitwatch import cloud, detect
+
+    detect.ensure_schema(store.conn)
+    orig_empty = cloud.empty_serving
+
+    def empty_with_ema(p):
+        orig_empty(p)
+        import sqlite3
+        c = sqlite3.connect(p)
+        er.ensure_schema(c)
+        c.close()
+    monkeypatch.setattr(cloud, "empty_serving", empty_with_ema)
+    tables = ([t for t in cloud.SERVING_TABLES if t[0] != "meta"] + er.serving_tables(store.conn)
+              + [("meta", None, er.SERVING_META_FILTER)])
+    monkeypatch.setattr(cloud, "SERVING_TABLES", tables)
+    cloud.build_serving(store.conn, str(path))
+
+
+def serving_world(store, ledger, tmp_path):
+    """A denial with a later payment no 835 carries, a denial only EMA saw, an 835 EMA never posted, an A/R line still
+    open in EMA that insurance paid under the patient's other EMA claim, a credit, and an item on file."""
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), status="Denied", denial=150, current=0, aging=D(2026, 4, 25), svc=SVC),
+          F.ar_row(claim=F.claim_id(4), link=F.link_no(4), status="Batched for Printing", current=60, aging=None, patient=3, svc=SVC),
+          F.ar_row(claim=F.claim_id(6), link=F.link_no(6), status="Payment Pending", current=-30, aging=D(2026, 4, 25), svc=SVC),
+          F.ar_row(claim=F.claim_id(11), link=F.link_no(11), status="Payment Pending", current=100, aging=D(2026, 4, 25),
+                   patient=2, svc=SVC)]
+    extra = [pay(F.link_no(1), F.check_no(5), 150, posted=D(2026, 4, 20)),
+             charge(F.link_no(12), patient=2), pay(F.link_no(12), "PAPER-12", 80, patient=2, posted=D(2026, 4, 2)),
+             charge(F.link_no(13), patient=1), pay(F.link_no(13), F.check_no(7), 70, patient=1, posted=D(2026, 3, 31))]
+    remit(store, trace="UNPOSTED1", paid_on="2026-03-28", claims=[{"pcn": F.claim_id(30), "last": "SAMPLE", "first": "BRAVO",
+                                                                    "lines": [(S, "99213", 150, 80)]}])
+    remit(store, trace=F.check_no(7), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(13), "last": "SAMPLE", "first": "BRAVO",
+                                                                      "lines": [(S, "99213", 150, 70)]}])
+    keep(store, F.claim_id(1))
+    tk = denial_world(store, ledger, tmp_path, c5_rows() + extra, ar_rows=ar)
+    c = store.conn
+    f = finding(tk)
+    ec.posting_lag(c)
+    ec.turnaround(c, today=TODAY)
+    ec.unposted_remits(c, today=TODAY)
+    return f
+
+
+def page_answers(conn, f, o):
+    """What every page and CSV route asks of ema_checks and ema_reports (needs_ema_checks section 4)."""
+    out = {"c1": ec.c1_summary(conn, "2026-01-01", "2026-12-31"), "c1_all": ec.c1_summary(conn),
+           "reconcile": ec.reconcile_summary(conn, today=TODAY, save=False),
+           "ar": {b: ec.ar_list(conn, b, 1) for b in ec.AR_BUCKETS}, "unposted": list(ec.unposted_csv(conn, today=TODAY)),
+           "checks": list(ec.checks_csv(conn)), "credits": ec.credits(conn, today=TODAY), "credits_csv": list(ec.credits_csv(conn)),
+           "health": ec.data_health(conn, today=TODAY), "freshness": ec.freshness(conn, TODAY),
+           "block": ec.claim_block(conn, claim_id=F.claim_id(1)), "vouch": ec.fax_vouch(conn, [f], o, today=TODAY),
+           "outcomes": ec.line_outcomes(conn, [f], code_once=NO_CLOSE, today=TODAY),
+           "catalog": {k: v for k, v in er.catalog(conn).items() if k != "files"}, "coverage": er.coverage(conn)}
+    return _strip_times(json.loads(json.dumps(out, default=str)))
+
+
+def test_every_page_reads_the_same_on_the_dashboard_copy_as_on_the_store(store, ledger, tmp_path, monkeypatch):
+    """On a serverless host the pages read the dashboard's copy, which holds no keys, only the checks and lines the pages
+    show, and no key salt. Every figure must still be the store's: the ones the copy cannot work out are what detection
+    stored (meta ema:reconcile and ema:c1_cells, ema:unposted's rows, ema_ar.bucket). And no page writes to the copy."""
+    import hashlib
+    import sqlite3
+
+    f = serving_world(store, ledger, tmp_path)
+    c = store.conn
+    o = outcomes(store, [f])
+    live = {b: ec.ar_list(c, b, 1) for b in ec.AR_BUCKETS}            # before detection stored the buckets: worked out
+    assert live["paid_elsewhere"]["count"] == 1 and live["waiting"]["count"] == 0
+    ec.ar_accounted(c, today=TODAY)                                    # detection stores the W4 buckets (the store's items) ...
+    assert {b: ec.ar_list(c, b, 1) for b in ec.AR_BUCKETS} == live     # ... and the lists they open do not change
+    ec.reconcile_summary(c, today=TODAY)                               # ... and the figures the copy reads
+    store_side = page_answers(c, f, o)
+    assert store_side["c1"]["matched_cents"] > 0 and store_side["unposted"][1:] and store_side["ar"]["paid_elsewhere"]["rows"]
+    assert store_side["credits"]["production_not_on_ar"] is not None
+    path = tmp_path / "serving.sqlite"
+    serving_copy(store, path, monkeypatch)
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    copy = sqlite3.connect(str(path))
+    try:
+        assert copy.execute("SELECT COUNT(*) FROM meta WHERE key='ema:key_salt'").fetchone()[0] == 0
+        assert copy.execute("SELECT COUNT(*) FROM ema_ar WHERE name_key IS NOT NULL").fetchone()[0] == 0
+        copy_side = page_answers(copy, f, o)
+        copy.commit()
+    finally:
+        copy.close()
+    assert copy_side == store_side
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before       # no page wrote to the copy (no salt, no schema)
+
+
+def test_a_page_on_a_store_that_never_read_a_report_makes_no_salt(tmp_path):
+    s = Store(str(tmp_path / "fresh.sqlite"))
+    try:
+        er.ensure_schema(s.conn)
+        assert ec.c1_summary(s.conn)["matched_cents"] == 0 and ec.ar_list(s.conn, "waiting")["count"] == 0
+        assert ec.reconcile_summary(s.conn, save=False) == {} and list(ec.unposted_csv(s.conn))[1:] == []
+        ec.data_health(s.conn)
+        assert s.conn.execute("SELECT COUNT(*) FROM meta WHERE key='ema:key_salt'").fetchone()[0] == 0
+    finally:
+        s.close()
+
+
+def test_the_dashboard_copy_keeps_every_claim_number_of_a_bill_with_an_item(store, ledger, tmp_path, monkeypatch):
+    """The map ties the claim number to the bill's first submission (C1); the item is on the second (C2) of the same
+    bill. The copy keeps the claim number's lines all the same, so the item's EMA box is not empty on a serverless host."""
+    import sqlite3
+
+    f = serving_world(store, ledger, tmp_path)
+    c = store.conn
+    c.execute("DELETE FROM findings")
+    c.execute("INSERT INTO findings (finding_id, signal, category, status, patient_control_number, stale) VALUES "
+              "('C2', 'DENIED_AUTH', 'denial', 'open', ?, 0)", (F.claim_id(1, sub=2),))
+    c.execute("DELETE FROM ema_claim_links")                         # no A/R tie either: only the bill joins them
+    c.execute("DELETE FROM ema_ar")
+    c.commit()
+    assert one(c, "SELECT claim_id, bill FROM ema_link_map WHERE link=?", F.link_no(1)) == (F.claim_id(1), F.bill_id(1))
+    path = tmp_path / "serving.sqlite"
+    serving_copy(store, path, monkeypatch)
+    copy = sqlite3.connect(str(path))
+    try:
+        assert copy.execute("SELECT COUNT(*) FROM ema_lines WHERE link=?", (F.link_no(1),)).fetchone()[0] == \
+            c.execute("SELECT COUNT(*) FROM ema_lines WHERE link=?", (F.link_no(1),)).fetchone()[0] > 0
+        assert copy.execute("SELECT COUNT(*) FROM ema_link_map WHERE link=?", (F.link_no(1),)).fetchone()[0] == 1
+        assert copy.execute("SELECT COUNT(*) FROM ema_lines WHERE link=?", (F.link_no(12),)).fetchone()[0] == 0
+    finally:
+        copy.close()
+    assert f["finding_id"] == "F1"
+
+
+@pytest.mark.parametrize("claim", ["ZZ00TEST1C001", "ZZ00TEST1C1", "ZZ00TEST1C", "FZZ00TEST1C002", "ZZ00TEST1", "OTHER-77",
+                                   "ZZ00TEST12345C12"])
+def test_the_copys_bill_expression_agrees_with_bill_of_claim(claim):
+    import sqlite3
+
+    c = sqlite3.connect(":memory:")
+    got = c.execute(f"SELECT x, {er.bill_sql('x')} FROM (SELECT ? AS x)", (claim,)).fetchone()
+    assert er.bill_of_claim(claim) in got

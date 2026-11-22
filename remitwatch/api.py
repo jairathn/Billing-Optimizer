@@ -4471,3 +4471,7 @@ def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends
         return email_packet(conn, packet_id, to, note)
     finally:
         conn.close()
+
+
+from . import api_uploads  # noqa: E402  (unit A2: large files in pieces and the EMA export checklist, remitwatch/api_uploads.py)
+app.include_router(api_uploads.router)

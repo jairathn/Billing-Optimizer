@@ -56,7 +56,9 @@ SERVERLESS_RETAIN_DAYS = 730        # ... on a serverless host, whose temporary 
 RETAIN_HOLD_SHARE = 0.60            # retention deleting more than this share of the ledger at once waits for a person (a year of
                                     #   service arriving at once on a two-year ledger deletes about half)
 WORK_STALE_SECONDS = 3600           # a refresh's work file this old was left by a run that was killed: it is deleted
-TMP_BYTES_PER_ROW = 420             # serverless: temporary space a refresh needs per ledger row (ledger and work file; measured)
+# serverless: the temporary space a refresh needs, per ledger row (measured on the real files at two service years, with
+# about 15% added): the ledger file, the work file at the end of Part A (the ledger is let go then), and at the end of Part B
+LEDGER_BYTES_PER_ROW, WORK_A_BYTES_PER_ROW, WORK_B_BYTES_PER_ROW = 170, 200, 300
 TMP_MARGIN = 32 * 1024 * 1024       #   ... plus this much
 SCOPE_GAP_DAYS = 45                 # posted_lo - svc_lo above this: the file was filtered by posted date
 APPLIED = ("current", "partly_replaced", "replaced", "superseded")      # in the ledger (its box counts for the invariant)
@@ -618,25 +620,33 @@ class Ledger:
             self._remove_stage_file()
 
     # ------------------------------------------------------------------ holds
-    def tmp_need(self, staged_rows: int = 0) -> tuple[int, int]:
-        """(bytes the ledger and a refresh's work file need in the ledger's folder once `staged_rows` more postings are
-        applied, bytes there are for them: what is free plus what the ledger and the staging file hold now). A serverless
-        host's temporary folder is 512 MB, so a file that would not leave room for its own summaries is held there
-        (H8) instead of failing in the refresh, attempt after attempt."""
-        rows = (self.conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0) + max(0, staged_rows)
-        need = rows * TMP_BYTES_PER_ROW + TMP_MARGIN
+    def tmp_need(self, staged_rows: int = 0, *, newest: str | None = None, replaced: int = 0) -> tuple[int, int]:
+        """(bytes the ledger and a refresh's work file need in the ledger's folder once a file of `staged_rows` postings
+        whose newest posting is `newest` is applied, bytes there are for them: what is free plus what the ledger and the
+        staging file hold now). The ledger after it holds today's rows less what retention takes (as of `newest`) and
+        what the file replaces (`replaced`), plus its own; its file never shrinks. A refresh needs the ledger and Part A's
+        work file at once, then (the ledger let go) Part B's. A serverless host's temporary folder is 512 MB, so a file
+        that would not leave room for its own summaries is held there (H8) instead of failing in the refresh, attempt
+        after attempt."""
+        c = self.conn
+        rows_now = c.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0
+        cut = self._retention_cut(newest=newest)
+        gone = cut[1] if cut and not cut[2] else 0
+        rows_after = max(0, rows_now - gone - max(0, replaced)) + max(0, staged_rows)
+        sizes = []
+        for p in (self.path, self._stage_path()):
+            try:
+                sizes.append(os.path.getsize(p))
+            except OSError:
+                sizes.append(0)
+        ledger_after = max(sizes[0], rows_after * LEDGER_BYTES_PER_ROW)
+        need = max(ledger_after + rows_after * WORK_A_BYTES_PER_ROW, rows_after * WORK_B_BYTES_PER_ROW) + TMP_MARGIN
         folder = os.path.dirname(os.path.abspath(self.path)) if self.path != ":memory:" else runtime.tmp_dir()
         try:
             free = shutil.disk_usage(folder).free
         except OSError:
             return need, need
-        held = 0
-        for p in (self.path, self._stage_path()):
-            try:
-                held += os.path.getsize(p)
-            except OSError:
-                pass
-        return need, free + held
+        return need, free + sum(sizes)
 
     def _older_newer(self, mine: Box) -> tuple[list[Box], list[Box]]:
         boxes = [b for b in self.boxes(APPLIED) if b.file_id != mine.file_id and b.meets(mine)]
@@ -653,28 +663,24 @@ class Ledger:
             out.append(("H6", f"Save it as CSV: an Excel Production export of more than {XLSX_MAX_ROWS:,} rows is not read on "
                               "this site."))
         out += er.production_format_holds(stats)
-        if serverless:
-            need, have = self.tmp_need(int(stats.get("rows") or 0))
-            if need > have:
-                out.append(("H8", f"Too large for this site's temporary space: the summaries after it need about {need >> 20:,} MB "
-                                  f"and {have >> 20:,} MB is free. The server reads it; this site keeps "
-                                  f"{retain_days():,} days of postings (REMITWATCH_EMA_RETAIN_DAYS)."))
         share = stats.get("charge_line_share")
         if (meta.scope == "service" and share is not None and int(stats.get("lines") or 0) >= H2_MIN_LINES
                 and share < H2_CHARGE_SHARE):
             out.append(("H2", f"Only {int(share * 100)}% of its claim lines carry their charge, so it looks filtered by posted "
                               "date while its dates read as a service-date export. Export it again with one date filter."))
         if not self._stage_attached():
-            return out
+            return out + (self._tmp_hold(meta, stats, 0) if serverless else [])
         mine = meta.box()
         older, newer = self._older_newer(mine)
         live_older = [b for b in older if b.status in LIVE]
         c = self.conn
+        replaced = 0
         if live_older:
             pred, args = mine.sql("p")
             srcs = [b.src for b in live_older]
             base = f"FROM main.postings p WHERE p.src IN ({','.join('?' * len(srcs))}) AND {pred}"
             bargs = srcs + args
+            replaced = c.execute(f"SELECT COUNT(*) {base}", bargs).fetchone()[0] or 0
             links_old = c.execute(f"SELECT COUNT(DISTINCT p.link) {base} AND p.link IS NOT NULL", bargs).fetchone()[0]
             when = _day(max(b.as_of for b in live_older))
             if links_old >= H3_MIN_LINKS:
@@ -704,7 +710,17 @@ class Ledger:
             if rows >= H5_MIN_ROWS and payers < H5_MIN_PAYERS:
                 out.append(("H5", f"It names {payers} insurer{'s' if payers != 1 else ''} on {rows:,} rows and it is the first "
                                   "Production file for its dates: was it filtered by payer? It must hold every payer."))
+        if serverless:
+            out += self._tmp_hold(meta, stats, replaced)
         return out
+
+    def _tmp_hold(self, meta: FileMeta, stats: dict, replaced: int) -> list[tuple[str, str]]:
+        need, have = self.tmp_need(int(stats.get("rows") or 0), newest=meta.posted_hi, replaced=replaced)
+        if need <= have:
+            return []
+        return [("H8", f"Too large for this site's temporary space: the summaries after it need about {need >> 20:,} MB and "
+                       f"{have >> 20:,} MB is free. The server reads it; this site keeps {retain_days():,} days of postings "
+                       "(REMITWATCH_EMA_RETAIN_DAYS).")]
 
     # ------------------------------------------------------------------ applying
     def commit(self, meta: FileMeta) -> dict:
@@ -778,20 +794,17 @@ class Ledger:
             return 0
         days = retain_days() if days is None else int(days)
         c = self.conn
-        have = c.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
-        if not have:
+        cut = self._retention_cut(days, today=today, newest=newest)
+        if cut is None:
             return 0
-        newest = max(have, newest or "")
-        top = min(newest[:10], (today or er.today_iso())[:10])
-        cutoff = (date.fromisoformat(top) - timedelta(days=days)).isoformat()
-        per = c.execute("SELECT src, COUNT(*) FROM postings WHERE svc < ? GROUP BY src", (cutoff,)).fetchall()
-        if not per:
+        cutoff, gone, would_wait = cut
+        if not gone:
             if self._meta("retain_held"):
                 self.conn.execute("DELETE FROM ledger_meta WHERE key='retain_held'")
             return 0
-        gone = sum(k for _src, k in per)
+        per = c.execute("SELECT src, COUNT(*) FROM postings WHERE svc < ? GROUP BY src", (cutoff,)).fetchall()
         total = c.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0
-        if not force and total and gone > RETAIN_HOLD_SHARE * total:
+        if not force and would_wait:
             self._meta_put("retain_held", json.dumps({"cutoff": cutoff, "rows": gone, "of": total, "days": days, "at": _now()},
                                                      sort_keys=True))
             return 0
@@ -811,6 +824,20 @@ class Ledger:
             c.execute("ROLLBACK")
             raise
         return n
+
+    def _retention_cut(self, days: int | None = None, *, today: str | None = None,
+                       newest: str | None = None) -> tuple[str, int, bool] | None:
+        """(cutoff, postings retention would delete, whether that waits for a person), or None on an empty ledger."""
+        days = retain_days() if days is None else int(days)
+        c = self.conn
+        have = c.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
+        if not have:
+            return None
+        top = min(max(have, newest or "")[:10], (today or er.today_iso())[:10])
+        cutoff = (date.fromisoformat(top) - timedelta(days=days)).isoformat()
+        gone = c.execute("SELECT COUNT(*) FROM postings WHERE svc < ?", (cutoff,)).fetchone()[0] or 0
+        total = c.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0
+        return cutoff, gone, bool(total) and gone > RETAIN_HOLD_SHARE * total
 
     def retain_held(self) -> dict | None:
         """Retention that waits for a person: {'cutoff', 'rows', 'of', 'days', 'at'}, or None."""
