@@ -995,20 +995,22 @@ def run_checks(conn: sqlite3.Connection, *, today: Any = None, run_id: str | Non
     swallowed."""
     t = today_of(today)
     out = []
-    for cid, fn in ITEM_CHECKS.items():
+    for cid, fn in list(ITEM_CHECKS.items()) + [("counts_lists", lambda c, d: check_counts_lists(c, d, run_id))]:
         if only is not None and cid not in set(only):
             continue
         try:
             out.append(fn(conn, t))
-        except sqlite3.Error as exc:
-            out.append(_result(cid, [("error", 0, None)], info={"error": f"{type(exc).__name__}: {str(exc)[:160]}"},
-                               text=f"{CHECKS[cid][3]}: the check could not run ({type(exc).__name__})"))
-    if only is None or "counts_lists" in set(only):
-        try:
-            out.append(check_counts_lists(conn, t, run_id))
-        except sqlite3.Error as exc:
-            out.append(_result("counts_lists", [("error", 0, None)], info={"error": f"{type(exc).__name__}: {str(exc)[:160]}"}))
+        except Exception as exc:       # noqa: BLE001  (a check that cannot run is a failed check, with its error)
+            _caught(exc, cid)
+            out.append(_check_error(cid, exc))
     return out
+
+
+def _check_error(cid: str, exc: BaseException) -> dict:
+    r = _result(cid, [("error", 0, None)], info={"error": f"{type(exc).__name__}: {str(exc)[:160]}"},
+                text=f"{CHECKS[cid][3]}: the check could not run ({type(exc).__name__})")
+    r["status"] = "error"
+    return r
 
 
 # ---------------------------------------------------------------------------------------------- the run: before and after
@@ -1079,8 +1081,12 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
         superseded.update(tk for tk in part if have.get(tk, 1))      # gone from the store, or superseded
     offs = []
     routes: Counter = Counter()
+    states_kept = any(r.get("work_state") for r in before.values())
     for fid, r in before.items():
-        if fid in after or r.get("stale") or r.get("status") not in OPEN_STATUSES or r.get("work_state") not in LISTED:
+        if fid in after or r.get("stale") or r.get("status") not in OPEN_STATUSES:
+            continue
+        listed = r.get("work_state") in LISTED if states_kept else (r.get("status") == "open" and r.get("category") in MONEY)
+        if not listed:
             continue
         if r.get("line_key") and r["line_key"] in lines:
             routes["same_line"] += 1

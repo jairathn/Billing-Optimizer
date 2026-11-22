@@ -157,6 +157,8 @@ _ALNUM_OK = frozenset({"sha256", "x86-64", "utf-16", "utf-32", "base64", "py313"
 _ID_QUOTED = re.compile(r"^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+|"
                         r"%[-A-Za-z%/ :.]*|[A-Z][a-z]+(?:[A-Z][a-z]+)+(?:Error|Exception|Warning))$")
 _PLACEHOLDER = re.compile(r"\x00(\d+)\x00")
+_TRIPLE = re.compile(r'("""|\'\'\')(?:.|\n)*?\1')
+_COMMENT = re.compile(r"#[^\n]*")
 _NAME_STOP = frozenset("the and for with from this that not none null true false payer payers claim claims line lines bill "
                        "paid patient insurance medicare medicaid".split())
 
@@ -197,7 +199,9 @@ class Scrubber:
                 for fn in os.listdir(here):
                     if fn.endswith(".py"):
                         with open(os.path.join(here, fn), encoding="utf-8", errors="ignore") as fh:
-                            words |= {w.lower() for w in re.findall(r"[A-Za-z]{3,}", fh.read())}
+                            # comments and docstrings left out: their examples ("John Smith") are not the code's words
+                            src = _COMMENT.sub("", _TRIPLE.sub("", fh.read()))
+                        words |= {w.lower() for w in re.findall(r"[A-Za-z]{3,}", src)}
             except OSError as exc:
                 _note_internal("code_words", exc)
             self._code_words = words
