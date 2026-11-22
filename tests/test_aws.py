@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
+import sys
+import time
 
 import pytest
 
@@ -111,42 +114,236 @@ def test_the_servers_own_runs_look_after_the_fax_line(tmp_path, monkeypatch, cap
     assert out["fax"]["refresh"]["received"] == 1 and out["fax"]["follow_up"]["sent"] == 0
 
 
-def test_the_settings_script_keeps_values_exactly_and_the_key_loads(tmp_path):
-    if not shutil.which("bash"):
-        pytest.skip("no bash")
-    from remitwatch import modmed as M
+FAKE_DOCKER = r"""#!/bin/bash
+# a stand-in for docker: records each call (python given with -c is named by what it does), answers whether the store
+# holds data ($LOGDIR/store: data or empty), and fails the move when $LOGDIR/import_fails exists
+args=()
+for a in "$@"; do
+  case "$a" in
+    *"SELECT 1 FROM transactions"*) args+=("<store-state>") ;;
+    *"DELETE FROM meta WHERE key LIKE"*) args+=("<clear-locks>") ;;
+    *"SELECT key, value FROM meta"*) args+=("<run-locks>") ;;
+    *$'\n'*) args+=("<code>") ;;
+    *) args+=("$a") ;;
+  esac
+done
+echo "${args[*]}" >> "$LOGDIR/docker.log"
+case "${args[*]}" in
+  *"<store-state>"*) cat "$LOGDIR/store" 2>/dev/null ;;
+  *import-cloud*) [ -f "$LOGDIR/import_fails" ] && { echo "Dropbox could not be reached."; exit 1; } ;;
+esac
+exit 0
+"""
+
+SECRET_PROMPT = re.compile(r"\s+([A-Z][A-Z0-9_]+), (?:set|not set)")
+TEXT_PROMPT = re.compile(r"\s+([A-Z][A-Z0-9_]+) \[")
+
+
+def _drive(script, cwd, env, answers, timeout=90):
+    """Run a script in a terminal, as a person would: wait for each question, answer it by the setting's name (Enter when
+    `answers` has none; a list answers the same question again), and type a secret only once the terminal has stopped
+    showing what is typed, as it does for every secret. Returns the exit code and everything the terminal showed."""
+    import pty
+    import select
+    import termios
+    queues = {k: (list(v) if isinstance(v, list) else [v]) for k, v in answers.items()}
+    pid, fd = pty.fork()
+    if pid == 0:                                                    # the child: the script, in the terminal
+        os.chdir(cwd)
+        os.execvpe("bash", ["bash", script], env)
+    screen, pending, status = b"", b"", None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 0.05)
+        if r:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break
+            screen += chunk
+            pending += chunk
+            continue
+        text = pending.decode(errors="replace")
+        last = text.rsplit("\n", 1)[-1]
+        secret = False
+        if text.endswith("It is not shown:\r\n"):
+            name, secret = SECRET_PROMPT.match(text.rstrip("\r\n").rsplit("\n", 1)[-1]).group(1), True
+        elif last.endswith(": ") and SECRET_PROMPT.match(last):
+            name, secret = SECRET_PROMPT.match(last).group(1), True
+        elif last.endswith("]: ") and TEXT_PROMPT.match(last):
+            name = TEXT_PROMPT.match(last).group(1)
+        elif last.endswith("[Y/n] "):
+            name = "MOVE" if "Move the store" in last else "AUTODEPLOY"
+        else:
+            done, st = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = st
+                break
+            continue
+        queue = queues.get(name)
+        answer = queue.pop(0) if queue else ""
+        if secret:
+            until = time.time() + 3
+            while termios.tcgetattr(fd)[3] & termios.ECHO and time.time() < until:
+                time.sleep(0.01)
+        os.write(fd, (answer + "\n").encode())
+        pending = b""
+    while True:                                                     # what is left to show
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        screen += chunk
+    os.close(fd)
+    if status is None:
+        _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status), screen.decode(errors="replace")
+
+
+def _configure_repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / "deploy" / "aws").mkdir(parents=True)
-    shutil.copy(os.path.join(HERE, "deploy", "aws", "configure.sh"), repo / "deploy" / "aws" / "configure.sh")
+    for rel in ("deploy/aws/configure.sh", "deploy/auto-deploy.sh"):
+        shutil.copy(os.path.join(HERE, rel), repo / rel)
     (repo / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\n")
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    (bindir / "docker").write_text(f'#!/bin/bash\necho "$*" >> "{tmp_path}/docker.log"\n')
-    (bindir / "docker").chmod(0o755)
+    (bindir / "docker").write_text(FAKE_DOCKER)
     (bindir / "systemctl").write_text(f'#!/bin/bash\necho "$*" >> "{tmp_path}/systemctl.log"\nexit 1\n')     # auto-deploy not on
-    (bindir / "systemctl").chmod(0o755)
-    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", REMITWATCH_DEPLOY_STATE=str(tmp_path / "deploy-state"))
-    pem = M.generate_key()
-    answers = ("\n\n\n\n" "key123\n" "sec$ret#1 x\n" "tok\n\n" "Test Derm\n1 Main St\n\n\n\n\n\n" "\n\n" + pem
-               + "\n\n\n\n\n" "\n\n\n\n" "\n\n\n\n\n" "n\n")      # TriZetto: user, password, how long it lasts, folders, key
-    r = subprocess.run(["bash", str(repo / "deploy" / "aws" / "configure.sh")], input=answers, text=True, capture_output=True,
-                       env=env, timeout=60)
-    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    for f in ("docker", "systemctl"):
+        (bindir / f).chmod(0o755)
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", REMITWATCH_DEPLOY_STATE=str(tmp_path / "deploy-state"),
+               LOGDIR=str(tmp_path), TERM="dumb", REMITWATCH_DEPLOY_POLL="0")
+    return repo, env
+
+
+def _env_values(repo):
     vals = {}
     for ln in (repo / ".env").read_text().splitlines():
         k, v = ln.split("=", 1)
         assert v.startswith("'") and v.endswith("'"), ln          # single quotes: nothing in a value is read as a variable
         vals[k] = v[1:-1]
+    return vals
+
+
+def test_the_settings_script_keeps_values_exactly_shows_no_secret_and_the_key_loads(tmp_path):
+    if not shutil.which("bash"):
+        pytest.skip("no bash")
+    from remitwatch import modmed as M
+    repo, env = _configure_repo(tmp_path)
+    (tmp_path / "store").write_text("empty\n")
+    pem = M.generate_key()
+    secrets = {"DROPBOX_APP_SECRET": "sec$ret#1 xQ7Z", "DROPBOX_REFRESH_TOKEN": "tok-PROBE-K2W8", "ANTHROPIC_API_KEY": "sk-PROBE-J4V6",
+               "TRIZETTO_SFTP_PASSWORD": "Tz-PROBE-H3X5", "SMTP_PASS": "Mail-PROBE-G8N1", "ALERT_WEBHOOK_URL": "https://hooks.example.org/PROBE-F9M3"}
+    answers = dict(secrets, DROPBOX_APP_KEY="key123", PRACTICE_NAME="Test Derm", PRACTICE_ADDRESS="1 Main St",
+                   MODMED_PRIVATE_KEY=pem.strip(), TRIZETTO_SFTP_PASSWORD_DAYS="90 days (3 months)", TRIZETTO_SFTP_PORT="2222",
+                   REMITWATCH_SHOW_PHI="1", MOVE="y", AUTODEPLOY="n")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, answers)
+    assert code == 0, screen[-2500:]
+    vals = _env_values(repo)
     assert oct((repo / ".env").stat().st_mode & 0o777) == "0o600"
-    assert vals["DROPBOX_APP_SECRET"] == "sec$ret#1 x" and vals["DROPBOX_ROOT_PATH"] == "/Trizetto Data" and vals["REMITWATCH_USER"] == "oda"
+    assert vals["DROPBOX_APP_SECRET"] == "sec$ret#1 xQ7Z" and vals["DROPBOX_ROOT_PATH"] == "/Trizetto Data" and vals["REMITWATCH_USER"] == "oda"
     assert len(vals["REMITWATCH_PASSWORD"]) == 32 and len(vals["CRON_SECRET"]) == 32 and "SRFAX_ACCESS_ID" not in vals
+    assert vals["TRIZETTO_SFTP_PASSWORD_DAYS"] == "90" and vals["TRIZETTO_SFTP_PORT"] == "2222" and vals["REMITWATCH_SHOW_PHI"] == "1"
     assert M.jwks(M.Settings.from_env({"MODMED_PRIVATE_KEY": vals["MODMED_PRIVATE_KEY"]}))["keys"][0] == M.public_jwk(M.load_private_key(pem))
-    assert (tmp_path / "docker.log").read_text().splitlines() == ["compose stop app", "compose up -d --build"]
-    # run again, pressing Enter everywhere: everything is kept
+    # nothing typed or pasted for a secret is on the screen, nor the scheduler's secret; the dashboard password once
+    body = [ln for ln in pem.strip().splitlines() if "-----" not in ln]
+    for v in list(secrets.values()) + body + [vals["CRON_SECRET"]]:
+        assert v not in screen, v
+    assert screen.count(vals["REMITWATCH_PASSWORD"]) == 1 and "shown this once" in screen
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert calls.index("compose build") < calls.index("compose stop app")             # built while the site still runs
+    assert calls.index("compose exec -T app python -c <run-locks> busy") < calls.index("compose stop app")
+    assert calls.index("compose stop app") < calls.index("compose run --rm --no-deps -T app python -c <clear-locks>")
+    assert "compose run --rm --no-deps app python -m remitwatch.cli import-cloud" in calls and calls[-1] == "compose up -d"
+    # run again on a server that has its own data now, pressing Enter everywhere: everything is kept, nothing is moved,
+    # and no secret is hinted at
     before = (repo / ".env").read_text()
-    r = subprocess.run(["bash", str(repo / "deploy" / "aws" / "configure.sh")], input="\n" * 40, text=True, capture_output=True,
-                       env=env, timeout=60)
-    assert r.returncode == 0 and (repo / ".env").read_text() == before
+    (tmp_path / "store").write_text("data\n")
+    (tmp_path / "docker.log").write_text("")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {})
+    assert code == 0 and (repo / ".env").read_text() == before
+    assert "Already moved" in screen and "Move the store" not in screen and "--force" not in screen
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert not any("import-cloud" in c for c in calls)
+    assert "\u2026" not in screen                                          # the old hint: "set (\u2026" and the last four
+    for name in secrets:
+        assert f"{name}, set" in screen and vals[name][-4:] not in screen, name
+    for name in ("REMITWATCH_PASSWORD", "CRON_SECRET", "MODMED_PRIVATE_KEY"):
+        assert f"{name}, set" in screen and vals[name] not in screen, name
+
+
+def test_the_move_is_offered_only_while_the_store_is_empty_and_never_points_at_force(tmp_path):
+    repo, env = _configure_repo(tmp_path)
+    (repo / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\nDROPBOX_REFRESH_TOKEN='tok'\n")
+    (tmp_path / "store").write_text("empty\n")
+    (tmp_path / "import_fails").write_text("")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {"MOVE": "", "AUTODEPLOY": "n"})
+    assert code == 0 and "Move the store" in screen and "Not moved" in screen and "still empty" in screen
+    assert "Run this script again to retry" not in screen and "--force" not in screen
+    # an unreadable store: nothing is moved, and the advice is to look, not to force
+    (tmp_path / "store").write_text("unreadable\n")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {})
+    assert code == 0 and "could not be read" in screen and "--force" not in screen and "Move the store" not in screen
+
+
+def test_passwords_the_site_would_refuse_are_asked_for_again(tmp_path):
+    repo, env = _configure_repo(tmp_path)
+    (tmp_path / "store").write_text("data\n")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {
+        "REMITWATCH_PASSWORD": ["short1", "a-long-enough-pass-1"],
+        "REMITWATCH_OWNER_PASSWORD": ["a-long-enough-pass-1", "another-long-pass-2"],
+        "SMTP_PORT": ["five-eight-seven", "587"], "REMITWATCH_SHOW_PHI": ["yes", "1"], "AUTODEPLOY": "n"})
+    assert code == 0, screen[-1500:]
+    vals = _env_values(repo)
+    assert vals["REMITWATCH_PASSWORD"] == "a-long-enough-pass-1" and vals["REMITWATCH_OWNER_PASSWORD"] == "another-long-pass-2"
+    assert vals["SMTP_PORT"] == "587" and vals["REMITWATCH_SHOW_PHI"] == "1"
+    for why in ("must be 12 characters or more", "must differ from the dashboard password", "must be a number", "must be 1 or 0"):
+        assert why in screen, why
+    assert "short1" not in screen and "a-long-enough-pass-1" not in screen
+
+
+def _shell_function(path, name):
+    text = open(os.path.join(HERE, path)).read()
+    return re.search(rf"^{name}\(\) \{{.*?^\}}\n", text, re.S | re.M).group(0)
+
+
+@pytest.mark.parametrize("words,days", [
+    ("90 days (3 months)", 90), ("Expires every 180 days, i.e. 6 months", 180), ("3 months (90 days)", 90), ("1 yr", 365),
+    ("6 months", 180), ("8 weeks", 56), ("90-day", 90), ("annually", 365), ("every quarter", 91), ("never", 0),
+    ("Passwords do not expire", 0), ("60", 60), ("", 0)])
+def test_a_password_lifetime_is_read_from_trizettos_own_words(words, days):
+    fn = _shell_function("deploy/aws/configure.sh", "days_of")
+    r = subprocess.run(["bash", "-c", fn + 'days_of "$1"', "-", words], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stdout.strip() == str(days), (words, r.stdout, r.stderr)
+
+
+def test_configure_sh_python_finds_data_and_clears_run_locks(tmp_path):
+    """The python configure.sh runs in the app's image, against a real store."""
+    text = open(os.path.join(HERE, "deploy", "aws", "configure.sh")).read()
+    state = re.search(r"^STORE_STATE='(.*?)'$", text, re.S | re.M).group(1)
+    clear = re.search(r"^CLEAR_LOCKS='(.*?)'$", text, re.S | re.M).group(1)
+    db = tmp_path / "remitwatch.sqlite"
+    env = dict(os.environ, REMITWATCH_DB=str(db))
+    run = lambda code: subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30).stdout.strip()  # noqa: E731
+    assert run(state) == "empty" and not db.exists()
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    c.commit()
+    assert run(state) == "empty"                                  # a store with no remittances table yet
+    c.execute("CREATE TABLE transactions (id INTEGER)")
+    c.commit()
+    assert run(state) == "empty"
+    c.execute("INSERT INTO transactions VALUES (1)")
+    c.executemany("INSERT INTO meta VALUES (?, ?)", [("pipeline:lock", "{}"), ("fax:lock", "{}"), ("sync:cursor", "x")])
+    c.commit()
+    assert run(state) == "data"
+    run(clear)
+    assert [k for (k,) in c.execute("SELECT key FROM meta")] == ["sync:cursor"]
 
 
 def test_the_aws_template_passes_awss_own_checks():
@@ -154,6 +351,141 @@ def test_the_aws_template_passes_awss_own_checks():
     _ = cfnlint
     r = subprocess.run(["cfn-lint", os.path.join(HERE, "deploy", "aws", "remitwatch.yaml")], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _template():
+    return open(os.path.join(HERE, "deploy", "aws", "remitwatch.yaml")).read()
+
+
+def _resource(text, name):
+    start = text.index(f"\n  {name}:")
+    nxt = re.search(r"\n  [A-Za-z]+:", text[start + 3:])
+    return text[start:start + 3 + (nxt.start() if nxt else len(text))]
+
+
+def _units(text, how):
+    return dict(re.findall(how + r"(\S+)(?: >/dev/null)? <<'UNIT'\n(.*?)\nUNIT\n", text, re.S))
+
+
+def test_the_server_and_its_address_outlive_any_stack_update():
+    """A stack update must never put an empty server in place of the one holding the data: the server launches from the
+    launch template's default version (CloudFormation's own updates of the template never move it), and the server and
+    its fixed address are kept, not deleted, whatever the stack does."""
+    text = _template()
+    server, address = _resource(text, "Server"), _resource(text, "Address")
+    assert "Version: !GetAtt LaunchTemplate.DefaultVersionNumber" in server and "LatestVersionNumber" not in text
+    for res in (server, address):
+        assert "DeletionPolicy: Retain" in res and "UpdateReplacePolicy: Retain" in res
+    assert "DeleteOnTermination: false" in _resource(text, "LaunchTemplate")
+    aws = open(os.path.join(HERE, "docs", "AWS_SETUP.md")).read()
+    assert "## Never update or delete the stack" in aws and "Replacement: True" in aws
+    for param in ("InstanceType", "DiskSizeGiB", "GitRef", "SiteAddress"):
+        assert f"**{param}**" in aws
+
+
+def test_system_updates_really_happen_every_night():
+    """dnf-automatic on Amazon Linux 2023 stays on the release the image was made from, so it installs nothing: the
+    server moves to the latest release itself, every night, as AWS documents, and the runbook sets up the same on a
+    server made before."""
+    text = _template()
+    boot = text[text.index("UserData:"):text.index("\n  Server:")]
+    assert "dnf-automatic" not in boot and "automatic security updates" not in text
+    made = _units(boot.replace("\n            ", "\n"), "cat > /etc/systemd/system/")
+    service, timer = made["remitwatch-os-update.service"], made["remitwatch-os-update.timer"]
+    assert "ExecStart=/usr/bin/dnf -y --releasever=latest upgrade" in service
+    assert "OnCalendar=" in timer and "WantedBy=timers.target" in timer and "systemctl enable --now remitwatch-os-update.timer" in boot
+    assert "${" not in service + timer                                      # nothing CloudFormation would substitute
+    runbook = open(os.path.join(HERE, "docs", "SERVER_RUNBOOK.md")).read()
+    assert _units(runbook, "sudo tee /etc/systemd/system/") == made           # the runbook's copy for an older server
+    assert "disable --now dnf-automatic.timer" in runbook
+
+
+def test_the_nightly_update_reboots_only_when_needed_and_never_during_a_deploy(tmp_path):
+    import fcntl
+    service = _units(_template().replace("\n            ", "\n"), "cat > /etc/systemd/system/")["remitwatch-os-update.service"]
+    post = re.search(r"^ExecStartPost=(.*)$", service, re.M).group(1)
+    state, bindir = tmp_path / "state", tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in (("dnf", 'echo "dnf $*" >> "$LOG"; exit "$(cat "$NEEDS")"'), ("systemctl", 'echo "systemctl $*" >> "$LOG"'),
+                       ("auto-deploy.sh", 'echo "auto-deploy $*" >> "$LOG"')):
+        (bindir / name).write_text("#!/bin/bash\n" + body + "\n")
+        (bindir / name).chmod(0o755)
+    cmd = post.replace("/var/lib/remitwatch-deploy", str(state)).replace("/usr/local/lib/remitwatch/auto-deploy.sh", str(bindir / "auto-deploy.sh"))
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", LOG=str(tmp_path / "log"), NEEDS=str(tmp_path / "needs"))
+    log = lambda: (tmp_path / "log").read_text().splitlines() if (tmp_path / "log").exists() else []   # noqa: E731
+
+    (tmp_path / "needs").write_text("0")                                     # nothing needs a reboot
+    subprocess.run(["bash", "-c", cmd], env=env, timeout=30)
+    assert log() == ["dnf needs-restarting -r"]
+    (tmp_path / "needs").write_text("1")                                     # a new kernel: once runs have ended, reboot
+    subprocess.run(["bash", "-c", cmd], env=env, timeout=30)
+    assert log()[1:] == ["dnf needs-restarting -r", "auto-deploy --idle 3600", "systemctl reboot"]
+    with open(state / "lock", "w") as fh:                                   # a deploy is going: no reboot meanwhile
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        subprocess.run(["bash", "-c", cmd.replace("-w 3600", "-w 1")], env=env, timeout=30)
+    assert log()[3:] == ["dnf needs-restarting -r"]
+
+
+def _caddy_bytes(size):
+    """Caddy reads max_size with go-humanize: MB is 1000 x 1000 bytes, MiB is 1024 x 1024."""
+    m = re.fullmatch(r"(\d+)\s*([KMG]i?B)", size)
+    n, unit = int(m.group(1)), m.group(2)
+    return n * {"KB": 10**3, "MB": 10**6, "GB": 10**9, "KiB": 2**10, "MiB": 2**20, "GiB": 2**30}[unit]
+
+
+def test_caddy_takes_more_than_the_app_does_in_caddys_own_units():
+    from remitwatch import uploads
+    text = open(os.path.join(HERE, "deploy", "Caddyfile")).read()
+    big = re.search(r"request_body @uploads \{\s*max_size (\S+)", text).group(1)
+    small = re.search(r"request_body @other \{\s*max_size (\S+)", text).group(1)
+    assert _caddy_bytes(big) > uploads.MAX_BYTES, (big, _caddy_bytes(big), uploads.MAX_BYTES)
+    assert _caddy_bytes(small) == 20 * 10**6
+    runbook = open(os.path.join(HERE, "docs", "SERVER_RUNBOOK.md")).read()
+    assert f"{_caddy_bytes(big):,} bytes" in runbook
+
+
+def test_the_runbooks_restore_brings_back_the_copy_and_not_what_it_undoes(tmp_path):
+    """A run stopped halfway leaves its last changes in the store's -wal file. The runbook's restore must not let SQLite
+    lay them over the restored copy: the copy is what comes back, whole, with no run lock in it."""
+    import signal
+
+    from remitwatch.cli import backup_store
+    from remitwatch.store import Store
+    runbook = open(os.path.join(HERE, "docs", "SERVER_RUNBOOK.md")).read()
+    block = runbook[runbook.index("- To restore a copy"):]
+    unpack = re.search(r"app sh -c '(.*?)'\n", block).group(1)
+    check = re.search(r'app python -c "(.*?)"\n', block).group(1).replace('\\"', '"')
+    data = tmp_path / "data"
+    data.mkdir()
+    db = str(data / "remitwatch.sqlite")
+    s = Store(db)                                                          # the app's own store: WAL
+    s.conn.execute("CREATE TABLE work (id INTEGER PRIMARY KEY, status TEXT, note TEXT)")
+    s.conn.executemany("INSERT INTO work (status, note) VALUES ('open', ?)", [("x" * 200,) for _ in range(200)])
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('pipeline:lock', '{\"pid\": 7}')")
+    s.conn.commit()
+    s.close()
+    copy = backup_store(db, str(data / "backups"), keep=7)                  # the day's copy
+    child = subprocess.Popen([sys.executable, "-c", (
+        "import sqlite3, sys, time\n"
+        "c = sqlite3.connect(sys.argv[1], timeout=60)\n"
+        "c.execute(\"UPDATE work SET status='dismissed'\")\n"
+        "c.execute('DELETE FROM work WHERE id <= 50')\n"
+        "c.commit()\n"
+        "print('committed', flush=True)\n"
+        "time.sleep(600)\n"), db], stdout=subprocess.PIPE, text=True)
+    assert child.stdout.readline().strip() == "committed"
+    os.kill(child.pid, signal.SIGKILL)                                     # the mistake, and a run stopped halfway
+    child.wait()
+    assert os.path.getsize(db + "-wal") > 0
+    # a mistyped name changes nothing
+    bad = subprocess.run(["sh", "-c", unpack.replace("/data", str(data)).replace("<file>", "no-such-copy.sqlite.gz")])
+    assert bad.returncode != 0 and os.path.getsize(db + "-wal") > 0
+    subprocess.run(["sh", "-c", unpack.replace("/data", str(data)).replace("<file>", os.path.basename(copy))], check=True)
+    out = subprocess.run([sys.executable, "-c", check.replace("/data/remitwatch.sqlite", db)], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "ok"
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*), SUM(status='dismissed') FROM work").fetchone() == (200, 0)
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE key LIKE '%:lock'").fetchone()[0] == 0
 
 
 def test_a_new_server_answers_before_its_first_run_and_starts_its_scheduler(tmp_path, monkeypatch):

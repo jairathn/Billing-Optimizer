@@ -41,6 +41,7 @@ EXPORT_MAX_BYTES = 60 * 1024 * 1024     # one EMA export, as cloud.MAX_FILE_BYTE
 INCOMING_MAX_AGE = 24 * 60 * 60         # a file left in .incoming this long (a request cut off) is removed
 NOTE_MAX_BYTES = 15 * 1024 * 1024       # as a note read from EMA's API (modmed.MAX_NOTE_BYTES)
 ZIP_MAX_MEMBERS = 500
+ZIP_MAX_ENTRIES = 5000                  # entries a zip may list at all (hidden ones included) before it is opened
 ZIP_MAX_TOTAL = 1024 * 1024 * 1024
 DOC_PREFIX = "upload-"                  # the id an uploaded note goes by among EMA's notes (a person's pick)
 NOTE_EXT = {".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -189,10 +190,12 @@ def sniff(path: str, name: str) -> str:
     if head.startswith(b"\xd0\xcf\x11\xe0"):
         return "old_office"
     if head.startswith(b"PK"):
+        if zip_entries(path) > ZIP_MAX_ENTRIES:
+            return "zip"                # far too many to list: _take_zip refuses it without opening it
         try:
             with zipfile.ZipFile(path) as z:
                 names = set(z.namelist())
-        except zipfile.BadZipFile:
+        except (zipfile.BadZipFile, OSError, ValueError):
             return "unknown"
         if "xl/workbook.xml" in names:
             return "ema"
@@ -208,6 +211,25 @@ def sniff(path: str, name: str) -> str:
     if os.path.splitext(low)[1] in NOTE_EXT:
         return "note"
     return "unknown"
+
+
+def zip_entries(path: str) -> int:
+    """How many entries a zip lists, read from its end record without opening its directory (which for a zip of a
+    million empty entries alone takes hundreds of MB). 0 when there is no end record; a ZIP64 count reads as huge."""
+    import struct
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 65557))
+            tail = fh.read()
+    except OSError:
+        return 0
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0 or len(tail) - at < 22:
+        return 0
+    total = struct.unpack("<H", tail[at + 10: at + 12])[0]
+    return 1 << 30 if total == 0xFFFF else total
 
 
 def _export_text(head: bytes) -> bool:
@@ -455,6 +477,9 @@ def _take_zip(conn, db_path: str, tmp: str, name: str, sha: str, user: str, base
     """Each file in a zip is taken as if uploaded on its own (one level: a zip inside is not opened). A file in it that
     cannot be unpacked is said so on its own line, and nothing of it is left behind."""
     out = []
+    listed = zip_entries(tmp)
+    if listed > ZIP_MAX_ENTRIES:
+        raise Rejected(f"The zip lists {listed:,} files; upload at most {ZIP_MAX_MEMBERS} at a time.")
     try:
         z = zipfile.ZipFile(tmp)
         infos = z.infolist()

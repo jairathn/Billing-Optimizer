@@ -736,6 +736,14 @@ def test_a_zip_with_a_damaged_file_says_so_and_leaves_nothing_behind(site):
     # a zip that cannot be opened at all: refused in plain words
     broken = site.up("broken.zip", b"PK\x03\x04" + b"\x00" * 64)
     assert broken["status"] == "rejected"
+    # a zip that lists far more entries than anyone uploads (hidden ones too) is refused before its list is read
+    many = io.BytesIO()
+    with zipfile.ZipFile(many, "w") as zf:
+        for i in range(uploads.ZIP_MAX_ENTRIES + 1):
+            zf.writestr(f".hidden/{i}", b"")
+    assert uploads.zip_entries(str(site.tmp / "none")) == 0
+    lots = site.up("lots.zip", many.getvalue())
+    assert lots["status"] == "rejected" and "lists 5,001 files" in lots["reason"]
 
 
 def test_files_a_stopped_upload_left_behind_are_removed(site):
