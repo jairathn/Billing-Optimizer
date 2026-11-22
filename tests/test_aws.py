@@ -580,7 +580,6 @@ def test_backups_are_whole_copies_taken_while_the_site_runs(tmp_path, monkeypatc
     assert "file" in cli._daily_backup(db) and "skipped" in cli._daily_backup(db)
     for i in range(3):
         cli.backup_store(db, keep=2)
-        import time
         time.sleep(1.1)
     assert len([f for f in os.listdir(os.path.dirname(path)) if f.endswith(".sqlite.gz")]) == 2
 

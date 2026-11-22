@@ -90,6 +90,7 @@ async def lifespan(_app: FastAPI):
         return
     # every table the dashboard reads, whether or not a store exists yet (a new server's first page must not fail
     # before its first run), then the scheduler: the daily work runs without any outside cron
+    log_password_state()
     ensure_server_schema(DB_PATH)
     from .pipeline import SCHEDULER, start_scheduler_from_env
     start_scheduler_from_env(DB_PATH)
@@ -123,9 +124,10 @@ def require_xhr(request: Request) -> None:
 
 
 def open_allowed() -> bool:
-    """With no password the dashboard is open. That is acceptable on a developer's own machine and nowhere else, so a
-    deployed site refuses to serve data until REMITWATCH_PASSWORD is set."""
-    return not runtime.serverless() or os.environ.get("REMITWATCH_ALLOW_OPEN") == "1"
+    """With no password the dashboard is open. That is acceptable on a developer's own machine and nowhere else, so
+    every site, the server as much as Vercel, refuses to serve data until REMITWATCH_PASSWORD is set. Only
+    REMITWATCH_ALLOW_OPEN=1 says this is a developer's own machine (never set it on the server or on Vercel)."""
+    return os.environ.get("REMITWATCH_ALLOW_OPEN") == "1"
 
 
 def base_url(request: Request) -> str:
@@ -147,16 +149,46 @@ MIN_PASSWORD = 12
 
 def password_problem() -> str | None:
     """Why the dashboard password cannot be used, or None when it can. On a deployed site the password is all that
-    stands between the internet and the data, so a short one counts as none: the site stays locked and says why."""
+    stands between the internet and the data, so a short one counts as none on Vercel: the site stays locked and says
+    why. The server accepts a short one it already has, so that the live site never locks its own staff out after an
+    update; password_warning() says what is weak about it, on /setup and in the log."""
     if not PASSWORD:
         return "not set"
     if open_allowed():
         return None             # a developer's own machine
-    if not PASSWORD.isascii():
+    if not PASSWORD.isascii():  # a login cannot carry it (the browser and the sign-in check read plain characters only)
         return "has a character a browser cannot send in a login (use plain letters and digits)"
-    if len(PASSWORD) < MIN_PASSWORD:
+    if len(PASSWORD) < MIN_PASSWORD and runtime.serverless():
         return f"shorter than {MIN_PASSWORD} characters"
     return None
+
+
+def password_warning() -> str | None:
+    """What is weak about a dashboard password the site still accepts (a short one on the server), or None."""
+    if PASSWORD and not password_problem() and len(PASSWORD) < MIN_PASSWORD:
+        return f"shorter than {MIN_PASSWORD} characters"
+    return None
+
+
+def _password_fix(problem: str) -> str:
+    """Where this host's dashboard password is set, in the words of the setup page."""
+    if runtime.serverless():
+        return ("Add REMITWATCH_PASSWORD in Vercel (Settings, Environment Variables), then redeploy." if problem == "not set" else
+                f"Replace REMITWATCH_PASSWORD in Vercel with one of {MIN_PASSWORD} or more plain letters and digits (the box below offers one), then redeploy.")
+    return ("Set REMITWATCH_PASSWORD on the server: run sudo bash /opt/remitwatch/deploy/aws/configure.sh (it can make one for you)." if problem == "not set" else
+            f"Replace REMITWATCH_PASSWORD on the server with one of {MIN_PASSWORD} or more plain letters and digits: run sudo bash /opt/remitwatch/deploy/aws/configure.sh.")
+
+
+def log_password_state() -> None:
+    """Say in the server's log, at start, when the site serves nothing for want of a password, or accepts a weak one."""
+    import sys
+    problem, weak = password_problem(), password_warning()
+    if problem and not open_allowed():
+        print(f"RemitWatch: REMITWATCH_PASSWORD is {problem}, so this site serves no data until it is fixed. {_password_fix(problem)}",
+              file=sys.stderr, flush=True)
+    elif weak:
+        print(f"RemitWatch WARNING: REMITWATCH_PASSWORD is {weak}. This server still accepts it, so nobody is locked out, "
+              f"but it is easy to guess. {_password_fix(weak)}", file=sys.stderr, flush=True)
 
 
 def owner_problem() -> str | None:
@@ -205,8 +237,8 @@ def _blocked(who: str, record: bool = False, owner: bool = False) -> bool:
 
 
 def require_auth(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
-    """Basic auth with a single shared password. When no password is configured the
-    dashboard is open (local use only)."""
+    """Basic auth with a single shared password. When no password is configured the dashboard is open only on a
+    developer's own machine (REMITWATCH_ALLOW_OPEN=1); everywhere else it answers 503 and /setup says why."""
     problem = password_problem()
     if problem:
         if not PASSWORD and open_allowed():
@@ -2323,15 +2355,20 @@ def setup_status(request: Request, credentials: Optional[HTTPBasicCredentials] =
     problem = password_problem()
     if problem and not open_allowed():
         # before a usable password exists the page may only say what is wrong with it: nothing else about the site is public
-        fix = ("Add REMITWATCH_PASSWORD in Vercel (Settings, Environment Variables), then redeploy." if problem == "not set" else
-               f"Replace REMITWATCH_PASSWORD in Vercel with one of {MIN_PASSWORD} or more plain letters and digits (the box below offers one), then redeploy.")
         return JSONResponse({"locked": True, "ready": False, "checks": [
             {"key": "password", "label": "Dashboard password (REMITWATCH_PASSWORD)", "ok": False, "detail": problem,
-             "fix": fix + " Everything else on this page appears after that."}]},
+             "fix": _password_fix(problem) + " Everything else on this page appears after that."}]},
             headers={"Cache-Control": "no-store"})
     require_auth(request, credentials)
     from . import cloud
-    return JSONResponse(cloud.setup_status(base_url(request)), headers={"Cache-Control": "no-store"})
+    out = cloud.setup_status(base_url(request))
+    weak = password_warning()
+    for c in out.get("checks", []):
+        if weak and c.get("key") == "password":
+            # it works, so it stays ticked and the site stays ready, but the line says plainly that it must be replaced
+            c.update(detail=f"set, but {weak}: this site still accepts it, so nobody is locked out, but it is easy to guess",
+                     fix=_password_fix(weak), warn=True)
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/setup/dropbox-token", dependencies=[Depends(require_xhr)])

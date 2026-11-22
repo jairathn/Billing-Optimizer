@@ -189,11 +189,14 @@ copy that runs. The installer refuses a script that does not parse, and the copy
 - The site must answer within 3 minutes, in the app and through Caddy (HTTPS on this server's port 443, as visitors
   reach it). If it does not (or `up -d` fails), the images and files that ran before are put back and started again, and
   the new commit is held: it is not tried again by itself (push a fix, or `--force` it). A commit is recorded as
-  deployed only once the site answers.
+  deployed only once the site answers. The check through Caddy uses `SITE_ADDRESS`: until that address reaches this
+  server, Caddy has no certificate for it and every deploy is rolled back, so point the address first.
 - Files changed by hand in `/opt/remitwatch` (any tracked file that `git status` lists) stop it, and so does a commit that
   would overwrite a file git does not track there (a local override, or `.env` itself): nothing is overwritten, and the
   log says so once. Put the files back (`sudo git checkout -- .`) or make the change on main; move an untracked file out
   of the way. `.env` is never touched.
+- A failure also goes to the chat webhook in `ALERT_WEBHOOK_URL`, when `.env` has one: the first failure of a commit,
+  a rollback, and files changed by hand. Commits and results only, nothing about patients.
 - One deploy at a time: a tick that finds one running (or `configure.sh` running) skips. After each attempt, images that
   nothing uses any more are pruned, with build cache no build has used for 30 days and the build logs beyond the last
   30, so the disk does not fill.
