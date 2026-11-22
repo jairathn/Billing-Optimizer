@@ -125,8 +125,8 @@ def test_with_the_fax_line_and_the_trizetto_login_on_both_sites_only_one_acts(bo
         out = {}
         for name, get in (("vercel", vercel), ("server", server)):
             page = get("/api/faxes").json()
-            out[name] = (page["fax"], fax.provider() is not None, trizetto.configured())
-            assert page["fax"] or page["not_here"], name        # a site that does not send says why
+            out[name] = (page["sends"], fax.provider() is not None, trizetto.configured())
+            assert page["configured"] and (page["sends"] or page["not_here"]), name     # one that does not send says why
         return out
     assert acts() == {"vercel": (False, False, False), "server": (True, True, True)}
     # the practice can name the Vercel site instead: then the server stops faxing (one sender either way)
