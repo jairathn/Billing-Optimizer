@@ -711,13 +711,13 @@ def policy_set(body: dict = Body(default={}), user: str = Depends(_user)):
     name = " ".join(str(body.get("name") or "").split())[:40]
     who = f"{name} ({user})" if name and name != user else user
     with _conn() as c:
-        if False:
+        if not _known_pattern(c, pattern):
             raise HTTPException(404, "No item has that write-off pattern.")
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if runtime.serverless():
         from .cloud import SERVING_COPY
         try:
-            SERVING_COPY.record({"kind": "ema_policy", "pattern": pattern, "decision": decision, "actor": who[:80], "at": at})
+            SERVING_COPY.record({"kind": "ema_policy_x", "pattern": pattern, "decision": decision, "actor": who[:80], "at": at})
         except RuntimeError:
             raise HTTPException(503, "This site's storage is not set up yet: open /setup.") from None
         return {"ok": True, "pattern": pattern, "decision": decision, "by": who[:80], "at": at, "applies": "next run"}
