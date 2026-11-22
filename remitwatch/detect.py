@@ -2983,7 +2983,12 @@ class Detector:
                 continue
             o = oc.get(fid) or {}
             act = r.get("action")
-            if act == "close" and EMA_CLOSES:
+            if act == "close" and EMA_CLOSES and f["signal"] == "EMA_DENIED" and not self._paid_after_ema_denial(f, r):
+                # a payment posted the day EMA posted the denial: C5 did not count it as paid since, so the line is not
+                # proven paid; shown, never closed
+                f["hint"] = r.get("hint")
+                self.ema_counts["c6_same_day_hint"] += 1
+            elif act == "close" and EMA_CLOSES:
                 self._close_from_ema(f, r, o, "EMA shows it paid", r.get("note") or "")
                 self.ema_counts["c6_closed"] += 1
             elif act == "hint_other_payer" and EMA_CLOSES and self._rebilled(f, o, moved):
@@ -2995,6 +3000,15 @@ class Detector:
             elif r.get("hint"):
                 f["hint"] = r["hint"]
                 self.ema_counts["c6_" + str(act)] += 1
+
+    @staticmethod
+    def _paid_after_ema_denial(f: dict, r: dict) -> bool:
+        """EMA's payment came strictly after the denial only EMA saw was first posted (as C5 counts "paid since")."""
+        try:
+            first = json.loads(f.get("evidence") or "{}").get("first_denial_posted") or ""
+        except ValueError:
+            first = ""
+        return bool(first) and (r.get("date") or "") > first
 
     def _close_from_ema(self, f: dict, r: dict, o: dict, how: str, note: str) -> None:
         """Close an item by a payment EMA posted on a check no 835 carries, with that payment as the proof row."""
@@ -3328,7 +3342,8 @@ class Detector:
             for r, rate in priced:
                 _lk, _svc, cpt, paid, chg, grp, kind, cid, bill, as_of = r
                 seq, co45 = cuts.get((lk, svc, cpt), (0, 0))
-                allowed = max(paid + seq, (chg or 0) - co45 if co45 else 0)
+                # with no fee-schedule reduction posted, the allowed amount is unknown: taken as the charge, so never short
+                allowed = max(paid + seq, (chg or 0) - co45)
                 if chg and allowed >= chg:
                     continue                # paid the charge: the fee is below the rate, nothing to appeal
                 exp = rate

@@ -762,6 +762,56 @@ def test_the_dropbox_relay_takes_a_piece_whose_answer_was_lost(build):
     assert exc.value.status == 410
 
 
+def test_file_names_are_made_safe_for_both_hosts():
+    """The intake file's name: no folders (so never outside the intake folder), no character a server or Dropbox
+    refuses, not hidden, not ending in a dot or a space, not too long; the name as given is kept in the sidecar."""
+    cases = {
+        "../../etc/passwd": "passwd",
+        "..\\..\\windows\\Production.csv": "Production.csv",
+        "a/b/c/2026 Production(Sheet1).csv": "2026 Production(Sheet1).csv",
+        "  .hidden report.csv  ": "hidden report.csv",
+        'bad<>:"|?*name.csv': "bad_name.csv",
+        "tab\there\x00.csv": "tab_here.csv",
+        "trailing dots... .CSV": "trailing dots.csv",
+        "": "file", ".": "file", "...": "file",
+        "x" * 300 + ".csv": "x" * 100 + ".csv",
+        "report.weird-ending!!": "report.weirdendin",          # an ending is kept to ten letters and digits
+    }
+    for given, safe in cases.items():
+        assert uploads.intake_safe_name(given) == safe, (given, uploads.intake_safe_name(given))
+    for given in cases:
+        n = uploads.pair_name("a" * 32, given, True)
+        assert n.startswith("a" * 32 + "__") and n.endswith(".gz") and "/" not in n and "\\" not in n and len(n) < 160
+        assert not re.search(r'[\x00-\x1f<>:"|?*]', n)
+
+
+def test_nothing_logged_names_the_file_or_its_patient(build, caplog, capsys):
+    """A file saved under a patient's name goes through every route, a refusal and a storage error included: neither
+    the name nor any part of it reaches a log line or the console."""
+    import logging
+    caplog.set_level(logging.DEBUG)
+    for mode in MODES:
+        site = build(mode)
+        name = f"{F.PATIENTS[0][0]} visit {mode}.csv"
+        up = Up(site, text_report(), name=name, hint=None)
+        assert up.send().status_code == 200
+        bad = Up(site, text_report(seed=4), name=name, hint=None, sha=False)
+        bad.start()
+        for i in range(len(bad.pieces)):
+            bad.piece(i)
+        assert bad.finish(sha="0" * 64).status_code == 422
+        site.c.get("/api/uploads/recent")
+        if site.fake is not None:
+            site.fake.broken["files/upload_session/start"] = RuntimeError(f"download /x/{name} failed 500")
+            again = Up(site, text_report(seed=5), name=name, hint=None)
+            again.start()
+            assert again.piece(0).status_code == 502
+    out = capsys.readouterr()
+    words = [w for w in re.split(r"[ ,]+", F.PATIENTS[0][0]) if len(w) > 3]
+    for text in [r.getMessage() for r in caplog.records] + [out.out, out.err]:
+        assert not any(w in text for w in words), text[:200]
+
+
 def test_a_full_disk_is_said_plainly(build, monkeypatch):
     site = build("server")
     monkeypatch.setattr(api_uploads.shutil, "disk_usage", lambda p: shutil._ntuple_diskusage(10 ** 12, 10 ** 12 - 1000, 1000))

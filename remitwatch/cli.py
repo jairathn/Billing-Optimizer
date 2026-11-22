@@ -15,7 +15,8 @@
                                                          move the Vercel site's store and packets to this server, once
     python -m remitwatch.cli compare-cloud               prove it: the Vercel site's state against this server, table by table
     python -m remitwatch.cli backup [--dir D] [--keep N] a consistent copy of the store while the site runs (also made daily)
-    python -m remitwatch.cli ema-reports [--status | --summarize | --reread FILE_ID|all | --decide FILE_ID apply|discard]
+    python -m remitwatch.cli ema-reports [--status | --summarize | --reread FILE_ID|all | --decide FILE_ID apply|discard
+                                          | --retain-force]
                                                          EMA's A/R and Production reports and the posting ledger
 """
 from __future__ import annotations
@@ -136,7 +137,7 @@ def cmd_ema_reports(args: argparse.Namespace) -> int:
     conn = store.conn
     lpath = ema_ledger.ledger_path(args.db)
     try:
-        if args.status or not (args.summarize or args.reread or args.decide):
+        if args.status or not (args.summarize or args.reread or args.decide or args.retain_force):
             cat = ema_reports.catalog(conn)
             files = [{k: f.get(k) for k in ("file_id", "report", "source_name", "status", "as_of", "rows_read", "rows_applied",
                                             "live_rows", "scope", "status_reason")} for f in cat["files"]]
@@ -165,6 +166,13 @@ def cmd_ema_reports(args: argparse.Namespace) -> int:
                 out = ema_reports.decide(conn, fid, decision, "cli")
                 print(json.dumps(out, indent=1, default=str))
                 return 0 if "error" not in out else 1
+            if args.retain_force:
+                with ema_ledger.Ledger.open(lpath) as lg:
+                    held = lg.retain_held()
+                    gone = lg.retain(force=True)
+                    r = ema_ledger.refresh(store, lg, log=lambda *a: print(*a, file=sys.stderr))
+                print(json.dumps({"was_waiting": held, "postings_removed": gone, "summaries": bool(r.get("part_a"))}, default=str))
+                return 0
             if args.reread:
                 if args.reread == "all":
                     if os.path.exists(lpath):
@@ -965,6 +973,8 @@ def main(argv: list[str] | None = None) -> int:
     er_.add_argument("--summarize", action="store_true", help="make the summaries again from the posting ledger")
     er_.add_argument("--reread", metavar="FILE_ID|all", default=None, help="read a Production file again (all: every one)")
     er_.add_argument("--decide", nargs=2, metavar=("FILE_ID", "apply|discard"), default=None, help="decide on a held report")
+    er_.add_argument("--retain-force", action="store_true",
+                     help="let the ledger's retention delete what waits for a person (more than 60%% of the postings at once)")
     er_.set_defaults(fn=cmd_ema_reports)
     v = sub.add_parser("serve"); v.add_argument("--host", default="127.0.0.1"); v.add_argument("--port", type=int, default=8000); v.set_defaults(fn=cmd_serve)
     c = sub.add_parser("stats"); c.set_defaults(fn=cmd_stats)

@@ -1079,10 +1079,11 @@ def _evidence(fx: dict) -> list[dict]:
                         "follow_up": a["follow_up"], "text": f"EMA follow-up date set for {day(a['follow_up'])} (A/R of {day(a.get('as_of'))})"})
     # the payer received a corrected or new claim for the same services after this item's remittance
     for x in fx["r835"]["rows"]:
-        if not x.get("received") or not after:
+        if not x.get("received") or not after or x["status"] == "22":
             continue
-        newer_sub = submission_no(x["pcn"]) > submission_no(f.get("patient_control_number"))
-        if (x["date"] or "") > after and (x.get("freq") == "7" or newer_sub) and x["received"] >= (after or ""):
+        # the payer received the claim again after this item's remittance (a payer reprocessing on its own keeps the first
+        # received date): a corrected or new claim somebody sent
+        if (x["date"] or "") > after and x["received"] > after:
             out.append({"date": x["received"], "kind": "resubmitted", "source": "835", "dated_by": "payer", "confirmed": True,
                         "text": f"{row_group(x)[0]} received a {'corrected' if x.get('freq') == '7' else 'new'} claim on "
                                 f"{day(x['received'])} (its answer of {day(x['date'])})"})
@@ -1151,12 +1152,13 @@ def _payer_answers_after(fx: dict, since: str | None) -> list[dict]:
                         "codes": [f"{g}-{c}" for g, c, _a in x["adj"] if g != "PR" or c not in PATIENT_SHARE]})
     remit_days = set()
     days_835 = sorted({x["date"] for x in fx["r835"]["rows"] if x["date"]})
+    tks = {x.get("tk") for x in fx["r835"]["rows"] if x.get("tk")}
     for p in fx["ema"]["pays"]:
         if p["posted"] and (p["cents"] or p["check"]):
             remit_days.add(p["posted"])
         if (p["posted"] or "") > since and (p["cents"] or p["check"]):
-            # EMA's posting of a remittance whose 835 is on file repeats that 835's answer (posted a few days later)
-            if p.get("in_835") and any(0 <= (_days(d, p["posted"]) or 99) <= 14 for d in days_835):
+            # EMA's posting of a remittance whose 835 is on file repeats that 835's answer (posted days or weeks later)
+            if p.get("in_835") and (p.get("trace_key") in tks or any(0 <= (_days(d, p["posted"]) or 99) <= 14 for d in days_835)):
                 continue
             out.append({"date": p["posted"], "source": "production", "paid": p["cents"], "status": None, "payer": p["payer"],
                         "group": p.get("group") or _grp_kind(p["payer"])[0], "codes": []})
@@ -1282,6 +1284,12 @@ def paid_proof(fx: dict) -> dict | None:
     own = own_rows(fx)
     once = code_once(fx)
     lcns = {x.get("lcn") for x in own if x.get("lcn")}
+    if not lcns and own:
+        # a re-adjudication often drops the line control number: the same claim's earlier answer of the code carries it
+        o0 = own[0]
+        lcns = {x["lcn"] for x in rows if x.get("lcn") and x["code"] == o0["code"] and x["status"] != "22" and (
+            (bool(o0.get("pccn")) and x.get("pccn") == o0.get("pccn")) or
+            (x["pcn"] == o0["pcn"] and bool(o0.get("received")) and x.get("received") == o0.get("received")))}
     units = max([abs(x.get("ounits") or x.get("units") or 1) for x in own] or [1])
 
     def same_line(x: dict) -> bool:
@@ -1477,7 +1485,7 @@ def _decide(fx: dict, today: str) -> dict:
     f = fx["item"]
     ctx = fx["ctx"]
     sig, cat, st = f.get("signal") or "", f.get("category") or "", f.get("status") or "open"
-    grp, kind = f.get("payer_group"), f.get("payer_kind")
+    grp = f.get("payer_group")
     ev = _evidence(fx)
     res: dict = {"work_state": None, "follow_up_on": None, "state_basis": None, "evidence": [], "rule": None, "person": False,
                  "proof": None, "deadline": None, "deadline_basis": None, "work": None, "answered": None, "appeal_block": None,

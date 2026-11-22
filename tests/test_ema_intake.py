@@ -20,7 +20,7 @@ import time
 import pytest
 
 from remitwatch import cloud, dropbox_sync, ema_exports, ema_ledger as el, ema_reports as er, intake, pipeline
-from remitwatch.state import DropboxState, LocalState
+from remitwatch.state import DropboxState
 from remitwatch.store import Store
 from tests import ema_fixtures as F
 from tests.fakes import FakeDropbox
@@ -454,7 +454,7 @@ def test_a_serverless_run_reads_the_ar_and_keeps_production_waiting_until_its_sw
     root, client, state = vercel
     folder = root / DATA / "Reports"
     ar = write(folder / "AR 2026.xlsx", F.ar_xlsx(ar_rows()))
-    prod = write(folder / "2026 Production.zip", F.zipped("2026 Production.csv", F.production_csv(prod_rows())))
+    write(folder / "2026 Production.zip", F.zipped("2026 Production.csv", F.production_csv(prod_rows())))
     out = cycle(state, client)                                 # the serverless default reads the A/R only
     conn = state_store(state)
     cat = catalog(conn)
@@ -724,3 +724,224 @@ def test_fixture_workbooks_are_the_same_bytes_every_time():
     assert F.ar_xlsx(rows) == F.ar_xlsx(rows)
     time.sleep(1.1)                                         # across a second: openpyxl's own save time must not show
     assert F.ar_xlsx(rows) == F.ar_xlsx(list(rows)) and F.production_xlsx(prod_rows()) == F.production_xlsx(prod_rows())
+
+
+# ================================================================================================== gzip and seam
+def _ledger_totals(path: str) -> dict:
+    """Insurance paid and charges by payer and posted month, to the cent (what two orders of the same files must agree on)."""
+    c = sqlite3.connect(path)
+    try:
+        return {(r[0], r[1]): (r[2], r[3]) for r in c.execute(
+            """SELECT n.name, substr(p.posted, 1, 7), SUM(COALESCE(p.ins_paid, 0)), SUM(COALESCE(p.charges, 0))
+               FROM postings p LEFT JOIN names n ON n.id = p.payer GROUP BY 1, 2""")}
+    finally:
+        c.close()
+
+
+def test_a_gzipped_upload_is_read_as_it_unpacks_under_its_own_name_on_a_server(tmp_path):
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    data = F.production_csv(prod_rows(2026))
+    pair = _pair(intake.ready_dir(os.path.dirname(db)), "2026 Production(Sheet1).csv", data, gz=True)
+    out = run(db, sync=False)
+    assert out["intake"]["read"] == 1
+    s = open_store(db)
+    try:
+        row = s.conn.execute("SELECT status, source_name, via, source_kind FROM ema_report_files WHERE file_id=?", (sha(data),)).fetchone()
+        assert tuple(row) == ("current", "2026 Production(Sheet1).csv", "upload", "upload")
+    finally:
+        s.close()
+    assert ledger_rows(el.ledger_path(db)) == 12
+    assert json.load(open(os.path.join(intake.done_dir(os.path.dirname(db)), pair + ".json")))["result"]["status"] == "current"
+    # the same file arrives in the Dropbox mirror later: already read, nothing changes
+    again = dropbox_sync.ingest_new_files(open_store(db), [write(tmp_path / "mirror" / "2026 Production(Sheet1).csv", data)],
+                                          log=lambda *a: None, ledger=el.Ledger.open(el.ledger_path(db)))
+    assert [r["status"] for r in again["ema_reports"]] == ["already"]
+
+
+def test_a_gzipped_report_in_dropbox_and_one_uploaded_take_the_serverless_slot(vercel, monkeypatch):
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    d26 = F.production_csv(prod_rows(2026))
+    write(root / DATA / "Reports" / "2026 Production.csv.gz", gzip.compress(d26, mtime=0))
+    out = cycle(state, client)
+    assert out["ema_apply"]["files"] == 1 and catalog(state_store(state))[sha(d26)] == "current"
+    d25 = F.production_csv(prod_rows(2025))
+    pair = _pair(root / "RemitWatch-state" / "intake", "2025 Production.csv", d25, gz=True)
+    out = cycle(state, client)
+    assert out["intake"]["read"] == 1 and out["ema_apply"]["files"] == 1
+    assert catalog(state_store(state))[sha(d25)] == "current"
+    assert json.loads(state.get(f"intake/done/{pair}.json"))["result"]["status"] == "current"
+
+
+def test_an_upload_first_then_the_same_raw_csv_too_big_for_the_site_is_already_read(vercel, monkeypatch):
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    monkeypatch.setattr(cloud, "MAX_FILE_BYTES", 2000)
+    data = F.production_csv(prod_rows(n=12))
+    _pair(root / "RemitWatch-state" / "intake", "2026 Production(Sheet1).csv", data, gz=True)
+    cycle(state, client)
+    write(root / DATA / "Reports" / "2026 Production(Sheet1).csv", data)        # then the same bytes land in Dropbox
+    out = cycle(state, client)
+    assert out["ingest"].get("ema_waiting") is None and out["ingest"]["errors"] == 0
+    cat = catalog(state_store(state))
+    assert cat == {sha(data): "current"} and cloud.has_new_files(state, client) is False
+
+
+def test_the_same_export_saved_again_is_already_and_changes_nothing(tmp_path):
+    """(a) Another save time, other line endings: other bytes, the same rows. It is 'already' and changes nothing."""
+    store = open_store(tmp_path / "s.sqlite")
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        rows = prod_rows(2026)
+        crlf = write(tmp_path / "a" / "2026 Production.csv", F.production_csv(rows, crlf=True))
+        lf = write(tmp_path / "b" / "2026 Production.csv", F.production_csv(rows, crlf=False))
+        assert sha(crlf) != sha(lf)
+        first = er.ingest_file(store, crlf, via="mirror", ledger=lg, log=lambda *a: None)
+        seq, totals = lg.seq(), _ledger_totals(lg.path)
+        second = er.ingest_file(store, lf, via="mirror", ledger=lg, log=lambda *a: None)
+        assert (first["status"], second["status"]) == ("current", "already") and second["duplicate_of"] == sha(crlf)
+        assert lg.seq() == seq and _ledger_totals(lg.path) == totals and catalog(store.conn) == {sha(crlf): "current"}
+        ar1 = write(tmp_path / "a" / "AR 2026.xlsx", F.ar_xlsx(ar_rows()))
+        ar2 = write(tmp_path / "b" / "AR 2026.xlsx", F.ar_xlsx(ar_rows(), created=dt.datetime(2026, 11, 18, 9, 0)))
+        assert sha(ar1) != sha(ar2)
+        assert er.ingest_file(store, ar1, via="mirror", log=lambda *a: None)["status"] == "current"
+        before = store.conn.execute("SELECT COUNT(*), SUM(exposure_cents) FROM ema_ar").fetchone()
+        res = er.ingest_file(store, ar2, via="mirror", log=lambda *a: None)
+        assert res["status"] == "already" and res["duplicate_of"] == sha(ar1)
+        assert tuple(store.conn.execute("SELECT COUNT(*), SUM(exposure_cents) FROM ema_ar").fetchone()) == tuple(before)
+        assert catalog(store.conn)[sha(ar1)] == "current" and sha(ar2) not in catalog(store.conn)
+    finally:
+        lg.close()
+        store.close()
+
+
+def test_a_whole_year_exported_again_replaces_its_box_and_nothing_counts_twice(tmp_path):
+    """(b) The 2026 export again a month later: its box replaces the earlier one's, every posting once."""
+    store = open_store(tmp_path / "s.sqlite")
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        early = write(tmp_path / "a" / "2026 Production.csv", F.production_csv(prod_rows(2026, n=6)))
+        later_rows = prod_rows(2026, n=9)
+        later = write(tmp_path / "b" / "2026 Production.csv", F.production_csv(later_rows))
+        er.ingest_file(store, early, via="mirror", ledger=lg, log=lambda *a: None)
+        res = er.ingest_file(store, later, via="mirror", ledger=lg, log=lambda *a: None)
+        assert res["status"] == "current" and res["replaced"] == [(sha(early), "replaced")]
+        assert ledger_rows(lg.path) == len(later_rows)
+        fresh = el.Ledger.open(str(tmp_path / "fresh.sqlite"))
+        other = open_store(tmp_path / "o.sqlite")
+        other.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)",
+                           (store.conn.execute("SELECT value FROM meta WHERE key='ema:key_salt'").fetchone()[0],))
+        other.conn.commit()
+        er.ingest_file(other, later, via="mirror", ledger=fresh, log=lambda *a: None)
+        assert _ledger_totals(lg.path) == _ledger_totals(fresh.path)
+        fresh.close()
+        other.close()
+    finally:
+        lg.close()
+        store.close()
+
+
+def _year_and_slice(tmp_path) -> tuple[str, str]:
+    """A service-year export, and a posted-date pull cut from it (the postings of its last weeks: posted scope)."""
+    rows = []
+    for i in range(1, 11):
+        svc = D(2026, 1, 1) + dt.timedelta(days=i)
+        link, payer = F.link_no(500 + i), [P["bcbs"], P["medicare"], P["commercial"]][i % 3]
+        rows.append(F.production_row(svc=svc, posted=svc + dt.timedelta(days=2), link=link, charges=150.0, payer=payer, primary=payer))
+        rows.append(F.production_row(svc=svc, posted=svc + dt.timedelta(days=60), link=link, ins_paid=80.0 + i, contractual=70.0 - i,
+                                     check=F.check_no(500 + i), reason="CO-45", payer=payer, primary=payer))
+    year = write(tmp_path / "files" / "2026 Production.csv", F.production_csv(rows))
+    cut = D(2026, 2, 20)
+    late = [r for r in rows if r["Posted Date"] >= cut]
+    piece = write(tmp_path / "files" / "Production posted last weeks.csv", F.production_csv(late))
+    return year, piece
+
+
+@pytest.mark.parametrize("order", ["year_then_pull", "pull_then_year"])
+def test_posted_date_pulls_and_a_year_file_give_the_same_totals_in_either_order(tmp_path, order):
+    """(c) Weekly posted-date pulls after a year file, or a year file after them: the same totals as the year file alone."""
+    year, piece = _year_and_slice(tmp_path)
+    alone_store, alone = open_store(tmp_path / "alone.sqlite"), el.Ledger.open(str(tmp_path / "alone_ledger.sqlite"))
+    salt = alone_store.conn.execute("SELECT value FROM meta WHERE key='ema:key_salt'").fetchone()
+    er.ingest_file(alone_store, year, via="mirror", ledger=alone, log=lambda *a: None)
+    store, lg = open_store(tmp_path / "s.sqlite"), el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)",
+                       (alone_store.conn.execute("SELECT value FROM meta WHERE key='ema:key_salt'").fetchone()[0],))
+    store.conn.commit()
+    try:
+        files = [year, piece] if order == "year_then_pull" else [piece, year]
+        results = [er.ingest_file(store, f, via="mirror", ledger=lg, log=lambda *a: None) for f in files]
+        assert all(r["status"] in ("current", "superseded") for r in results), [r["status"] for r in results]
+        assert {r["scope"] for r in results} == {"service", "posted"}
+        assert _ledger_totals(lg.path) == _ledger_totals(alone.path) and ledger_rows(lg.path) == ledger_rows(alone.path)
+    finally:
+        for x in (lg, alone, store, alone_store):
+            x.close()
+    assert salt is None or salt
+
+
+def test_each_ar_snapshot_is_dated_the_newest_current_and_older_ones_kept_as_history(tmp_path):
+    """(e) Two weekly A/R pulls: the newest is current, the older replaced and kept in the catalog with its date, and the
+    item history spans both; the older one again changes nothing."""
+    store = open_store(tmp_path / "s.sqlite")
+    w1 = write(tmp_path / "a" / "AR 2026.xlsx", F.ar_xlsx(ar_rows(n=6, aging=D(2026, 11, 10))))
+    w2_rows = ar_rows(n=5, aging=D(2026, 11, 17))           # one line is no longer listed
+    w2 = write(tmp_path / "b" / "AR 2026.xlsx", F.ar_xlsx(w2_rows))
+    assert er.ingest_file(store, w1, via="mirror", log=lambda *a: None)["as_of"] == "2026-11-10"
+    res = er.ingest_file(store, w2, via="mirror", log=lambda *a: None)
+    assert res["status"] == "current" and res["as_of"] == "2026-11-17" and res["replaced"] == [(sha(w1), "replaced")]
+    rows = {r[0]: (r[1], r[2]) for r in store.conn.execute("SELECT file_id, status, as_of FROM ema_report_files")}
+    assert rows == {sha(w1): ("replaced", "2026-11-10"), sha(w2): ("current", "2026-11-17")}
+    items = store.conn.execute("SELECT COUNT(*), SUM(absent_since IS NOT NULL), MIN(first_seen), MAX(last_seen) FROM ema_ar_items").fetchone()
+    assert tuple(items) == (6, 1, "2026-11-10", "2026-11-17")
+    assert er.ingest_file(store, w1, via="mirror", log=lambda *a: None)["status"] == "already"
+    assert store.conn.execute("SELECT COUNT(*) FROM ema_ar").fetchone()[0] == 5
+    store.close()
+
+
+def test_postings_and_ar_rows_from_any_source_go_through_one_seam(tmp_path):
+    """Amendment 10: an API pull would hand postings for a stated range, and A/R rows with their date, to the same
+    seam the file readers use; each applied batch records where it came from."""
+    store = open_store(tmp_path / "s.sqlite")
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        p = write(tmp_path / "x.csv", F.production_csv(prod_rows(2026)))
+        rec = er.recognize(p, "x.csv")
+        salt = er.key_salt(store.conn)
+        postings = list(er.iter_production(p, rec, salt=salt, account=er.Account()))
+        res = el.apply_postings(lg, "api:production:2026-03", {"scope": "posted", "posted_lo": "2026-03-01", "posted_hi": "2026-04-30",
+                                                                "as_of": "2026-04-30"},
+                                postings, source_kind="api", store=store, source_name="EMA API", via="api", log=lambda *a: None)
+        assert res["status"] == "current" and res["scope"] == "posted" and res["source_kind"] == "api"
+        f = lg.file("api:production:2026-03")
+        assert (f["source_kind"], f["posted_lo"], f["posted_hi"], f["rows"]) == ("api", "2026-03-01", "2026-04-30", 12)
+        again = el.apply_postings(lg, "api:production:2026-03b", None, postings, source_kind="api", store=store, log=lambda *a: None)
+        assert again["status"] == "already" and again["duplicate_of"] == "api:production:2026-03"
+        with pytest.raises(ValueError):
+            el.apply_postings(lg, "x", None, postings, source_kind="email", store=store)
+        a = write(tmp_path / "AR.xlsx", F.ar_xlsx(ar_rows()))
+        arec = er.recognize(a, "AR.xlsx")
+        ar = list(er.iter_ar(a, arec, salt=salt, account=er.Account()))
+        res = er.apply_ar_snapshot(store.conn, "api:ar:2026-11-20", "2026-11-20", ar, source_kind="api", source_name="EMA API")
+        assert res["status"] == "current" and res["as_of"] == "2026-11-20"
+        assert tuple(store.conn.execute("SELECT source_kind, status FROM ema_report_files WHERE file_id='api:ar:2026-11-20'")
+                     .fetchone()) == ("api", "current")
+        assert store.conn.execute("SELECT COUNT(*) FROM files WHERE sha256='api:ar:2026-11-20'").fetchone()[0] == 0
+        # the file readers record their own kind on what they apply
+        fr = er.ingest_file(store, write(tmp_path / "y" / "2025 Production.csv", F.production_csv(prod_rows(2025))), via="mirror",
+                            ledger=lg, log=lambda *a: None)
+        assert fr["source_kind"] == "file" and lg.file(fr["file_id"])["source_kind"] == "file"
+    finally:
+        lg.close()
+        store.close()
+
+
+def test_a_file_held_because_it_would_not_fit_the_sites_temporary_space_is_no_failed_attempt(vercel, monkeypatch):
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    monkeypatch.setattr(el.Ledger, "_tmp_hold", lambda self, meta, stats, replaced: [("H8", "Too large for this site's temporary space.")])
+    data = F.production_csv(prod_rows())
+    write(root / DATA / "Reports" / "2026 Production.zip", F.zipped("2026 Production.csv", data))
+    out = cycle(state, client)
+    assert catalog(state_store(state))[sha(data)] == "held" and "ema_apply" not in out
+    assert sha(data) not in json.loads(state.get(el.ATTEMPTS_NAME) or b"{}")

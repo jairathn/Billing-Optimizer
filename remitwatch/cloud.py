@@ -499,6 +499,7 @@ class ProductionSlot:
         self.handle = None
         self.used = False
         self.pending: list[str] | None = None       # file ids applied, waiting for finish()
+        self.saved: list[str] = []                  # file ids whose attempts go once the store image is saved
         self.seq0: int | None = None
         self.out: dict = {}
 
@@ -575,15 +576,21 @@ class ProductionSlot:
             h.discard()
             out["ema_apply"] = {"error": type(exc).__name__}
             return False                    # APPLY_PENDING stays: the next run brings the catalog in line (repair_ledger)
-        for f in self.pending:
-            h.clear_attempt(f)
         conn.execute("DELETE FROM meta WHERE key=?", (APPLY_PENDING,))
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:detect_pending', '1')")
         conn.commit()
         out["ema_apply"] = {"files": len(self.pending), "refresh_seconds": r.get("seconds"),
                             "part_a": bool(r.get("part_a")), "part_b": bool(r.get("part_b"))}
-        self.pending = None
+        self.saved, self.pending = list(self.pending), None
         return True
+
+    def clear_attempts(self) -> None:
+        """Once the store image is saved (the ledger was saved before it), the files read this run no longer count an
+        attempt. A run that dies before this keeps them: the next run finds the file in the ledger ('already')."""
+        if self.handle is not None:
+            for f in self.saved:
+                self.handle.clear_attempt(f)
+        self.saved = []
 
 
 def _takes(fn, arg: str) -> bool:
@@ -1025,6 +1032,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     # reasons hidden for a payer (actions.apply_hide_rule)
     ("hide_rules", None, None),
     ("provider_ema_days", None, None), ("provider_ema_lag", None, None),
+    # when each EMA export and report was pulled (the claim view's "as of" day): names, times and counts, no patient data
+    ("ema_sources", None, None),
 ]
 
 
@@ -1583,6 +1592,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             t2 = time.time()
             meta = save_raw(state, store)
             out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
+            slot.clear_attempts()           # the Production file read this run is in the saved ledger and store
         if shown_changed or serving_stale:
             out["serving"] = save_serving(state, conn)
             state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "build": SERVING_BUILD, "at": _now()}).encode())

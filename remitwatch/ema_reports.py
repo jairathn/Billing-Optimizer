@@ -120,6 +120,7 @@ class Account(dict):
         super().__init__(*a, **kw)
         self.prefixes: list[str] = []
         self.status_words: set[str] = set()
+        self.content_id: str | None = None      # a hash of the rows read, in order (the same export saved again has it too)
 
 
 # ------------------------------------------------------------------------------------------------------ the layouts
@@ -2496,27 +2497,48 @@ def _ar_cols() -> list[str]:
     return _AR_COLS
 
 
-def _stage_ar(conn: sqlite3.Connection, path: str, rec: Recognized, salt: bytes, file_id: str) -> Account:
-    """Read an A/R file into the temporary table ema_ar_stage (rows as ema_ar will hold them, as_of and payer groups set)."""
+AR_CONTENT_SKIP = ("file_id", "as_of", "payer_group", "payer_kind")      # not the export's own rows: left out of its content id
+
+
+def _stage_ar_rows(conn: sqlite3.Connection, rows: Iterable[dict], file_id: str) -> tuple[int, str]:
+    """Stage A/R rows (ema_ar's columns but file_id and as_of, as iter_ar yields them) in the temporary table
+    ema_ar_stage. Returns how many, and the snapshot's content id: a hash of its rows in order (what the same export saved
+    again has too, whatever its save time or line endings)."""
     cols = _ar_cols()
     conn.execute("DROP TABLE IF EXISTS temp.ema_ar_stage")
     conn.execute("CREATE TEMP TABLE ema_ar_stage AS SELECT * FROM main.ema_ar WHERE 0")
     conn.execute("CREATE INDEX temp.ix_ar_stage ON ema_ar_stage(svc_year, item_key)")
-    acct = Account()
     sql = f"INSERT INTO temp.ema_ar_stage ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})"
+    keep = [c for c in cols if c not in AR_CONTENT_SKIP]
+    digest = hashlib.sha256()
     batch: list[tuple] = []
-    for r in iter_ar(path, rec, salt=salt, account=acct):
+    n = 0
+    for r in rows:
+        r = dict(r)
         r["file_id"] = file_id
+        digest.update(repr(tuple(r.get(c) for c in keep)).encode())
         batch.append(tuple(r.get(c) for c in cols))
+        n += 1
         if len(batch) >= 1000:
             conn.executemany(sql, batch)
             batch.clear()
     if batch:
         conn.executemany(sql, batch)
+    return n, digest.hexdigest()
+
+
+def _stage_ar_groups(conn: sqlite3.Connection, as_of: str | None) -> None:
     payer = ("CASE WHEN lower(coverage) LIKE 'secondary%' AND secondary_payer IS NOT NULL THEN secondary_payer "
              "ELSE primary_payer END")
     conn.execute(f"UPDATE temp.ema_ar_stage SET as_of=?, payer_group=rw_payer_group({payer}), payer_kind=rw_payer_kind({payer})",
-                 (acct.get("as_of"),))
+                 (as_of,))
+
+
+def _stage_ar(conn: sqlite3.Connection, path: str, rec: Recognized, salt: bytes, file_id: str) -> Account:
+    """Read an A/R file into the temporary table ema_ar_stage (rows as ema_ar will hold them, as_of and payer groups set)."""
+    acct = Account()
+    _n, acct.content_id = _stage_ar_rows(conn, iter_ar(path, rec, salt=salt, account=acct), file_id)
+    _stage_ar_groups(conn, acct.get("as_of"))
     return acct
 
 
@@ -2688,65 +2710,118 @@ ON CONFLICT(claim_id) DO UPDATE SET link = excluded.link, bill = excluded.bill,
 
 def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, origin: dict | None = None, force: bool = False,
              log: Any = print) -> dict:
-    """Read an A/R file and make it the current snapshot of each service year it spans for which it is newer than the
-    snapshot on file (order: as_of, the workbook's creation time, when it arrived, its id); an older file never replaces
-    a newer one, and is superseded for that year. For each year it takes: its rows replace the year's rows in ema_ar,
-    the item history is brought forward (first and last seen, absent since, worked marks), and every claim id to claim
-    number pair is kept in ema_claim_links. A file that lists far fewer of the lines a re-export must still show is held
-    until a person decides (force skips holds, never refusals)."""
+    """Read an A/R file and apply it as a snapshot: the file adapter of apply_ar_snapshot (it reads the rows with iter_ar
+    and hands them on, with the file's name, layout and origin)."""
     conn = store.conn
     ensure_schema(conn)
     salt = key_salt(conn)
     register_functions(conn, salt)
-    source_name, container = _names_of(path, rec)
-    base: dict = dict(report="ar_report", source_name=source_name, container=container, via=via, origin=origin or {},
-                      format=rec.fmt, columns=list(rec.columns), missing=list(rec.missing), unused=list(rec.unused))
     if rec.missing:
         return _record_refusal(store, file_id, ReportRefused("missing_columns", _missing_message(rec), "ar_report"), path=path,
                                rec=rec, via=via, origin=origin, log=log)
+    acct = Account()
+    return apply_ar_snapshot(store, file_id, None, iter_ar(path, rec, salt=salt, account=acct), source_kind=source_kind_of(via),
+                             account=acct, path=path, rec=rec, via=via, origin=origin, force=force, log=log)
+
+
+class _ConnStore:
+    """A store-like holder for a bare connection (apply_ar_snapshot's caller may hold only that)."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+        self.ema_changed = False
+
+
+def apply_ar_snapshot(target: Any, source_id: str, as_of: str | None, rows: Iterable[dict], *, source_kind: str,
+                      account: Account | None = None, path: str | None = None, rec: Recognized | None = None,
+                      via: str | None = None, origin: dict | None = None, force: bool = False, log: Any = print,
+                      source_name: str | None = None) -> dict:
+    """The seam every source of A/R rows goes through (amendment 10): make these rows (ema_ar's columns but file_id and
+    as_of, as iter_ar yields them) the current snapshot of each service year they span for which they are newer than the
+    snapshot on file (order: as_of, the workbook's creation time, when it arrived, its id); an older snapshot never
+    replaces a newer one, and is superseded for that year. For each year it takes: its rows replace the year's rows in
+    ema_ar, the item history is brought forward (first and last seen, absent since, worked marks), and every claim id to
+    claim number pair is kept in ema_claim_links. A snapshot that lists far fewer of the lines a re-export must still show
+    is held until a person decides (force skips holds, never refusals). Every snapshot is dated (as_of: given, or the
+    reader's newest date) and records `source_kind` ('file', 'upload' or 'api') and a content id: the same rows as a
+    snapshot on file (the export saved again) are 'already' and change nothing. `target` is the store (or a bare
+    connection). A file's reader passes its `account`, `path` and `rec`; an API pull passes none of them."""
+    if source_kind not in SOURCE_KINDS:
+        raise ValueError("source_kind is file, upload or api")
+    store = target if hasattr(target, "conn") else _ConnStore(target)
+    conn = store.conn
+    ensure_schema(conn)
+    salt = key_salt(conn)
+    register_functions(conn, salt)
+    acct = account if account is not None else Account()
+    if rec is not None and path is not None:
+        source_name, container = _names_of(path, rec)
+    else:
+        source_name, container = source_name or "A/R snapshot", None
+    base: dict = dict(report="ar_report", source_name=source_name, container=container, via=via or source_kind,
+                      origin=origin or {}, source_kind=source_kind)
+    if rec is not None:
+        base.update(format=rec.fmt, columns=list(rec.columns), missing=list(rec.missing), unused=list(rec.unused))
+    where = path or source_name
     try:
-        acct = _stage_ar(conn, path, rec, salt, file_id)
+        staged, content_id = _stage_ar_rows(conn, rows, source_id)
     except ReportRefused as exc:
         conn.rollback()
         _drop_stage(conn)
-        return _record_refusal(store, file_id, exc, path=path, rec=rec, via=via, origin=origin, log=log)
+        return _record_refusal(store, source_id, exc, path=where, rec=rec, via=via or source_kind, origin=origin, log=log)
+    if account is None:
+        lo, hi = conn.execute("SELECT MIN(svc), MAX(svc) FROM temp.ema_ar_stage").fetchone()
+        acct.update(rows_read=staged, rows_kept=staged, svc_lo=lo, svc_hi=hi, as_of=as_of)
+    as_of = as_of or acct.get("as_of")
+    acct["as_of"] = as_of
+    _stage_ar_groups(conn, as_of)
     try:
         if not acct.get("rows_kept"):
             conn.rollback()
-            return _record_refusal(store, file_id, ReportRefused("empty", "It holds no line with a service date and a responsible "
-                                                                 "party.", "ar_report"), path=path, rec=rec, via=via,
-                                   origin=origin, log=log)
-        as_of = acct["as_of"]
+            return _record_refusal(store, source_id, ReportRefused("empty", "It holds no line with a service date and a responsible "
+                                                                   "party.", "ar_report"), path=where, rec=rec,
+                                   via=via or source_kind, origin=origin, log=log)
+        dup = conn.execute(f"""SELECT file_id, applied_at FROM ema_report_files WHERE report='ar_report' AND content_id=?
+                               AND file_id<>? AND status IN ({','.join('?' * len(DONE_STATUSES))}) LIMIT 1""",
+                           (content_id, source_id, *DONE_STATUSES)).fetchone()
+        if dup is not None:
+            # the same rows as a snapshot on file, saved again (another save time or line endings): nothing changes
+            conn.rollback()
+            reason = f"It holds the same rows as the A/R read on {_day(dup[1])} (saved again): nothing changed."
+            supersede_waiting(conn, source_id, reason=reason, replaced_by=dup[0])
+            log(f"  EMA report {source_name}: already read (the same rows as an A/R on file)")
+            return _result("already", "ar_report", source_id, reason=reason, duplicate_of=dup[0], content_id=content_id,
+                           rows_read=acct.get("rows_read") or 0, as_of=as_of)
         years = _stage_years(conn)          # a year the file has no row for keeps its own snapshot
-        row = _catalog_row(conn, file_id)
+        row = _catalog_row(conn, source_id)
         received = (row or {}).get("received_at") or _now()
-        created = _created_at(path, rec)
-        mine = (as_of or "", created or "", received, file_id)
+        created = _created_at(path, rec) if (path and rec is not None) else None
+        mine = (as_of or "", created or "", received, source_id)
         take, behind, current_of = [], [], {}
         for y in years:
             cur = conn.execute("SELECT file_id FROM main.ema_ar WHERE svc_year=? LIMIT 1", (y,)).fetchone()
             if cur is None:
                 take.append(y)
-            elif cur[0] != file_id and mine > _order(conn, cur[0]):
+            elif cur[0] != source_id and mine > _order(conn, cur[0]):
                 take.append(y)
                 current_of[y] = cur[0]
-            elif cur[0] != file_id:
+            elif cur[0] != source_id:
                 behind.append(y)
         scope = _years_label(years)
         links = conn.execute("SELECT COUNT(DISTINCT link) FROM temp.ema_ar_stage WHERE link IS NOT NULL").fetchone()[0]
-        info = dict(scope=scope, svc_lo=acct["svc_lo"], svc_hi=acct["svc_hi"], as_of=as_of, created_at=created,
-                    received_at=received, rows_read=acct["rows_read"], rows_kept=acct["rows_kept"], links=links,
-                    account=dict(acct))
+        info = dict(scope=scope, svc_lo=acct.get("svc_lo"), svc_hi=acct.get("svc_hi"), as_of=as_of, created_at=created,
+                    received_at=received, rows_read=acct.get("rows_read") or 0, rows_kept=acct.get("rows_kept") or 0, links=links,
+                    account=dict(acct), content_id=content_id)
         holds = [] if force else format_holds(acct) + _ar_holds(conn, take, current_of, as_of)
         if holds:
             reason = " ".join(m for _c, m in holds)
-            _catalog_put(conn, file_id, **base, **info, status="held", status_reason=reason)
+            _catalog_put(conn, source_id, **base, **info, status="held", status_reason=reason)
             conn.commit()
             store.ema_changed = True
             log(f"  EMA report {source_name}: held ({', '.join(sorted({c for c, _m in holds}))})")
-            return _result("held", "ar_report", file_id, reason=reason, rows_read=acct["rows_read"], rows_kept=acct["rows_kept"],
-                           scope=scope, as_of=as_of, account=dict(acct), box={"years": years, "svc_lo": acct["svc_lo"],
-                                                                                "svc_hi": acct["svc_hi"], "as_of": as_of})
+            return _result("held", "ar_report", source_id, reason=reason, rows_read=info["rows_read"], rows_kept=info["rows_kept"],
+                           scope=scope, as_of=as_of, account=dict(acct), content_id=content_id,
+                           box={"years": years, "svc_lo": info["svc_lo"], "svc_hi": info["svc_hi"], "as_of": as_of})
         applied = 0
         for y in take:
             conn.execute("UPDATE ema_ar_items SET absent_since=? WHERE substr(svc,1,4)=? AND absent_since IS NULL "
@@ -2762,7 +2837,7 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
             left = conn.execute("SELECT COUNT(*) FROM main.ema_ar WHERE file_id=?", (old,)).fetchone()[0]
             st = "partly_replaced" if left else "replaced"
             if _catalog_row(conn, old) is not None:
-                _catalog_put(conn, old, status=st, live_rows=left, replaced_by=file_id)
+                _catalog_put(conn, old, status=st, live_rows=left, replaced_by=source_id)
             replaced.append((old, st))
         status = "current" if take else "superseded"
         if take and behind:
@@ -2771,8 +2846,8 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
             reason = f"Newer snapshots of {', '.join(behind)} are on file."
         else:
             reason = None
-        live = conn.execute("SELECT COUNT(*) FROM main.ema_ar WHERE file_id=?", (file_id,)).fetchone()[0]
-        _catalog_put(conn, file_id, **base, **info, status=status, status_reason=reason, applied_at=_now(),
+        live = conn.execute("SELECT COUNT(*) FROM main.ema_ar WHERE file_id=?", (source_id,)).fetchone()[0]
+        _catalog_put(conn, source_id, **base, **info, status=status, status_reason=reason, applied_at=_now(),
                      rows_applied=applied, live_rows=live)
         if take:
             since = min(as_of or today_iso(), today_iso())      # retention never counts from a day still to come
@@ -2780,8 +2855,9 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
                          (since, f"-{AR_HISTORY_DAYS} days"))
             conn.execute("DELETE FROM ema_claim_links WHERE last_seen < date(?, ?)", (since, f"-{CLAIM_LINK_DAYS} days"))
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')", (META_MAP_DIRTY,))
-        _write_files_row(conn, file_id, path, rec, kind="ema:ar", status=status, rows_read=acct["rows_read"],
-                         rows_applied=applied, created=created, rows_kept=acct["rows_kept"])
+        if path and rec is not None:
+            _write_files_row(conn, source_id, path, rec, kind="ema:ar", status=status, rows_read=info["rows_read"],
+                             rows_applied=applied, created=created, rows_kept=info["rows_kept"])
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -2789,15 +2865,16 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
     finally:
         _drop_stage(conn)
     try:
-        learn_claim_prefix(conn, acct.prefixes)
+        learn_claim_prefix(conn, getattr(acct, "prefixes", []))
     except ReportRefused:
         pass
-    record_unknown_statuses(conn, acct.status_words)
+    record_unknown_statuses(conn, getattr(acct, "status_words", set()))
     store.ema_changed = True
     log(f"  EMA report {source_name}: {status}, {applied:,} rows applied" + (f" ({reason})" if reason else ""))
-    return _result(status, "ar_report", file_id, reason=reason, rows_read=acct["rows_read"], rows_kept=acct["rows_kept"],
+    return _result(status, "ar_report", source_id, reason=reason, rows_read=info["rows_read"], rows_kept=info["rows_kept"],
                    rows_applied=applied, live_rows=live, scope=scope, as_of=as_of, replaced=replaced, account=dict(acct),
-                   box={"years": years, "svc_lo": acct["svc_lo"], "svc_hi": acct["svc_hi"], "as_of": as_of})
+                   content_id=content_id, source_kind=source_kind,
+                   box={"years": years, "svc_lo": info["svc_lo"], "svc_hi": info["svc_hi"], "as_of": as_of})
 
 
 # -------------------------------------------------------------------------------------------------------------- preview

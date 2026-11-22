@@ -540,39 +540,44 @@ def test_an_unreadable_file_is_remembered_and_starts_nothing_again(box, monkeypa
     assert cloud.has_new_files(state, client) is False
 
 
-def test_a_report_no_reader_reads_yet_is_neither_stored_nor_remembered_as_seen(box):
-    """An A/R report in the data folder (none of the three weekly EMA exports): the run fetches it but stores no row of it,
-    records no file and does not remember it as seen, so a later listing of the whole folder hands it over again, to the
-    reader made for it by then. A listing of what changed does not name it again, so it is not fetched on every run."""
-    from tests.test_feeds import AR_COLS, _ar_rows
-    from tests.test_uploads import xlsx
+def test_an_ar_report_in_the_data_folder_is_read_as_a_report_and_remembered(box):
+    """An A/R report in the data folder is read by its own reader (remitwatch.ema_reports): it becomes the current A/R
+    snapshot, none of its rows goes to the weekly exports' table, and the file is remembered as seen, so neither a listing
+    of what changed nor a listing of the whole folder fetches it again."""
+    from remitwatch import ema_reports
+    from tests import ema_fixtures as F
     root, client, state = box
     write_remits(root / DATA, visits_with_downcodes())
-    (root / DATA / "AR and Collections Reports from EMA").mkdir(parents=True)
-    (root / DATA / "AR and Collections Reports from EMA" / "AR 2026.xlsx").write_bytes(xlsx("A/R Report", AR_COLS, _ar_rows()))
+    folder = root / DATA / "AR and Collections Reports from EMA"
+    folder.mkdir(parents=True)
+    rows = [F.ar_row(claim=F.claim_id(i), link=F.link_no(i), svc=__import__("datetime").date(2026, 10, 5)) for i in range(1, 5)]
+    data = F.ar_xlsx(rows)
+    (folder / "AR 2026.xlsx").write_bytes(data)
     out = cycle(state, client)
-    assert (out["ingest"]["downloaded"], out["ingest"]["remits"], out["ingest"]["ema"], out["ingest"]["skipped"]) == (7, 6, 0, 1)
+    assert (out["ingest"]["downloaded"], out["ingest"]["remits"], out["ingest"]["ema"]) == (7, 6, 1)
     assert out["ingest"]["failed"] == [] and out["ingest"]["errors"] == 0
     conn = raw_conn(state)
-    assert conn.execute("SELECT (SELECT COUNT(*) FROM ema_rows) + (SELECT COUNT(*) FROM ema_sources)").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM files WHERE kind LIKE 'ema%'").fetchone()[0] == 0
-    seen = [r[0] for r in conn.execute("SELECT path FROM dropbox_seen")]
-    assert len(seen) == 6 and not any(p.endswith("AR 2026.xlsx") for p in seen)
+    fid = hashlib.sha256(data).hexdigest()
+    assert tuple(conn.execute("SELECT status, report FROM ema_report_files WHERE file_id=?", (fid,)).fetchone()) == ("current", "ar_report")
+    assert conn.execute("SELECT COUNT(*) FROM ema_rows").fetchone()[0] == 0 and conn.execute("SELECT COUNT(*) FROM ema_ar").fetchone()[0] == 4
+    assert conn.execute("SELECT kind FROM files WHERE sha256=?", (fid,)).fetchone()[0] == "ema:ar"
+    assert any(p.endswith("AR 2026.xlsx") for (p,) in conn.execute("SELECT path FROM dropbox_seen"))
+    assert ema_reports.catalog(conn)["files"][0]["via"] == "dropbox"
     again = cycle(state, client)
     assert again["ingest"]["mode"] == "delta" and again["ingest"]["downloaded"] == 0
     state.delete(cloud.CURSOR)                          # Dropbox dropped the position: the whole folder is listed again
     full = cycle(state, client)
-    assert (full["ingest"]["mode"], full["ingest"]["downloaded"], full["ingest"]["skipped"], full["ingest"]["remits"]) == ("full", 1, 1, 0)
+    assert (full["ingest"]["mode"], full["ingest"]["downloaded"], full["ingest"]["ema"]) == ("full", 0, 0)
 
 
-def test_a_report_in_the_first_load_archive_is_not_remembered_either(box):
-    """The same report inside the archive read on the first load: no row of it is stored and its bytes are not remembered,
-    so its loose copy in the folder is fetched (and left unread again) instead of being passed over as already read."""
-    from tests.test_feeds import AR_COLS, _ar_rows
-    from tests.test_uploads import xlsx
+def test_a_report_in_the_first_load_archive_is_read_once_and_its_loose_copy_is_not_fetched(box):
+    """The same report inside the archive read on the first load: it is read as a report from the archive, and its loose
+    copy in the folder (the same bytes) is passed over without a download."""
+    from tests import ema_fixtures as F
     root, client, state = box
     names = write_remits(root / DATA / "Trizetto", visits_with_downcodes())
-    report = xlsx("A/R Report", AR_COLS, _ar_rows())
+    rows = [F.ar_row(claim=F.claim_id(i), link=F.link_no(i), svc=__import__("datetime").date(2026, 10, 5)) for i in range(1, 5)]
+    report = F.ar_xlsx(rows)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for n in names:
@@ -582,10 +587,10 @@ def test_a_report_in_the_first_load_archive_is_not_remembered_either(box):
     (root / DATA / "Reports").mkdir()
     (root / DATA / "Reports" / "AR 2026.xlsx").write_bytes(report)
     out = cycle(state, client)
-    assert (out["ingest"]["from_archive"], out["ingest"]["remits"], out["ingest"]["skipped"], out["ingest"]["downloaded"]) == (7, 6, 2, 1)
+    assert (out["ingest"]["from_archive"], out["ingest"]["remits"], out["ingest"]["ema"], out["ingest"]["downloaded"]) == (7, 6, 1, 0)
     conn = raw_conn(state)
-    assert not conn.execute("SELECT 1 FROM dropbox_seen WHERE path LIKE '%AR 2026.xlsx'").fetchone()
-    assert conn.execute("SELECT COUNT(*) FROM dropbox_seen").fetchone()[0] == 12          # the six archived files and their loose copies
+    assert [tuple(r) for r in conn.execute("SELECT status FROM ema_report_files")] == [("current",)]
+    assert conn.execute("SELECT COUNT(*) FROM dropbox_seen").fetchone()[0] == 14          # the seven archived files and their loose copies
     assert conn.execute("SELECT COUNT(*) FROM ema_rows").fetchone()[0] == 0
 
 

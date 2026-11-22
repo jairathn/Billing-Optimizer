@@ -135,3 +135,75 @@ def test_with_the_fax_line_and_the_trizetto_login_on_both_sites_only_one_acts(bo
     assert got["vercel"][:2] == (True, True) and got["server"][:2] == (False, False)
     monkeypatch.setenv("REMITWATCH_FAX_SENDER", "none")                 # faxing paused everywhere
     assert [v[:2] for v in acts().values()] == [(False, False), (False, False)]
+
+
+def test_the_ema_reports_give_the_same_state_and_findings_on_both_hosts(tmp_path, monkeypatch):
+    """The same data folder (remittances, an A/R report and a zipped Production report) read by the serverless cycle,
+    run after run until it has nothing left to do, and by one server cycle: the same report catalog, A/R snapshot, EMA
+    summaries and findings (the posting ledger too, by its rows and sums)."""
+    import sqlite3
+
+    from remitwatch import cloud, dropbox_sync, ema_ledger as el, ema_reports as er, pipeline
+    from remitwatch.state import DropboxState
+    from remitwatch.store import Store
+    from tests import ema_fixtures as F
+    from tests.test_cloud import DATA, visits_with_downcodes, write_remits
+    from tests.test_ema_intake import Dbx, ar_rows, prod_rows
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "REMITWATCH_STATE_DIR", "SMTP_HOST", "REPORT_TO", "VERCEL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
+    monkeypatch.setenv("DROPBOX_ROOT_PATH", f"/{DATA}")
+    root = tmp_path / "dbx"
+    write_remits(root / DATA, visits_with_downcodes())
+    reports = root / DATA / "Reports"
+    reports.mkdir(parents=True)
+    (reports / "AR 2026.xlsx").write_bytes(F.ar_xlsx(ar_rows()))
+    (reports / "2026 Production.zip").write_bytes(F.zipped("2026 Production.csv", F.production_csv(prod_rows(2026))))
+    client = Dbx(str(root))
+    # the serverless site, run after run as its own follow-up calls would
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    state = DropboxState(client, "/RemitWatch-state")
+    for _ in range(6):
+        out = cloud.run_cloud_cycle(state, client, budget_s=600, email=False, log=lambda *a: None)
+        if not out.get("more"):
+            break
+    assert out.get("more") is False
+    vstore, _ = cloud.load_raw(state)
+    # the server, with the same folder behind its sync, in one cycle
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    for k, v in (("DROPBOX_APP_KEY", "k"), ("DROPBOX_APP_SECRET", "s"), ("DROPBOX_REFRESH_TOKEN", "r")):
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("REMITWATCH_DATA_DIR", str(tmp_path / "srv" / "dropbox"))
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **k: client)
+    db = str(tmp_path / "srv" / "remitwatch.sqlite")
+    pipeline.run_cycle(db, email=False, report=False, log=lambda *a: None)
+    sstore = Store(db)
+
+    def ema(conn):
+        cat = sorted((r[0], r[1], r[2], r[3]) for r in conn.execute("SELECT file_id, report, status, rows_applied FROM ema_report_files"))
+        ar = conn.execute("SELECT COUNT(*), SUM(exposure_cents) FROM ema_ar").fetchone()
+        lines = conn.execute("SELECT COUNT(*), SUM(ins_paid), SUM(charges), SUM(balance) FROM ema_lines").fetchone()
+        return cat, tuple(ar), tuple(lines)
+
+    def found(conn):
+        return sorted((r[0], r[1], r[2]) for r in conn.execute(
+            "SELECT signal, patient_control_number, shortfall_cents FROM findings WHERE COALESCE(stale, 0) = 0"))
+    try:
+        assert ema(vstore.conn) == ema(sstore.conn)
+        assert len(ema(sstore.conn)[0]) == 2 and ema(sstore.conn)[2][0] > 0
+        assert found(vstore.conn) == found(sstore.conn) and found(sstore.conn)
+        h = el.LedgerHandle(state, tmp_dir=str(tmp_path / "look"))
+        try:
+            v = h.open().conn.execute("SELECT COUNT(*), SUM(ins_paid), SUM(charges) FROM postings").fetchone()
+        finally:
+            h.discard()
+        c = sqlite3.connect(el.ledger_path(db))
+        try:
+            assert tuple(v) == tuple(c.execute("SELECT COUNT(*), SUM(ins_paid), SUM(charges) FROM postings").fetchone())
+        finally:
+            c.close()
+    finally:
+        vstore.close()
+        sstore.close()
