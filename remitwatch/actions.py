@@ -101,12 +101,14 @@ def apply_payer_fax(conn: sqlite3.Connection, a: dict) -> None:
         return
     before = cur or ((r[2] or "") if r else "")         # the number in use before this save (a removal keeps it as previous)
     changed = bool(before) and num != before
-    previous = before if changed or not num else ((r[2] or "") if r else "")
+    if changed or not num:
+        previous, changed_at = before, at
+    else:                                                 # the first number, or the one removed saved again
+        previous, changed_at = "", (r[3] if r else None)
     auto_ok = 0 if (changed and num) else 1
     conn.execute("""INSERT OR REPLACE INTO payer_fax (payer_group, purpose, number, confirmed_by, confirmed_at, previous, changed_at, auto_ok,
                     checked_by, checked_at, history) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                 (pg, purpose, num, who, at, previous, at if (changed or not num) else ((r[3] if r else None)), auto_ok,
-                  None if auto_ok == 0 else who, None if auto_ok == 0 else at, hist))
+                 (pg, purpose, num, who, at, previous, changed_at, auto_ok, None if auto_ok == 0 else who, None if auto_ok == 0 else at, hist))
 
 
 def apply_payer_fax_check(conn: sqlite3.Connection, a: dict) -> None:
@@ -179,8 +181,12 @@ def apply_hide_rule(conn: sqlite3.Connection, a: dict) -> None:
         have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "finding_events" not in have:
             return
+        # what decided its status last: a line in its history that changes no status (a payer's fax read, a follow-up faxed)
+        # does not count, so an item the payer wrote about still comes back
         for (fid,) in conn.execute("""SELECT f.finding_id FROM findings f WHERE f.payer_group=? AND f.signal=? AND f.status='dismissed'
-                                        AND (SELECT e.kind FROM finding_events e WHERE e.finding_id=f.finding_id ORDER BY e.at DESC, e.id DESC LIMIT 1)='hidden'""",
+                                        AND (SELECT e.kind FROM finding_events e WHERE e.finding_id=f.finding_id
+                                               AND e.kind IN ('manual','hidden','unhidden','paid_on_later_remit','reopened')
+                                             ORDER BY e.at DESC, e.id DESC LIMIT 1)='hidden'""",
                                      (pg, sig)).fetchall():
             conn.execute("UPDATE findings SET status='open', status_changed_at=? WHERE finding_id=?", (at, fid))
             conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) "
@@ -256,6 +262,9 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
         return True
     if kind == "payer_fax":
         apply_payer_fax(conn, action)
+        return True
+    if kind == "payer_fax_check":
+        apply_payer_fax_check(conn, action)
         return True
     if kind == "lesson":
         apply_lesson(conn, action["record"])
