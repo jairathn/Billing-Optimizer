@@ -40,7 +40,7 @@ a{color:var(--accent)}
   </div>
 
   <div class="panel" id="gen" style="display:none"><h2>Values you make up yourself</h2>
-    <div class="small muted">These two are passwords you invent. The values below were made in your browser just now and are not stored anywhere. Copy each into Vercel.</div>
+    <div class="small muted">These two are passwords you invent. The values below were made in your browser just now and are not stored anywhere. Put each in the host's settings: on the server, type it when configure.sh asks for it; on Vercel, add it in Settings, Environment Variables, then redeploy.</div>
     <div class="row"><b>REMITWATCH_PASSWORD</b> <span class="val" id="genPw"></span> <button data-copy="genPw">Copy</button></div>
     <div class="row"><b>CRON_SECRET</b> <span class="val" id="genCron"></span> <button data-copy="genCron">Copy</button></div>
     <div class="small muted">Write the dashboard password down for the practice owner. The user name is <code>oda</code> unless REMITWATCH_USER is set.</div>
@@ -53,7 +53,7 @@ a{color:var(--accent)}
       <li>Paste the code here and press Get token.
         <div class="row"><input id="code" placeholder="code from Dropbox" style="flex:1;min-width:240px"><button class="primary" id="exchange">Get token</button></div>
         <div id="exMsg" class="small"></div></li>
-      <li id="tokStep" style="display:none">Copy this value. In Vercel add an environment variable named <code>DROPBOX_REFRESH_TOKEN</code> with it, for Production. Then redeploy and press Check again.
+      <li id="tokStep" style="display:none">Copy this value. It is <code>DROPBOX_REFRESH_TOKEN</code>. On the server, paste it when configure.sh asks for the Dropbox refresh token. On Vercel, add an environment variable with that name for Production, then redeploy. Then press Check again.
         <textarea id="token" rows="3" readonly></textarea>
         <div class="row"><button data-copy="token">Copy</button><span class="small muted">It is shown once. If you lose it, repeat these steps.</span></div></li>
     </ol>

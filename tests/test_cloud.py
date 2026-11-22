@@ -565,6 +565,30 @@ def test_a_report_no_reader_reads_yet_is_neither_stored_nor_remembered_as_seen(b
     assert (full["ingest"]["mode"], full["ingest"]["downloaded"], full["ingest"]["skipped"], full["ingest"]["remits"]) == ("full", 1, 1, 0)
 
 
+def test_a_report_in_the_first_load_archive_is_not_remembered_either(box):
+    """The same report inside the archive read on the first load: no row of it is stored and its bytes are not remembered,
+    so its loose copy in the folder is fetched (and left unread again) instead of being passed over as already read."""
+    from tests.test_feeds import AR_COLS, _ar_rows
+    from tests.test_uploads import xlsx
+    root, client, state = box
+    names = write_remits(root / DATA / "Trizetto", visits_with_downcodes())
+    report = xlsx("A/R Report", AR_COLS, _ar_rows())
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n in names:
+            zf.write(root / DATA / "Trizetto" / n, f"Trizetto/{n}")
+        zf.writestr("Reports/AR 2026.xlsx", report)
+    (root / DATA / "Trizetto.zip").write_bytes(buf.getvalue())
+    (root / DATA / "Reports").mkdir()
+    (root / DATA / "Reports" / "AR 2026.xlsx").write_bytes(report)
+    out = cycle(state, client)
+    assert (out["ingest"]["from_archive"], out["ingest"]["remits"], out["ingest"]["skipped"], out["ingest"]["downloaded"]) == (7, 6, 2, 1)
+    conn = raw_conn(state)
+    assert not conn.execute("SELECT 1 FROM dropbox_seen WHERE path LIKE '%AR 2026.xlsx'").fetchone()
+    assert conn.execute("SELECT COUNT(*) FROM dropbox_seen").fetchone()[0] == 12          # the six archived files and their loose copies
+    assert conn.execute("SELECT COUNT(*) FROM ema_rows").fetchone()[0] == 0
+
+
 def test_a_download_that_may_work_later_holds_the_position_and_one_that_cannot_does_not(box):
     import requests
     root, client, state = box

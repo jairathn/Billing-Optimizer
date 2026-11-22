@@ -951,13 +951,24 @@ def test_the_setup_page_and_the_settings_file_name_the_one_fax_sender():
     for said in ("<code>REMITWATCH_FAX_SENDER</code>", "<code>server</code>", "<code>serverless</code>", "<code>none</code> pauses faxing",
                  "sends nothing", 'id="fxWhere"'):
         assert said in panel, said
-    assert "—" not in panel and "const fxWhere = s.fax && s.fax.not_here;" in page and "esc(fxWhere)" in page
+    assert "\u2014" not in panel and "const fxWhere = s.fax && s.fax.not_here;" in page and "esc(fxWhere)" in page
     lines = open(os.path.join(ROOT, ".env.example"), encoding="utf-8").read().splitlines()
     at = lines.index("REMITWATCH_FAX_SENDER=server")
     assert "Fax line" in next(ln for ln in reversed(lines[:at]) if ln.startswith("# ----"))
     above = " ".join(ln for ln in lines[at - 3:at] if ln.startswith("#"))
     for said in ("server (the default)", "serverless: the Vercel site", "none: faxing is paused", "sends nothing"):
         assert said in above, said
+
+
+def test_the_setup_page_says_where_each_value_goes_on_either_host():
+    """The same page serves the server and the Vercel site. The passwords it makes and the Dropbox token it fetches are
+    put in the server's settings with configure.sh, or in Vercel's: never "into Vercel" alone."""
+    page = open(os.path.join(ROOT, "remitwatch", "static", "setup.html"), encoding="utf-8").read()
+    for panel_id, end in (('id="gen"', 'id="connect"'), ('id="tokStep"', "</li>")):
+        at = page.index(panel_id)
+        text = page[at:page.index(end, at)]
+        assert "configure.sh" in text and "Vercel" in text and "redeploy" in text, panel_id
+    assert "Copy each into Vercel" not in page and "In Vercel add an environment variable" not in page
 
 
 # --------------------------------------------------------------------------- what a Dropbox sync hands over
