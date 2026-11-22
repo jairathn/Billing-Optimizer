@@ -55,21 +55,25 @@ The site's address will be a name under it, for example `remitwatch.yourpractice
 
    It asks for the settings by the same names as on Vercel (have Vercel's **Settings, Environment Variables** open in
    another tab and copy each value across; press Enter to skip one). A few rare ones it does not ask for (some ModMed
-   settings, the tuning ones): it lists them at the end, to copy into `/opt/remitwatch/.env` by hand if Vercel has them.
-   Nothing you type or paste for a secret is shown, the ModMed private key included (a dot per line shows it arrived),
-   and a secret already set is only said to be set. It makes the dashboard password and the scheduler secret for you if
-   you leave them empty, and shows the password once: write it down.
+   settings, the Vercel state folder's path, the tuning ones): it lists them at the end, to copy into
+   `/opt/remitwatch/.env` by hand if Vercel has them. Nothing you type or paste for a secret is shown, the ModMed private
+   key included (a dot per line shows it arrived), and a secret already set is only said to be set. It makes the
+   dashboard password and the scheduler secret for you if you leave them empty, and shows the password once: write it
+   down. Until a dashboard password is set the site serves no data at all. A password already in use that is shorter
+   than 12 characters is kept when you press Enter (the site still accepts it, with a warning on `/setup`); it is
+   replaced only when you answer yes, and then everyone signs in with the new one.
 3. When it asks **Move the store ... from the Vercel site now?**, answer **Y**. It copies the Vercel site's data from
    Dropbox (the findings, everything people marked, payer fax numbers, hidden reasons, appeal packets) and where the
    site had got to in the Dropbox folder, so nothing is downloaded again. It asks only while the server's store is
    empty: once the server has its own data, the script never moves the Vercel site's data onto it again.
 4. It starts the site and prints what is left: open `https://<the address>/setup`, change the Dropbox webhook to the new
    address, give ModMed the new key address (`https://<the address>/.well-known/jwks.json`), and turn the Vercel
-   site off, so staff work on one site. Faxes go out from this server alone (`docs/SERVER_RUNBOOK.md`, the fax
-   settings).
+   site off, so staff work on one site. Faxes go out from this server alone (`REMITWATCH_FAX_SENDER`,
+   `docs/SERVER_RUNBOOK.md`), and only this server reads TriZetto.
 
-Run the script again any time to change a setting. It waits for a data cycle or fax run that is going to end (up to
-10 minutes), then starts the site again with the new settings.
+Run the script again any time to change a setting. It waits for a data cycle, fax run or backup that is going to end (up
+to 10 minutes), then starts the site again with the new settings. A setting changed in `/opt/remitwatch/.env` by hand
+takes effect with `sudo docker compose up -d` (not `restart`).
 
 ## Never update or delete the stack
 
@@ -103,9 +107,11 @@ What to do instead:
 
 - Backups: **EC2**, **Snapshots** shows one a day. To go back to one: make a volume from it and swap it in (or ask).
 - Updates to RemitWatch deploy themselves: every 5 minutes the server looks at main and deploys a new commit (build
-  first, swap only when the build succeeds and the site answers). How it works and how to read its log:
-  `docs/SERVER_RUNBOOK.md`, "Automatic deploys".
+  first, swap only when the build succeeds and the site answers; if it does not, the version before runs again). How it
+  works and how to read its log: `docs/SERVER_RUNBOOK.md`, "Automatic deploys". `https://<the address>/api/health`
+  shows the commit the server runs.
 - Whoever can push to main controls this server, so protect main in GitHub (a required review, no force pushes):
   `docs/SERVER_RUNBOOK.md`, "Who controls the server".
-- Logs: `cd /opt/remitwatch && sudo docker compose logs --tail 200 app`.
+- Logs: `cd /opt/remitwatch && sudo docker compose logs --tail 200 app`. Every command on the server starts with `sudo`:
+  the Session Manager user is not root.
 - If the site does not answer: **EC2**, **Instances**, the RemitWatch server, **Instance state**, **Reboot**.

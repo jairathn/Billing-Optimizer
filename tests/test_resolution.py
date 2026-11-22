@@ -177,6 +177,58 @@ def test_ema_closes_and_reads_the_newest_export(tmp_path):
     store.close()
 
 
+def whole_claim(i, who, *codes):
+    """A whole claim denied (CLP02 4) for these codes: (code, charge) pairs, one line each, on April 1."""
+    total = sum(float(ch) for _c, ch in codes)
+    return (f"CLP*CB{i:07d}C017*4*{total:.2f}*0.00*0.00*12*PC{i}*11~NM1*QC*1*{who}~NM1*82*2*TEST PROVIDER*****XX*{NPI}~DTM*232*20260401~"
+            + "".join(svc(code, ch, "0.00", None, f"CAS*CO*16*{ch}~") for code, ch in codes))
+
+
+def test_ema_closes_a_whole_claim_only_when_it_shows_every_code_paid(tmp_path):
+    """A whole claim denied for a visit and a biopsy, and EMA shows the insurer paid the visit only: the biopsy is still
+    unpaid, so the item stays listed with a hint naming both. Once EMA shows both paid it closes, recovering both."""
+    base = base_visits() + clean_visits(50, 25, "11102", "150.00", "110.00") + clean_visits(80, 25, "17003", "25.00", "6.00")
+    store = build_store(tmp_path, base + [whole_claim(300, "OAK*KIM****MI*W55500399", ("99214", "223.65"), ("11102", "150.00")),
+                                          whole_claim(301, "ASH*RO****MI*W55500398", ("99214", "223.65"), ("11102", "150.00")),
+                                          whole_claim(302, "FIR*JO****MI*W55500397", ("99214", "223.65")),
+                                          whole_claim(303, "YEW*MO****MI*W55500396", ("99214", "223.65"), ("17003", "25.00"))],
+                        pay_date="20260415")
+    charge = lambda fp, claim, cpt, paid: (fp, "charge_lines", "Encounter & Charge Lines.xlsx", 1, "2026-04-01", claim, cpt, 1, 15000, "Charge",
+                                           paid, None, None, None)
+    ema(store, [charge("a1", "CB0000300C017", "99214", 11760), charge("a2", "CB0000300C017", "11102", 0),
+                # the insurer's payment on the visit only, posted from its ERA after the denial
+                ("b1", "era_lines", "ERA & Payment Lines.xlsx", 1, "2026-04-01", "CB0000301C017", "99214", 1, 22365, None, None, 11760, "2026-05-01", None),
+                charge("c1", "CB0000302C017", "99214", 11760),           # one code: EMA shows it paid, so it closes as before
+                # a cheap code and a visit: each judged against its own usual rate, not an equal split of the claim
+                charge("d1", "CB0000303C017", "99214", 11760), charge("d2", "CB0000303C017", "17003", 600)])
+    Detector(store, run_id="t").run()
+    q = ("SELECT patient_control_number, status, hint, evidence, auto_note, recovered_cents, expected_cents FROM findings "
+         "WHERE signal='CLAIM_DENIED_UNPAID'")
+    rows = {r["patient_control_number"]: r for r in store.query(q)}
+    one = rows["CB0000300C017"]
+    assert one["status"] == "open" and one["expected_cents"] == 22760 and one["recovered_cents"] is None
+    assert one["hint"] == "EMA shows $117.60 paid by insurance for 99214, not for 11102; check before marking recovered"
+    shown = json.loads(one["evidence"])["ema_shows_paid"]
+    assert shown["codes_paid"] == ["99214"] and shown["codes_not_paid"] == ["11102"] and shown["paid_cents"] == 11760
+    era = rows["CB0000301C017"]                                     # the ERA lines read the same way
+    assert era["status"] == "open" and era["hint"].startswith("EMA shows $117.60 paid by insurance for 99214 on 2026-05-01, not for 11102")
+    assert rows["CB0000302C017"]["status"] == "resolved" and rows["CB0000302C017"]["recovered_cents"] == 11760
+    assert rows["CB0000302C017"]["auto_note"].startswith("EMA shows $117.60 paid by insurance (Encounter & Charge Lines.xlsx)")
+    cheap = rows["CB0000303C017"]
+    assert cheap["status"] == "resolved" and cheap["recovered_cents"] == 12360
+    assert cheap["auto_note"].startswith("EMA shows $123.60 paid by insurance for 17003, 99214 (Encounter & Charge Lines.xlsx)")
+    # the newest export shows the biopsy paid too: every code is paid, so it closes, recovering both
+    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=11000 WHERE row_fingerprint='a2'")
+    store.conn.execute("UPDATE ema_rows SET insurance_payments_cents=2000 WHERE row_fingerprint='d1'")   # under half the visit's rate
+    store.conn.commit()
+    Detector(store, run_id="t2").run()
+    rows = {r["patient_control_number"]: r for r in store.query(q)}
+    assert rows["CB0000300C017"]["status"] == "resolved" and rows["CB0000300C017"]["recovered_cents"] == 22760 and rows["CB0000300C017"]["hint"] is None
+    assert rows["CB0000300C017"]["auto_note"].startswith("EMA shows $227.60 paid by insurance for 11102, 99214 (Encounter & Charge Lines.xlsx)")
+    assert rows["CB0000303C017"]["status"] == "open" and "for 17003, not for 99214" in rows["CB0000303C017"]["hint"]
+    store.close()
+
+
 def test_earlier_secondary_or_superseded_payments_do_not_close(tmp_path):
     store = build_store(tmp_path, base_visits() + [visit(700, "ASH*RO****MI*W55500304")], pay_date="20260410")      # paid before the denial
     store.close()

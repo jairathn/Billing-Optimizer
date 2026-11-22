@@ -29,6 +29,8 @@ turns them into keyed hashes first. No log line, exception or status reason here
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import secrets
@@ -722,6 +724,26 @@ class Ledger:
             raise
         return n
 
+    def forget(self, file_id: str) -> int:
+        """Take one file out of the ledger (its rows and its record), to read it again (the CLI's --reread). The rows of
+        older files it replaced do not come back: reading it again restores the ledger. Returns the rows removed."""
+        if self.readonly:
+            return 0
+        f = self.file(file_id)
+        if f is None:
+            return 0
+        c = self.conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            n = c.execute("DELETE FROM postings WHERE src=?", (f["src"],)).rowcount
+            c.execute("DELETE FROM ledger_files WHERE src=?", (f["src"],))
+            self._bump()
+            c.execute("COMMIT")
+        except BaseException:
+            c.execute("ROLLBACK")
+            raise
+        return n
+
     def copies_to_drop(self, keep: int | None = None) -> list[str]:
         """Files with no live rows whose box at least `keep` newer files with rows cover whole
         (REMITWATCH_EMA_REPORT_KEEP, default 2): the server may delete its kept copy of them. The catalog row stays."""
@@ -780,12 +802,48 @@ def _mark_reread(conn: sqlite3.Connection, file_ids: Iterable[str], reason: str)
     return n
 
 
-def apply_production_file(store: Any, path: str, rec: Any, *, file_id: str, via: str, origin: dict | None = None,
+class _Hashing(io.RawIOBase):
+    """A read-only stream that hashes what is read through it (the file id of a report read from a stream)."""
+
+    def __init__(self, raw: Any):
+        super().__init__()
+        self.raw = raw
+        self.sha = hashlib.sha256()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        data = self.raw.read(len(b))
+        if not data:
+            return 0
+        n = len(data)
+        b[:n] = data
+        self.sha.update(data)
+        return n
+
+
+def _already(store: Any, ledger: Ledger, file_id: str) -> dict | None:
+    have = ledger.file(file_id)
+    if not have or have.get("status") not in APPLIED:
+        return None
+    sync_catalog(store, ledger, file_ids=[file_id])
+    box = next((b for b in ledger.boxes(APPLIED) if b.file_id == file_id), None)
+    return _result("already", file_id, reason=have.get("status"), rows_read=have.get("rows_read") or 0,
+                   rows_kept=have.get("rows") or 0, rows_applied=have.get("rows") or 0, live_rows=have.get("live_rows") or 0,
+                   scope=have.get("scope"), box=box, as_of=have.get("as_of"))
+
+
+def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | None, via: str, origin: dict | None = None,
                           force: bool = False, ledger: Ledger, deadline: float | None = None, serverless: bool = False,
-                          log: Any = print) -> dict:
+                          log: Any = print, source_name: str | None = None) -> dict:
     """Read one Production file into the ledger: stage it, check the holds, and apply it under the box invariant.
     ema_reports.ingest_file calls this and writes the catalog, files and ema_sources rows from the result; it does not
     write them here (except a catalog row the ledger holds and the store lost: see sync_catalog).
+
+    `path` is a file on disk (CSV, xlsx or a zip member as `rec` says), or a binary stream of delimited text (a download
+    read as it arrives, never written anywhere). For a stream `file_id` may be None: the SHA-256 of the bytes read becomes
+    the file's id, and a file the ledger already holds is then left as it is ('already').
 
     Result: {'status': 'current'|'superseded'|'held'|'waiting'|'already', 'reason', 'rows_read', 'rows_kept',
     'rows_applied', 'live_rows', 'scope', 'box', 'as_of', 'replaced': [(file_id, status)], 'account', 'links', 'holds',
@@ -794,18 +852,30 @@ def apply_production_file(store: Any, path: str, rec: Any, *, file_id: str, via:
     conn = store.conn
     er.ensure_schema(conn)
     salt = er.key_salt(conn)
+    hasher = None
+    if isinstance(path, (bytes, bytearray, memoryview)):
+        path = io.BytesIO(bytes(path))
+    if not isinstance(path, (str, os.PathLike)):
+        if getattr(rec, "fmt", "csv") != "csv" or getattr(rec, "member", None):
+            raise er.ReportRefused("unreadable", "Only a CSV Production report can be read as it downloads. Save the file "
+                                   "first, or zip it and let the zip be read.", "production")
+        source_name = source_name or os.path.basename(str(getattr(path, "name", "") or "")) or "stream"
+        hasher = _Hashing(path)
+        path = io.BufferedReader(hasher, 1 << 20)
+    else:
+        path = os.fspath(path)
+        source_name = source_name or (os.path.basename(rec.member) if getattr(rec, "member", None) else os.path.basename(path))
+        if file_id is None:
+            file_id = er._member_id(path, rec.member) if getattr(rec, "member", None) else er.file_id_of(path)
     reread = ledger.bind_salt(er.salt_fingerprint(salt))
     if reread:
         _mark_reread(conn, [f for f in reread if f != file_id],
                      "The posting ledger was keyed for another store; the file is read again.")
         log(f"  EMA posting ledger: emptied (keyed for another store); {len(reread)} file(s) to read again")
-    have = ledger.file(file_id)
-    if have and have.get("status") in APPLIED:
-        sync_catalog(store, ledger, file_ids=[file_id])
-        box = next((b for b in ledger.boxes(APPLIED) if b.file_id == file_id), None)
-        return _result("already", file_id, reason=have.get("status"), rows_read=have.get("rows_read") or 0,
-                       rows_kept=have.get("rows") or 0, rows_applied=have.get("rows") or 0, live_rows=have.get("live_rows") or 0,
-                       scope=have.get("scope"), box=box, as_of=have.get("as_of"))
+    if file_id is not None:
+        done = _already(store, ledger, file_id)
+        if done is not None:
+            return done
     if getattr(rec, "missing", ()):
         raise er.ReportRefused("missing_columns", er._missing_message(rec), "production")
     if not force and serverless and rec.fmt == "xlsx" and (rec.dimension or 0) > XLSX_MAX_ROWS:
@@ -824,18 +894,26 @@ def apply_production_file(store: Any, path: str, rec: Any, *, file_id: str, via:
     except BaseException:
         ledger.drop_stage()
         raise
+    if hasher is not None:
+        while path.read(1 << 20):           # what the reader left (lines after the last row) is part of the file's bytes
+            pass
+        file_id = file_id or hasher.sha.hexdigest()
+        done = _already(store, ledger, file_id)
+        if done is not None:
+            ledger.drop_stage()
+            return done
     try:
         if not acct.get("rows_kept"):
             raise er.ReportRefused("empty", "It holds no posting with a posted date and a service date.", "production")
         left = acct.get("left") or {}
         stats.update(rows_read=acct.get("rows_read") or 0, no_date=left.get("no_date") or 0,
                      identity_breaks=acct.get("identity_breaks") or stats.get("identity_breaks") or 0)
-        source_name = os.path.basename(rec.member) if getattr(rec, "member", None) else os.path.basename(path)
         created = None
-        try:
-            created = er._created_at(path, rec)
-        except Exception:           # noqa: BLE001  (the workbook does not say when it was made)
-            created = None
+        if hasher is None:
+            try:
+                created = er._created_at(path, rec)
+            except Exception:       # noqa: BLE001  (the workbook does not say when it was made)
+                created = None
         meta = FileMeta(file_id=file_id, source_name=source_name, via=via,
                         scope=scope_of(acct["svc_lo"], acct["posted_lo"]), svc_lo=acct["svc_lo"], svc_hi=acct["svc_hi"],
                         posted_lo=acct["posted_lo"], posted_hi=acct["posted_hi"], as_of=acct.get("as_of") or acct["posted_hi"],
@@ -1011,12 +1089,20 @@ class _Work:
         _remove(self.path)
 
 
-def _insert_select(conn: sqlite3.Connection, target: str, exprs: dict, tail: str, args: Sequence = ()) -> int:
+def _drop(conn: sqlite3.Connection, *tables: str) -> None:
+    """Drop work tables that are no longer needed: the work database has no journal, so their pages are reused at once
+    and the file stops growing (the serverless host's temporary folder is small)."""
+    for t in tables:
+        conn.execute(f"DROP TABLE IF EXISTS {_W}.{t}")
+
+
+def _insert_select(conn: sqlite3.Connection, target: str, exprs: dict, tail: str, args: Sequence = (),
+                   verb: str = "INSERT") -> int:
     """INSERT INTO target (every column) SELECT the given expression per column (NULL for the rest) <tail>."""
     schema, table = target.split(".")
     cols = _columns(conn, schema, table)
     sel = ", ".join(exprs.get(c, "NULL") for c in cols)
-    return conn.execute(f"INSERT INTO {target} ({', '.join(cols)}) SELECT {sel} {tail}", list(args)).rowcount
+    return conn.execute(f"{verb} INTO {target} ({', '.join(cols)}) SELECT {sel} {tail}", list(args)).rowcount
 
 
 # -------------------------------------------------------------------------------------------------------------- Part A
@@ -1124,11 +1210,14 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
             LEFT JOIN {W}.pa_pj j ON j.person = a.person AND j.svc = a.svc AND j.cpt = a.cpt
             LEFT JOIN {W}.pa_pad d ON d.link = a.link AND d.svc = a.svc AND d.cpt = a.cpt
             LEFT JOIN {W}.pa_alw w ON w.link = a.link AND w.svc = a.svc AND w.cpt = a.cpt""")
+    _drop(conn, "pa_agg", "pa_py", "pa_pat", "pa_pj", "pa_pad", "pa_alw")     # their pages are reused from here on
     _line_indexes(conn)
     x(f"""UPDATE {W}.pa_full SET balance = charges - ins_paid - contractual - noncontractual - pat_paid_joined - pat_adj_joined,
               status_class = rw_status_class(status, ins_answer_rows > 0),
               twin_link = CASE WHEN person IS NULL THEN NULL ELSE (SELECT MIN(t.link) FROM {W}.pa_full t
                   WHERE t.person = pa_full.person AND t.svc = pa_full.svc AND t.cpt = pa_full.cpt AND t.link <> pa_full.link) END""")
+    n_ev = _events(conn)
+    _drop(conn, "pa_st", "pa_ac")
     # payments and $0 answers: one row per (line, check, posted date, payer)
     x(f"CREATE TABLE {W}.pa_pay AS SELECT * FROM main.ema_line_payments WHERE 0")
     role = ("MIN(CASE WHEN p.payer IS NOT NULL AND p.payer = p.primary_payer THEN 'primary' WHEN p.payer IS NOT NULL "
@@ -1141,16 +1230,11 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
             WHERE p.link IS NOT NULL AND (p.flags & 17) = 0 AND (p.check_no IS NOT NULL OR COALESCE(p.ins_paid, 0) <> 0)
             GROUP BY p.link, p.svc, {cpt}, COALESCE(p.check_no, ''), p.posted, COALESCE(n.name, '')""")
     _pay_indexes(conn)
-    # adjustments by reason
+    # adjustments by reason: the payers' non-routine reasons and EMA's own kinds (the routine reasons of lines whose bill
+    # has a finding are read from the ledger when the store is written)
     x(f"CREATE TABLE {W}.pa_rsn AS SELECT * FROM main.ema_line_reasons WHERE 0")
-    n_rsn = _insert_select(conn, f"{W}.pa_rsn", {
-        "link": "p.link", "svc": "p.svc", "cpt": cpt, "grp": "COALESCE(p.grp, '')", "code": "COALESCE(p.code, k.name, '')",
-        "reason_class": "rw_reason_class(p.grp, p.code, k.name)", "payer": "COALESCE(MAX(n.name), '')",
-        "contractual": "SUM(COALESCE(p.contractual, 0))", "noncontractual": "SUM(COALESCE(p.noncontractual, 0))",
-        "rows": "COUNT(*)", "first_posted": "MIN(p.posted)", "last_posted": "MAX(p.posted)"},
-        f"""FROM {L}.postings p LEFT JOIN {L}.names k ON k.id = p.kind LEFT JOIN {L}.names n ON n.id = p.payer
-            WHERE p.link IS NOT NULL AND (p.grp IS NOT NULL OR p.kind IS NOT NULL)
-            GROUP BY p.link, p.svc, {cpt}, COALESCE(p.grp, ''), COALESCE(p.code, k.name, '')""")
+    n_rsn = _insert_select(conn, f"{W}.pa_rsn", REASON_EXPRS, _reason_tail(f"p.link IS NOT NULL AND ({nr} OR (p.grp IS NULL "
+                                                                           "AND p.kind IS NOT NULL))"))
     x(f"CREATE INDEX {W}.ix_pa_rsn ON pa_rsn(link, svc, cpt)")
     # checks (insurance rows with a check number; never product or patient-side rows)
     x(f"CREATE TABLE {W}.pa_chk AS SELECT * FROM main.ema_checks WHERE 0")
@@ -1163,27 +1247,42 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
         f"""FROM {L}.postings p LEFT JOIN {L}.names n ON n.id = p.payer
             WHERE p.check_no IS NOT NULL AND (p.flags & 17) = 0 GROUP BY p.check_no, COALESCE(n.name, '')""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pa_chk ON pa_chk(check_no, payer)")
-    x(f"""UPDATE {W}.pa_chk SET twin_cents = COALESCE((SELECT SUM(y.ins_paid) FROM {W}.pa_pay y JOIN {W}.pa_full l
-              ON l.link = y.link AND l.svc = y.svc AND l.cpt = y.cpt
-              WHERE y.check_no = pa_chk.check_no AND y.payer = pa_chk.payer AND l.twin_link IS NOT NULL), 0),
+    x(f"""CREATE TABLE {W}.pa_twc AS SELECT y.check_no AS check_no, y.payer AS payer, SUM(y.ins_paid) AS cents
+          FROM {W}.pa_pay y JOIN {W}.pa_full l ON l.link = y.link AND l.svc = y.svc AND l.cpt = y.cpt
+          WHERE l.twin_link IS NOT NULL GROUP BY y.check_no, y.payer""")
+    x(f"CREATE UNIQUE INDEX {W}.ix_pa_twc ON pa_twc(check_no, payer)")
+    x(f"""UPDATE {W}.pa_chk SET twin_cents = COALESCE((SELECT t.cents FROM {W}.pa_twc t WHERE t.check_no = pa_chk.check_no
+                  AND t.payer = pa_chk.payer), 0),
               cause = (SELECT c.cause FROM main.ema_checks c WHERE c.check_no = pa_chk.check_no AND c.payer = pa_chk.payer),
               pair_trace = (SELECT c.pair_trace FROM main.ema_checks c WHERE c.check_no = pa_chk.check_no AND c.payer = pa_chk.payer)""")
+    _drop(conn, "pa_twc")
     n_mon = _months(conn, nr, adj)
-    n_ev = _events(conn)
     conn.commit()               # only the work database changed: the store is written in one step by _publish
     return {"lines": n_lines, "payments": n_pay, "reasons": n_rsn, "checks": n_chk, "months": n_mon, "events": n_ev,
             "seconds": round(time.time() - t0, 1)}
 
 
+REASON_EXPRS = {
+    "link": "p.link", "svc": "p.svc", "cpt": "COALESCE(p.cpt, '')", "grp": "COALESCE(p.grp, '')",
+    "code": "COALESCE(p.code, k.name, '')", "reason_class": "rw_reason_class(p.grp, p.code, k.name)",
+    "payer": "COALESCE(MAX(n.name), '')", "contractual": "SUM(COALESCE(p.contractual, 0))",
+    "noncontractual": "SUM(COALESCE(p.noncontractual, 0))", "rows": "COUNT(*)", "first_posted": "MIN(p.posted)",
+    "last_posted": "MAX(p.posted)"}
+
+
+def _reason_tail(where: str) -> str:
+    """FROM ... WHERE <where> GROUP BY ...: the ledger's adjustments grouped as ema_line_reasons holds them."""
+    return (f"FROM {_L}.postings p LEFT JOIN {_L}.names k ON k.id = p.kind LEFT JOIN {_L}.names n ON n.id = p.payer "
+            f"WHERE {where} GROUP BY p.link, p.svc, COALESCE(p.cpt, ''), COALESCE(p.grp, ''), COALESCE(p.code, k.name, '')")
+
+
 def _line_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {_W}.ix_pa_full ON pa_full(link, svc, cpt)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS {_W}.ix_pa_full_pd ON pa_full(person, svc, cpt)")
-    conn.execute(f"CREATE INDEX IF NOT EXISTS {_W}.ix_pa_full_nk ON pa_full(name_key, svc, cpt)")
 
 
 def _pay_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(f"CREATE INDEX IF NOT EXISTS {_W}.ix_pa_pay ON pa_pay(link, svc, cpt)")
-    conn.execute(f"CREATE INDEX IF NOT EXISTS {_W}.ix_pa_pay_chk ON pa_pay(check_no, payer)")
 
 
 def _months(conn: sqlite3.Connection, nr: str, adj: str) -> int:
@@ -1229,6 +1328,7 @@ def _months(conn: sqlite3.Connection, nr: str, adj: str) -> int:
     x(f"""INSERT INTO {W}.pa_mon ({cols})
         SELECT month, payer, 'denial_code', rw_reason_class(grp, code) || '|' || cpt AS detail, SUM(cents), SUM(rows)
         FROM {W}.pa_dcode GROUP BY month, payer, detail""")
+    _drop(conn, "pa_mraw", "pa_dcode")
     return conn.execute(f"SELECT COUNT(*) FROM {W}.pa_mon").fetchone()[0]
 
 
@@ -1236,7 +1336,7 @@ def _events(conn: sqlite3.Connection) -> int:
     """G14: each link's newest status and action, first seen at this Production as_of (kept first-seen by the store)."""
     x = conn.execute
     W, L = _W, _L
-    x(f"CREATE TABLE {W}.pa_lk AS SELECT link, MAX(as_of) AS as_of FROM {W}.pa_agg GROUP BY link")
+    x(f"CREATE TABLE {W}.pa_lk AS SELECT link, MAX(as_of) AS as_of FROM {W}.pa_full GROUP BY link")
     x(f"CREATE UNIQUE INDEX {W}.ix_pa_lk ON pa_lk(link)")
     x(f"""CREATE TABLE {W}.pa_ev AS
         SELECT CAST(s.link AS INTEGER) AS link, CAST('status' AS TEXT) AS kind, CAST(n.name AS TEXT) AS value,
@@ -1383,15 +1483,15 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
             SELECT ckey, svc, code, paid, bill, pcn, nk, cnk FROM {W}.pb_l835 WHERE code IS NOT NULL
             UNION ALL SELECT ckey, svc, ocode, paid, bill, pcn, nk, cnk FROM {W}.pb_l835
                       WHERE ocode IS NOT NULL AND ocode <> COALESCE(code, ''))""")
+    _drop(conn, "pb_l835")
     x(f"CREATE INDEX {W}.ix_pb_k835 ON pb_k835(ckey, svc, code)")
-    x(f"""CREATE TABLE {W}.pb_cand AS
-        SELECT y.link AS link, y.svc AS svc, y.cpt AS cpt, y.check_no AS check_no, y.posted AS posted, y.payer AS payer,
+    cand = f"""SELECT y.link AS link, y.svc AS svc, y.cpt AS cpt, y.check_no AS check_no, y.posted AS posted, y.payer AS payer,
                k.bill AS bill, k.pcn AS pcn,
                (y.name_key IS NOT NULL AND (y.name_key = k.nk OR y.name_key = k.cnk)) AS sn, (y.ins_paid = k.paid) AS sa
         FROM {W}.pa_pay y JOIN {W}.pb_ck ck ON ck.check_no = y.check_no
         JOIN {W}.pb_k835 k ON k.ckey = ck.ckey AND k.svc = y.svc AND k.code = y.cpt
         WHERE y.in_835 = 1 AND y.link IN (SELECT link FROM {W}.pb_need)
-          AND y.link NOT IN (SELECT link FROM {W}.pb_ar WHERE fac = 1)""")
+          AND y.link NOT IN (SELECT link FROM {W}.pb_ar WHERE fac = 1)"""
     # each payment votes for the bill of the first narrowing (name and amount, name, amount, any) that leaves exactly one
     x(f"""CREATE TABLE {W}.pb_votes AS
         SELECT CAST(link AS INTEGER) AS link,
@@ -1405,13 +1505,14 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
                 COUNT(DISTINCT CASE WHEN sa THEN bill END) AS n3, MIN(CASE WHEN sa THEN bill END) AS b3,
                 MAX(CASE WHEN sa THEN pcn END) AS p3,
                 COUNT(DISTINCT bill) AS n4, MIN(bill) AS b4, MAX(pcn) AS p4
-              FROM {W}.pb_cand GROUP BY link, svc, cpt, check_no, posted, payer)""")
+              FROM ({cand}) GROUP BY link, svc, cpt, check_no, posted, payer)""")
     x(f"""CREATE TABLE {W}.pb_pay AS SELECT CAST(link AS INTEGER) AS link, CAST(bill AS TEXT) AS bill, n AS votes, total, pcn FROM (
               SELECT link, bill, n, pcn, SUM(n) OVER (PARTITION BY link) AS total,
                      ROW_NUMBER() OVER (PARTITION BY link ORDER BY n DESC, bill) AS rk
               FROM (SELECT link, bill, COUNT(*) AS n, MAX(pcn) AS pcn FROM {W}.pb_votes WHERE bill IS NOT NULL GROUP BY link, bill))
           WHERE rk = 1""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_pay ON pb_pay(link)")
+    _drop(conn, "pb_votes", "pb_k835", "pb_tx", "pb_ck")
     # the map
     x(f"CREATE TABLE {W}.pb_map AS SELECT * FROM main.ema_link_map WHERE 0")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_map ON pb_map(link)")
@@ -1541,6 +1642,7 @@ def _patient_day(conn: sqlite3.Connection, boxes: Sequence[Box], now: str) -> di
         SELECT w.link, w.bill, (SELECT MAX(k.pcn) FROM {W}.pd_key k WHERE k.bill = w.bill), 'patient_day', w.shared,
                (SELECT COUNT(DISTINCT k.svc || '|' || k.code) FROM {W}.pd_key k WHERE k.bill = w.bill), 0, ?, 0
         FROM {W}.pd_win w""", (now,)).rowcount
+    _drop(conn, "pd_bill", "pd_l", "pd_key", "pd_cl", "pd_lk", "pd_pair", "pd_win")
     return {"bills": bills, "mapped": n, "ties": ties, "charge_mismatch": mismatch}
 
 
@@ -1599,6 +1701,7 @@ def _map_coverage(conn: sqlite3.Connection, boxes: Sequence[Box]) -> dict:
                   AND COALESCE(m.conflict, 0) = 0 GROUP BY b.bill) GROUP BY 1"""):
         by[method] = n
     mapped = sum(by.values())
+    _drop(conn, "mc_bill")
     return {"bills": bills, "mapped": mapped, "share": round(mapped / bills, 4) if bills else None, "by_method": by}
 
 
@@ -1639,6 +1742,13 @@ def _publish(conn: sqlite3.Connection, *, part_a: bool, pruned: bool, meta: dict
                       JOIN {W}.pa_full l ON l.link = r.link AND l.svc = r.svc AND l.cpt = r.cpt
                       WHERE {lkeep} AND (COALESCE(r.reason_class, 'other') NOT IN ({routine}) OR l.keep IS NULL
                                          OR instr(',' || l.keep || ',', ',finding,') > 0)""").rowcount
+        if part_a:
+            # every reason, routine ones too, of the lines whose bill has a finding: read from the ledger
+            fk = "(keep IS NULL OR instr(',' || keep || ',', ',finding,') > 0)"
+            n_rsn += _insert_select(conn, "main.ema_line_reasons", REASON_EXPRS, _reason_tail(
+                f"p.link IN (SELECT link FROM {W}.pa_full WHERE {fk}) AND (p.grp IS NOT NULL OR p.kind IS NOT NULL) "
+                f"AND EXISTS (SELECT 1 FROM {W}.pa_full l WHERE l.link = p.link AND l.svc = p.svc AND l.cpt = COALESCE(p.cpt, '') "
+                f"AND {fk.replace('keep', 'l.keep')})"), verb="INSERT OR IGNORE")
         x("DELETE FROM main.ema_checks")
         cc = cols("ema_checks")
         n_chk = x(f"INSERT INTO main.ema_checks ({cc}) SELECT {cc} FROM {W}.pa_chk").rowcount
@@ -1955,3 +2065,17 @@ class LedgerHandle:
 
 ATTEMPT_HOLD_REASON = ("Too slow to read on this site: zip the CSV (about 12-15 MB) and put the zip in the same folder, or let "
                        "the server read it.")
+
+
+def hold_slow_file(store: Any, file_id: str, reason: str = ATTEMPT_HOLD_REASON) -> bool:
+    """Hold a Production file whose read was started MAX_ATTEMPTS times on a serverless host without finishing (the run
+    was stopped each time), so it is not tried forever. A person can press Apply (another try) or Discard. Only a
+    waiting file is held; returns whether it was."""
+    conn = store.conn
+    er.ensure_schema(conn)
+    n = conn.execute("UPDATE ema_report_files SET status='held', status_reason=? WHERE file_id=? AND status IN ('waiting','reread')",
+                     (reason, file_id)).rowcount
+    conn.commit()
+    if n:
+        store.ema_changed = True
+    return bool(n)

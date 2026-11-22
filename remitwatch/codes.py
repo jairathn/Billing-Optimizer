@@ -197,6 +197,8 @@ PAYER_RULES: list[tuple[str, str, str]] = [
     (r"UNITED HEALTHCARE OF ALL STATES|^UHC$|UNITEDHEALTHCARE|UNITED HEALTHCARE$|UNITED HEALTH CARE", "UnitedHealthcare", "commercial"),
     (r"UNITEDHEALTH INTEGRATED|WAUSAU", "UHC Integrated Services (Wausau)", "commercial"),
     (r"UNITED MEDICAL RESOURCES|^UMR\b", "UMR", "commercial"),
+    # VA Community Care before Optum: Optum runs part of the VA's network, and its VA remittances say so ("OPTUM VA ...")
+    (r"VETERAN|^VA\b|TRIWEST|OPTUM VA|CCN|VACAA", "VA Community Care", "va"),
     (r"OPTUM", "Optum (UHC)", "commercial"),
     (r"SUREST|BIND", "Surest (UHC)", "commercial"),
     (r"ANTHEM.*(MEDICARE|ADVANTAGE)|BLUE.*MEDICARE ADV|BCBS.*MEDICARE", "Anthem Medicare Advantage", "medicare_advantage"),
@@ -208,7 +210,6 @@ PAYER_RULES: list[tuple[str, str, str]] = [
     (r"^CIGNA", "Cigna", "commercial"),
     (r"WELLCARE|AMBETTER", "WellCare / Ambetter (Centene)", "medicare_advantage"),
     (r"TRICARE", "Tricare", "tricare"),
-    (r"VETERAN|^VA\b|TRIWEST|OPTUM VA|CCN", "VA Community Care", "va"),
     (r"UMWA", "UMWA Health & Retirement Funds", "commercial"),
     (r"MUTUAL OF OMAHA|MEDICO|GREAT AMERICAN LIFE|AMERICAN ENTERPRISE|BANKERS FIDELITY|WELLABE|PHYSICIANS MUTUAL|"
      r"COMBINED INSURANCE|COMPANION LIFE|FORETHOUGHT|ATLANTIC COAST|MANHATTAN LIFE|GLOBAL CARE|RESERVE NATIONAL|"
@@ -381,6 +382,9 @@ FILING_RULES: list[dict] = [
     {"match": r"^Humana", "kinds": {"medicare_advantage"}, "days": 365, "verified": True,
      "label": "Humana Medicare Advantage: 1 year from the date of service (Humana Provider Manual 2026, claims submission)",
      "source": "Humana Provider Manual 2026"},
+    # the payer rules do not know CHAMPVA's names ("Champva - HAC", "CHAMPVA-HAC MEDICARE CROSSOVER"): their group is the name
+    {"match": r"(?i)^champva", "kinds": None, "days": 365, "verified": True,
+     "label": "CHAMPVA: 1 year from the date of service (38 CFR 17.276)", "source": "38 CFR 17.276(a)"},
 ]
 FILING_DEFAULTS: dict[str, tuple[int, str]] = {
     "medicare": (365, "Medicare: 1 calendar year from the date of service (42 CFR 424.44)"),
@@ -390,18 +394,25 @@ FILING_DEFAULTS: dict[str, tuple[int, str]] = {
     "supplement": (365, "Supplement plans: claims normally follow Medicare's, so 1 year from the date of service"),
     "tricare": (365, "TRICARE: 1 year from the date of service"),
     "va": (180, "VA Community Care Network: 180 days from the date of service"),
-    "other": (90, "90 days from the date of service, the shortest common limit: this payer's limit is not known"),
+    # A payer the rules do not know: its item is dated by the longest common limit, so a guess never makes it expire, and
+    # the item also names the shortest one (FILING_EARLIEST) as the date to send it by where possible.
+    "other": (365, "This payer's limit is not known: common limits run from 90 days to 1 year from the date of service. The date "
+                   "shown is the longest; the agreement's own limit applies, and it can be 90 days"),
 }
+FILING_EARLIEST: dict[str, int] = {"other": 90}
 
 
 def filing_rule(payer_group: str | None, payer_kind: str | None) -> dict:
-    """The first-filing limit for this payer: {'days', 'label', 'source', 'verified'}, counted from the date of service."""
+    """The first-filing limit for this payer: {'days', 'label', 'source', 'verified', 'earliest'}, counted from the date of
+    service. 'earliest' is set only where the limit is not known: the shortest common limit, to send the claim by where
+    possible, while 'days' is the longest, which dates the item."""
     grp, kind = payer_group or "", payer_kind or "other"
     for r in FILING_RULES:
         if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
-            return {k: r[k] for k in ("days", "label", "source", "verified")}
+            return dict({k: r[k] for k in ("days", "label", "source", "verified")}, earliest=None)
     days, label = FILING_DEFAULTS.get(kind, FILING_DEFAULTS["other"])
-    return {"days": days, "label": label, "source": "common limit for this kind of payer", "verified": kind == "medicare"}
+    return {"days": days, "label": label, "source": "common limit for this kind of payer", "verified": kind == "medicare",
+            "earliest": FILING_EARLIEST.get(kind if kind in FILING_DEFAULTS else "other")}
 
 
 # --------------------------------------------------------------------------- statutes cited in letters

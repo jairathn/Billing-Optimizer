@@ -89,15 +89,18 @@ Thank you!
 
 ## After the answer comes back (for whoever runs the server)
 
-1. `sudo bash /opt/remitwatch/deploy/aws/configure.sh`, TriZetto section: the username, the password (given by phone or in
-   person), how many days TriZetto lets it last, the folder the 835 files are in, and every host-key fingerprint TriZetto
-   gave (separated by commas). Enter keeps every other setting.
-2. Open the server's `/setup` page and press "Test the TriZetto connection": the server and its key, the sign-in,
+1. `sudo bash /opt/remitwatch/deploy/aws/configure.sh`, TriZetto section: the server and port only if TriZetto named
+   others, the username, the password (given by phone or in person), how many days TriZetto lets it last (a number, or
+   TriZetto's own words), the folder the 835 files are in, and every host-key fingerprint TriZetto gave (separated by
+   commas). Enter keeps every other setting. Only the server reads TriZetto: leave these settings off the Vercel site.
+2. Open the server's `/setup` page and press "Test the TriZetto connection" once: the server and its key, the sign-in,
    the files there and one remittance read. The next hourly run reads the remittances.
 3. If TriZetto could only offer the Site ID's own login (shared with ModMed), don't enter it until ModMed confirms that a
    second reader on that login is safe (nothing it does deletes or moves the files first) and that password changes will
-   be made in both places on the same day. RemitWatch never retries a refused password within a day, so it cannot lock
-   that login, and the data checks warn 20 days before the password expires.
+   be made in both places on the same day. After TriZetto refuses a password, nothing in RemitWatch signs in with it
+   again for a day: not the hourly runs, and not the Test button either (it says "Not tried now" and until when). A new
+   password is tried at once. So RemitWatch alone cannot lock that login, and the data checks warn 20 days before the
+   password expires.
 4. If the 999 and 277CA copies arrive in their own folder, leave that folder out of `TRIZETTO_SFTP_DIRS` for now: RemitWatch
    reads 835s; reading claim acknowledgments and rejections from TriZetto is a later step.
 

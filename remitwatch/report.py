@@ -51,8 +51,10 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
         if st in by:
             lines.append(f"| {st} | {by[st]['n']:,} | {money(by[st]['rec'] if st == 'resolved' else by[st]['cents'])} |")
     lines.append("")
+    # stale rows (worked findings the rules no longer produce, kept for their notes) are left out of every count here
     new = q("""SELECT category, signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
-               WHERE first_seen = (SELECT MAX(first_seen) FROM findings) AND category IN ('downcoding','bundling','denial','underpayment','fees')
+               WHERE first_seen = (SELECT MAX(first_seen) FROM findings WHERE COALESCE(stale,0)=0) AND COALESCE(stale,0)=0
+                 AND category IN ('downcoding','bundling','denial','underpayment','fees')
                GROUP BY 1,2 ORDER BY cents DESC""")
     lines.append("## New this run")
     if new:
@@ -118,7 +120,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     for r in fix:
         lines.append(f"- {r['signal']}: {r['n']} lines, {money(r['cents'])}")
     lines.append("")
-    info = q("SELECT title FROM findings WHERE category='info' ORDER BY signal, year")
+    info = q("SELECT title FROM findings WHERE category='info' AND COALESCE(stale,0)=0 ORDER BY signal, year")
     if info:
         lines.append("## Context")
         for r in info:

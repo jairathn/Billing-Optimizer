@@ -13,6 +13,7 @@ import itertools
 import json
 import os
 import sqlite3
+import time
 
 import pytest
 
@@ -132,9 +133,9 @@ def add_finding(store, pcn, status="open", **kw):
     from remitwatch import detect
     detect.ensure_schema(store.conn)
     fid = f"F{next(_TX)}"
-    store.conn.execute("INSERT INTO findings (finding_id, signal, category, status, patient_control_number, stale, notes) "
-                       "VALUES (?,?,?,?,?,?,?)", (fid, "CLAIM_DENIED_UNPAID", "denial", status, pcn, kw.get("stale", 0),
-                                                 kw.get("notes")))
+    store.conn.execute("INSERT INTO findings (finding_id, signal, category, status, patient_control_number, stale, notes, "
+                       "auto_note) VALUES (?,?,?,?,?,?,?,?)", (fid, "CLAIM_DENIED_UNPAID", "denial", status, pcn,
+                                                             kw.get("stale", 0), kw.get("notes"), kw.get("auto_note")))
     store.conn.commit()
     return fid
 
@@ -164,6 +165,8 @@ def test_identical_postings_are_both_kept_and_the_same_file_twice_changes_nothin
     assert again["status"] == "already" and ledger.seq() == seq
     assert el.apply_production_file(store, p, er.recognize(p, "p"), file_id=res["file_id"], via="t", ledger=ledger,
                                     log=Log())["status"] == "already"
+    assert el.apply_production_file(store, p, er.recognize(p, "p"), file_id=None, via="t", ledger=ledger,
+                                    log=Log())["file_id"] == res["file_id"]
     assert one(ledger.conn, "SELECT COUNT(*) FROM postings") == (3,)
 
 
@@ -199,11 +202,12 @@ def test_a_service_file_after_a_posted_pull_takes_its_services_only(store, ledge
     r1 = apply(store, ledger, prod_file(tmp_path, pull))
     assert r1["scope"] == "posted"
     year = [charge(F.link_no(2), svc=D(2026, 2, 2)), payment(F.link_no(2), F.check_no(2), 70, svc=D(2026, 2, 2),
-                                                             posted=D(2026, 3, 9))]
+                                                             posted=D(2026, 3, 9)),
+            payment(F.link_no(2), F.check_no(9), 1, svc=D(2026, 2, 2), posted=D(2026, 3, 12))]
     r2 = apply(store, ledger, prod_file(tmp_path, year))
     assert r2["scope"] == "service" and r2["replaced"] == [(r1["file_id"], "partly_replaced")]
     # the 2025 visit's payment stays from the pull; the 2026 visit's rows come from the year file
-    assert rows(ledger.conn, "SELECT svc, COUNT(*) FROM postings GROUP BY svc ORDER BY svc") == [("2025-11-03", 1), ("2026-02-02", 2)]
+    assert rows(ledger.conn, "SELECT svc, COUNT(*) FROM postings GROUP BY svc ORDER BY svc") == [("2025-11-03", 1), ("2026-02-02", 3)]
 
 
 def test_a_late_older_file_fills_only_what_no_newer_file_covers(store, ledger, tmp_path):
@@ -286,6 +290,7 @@ def test_hold_h3_coverage_and_h4_double_filter(store, ledger, tmp_path):
     # a newer export of the same services whose postings start later: filtered by both dates
     late = [payment(F.link_no(1000 + i), F.check_no(1), 10, svc=D(2026, 3, 2), posted=D(2026, 3, 30)) for i in range(250)]
     late.append(charge(F.link_no(5), svc=D(2026, 3, 2), posted=D(2026, 3, 29)))
+    late.append(payment(F.link_no(1000), F.check_no(2), 1, posted=D(2026, 3, 31)))     # pulled later than the first
     r = apply(store, ledger, prod_file(tmp_path, late))
     assert r["status"] == "held" and "H4" in [h["code"] for h in r["holds"]] and "both dates" in r["reason"]
     assert one(ledger.conn, "SELECT COUNT(*) FROM ledger_files") == (1,)
@@ -514,8 +519,7 @@ def test_the_map_by_ar_payment_votes_and_patient_day(store, ledger, tmp_path):
     assert 6 not in m and 7 not in m                                  # a tie stays unmapped
     assert m[8][:3] == (F.bill_id(8), "ar", 0)
     cov = json.loads(one(store.conn, "SELECT value FROM meta WHERE key='ema:map_coverage'")[0])
-    assert cov["bills"] == 8 and cov["mapped"] == 6 and cov["by_method"] == {"ar": 1, "payment": 3, "patient_day": 1, }.__class__(
-        ar=1, payment=3, patient_day=1) or True
+    assert (cov["bills"], cov["mapped"], cov["by_method"]) == (8, 5, {"ar": 1, "payment": 3, "patient_day": 1})
     assert out["part_b"]["map"]["patient_day"]["ties"] == 1
     # the checks: exact (with and without leading zeros), loose, none
     ck = dict(rows(store.conn, "SELECT check_no, match FROM ema_checks"))
@@ -523,7 +527,7 @@ def test_the_map_by_ar_payment_votes_and_patient_day(store, ledger, tmp_path):
     assert dict(rows(store.conn, "SELECT check_no, in_835 FROM ema_line_payments"))["ACH-0099"] == 0
     assert one(store.conn, "SELECT trace_paid_cents FROM ema_checks WHERE check_no=?", F.check_no(1)) == (8000,)
     lines = dict(rows(store.conn, "SELECT link, map_method FROM ema_lines"))
-    assert lines[F.link_no(3)] == "conflict" and lines[F.link_no(1)] == "payment"
+    assert lines[F.link_no(3)] == "conflict" and lines[F.link_no(8)] == "ar" and F.link_no(1) not in lines   # paid: pruned
 
 
 def test_an_ar_pair_wins_over_payment_votes_and_marks_a_conflict(store, ledger, tmp_path):
@@ -551,7 +555,8 @@ def test_patient_day_needs_the_charge_to_agree_and_never_takes_a_facility_link(s
     store.conn.execute("DELETE FROM ema_link_map")
     store.conn.commit()
     add_claim_link(store, F.claim_id(6, facility=True), F.link_no(6))
-    rows2 = [charge(F.link_no(5), cpt="11102", patient=1, amount=150), charge(F.link_no(6), cpt="11102", patient=1, amount=150)]
+    rows2 = [charge(F.link_no(5), cpt="11102", patient=1, amount=150, posted=D(2026, 3, 3)),
+             charge(F.link_no(6), cpt="11102", patient=1, amount=150, posted=D(2026, 3, 3))]
     apply(store, ledger, prod_file(tmp_path, rows2))
     el.refresh(store, ledger, log=Log())
     m = dict((r[0], r[1:]) for r in rows(store.conn, "SELECT link, bill, method, facility FROM ema_link_map"))
@@ -561,12 +566,21 @@ def test_patient_day_needs_the_charge_to_agree_and_never_takes_a_facility_link(s
 
 def test_a_twin_paid_by_the_same_payer_under_a_check_with_no_remittance_is_a_facility_link(store, ledger, tmp_path):
     rows_ = [charge(F.link_no(1), cpt="17311", patient=1, amount=500), payment(F.link_no(1), F.check_no(1), 300, cpt="17311", patient=1),
-             charge(F.link_no(2), cpt="17311", patient=1, amount=900), payment(F.link_no(2), "ASC77", 450, cpt="17311", patient=1)]
+             charge(F.link_no(2), cpt="17311", patient=1, amount=900), payment(F.link_no(2), "ASC77", 450, cpt="17311", patient=1),
+             # the same shape, but the twin was paid by another payer group: not the ASC's claim
+             charge(F.link_no(11), cpt="17311", patient=2, amount=500),
+             payment(F.link_no(11), F.check_no(11), 300, cpt="17311", patient=2),
+             charge(F.link_no(12), cpt="17311", patient=2, amount=900),
+             payment(F.link_no(12), "OTHER88", 450, cpt="17311", patient=2, payer=P["medicare"])]
     apply(store, ledger, prod_file(tmp_path, rows_))
     add_remit(store, trace=F.check_no(1), paid_on="2026-03-28",
               claims=[{"pcn": F.claim_id(1), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "17311", 500, 300)]}])
+    add_remit(store, trace=F.check_no(11), paid_on="2026-03-28",
+              claims=[{"pcn": F.claim_id(11), "last": "EXAMPLE", "first": "CHARLIE", "lines": [(S, "17311", 500, 300)]}])
     out = el.refresh(store, ledger, log=Log())
     assert out["part_b"]["map"]["facility"] == 1
+    assert one(store.conn, "SELECT COUNT(*) FROM ema_link_map WHERE link=?", F.link_no(12)) == (0,)
+    assert one(store.conn, "SELECT facility FROM ema_lines WHERE link=?", F.link_no(12)) == (0,)
     assert one(store.conn, "SELECT bill, method, facility FROM ema_link_map WHERE link=?", F.link_no(2)) == (None, "facility", 1)
     assert one(store.conn, "SELECT facility, twin_link FROM ema_lines WHERE link=?", F.link_no(2)) == (1, F.link_no(1))
     assert el.mark_facility(store.conn) == 1
@@ -585,7 +599,8 @@ def test_the_map_with_remittances_read_by_the_835_parser(store, ledger, tmp_path
     apply(store, ledger, prod_file(tmp_path, [charge(F.link_no(1)), payment(F.link_no(1), trace, 80)]))
     el.refresh(store, ledger, log=Log())
     assert one(store.conn, "SELECT bill, method FROM ema_link_map WHERE link=?", F.link_no(1)) == (F.bill_id(1), "payment")
-    assert one(store.conn, "SELECT in_835 FROM ema_line_payments") == (1,)
+    assert one(store.conn, "SELECT match FROM ema_checks") == ("exact",)
+    assert one(store.conn, "SELECT COUNT(*) FROM ema_lines") == (0,)            # mapped and paid on the 835: pruned
 
 
 # ======================================================================================================= 6. keep rule
@@ -606,7 +621,7 @@ def keep_world(store, ledger, tmp_path):
         add_remit(store, trace=F.check_no(n), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(n), "lines": [(S, "99213", 150, 80)]}])
     add_claim_link(store, F.claim_id(4), F.link_no(4))
     add_finding(store, F.claim_id(5, sub=2))
-    add_finding(store, F.claim_id(3), status="resolved")          # resolved by the rules, untouched: keeps nothing
+    add_finding(store, F.claim_id(3), status="resolved", auto_note="Paid on a later remittance")   # closed by the rules
 
 
 def test_each_keep_rule_keeps_its_line_and_the_rest_are_pruned(store, ledger, tmp_path):
@@ -655,6 +670,69 @@ def test_refresh_runs_part_a_only_when_the_ledger_changed(store, ledger, tmp_pat
         el.refresh(store, None, parts="A")
 
 
+def test_a_refresh_of_tens_of_thousands_of_postings_takes_seconds(store, ledger, tmp_path):
+    """The work tables get declared column types, so their indexes serve the patient-day join and the twins. Without
+    them those lookups scan whole tables per line and this refresh takes many minutes."""
+    p = str(tmp_path / "big.csv")
+    F.big_production_csv(p, 40_000)
+    assert apply(store, ledger, p, force=True)["status"] == "current"
+    t = time.time()
+    out = el.refresh(store, ledger, log=Log())
+    assert out["part_a"]["lines"] > 25_000 and out["part_b"]["keep"]["lines"] == out["part_a"]["lines"]
+    assert time.time() - t < 60
+
+
+def test_the_work_tables_lookups_use_their_indexes(store, ledger, tmp_path, monkeypatch):
+    """Each correlated lookup the refresh runs per line must be an index search. A work table made by CREATE TABLE AS
+    SELECT has no column types unless the keys are cast, and then SQLite cannot use its indexes: on the real files the
+    patient-day join alone (41,000 patient groups against 204,000 lines) never finished."""
+    map_world(store, ledger, tmp_path)
+    apply(store, ledger, prod_file(tmp_path, summary_rows()))
+    plans: dict = {}
+
+    def plan(conn, name, sql):
+        plans[name] = " | ".join(r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + sql))
+
+    real_events, real_lines = el._events, el._map_lines
+
+    def spy_a(conn):
+        plan(conn, "twins", "SELECT (SELECT MIN(t.link) FROM emaw.pa_full t WHERE t.person = f.person AND t.svc = f.svc "
+                            "AND t.cpt = f.cpt AND t.link <> f.link) FROM emaw.pa_full f")
+        return real_events(conn)
+
+    def spy_b(conn):
+        plan(conn, "line payments", "SELECT (SELECT SUM(y.ins_paid) FROM emaw.pa_pay y WHERE y.link = f.link AND y.svc = f.svc "
+                                    "AND y.cpt = f.cpt) FROM emaw.pa_full f")
+        plan(conn, "map rows", "SELECT (SELECT m.bill FROM emaw.pb_map m WHERE m.link = f.link) FROM emaw.pa_full f")
+        plan(conn, "check marks", "SELECT (SELECT c.match FROM emaw.pa_chk c WHERE c.check_no = y.check_no AND c.payer = y.payer) "
+                                  "FROM emaw.pa_pay y")
+        plan(conn, "traces", "SELECT (SELECT t.tk FROM emaw.pb_tr t WHERE t.ckey = rw_ckey(c.check_no)) FROM emaw.pa_chk c")
+        return real_lines(conn)
+
+    real_drop = el._drop
+
+    def spy_drop(conn, *tables):          # the work tables of each step, just before they are dropped
+        if "pa_pat" in tables:
+            plan(conn, "patient day", "SELECT (SELECT COUNT(*) FROM emaw.pa_agg l WHERE l.person = g.person AND l.svc = g.svc "
+                                      "AND l.cpt = g.cpt) FROM emaw.pa_pat g")
+        if "pb_k835" in tables:
+            plan(conn, "votes", "SELECT * FROM emaw.pa_pay y JOIN emaw.pb_ck ck ON ck.check_no = y.check_no "
+                                "JOIN emaw.pb_k835 k ON k.ckey = ck.ckey AND k.svc = y.svc AND k.code = y.cpt")
+        if "pd_key" in tables:
+            plan(conn, "patient-day pairs", "SELECT * FROM emaw.pd_key k JOIN emaw.pd_cl e ON e.name_key = k.nk "
+                                            "AND e.svc = k.svc AND e.cpt = k.code")
+        return real_drop(conn, *tables)
+
+    monkeypatch.setattr(el, "_drop", spy_drop)
+    monkeypatch.setattr(el, "_events", spy_a)
+    monkeypatch.setattr(el, "_map_lines", spy_b)
+    el.refresh(store, ledger, log=Log())
+    assert len(plans) == 8
+    for name, p_ in plans.items():
+        scans = [x for x in p_.split(" | ") if x.startswith("SCAN")]
+        assert len(scans) <= 1 and "INDEX" in p_, (name, p_)
+
+
 # ============================================================================================ 7. the catalog and its repair
 def test_ingest_records_the_catalog_and_sync_catalog_repairs_a_lost_store(store, ledger, tmp_path):
     p1 = prod_file(tmp_path, [charge(F.link_no(1), svc=D(2026, 3, 2))])
@@ -698,7 +776,6 @@ def test_no_name_birth_date_record_number_or_address_reaches_the_ledger_the_stor
     for conn, tables in ((ledger.conn, ("names", "postings", "ledger_files", "ledger_meta")),
                          (store.conn, er.EMA_TABLES)):
         for t in tables:
-            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})")]
             for r in conn.execute(f"SELECT * FROM {t}"):
                 texts += [str(v) for v in r if isinstance(v, str)]
     blob = "\n".join(texts + list(log))
@@ -725,7 +802,19 @@ def test_the_handle_saves_the_ledger_to_the_state_folder_and_opens_it_again(stor
     assert not os.path.exists(h2.path)
 
 
-def test_a_run_that_dies_after_saving_the_ledger_is_repaired_by_the_next(store, tmp_path):
+def memory_store():
+    """A compact in-memory store, as a serverless host loads it from the state folder."""
+    blank = Store(":memory:", compact=True)
+    s = Store.from_bytes(blank.to_bytes())
+    blank.close()
+    er.ensure_schema(s.conn)
+    s.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (SALT_HEX,))
+    s.conn.commit()
+    return s
+
+
+def test_a_run_that_dies_after_saving_the_ledger_is_repaired_by_the_next(tmp_path):
+    store = memory_store()
     state = LocalState(str(tmp_path / "state"))
     h = el.LedgerHandle(state, tmp_dir=str(tmp_path / "tmp"))
     lg = h.open()
@@ -751,6 +840,7 @@ def test_a_run_that_dies_after_saving_the_ledger_is_repaired_by_the_next(store, 
     assert r1["status"] == "current"
     h3.discard()
     restored.close()
+    store.close()
 
 
 def test_attempts_are_counted_in_the_state_folder_before_a_read(tmp_path):
@@ -788,11 +878,50 @@ def test_the_staging_file_is_removed_after_every_outcome(store, tmp_path):
         fh.write(b"x")
     h.discard()
     assert not os.path.exists(stage) and not os.path.exists(h.path)
-    lg2 = el.Ledger.open(str(tmp_path / "other.sqlite"))
-    open(lg2.path + "-stage", "wb").close()
-    lg2.close()
-    el.Ledger.open(str(tmp_path / "other.sqlite")).close()
-    assert not os.path.exists(str(tmp_path / "other.sqlite") + "-stage")
+    other = str(tmp_path / "other.sqlite")
+    el.Ledger.open(other).close()
+    open(other + "-stage", "wb").close()                             # a killed run's staging file, found on the next open
+    el.Ledger.open(other).close()
+    assert not os.path.exists(other + "-stage")
+
+
+def test_a_production_csv_is_read_from_a_byte_stream_and_its_id_is_its_hash(store, tmp_path):
+    import hashlib
+
+    state = LocalState(str(tmp_path / "state"))
+    h = el.LedgerHandle(state, tmp_dir=str(tmp_path / "tmp"))
+    lg = h.open()
+    data = F.production_csv(summary_rows())
+    rec = er.recognize(data[:er.PEEK_BYTES], "Production.csv")
+    chunks = [data[i:i + 100] for i in range(0, len(data), 100)]        # as a download arrives
+    res = el.apply_production_file(store, er.ChunkStream(chunks), rec, file_id=None, via="dropbox", ledger=lg, log=Log())
+    assert res["status"] == "current" and res["file_id"] == hashlib.sha256(data).hexdigest()
+    assert res["rows_applied"] == len(summary_rows()) and lg.file(res["file_id"])["source_name"] == "stream"
+    again = el.apply_production_file(store, er.ChunkStream(chunks), rec, file_id=None, via="dropbox", ledger=lg, log=Log(),
+                                     source_name="Production.csv")
+    assert again["status"] == "already" and one(lg.conn, "SELECT COUNT(*) FROM postings") == (len(summary_rows()),)
+    assert not os.path.exists(lg.path + "-stage")
+    x = F.production_xlsx([charge(F.link_no(1))])
+    with pytest.raises(er.ReportRefused):
+        el.apply_production_file(store, er.ChunkStream([x]), er.recognize(x, "p.xlsx"), file_id=None, via="t", ledger=lg, log=Log())
+    h.discard()
+
+
+def test_a_file_read_too_slowly_three_times_is_held_and_one_file_can_be_read_again(store, ledger, tmp_path):
+    p = prod_file(tmp_path, [charge(F.link_no(1))])
+    fid = er.file_id_of(p)
+    er.record_waiting(store.conn, file_id=fid, report="production", source_name="p.csv", via="dropbox",
+                      origin={"dropbox_id": "id:1"}, reason="waiting")
+    assert el.hold_slow_file(store, fid) and not el.hold_slow_file(store, fid)
+    row = one(store.conn, "SELECT status, status_reason FROM ema_report_files WHERE file_id=?", fid)
+    assert row[0] == "held" and "zip the CSV" in row[1]
+    assert er.decide(store.conn, fid, "apply", "tester")["requeue"] == {"dropbox_id": "id:1"}
+    assert apply(store, ledger, p)["status"] == "current"
+    seq = ledger.seq()
+    assert ledger.forget(fid) == 1 and ledger.file(fid) is None and ledger.seq() == seq + 1
+    assert el.sync_catalog(store, ledger) == 1
+    assert one(store.conn, "SELECT status FROM ema_report_files WHERE file_id=?", fid) == ("reread",)
+    assert apply(store, ledger, p)["status"] == "current" and ledger.forget("nope") == 0
 
 
 def test_a_ledger_written_by_another_version_is_not_opened(tmp_path):

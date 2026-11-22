@@ -15,6 +15,7 @@ redeploy after every change.
 | Name | Where the value comes from | Needed |
 | --- | --- | --- |
 | `REMITWATCH_PASSWORD` | Made up, 12 or more plain letters and digits. The dashboard password. The site stays locked until it is set and long enough. | Yes |
+| `REMITWATCH_USER` | The dashboard's user name. Left out, the default that `/setup` names is used. | No |
 | `CRON_SECRET` | Made up, 16 characters or more, no spaces. Vercel's scheduler and the site's own follow-up runs present it. | Yes |
 | `DROPBOX_APP_KEY` | Dropbox Developer Console, the app's Settings tab | Yes |
 | `DROPBOX_APP_SECRET` | Same tab | Yes |
@@ -25,18 +26,34 @@ redeploy after every change.
 | `REMITWATCH_SHOW_PHI` | `1` shows each patient's name and member number in the work queue, the search box, the claim detail and the CSV export, to everyone who can sign in. Left out or `0`, patients show as initials and the billers look each one up in EMA by the claim ID shown beside it. `0` hides names on the screens and in the export only: an appeal packet PDF carries the name and member number for anyone who can sign in. A long random `REMITWATCH_PASSWORD` and Vercel's business associate agreement are needed in both settings. | No |
 | `REMITWATCH_STATE_PATH` | Where the site keeps its own files in Dropbox. Default `/RemitWatch-state`. | No |
 | `REMITWATCH_MAX_SECONDS` | Time allowed for one run. Default 240, one minute under the function limit in `vercel.json`. | No |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary | No |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_STARTTLS`, `REPORT_TO` | Outgoing mail, for alerts and the weekly summary (`SMTP_STARTTLS=0` only for a mail server that does not use it) | No |
+| `ALERT_WEBHOOK_URL` | A chat webhook (Slack or Teams) that also gets the alerts, with no patient data | No |
 | `APPEAL_EMAIL_DOMAINS` | The domains appeal packets may be emailed to, comma separated. Until it is set, packets can be downloaded but not emailed. | To email packets |
+| `APPEAL_EMAIL_TO` | Where a packet is emailed when nobody names an address | No |
 | `PRACTICE_NAME`, `PRACTICE_ADDRESS`, `PRACTICE_TIN`, `PRACTICE_NPI`, `PRACTICE_PHONE`, `PRACTICE_FAX`, `PRACTICE_EMAIL` | The practice's legal name, mailing address, tax ID, group NPI and billing contacts, as they should appear at the top of appeal letters. Until they are set the letters show bracketed words in their place. | For appeal letters |
 | `ANTHROPIC_API_KEY` | Turns on the visit-note review for appeal packets. The practice's business associate agreement with Anthropic covers it. | No |
-| `TRIZETTO_SFTP_USER`, `TRIZETTO_SFTP_PASSWORD` | Read the remittances straight from TriZetto's SFTP on every run, so paid claims leave the lists within hours and nobody copies files into Dropbox (OPERATIONS.md, TriZetto direct). The user is the TriZetto Site ID. | Recommended |
-| `TRIZETTO_SFTP_HOST`, `TRIZETTO_SFTP_PORT`, `TRIZETTO_SFTP_DIRS`, `TRIZETTO_SFTP_HOSTKEY` | Only where TriZetto names another server (default sftp.gatewayedi.com), port or folder, or gives its key's fingerprint. | No |
-| `REMITWATCH_EMA_CLOSES`, `REMITWATCH_STALE_APPEAL_DAYS`, `REMITWATCH_FRESHEN_HOURS` | `0` keeps EMA's posted payments as a hint instead of closing items; days after which appeals wait for newer remittances (14); hours after which opening the site starts a run (3). | No |
-| `SRFAX_ACCESS_ID`, `SRFAX_ACCESS_PWD`, `SRFAX_CALLER_ID`, `SRFAX_SENDER_EMAIL` | The fax line (SRFax): appeals faxed in one click, payers' answers read and matched, follow-ups every week (OPERATIONS.md, Faxing appeals). `SRFAX_CALLER_ID` is the line's own number; letters give it, so answers come back to it. Faxing also needs every `PRACTICE_` detail. | To fax appeals |
+| `TRIZETTO_SFTP_USER`, `TRIZETTO_SFTP_PASSWORD` | Leave them out here. The TriZetto feed runs on the server (`docs/TRIZETTO_REQUEST.md`, `configure.sh`), with the login TriZetto issued for RemitWatch, never the Site ID's own. A Vercel site does not read TriZetto even with these set, unless `TRIZETTO_SFTP_SERVERLESS=1`. | No |
+| `TRIZETTO_SFTP_SERVERLESS` | `1` lets this site read TriZetto. Only for a deployment with no server reading TriZetto with the same login: each site keeps its own hold on a refused password and its own expiry reminder, so two readers would each send TriZetto a refused password. | No |
+| `TRIZETTO_SFTP_PASSWORD_SET`, `TRIZETTO_SFTP_PASSWORD_DAYS` | Only with `TRIZETTO_SFTP_SERVERLESS=1`: the day the password was set (YYYY-MM-DD) and how many days it lasts. Without them no reminder comes before the password expires. | With TriZetto here |
+| `TRIZETTO_SFTP_HOST`, `TRIZETTO_SFTP_PORT`, `TRIZETTO_SFTP_DIRS`, `TRIZETTO_SFTP_HOSTKEY` | Only with `TRIZETTO_SFTP_SERVERLESS=1`, and only where TriZetto names another server (default sftp.gatewayedi.com), port or folder, or gives its key's fingerprints. | No |
+| `REMITWATCH_EMA_CLOSES`, `REMITWATCH_STALE_APPEAL_DAYS`, `REMITWATCH_FRESHEN_HOURS`, `REMITWATCH_NO_ANSWER_DAYS` | `0` keeps EMA's posted payments as a hint instead of closing items; days after which appeals wait for newer remittances (14); hours after which opening the site starts a run (3); days after a claim was sent before it is listed as unanswered (30). | No |
+| `REMITWATCH_REPORT_EVERY_DAYS`, `REMITWATCH_STALE_DAYS`, `REMITWATCH_ALERT_RECENT_DAYS`, `REMITWATCH_ALERT_BASELINE_DAYS`, `REMITWATCH_NOTE_MODEL`, `REMITWATCH_NOTE_SCRUB`, `REMITWATCH_NOTE_SEND_SCANS` | Tuning, as `.env.example` explains: the weekly summary, the stopped-feed alert, the alert windows, and the note review. | No |
+| `REMITWATCH_DEFER_DETECT_FILES`, `REMITWATCH_BACKFILL_ZIP` | Tuning of the first load on Vercel (`remitwatch/cloud.py`). | No |
+| `SRFAX_ACCESS_ID`, `SRFAX_ACCESS_PWD`, `SRFAX_CALLER_ID`, `SRFAX_SENDER_EMAIL` | The fax line (SRFax): appeals faxed in one click, payers' answers read and matched, follow-ups every week (OPERATIONS.md, Faxing appeals). `SRFAX_CALLER_ID` is the line's own number; letters give it, so answers come back to it. Faxing also needs every `PRACTICE_` detail. With these set this site shows the Faxes page and opens faxes that came in; it sends only when `REMITWATCH_FAX_SENDER` names it. `SRFAX_URL` only if SRFax gives another address. | To see faxes |
+| `REMITWATCH_FAX_SENDER` | Which site sends faxes: `server` (the default, also when it is left out), `serverless` (this site), or `none` (faxing paused). Exactly one site sends. Leave it out while the practice's server runs: the server sends. Set `serverless` only on a deployment with no server, and then only here. | To fax from here |
 | `MODMED_CLIENT_ID`, `MODMED_PRIVATE_KEY` | Connect ModMed EMA, so the visit note behind an appeal is read from EMA instead of uploaded (OPERATIONS.md, Connecting ModMed EMA). Make the key with `python -m remitwatch.cli modmed-key`. | To read notes from EMA |
 | `MODMED_CLIENT_SECRET`, `MODMED_API_KEY`, `MODMED_FHIR_BASE`, `MODMED_TOKEN_URL`, `MODMED_SCOPE`, `MODMED_AUDIENCE`, `MODMED_KEY_ID`, `MODMED_GROUP_ID` | Only where ModMed's registration names other values than the defaults. | No |
 
 The rest of `.env.example` (alert windows, letterhead, appeal email limits) works the same on Vercel.
+
+Not on Vercel: `REMITWATCH_ALLOW_OPEN` (it opens a site with no password: a developer's own machine only),
+`REMITWATCH_SYNC_INTERVAL_MINUTES`, `REMITWATCH_WEBHOOK_DEBOUNCE_SECONDS`, `REMITWATCH_BACKUP_KEEP`, `REMITWATCH_BACKUP_DIR`,
+`REMITWATCH_UPLOAD_DIR` (a server's scheduler, backups and uploads), `REMITWATCH_DB`, `REMITWATCH_DATA_DIR`,
+`REMITWATCH_COMMIT` (set by the server's image), `REMITWATCH_TRIGGER` (set by the server's scheduler), `REMITWATCH_TMP` (a
+scratch folder for tests). `REMITWATCH_MODE` and `REMITWATCH_STATE_DIR` are only for trying the mode on a laptop (below).
+The `VERCEL*` names the app reads (`VERCEL`, `VERCEL_ENV`, `VERCEL_GIT_COMMIT_SHA`, `VERCEL_PROJECT_PRODUCTION_URL`,
+`VERCEL_FUNCTION_MEMORY`, and `VERCEL_AUTOMATION_BYPASS_SECRET` where the production address is protected) come from
+Vercel itself: never add them by hand.
 
 ## Setup, in order
 
@@ -47,7 +64,8 @@ The rest of `.env.example` (alert windows, letterhead, appeal email limits) work
 2. **First four settings.** In Vercel add `REMITWATCH_PASSWORD`, `CRON_SECRET`, `DROPBOX_APP_KEY` and
    `DROPBOX_APP_SECRET`. Redeploy. Before a password is set, the site's `/setup` page shows one line saying so, and offers
    random values for the first two.
-3. **Connect Dropbox.** Open `/setup`, log in (user `oda`), and use the Connect Dropbox box: it links to Dropbox's
+3. **Connect Dropbox.** Open `/setup`, log in (with the user name `/setup` gave in step 2, or `REMITWATCH_USER` if you
+   set it), and use the Connect Dropbox box: it links to Dropbox's
    approval page, takes the code Dropbox shows, and returns the long-lived token once. Add it in Vercel as
    `DROPBOX_REFRESH_TOKEN`. Redeploy. The token only carries the permissions ticked when it was made: if you tick one
    later, connect again.
@@ -58,14 +76,16 @@ The rest of `.env.example` (alert windows, letterhead, appeal email limits) work
    tab, Webhooks, Add webhook. Without it the site still checks Dropbox once a day.
 
 `/setup` checks every setting live and says what to fix. `/api/health` needs no login and shows the version, the commit
-and what the runtime offers.
+and what the runtime offers. The practice's server shows the commit it runs at the same address, so the two sites can
+be compared (`docs/SERVER_RUNBOOK.md`, "Which commit runs").
 
 ## How it works
 
 - `vercel.json` sends every address to one Python function (`api/index.py`), allows it 300 seconds, and schedules
   `/api/cron/cycle` once a day (10:17 UTC; on the Hobby plan Vercel fires it some time in that hour) and
   `/api/cron/faxes` once a day (15:43 UTC: the faxes going out, the payers' faxes in, the follow-ups due; it does
-  nothing until the fax line is set). `public/` exists so that Vercel serves nothing else from the repository.
+  nothing unless this site is the one that sends, `REMITWATCH_FAX_SENDER=serverless`, and never while another fax run is
+  going). `public/` exists so that Vercel serves nothing else from the repository.
 - Keep `"framework": null` in `vercel.json`. Under Vercel's FastAPI preset the function is given the rewritten path, so
   every request would arrive as `/api/index`.
 - Vercel refuses to build when `CRON_SECRET` has a space or a line break at either end.
@@ -102,7 +122,9 @@ and what the runtime offers.
 
 ## Access
 
-- One shared login (user `oda`). Ten wrong passwords from one address lock that address out for ten minutes.
+- One shared login (`REMITWATCH_USER`, or the default `/setup` names). Ten wrong passwords from one address lock that
+  address out for ten minutes. Without `REMITWATCH_PASSWORD`, or with one shorter than 12 characters, the site serves no
+  data and `/setup` says why.
 - Optionally a second password for the owner (`REMITWATCH_OWNER_PASSWORD`), typed into the Providers tab. It is not a login: the page sends it with the provider
   calls and forgets it on Lock, on leaving or reloading the page and after half an hour without use.
 - What the owner's password does and does not do: it keeps the provider figures off the dashboard for people who have only the dashboard login. It does not
@@ -133,7 +155,9 @@ the setup page and the Data tab say that a run stopped without finishing.
 Remittance files, the store and appeal packets contain patient information. On Vercel the store passes through Vercel's
 function memory and is kept in Dropbox. Vercel signs a business associate agreement only on its Pro plan (as a paid
 add-on) and Enterprise, and its Hobby plan is not offered for commercial use. Dropbox signs one on its team plans. Check
-both before real data goes through this deployment, and see [OPERATIONS.md](OPERATIONS.md) for the VM alternative.
+both before real data goes through this deployment, and see [OPERATIONS.md](OPERATIONS.md) for the VM alternative. The
+fax line (SRFax) and Claude (Anthropic: the note review, and the payers' faxes read) need their own agreements too;
+README.md, "PHI", lists where patient data goes.
 
 ## Trying it without Vercel
 

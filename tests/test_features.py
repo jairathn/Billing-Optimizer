@@ -1010,3 +1010,36 @@ def test_code_tables_come_from_cms_and_the_2027_same_day_rule_spares_10_day_proc
     assert [s for (p, code), s in under.items() if code == "17000"] == ["UNDERPAID_VS_OWN_RATE"], under
     assert not any(p == "CB0000302C017" for p, _c in under), under       # with a biopsy on the claim it is the rule, not a shortfall
     st.close()
+
+
+def test_the_weekly_report_leaves_out_what_is_stale(tmp_path):
+    """Worked findings the rules no longer produce are kept, marked stale, so that no note is lost. The weekly report
+    counts none of them: not in the scoreboard, the due list and its count, the by-payer table, the correctables, what
+    is new or the context lines."""
+    from datetime import date, timedelta
+
+    from remitwatch.report import build_report
+    denied = claim(300, svc("99214", "223.65", "0.00", None, "CAS*CO*16*223.65~"))     # information missing: correct and resubmit
+    store = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60") + [denied])
+    Detector(store, run_id="t").run()
+    soon = (date.today() + timedelta(days=10)).isoformat()
+    c = store.conn
+    c.execute("UPDATE findings SET appeal_deadline=? WHERE patient_control_number='CB0000300C017' AND signal='DENIED_MISSING_INFO'", (soon,))
+    cols = [r[1] for r in c.execute("PRAGMA table_info(findings)")]
+    row = dict(zip(cols, c.execute("SELECT * FROM findings WHERE patient_control_number='CB0000300C017' AND signal='DENIED_MISSING_INFO'").fetchone()))
+    stale = [dict(row, finding_id="stale-denial", patient_control_number="CB0000999C017", payer_group="Kept Payer", notes="kept for its notes",
+                  stale=1, first_seen="9999-12-31T00:00:00+00:00", shortfall_cents=99900),
+             dict(row, finding_id="stale-info", category="info", signal="G2211_DENIED", title="Kept context line", stale=1,
+                  first_seen="9999-12-31T00:00:00+00:00")]
+    c.executemany(f"INSERT INTO findings ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", [tuple(r[k] for k in cols) for r in stale])
+    c.commit()
+    text = build_report(store, detail=True)
+    assert "Kept Payer" not in text and "CB0000999C017" not in text and "Kept context line" not in text and "$999" not in text
+    live = "COALESCE(stale,0)=0 AND category IN ('downcoding','bundling','denial','underpayment')"
+    n_open = c.execute(f"SELECT COUNT(*) FROM findings WHERE status='open' AND {live}").fetchone()[0]
+    assert f"| open | {n_open:,} |" in text
+    n_fix = c.execute("SELECT COUNT(*) FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND signal='DENIED_MISSING_INFO'").fetchone()[0]
+    assert f"- DENIED_MISSING_INFO: {n_fix} lines" in text
+    new = text.split("## New this run")[1].split("##")[0]
+    assert "| denial | DENIED_MISSING_INFO |" in new and "G2211_DENIED" not in new
+    assert "1 findings are due" in build_report(store, detail=False)

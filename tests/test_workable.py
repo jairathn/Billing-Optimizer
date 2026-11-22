@@ -5,6 +5,7 @@ patient, claim and amount is made up.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 
@@ -680,3 +681,183 @@ def test_a_claim_sent_again_and_answered_takes_the_notes_and_the_earlier_one_sta
     assert chased(s) == {}                                                       # C017 stays superseded by the answered C024
     r = s.query("SELECT signal, status, notes FROM findings WHERE patient_control_number='CB0000R51C024' AND COALESCE(stale,0)=0")
     assert [(x["signal"], x["status"]) for x in r] == [("DENIED_TIMELY_FILING", "in_progress")] and "ref 4471" in r[0]["notes"]
+
+
+# --------------------------------------------------------------------------- the review of round 7
+def test_the_claim_status_words_emas_exports_use(tmp_path):
+    """The words the practice's EMA writes: Payment Pending, Resolved/Paid, Resolved/Other, Denied, Batched for Printing,
+    Rejected, Ready for Posting, Invalid and Inactive/Voided, and a Claims State column that holds a US state."""
+    from remitwatch.detect import Detector
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    status = lambda claim, word, **kw: ema(c, claim, family="claim_status", claim_status=word, **kw)      # noqa: E731
+    ema(c, "CB0000E01C017")                                         # sent and never answered: chased
+    status("CB0000E01C017", "Payment Pending", claim_submission_date="2026-09-16", claims_state="TN")
+    ema(c, "CB0000E02C017", service_date="2026-08-03", bill_created="2026-08-04")      # in the print batch since August
+    status("CB0000E02C017", "Batched for Printing", service_date="2026-08-03")
+    ema(c, "CB0000E03C017", bill_created="2026-10-20")              # batched three weeks ago: not listed yet
+    status("CB0000E03C017", "Batched for Printing")
+    for claim, word in (("CB0000E04C017", "Resolved/Paid"), ("CB0000E05C017", "Resolved/Other"), ("CB0000E06C017", "Inactive/Voided"),
+                        ("CB0000E07C017", "Ready for Posting")):
+        ema(c, claim)
+        status(claim, word, claim_submission_date="2026-09-16")
+    ema(c, "CB0000E08C017")                                         # Invalid with a submission date: still chased
+    status("CB0000E08C017", "Invalid", claim_submission_date="2026-09-16")
+    # October's status report says Denied; November's charge export lists the claim with only a Claims State
+    status("CB0000E09C017", "Denied", claim_submission_date="2026-09-16", denial_date="2026-10-02", source_sha256="oct")
+    ema(c, "CB0000E09C017", claims_state="KY", source_sha256="nov")
+    ema(c, "CB0000E10C017", bill_created=None, claim_status="Payment Pending")          # no date EMA sent it, nor made the bill
+    c.execute("INSERT INTO ema_sources (source_name, sha256, family, created_at, rows, recorded_at) VALUES ('Status Oct.csv','oct','claim_status','2026-10-15T08:00:00',1,'2026-10-15')")
+    c.execute("INSERT INTO ema_sources (source_name, sha256, family, created_at, rows, recorded_at) VALUES ('Charges Nov.xlsx','nov','charge_lines','2026-11-15T08:00:00',1,'2026-11-15')")
+    c.commit()
+    det = Detector(s, run_id="words")
+    det.run()
+    assert not hasattr(det, "ema_answered") and not hasattr(det, "ema_latest")     # nothing reads them: not kept for the run
+    found = {r["patient_control_number"]: dict(r) for r in s.query("SELECT * FROM findings WHERE signal IN ('NO_ANSWER','REJECTED_PRE_PAYER')")}
+    assert set(found) == {"CB0000E01C017", "CB0000E02C017", "CB0000E08C017", "CB0000E10C017"}
+    sent = found["CB0000E01C017"]
+    assert sent["signal"] == "NO_ANSWER" and sent["title"] == "Sent 2026-09-16, no answer from Anthem / BCBS in 55 days: 99214"
+    assert json.loads(sent["evidence"])["ema_status"] == "Payment Pending" and sent["appeal_deadline"] == "2028-12-12"
+    # never sent: listed to be sent (Fix and resubmit), by the first-filing limit (Anthem's 90 days from the visit)
+    batch = found["CB0000E02C017"]
+    assert batch["signal"] == "REJECTED_PRE_PAYER" and batch["actionable"] == "correct_and_resubmit"
+    assert batch["title"] == "In EMA's print batch, never sent to Anthem / BCBS (bill made 2026-08-04): 99214"
+    assert batch["appeal_deadline"] == "2026-11-01" and "Print and mail it" in batch["deadline_basis"] and "Sent on time" not in batch["deadline_basis"]
+    assert batch["hint"].startswith("EMA shows it waiting in its print batch") and json.loads(batch["evidence"])["not_sent"] is True
+    assert batch["severity"] == "high"                              # its limit was reached before the newest remittance
+    assert found["CB0000E08C017"]["signal"] == "NO_ANSWER"
+    # no date EMA gives for it: the date of service proves nothing about when it went out, so it is dated by the limit
+    dos = found["CB0000E10C017"]
+    assert dos["title"] == "Visit of 2026-09-14, no answer from Anthem / BCBS in 57 days, and EMA gives no date it was sent: 99214"
+    assert dos["appeal_deadline"] == "2026-12-13" and "proof of timely filing" not in dos["deadline_basis"]
+
+
+def test_the_work_never_goes_to_another_payer_of_a_group_of_many(tmp_path):
+    """Medicare and a Medigap carrier, two administrators of self-funded plans, or two payers the rules do not know that
+    share a first word, are other payers: the bill's later claim to them starts with nothing. The same payer under another
+    name (Anthem, Medicaid as EMA and the remittance spell it) still takes the work."""
+    import pathlib
+
+    from remitwatch.actions import apply_status
+    from tests.test_features import claim
+    from tests.test_remitwatch import remit
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    pairs = {"G1": ("Medicare of Kentucky - J15", "15102", "Mutual of Omaha Insurance Company", "MOO01"),
+             "G2": ("Auxiant", "AUX01", "Meritain Health", "MER01"),
+             "G3": ("Health Alpha Plan", "HAP01", "Health Beta Cooperative", "HBC01"),
+             "G4": ("Anthem Blue Cross", "00660", "Blue Cross and Blue Shield of Kentucky", "00660"),
+             "G5": ("Medicaid of Kentucky", "KYMCD", "Medicaid of Kentucky", "KYMCD"),
+             "G6": ("Optum Unitedhealth Care", "VACCN", "Optum Unitedhealth Care", "VACCN")}
+    for g, (first, first_id, _second, _sid) in pairs.items():
+        ema(c, f"CB0000{g}1C017", payer=first, payer_id=first_id)
+        ema(c, f"CB0000{g}1C017", family="claim_status", payer=first, claim_status="Payment Pending", claim_submission_date="2026-09-15")
+    first = chased(s)
+    for g in pairs:
+        apply_status(c, first[f"CB0000{g}1C017"]["finding_id"], "in_progress", f"{g}: no record of the claim; resent", actor="biller")
+    c.commit()
+    for g, (_first, _fid, second, second_id) in pairs.items():
+        if g in ("G5", "G6"):
+            continue                                                # these answer C024 by a remittance below
+        ema(c, f"CB0000{g}1C024", payer=second, payer_id=second_id)
+        ema(c, f"CB0000{g}1C024", family="claim_status", payer=second, claim_status="Payment Pending", claim_submission_date="2026-10-01")
+    # Medicaid as the remittance spells it; the VA's network as its own remittance names it (EMA names its administrator)
+    for g, payer, ctrl in (("G5", "KENTUCKY MEDICAID", "000000093"), ("G6", "VA CCN OPTUM", "000000094")):
+        den = claim(0, svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~", dos="20260914"), dos="20260914").replace("CB0000000C017", f"CB0000{g}1C024")
+        p = pathlib.Path(s.db_path).parent / f"{g}.RMT"
+        p.write_bytes(remit(den, "0.00", payer=payer, seg_count=99, isa_ctrl=ctrl, pay_date="20261118"))
+        s.ingest_835_paths([str(p)])
+    found = chased(s)
+    for g in ("G1", "G2", "G3"):                                     # another payer: nothing handed over
+        assert found[f"CB0000{g}1C024"]["status"] == "open" and found[f"CB0000{g}1C024"]["notes"] is None, g
+    assert found["CB0000G41C024"]["status"] == "in_progress" and "G4: no record" in found["CB0000G41C024"]["notes"]
+    for g in ("G5", "G6"):
+        r = s.query(f"SELECT signal, status, notes FROM findings WHERE patient_control_number='CB0000{g}1C024' AND COALESCE(stale,0)=0")
+        assert [(x["signal"], x["status"]) for x in r] == [("DENIED_MEDICAL_NECESSITY", "in_progress")] and f"{g}: no record" in r[0]["notes"], g
+
+
+def test_a_va_claim_named_after_its_administrator_runs_on_the_vas_limits(tmp_path):
+    """EMA names the VA's network after its administrator ('Optum Unitedhealth Care') with payer id VACCN: the claim is the
+    VA's, with its 180 days to file, not a commercial plan's 90. A claim of that name with no id of its own is the VA's
+    too when the name's rows carry the VA's id; the same name with another payer's id is not."""
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    optum = "Optum Unitedhealth Care"
+    # as in EMA's exports, the status report carries no payer id; one charge layout does, the other does not
+    ema(c, "CB0000V11C017", payer=optum, payer_id="VACCN", service_date="2026-07-01", bill_created="2026-07-02")
+    ema(c, "CB0000V11C017", family="claim_status", payer=optum, payer_id=None, service_date="2026-07-01", claim_status="Rejected",
+        claim_submission_date="2026-07-02")
+    ema(c, "CB0000V12C017", payer=optum, payer_id=None, service_date="2026-07-01", bill_created="2026-07-02")
+    ema(c, "CB0000V12C017", family="claim_status", payer=optum, payer_id=None, service_date="2026-07-01", claim_status="Rejected",
+        claim_submission_date="2026-07-02")
+    for i in range(20):                                              # the name's other rows carry the VA's id
+        ema(c, f"CB0000V{20 + i:02d}C017", payer=optum, payer_id="VACCN", claim_status="Resolved/Paid", insurance_payments_cents=11760)
+    ema(c, "CB0000U11C017", payer="Optum Health Plan", payer_id="87726", service_date="2026-07-01", bill_created="2026-07-02")
+    ema(c, "CB0000U11C017", family="claim_status", payer="Optum Health Plan", payer_id=None, service_date="2026-07-01",
+        claim_status="Rejected", claim_submission_date="2026-07-02")
+    found = chased(s)
+    for claim_id in ("CB0000V11C017", "CB0000V12C017"):
+        va = found[claim_id]
+        assert (va["payer_group"], va["payer_kind"]) == ("VA Community Care", "va"), claim_id
+        assert va["appeal_deadline"] == "2026-12-28" and "VA Community Care Network: 180 days" in va["deadline_basis"]
+        assert "Rejected before reaching VA Community Care" in va["title"]
+    commercial = found["CB0000U11C017"]
+    assert commercial["payer_group"] == "Optum (UHC)" and commercial["appeal_deadline"] == "2026-09-29"
+    from remitwatch.codes import normalize_payer
+    assert normalize_payer("OPTUM VA CCN") == ("VA Community Care", "va") and normalize_payer(optum) == ("Optum (UHC)", "commercial")
+
+
+def test_a_payer_the_rules_do_not_know_is_dated_by_the_longest_limit(tmp_path):
+    """A payer the rules do not know has a first-filing limit nobody here knows: its item is dated by the longest common
+    limit (a year), so a guess never makes it expire, and it names the shortest (90 days) as the date to send it by where
+    possible. CHAMPVA's own limit is a year from the date of service (38 CFR 17.276)."""
+    from remitwatch.codes import filing_rule
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    for claim_id, payer in (("CB0000K11C017", "Imagined Health Cooperative"), ("CB0000K12C017", "Champva - HAC")):
+        ema(c, claim_id, payer=payer, payer_id="X" + claim_id[6:9], service_date="2026-07-01", bill_created="2026-07-02")
+        ema(c, claim_id, family="claim_status", payer=payer, service_date="2026-07-01", claim_status="Rejected", claim_submission_date="2026-07-02")
+    ema(c, "CB0000K13C017", payer="Imagined Health Cooperative", payer_id="XK13", service_date="2026-07-01")   # sent within 90 days
+    ema(c, "CB0000K13C017", family="claim_status", payer="Imagined Health Cooperative", service_date="2026-07-01",
+        claim_status="Payment Pending", claim_submission_date="2026-07-05")
+    ema(c, "CB0000K14C017", payer="Imagined Health Cooperative", payer_id="XK14", service_date="2026-05-01")   # sent after 90 days
+    ema(c, "CB0000K14C017", family="claim_status", payer="Imagined Health Cooperative", service_date="2026-05-01",
+        claim_status="Payment Pending", claim_submission_date="2026-08-15")
+    found = chased(s)
+    unknown = found["CB0000K11C017"]
+    assert unknown["payer_kind"] == "other" and unknown["appeal_deadline"] == "2027-07-01"       # not 2026-09-29, already past
+    assert "send it again by 2026-09-29 where you can; it must reach the payer by this date at the latest" in unknown["deadline_basis"]
+    assert "it can be 90 days" in unknown["deadline_basis"]
+    champva = found["CB0000K12C017"]
+    assert champva["appeal_deadline"] == "2027-07-01" and "38 CFR 17.276" in champva["deadline_basis"]
+    assert "where you can" not in champva["deadline_basis"] and "not confirmed" not in champva["deadline_basis"]
+    on_time = found["CB0000K13C017"]                                # within the shortest limit: on time whatever the limit is
+    assert on_time["appeal_deadline"] == "2027-12-28" and "by 2026-09-29 where you can, and by 2027-07-01 at the latest" in on_time["deadline_basis"]
+    late = found["CB0000K14C017"]                                   # past 90 days: not shown as on time, dated by the year
+    assert late["appeal_deadline"] == "2027-05-01" and "Sent on time" not in late["deadline_basis"]
+    assert filing_rule("Champva-Hac Medicare Crossover", "other")["days"] == 365 and filing_rule("Champva", "other")["verified"]
+    assert (filing_rule("Some Small Plan", "other")["days"], filing_rule("Some Small Plan", "other")["earliest"]) == (365, 90)
+    assert filing_rule("Anthem / BCBS", "commercial")["days"] == 90 and filing_rule("Anthem / BCBS", "commercial")["earliest"] is None
+
+
+def test_the_progress_snapshot_leaves_out_what_is_stale(tmp_path):
+    """An unanswered claim's item whose notes moved on is kept, stale, so the notes are not lost: the Progress tab's
+    snapshot of the run does not count it, as no other total does."""
+    from remitwatch.actions import apply_status
+    from remitwatch.detect import Detector
+    s = build_store(tmp_path, clean_visits(1, 25, "99214", "223.65", "117.60"), pay_date="20261110")
+    c = s.conn
+    ema(c, "CB0000Z01C017")
+    ema(c, "CB0000Z01C017", family="claim_status", claim_status="Rejected", claim_submission_date="2026-10-20")
+    fid = chased(s)["CB0000Z01C017"]["finding_id"]
+    apply_status(c, fid, "open", "member id corrected, resending", actor="biller")
+    c.commit()
+    ema(c, "CB0000Z01C024")
+    ema(c, "CB0000Z01C024", family="claim_status", claim_status="Payment Pending", claim_submission_date="2026-10-25")
+    assert chased(s) == {}                                          # C024 is not due yet; C017's item waits, stale
+    Detector(s, run_id="snap").run()
+    assert [(x["status"], x["stale"]) for x in s.query("SELECT status, stale FROM findings WHERE finding_id=?", (fid,))] == [("open", 1)]
+    snap = {(r["category"], r["status"]): r["n"] for r in s.query("SELECT category, status, n FROM progress_snapshots WHERE run_id='snap'")}
+    live = {(r["category"], r["status"]): r["n"] for r in s.query(
+        "SELECT category, status, COUNT(*) n FROM findings WHERE COALESCE(stale,0)=0 GROUP BY 1, 2")}
+    assert snap == live and snap.get(("denial", "open"), 0) == live.get(("denial", "open"), 0)

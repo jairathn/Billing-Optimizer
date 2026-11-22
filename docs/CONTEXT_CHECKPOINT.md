@@ -1,6 +1,6 @@
 # Context checkpoint (resume here after compaction)
 
-Last updated: 2026-11-21 (the Upload page: EMA by hand until ModMed's API is approved). Read the last section first.
+Last updated: 2026-11-22 (the fixes from the review of the last 25 commits). Read the last section first.
 
 ## Mission
 Rebuild the Billing-Optimizer repo (currently "DermBill AI", an LLM note-analysis tool) into a
@@ -188,7 +188,8 @@ for an intern. The app now runs there with its store in a private Dropbox folder
   DROPBOX_REFRESH_TOKEN, redeploy, Run the first load, add the webhook.
 - GitHub Pages is also enabled on this repository and rebuilds from main on every push.
 - To check a deployment from a session: GET /api/health on the production address (no login) shows version, commit and runtime.
-  Commit statuses are not readable without a pull request.
+  Commit statuses are not readable without a pull request. (Since November 22 the AWS server's /api/health shows the commit
+  its image was built from as well: docs/SERVER_RUNBOOK.md, "Which commit runs".)
 
 Review of the Vercel mode (same day). An independent reviewer reproduced, and the following commits closed: a self-call loop on
 one unreadable file (and two other loop routes through notifications); status changes dropped when the dashboard's copy was ahead
@@ -410,7 +411,7 @@ analysis window, or a 4 GB function (Vercel Pro).
 - Five-lens review of the calculator and lab found about 66 issues; fixed by three agents (engine, page/model, lab/API),
   then the ASC strategy was rebuilt. A second independent re-check runs before deploy.
 - Owner's facts: Mohs (17311-17315) is only ever done and billed in the clinic. Newburgh already closes most Mohs wounds the
-  same day in an Indiana ASC (POS 24, EMA location "Skin Cancer and Laser Surgery Center") on a separate claim under the
+  same day in an Indiana ASC (POS 24, the ASC's own location in EMA) on a separate claim under the
   same NPI; the Kentucky offices close in the clinic. Whether the practice receives that ASC's facility fee is unknown (the
   835s are professional only): it decides whether today's routing gains or loses. Asked the owner.
 - Verified rules (CPM ch.12 §40.6, Addendum AA, the practice's own WPS remittances): the 50% professional cut applies across
@@ -485,7 +486,7 @@ In this sandbox three page tests fail because the network policy blocks cdnjs (C
 Settled, do not raise again: the practice's BAA with Anthropic is signed (November 2026); the owner has practice consent
 for EMA (it is the owner's practice); moving the site to AWS for its BAA is acceptable if needed. The owner wants
 automation over caution: every claim with evidence appealed, by fax at volume, followed up weekly and escalated until
-paid. The owner was annoyed by repeated BAA reminders: state facts once, then build.
+paid. State such facts once, then build.
 
 Built: `remitwatch/modmed.py` (ModMed's ONC-certified FHIR R4 API: SMART Backend Services sign-in with an ES384/RS384
 key, or a client secret plus x-api-key; discovery; search with fallbacks; Bulk FHIR export for an export-only app; the
@@ -606,15 +607,23 @@ Built (server only; Vercel answers 409 and the page says so; `/api/meta` has `up
 
 The owner's assistant: the migration is done (the new domain live on AWS, compare-cloud zero differences, Dropbox webhook re-pointed).
 Built at the owner's request: `deploy/auto-deploy.sh` + `deploy/systemd/remitwatch-deploy.{service,timer}` +
-`deploy/install-auto-deploy.sh`: every 5 minutes as root from /opt/remitwatch, fetch main; docs-only diffs are checked out
-without a rebuild; otherwise build first and `up -d` only after a good build (waits up to 20 min for a running data
-cycle, clears the lock of one the swap ended, restarts Caddy when its file changed, health check on /robots.txt inside the
-app container with rollback and hold); a failed build restores the files and leaves the site alone (retry next tick,
-hourly after 3); hand-edited tracked files block it. Log: /var/log/remitwatch-deploy.log (time, from, to, result, detail);
-marker /var/lib/remitwatch-deploy/deployed; builds/ keeps the last 30 build outputs. configure.sh offers it and holds the
-deploy lock; CloudFormation first boot runs `install-auto-deploy.sh --mark-current`. Verified on a real compose stack in
-the sandbox (deploy, broken build, docs-only, never-answering version rolled back, lock cleared after a swap).
-Switch it on: `sudo bash -c 'cd /opt/remitwatch && git pull --ff-only && bash deploy/install-auto-deploy.sh'`.
+`deploy/install-auto-deploy.sh`: every 5 minutes as root, fetch main; docs-only diffs are checked out without a rebuild;
+otherwise build first and `up -d` only after a good build. Log: /var/log/remitwatch-deploy.log (time, from, to, result,
+detail); marker /var/lib/remitwatch-deploy/deployed; builds/ keeps the last 30 build outputs. configure.sh offers it and
+holds the deploy lock; CloudFormation first boot runs `install-auto-deploy.sh --mark-current`. As changed by the review
+fixes (November 22; docs/SERVER_RUNBOOK.md, "Automatic deploys", is the reference):
+- The timer runs a copy the installer puts in /usr/local/lib/remitwatch, never the checkout's script. A change to the deploy
+  script, its installer or the timer's files takes effect only after a person runs `install-auto-deploy.sh --update`.
+- No swap while a data cycle, a fax run or a backup is going (it waits up to 5 minutes, then puts everything back and a
+  later check tries again); a stopped app is not deployed; hand-changed tracked files, or a commit that would overwrite
+  an untracked file, stop it.
+- Health is checked in the app and through Caddy (HTTPS on the server's own port 443), and `caddy validate` runs before the
+  swap. A failed swap rolls back to the images and files that ran before, and holds the commit.
+- Failures go to `ALERT_WEBHOOK_URL`; old images, build cache and build logs are pruned. Nightly Amazon Linux updates
+  (08:40 to 09:00 UTC, a reboot only when needed) come with the current template; on an older server a person runs the
+  runbook's "System updates" block once.
+Switch it on (it notes the commit running first, so a failed first deploy can go back to it):
+`sudo bash -c 'cd /opt/remitwatch && mkdir -p /var/lib/remitwatch-deploy && git rev-parse HEAD > /var/lib/remitwatch-deploy/deployed && git pull --ff-only && bash deploy/install-auto-deploy.sh'`.
 From then on every push to main deploys itself to the live site.
 
 STANDING ITEM, to remind the owner in every reply until done: the sample AR report (and a collections report) from the
@@ -648,3 +657,40 @@ probes; the reports and probes were kept in the session's scratchpad):
 
 Still open: the sample AR report and collections report (STANDING ITEM above); EMA's export layouts and status words to
 confirm against them; TriZetto's answers (login, folders, fingerprints, password lifetime) for configure.sh.
+
+## Review fixes (November 22, 2026)
+
+An independent review of the 25 commits before b3c05a5 found 175 problems. Two waves of fixes followed, one owner per set
+of files, each fix with a test on invented data. The docs now describe the code as it is; what a later session must know:
+
+- Faxes: one site sends (`REMITWATCH_FAX_SENDER`: `server`, the default; `serverless`; `none` pauses). Fax runs hold a lock
+  (`fax:lock`), each send is written down before it goes, and a send cut off is checked against SRFax's outbox. Payer
+  numbers take the owner's password where one is set, keep their history, and a replaced number waits for Confirm before
+  retries and follow-ups use it. A payer's fax is tied by itself only on a number that names the claim and only from a
+  number known for that payer. Reviews with doubts (`review_caution`) and unchecked quotes (`quotes`) are never faxed by
+  themselves.
+- The server is closed without `REMITWATCH_PASSWORD`, as Vercel is; `REMITWATCH_ALLOW_OPEN=1` is for a developer's own
+  machine only. A short password already in use keeps working on the server, with a warning.
+- TriZetto: only the server reads it (`TRIZETTO_SFTP_SERVERLESS` is off by default); the /setup test keeps to the refusal
+  hold and has no "try anyway"; requests to TriZetto go in writing; the Site ID's password is never touched and remittances
+  are never downloaded in the portal.
+- Visit notes go into an appeal by themselves only when two of the claim's identifiers agree (EMA's patient ID or the
+  record number, with the full name). The member ID is not used.
+- Deploys: the timer runs an installed copy (`--update` to change it), waits for every run's lock, checks health through
+  Caddy and rolls back; nightly system updates; `/api/health` names the commit on both sites. The runbook's restore removes
+  the old `-wal` and `-shm` files, `.env` changes take `docker compose up -d`, and every server command starts with `sudo`.
+- `import-cloud` stops while the Vercel site's journal still waits for items (`--drop-waiting` moves without them).
+  Uploads: 240 MB per upload, 60 MB per EMA export. The ASC tables are generated from CMS's own CSVs and checked against them.
+- `tests/test_docs.py` holds the docs to the code (the settings lists of both hosts, the commands, the limits, the restore
+  run on a store with a stale `-wal`) and checks the public-repo rules.
+- The sample A/R and production reports arrived (the STANDING ITEM above). Their readers (`remitwatch/ema_reports.py`,
+  `remitwatch/ema_ledger.py`) were being built in the same round and were not yet part of the cycle.
+
+Owner decisions still open:
+
+- Git history still holds the TriZetto Site ID and the practice's tax ID, and older commits hold names the current files no
+  longer carry. Removing them means rewriting the public history (a force push to main). That is the owner's decision.
+- The default dashboard user name is the practice's initials. Changing it changes the login of every site that does not
+  set `REMITWATCH_USER`, so each live site's settings come first.
+- Protecting main with a required review also makes the changes a Claude session pushes wait for an approval.
+- Package versions are not pinned: the two sites can run the same commit on different library versions.
