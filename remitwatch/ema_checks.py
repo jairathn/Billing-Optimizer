@@ -2571,7 +2571,8 @@ def fax_vouch(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: dict
       - Production is at most 14 days old;
       - the item's line is on an EMA claim tied to its bill, with no conflict;
       - no insurance payment was posted on the line after the item's remittance;
-      - the line is on an A/R at most 8 days old, or its EMA balance is over $0.
+      - the line is on an A/R at most 8 days old, or its EMA balance is over $0, or EMA closed it with a write-off or a
+        contractual adjustment (a write-off is not a payment: the item is still unpaid and still appealable).
     An EMA_DENIED item has no remittance at all: it is always held, code no_remittance. outcomes: line_outcomes' result.
     Returns {finding id: {'vouched': bool, 'code': None or why not, 'message'}}."""
     _prepare(conn)
@@ -2603,7 +2604,8 @@ def fax_vouch(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: dict
             code, msg = "not_mapped", "This item's line is not tied to its EMA claim, so EMA cannot vouch for it."
         elif (o.get("paid_after_same") or 0) + (o.get("paid_after_other") or 0) + (o.get("paid_after_835") or 0) > 0:
             code, msg = "paid_after", "EMA shows a payment on this line after its remittance: check it before you fax."
-        elif int(lk) not in on_ar and (o.get("balance") or 0) <= 0:
+        elif int(lk) not in on_ar and (o.get("balance") or 0) <= 0 and o.get("outcome") not in WRITE_OFF_OUTCOMES:
+            # a balance EMA wrote off is still unpaid (amendment 8): only a line closed some other way is held
             code, msg = "no_balance", "EMA shows no balance on this line and it is not on an A/R from the last 8 days."
         else:
             code, msg = None, f"EMA's postings through {fr['production_as_of']} vouch for this item."

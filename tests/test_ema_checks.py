@@ -870,6 +870,27 @@ def test_unworked_equals_its_filter(store):
     assert got["written_off"]["n"] == 1 and ec._meta(store.conn, ec.UNWORKED_KEY)["n"] == 3
 
 
+def test_ema_vouches_for_a_fax_only_with_fresh_postings_and_an_open_line(store, ledger, tmp_path):
+    """W5: Production fresh, the line tied to its EMA claim, nothing paid after the remittance, and the line on a recent
+    A/R or carrying a balance. An item EMA alone saw is always held."""
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), status="Denied", denial=150, current=0, aging=D(2026, 4, 28), svc=SVC)]
+    tk = denial_world(store, ledger, tmp_path, ar_rows=ar)
+    f = finding(tk)
+    o = outcomes(store, [f])
+    v = ec.fax_vouch(store.conn, [f], o, today=TODAY)["F1"]
+    assert v["vouched"] and v["code"] is None and "2026-05-01" in v["message"]       # on the A/R of Apr 28, balance $0
+    assert ec.fax_vouch(store.conn, [f], o, today="2026-05-20")["F1"]["code"] == "production_old"
+    assert ec.fax_vouch(store.conn, [f], {"F1": dict(o["F1"], paid_after_other=500)}, today=TODAY)["F1"]["code"] == "paid_after"
+    assert ec.fax_vouch(store.conn, [f], {"F1": dict(o["F1"], link=None)}, today=TODAY)["F1"]["code"] == "not_mapped"
+    # past the A/R's 8 days: a line EMA wrote off is still unpaid and still vouched for; a line closed some other way is not
+    assert o["F1"]["outcome"] == "auto_written_off" and ec.fax_vouch(store.conn, [f], o, today="2026-05-07")["F1"]["vouched"]
+    closed = {"F1": dict(o["F1"], outcome="closed_unexplained")}
+    assert ec.fax_vouch(store.conn, [f], closed, today="2026-05-07")["F1"]["code"] == "no_balance"
+    assert ec.fax_vouch(store.conn, [f], {"F1": dict(closed["F1"], balance=2500)}, today="2026-05-07")["F1"]["vouched"]
+    d = ec.fax_vouch(store.conn, [dict(f, signal="EMA_DENIED")], o, today=TODAY)["F1"]
+    assert d == {"vouched": False, "code": "no_remittance", "message": ec.NO_REMITTANCE_MESSAGE}
+
+
 def test_the_ar_accounted_for_adds_up_to_its_exposure(store, ledger, tmp_path):
     ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), status="Payment Pending", current=100, aging=D(2026, 4, 25)),
           F.ar_row(claim=F.claim_id(2), link=F.link_no(2), status="Denied", denial=80, current=0, aging=D(2026, 4, 25), patient=1),
