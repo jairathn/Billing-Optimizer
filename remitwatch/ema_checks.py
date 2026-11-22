@@ -16,6 +16,7 @@ ema_link_events). This module reads those tables and the 835 tables and answers,
   C8  credits               credit balances on the A/R, and Production's insurance credits the A/R leaves out
   C9  timely_writeoffs      timely-filing write-offs (report)
   W2-W4  overlays, unworked, ar_accounted: worked in EMA, the unworked number, the A/R accounted for
+  W5  fax_vouch             whether EMA's reports vouch for an item the 835s alone would hold before a fax
 
 The rules every check follows (spec 7.3 and the tech lead's amendments):
   - The 835 decides wherever it exists. EMA's money counts only where no 835 carries it, and is never added to an 835
@@ -2557,6 +2558,56 @@ def unworked(conn: sqlite3.Connection, findings: Iterable[dict], *, data_through
                 out["written_off"][f["written_off_when"]] += 1
     _set_meta(conn, UNWORKED_KEY, out)
     conn.commit()
+    return out
+
+
+# ------------------------------------------------------------------------------------------- W5: vouching before a fax
+NO_REMITTANCE_MESSAGE = "No remittance on file: get the EOB from the payer's portal, then Fax it anyway."
+
+
+def fax_vouch(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: dict, *, today: str | None = None) -> dict[str, dict]:
+    """W5: whether EMA's reports vouch for an item that the 835s alone would hold as stale before a fax. appeals_send
+    holds an item only when neither the 835s nor Production can vouch for it. Production vouches when all of these hold:
+      - Production is at most 14 days old;
+      - the item's line is on an EMA claim tied to its bill, with no conflict;
+      - no insurance payment was posted on the line after the item's remittance;
+      - the line is on an A/R at most 8 days old, or its EMA balance is over $0.
+    An EMA_DENIED item has no remittance at all: it is always held, code no_remittance. outcomes: line_outcomes' result.
+    Returns {finding id: {'vouched': bool, 'code': None or why not, 'message'}}."""
+    _prepare(conn)
+    fr = freshness(conn, today)
+    t = fr["today"]
+    fs = [f for f in findings if f.get("finding_id")]
+    links = sorted({int(o["link"]) for f in fs for o in [outcomes.get(f["finding_id"]) or {}] if o.get("link") is not None})
+    mapped: set[int] = set()
+    on_ar: set[int] = set()
+    since = _add(t, -AR_FRESH_DAYS) or ""
+    for part in _chunks(links):
+        _temp(conn, "ec_fv", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
+        mapped.update(r[0] for r in conn.execute("""SELECT m.link FROM temp.ec_fv v JOIN ema_link_map m ON m.link = v.link
+                                                    WHERE m.bill IS NOT NULL AND COALESCE(m.conflict, 0) = 0"""))
+        on_ar.update(r[0] for r in conn.execute("""SELECT DISTINCT a.link FROM temp.ec_fv v JOIN ema_ar a ON a.link = v.link
+                                                   WHERE a.as_of >= ? AND a.as_of <= ?""", (since, t)))
+    _drop(conn, "ec_fv")
+    out: dict[str, dict] = {}
+    for f in fs:
+        o = outcomes.get(f["finding_id"]) or {}
+        lk = o.get("link")
+        if f.get("signal") == "EMA_DENIED":
+            code, msg = "no_remittance", NO_REMITTANCE_MESSAGE
+        elif not fr["production_fresh"]:
+            code = "production_old"
+            msg = (f"EMA's Production report is {fr['production_days']} days old: pull a new one so it can vouch for this item."
+                   if fr["production_days"] is not None else "No EMA Production report on file to vouch for this item.")
+        elif lk is None or int(lk) not in mapped:
+            code, msg = "not_mapped", "This item's line is not tied to its EMA claim, so EMA cannot vouch for it."
+        elif (o.get("paid_after_same") or 0) + (o.get("paid_after_other") or 0) + (o.get("paid_after_835") or 0) > 0:
+            code, msg = "paid_after", "EMA shows a payment on this line after its remittance: check it before you fax."
+        elif int(lk) not in on_ar and (o.get("balance") or 0) <= 0:
+            code, msg = "no_balance", "EMA shows no balance on this line and it is not on an A/R from the last 8 days."
+        else:
+            code, msg = None, f"EMA's postings through {fr['production_as_of']} vouch for this item."
+        out[f["finding_id"]] = {"vouched": code is None, "code": code, "message": msg}
     return out
 
 
