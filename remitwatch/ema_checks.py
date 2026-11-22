@@ -1821,7 +1821,10 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
         first_wo = min((z["first"] for z in pos if z["first"]), default=None)
         res["written_off_on"] = max((z["last"] for z in counted if z["last"]), default=None)
         anchor0 = res["anchor"]
-        res["written_off_when"] = "at_posting" if (first_wo and anchor0 and first_wo <= anchor0) else "later"
+        # at posting: every posting of the write-off falls on or before the day EMA posted the payer's answer; anything
+        # posted to it later (a reversal and a new write-off included) is a person's doing
+        last_wo = max((z["last"] or z["first"] or "" for z in counted if z["cents"] or z["contr"] or z["nonc"]), default=None)
+        res["written_off_when"] = "at_posting" if (first_wo and anchor0 and first_wo <= anchor0 and (last_wo or "") <= anchor0) else "later"
         if res["written_off_when"] == "at_posting" and _has_handled(handled.get(f.get("line_key") or "", []), counted):
             res["evidence_level"] = "rule_proven"
         elif res["written_off_when"] == "at_posting":
@@ -2049,7 +2052,9 @@ def policy_summary(conn: sqlite3.Connection, findings: Iterable[dict], outcomes:
         for key, p in pats.items():
             h = hist.get(key)
             p["later_paid_share"] = round(h[1] / h[0], 3) if h and h[0] else None
-            p["decision"] = (pol.get(key) or {}).get("decision", "pursue")
+    for key, p in pats.items():
+        p.setdefault("later_paid_share", None)
+        p["decision"] = (pol.get(key) or {}).get("decision", "pursue")
     return sorted(pats.values(), key=lambda p: (-p["cents"], p["pattern"]))
 
 
@@ -2903,7 +2908,8 @@ def _remits_missing(conn: sqlite3.Connection, fr: dict) -> dict:
     """Data health remits_missing: not ok when the last full month's checks with no remittance for a feed reason
     (feed_gap, no_era, no_era_va) exceed the larger of $5,000 and 2% of the matched checks."""
     newest = fr.get("newest_835")
-    month = (_add((newest or "")[:7] + "-01", -1) or "")[:7] if newest else None
+    # the last full month the remittances reach: the newest 835's month when it is that month's last day, else the one before
+    month = (_add((_add(newest, 1) or "")[:7] + "-01", -1) or "")[:7] if newest else None
     if not month:
         return {"key": "remits_missing", "ok": True, "title": "No remittances to compare yet", "detail": "", "who": ""}
     gap, matched = conn.execute("""SELECT COALESCE(SUM(CASE WHEN cause IN ('feed_gap','no_era','no_era_va') THEN ins_paid END), 0),
