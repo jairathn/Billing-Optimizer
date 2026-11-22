@@ -570,6 +570,8 @@ def test_the_pages_say_what_the_two_reasons_with_no_payer_answer_are(page_steps)
     texts = page_steps["texts"]["got"]
     assert "claims the payer never answered" in texts["intro"] and "rejected before they reached it" in texts["intro"]
     assert texts["help"]["NO_ANSWER"].startswith("EMA shows the claim sent and unpaid") and "portal" in texts["help"]["NO_ANSWER"]
+    # the date an unanswered claim shows can be the payer's appeal window; sending it again goes by the first-filing limit
+    assert "first-filing limit" in texts["help"]["NO_ANSWER"]
     assert texts["help"]["REJECTED_PRE_PAYER"].startswith("EMA shows the claim rejected before it reached the payer")
     for text in (texts["intro"], *texts["help"].values()):
         assert "—" not in text

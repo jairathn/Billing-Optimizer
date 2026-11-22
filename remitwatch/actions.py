@@ -22,13 +22,19 @@ CREATE TABLE IF NOT EXISTS faxes (
 );
 CREATE INDEX IF NOT EXISTS ix_fax_finding ON faxes(finding_id);
 CREATE TABLE IF NOT EXISTS payer_fax (
-    payer_group TEXT, purpose TEXT, number TEXT, confirmed_by TEXT, confirmed_at TEXT, PRIMARY KEY (payer_group, purpose)
+    payer_group TEXT, purpose TEXT, number TEXT, confirmed_by TEXT, confirmed_at TEXT, previous TEXT, changed_at TEXT,
+    auto_ok INTEGER, checked_by TEXT, checked_at TEXT, history TEXT, PRIMARY KEY (payer_group, purpose)
 );
 CREATE TABLE IF NOT EXISTS note_lessons (
     lesson_key TEXT PRIMARY KEY, created_at TEXT, finding_id TEXT, payer_group TEXT, payer_kind TEXT, signal TEXT, code TEXT,
     npi TEXT, provider TEXT, recommendation TEXT, supports TEXT, amount_cents INTEGER, gaps TEXT, tips TEXT
 );
 """
+# payer_fax, beyond the number and who saved it: the number it replaced and when (previous, changed_at), whether a person
+# has confirmed a changed number for the sends nobody presses a button for (auto_ok, checked_by, checked_at; retries and
+# follow-ups wait until then), and every save and confirmation (history)
+PAYER_FAX_ADDED = (("previous", "TEXT"), ("changed_at", "TEXT"), ("auto_ok", "INTEGER"), ("checked_by", "TEXT"), ("checked_at", "TEXT"),
+                   ("history", "TEXT"))
 FAX_COLS = ("direction", "finding_id", "packet_id", "payer_group", "number", "purpose", "level", "provider", "provider_id", "status",
             "pages", "error", "created_at", "updated_at", "sent_at", "doc")
 LESSON_COLS = ("created_at", "finding_id", "payer_group", "payer_kind", "signal", "code", "npi", "provider", "recommendation",
@@ -37,11 +43,14 @@ LESSON_COLS = ("created_at", "finding_id", "payer_group", "payer_kind", "signal"
 
 def ensure_fax_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(FAX_DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(payer_fax)")}
+    for col, typ in PAYER_FAX_ADDED:
+        if col not in have:             # a store made before these columns
+            conn.execute(f"ALTER TABLE payer_fax ADD COLUMN {col} {typ}")
 
 
-def apply_fax(conn: sqlite3.Connection, rec: dict) -> None:
-    """Add a fax, or bring one up to date: only the fields given are changed (a status check sends only the status)."""
-    ensure_fax_tables(conn)
+def upsert_fax(conn: sqlite3.Connection, rec: dict) -> None:
+    """apply_fax for a store whose tables exist: it runs inside a transaction a caller holds (making the tables would end it)."""
     key = rec["fax_key"]
     vals = {k: (json.dumps(rec[k], default=str) if k == "doc" and not isinstance(rec[k], (str, type(None))) else rec[k])
             for k in FAX_COLS if k in rec}
@@ -52,14 +61,65 @@ def apply_fax(conn: sqlite3.Connection, rec: dict) -> None:
         conn.execute(f"INSERT INTO faxes (fax_key, {', '.join(vals)}) VALUES (?{', ?' * len(vals)})", (key, *vals.values()))
 
 
-def apply_payer_fax(conn: sqlite3.Connection, a: dict) -> None:
-    """A payer's fax number for one purpose ('appeal', 'level_2'), confirmed by a person; an empty number removes it."""
+def apply_fax(conn: sqlite3.Connection, rec: dict) -> None:
+    """Add a fax, or bring one up to date: only the fields given are changed (a status check sends only the status)."""
     ensure_fax_tables(conn)
-    if not a.get("number"):
-        conn.execute("DELETE FROM payer_fax WHERE payer_group=? AND purpose=?", (a["payer_group"], a.get("purpose") or "appeal"))
+    upsert_fax(conn, rec)
+
+
+def _history(raw: str | None, entry: dict) -> str:
+    try:
+        hist = json.loads(raw or "[]")
+    except ValueError:
+        hist = []
+    hist = [h for h in (hist if isinstance(hist, list) else []) if isinstance(h, dict)]
+    if entry not in hist:
+        hist.append(entry)
+    return json.dumps(sorted(hist, key=lambda h: str(h.get("at") or ""))[-40:])
+
+
+def apply_payer_fax(conn: sqlite3.Connection, a: dict) -> None:
+    """A payer's fax number for one purpose ('appeal', 'level_2'), confirmed by a person; an empty number removes it (the
+    row stays, with no number, so the removal is dated like any change). The newest save wins whatever order the saves
+    arrive in: an instance of a serverless host can apply an older save after its own. A number that replaces another is
+    not used by a send nobody pressed a button for (a retry, a follow-up) until a person confirms it (apply_payer_fax_check).
+    Every save is kept in the row's history: the number, who, when."""
+    ensure_fax_tables(conn)
+    pg, purpose = a["payer_group"], a.get("purpose") or "appeal"
+    num, who, at = a.get("number") or "", a.get("actor") or "", a.get("at") or _now()
+    r = conn.execute("SELECT number, confirmed_at, previous, changed_at, auto_ok, history FROM payer_fax WHERE payer_group=? AND purpose=?",
+                     (pg, purpose)).fetchone()
+    hist = _history(r[5] if r else None, {"number": num, "by": who, "at": at})
+    cur = (r[0] or "") if r else ""
+    if r and ((r[1] or "") > at or ((r[1] or "") == at and cur == num)):
+        # an older save than the one in place (or this very save, applied again): it changes nothing but the history
+        conn.execute("UPDATE payer_fax SET history=? WHERE payer_group=? AND purpose=?", (hist, pg, purpose))
         return
-    conn.execute("INSERT OR REPLACE INTO payer_fax (payer_group, purpose, number, confirmed_by, confirmed_at) VALUES (?,?,?,?,?)",
-                 (a["payer_group"], a.get("purpose") or "appeal", a["number"], a.get("actor") or "", a.get("at") or _now()))
+    if r and cur == num:
+        # the same number saved again: who saved it last, nothing else
+        conn.execute("UPDATE payer_fax SET confirmed_by=?, confirmed_at=?, history=? WHERE payer_group=? AND purpose=?", (who, at, hist, pg, purpose))
+        return
+    before = cur or ((r[2] or "") if r else "")         # the number in use before this save (a removal keeps it as previous)
+    changed = bool(before) and num != before
+    previous = before if changed or not num else ((r[2] or "") if r else "")
+    auto_ok = 0 if (changed and num) else 1
+    conn.execute("""INSERT OR REPLACE INTO payer_fax (payer_group, purpose, number, confirmed_by, confirmed_at, previous, changed_at, auto_ok,
+                    checked_by, checked_at, history) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                 (pg, purpose, num, who, at, previous, at if (changed or not num) else ((r[3] if r else None)), auto_ok,
+                  None if auto_ok == 0 else who, None if auto_ok == 0 else at, hist))
+
+
+def apply_payer_fax_check(conn: sqlite3.Connection, a: dict) -> None:
+    """A person confirms a payer's changed fax number, as shown to them: from then on retries and follow-ups use it. A
+    confirmation of a number that is no longer the one saved changes nothing."""
+    ensure_fax_tables(conn)
+    pg, purpose = a["payer_group"], a.get("purpose") or "appeal"
+    num, who, at = a.get("number") or "", a.get("actor") or "", a.get("at") or _now()
+    r = conn.execute("SELECT number, confirmed_at, history FROM payer_fax WHERE payer_group=? AND purpose=?", (pg, purpose)).fetchone()
+    if not r or not num or (r[0] or "") != num or (r[1] or "") > at:
+        return
+    conn.execute("UPDATE payer_fax SET auto_ok=1, checked_by=?, checked_at=?, history=? WHERE payer_group=? AND purpose=?",
+                 (who, at, _history(r[2], {"number": num, "by": who, "at": at, "confirmed": True}), pg, purpose))
 
 
 def apply_event(conn: sqlite3.Connection, a: dict) -> bool:

@@ -197,15 +197,14 @@ def _int_b64u(n: int, length: int | None = None) -> str:
 def public_jwk(key, kid: str | None = None) -> dict:
     """The key's public half as a JWK (no private member), with its algorithm and id."""
     from cryptography.hazmat.primitives.asymmetric import ec
-    pub = key.public_key()
-    nums = pub.public_numbers()
+    alg = key_alg(key)                  # a key of another kind is refused here, in plain words
+    nums = key.public_key().public_numbers()
     if isinstance(key, ec.EllipticCurvePrivateKey):
         size = (key.curve.key_size + 7) // 8
-        crv = {"secp384r1": "P-384", "secp256r1": "P-256", "secp521r1": "P-521"}[key.curve.name]
-        jwk = {"kty": "EC", "crv": crv, "x": _int_b64u(nums.x, size), "y": _int_b64u(nums.y, size)}
+        jwk = {"kty": "EC", "crv": CURVES[key.curve.name][1], "x": _int_b64u(nums.x, size), "y": _int_b64u(nums.y, size)}
     else:
         jwk = {"kty": "RSA", "n": _int_b64u(nums.n), "e": _int_b64u(nums.e)}
-    jwk.update({"kid": kid or thumbprint(jwk), "alg": key_alg(key), "use": "sig", "key_ops": ["verify"]})
+    jwk.update({"kid": kid or thumbprint(jwk), "alg": alg, "use": "sig", "key_ops": ["verify"]})
     return jwk
 
 
@@ -215,12 +214,25 @@ def thumbprint(jwk: dict) -> str:
     return _b64u(hashlib.sha256(json.dumps({k: jwk[k] for k in req}, separators=(",", ":"), sort_keys=True).encode()).digest())
 
 
+_JWKS: dict[str, dict] = {}
+_JWKS_LOCK = threading.Lock()
+
+
 def jwks(settings: Settings | None = None) -> dict | None:
-    """The public key set the site publishes for ModMed, or None without a key."""
+    """The public key set the site publishes for ModMed, or None without a key. Worked out once per key: the route is
+    open to anyone, and reading an RSA key takes a tenth of a second."""
     s = settings or Settings.from_env()
     if not s.private_key:
         return None
-    return {"keys": [public_jwk(load_private_key(s.private_key), s.key_id or None)]}
+    k = hashlib.sha256(f"{s.key_id}\n{s.private_key}".encode()).hexdigest()
+    with _JWKS_LOCK:
+        hit = _JWKS.get(k)
+    if hit is None:
+        hit = {"keys": [public_jwk(load_private_key(s.private_key), s.key_id or None)]}
+        with _JWKS_LOCK:
+            _JWKS.clear()           # one key at a time: a changed key replaces the old one
+            _JWKS[k] = hit
+    return json.loads(json.dumps(hit))
 
 
 def generate_key(kind: str = "EC") -> str:
@@ -258,10 +270,16 @@ def _outcome(resp) -> str:
     return str(j)[:200]
 
 
+class Found(list):
+    """What a search returned; `truncated` when it stopped at its page limit with more pages left."""
+    truncated = False
+
+
 class ModMed:
     """One connection to ModMed's FHIR API: a token kept until shortly before it expires, calls retried when ModMed asks
-    for patience (429, 503), a token renewed once when refused (401). The bearer token goes only to the FHIR server
-    (and to export files that say they need it), never to another host."""
+    for patience (429, 503), a token renewed once when refused (401). The bearer token and the API key go only to the
+    FHIR server (and to export files that say they need the token); the API key also goes to the sign-in server. Never
+    to another host, such as one an attachment's link names."""
 
     def __init__(self, settings: Settings | None = None, session: Any = None, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep):
@@ -366,8 +384,9 @@ class ModMed:
         send_token = (urlparse(url).netloc == self._host) if auth is None else auth
         renewed = False
         for attempt in range(4):
-            h = self._plain({"Accept": accept, **(headers or {})})
-            if send_token:
+            h = {"Accept": accept, **(headers or {})}
+            if send_token:              # the API key and the token go together, and only where the token may go
+                h = self._plain(h)
                 h["Authorization"] = f"Bearer {self.token()}"
             try:
                 r = self.http.get(url, params=params, headers=h, timeout=TIMEOUT)
@@ -401,17 +420,23 @@ class ModMed:
         except Exception as exc:
             raise ModMedError("ModMed answered with something that is not FHIR JSON.") from exc
 
-    def search(self, resource: str, params: dict, max_pages: int = MAX_PAGES) -> list[dict]:
-        """Every resource of the type a search returns, following the server's next links."""
-        out: list[dict] = []
+    def search(self, resource: str, params: dict, max_pages: int = MAX_PAGES) -> Found:
+        """Every resource of the type a search returns, following the server's next links up to `max_pages` pages. A
+        search that stops there with more pages left says so (`truncated`); the page after the last is never fetched."""
+        out = Found()
         bundle = self.get_json(resource, params)
-        for _ in range(max_pages):
+        pages = 1
+        while True:
             out += [e["resource"] for e in bundle.get("entry") or [] if isinstance(e.get("resource"), dict)
                     and e["resource"].get("resourceType") == resource]
             nxt = next((link.get("url") for link in bundle.get("link") or [] if link.get("relation") == "next"), None)
             if not nxt:
                 break
+            if pages >= max_pages:
+                out.truncated = True
+                break
             bundle = self.get_json(nxt)
+            pages += 1
         return out
 
     def read(self, resource: str, rid: str) -> dict | None:
@@ -451,9 +476,7 @@ class ModMed:
         return data, ctype or "application/octet-stream"
 
     # ---- Bulk FHIR
-    def export(self, types: Iterable[str], since: str | None = None, budget: float = 240.0) -> dict[str, list[dict]]:
-        """A Bulk FHIR export of these resource types (the Group's when MODMED_GROUP_ID is set, else every patient's),
-        waited for up to `budget` seconds; the resources by type."""
+    def _kick_off(self, types: list[str], since: str | None) -> str:
         path = f"Group/{self.s.group_id}/$export" if self.s.group_id else "Patient/$export"
         params = {"_type": ",".join(types)}
         if since:
@@ -462,20 +485,55 @@ class ModMed:
         status_url = r.headers.get("Content-Location")
         if r.status_code != 202 or not status_url:
             raise ModMedError(f"ModMed did not start the export ({r.status_code}).", r.status_code)
-        end = self.clock() + budget
+        return status_url
+
+    def export(self, types: Iterable[str], since: str | None = None, budget: float = 240.0,
+               deadline: float | None = None) -> dict[str, list[dict]]:
+        """A Bulk FHIR export of these resource types (the Group's when MODMED_GROUP_ID is set, else every patient's),
+        waited for until `deadline` (on this connection's clock; else `budget` seconds from now), asking once more when
+        the wait ends; the resources by type. An export still running then is kept (_PENDING): the next call for the
+        same types asks about it again instead of starting another."""
+        types = list(types)
+        end = deadline if deadline is not None else self.clock() + budget
+        pkey = (self.s.fingerprint(), tuple(types))
+        with _PENDING_LOCK:
+            pend = _PENDING.get(pkey)
+            if pend and (self.clock() - pend[0] > EXPORT_KEEP or (pend[1] or "") > (since or "")):
+                pend = None             # too old, or it starts later than this call needs
+        status_url = pend[2] if pend else None
+        if not status_url:
+            status_url = self._kick_off(types, since)
+            with _PENDING_LOCK:
+                _PENDING[pkey] = (self.clock(), since, status_url)
         manifest = None
-        while self.clock() < end:
-            s = self.get(status_url, accept="application/json")
+        while True:
+            try:
+                s = self.get(status_url, accept="application/json")
+            except ModMedError as exc:
+                with _PENDING_LOCK:
+                    _PENDING.pop(pkey, None)
+                if pend and exc.status in (404, 410):       # the export kept from before is gone: start one now
+                    pend = None
+                    status_url = self._kick_off(types, since)
+                    with _PENDING_LOCK:
+                        _PENDING[pkey] = (self.clock(), since, status_url)
+                    continue
+                raise
             if s.status_code == 200:
                 manifest = s.json()
+                break
+            left = end - self.clock()
+            if left <= 0:
                 break
             try:
                 wait = float(s.headers.get("Retry-After") or 5)
             except ValueError:
                 wait = 5.0
-            self.sleep(max(1.0, min(wait, 30.0, end - self.clock())))
+            self.sleep(min(max(wait, 1.0), 30.0, left))       # then asked once more, however little time is left
         if manifest is None:
-            raise ModMedError("ModMed's export is still running; try again in a few minutes.", 202)
+            raise ModMedError(STILL_RUNNING, 202)
+        with _PENDING_LOCK:
+            _PENDING.pop(pkey, None)
         out: dict[str, list[dict]] = {}
         need = bool(manifest.get("requiresAccessToken", True))
         for f in manifest.get("output") or []:
@@ -489,6 +547,9 @@ class ModMed:
 
 _CLIENTS: dict[str, ModMed] = {}
 _CLIENTS_LOCK = threading.Lock()
+# exports still running when their caller's time ran out: (settings, types) -> (started, _since, status link)
+_PENDING: dict[tuple, tuple[float, str | None, str]] = {}
+_PENDING_LOCK = threading.Lock()
 
 
 def client(settings: Settings | None = None) -> ModMed:
@@ -516,6 +577,14 @@ class LiveSource:
         self.mm = mm
         self._pract: dict[str, dict | None] = {}
 
+    def for_claim(self, key: "ClaimKey") -> "LiveSource":
+        """The records a claim may be matched against (all of them here; an upload source narrows them)."""
+        return self
+
+    def identify(self, p: dict, key: "ClaimKey") -> list[str]:
+        """Which of the claim's identifiers this patient's record agrees with (find_note needs two, or a person)."""
+        return _agree(p, key)
+
     def patient(self, pid: str) -> dict | None:
         return self.mm.read("Patient", pid) if re.fullmatch(r"[A-Za-z0-9\-.]{1,64}", pid or "") else None
 
@@ -523,6 +592,8 @@ class LiveSource:
         return self.mm.search("Patient", {"identifier": value}, max_pages=2)
 
     def patients_by_name(self, family: str, given: str) -> list[dict]:
+        """Everyone the server finds for the name (FHIR name searches match the start of a name); `truncated` when there
+        were more pages than are read."""
         params = {"family": family}
         if given.split():
             params["given"] = given.split()[0]
@@ -573,24 +644,45 @@ class LiveSource:
         return self.mm.attachment(att)
 
 
-_EXPORTS: dict[tuple[str, str], tuple[float, dict]] = {}
+# finished exports, reused for EXPORT_TTL: (settings, "people" or "notes") -> (fetched, first day covered, resources by type)
+_EXPORTS: dict[tuple[str, str], tuple[float, str, dict]] = {}
+_EXPORTS_LOCK = threading.Lock()        # one export at a time: lookups made together wait for it instead of starting more
+
+
+def _exported(mm: ModMed, part: str, types: list[str], since_day: str, end: float) -> dict:
+    """One part of the export, from the cache when it covers `since_day` and is fresh, else fetched by `end`."""
+    fp = mm.s.fingerprint()
+
+    def cached():
+        hit = _EXPORTS.get((fp, part))
+        return hit[2] if hit and hit[1] <= since_day and mm.clock() - hit[0] < EXPORT_TTL else None
+    got = cached()
+    if got is not None:
+        return got
+    if not _EXPORTS_LOCK.acquire(timeout=max(0.0, end - mm.clock())):
+        raise ModMedError(STILL_RUNNING, 202)
+    try:
+        got = cached()                  # another lookup may have fetched it meanwhile
+        if got is None:
+            got = mm.export(types, f"{since_day}T00:00:00Z" if since_day else None, deadline=end)
+            for k in [k for k in _EXPORTS if k[0] != fp]:
+                _EXPORTS.pop(k, None)
+            _EXPORTS[(fp, part)] = (mm.clock(), since_day, got)
+        return got
+    finally:
+        _EXPORTS_LOCK.release()
 
 
 class ExportSource(LiveSource):
     """The same lookups over a Bulk FHIR export, for an app ModMed lets only export: patients (all of them, as a
-    patient's record may not have changed lately), and the visits and notes changed since the window began."""
+    patient's record may not have changed lately), and the visits and notes changed since the window began. Both
+    exports share one time budget."""
 
     def __init__(self, mm: ModMed, since_day: str, budget: float = 240.0):
         super().__init__(mm)
-        fp = mm.s.fingerprint()
-        hit = next((v for k, v in _EXPORTS.items() if k[0] == fp and k[1] <= since_day and mm.clock() - v[0] < EXPORT_TTL), None)
-        if hit:
-            data = hit[1]
-        else:
-            data = dict(mm.export(["Patient", "Practitioner"], None, budget))
-            data.update(mm.export(["Encounter", "DocumentReference"], f"{since_day}T00:00:00Z", budget))
-            _EXPORTS.clear()
-            _EXPORTS[(fp, since_day)] = (mm.clock(), data)
+        end = mm.clock() + budget
+        data = dict(_exported(mm, "people", ["Patient", "Practitioner"], "", end))
+        data.update(_exported(mm, "notes", ["Encounter", "DocumentReference"], since_day, end))
         self.d = data
         self.by_id = {(r.get("resourceType"), r.get("id")): r for rs in data.values() for r in rs}
 
@@ -626,32 +718,52 @@ def _names(p: dict) -> list[dict]:
     return [n for n in p.get("name") or [] if isinstance(n, dict)]
 
 
+def _parts(name: str | None) -> set[str]:
+    """The words of a family name, letters only ("Smith-Jones" -> SMITH, JONES)."""
+    return {w for w in (_norm(x) for x in re.split(r"[\s\-]+", name or "")) if w}
+
+
 def _family_ok(p: dict, family: str) -> bool:
-    """The claim's family name agrees with one of the patient's (letters only; either may hold the other, for a
-    hyphenated or a married name)."""
-    want = _norm(family)
+    """The claim's family name agrees with one of the patient's: the same letters, or one whole word of three letters or
+    more in common (a hyphenated or a married name: SMITH and SMITH-JONES). A name that merely contains the other (HALL,
+    MARSHALL) or starts like it (HALL, HALLORAN) does not agree."""
+    want, words = _norm(family), {w for w in _parts(family) if len(w) >= 3}
     if not want:
         return False
     for n in _names(p):
         got = _norm(n.get("family"))
-        if got and (got == want or (min(len(got), len(want)) >= 4 and (got in want or want in got))):
+        if got and (got == want or words & {w for w in _parts(n.get("family")) if len(w) >= 3}):
             return True
     return False
 
 
+def _first(v: str | None) -> str:
+    """The first word of a first name, letters only (a middle initial typed into the first-name field is ignored)."""
+    return _norm((v or "").split()[0]) if (v or "").split() else ""
+
+
 def _given_ok(p: dict, given: str) -> bool:
-    """First names agree on their first word (a middle initial typed into the first-name field is ignored); either may
-    be the start of the other."""
-    first = lambda v: _norm((v or "").split()[0]) if (v or "").split() else ""      # noqa: E731
-    want = first(given)
+    """Whether the patient can be the claim's by first name, for a person to decide: the same first word, or, when both
+    have three letters or more, one the start of the other (ANN and ANNETTE, or a name the payer cut short). A claim
+    with no first name matches nobody."""
+    want = _first(given)
     if not want:
-        return True
+        return False
     for n in _names(p):
         for g in n.get("given") or []:
-            got = first(g)
-            if got and (got == want or got.startswith(want) or want.startswith(got)):
+            got = _first(g)
+            if got == want or (min(len(got), len(want)) >= 3 and (got.startswith(want) or want.startswith(got))):
                 return True
     return False
+
+
+def _name_agrees(p: dict, family: str, given: str) -> bool:
+    """The full name agrees: the same family name (letters only) and the same first word of the first name, in one of
+    the patient's names. This is what "the name" counts for when the patient is identified."""
+    want_f, want_g = _norm(family), _first(given)
+    if not want_f or not want_g:
+        return False
+    return any(_norm(n.get("family")) == want_f and want_g == _first((n.get("given") or [""])[0]) for n in _names(p))
 
 
 def _encounter_on(e: dict, dos: str) -> bool:
@@ -662,14 +774,15 @@ def _encounter_on(e: dict, dos: str) -> bool:
 
 @dataclass
 class ClaimKey:
-    """What a claim says about whose note it needs: the patient's name, the date of service, the rendering clinician
-    and any identifier that names the patient in EMA. Held in memory only."""
+    """What a claim says about whose note it needs: the patient's name, the date of service, the rendering clinician,
+    any identifier that names the patient in EMA, and the claim's own ID. Held in memory only."""
     family: str
     given: str
     dos: str
     npi: str = ""
     ema_patient_ids: list[str] = field(default_factory=list)
     mrn: str = ""
+    claim_id: str = ""              # EMA's Claim ID, which the 835 echoes as the patient control number
 
 
 def claim_key(detail: dict, raw_claim: dict | None, ema_patient_ids: Iterable[str] = ()) -> ClaimKey:
@@ -678,7 +791,40 @@ def claim_key(detail: dict, raw_claim: dict | None, ema_patient_ids: Iterable[st
     dos = _day(f.get("service_date") or c.get("service_date_start") or c.get("statement_from") or "")
     return ClaimKey(family=c.get("patient_last") or c.get("corrected_patient_last") or "", given=c.get("patient_first") or c.get("corrected_patient_first") or "",
                     dos=dos, npi=f.get("rendering_provider_npi") or c.get("rendering_provider_npi") or "",
-                    ema_patient_ids=[str(x) for x in dict.fromkeys(i for i in ema_patient_ids if i)], mrn=c.get("medical_record_number") or "")
+                    ema_patient_ids=[str(x) for x in dict.fromkeys(i for i in ema_patient_ids if i)], mrn=c.get("medical_record_number") or "",
+                    claim_id=f.get("patient_control_number") or c.get("patient_control_number") or "")
+
+
+PERSON = "a person"         # what identifies the patient when a person chose the note (a pick, a note attached to the item)
+
+
+def _nid(v: Any) -> str:
+    """An identifier as compared: letters and digits, upper case; one shorter than four characters says too little."""
+    s = re.sub(r"[^A-Z0-9]", "", str(v or "").upper())
+    return s if len(s) >= 4 else ""
+
+
+def _agree(p: dict, key: ClaimKey) -> list[str]:
+    """The claim's identifiers this patient's record carries, each value counted once (EMA's patient ID and the
+    record number can be the same number), and "name" when the full name agrees. The member ID is not one of them:
+    a payer can give one ID to a whole family, and the 835 carries no birth date to tell a parent from a child of the
+    same name."""
+    have = {_nid(p.get("id"))} | {_nid(i.get("value")) for i in p.get("identifier") or [] if isinstance(i, dict)}
+    have.discard("")
+    out: list[str] = []
+    used: set[str] = set()
+    for label, vals in (("EMA patient ID", key.ema_patient_ids), ("medical record number", [key.mrn])):
+        hit = ({_nid(v) for v in vals} - {""}) & have - used
+        if hit:
+            used |= hit
+            out.append(label)
+    if _name_agrees(p, key.family, key.given):
+        out.append("name")
+    return out
+
+
+def _enough(ids: list[str]) -> bool:
+    return PERSON in ids or len(ids) >= 2
 
 
 def _note_type(d: dict) -> tuple[str, str]:
