@@ -13,8 +13,6 @@ from __future__ import annotations
 import datetime as dt
 import itertools
 import json
-import os
-import sqlite3
 
 import pytest
 
@@ -609,6 +607,7 @@ def test_an_underpayment_counts_its_own_reason_and_the_contractual_reduction(sto
                 shortfall_cents=2000)
     o = outcomes(store, [f])["F1"]
     assert o["outcome"] == "contractual_at_posting" and o["contractual_routine"] == 2000
+    assert o["pattern"] == f"{BCBS}|99213||CO-45"                                 # the owner's pattern names the routine reason
     assert "F1" not in ec.written_off_in_ema(store.conn, [f], {"F1": o})          # a routine reason is no write-off mark
     f2 = dict(f, carc="45")                                                       # ...unless it is the item's own reason
     w = ec.written_off_in_ema(store.conn, [f2], outcomes(store, [f2]))["F1"]
@@ -948,3 +947,54 @@ def test_the_outcome_lookups_use_their_indexes(store, ledger, tmp_path, monkeypa
     for p in plans:
         for t in ("ema_lines", "ema_line_payments", "ema_line_reasons", "ema_link_map", "ema_checks"):
             assert not (p.startswith("SCAN") and t in p.split()), p
+
+
+# ================================================================================================= both modes
+def _strip_times(x):
+    """The same answers with the clock-time stamps the checks write to meta left out."""
+    if isinstance(x, dict):
+        return {k: _strip_times(v) for k, v in x.items() if k not in ("at", "computed_at")}
+    if isinstance(x, list):
+        return [_strip_times(v) for v in x]
+    return x
+
+
+def _answers(store, ledger, tmp_path):
+    """Every check run on one world: a denial EMA shows paid later with no 835, a denial only EMA saw, a claim never
+    sent, and the A/R."""
+    ec._LAST_POST.clear()
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), status="Denied", denial=150, current=0, aging=D(2026, 4, 25), svc=SVC),
+          F.ar_row(claim=F.claim_id(4), link=F.link_no(4), status="Batched for Printing", current=60, aging=None, patient=3, svc=SVC),
+          F.ar_row(claim=F.claim_id(6), link=F.link_no(6), status="Payment Pending", current=-30, aging=D(2026, 4, 25), svc=SVC)]
+    later = [pay(F.link_no(1), F.check_no(5), 150, posted=D(2026, 4, 20))]
+    tk = denial_world(store, ledger, tmp_path, c5_rows() + later, ar_rows=ar)
+    c = store.conn
+    f = finding(tk)
+    out = {"lag": ec.posting_lag(c), "turnaround": ec.turnaround(c, today=TODAY)}
+    o = outcomes(store, [f])
+    out.update(outcomes=o, paid=ec.paid_in_ema(c, [f], o), written_off=ec.written_off_in_ema(c, [f], o),
+               overlays=ec.overlays(c, [f], o, today=TODAY), denied=c5(store, rate=lambda g, code, y: 7000),
+               not_sent=ec.not_sent(c, today=TODAY), unposted=ec.unposted_remits(c, today=TODAY),
+               accounted=ec.ar_accounted(c, [f], today=TODAY, save=False), credits=ec.credits(c, today=TODAY),
+               block=ec.claim_block(c, claim_id=F.claim_id(1)), c1=ec.c1_summary(c))
+    return _strip_times(json.loads(json.dumps(out, default=str)))
+
+
+def test_a_serverless_compact_store_gives_the_same_answers_as_a_server(store, ledger, tmp_path, monkeypatch):
+    """A serverless host holds the store in memory with few secondary indexes: every check must give the same answer."""
+    server = _answers(store, ledger, tmp_path)
+    assert server["paid"]["F1"]["action"] == "close" and server["denied"] and server["not_sent"]
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    mem = Store(":memory:", compact=True)
+    er.ensure_schema(mem.conn)
+    mem.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", (SALT_HEX,))
+    mem.conn.commit()
+    lg2 = el.Ledger.open(str(tmp_path / "ledger_serverless.sqlite"))
+    try:
+        sub = tmp_path / "serverless"
+        sub.mkdir()
+        assert _answers(mem, lg2, sub) == server
+    finally:
+        lg2.close()
+        mem.close()

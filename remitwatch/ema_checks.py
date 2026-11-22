@@ -1884,7 +1884,8 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     else:
         out = "open"
     if out in WRITE_OFF_OUTCOMES:
-        top = max(counted, key=lambda z: z["cents"], default=None)
+        # the reason that took the most; a line closed by the routine reduction alone is named by that reason (CO-45)
+        top = max(counted, key=lambda z: z["cents"], default=None) or max(routine_co, key=lambda z: z["contr"] or 0, default=None)
         res["pattern"] = _pattern(f, f"{top['grp']}-{top['code']}" if top else None)
         if (policy.get(res["pattern"]) or {}).get("decision") == "accept":
             out = "written_off_by_policy"
