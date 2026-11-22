@@ -57,7 +57,15 @@ CLAIM_HOST_SUFFIX = "ema.md"        # the vendor's public domain the claim-link 
 VA_PAYER_IDS = frozenset({"VACCN", "TWVACCN"})
 FLAG_PRODUCT, FLAG_POSTED_BEFORE_SERVICE, FLAG_DAMAGED_CHECK, FLAG_IDENTITY_BREAK, FLAG_PATIENT_SIDE = 1, 2, 4, 8, 16
 MAX_ROWS = 3_000_000                # a report with more rows is refused
-ORDER_SAMPLES = 5000                # date values read before a file's date order is decided
+ORDER_SAMPLES = 5000                # date values read before a file's date order is decided (and at most this many rows)
+EARLIEST_DATE = "2000-01-01"        # no posting, aging or service date before this is real
+POSTED_AHEAD_DAYS = 1               # a posted or aging date may be at most this many days after the day the file is read
+SERVICE_AHEAD_DAYS = 31             # a service date may be at most this many days after it (a visit booked ahead)
+FORMAT_HOLD_SHARE = 0.01            # an A/R file is held when more than 1% of its rows (and more than 20) are left out
+FORMAT_HOLD_MIN = 20                #   for a date that cannot be read or cells that do not line up with the column names
+H1_NO_DATE_SHARE = 0.01             # Production H1: rows left out for their date or their cells, or cut short
+H1_BREAK_SHARE = 0.005              #   ... or rows breaking EMA's own money totals
+H7_DAMAGED_MIN, H7_DAMAGED_SHARE = 10, 0.005     # Production H7: check numbers a spreadsheet changed
 DEADLINE_EVERY = 10_000             # a reader checks its deadline this often (rows)
 XLSX_MEMBER_MAX = 64 * 1024 * 1024  # an .xlsx inside a zip is read into memory; larger ones are refused
 TEXT_MEMBERS = (".csv", ".tsv", ".txt")
@@ -517,8 +525,9 @@ class ChunkStream(io.RawIOBase):
         return n
 
 
-def _rows(fh: BinaryIO, rec: Recognized) -> Iterator[Sequence[Any]]:
-    """The rows below the column names, as cells: text for delimited text, typed values for an .xlsx."""
+def _rows(fh: BinaryIO, rec: Recognized, state: dict | None = None) -> Iterator[Sequence[Any]]:
+    """The rows below the column names, as cells: text for delimited text, typed values for an .xlsx. For delimited
+    text, `state['cut_short']` is set when the file's last line ends without a line break (an interrupted copy)."""
     if rec.fmt == "xlsx":
         import openpyxl
 
@@ -548,8 +557,14 @@ def _rows(fh: BinaryIO, rec: Recognized) -> Iterator[Sequence[Any]]:
             raise ReportRefused("unreadable", f"The workbook could not be read to its end ({failed}). Export it again.", rec.report)
         return
     text = io.TextIOWrapper(fh, encoding="utf-8-sig", errors=_ERRORS, newline="")
+    last = [""]
+
+    def lines() -> Iterator[str]:
+        for line in text:
+            last[0] = line
+            yield line
     try:
-        reader = csv.reader(text, delimiter=rec.delimiter or ",")
+        reader = csv.reader(lines(), delimiter=rec.delimiter or ",")
         i = -1
         while True:
             try:
@@ -562,6 +577,8 @@ def _rows(fh: BinaryIO, rec: Recognized) -> Iterator[Sequence[Any]]:
             i += 1
             if i > rec.header_index:
                 yield row
+        if state is not None and last[0] and not last[0].endswith(("\n", "\r")):
+            state["cut_short"] = True
     finally:
         try:
             text.detach()
@@ -574,7 +591,6 @@ _BAD = object()     # a cell that holds something but not a valid value of its k
 _MONEY = re.compile(r"^(-)?\(?(-)?\$?(-)?(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d*))?\)?$")
 _MDY = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})(?:[ T].*)?$")
 _ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T].*)?$")
-_SERIAL = re.compile(r"^\d{5}(?:\.\d+)?$")
 _LINK = re.compile(r"/claim/(\d{1,12})/?\s*$")
 _SCI = re.compile(r"^\d(\.\d+)?E[+-]?\d+$", re.I)
 _CPT = re.compile(r"^(\d{4}[0-9A-Z]|[A-V]\d{4})$")
@@ -681,16 +697,29 @@ def _date(v: Any, order: str = "mdy") -> Any:
     m = _ISO.match(s)
     if m:
         return _iso_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    if _SERIAL.match(s):
-        return _date(float(s), order)
-    return _BAD
+    return _BAD             # five digits written as text are a damaged cell, never an Excel serial (only a typed number is)
 
 
 def parse_date(v: Any, order: str = "mdy") -> str | None:
     """An ISO date (YYYY-MM-DD) from a date cell: a date or datetime, M/D/YYYY (D/M/YYYY when order is 'dmy'; a two-digit
-    year becomes 20YY), YYYY-MM-DD with or without a time, or an Excel serial number from 20000 to 80000. None otherwise."""
+    year becomes 20YY), YYYY-MM-DD with or without a time, or an Excel serial number from 20000 to 80000 when the cell is a
+    typed number (an .xlsx cell; the same digits written as text are not a date). None otherwise."""
     d = _date(v, order)
     return None if d is _BAD else d
+
+
+def today_iso() -> str:
+    """Today's date (UTC) as YYYY-MM-DD: the day a report is read, which bounds the dates it may hold, and the latest day
+    the ledger's retention may count from. The tests set it."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def date_bounds(today: str | None = None) -> tuple[str, str, str]:
+    """(earliest real date, latest posted or aging date, latest service date) for a file read on `today`: a posting
+    can carry at most tomorrow's date, a visit at most a month ahead, and nothing is older than EARLIEST_DATE."""
+    t = date.fromisoformat((today or today_iso())[:10])
+    return (EARLIEST_DATE, (t + timedelta(days=POSTED_AHEAD_DAYS)).isoformat(),
+            (t + timedelta(days=SERVICE_AHEAD_DAYS)).isoformat())
 
 
 def date_order(samples: Iterable[Any]) -> str:
@@ -1318,8 +1347,9 @@ def _refuse_missing(rec: Recognized) -> None:
 
 
 def _first_rows(rows: Iterator[Sequence[Any]], positions: Sequence[int | None]) -> tuple[list, str]:
-    """Read rows until ORDER_SAMPLES date values written as text are seen, and decide the file's date order from them.
-    The rows read are handed back so nothing is lost; at most a few thousand rows are ever held."""
+    """Read rows until ORDER_SAMPLES date values written as text are seen, or ORDER_SAMPLES rows whatever they hold (typed
+    dates in an .xlsx and ISO text need no order), and decide the file's date order from the text dates seen. The rows read
+    are handed back so nothing is lost; at most ORDER_SAMPLES rows are ever held."""
     buf: list = []
     samples: list[str] = []
     pos = [p for p in positions if p is not None]
@@ -1330,9 +1360,39 @@ def _first_rows(rows: Iterator[Sequence[Any]], positions: Sequence[int | None]) 
                 v = row[p]
                 if isinstance(v, str) and "/" in v:
                     samples.append(v)
-        if len(samples) >= ORDER_SAMPLES:
+        if len(samples) >= ORDER_SAMPLES or len(buf) >= ORDER_SAMPLES:
             break
     return buf, date_order(samples)
+
+
+def _header_width(rec: Recognized) -> int:
+    """How many cells a row of delimited text must have: the column names, less empty ones at the end."""
+    n = len(rec.columns)
+    while n and not str(rec.columns[n - 1] if rec.columns[n - 1] is not None else "").strip():
+        n -= 1
+    return n
+
+
+def _misaligned(row: Sequence[Any], width: int) -> bool:
+    """A line of delimited text whose cells do not line up with the column names: an extra cell (an unquoted comma in a
+    description shifts every later column by one) or a missing one (a line cut short). Empty cells after the last
+    column do not count."""
+    n = len(row)
+    if n == width:
+        return False
+    if n > width:
+        return any(isinstance(c, str) and c.strip() for c in row[width:])
+    return True
+
+
+def _left_out(row: Sequence[Any], counts: dict, kind: str) -> None:
+    """Count a line that is not kept: blank, a total line, or `kind`."""
+    if _blank(row):
+        counts["blank"] += 1
+    elif _total_line(row):
+        counts["total"] += 1
+    else:
+        counts[kind] += 1
 
 
 def _blank(row: Sequence[Any]) -> bool:
@@ -1361,9 +1421,9 @@ def _total_line(row: Sequence[Any]) -> bool:
 
 
 def _start_account(account: dict, rec: Recognized) -> None:
-    account.update(rows_read=0, rows_kept=0, left={"blank": 0, "total": 0, "no_date": 0}, bad_amounts=0, bad_dates=0,
-                   damaged_checks=0, identity_breaks=0, bad_links=0, hosts=0, svc_lo=None, svc_hi=None, posted_lo=None,
-                   posted_hi=None, as_of=None, date_order=None, format=rec.fmt)
+    account.update(rows_read=0, rows_kept=0, left={"blank": 0, "total": 0, "no_date": 0, "misaligned": 0}, bad_amounts=0,
+                   bad_dates=0, out_of_range_dates=0, damaged_checks=0, check_rows=0, identity_breaks=0, bad_links=0, hosts=0, svc_lo=None,
+                   svc_hi=None, posted_lo=None, posted_hi=None, as_of=None, date_order=None, format=rec.fmt, cut_short=False)
 
 
 class Posting(NamedTuple):
@@ -1398,12 +1458,18 @@ class Posting(NamedTuple):
 
 
 def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, account: dict,
-                    deadline: float | None = None) -> Iterator[Posting]:
+                    deadline: float | None = None, today: str | None = None) -> Iterator[Posting]:
     """Stream a Production report as Posting tuples (keys only: no name, date of birth, description or staff), one per
-    row whose posted date and service date parse. Nothing is held but the row being read and a few small look-up caches.
-    `account` is filled with counts and dates (an Account also collects the claim-link prefixes and the status words it
-    did not know). Raises ReportRefused (missing_columns, two_hosts, two_date_orders, too_many_rows, unreadable) and
-    ReadTimeout when `deadline` (a time.time() value) passes; the deadline is checked every DEADLINE_EVERY rows."""
+    row whose posted date and service date parse and are real for a file read on `today` (default: today): a posted date
+    from 2000 to tomorrow, a service date from 2000 to a month ahead. Other rows are left out and counted, never kept: a
+    date outside that range (a damaged cell) would otherwise make the file look newer than any later export. In delimited
+    text a row whose cells do not line up with the column names (an unquoted comma shifts every later column) is left
+    out as 'misaligned', and a file whose last line has no line break is marked cut_short. The as_of is the newest posted
+    date, never later than `today`. Nothing is held but the row being read, at most ORDER_SAMPLES rows while the date
+    order is decided, and a few small look-up caches. `account` is filled with counts and dates (an Account also collects
+    the claim-link prefixes and the status words it did not know). Raises ReportRefused (missing_columns, two_hosts,
+    two_date_orders, too_many_rows, unreadable) and ReadTimeout when `deadline` (a time.time() value) passes; the deadline
+    is checked every DEADLINE_EVERY rows."""
     if rec.report != "production":
         raise ValueError("iter_production reads a Production report")
     _refuse_missing(rec)
@@ -1423,8 +1489,14 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
     i_pay, i_adj, i_ins_adj = g("payments"), g("adjustments"), g("insurance adjustments")
     identities = None not in (i_pay, i_adj, i_ins_adj)
     width = max(ix.values()) + 1
-    n = kept = blank = total = no_date = 0
-    c = {"bad_amounts": 0, "bad_dates": 0, "damaged": 0, "breaks": 0, "bad_links": 0}
+    text_rows = rec.fmt != "xlsx"
+    hw = _header_width(rec)
+    day = (today or today_iso())[:10]
+    earliest, posted_max, svc_max = date_bounds(day)
+    n = kept = 0
+    left = {"blank": 0, "total": 0, "no_date": 0, "misaligned": 0}
+    c = {"bad_amounts": 0, "bad_dates": 0, "far": 0, "damaged": 0, "breaks": 0, "bad_links": 0, "checks": 0}
+    state: dict = {}
     svc_lo = svc_hi = posted_lo = posted_hi = None
     prefixes: list[str] = []
     prefix_low: set[str] = set()
@@ -1448,16 +1520,18 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
         return _text(row[i]) if i is not None else None
 
     def flush() -> None:
-        account.update(rows_read=n, rows_kept=kept, left={"blank": blank, "total": total, "no_date": no_date},
-                       bad_amounts=c["bad_amounts"], bad_dates=c["bad_dates"], damaged_checks=c["damaged"],
-                       identity_breaks=c["breaks"], bad_links=c["bad_links"], hosts=len(prefixes), svc_lo=svc_lo,
-                       svc_hi=svc_hi, posted_lo=posted_lo, posted_hi=posted_hi, as_of=posted_hi)
+        account.update(rows_read=n, rows_kept=kept, left=dict(left), bad_amounts=c["bad_amounts"], bad_dates=c["bad_dates"],
+                       out_of_range_dates=c["far"], damaged_checks=c["damaged"], check_rows=c["checks"],
+                       identity_breaks=c["breaks"],
+                       bad_links=c["bad_links"], hosts=len(prefixes), svc_lo=svc_lo, svc_hi=svc_hi, posted_lo=posted_lo,
+                       posted_hi=posted_hi, as_of=min(posted_hi, day) if posted_hi else None,
+                       cut_short=bool(state.get("cut_short")))
         if account_extra is not None:
             account_extra.prefixes = prefixes[:3]
             account_extra.status_words |= status_seen
 
     with open_report(src, rec) as fh:
-        rows = _rows(fh, rec)
+        rows = _rows(fh, rec, state)
         buf, order = _first_rows(rows, (i_posted, i_svc, i_dob))
         account["date_order"] = order
         failed = None
@@ -1469,6 +1543,9 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
                                         "production")
                 if deadline is not None and n % DEADLINE_EVERY == 0 and time.time() > deadline:
                     raise ReadTimeout(f"Reading stopped at the time limit after {n:,} rows.")
+                if text_rows and len(row) != hw and _misaligned(row, hw):
+                    _left_out(row, left, "misaligned")
+                    continue
                 if len(row) < width:
                     row = list(row) + [None] * (width - len(row))
                 v = row[i_posted]
@@ -1479,14 +1556,18 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
                 svc = dates.get(v, _MISS)
                 if svc is _MISS:
                     svc = dates[v] = _date(v, order)
+                far_p = posted is not None and posted is not _BAD and not (earliest <= posted <= posted_max)
+                far_s = svc is not None and svc is not _BAD and not (earliest <= svc <= svc_max)
+                if far_p:
+                    posted = _BAD
+                if far_s:
+                    svc = _BAD
                 if posted is None or posted is _BAD or svc is None or svc is _BAD:
-                    if _blank(row):
-                        blank += 1
-                    elif _total_line(row):
-                        total += 1
-                    else:
-                        no_date += 1
+                    before = left["no_date"]
+                    _left_out(row, left, "no_date")
+                    if left["no_date"] > before:
                         c["bad_dates"] += (posted is _BAD) + (svc is _BAD)
+                        c["far"] += far_p + far_s
                     continue
                 if len(dates) > 20_000:
                     dates.clear()
@@ -1510,6 +1591,8 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
                 if posted < svc:
                     flags |= FLAG_POSTED_BEFORE_SERVICE
                 check_no, damaged = check_number(row[i_check])
+                if check_no is not None:
+                    c["checks"] += 1
                 if damaged:
                     flags |= FLAG_DAMAGED_CHECK
                     c["damaged"] += 1
@@ -1609,11 +1692,16 @@ def _cap(s: str | None, n: int) -> str | None:
     return s[:n] if s else s
 
 
-def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, account: dict) -> Iterator[dict]:
+def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, account: dict,
+            today: str | None = None) -> Iterator[dict]:
     """Stream an A/R report as dicts holding the ema_ar columns (all but file_id and as_of, which the caller sets; the
-    payer group is set by apply_ar, which knows the aliases). A row is kept when it has a service date and a responsible
-    party. Exposure is the open A/R (the sum of the aging buckets when the export has more than the current one), else
-    the denial amount: never the two added. `account` gets counts, dates, the date order, the aging window (30 when every
+    payer group is set by apply_ar, which knows the aliases). A row is kept when it has a real service date (from 2000 to a
+    month after `today`, default today) and a responsible party; other rows are left out and counted. An aging date
+    after tomorrow or before 2000 is a damaged cell: it is left blank and counted, as an unreadable one is. In delimited
+    text a row whose cells do not line up with the column names is left out as 'misaligned', and a file whose last line
+    has no line break is marked cut_short. The as_of (the newest service or aging date) is never later than `today`.
+    Exposure is the open A/R (the sum of the aging buckets when the export has more than the current one), else the
+    denial amount: never the two added. `account` gets counts, dates, the date order, the aging window (30 when every
     open line's aging date is within 31 days of the file's as_of, None for a full export) and the bucket columns."""
     if rec.report != "ar_report":
         raise ValueError("iter_ar reads an A/R report")
@@ -1631,8 +1719,14 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
     totals = sorted(p for name, p in ix.items() if _is_total(name))
     i_total = totals[0] if totals else None
     width = max(ix.values()) + 1
-    n = kept = blank = total = no_date = 0
-    c = {"bad_amounts": 0, "bad_dates": 0}
+    text_rows = rec.fmt != "xlsx"
+    hw = _header_width(rec)
+    day = (today or today_iso())[:10]
+    earliest, posted_max, svc_max = date_bounds(day)
+    n = kept = 0
+    left = {"blank": 0, "total": 0, "no_date": 0, "misaligned": 0}
+    c = {"bad_amounts": 0, "bad_dates": 0, "far": 0}
+    state: dict = {}
     svc_lo = svc_hi = aging_hi = oldest_open = None
     prefixes: list[str] = []
     occurrences: dict[str, int] = {}
@@ -1654,26 +1748,35 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
             return None
         return x
 
+    def aging_of(v: Any) -> str | None:
+        x = dv(v)
+        if x is not None and not (earliest <= x <= posted_max):
+            c["bad_dates"] += 1
+            c["far"] += 1
+            return None
+        return x
+
     def opt(row: Sequence[Any], i: int | None) -> Any:
         return row[i] if i is not None else None
 
     def flush() -> None:
         as_of = max(x for x in (svc_hi, aging_hi) if x) if (svc_hi or aging_hi) else None
+        as_of = min(as_of, day) if as_of else None
         window = None
         if not bucket_names:
             window = 30
             if oldest_open and as_of:
                 window = 30 if (date.fromisoformat(as_of) - date.fromisoformat(oldest_open)).days <= 31 else None
-        account.update(rows_read=n, rows_kept=kept, left={"blank": blank, "total": total, "no_date": no_date},
-                       bad_amounts=c["bad_amounts"], bad_dates=c["bad_dates"], hosts=len(prefixes), svc_lo=svc_lo,
-                       svc_hi=svc_hi, as_of=as_of, aging_window=window, buckets=bucket_names)
+        account.update(rows_read=n, rows_kept=kept, left=dict(left), bad_amounts=c["bad_amounts"], bad_dates=c["bad_dates"],
+                       out_of_range_dates=c["far"], hosts=len(prefixes), svc_lo=svc_lo, svc_hi=svc_hi, as_of=as_of,
+                       aging_window=window, buckets=bucket_names, cut_short=bool(state.get("cut_short")))
         if account_extra is not None:
             account_extra.prefixes = prefixes[:3]
             account_extra.status_words |= status_seen
 
     order = "mdy"
     with open_report(src, rec) as fh:
-        rows = _rows(fh, rec)
+        rows = _rows(fh, rec, state)
         buf, order = _first_rows(rows, (i_svc, i_aging, i_follow))
         account["date_order"] = order
         failed = None
@@ -1682,18 +1785,22 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
                 n += 1
                 if n > MAX_ROWS:
                     raise ReportRefused("too_many_rows", f"It has more than {MAX_ROWS:,} rows.", "ar_report")
+                if text_rows and len(row) != hw and _misaligned(row, hw):
+                    _left_out(row, left, "misaligned")
+                    continue
                 if len(row) < width:
                     row = list(row) + [None] * (width - len(row))
                 svc = _date(row[i_svc], order)
+                far = svc is not None and svc is not _BAD and not (earliest <= svc <= svc_max)
+                if far:
+                    svc = _BAD
                 party = _text(row[i_party])
                 if svc is None or svc is _BAD or not party:
-                    if _blank(row):
-                        blank += 1
-                    elif _total_line(row):
-                        total += 1
-                    else:
-                        no_date += 1
+                    before = left["no_date"]
+                    _left_out(row, left, "no_date")
+                    if left["no_date"] > before:
                         c["bad_dates"] += svc is _BAD
+                        c["far"] += far
                     continue
                 kept += 1
                 svc_lo = svc if svc_lo is None or svc < svc_lo else svc_lo
@@ -1711,7 +1818,7 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
                 else:
                     open_amount = current
                 exposure = open_amount if open_amount else (denial if denial is not None else open_amount)
-                aging = dv(opt(row, i_aging))
+                aging = aging_of(opt(row, i_aging))
                 if aging and (aging_hi is None or aging > aging_hi):
                     aging_hi = aging
                 if aging and current and (oldest_open is None or aging < oldest_open):
@@ -2248,6 +2355,73 @@ def _day(d: str | None) -> str:
         return str(d)
 
 
+def format_holds(acct: dict, report: str = "ar_report") -> list[tuple[str, str]]:
+    """The format hold of a report read whole: more than 1% of its rows (and more than 20) left out because a date could
+    not be read or its cells do not line up with the column names, or a file whose last line was cut short. A
+    re-export in a changed layout would otherwise replace the year's rows with what could be read."""
+    out: list[tuple[str, str]] = []
+    left = acct.get("left") or {}
+    read = int(acct.get("rows_read") or 0)
+    bad = int(left.get("no_date") or 0) + int(left.get("misaligned") or 0)
+    if read and bad > max(FORMAT_HOLD_MIN, FORMAT_HOLD_SHARE * read):
+        parts = []
+        if left.get("no_date"):
+            parts.append(f"{int(left['no_date']):,} rows have no readable date")
+        if left.get("misaligned"):
+            parts.append(f"{int(left['misaligned']):,} rows have more or fewer cells than the column names")
+        out.append(("format", f"The layout or format changed: {' and '.join(parts)}, of {read:,}. Export it again from EMA "
+                              "without opening it in another program."))
+    if acct.get("cut_short"):
+        out.append(("cut_short", f"It looks cut short: its last line ends without a line break. Copy or export the "
+                                 f"{REPORT_NAMES.get(report, 'report')} again."))
+    return out
+
+
+def production_format_holds(acct: dict) -> list[tuple[str, str]]:
+    """The holds a Production file meets on what its reader counted alone (the ledger adds the ones that compare it with
+    the files on file): H1 when more than 1% of its rows were left out for a date that cannot be read or cells that do
+    not line up with the column names, more than 0.5% break EMA's own money totals, or the file was cut short; H7 when
+    more than max(10, 0.5% of the rows with a check number) carry a check number a spreadsheet changed (scientific
+    notation): those checks match no remittance, so every payment on them would read as not posted in EMA."""
+    out: list[tuple[str, str]] = []
+    left = acct.get("left") or {}
+    read = int(acct.get("rows_read") or acct.get("rows") or 0)
+    no_date = int(acct.get("no_date") if acct.get("no_date") is not None else left.get("no_date") or 0)
+    misaligned = int(acct.get("misaligned") if acct.get("misaligned") is not None else left.get("misaligned") or 0)
+    breaks = int(acct.get("identity_breaks") or 0)
+    if read and (no_date + misaligned > H1_NO_DATE_SHARE * read or breaks > H1_BREAK_SHARE * read):
+        parts = [f"{no_date:,} rows have no readable date"]
+        if misaligned:
+            parts.append(f"{misaligned:,} rows have more or fewer cells than the column names")
+        parts.append(f"{breaks:,} rows break EMA's own money totals")
+        out.append(("H1", f"The layout or format changed: {', '.join(parts[:-1])} and {parts[-1]}. Export it again from EMA "
+                          "without opening it in Excel."))
+    if acct.get("cut_short"):
+        out.append(("H1", "It looks cut short: its last line ends without a line break. Copy or export it again."))
+    damaged = int(acct.get("damaged_checks") or 0)
+    with_check = int(acct.get("check_rows") or 0)
+    if damaged > max(H7_DAMAGED_MIN, H7_DAMAGED_SHARE * with_check):
+        out.append(("H7", f"{damaged:,} check numbers were changed by a spreadsheet (written as 9.1E+11 and the like): export "
+                          "it again from EMA without opening it in Excel."))
+    return out
+
+
+def _years_label(years: Sequence[str]) -> str:
+    """'2026', '2025-2026', or '2023, 2026' when the years are not one run."""
+    if not years:
+        return ""
+    if len(years) == 1:
+        return years[0]
+    run = all(int(b) == int(a) + 1 for a, b in zip(years, years[1:]))
+    return f"{years[0]}-{years[-1]}" if run else ", ".join(years)
+
+
+def _stage_years(conn: sqlite3.Connection) -> list[str]:
+    """The service years an A/R file has rows for (never the years between them it has none of)."""
+    return [r[0] for r in conn.execute("SELECT DISTINCT svc_year FROM temp.ema_ar_stage WHERE svc_year IS NOT NULL "
+                                       "ORDER BY svc_year")]
+
+
 def _ar_holds(conn: sqlite3.Connection, years: Sequence[str], current_of: dict, as_of: str) -> list[tuple[str, str]]:
     """The shrink hold: for a year whose current snapshot is at most AR_HOLD_MAX_GAP days older, compare only the lines an
     honest re-export must still list (a denial amount, or an aging date within 30 minus the gap days of the new as_of).
@@ -2355,7 +2529,7 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
                                                                  "party.", "ar_report"), path=path, rec=rec, via=via,
                                    origin=origin, log=log)
         as_of = acct["as_of"]
-        years = [str(y) for y in range(int(acct["svc_lo"][:4]), int(acct["svc_hi"][:4]) + 1)]
+        years = _stage_years(conn)          # a year the file has no row for keeps its own snapshot
         row = _catalog_row(conn, file_id)
         received = (row or {}).get("received_at") or _now()
         created = _created_at(path, rec)
@@ -2370,12 +2544,12 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
                 current_of[y] = cur[0]
             elif cur[0] != file_id:
                 behind.append(y)
-        scope = years[0] if len(years) == 1 else f"{years[0]}-{years[-1]}"
+        scope = _years_label(years)
         links = conn.execute("SELECT COUNT(DISTINCT link) FROM temp.ema_ar_stage WHERE link IS NOT NULL").fetchone()[0]
         info = dict(scope=scope, svc_lo=acct["svc_lo"], svc_hi=acct["svc_hi"], as_of=as_of, created_at=created,
                     received_at=received, rows_read=acct["rows_read"], rows_kept=acct["rows_kept"], links=links,
                     account=dict(acct))
-        holds = [] if force else _ar_holds(conn, take, current_of, as_of)
+        holds = [] if force else format_holds(acct) + _ar_holds(conn, take, current_of, as_of)
         if holds:
             reason = " ".join(m for _c, m in holds)
             _catalog_put(conn, file_id, **base, **info, status="held", status_reason=reason)
@@ -2413,9 +2587,10 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
         _catalog_put(conn, file_id, **base, **info, status=status, status_reason=reason, applied_at=_now(),
                      rows_applied=applied, live_rows=live)
         if take:
+            since = min(as_of or today_iso(), today_iso())      # retention never counts from a day still to come
             conn.execute("DELETE FROM ema_ar_items WHERE absent_since IS NOT NULL AND absent_since < date(?, ?)",
-                         (as_of, f"-{AR_HISTORY_DAYS} days"))
-            conn.execute("DELETE FROM ema_claim_links WHERE last_seen < date(?, ?)", (as_of, f"-{CLAIM_LINK_DAYS} days"))
+                         (since, f"-{AR_HISTORY_DAYS} days"))
+            conn.execute("DELETE FROM ema_claim_links WHERE last_seen < date(?, ?)", (since, f"-{CLAIM_LINK_DAYS} days"))
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')", (META_MAP_DIRTY,))
         _write_files_row(conn, file_id, path, rec, kind="ema:ar", status=status, rows_read=acct["rows_read"],
                          rows_applied=applied, created=created, rows_kept=acct["rows_kept"])
@@ -2509,7 +2684,7 @@ def _preview_ar(conn: sqlite3.Connection, path: str, rec: Recognized, file_id: s
         if not acct.get("rows_kept"):
             raise ReportRefused("empty", "It holds no line with a service date and a responsible party.", "ar_report")
         as_of = acct["as_of"]
-        years = [str(y) for y in range(int(acct["svc_lo"][:4]), int(acct["svc_hi"][:4]) + 1)]
+        years = _stage_years(conn)          # a year the file has no row for keeps its own snapshot
         row = _catalog_row(conn, file_id)
         mine = (as_of or "", _created_at(path, rec) or "", (row or {}).get("received_at") or _now(), file_id)
         replaces, behind, current_of = [], [], {}
@@ -2522,7 +2697,7 @@ def _preview_ar(conn: sqlite3.Connection, path: str, rec: Recognized, file_id: s
                 current_of[y] = cur[0]
             elif cur[0] != file_id:
                 behind.append({"year": y, "file_id": cur[0], "as_of": cur[1]})
-        holds = _ar_holds(conn, [r["year"] for r in replaces], current_of, as_of)
+        holds = format_holds(acct) + _ar_holds(conn, [r["year"] for r in replaces], current_of, as_of)
         t = conn.execute("""SELECT COUNT(DISTINCT claim_id),
                                    SUM(CASE WHEN lower(party) LIKE 'insur%' THEN exposure_cents ELSE 0 END),
                                    SUM(CASE WHEN lower(party) LIKE 'insur%' THEN 0 ELSE exposure_cents END),
@@ -2531,7 +2706,7 @@ def _preview_ar(conn: sqlite3.Connection, path: str, rec: Recognized, file_id: s
         return {"rows": acct["rows_read"], "rows_kept": acct["rows_kept"], "claim_ids": t[0] or 0,
                 "insurance_cents": t[1] or 0, "patient_cents": t[2] or 0, "insurance_no_claim": t[3] or 0,
                 "svc_lo": acct["svc_lo"], "svc_hi": acct["svc_hi"], "as_of": as_of, "years": years,
-                "scope": years[0] if len(years) == 1 else f"{years[0]}-{years[-1]}", "aging_window": acct.get("aging_window"),
+                "scope": _years_label(years), "aging_window": acct.get("aging_window"),
                 "replaces": replaces, "behind": behind, "holds": [{"code": c, "message": m} for c, m in holds],
                 "account": dict(acct)}
     finally:
@@ -2557,9 +2732,7 @@ def _preview_production(conn: sqlite3.Connection, path: str, rec: Recognized, fi
            "posted_hi": acct.get("posted_hi"), "as_of": acct.get("as_of")}
     overlaps = [b for b in current if b["file_id"] != file_id and _boxes_meet(box, b)]
     read = acct.get("rows_read") or 0
-    left = acct.get("left") or {}
-    if read and (left.get("no_date", 0) > 0.01 * read or (acct.get("identity_breaks") or 0) > 0.005 * read):
-        holds.append({"code": "H1", "message": "The layout or format changed."})
+    holds += [{"code": c, "message": m} for c, m in production_format_holds(acct)]
     if not current and (acct.get("rows_kept") or 0) >= 2000 and len(payers) < 3:
         holds.append({"code": "H5", "message": "It names fewer than three insurers: was it filtered by payer?"})
     return {"rows": read, "rows_kept": acct.get("rows_kept"), "scope": scope, "box": box, "as_of": acct.get("as_of"),

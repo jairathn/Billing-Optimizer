@@ -58,9 +58,9 @@ MAX_ATTEMPTS = 3                    # serverless: a file whose read was started 
 XLSX_MAX_ROWS = 120_000             # H6: a larger Excel Production export is not read on a serverless host
 STAGE_BATCH = 5000
 
-# holds (spec 6.3)
-H1_NO_DATE_SHARE = 0.01
-H1_BREAK_SHARE = 0.005
+# holds (spec 6.3); H1 and H7 are judged on what the reader counted (ema_reports.production_format_holds)
+H1_NO_DATE_SHARE = er.H1_NO_DATE_SHARE
+H1_BREAK_SHARE = er.H1_BREAK_SHARE
 H2_CHARGE_SHARE = 0.97
 H2_MIN_LINES = 20                   # a file of fewer claim lines says nothing about its scope
 H3_MIN_LINKS = 200
@@ -576,18 +576,14 @@ class Ledger:
     def holds(self, meta: FileMeta, stats: dict, *, serverless: bool, fmt: str = "csv",
               dimension: int | None = None) -> list[tuple[str, str]]:
         """The holds (spec 6.3) a staged file meets, as (code, message). A held file waits for a person to press Apply or
-        Discard; Apply skips holds, never refusals. `stats` is what stage() returned plus the reader's rows_read and
-        no_date counts."""
+        Discard; Apply skips holds, never refusals. `stats` is what stage() returned plus the reader's counts (rows_read,
+        no_date, misaligned, cut_short, damaged_checks, check_rows): H1 (format, cut short) and H7 (check numbers a
+        spreadsheet changed) are judged on those (ema_reports.production_format_holds)."""
         out: list[tuple[str, str]] = []
         if serverless and fmt == "xlsx" and (dimension or 0) > XLSX_MAX_ROWS:
             out.append(("H6", f"Save it as CSV: an Excel Production export of more than {XLSX_MAX_ROWS:,} rows is not read on "
                               "this site."))
-        read = int(stats.get("rows_read") or stats.get("rows") or 0)
-        no_date = int(stats.get("no_date") or 0)
-        breaks = int(stats.get("identity_breaks") or 0)
-        if read and (no_date > H1_NO_DATE_SHARE * read or breaks > H1_BREAK_SHARE * read):
-            out.append(("H1", f"The layout or format changed: {no_date:,} rows have no readable date and {breaks:,} rows break "
-                              "EMA's own money totals. Export it again from EMA without opening it in Excel."))
+        out += er.production_format_holds(stats)
         share = stats.get("charge_line_share")
         if (meta.scope == "service" and share is not None and int(stats.get("lines") or 0) >= H2_MIN_LINES
                 and share < H2_CHARGE_SHARE):
@@ -907,6 +903,8 @@ def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | Non
             raise er.ReportRefused("empty", "It holds no posting with a posted date and a service date.", "production")
         left = acct.get("left") or {}
         stats.update(rows_read=acct.get("rows_read") or 0, no_date=left.get("no_date") or 0,
+                     misaligned=left.get("misaligned") or 0, cut_short=bool(acct.get("cut_short")),
+                     damaged_checks=acct.get("damaged_checks") or 0, check_rows=acct.get("check_rows") or 0,
                      identity_breaks=acct.get("identity_breaks") or stats.get("identity_breaks") or 0)
         created = None
         if hasher is None:
