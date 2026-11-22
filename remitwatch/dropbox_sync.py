@@ -34,7 +34,16 @@ CONTENT = "https://content.dropboxapi.com/2"
 TOKEN_URL = "https://api.dropboxapi.com/oauth2/token"
 AUTH_URL = "https://www.dropbox.com/oauth2/authorize"
 
-WANTED_EXT = (".rmt", ".835", ".era", ".edi", ".xlsx", ".txt", ".x12", ".dat")
+WANTED_EXT = (".rmt", ".835", ".era", ".edi", ".xlsx", ".txt", ".x12", ".dat", ".csv", ".tsv", ".zip", ".gz")
+REPORT_TIMEOUT = (10, 30)           # (connect, read) seconds for every Dropbox read of an EMA report: a stalled stream fails
+                                    # in 30 s instead of outliving a serverless run
+MAX_EXPORT_BYTES = 60 * 1024 * 1024     # one of the three weekly exports is read whole in memory: a larger one is refused
+REPORT_EXTS = (".xlsx", ".csv", ".tsv", ".txt", ".zip", ".gz")     # endings the router asks the report reader about first
+
+
+def backfill_zip_name() -> str:
+    """The archive of remittances read once on a serverless host's first load (cloud.ingest_zip), never as a report."""
+    return os.environ.get("REMITWATCH_BACKFILL_ZIP", "Trizetto.zip")
 
 
 def dropbox_content_hash(path: str) -> str:
@@ -215,11 +224,13 @@ class DropboxClient:
             return r.content, json.loads(r.headers.get("Dropbox-API-Result", "{}"))
         raise RuntimeError(f"download {path_or_id}: too many retries")
 
-    def download_chunks(self, path_or_id: str, chunk: int = 4 << 20) -> Iterator[bytes]:
-        """Stream a large file without holding it in one piece."""
+    def download_chunks(self, path_or_id: str, chunk: int = 4 << 20, timeout=REPORT_TIMEOUT) -> Iterator[bytes]:
+        """Stream a large file without holding it in one piece. `timeout` is (connect, read) in seconds: the read part is
+        the longest wait for the next bytes, so a stalled stream fails instead of hanging."""
         refreshed = False
         for attempt in range(self.attempts):
-            r = self.s.post(f"{CONTENT}/files/download", headers=self._headers({"Dropbox-API-Arg": json.dumps({"path": path_or_id})}), stream=True, timeout=300)
+            r = self.s.post(f"{CONTENT}/files/download", headers=self._headers({"Dropbox-API-Arg": json.dumps({"path": path_or_id})}),
+                            stream=True, timeout=timeout)
             if r.status_code == 429 or r.status_code >= 500:
                 if attempt + 1 < self.attempts:
                     time.sleep(min(float(r.headers.get("Retry-After") or 0) or 2 ** attempt, 60))
@@ -233,7 +244,10 @@ class DropboxClient:
                 raise DropboxNotFound(path_or_id)
             if r.status_code != 200:
                 raise RuntimeError(f"download {path_or_id} failed {r.status_code}: {r.text[:200]}")
-            yield from r.iter_content(chunk)
+            try:
+                yield from r.iter_content(chunk)
+            finally:
+                r.close()       # a reader that stops early (the first 64 KB of a large report) lets the rest go
             return
         raise RuntimeError(f"download {path_or_id}: too many retries")
 
@@ -288,6 +302,21 @@ class DropboxClient:
         return self._content_call("files/upload_session/finish",
                                   {"cursor": {"session_id": sid, "offset": offset},
                                    "commit": {"path": path, "mode": "overwrite", "autorename": False, "mute": True}}, bytes(buf))
+
+    def move(self, from_path: str, to_path: str) -> dict:
+        """Move a file inside Dropbox (files/move_v2; needs the files.content.write permission). A file already at the
+        destination raises DropboxConflict; a source that is gone raises DropboxNotFound."""
+        try:
+            res = self._rpc("files/move_v2", {"from_path": from_path, "to_path": to_path, "autorename": False,
+                                              "allow_ownership_transfer": False})
+        except RuntimeError as exc:
+            text = str(exc)
+            if "from_lookup/not_found" in text:
+                raise DropboxNotFound(from_path) from exc
+            if "conflict" in text:
+                raise DropboxConflict(text[:200]) from exc
+            raise
+        return res.get("metadata") or res
 
     def get_metadata(self, path: str) -> dict | None:
         try:
@@ -351,14 +380,45 @@ def permanent_download_error(exc: Exception) -> bool:
 
 
 def wanted(entry: dict) -> bool:
+    """A file the app reads: a remittance, an 837, one of EMA's exports or reports (Excel, CSV, a zip or a gzip of them).
+    The archive of remittances read on a serverless host's first load (REMITWATCH_BACKFILL_ZIP) is not: cloud.ingest_zip
+    reads it whole, once."""
     if entry.get(".tag") != "file":
         return False
     name = entry.get("name", "").lower()
     if name.startswith("~$") or name.startswith("."):
         return False
-    if name.endswith(".zip"):
+    if name.endswith(".zip") and name == backfill_zip_name().lower():
         return False
     return name.endswith(WANTED_EXT)
+
+
+def _takes(fn, arg: str) -> bool:
+    """Whether a client method takes this keyword (a stand-in client may not)."""
+    import inspect
+    try:
+        return arg in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def read_chunks(client, path_or_id: str, chunk: int = 4 << 20, timeout=REPORT_TIMEOUT) -> Iterator[bytes]:
+    """A file's bytes from Dropbox in pieces, with the report read timeout when the client takes one."""
+    if _takes(client.download_chunks, "timeout"):
+        return client.download_chunks(path_or_id, chunk=chunk, timeout=timeout)
+    return client.download_chunks(path_or_id, chunk)
+
+
+def peek(client, path_or_id: str, n: int = 65536) -> bytes:
+    """The first `n` bytes of a file in Dropbox, read in one short request that is then closed (a raw CSV too large to
+    download on a serverless host is recognised from these alone)."""
+    it = read_chunks(client, path_or_id, chunk=n)
+    try:
+        return next(iter(it), b"")
+    finally:
+        close = getattr(it, "close", None)
+        if close:
+            close()
 
 
 def local_path(data_dir: str, entry: dict) -> str:
@@ -435,72 +495,219 @@ def sync(store, client: DropboxClient | None = None, root_path: str | None = Non
     return stats
 
 
-def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | None = None) -> dict:
-    """Route downloaded files to the right loader. A spreadsheet that is none of EMA's three exports is left unread and
-    unrecorded (counted in `skipped`); its path is added to `unread` when a list is given, so a caller that remembers what
-    it fetched (cloud.sync_and_ingest) can leave it to be read again."""
-    from .ema_exports import TEXT_EXPORTS, export_created, iter_rows
+def file_sha256(path: str) -> str:
+    """The SHA-256 of a file, read in 1 MB pieces (a report can be hundreds of MB)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for piece in iter(lambda: fh.read(1 << 20), b""):
+            h.update(piece)
+    return h.hexdigest()
+
+
+def _note_report(out: dict, res: dict, name: str, log) -> None:
+    """Count what the report reader made of one file (or of each report in a zip)."""
+    if res.get("status") == "zip":
+        members = res.get("members") or []
+        if not members:
+            out["skipped"] += 1
+            log(f"  {name}: a zip with no EMA report in it; not read")
+            return
+    else:
+        members = [res]
+    if any(m.get("status") in ("current", "superseded") for m in members):
+        out["ema"] += 1
+    if any(m.get("status") not in ("already", "not_report") for m in members):
+        out["ema_changed"] = True
+    for m in members:
+        out.setdefault("ema_reports", []).append({k: m.get(k) for k in ("status", "report", "file_id", "rows_applied")})
+    if res.get("status") == "refused" and res.get("code") == "zip_in_zip":
+        out["ema_changed"] = True
+
+
+def _route_report(store, path: str, name: str, *, via: str, origin: dict | None, ledger, deadline, wait_reason, log) -> dict | None:
+    """Read a file as one of EMA's two reports when it is one (a zip of reports, a gzip of one, the file itself):
+    remitwatch.ema_reports.ingest_file decides and records it. None when it is no report."""
+    from . import ema_reports as er
+
+    extra = {"wait_reason": wait_reason} if wait_reason else {}
+    if er.is_plain_zip(path):
+        return er.ingest_file(store, path, via=via, origin=origin, ledger=ledger, deadline=deadline, log=log, **extra)
+    try:
+        rec = er.recognize(path, name)
+    except er.ReportRefused:
+        rec = "refused"                 # a report all the same: ingest_file records why it is not read
+    if not rec:
+        return None
+    return er.ingest_file(store, path, None if rec == "refused" else rec, via=via, origin=origin, ledger=ledger,
+                          deadline=deadline, log=log, **extra)
+
+
+def _gunzip_to(path: str, folder: str, limit: int) -> str | None:
+    """A gzipped file that is not a report, unpacked under its own name (less .gz) into `folder`; None when it unpacks to
+    more than `limit` bytes (nothing but a report is that large) or is not gzip at all."""
+    import gzip
+    import zlib
+    name = os.path.basename(path)[:-3] or "file"
+    out = os.path.join(folder, name)
+    n = 0
+    try:
+        with gzip.open(path, "rb") as src, open(out, "wb") as dst:
+            for piece in iter(lambda: src.read(1 << 20), b""):
+                n += len(piece)
+                if n > limit:
+                    break
+                dst.write(piece)
+    except (OSError, EOFError, zlib.error):
+        n = limit + 1
+    if n > limit:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        return None
+    return out
+
+
+def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | None = None, *, origins: dict | None = None,
+                     ledger=None, via: str = "mirror", deadline: float | None = None, wait_reason: str | None = None) -> dict:
+    """Route files to the right reader, EMA's two reports first. Each .xlsx, .csv, .tsv, .txt, .zip or .gz is asked
+    whether it is the A/R or the Production report (remitwatch.ema_reports); a report goes to ema_reports.ingest_file,
+    with its origin (`origins`, by path) and the ledger opener (`ledger`: a Ledger or a callable; without one a
+    Production file waits). Otherwise a spreadsheet is read as one of the three weekly exports (one over 60 MB is refused
+    before it is read), an X12 file as a remittance or an 837. A spreadsheet that is none of them is recorded as not read
+    (files kind 'ema:unknown'), so it is listed on the Data tab and not fetched again. `via` labels where the files came
+    from ('mirror' on a server, 'dropbox' from cloud, 'upload', 'cli'). `unread` is kept for callers that pass it: no file
+    is left unread now. Returns counts; 'ema_reports' lists what the report reader made of each report."""
+    import shutil
+    import tempfile
+
+    from .ema_exports import TEXT_EXPORTS, IsReport, export_created, iter_rows
     from .x12_835 import looks_like_x12
 
     out = {"remits": 0, "ema": 0, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []}
-    remits = []
-    for p in paths:
-        low = p.lower()
-        if low.endswith((".xlsx",) + TEXT_EXPORTS):        # a CSV export arrives only by upload (remitwatch.uploads)
-            try:
-                with open(p, "rb") as fh:
-                    sha = hashlib.sha256(fh.read()).hexdigest()
-                if store.file_seen(sha):
-                    out["skipped"] += 1
-                    continue
-                acct: dict = {}
-                it = iter_rows(p, acct)
-                first = next(it, None)          # reads the file and its column names (acct) before any row is converted
-                if (acct.get("family") or "unknown") == "unknown":
-                    # none of EMA's three exports (an A/R or a production report, or another spreadsheet): neither loaded
-                    # nor recorded, so it is not stored as rows that tie to no claim, and it can be read once RemitWatch
-                    # has a reader for it. The line below is also what the Upload page shows for a file queued before
-                    # the page refused such reports.
-                    out["skipped"] += 1
-                    if unread is not None:
-                        unread.append(p)
-                    log(f"  EMA ERROR {os.path.basename(p)}: Not read: it is none of the three EMA exports RemitWatch reads "
-                        "(Encounter & Charge Lines, ERA & Payment Lines, Claim & Claim Status). It has no Claim ID, Bill ID or "
-                        "Bill Item Identifier column (an A/R or a production report has none). Nothing from it is stored.")
-                    continue
-                rows = ([first] if first is not None else []) + list(it)
-                r = store.ingest_ema_rows(rows)
-                left = {k: v for k, v in (acct.get("left") or {}).items() if v}
-                if left or acct.get("above"):
-                    log(f"  EMA {os.path.basename(p)}: {acct.get('above', 0)} line(s) above the column names left out"
-                        + "".join(f", {v} {k} line(s) left out" for k, v in left.items()))
-                fam = rows[0]["family"] if rows else (acct.get("family") or "unknown")
-                store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
-                store.record_export(os.path.basename(p), sha, fam, export_created(p), len(rows))
-                out["ema"] += 1
-            except Exception as exc:
-                out["errors"] += 1
-                out["failed"].append(os.path.basename(p))
-                log(f"  EMA ERROR {os.path.basename(p)}: {exc}")
-        elif looks_like_x12(p):
-            with open(p, "rb") as fh:
-                head = fh.read(400)
-            if b"*837*" in head or b"GS*HC*" in head:
+    origins = origins or {}
+    remits: list[str] = []
+    scratch: list[str] = []
+    queue = list(paths)
+    try:
+        while queue:
+            p = queue.pop(0)
+            n = os.path.basename(p)
+            low = n.lower()
+            if low.endswith(REPORT_EXTS):
                 try:
-                    from .x12_837 import ingest_837_file
-                    ingest_837_file(store, p)
-                    out["claims_837"] += 1
+                    res = _route_report(store, p, n, via=via, origin=origins.get(p), ledger=ledger, deadline=deadline,
+                                        wait_reason=wait_reason, log=log)
+                except Exception as exc:        # noqa: BLE001  (never the message: a converter's message can hold a cell)
+                    out["errors"] += 1
+                    out["failed"].append(n)
+                    log(f"  EMA report ERROR {n}: {type(exc).__name__}")
+                    continue
+                if res is not None:
+                    _note_report(out, res, n, log)
+                    continue
+                if low.endswith(".zip"):
+                    out["skipped"] += 1
+                    log(f"  {n}: not read (only a zip of EMA reports is read here)")
+                    continue
+                if low.endswith(".gz"):
+                    d = tempfile.mkdtemp(prefix="gunzip-", dir=_scratch_dir())
+                    scratch.append(d)
+                    inner = _gunzip_to(p, d, MAX_EXPORT_BYTES)
+                    if inner is None:
+                        out["errors"] += 1
+                        out["failed"].append(f"{n} (not read: not a report, and too large or not gzip)")
+                        continue
+                    if p in origins:
+                        origins[inner] = origins[p]
+                    queue.insert(0, inner)
+                    continue
+            if low.endswith((".xlsx",) + TEXT_EXPORTS):
+                try:
+                    sha = file_sha256(p)
+                    if store.file_seen(sha):
+                        out["skipped"] += 1
+                        continue
+                    if os.path.getsize(p) > MAX_EXPORT_BYTES:
+                        # one of the weekly exports is read whole in memory: one this large is not read at all
+                        out["errors"] += 1
+                        out["failed"].append(f"{n} (too large for this report)")
+                        store.record_file(sha, p, kind="ema:too_large", status="not_read", lines=0)
+                        log(f"  EMA ERROR {n}: Not read: an export over {MAX_EXPORT_BYTES >> 20} MB. Export a shorter date range.")
+                        continue
+                    acct: dict = {}
+                    it = iter_rows(p, acct)
+                    first = next(it, None)          # reads the file and its column names (acct) before any row is converted
+                    if (acct.get("family") or "unknown") == "unknown":
+                        # none of EMA's exports or reports: no row is stored, and the file is noted as not read, so the
+                        # Data tab lists it and it is not fetched again until it changes
+                        out["skipped"] += 1
+                        store.record_file(sha, p, kind="ema:unknown", status="not_read", lines=0)
+                        log(f"  EMA ERROR {n}: Not read: it is none of the EMA exports or reports RemitWatch reads "
+                            "(A/R report, Production report, Encounter & Charge Lines, ERA & Payment Lines, Claim & Claim "
+                            "Status). Nothing from it is stored.")
+                        continue
+                    rows = ([first] if first is not None else []) + list(it)
+                    r = store.ingest_ema_rows(rows)
+                    left = {k: v for k, v in (acct.get("left") or {}).items() if v}
+                    if left or acct.get("above"):
+                        log(f"  EMA {n}: {acct.get('above', 0)} line(s) above the column names left out"
+                            + "".join(f", {v} {k} line(s) left out" for k, v in left.items()))
+                    fam = rows[0]["family"] if rows else (acct.get("family") or "unknown")
+                    store.record_file(sha, p, kind=f"ema:{fam}", status="ok", lines=len(rows), duplicates=len(rows) - r["inserted"])
+                    store.record_export(n, sha, fam, export_created(p), len(rows))
+                    out["ema"] += 1
+                except IsReport as exc:
+                    out["errors"] += 1
+                    out["failed"].append(n)
+                    log(f"  EMA ERROR {n}: {exc}")
                 except Exception as exc:
                     out["errors"] += 1
-                    out["failed"].append(os.path.basename(p))
-                    log(f"  837 ERROR {os.path.basename(p)}: {exc}")
+                    out["failed"].append(n)
+                    log(f"  EMA ERROR {n}: {exc}")
+            elif looks_like_x12(p):
+                with open(p, "rb") as fh:
+                    head = fh.read(400)
+                if b"*837*" in head or b"GS*HC*" in head:
+                    try:
+                        from .x12_837 import ingest_837_file
+                        ingest_837_file(store, p)
+                        out["claims_837"] += 1
+                    except Exception as exc:
+                        out["errors"] += 1
+                        out["failed"].append(n)
+                        log(f"  837 ERROR {n}: {exc}")
+                else:
+                    remits.append(p)
             else:
-                remits.append(p)
-        else:
-            out["skipped"] += 1
-    if remits:
-        st = store.ingest_835_paths(remits)
-        out["remits"] = st["ingested"]
-        out["remit_stats"] = st
-        store.mark_superseded()
+                out["skipped"] += 1
+        if remits:
+            st = store.ingest_835_paths(remits)
+            out["remits"] = st["ingested"]
+            out["remit_stats"] = st
+            if st.get("transactions"):
+                mark_map_dirty(store.conn)      # committed with the next write below
+            store.mark_superseded()
+    finally:
+        for d in scratch:
+            shutil.rmtree(d, ignore_errors=True)
     return out
+
+
+def _scratch_dir() -> str:
+    from . import runtime
+    return runtime.tmp_dir()
+
+
+def mark_map_dirty(conn) -> bool:
+    """New remittances arrived: EMA's claim-link map is made again by the next detection (Part B), so EMA postings the
+    new 835s carry are marked. Only when the store holds an EMA report read as one (otherwise there is nothing to map).
+    Not committed here."""
+    try:
+        if not conn.execute("SELECT 1 FROM ema_report_files WHERE status IN ('current','partly_replaced','replaced','superseded') "
+                            "LIMIT 1").fetchone():
+            return False
+    except Exception:       # noqa: BLE001  (a store with no report table yet has nothing to map)
+        return False
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:map_dirty', '1')")
+    return True

@@ -474,7 +474,9 @@ def _report_hand_off(conn: sqlite3.Connection, db_path: str, tmp: str, name: str
     neither report. A report that lacks a column, or names one twice, is refused here and not kept."""
     from . import ema_reports
     try:
-        rec = ema_reports.recognize(tmp, name)
+        # an open file, not the path: the file waiting here has no ending, and the workbook reader refuses a path without one
+        with open(tmp, "rb") as fh:
+            rec = ema_reports.recognize(fh, name)
     except ema_reports.ReportRefused as exc:
         raise Rejected(exc.message) from exc
     except Exception:
@@ -2471,7 +2473,8 @@ def howto_edit(doc: dict, key: str, text: Any, user: str, name: Any = None, base
     if cur.get("at"):
         hist.insert(0, {"text": cur.get("text") or "", "by": cur.get("by"), "name": cur.get("name"), "at": cur["at"]})
     out = dict(doc)
-    out[key] = {"text": text, "by": user or "", "name": name, "at": now or _now(), "history": hist[:HOWTO_HISTORY]}
+    at = now or datetime.now(timezone.utc).isoformat(timespec="milliseconds")      # two saves within a second still differ
+    out[key] = {"text": text, "by": user or "", "name": name, "at": at, "history": hist[:HOWTO_HISTORY]}
     return out
 
 

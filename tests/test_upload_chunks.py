@@ -266,9 +266,8 @@ def test_every_route_needs_the_sign_in_and_the_header(site, monkeypatch):
                              ("put", "/api/ema/exports/ar/howto", {"json": {"text": "x"}})):
         r = getattr(site.c, method)(path, headers=XHR, **kw)
         assert r.status_code == 401, (path, r.status_code)
-    r = site.c.get("/api/ema/exports", auth=("oda", "correct-horse-battery-7"))
-    assert r.status_code in (200, 401)              # the shared login's name is the configured one
     monkeypatch.setattr(api, "USERNAME", "staff")
+    assert site.c.get("/api/ema/exports", auth=("other", "correct-horse-battery-7")).status_code == 401
     assert site.c.get("/api/ema/exports", auth=("staff", "correct-horse-battery-7")).status_code == 200
 
 
@@ -387,18 +386,21 @@ def test_a_piece_too_large_and_a_file_over_the_cap_are_refused(build, monkeypatc
         codes = [big.piece(i).status_code for i in range(len(big.pieces))]
         assert codes[:4] == [200, 200, 200, 200] and codes[4] == 413
         monkeypatch.delenv("REMITWATCH_UPLOAD_MAX_GB")
-        # only the last piece may be shorter, and nothing follows it
-        short = Up(site, os.urandom(700 * 1024), gz=False)
+        # only the last piece may be shorter, and nothing follows it (a compressed file's count is known at its end only)
+        short = Up(site, os.urandom(700 * 1024), gz=True)
         short.start()
         assert short.piece(0).status_code == 200
         r = short.piece(1, data=short.pieces[1][:1000], total=3)
         assert r.status_code == 400 and "Only the last piece" in r.json()["detail"]
-        r = short.piece(1, data=short.pieces[1][:1000], total=0)       # taken as the last
+        r = short.piece(1, data=short.pieces[1][:1000], total=0)       # shorter: the last one
         assert r.status_code == 200 and r.json()["closed"] is True
         r = short.piece(2, data=short.pieces[2], total=0)
         assert r.status_code == 409 and "The last piece has arrived already" in r.json()["detail"]
-        r = short.piece(3, total=3)
-        assert r.status_code in (400, 409)
+        assert short.piece(3, data=short.pieces[0], total=0).status_code == 409     # past the next one: out of order
+        plain = Up(site, os.urandom(600 * 1024), gz=False)             # a plain file says its count from the first piece
+        plain.start()
+        assert plain.piece(0).status_code == 200
+        assert plain.piece(1, data=plain.pieces[1][:10]).status_code == 400
         monkeypatch.setattr(uploads, "CHUNK_BYTES", 4 * 1024 * 1024)
 
 
@@ -562,10 +564,10 @@ def test_the_checklist_says_what_each_export_is_and_whether_it_is_overdue(site):
     ago = lambda n: (today - timedelta(days=n)).isoformat()      # noqa: E731
 
     def fill(c):
-        for fid, rep, as_of, st in (("a1", "ar_report", ago(3), "current"), ("p1", "production", ago(20), "current"),
-                                    ("p2", "production", ago(1), "refused")):
+        for fid, rep, as_of, came, st in (("a1", "ar_report", ago(3), ago(2), "current"), ("p1", "production", ago(20), ago(17), "current"),
+                                          ("p2", "production", ago(1), ago(1), "refused")):      # a refused file has not arrived
             c.execute("INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, via) VALUES (?,?,?,?,?,?)",
-                      (fid, rep, st, as_of, ago(int(as_of < ago(4)) * 15 + 2), "upload"))
+                      (fid, rep, st, as_of, came, "upload"))
         c.execute("CREATE TABLE IF NOT EXISTS files (sha256 TEXT, kind TEXT, ingested_at TEXT)")
         c.execute("INSERT INTO files (sha256, kind, ingested_at) VALUES ('s1', 'ema:charge_lines', ?)", (ago(2),))
         c.execute("INSERT INTO files (sha256, kind, ingested_at) VALUES ('s2', 'ema:era_lines', ?)", (ago(9),))
@@ -608,7 +610,6 @@ def test_the_how_to_box_keeps_who_saved_it_when_and_the_versions_before(site, mo
     first = box()
     assert first["howto"]["text"] == "Step one.\nStep two." and first["howto"]["name"] == "Front desk"
     assert first["howto"]["by"] == "anonymous" and first["howto"]["at"] and first["howto"]["versions"] == 0 and first["ask"] is None
-    time.sleep(1.1)                                                 # a second later: a new saved time
     r = put({"text": "Step one, then two.", "base_at": first["howto"]["at"]})
     assert r.status_code == 200
     second = box()
@@ -686,6 +687,7 @@ def test_the_cycle_is_asked_to_read_the_file_when_intake_can_be_asked(build, mon
     r = Up(site, text_report()).send()
     assert r.status_code == 200 and calls == [os.path.dirname(site.db)]
     assert "The cycle was asked to read it now." in r.json()["lines"]
+    monkeypatch.delattr(remitwatch, "intake")
     monkeypatch.setitem(sys.modules, "remitwatch.intake", None)          # a build with no intake yet
     r = Up(site, text_report(seed=9)).send()
     assert r.status_code == 200 and "The next cycle reads it." in r.json()["lines"] and len(calls) == 1
@@ -891,7 +893,7 @@ def test_the_upload_page_serves_its_script_and_says_what_happens_to_the_files(bu
     js = site.c.get("/static/upload.js").text
     assert '<script src="/static/upload.js"></script>' in page and "EMA exports RemitWatch needs" in page
     assert "/api/uploads/chunk" in js and "CompressionStream('gzip')" in js and "/api/ema/exports" in js
-    assert "Never" not in page or "never guesses EMA's menus" in page
+    assert "RemitWatch never guesses EMA's menus." in page
     words = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page))
     assert "a file that does not arrive whole is not kept" in words
     assert "RemitWatch knows a file by its checksum, the same way whether it was uploaded or found in the Dropbox folder" in words

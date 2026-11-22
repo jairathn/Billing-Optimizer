@@ -58,6 +58,8 @@ CARC: dict[str, str] = {
     "B16": "New patient qualifications were not met", "B20": "Procedure/service partially or fully furnished by another provider",
     "B22": "Payment adjusted based on the diagnosis", "B23": "Procedure billed is not authorized per your CLIA certification",
     "P1": "State-mandated requirement for property and casualty", "W1": "Workers compensation state fee schedule",
+    "114": "Procedure/product not approved by the Food and Drug Administration", "B9": "Patient is enrolled in a Hospice",
+    "177": "Patient has not met the required eligibility requirements", "288": "Referral absent",
 }
 
 # --------------------------------------------------------------------------- RARC
@@ -99,6 +101,9 @@ RARC: dict[str, str] = {
     "N781": "Alert: patient is a Medicaid/QMB beneficiary; do not bill", "N782": "Alert: patient is a Medicaid/QMB beneficiary; review patient liability",
     "N793": "Alert: service must be billed with the appropriate modifier", "N807": "Payment adjustment based on the Merit-based Incentive Payment System (MIPS)",
     "N822": "Missing procedure modifier(s)", "N823": "Incomplete/invalid procedure modifier(s)",
+    "MA63": "Missing/incomplete/invalid principal diagnosis", "MA67": "Correction to a prior claim",
+    "N104": "This claim/service is not payable under our claim jurisdiction area",
+    "N89": "Alert: payment information for this claim has been forwarded to more than one other payer",
 }
 
 # --------------------------------------------------------------------------- code attributes
@@ -264,7 +269,7 @@ def pos_class(pos: str | None) -> str:
 # (docs/RESEARCH_SUMMARY.md lists the sources). A participation agreement can set a different period,
 # so every deadline shown by the dashboard is an estimate.
 APPEAL_RULES: list[dict] = [
-    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "verified": True,
+    {"match": r"^Anthem / BCBS$", "kinds": {"commercial", "supplement", "other"}, "days": 730, "verified": True, "legal": {"years": 2},
      "label": "Anthem commercial: Claim Payment Reconsideration within two years of the EOP issue date; "
               "Claim Payment Appeal within 90 days of the reconsideration decision",
      "source": "Anthem Blue Cross and Blue Shield Kentucky Commercial Provider Manual, effective September 1, 2026, Claim Payment Disputes"},
@@ -274,17 +279,17 @@ APPEAL_RULES: list[dict] = [
     {"match": r"^Anthem", "kinds": {"medicaid"}, "days": 90, "verified": True,
      "label": "Anthem Kentucky Medicaid: payment appeal within 90 calendar days of the remittance date",
      "source": "Anthem Kentucky Medicaid Provider Manual, payment appeals"},
-    {"match": r"^(UnitedHealthcare|UHC)(?! Integrated)", "kinds": None, "days": 365, "verified": True,
+    {"match": r"^(UnitedHealthcare|UHC)(?! Integrated)", "kinds": None, "days": 365, "verified": True, "legal": {"months": 12},
      "label": "UnitedHealthcare: reconsideration and appeal together within 12 months of the original EOB or PRA (one window for both steps)",
      "source": "UnitedHealthcare Administrative Guide 2026, chapter 10 (revised May 13, 2026); uhcprovider.com appeals page"},
-    {"match": r"^(UMR|Optum|Surest|UHC Integrated)", "kinds": None, "days": 365, "verified": False,
+    {"match": r"^(UMR|Optum|Surest|UHC Integrated)", "kinds": None, "days": 365, "verified": False, "legal": {"months": 12},
      "label": "UnitedHealthcare-administered plan: 12 months from the original EOB or PRA, as for UnitedHealthcare",
      "source": "UnitedHealthcare Administrative Guide 2026 (the plan's own rules not checked)"},
     {"match": r"^Humana", "kinds": {"medicaid"}, "days": 120, "verified": False,
      "label": "Humana Medicaid: 120 days used. Humana Healthy Horizons in Kentucky takes an appeal of a denial or reduction within 120 days "
               "(KRS 205.534) and a contracted-rate dispute within 24 months; the Indiana plan allows 60 days. The remittance does not say which plan",
      "source": "Humana Healthy Horizons in Kentucky appeals page (2026) and KRS 205.534; Humana Healthy Horizons in Indiana provider manual (2026)"},
-    {"match": r"^Humana", "kinds": None, "days": 540, "verified": True,
+    {"match": r"^Humana", "kinds": None, "days": 540, "verified": True, "legal": {"months": 18},
      "label": "Humana: claim dispute within 18 months of receiving the original claim determination (counted here from the remittance date)",
      "source": "Humana Provider Manual 2026 (773902ALL0725), claims disputes, for all products"},
     {"match": r"^Aetna", "kinds": None, "days": 180, "verified": False,
@@ -294,6 +299,13 @@ APPEAL_RULES: list[dict] = [
      "label": "Cigna: payment review within 180 days of the initial payment or denial",
      "source": "Cigna reference guide (as reported in research)"},
 ]
+# The payer's own limit where the due date shown is a safer, earlier one (the answer key compared each window with its
+# document): Medicare's 120 days run from the receipt of the remittance, presumed 5 days after it (42 CFR 405.942: 125
+# days from the remittance); CMS's 2026 guidance gives Medicare Advantage reconsiderations 65 days; a window in months or
+# years ends on the same calendar day (18 months is not 540 days, two years across a leap day is 731). The safe date stays
+# the item's due date; the legal one is shown beside it ("file by <due>; the payer's limit is <legal>").
+APPEAL_LEGAL_DEFAULTS: dict[str, dict] = {"medicare": {"days": 125}, "medicare_advantage": {"days": 65}}
+FEP_LEGAL = {"months": 6}           # federal employee plans: 6 months (5 CFR 890.105)
 APPEAL_DEFAULTS: dict[str, tuple[int, str]] = {
     "medicare": (120, "Medicare Part B: redetermination within 120 days of receipt of the remittance (42 CFR 405.942)"),
     "medicare_advantage": (60, "Medicare Advantage: contracted providers follow the plan manual; 60 days is the conservative default"),
@@ -317,7 +329,7 @@ CORRECTED_RULES: list[dict] = [
     {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "clerical": True, "days": 365, "clock": "remit", "verified": True,
      "label": "Medicare Part B takes no corrected claims: ask for a reopening (a clerical error, including a wrong or missing modifier) within 1 year of the initial determination (42 CFR 405.980)",
      "source": "42 CFR 405.980(b); CMS Claims Processing Manual ch. 34 sec. 10.4; CGS reopening and redetermination job aid, December 2025"},
-    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 120, "clock": "remit", "verified": True,
+    {"match": r"^Medicare|^Railroad Medicare", "kinds": {"medicare"}, "days": 120, "clock": "remit", "verified": True, "legal": {"days": 125},
      "label": "Medicare Part B: information or records the claim lacked go in a redetermination within 120 days of receipt of the remittance "
               "(42 CFR 405.942); a reopening takes no documents",
      "source": "42 CFR 405.942; CGS reopening and redetermination job aid, December 2025 (documentation is not reviewed in a reopening)"},
@@ -355,7 +367,7 @@ def corrected_rule(payer_group: str | None, payer_kind: str | None, rarcs: str |
         if r.get("clerical") and not clerical:
             continue
         if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
-            return {k: r[k] for k in ("days", "clock", "label", "source", "verified")}
+            return dict({k: r[k] for k in ("days", "clock", "label", "source", "verified")}, legal=r.get("legal"))
     return None
 
 
@@ -363,13 +375,39 @@ def appeal_rule(payer_group: str | None, payer_kind: str | None, plan: str | Non
     """Filing window for the first-level dispute: {'days', 'label', 'source', 'verified'}."""
     grp, kind = payer_group or "", payer_kind or "other"
     if plan and "FEDERAL EMPLOYEE" in plan.upper():
-        return {"days": 180, "verified": False, "source": "conservative default for the Federal Employee Program",
+        return {"days": 180, "verified": False, "source": "conservative default for the Federal Employee Program", "legal": FEP_LEGAL,
                 "label": "Federal Employee Program: 180 days used as a conservative window; confirm the provider dispute period with the local Blue plan"}
     for r in APPEAL_RULES:
         if re.search(r["match"], grp) and (r["kinds"] is None or kind in r["kinds"]):
-            return {"days": r["days"], "label": r["label"], "source": r["source"], "verified": r["verified"]}
+            return {"days": r["days"], "label": r["label"], "source": r["source"], "verified": r["verified"], "legal": r.get("legal")}
     days, label = APPEAL_DEFAULTS.get(kind, APPEAL_DEFAULTS["other"])
-    return {"days": days, "label": label, "source": "default by payer type", "verified": kind == "medicare"}
+    return {"days": days, "label": label, "source": "default by payer type", "verified": kind == "medicare",
+            "legal": APPEAL_LEGAL_DEFAULTS.get(kind)}
+
+
+def _add_months(d, months: int):
+    """The same calendar day `months` later (the month's last day when it has no such day)."""
+    import calendar
+    y, m = divmod(d.month - 1 + months, 12)
+    y, m = d.year + y, m + 1
+    return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def legal_deadline(start: str | None, rule: dict | None) -> str | None:
+    """The payer's own limit for a window that starts on `start` (ISO date), from the rule's 'legal' spec ({'days': n},
+    {'months': n} or {'years': n}); None when the rule has none (the due date shown is the payer's own limit)."""
+    from datetime import date as _date, timedelta as _td
+    spec = (rule or {}).get("legal")
+    if not spec or not start:
+        return None
+    try:
+        d = _date.fromisoformat(str(start)[:10])
+    except ValueError:
+        return None
+    if spec.get("days"):
+        return (d + _td(days=int(spec["days"]))).isoformat()
+    months = int(spec.get("months") or 0) + 12 * int(spec.get("years") or 0)
+    return _add_months(d, months).isoformat() if months else None
 
 
 # The limit for a claim's first filing, counted from the date of service: a claim the payer has no record of (never

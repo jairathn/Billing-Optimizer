@@ -9,6 +9,7 @@ serverless mode on a laptop.
     get_chunks(name) -> iterator or None  put_chunks(name, chunks) -> meta        (large files)
     meta(name) -> {"rev", "size", "modified"} or None
     list(prefix) -> [{"name", "rev", "size", "modified"}]        delete(name) -> bool
+    move(name, to) -> bool                                        (the intake folder's pairs go to intake/done/)
 
 mode "add" refuses to replace an existing file and mode "update" replaces it only when its revision is still `rev`.
 Both raise Conflict otherwise. That is all the locking the cycle needs.
@@ -158,6 +159,17 @@ class LocalState:
     def delete_many(self, names: list[str]) -> int:
         return sum(1 for n in names if self.delete(n))
 
+    def move(self, name: str, to: str) -> bool:
+        """Move a file inside the folder (a file already at `to` is replaced). False when there is no such file."""
+        src, dst = self._p(name), self._p(to)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with self._locked():
+            try:
+                os.replace(src, dst)
+                return True
+            except FileNotFoundError:
+                return False
+
     def describe(self) -> str:
         return f"local folder {self.root}"
 
@@ -223,6 +235,29 @@ class DropboxState:
     def delete_many(self, names: list[str]) -> int:
         """Many small files in a few calls: a day of status changes is hundreds of journal entries."""
         return self.client.delete_many([self._p(n) for n in names]) if names else 0
+
+    def move(self, name: str, to: str) -> bool:
+        """Move a file inside the folder (Dropbox moves it; a file already at `to` is replaced). False when there is no
+        such file. A client with no move of its own copies the file and deletes the original."""
+        from .dropbox_sync import DropboxConflict, DropboxNotFound
+        mover = getattr(self.client, "move", None)
+        if mover is None:
+            data = self.get(name)
+            if data is None:
+                return False
+            self.put(to, data)
+            self.delete(name)
+            return True
+        for _ in range(2):
+            try:
+                mover(self._p(name), self._p(to))
+                return True
+            except DropboxNotFound:
+                return False
+            except DropboxConflict:
+                self.delete(to)         # an earlier move of the same name whose answer was lost: the newer one wins
+        mover(self._p(name), self._p(to))
+        return True
 
     def describe(self) -> str:
         return f"Dropbox folder {self.base}"
