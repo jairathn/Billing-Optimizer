@@ -229,45 +229,67 @@ function bindFaxDrawer(id, d){
 }
 
 // ---------------------------------------------------------------- the Faxes page
+const FAX_RESEND = new Set(['second_request','next_level','records','payment']);
 async function faxesTab(v){
   const [fx, pp] = await Promise.all([api('/api/faxes'), api('/api/faxes/payers')]);
-  const due = fx.due || [], pushes = due.filter(x => x.action !== 'person'), people = due.filter(x => x.action === 'person');
+  const due = fx.due || [], pushes = due.filter(x => x.action !== 'person' && !x.hold), people = due.filter(x => x.action === 'person' || x.hold);
   const unmatched = (fx.received||[]).filter(x => !x.finding_id);
-  const numInput = (p, purpose) => { const cur = ((p.numbers||{})[purpose]||{}).number || '';
-    return `<input data-pfax="${esc(p.payer_group)}" data-purpose="${purpose}" value="${esc(cur)}" placeholder="${purpose==='appeal'?'(800) 555-0100':'if different'}" inputmode="tel" style="width:140px"><button data-psave="${esc(p.payer_group)}" data-purpose="${purpose}">Save</button>`; };
+  const sends = fx.sends !== false;
+  const numInput = (p, purpose) => { const n = (p.numbers||{})[purpose] || {}, cur = n.number || '';
+    const when = s => esc(String(s||'').replace('T',' ').slice(0,16));
+    return `<input data-pfax="${esc(p.payer_group)}" data-purpose="${purpose}" value="${esc(cur)}" placeholder="${purpose==='appeal'?'(800) 555-0100':'if different'}" inputmode="tel" style="width:140px"><button data-psave="${esc(p.payer_group)}" data-purpose="${purpose}">Save</button>`
+      + (cur ? `<div class="muted" title="${esc((n.history||[]).map(h => `${h.number} by ${h.by||'?'} on ${String(h.at||'').slice(0,10)}${h.confirmed ? ' (confirmed)' : ''}`).join('\n'))}">Saved by ${esc(n.by||'?')} on ${when(n.at).slice(0,10)}</div>` : '')
+      + (cur && n.confirmed === false ? `<div class="sev-medium">Changed${n.changed_at ? ' on ' + when(n.changed_at).slice(0,10) : ''}${n.previous ? ` (was ${esc(n.previous)})` : ''}. Retries and follow-ups wait until someone confirms it.
+          <button data-pconfirm="${esc(p.payer_group)}" data-purpose="${purpose}" data-number="${esc(cur)}">Confirm ${esc(cur)}</button></div>` : ''); };
   const nth = k => { const r = [11,12,13].includes(k % 100) ? 0 : k % 10; return k + (r === 1 ? 'st' : r === 2 ? 'nd' : r === 3 ? 'rd' : 'th'); };
   const what = x => x.action === 'second_request' ? `Ask again (${nth(x.n + 1)} request)`
     : ({next_level:'Ask for the next level', records:'Send the records', payment:'Ask for the payment', person:'A person decides'}[x.action] || x.action);
+  // what a person can do about one item, in one click: send it to the number saved now, or say whether a send went out
+  const personDo = x => {
+    if(x.settle) return `<button data-settle="${esc(x.settle)}" data-went="1">It went out</button> <button data-settle="${esc(x.settle)}" data-went="0">It did not go out</button>`;
+    const act = x.action === 'person' ? x.resend : x.action;
+    if(sends && x.number && FAX_RESEND.has(act)) return `<button data-send="${esc(x.finding_id)}" data-number="${esc(x.number)}">Send it to ${esc(x.number)}</button>`;
+    if(x.resend === 'appeal') return '<span class="muted">Open the item: Send the appeal again</span>';
+    return '';
+  };
+  const says = x => `<select data-says="${esc(x.fax_key)}"><option value="">What it says (when it was not read)</option>${FAX_SAYS.map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join('')}</select>`;
+  const unread = x => !x.document_type || x.purpose === 'unread' || !!x.error;
+  const itemCell = x => x.finding_id
+    ? `<a href="#" data-open="${esc(x.finding_id)}">${esc(x.title||'Open the item')}</a>${(x.tied||[]).length > 1 ? `<div class="muted">and ${pl(x.tied.length - 1, 'other item')} of the claim</div>` : ''}`
+    : `<span class="sev-medium">Needs a person to match</span>${x.needs ? `<div class="muted">${esc(x.needs)}</div>` : ''}
+       ${(x.suggested||[]).length ? `<div>${unread(x) ? says(x) : ''}${x.suggested.map(s => `<div><button data-tie="${esc(x.fax_key)}" data-to="${esc(s.finding_id)}">Tie to: ${esc(s.title||'item')} · ${esc(s.service_date||'')} · ${esc(s.payer_group||'')}${s.patient_control_number ? ' · claim ' + esc(s.patient_control_number) : ''}</button></div>`).join('')}</div>` : ''}`;
   v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">Faxes</h1> <span class="muted">Appeals faxed to payers, their answers read and matched, and the follow-ups that keep going every week until each claim is paid or decided.</span></div>
-      <div class="ph-go">${fx.configured ? '<button id="fxCheck">Check for faxes now</button>' : ''}<button class="primary" id="fxAll">Appeal everything appealable</button></div></div>
+      <div class="ph-go">${fx.configured && sends ? '<button id="fxCheck">Check for faxes now</button>' : ''}<button class="primary" id="fxAll">Appeal everything appealable</button></div></div>
     <div class="panel"><b>The fax line:</b> ${fx.configured ? `${fx.line ? esc(fx.line) : 'set up'}${fx.line ? ' · payers answer to this number, so their letters come back here' : ' · set SRFAX_CALLER_ID to the line\'s number so letters give it'}` : '<span class="sev-medium">not set up yet</span>: sign up with SRFax (a healthcare plan, with its BAA), then set SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD, SRFAX_CALLER_ID and SRFAX_SENDER_EMAIL in the host\'s settings. /setup checks it.'}
+      ${fx.not_here ? `<div class="small sev-medium">${esc(fx.not_here)}</div>` : ''}
       ${(fx.practice_missing||[]).length ? `<div class="small sev-medium">The letters still lack the practice's details: set ${esc(fx.practice_missing.join(', '))}.</div>` : ''}
       <div id="fxCheckMsg" class="small muted"></div></div>
     <div class="panel"><h2>Follow-ups due <span class="muted small">${num(pushes.length)}</span></h2>
-      <div class="note">An appeal with no decision after the payer's time to answer (60 days for Medicare and Medicare Advantage, 30 for commercial plans) gets a second request, then another every week; an upheld appeal goes to the next level with the payer's decision attached; approved but unpaid after 30 days gets a payment request. The daily run sends these by itself; this button sends them now.</div>
+      <div class="note">An appeal with no decision after the payer's time to answer (60 days for Medicare and Medicare Advantage, 30 for commercial plans) gets a second request, then another every week; an upheld appeal goes to the next level with the payer's decision attached; approved but unpaid after 30 days gets a payment request. The daily run sends these by itself; this button sends them now. A follow-up waits for a person when the payer's number changed since the item's last fax.</div>
       ${pushes.length ? `<table class="small"><thead><tr><th>Item</th><th>Payer</th><th>Next</th><th>Why</th><th class="num">Amount</th></tr></thead><tbody>${pushes.map(x=>`<tr class="row" data-id="${esc(x.finding_id)}"><td>${esc(x.title||'')}<div class="muted">${esc(x.service_date||'')}</div></td><td>${esc(x.payer_group||'')}</td><td><b>${esc(what(x))}</b></td><td>${esc(x.why)}</td><td class="num">${money2(x.shortfall_cents)}</td></tr>`).join('')}</tbody></table>
-        <div class="actions" style="margin-top:6px"><button class="primary" id="fxPush">${pushes.length === 1 ? 'Send the follow-up now' : `Send the ${num(pushes.length)} follow-ups now`}</button><span id="fxPushMsg" class="small muted"></span></div>` : '<div class="muted small">Nothing due. Each appeal sent is checked every day.</div>'}
-      ${people.length ? `<h3 class="small" style="margin-top:10px">For a person <span class="muted">${num(people.length)}</span></h3><table class="small"><tbody>${people.map(x=>`<tr class="row" data-id="${esc(x.finding_id)}"><td>${esc(x.title||'')}</td><td>${esc(x.payer_group||'')}</td><td>${esc(x.why)}</td><td class="num">${money2(x.shortfall_cents)}</td></tr>`).join('')}</tbody></table>` : ''}</div>
-    <div class="panel"><h2>Payer fax numbers</h2><div class="note">Typed once per payer from its provider manual, appeal form or one of its letters. Faxes go only to a number saved here. The phone and website are what the payer's remittances give, to look the number up.</div>
+        ${sends ? `<div class="actions" style="margin-top:6px"><button class="primary" id="fxPush">${pushes.length === 1 ? 'Send the follow-up now' : `Send the ${num(pushes.length)} follow-ups now`}</button><span id="fxPushMsg" class="small muted"></span></div>` : ''}` : '<div class="muted small">Nothing due. Each appeal sent is checked every day.</div>'}
+      ${people.length ? `<h3 class="small" style="margin-top:10px">For a person <span class="muted">${num(people.length)}</span></h3><table class="small"><tbody>${people.map(x=>`<tr class="row" data-id="${esc(x.finding_id)}"><td>${esc(x.title||'')}</td><td>${esc(x.payer_group||'')}</td><td>${esc(x.hold || x.why)}</td><td class="num">${money2(x.shortfall_cents)}</td><td>${personDo(x)}</td></tr>`).join('')}</tbody></table><div id="fxPersonMsg" class="small"></div>` : ''}</div>
+    <div class="panel"><h2>Payer fax numbers</h2><div class="note">Typed once per payer from its provider manual, appeal form or one of its letters, and read back before it is saved. Faxes go only to a number saved here.${pp.owner ? ' Adding or changing a number needs the owner\'s password.' : ''} A number that replaces another is used by retries and follow-ups only once someone confirms it. The phone and website are what the payer's remittances give, to look the number up.</div>
       <div class="scroll"><table class="small"><thead><tr><th>Payer</th><th class="num">Open appeals</th><th>Appeal fax</th><th>Second level fax</th><th>Look it up</th></tr></thead><tbody>
       ${(pp.payers||[]).map(p=>`<tr><td>${esc(p.payer_group)}<div class="muted">${esc(p.payer_kind||'')}</div></td><td class="num">${num(p.n)} · ${money(p.cents)}</td><td>${numInput(p,'appeal')}</td><td>${numInput(p,'level_2')}</td><td class="muted">${esc(fax10(p.phone))}${p.url?`<div>${esc(p.url)}</div>`:''}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No payer has an open appeal.</td></tr>'}
       </tbody></table></div><div id="pfMsg" class="small"></div></div>
     <div class="panel"><h2>Came in <span class="muted small">${num((fx.received||[]).length)}</span></h2>
       ${fx.review ? '' : '<div class="note sev-medium">Claude\'s reading of incoming faxes is off (ANTHROPIC_API_KEY): they are listed, not read or matched.</div>'}
-      ${unmatched.length ? `<div class="note">${pl(unmatched.length, 'fax')} could not be tied to an item: open the PDF, then open the item it answers and use "Tie a fax that came in".</div>` : ''}
+      ${unmatched.length ? `<div class="note">${pl(unmatched.length, 'fax')} need a person to match. A fax is tied by itself only when a claim number or member ID on it names the item and it came from a number known for that payer. Open the PDF, then tie it to the item it answers (or open the item and use "Tie a fax that came in").</div>` : ''}
       ${(fx.received||[]).length ? `<div class="scroll"><table class="small"><thead><tr><th>Received</th><th>From</th><th>What</th><th>Says</th><th>Item</th><th></th></tr></thead><tbody>${fx.received.map(x=>`<tr><td>${esc(String(x.created_at||'').replace('T',' ').slice(0,16))}</td><td>${esc(fax10(x.number))}${x.payer?`<div class="muted">${esc(x.payer)}</div>`:''}</td>
         <td>${esc(FAX_DOC[x.purpose]||x.purpose||'')}${x.decision && FAX_DECISION[x.decision] ? `<div class="${FAX_DECISION[x.decision][1]}">${FAX_DECISION[x.decision][0]}</div>` : ''}</td>
         <td>${esc(x.summary||x.error||'')}${x.deadline?`<div class="sev-medium">Deadline ${esc(x.deadline)}</div>`:''}${x.patient?`<div class="muted">${esc(x.patient)}</div>`:''}</td>
-        <td>${x.finding_id ? `<a href="#" data-open="${esc(x.finding_id)}">${esc(x.title||'Open the item')}</a>` : '<span class="muted">not tied</span>'}</td>
-        <td><a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">PDF</a></td></tr>`).join('')}</tbody></table></div>` : '<div class="muted small">Nothing yet.</div>'}</div>
+        <td>${itemCell(x)}</td>
+        <td><a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">PDF</a></td></tr>`).join('')}</tbody></table></div><div id="fxTieMsg" class="small"></div>` : '<div class="muted small">Nothing yet.</div>'}</div>
     <div class="panel"><h2>Sent <span class="muted small">${num((fx.sent||[]).length)}</span></h2>
       ${(fx.sent||[]).length ? `<div class="scroll"><table class="small"><thead><tr><th>Sent</th><th>To</th><th>What</th><th>State</th><th class="num">Pages</th><th>Item</th><th></th></tr></thead><tbody>${fx.sent.map(x=>`<tr><td>${esc(String(x.created_at||'').replace('T',' ').slice(0,16))}</td><td>${esc(x.payer_group||'')}<div class="muted">${esc(x.number||'')}</div></td>
         <td>${esc(FAX_PURPOSE[x.purpose]||x.purpose||'')}${x.level>1?` <span class="muted">(level ${esc(x.level)})</span>`:''}</td>
-        <td><span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status==='queued'?'going out':x.status||'')}</span>${x.error?`<div class="muted">${esc(x.error)}</div>`:''}</td>
+        <td><span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status==='queued'?'going out':x.status==='sending'?'not settled':x.status||'')}</span>${x.error?`<div class="muted">${esc(x.error)}</div>`:''}
+          ${x.unsettled ? `<div class="small">Look in SRFax's sent faxes: <button data-settle="${esc(x.fax_key)}" data-went="1">It went out</button> <button data-settle="${esc(x.fax_key)}" data-went="0">It did not go out</button></div>` : ''}</td>
         <td class="num">${esc(x.pages||'')}</td><td>${x.finding_id ? `<a href="#" data-open="${esc(x.finding_id)}">${esc(x.title||'Open')}</a>` : ''}</td>
         <td>${x.packet_id ? `<a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">Packet</a>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted small">Nothing sent yet. Tick items on a list and use Appeal by fax, or Appeal everything appealable above.</div>'}</div>`;
   v.querySelectorAll('[data-open]').forEach(a => a.onclick = e => { e.preventDefault(); openDetail(a.dataset.open); });
-  v.querySelectorAll('tr.row[data-id]').forEach(tr => tr.onclick = () => openDetail(tr.dataset.id));
+  v.querySelectorAll('tr.row[data-id]').forEach(tr => tr.onclick = e => { if(e.target.closest('button,select,input,a')) return; openDetail(tr.dataset.id); });
   v.querySelector('#fxAll').onclick = () => appealEverything({after: render});
   const ck = v.querySelector('#fxCheck');
   if(ck) ck.onclick = async () => {
@@ -290,11 +312,45 @@ async function faxesTab(v){
       setTimeout(render, 1200); }
     catch(e){ msg.textContent = e.message; push.disabled = false; }
   };
+  // one item, by a person, to the number in front of them
+  v.querySelectorAll('[data-send]').forEach(b => b.onclick = async () => {
+    const msg = v.querySelector('#fxPersonMsg');
+    if(!confirm(`Fax this item's follow-up to ${b.dataset.number}?`)) return;
+    b.disabled = true;
+    try { const r = await post('/api/faxes/follow_up', {finding_ids: [b.dataset.send], number: b.dataset.number});
+      const one = (r.results||[])[0] || {};
+      msg.className = one.status === 'sent' ? 'small ok' : 'small sev-medium';
+      msg.textContent = one.status === 'sent' ? `Faxed to ${one.number}.` : (one.reason || 'Not sent.');
+      if(one.status === 'sent') setTimeout(render, 1200); else b.disabled = false; }
+    catch(e){ msg.className = 'small sev-high'; msg.textContent = e.message; b.disabled = false; }
+  });
+  v.querySelectorAll('[data-settle]').forEach(b => b.onclick = async () => {
+    const went = b.dataset.went === '1';
+    if(!confirm(went ? 'You found this fax in SRFax\'s sent faxes: it went out?' : 'This fax is not in SRFax\'s sent faxes: it did not go out? The line then tries it again.')) return;
+    try { await post('/api/faxes/settle', {fax_key: b.dataset.settle, went}); render(); }
+    catch(e){ alert(e.message); }
+  });
+  v.querySelectorAll('[data-tie]').forEach(b => b.onclick = async () => {
+    const msg = v.querySelector('#fxTieMsg'), sel = v.querySelector(`[data-says="${CSS.escape(b.dataset.tie)}"]`);
+    if(!confirm('Tie this fax to that item? From then on it counts as the payer\'s answer about it.')) return;
+    try { await post('/api/faxes/match', Object.assign({fax_key: b.dataset.tie, finding_id: b.dataset.to}, sel && sel.value ? {says: sel.value} : {})); render(); }
+    catch(e){ msg.className = 'small sev-high'; msg.textContent = e.message; }
+  });
   v.querySelectorAll('[data-psave]').forEach(b => b.onclick = async () => {
     const p = b.dataset.psave, purpose = b.dataset.purpose, input = [...v.querySelectorAll('[data-pfax]')].find(x => x.dataset.pfax === p && x.dataset.purpose === purpose);
-    const msg = v.querySelector('#pfMsg');
-    try { const r = await post('/api/faxes/payer', {payer_group: p, purpose, number: input.value});
-      msg.className = 'small ok'; msg.textContent = r.number ? `${p}: ${purpose === 'appeal' ? 'appeal' : 'second level'} fax saved as ${r.number}.` : `${p}: removed.`; }
+    const msg = v.querySelector('#pfMsg'), d = faxDigits(input.value);
+    if(input.value.trim() && !d){ msg.className = 'small sev-high'; msg.textContent = `${p}: type the ten digits of the fax number.`; return; }
+    if(!faxReadBack(p, purpose, d)) return;
+    try { const r = await faxOwnerPost('/api/faxes/payer', {payer_group: p, purpose, number: d}, msg);
+      msg.className = 'small ok'; msg.textContent = r.number ? `${p}: ${purpose === 'appeal' ? 'appeal' : 'second level'} fax saved as ${r.number}.` : `${p}: removed.`;
+      if(r.needs_confirm) msg.textContent += ` It replaced ${r.previous}: retries and follow-ups wait until someone confirms it.`;
+      setTimeout(render, 1500); }
+    catch(e){ msg.className = 'small sev-high'; msg.textContent = `${p}: ${e.message}`; }
+  });
+  v.querySelectorAll('[data-pconfirm]').forEach(b => b.onclick = async () => {
+    const p = b.dataset.pconfirm, purpose = b.dataset.purpose, msg = v.querySelector('#pfMsg');
+    if(!confirm(`Retries and follow-ups for ${p} go to ${b.dataset.number} from now on, each with the patient's records. Is that the payer's number, from its own papers?`)) return;
+    try { await faxOwnerPost('/api/faxes/payer/confirm', {payer_group: p, purpose, number: b.dataset.number}, msg); render(); }
     catch(e){ msg.className = 'small sev-high'; msg.textContent = `${p}: ${e.message}`; }
   });
 }
@@ -305,11 +361,17 @@ async function tieFaxHtml(d, id){
   el.onclick = async () => {
     const box = d.querySelector('#fxOneMsg');
     let fx; try { fx = await api('/api/faxes'); } catch(e){ box.textContent = e.message; return; }
-    const loose = (fx.received||[]).filter(x => !x.finding_id);
-    if(!loose.length){ box.className = 'small muted'; box.textContent = 'Every fax that came in is tied to an item.'; return; }
-    box.innerHTML = `<select id="fxTieSel">${loose.map(x=>`<option value="${esc(x.fax_key)}">${esc(String(x.created_at||'').slice(0,10))} · ${esc(FAX_DOC[x.purpose]||x.purpose||'')} · ${esc((x.summary||'').slice(0,80))}</option>`).join('')}</select> <button id="fxTieGo">Tie to this item</button>`;
+    // the faxes that name this item first, then the others not tied yet, then those tied elsewhere (a wrong tie is undone here)
+    const all = (fx.received||[]).filter(x => x.finding_id !== id && !(x.tied||[]).includes(id));
+    const named = x => (x.suggested||[]).some(s => s.finding_id === id);
+    const order = [...all.filter(named), ...all.filter(x => !named(x) && !x.finding_id), ...all.filter(x => !named(x) && x.finding_id)];
+    if(!order.length){ box.className = 'small muted'; box.textContent = 'No fax that came in is left to tie here.'; return; }
+    box.className = 'small';
+    box.innerHTML = `<select id="fxTieSel">${order.map(x=>`<option value="${esc(x.fax_key)}">${named(x) ? 'Names this item · ' : x.finding_id ? 'Tied to another item · ' : ''}${esc(String(x.created_at||'').slice(0,10))} · ${esc(fax10(x.number))} · ${esc(FAX_DOC[x.purpose]||x.purpose||'')} · ${esc((x.summary||x.error||'').slice(0,80))}${(x.claim_numbers||[]).length ? ' · claim ' + esc(x.claim_numbers.join(', ')) : ''}</option>`).join('')}</select>
+      <select id="fxTieSays"><option value="">What it says (when it was not read)</option>${FAX_SAYS.map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join('')}</select> <button id="fxTieGo">Tie to this item</button>`;
     box.querySelector('#fxTieGo').onclick = async () => {
-      try { await post('/api/faxes/match', {fax_key: box.querySelector('#fxTieSel').value, finding_id: id}); openDetail(id); }
+      const says = box.querySelector('#fxTieSays').value;
+      try { await post('/api/faxes/match', Object.assign({fax_key: box.querySelector('#fxTieSel').value, finding_id: id}, says ? {says} : {})); openDetail(id); }
       catch(e){ box.textContent = e.message; }
     };
   };

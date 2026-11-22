@@ -520,6 +520,308 @@ def test_two_patients_of_one_name_that_day_are_told_apart_or_left_to_a_person(si
     assert r["note"]["status"] == "matched" and r["note"]["claims"] == ["CB0000999C017"] and r["note"]["matched_by"] == "person"
 
 
+def _twin(db: str, last: str = "SAMPLE", first: str = "PAT") -> None:
+    """Another patient seen on 11/01 with a denial of her own (claim CB0000999C017, EMA patient EMA90); the store's denied
+    visit (CB0000300C017) is EMA patient EMA77's."""
+    conn = sqlite3.connect(db)
+    conn.execute("""INSERT INTO claims (claim_key, transaction_key, patient_control_number, patient_last, patient_first, statement_from)
+                    VALUES ('k-twin', 't-twin', 'CB0000999C017', ?, ?, '2026-11-01')""", (last, first))
+    conn.execute("""INSERT INTO findings (finding_id, signal, category, claim_key, patient_control_number, service_date, payer_group, status)
+                    VALUES ('f-twin', 'DENIED_MEDICAL_NECESSITY', 'denial', 'k-twin', 'CB0000999C017', '2026-11-01', 'Humana', 'open')""")
+    conn.commit()
+    conn.close()
+    ema_row(db, DENIED, "EMA77")
+    ema_row(db, "CB0000999C017", "EMA90")
+
+
+@pytest.mark.parametrize("last, first", [("SAMPLE", "PAT"), ("SAMPLE", "PATRICIA"), ("SAMPLESON", "PAT")])
+def test_the_other_patients_uploaded_note_is_never_used(site, last, first):
+    """Only EMA77's note is uploaded, and it states her patient ID. The other patient seen that day (same name, a first
+    name that starts like hers, or a family name that holds hers) gets no note from it: not by name, not in the list of
+    notes waiting, not in the batch, not in an appeal. Before, her appeal was built (and faxed) from EMA77's note."""
+    from remitwatch import modmed
+    _twin(site.db, last, first)
+    one = site.up("note.pdf", note_pdf(NOTE))
+    assert one["status"] == "matched" and one["note"]["claims"] == [DENIED] and one["note"]["confirm"] is False
+    conn = sqlite3.connect(site.db)
+    conn.row_factory = sqlite3.Row
+    try:
+        twin = modmed.ClaimKey(last, first, "2026-11-01", ema_patient_ids=["EMA90"], claim_id="CB0000999C017")
+        assert uploads.find_note(conn, twin)["status"] == "not_found"
+        mine = uploads.find_note(conn, modmed.ClaimKey("SAMPLE", "PAT", "2026-11-01", ema_patient_ids=["EMA77"], claim_id=DENIED))
+        assert mine["status"] == "found" and mine["identified_by"] == ["EMA patient ID", "name"]
+    finally:
+        conn.close()
+    need = {i["finding_id"]: i["note"] for i in site.c.get("/api/uploads/needed").json()["items"]}
+    assert need["f-twin"] == "not_found" and list(need.values()).count("found") == 1
+    assert "f-twin" not in [i["finding_id"] for i in site.c.get("/api/appeals/ema_queue?ready=1").json()["items"]]
+    r = site.c.post("/api/appeals/from_ema", json={"finding_id": "f-twin", "use_ai": False}, headers=XHR).json()
+    assert r["status"] == "not_found" and "packet" not in r
+
+
+def test_two_patients_notes_of_one_name_each_go_to_their_own_claim(site):
+    """Both patients' notes uploaded, each stating its patient ID: each claim finds its own, never the other's (they no
+    longer merge into one patient)."""
+    _twin(site.db)
+    site.up("note-77.pdf", note_pdf(NOTE))
+    other = [ln.replace("EMA77", "EMA90").replace("changing mole on the back", "rash on the arm") for ln in NOTE]
+    two = site.up("note-90.pdf", note_pdf(other))
+    assert two["status"] == "matched" and two["note"]["claims"] == ["CB0000999C017"]
+    a = site.c.post("/api/appeals/from_ema", json={"finding_id": "f-twin", "use_ai": False}, headers=XHR).json()
+    assert a["status"] == "built" and a["note"]["id"] == "upload-" + two["note"]["note_id"] and a["others"] == []
+    fid = next(i["finding_id"] for i in site.c.get("/api/uploads/needed").json()["items"] if i["finding_id"] != "f-twin")
+    b = site.c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False}, headers=XHR).json()
+    assert b["status"] == "built" and b["note"]["id"] != a["note"]["id"] and b["others"] == []
+
+
+def test_a_note_matched_by_name_and_date_alone_waits_for_a_person(site):
+    """The claim has EMA's patient ID, the note states none: name and date are all that agree, so nothing goes out until
+    a person confirms it in the item (a pick) or attaches it there."""
+    ema_row(site.db, DENIED, "EMA77")
+    plain = [ln.replace("    Patient ID: EMA77", "") for ln in NOTE]
+    up = site.up("plain.pdf", note_pdf(plain))
+    assert up["status"] == "matched" and up["note"]["confirm"] is True
+    fid = site.c.get("/api/uploads/needed").json()["items"][0]["finding_id"]
+    assert site.c.get("/api/uploads/needed").json()["items"][0]["note"] == "ambiguous"
+    r = site.c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False}, headers=XHR).json()
+    assert r["status"] == "ambiguous" and [c["id"] for c in r["candidates"]] == ["upload-" + up["note"]["note_id"]]
+    assert "Only the name agrees" in r["reason"]
+    picked = site.c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False, "document_id": r["candidates"][0]["id"]},
+                         headers=XHR).json()
+    assert picked["status"] == "built" and "a person" in picked["identified_by"]
+    # a number on the note that is not after a label (the practice's ZIP code, a dose) is never taken for the patient's ID
+    assert uploads.note_ids("Test Dermatology, 1 Main St, Anytown KY 42301\nPatient ID: EMA77 DOB: 01/02/1960") == ["EMA77"]
+    assert uploads.note_ids("Anytown KY 42301. Ibuprofen 400 mg.") == []
+    assert uploads.birth_date("Patient: Pat Sample    DOB: 01/02/1960") == "1960-01-02"
+
+
+def test_a_note_for_a_visit_with_no_item_is_not_tied_to_one_it_mentions(site):
+    """A follow-up note (its date of service 11/15) mentions the biopsy of 11/01, which has a denial. It is the 11/15
+    visit's note, so it is never tied to the 11/01 claim, and that appeal is not built from it."""
+    follow = ["Test Dermatology  -  Progress Note", "Patient: Pat Sample    Patient ID: EMA77", "Date of Service: 11/15/2026",
+              "Follow-up of the shave biopsy done 11/01/2026: healing well, pathology benign."]
+    r = site.up("follow-up.pdf", note_pdf(follow))
+    assert r["status"] == "unmatched" and "Nov 15, 2026" in r["lines"][0]
+    fid = site.c.get("/api/uploads/needed").json()["items"][0]["finding_id"]
+    built = site.c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False}, headers=XHR).json()
+    assert built["status"] == "not_found"
+    conn = sqlite3.connect(site.db)
+    try:
+        assert uploads.rematch(conn) == {} and table(site.db, "SELECT status FROM uploaded_notes") == [("unmatched",)]
+    finally:
+        conn.close()
+
+
+def test_names_off_hide_the_note_files_own_name(site, monkeypatch):
+    """A note saved under the patient's name: with names off, the answer, the history and the appeal show it by kind and
+    a short id. With names on, its own name."""
+    import remitwatch.api as api
+    ema_row(site.db, DENIED, "EMA77")
+    r = site.up("Sample Pat 11-01.pdf", note_pdf(NOTE))
+    assert r["name"].startswith("Visit note ") and "Sample" not in json.dumps(r)
+    hist = site.c.get("/api/uploads").json()["items"]
+    assert [i["name"] for i in hist] == [r["name"]]
+    fid = site.c.get("/api/uploads/needed").json()["items"][0]["finding_id"]
+    built = site.c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False}, headers=XHR).json()
+    assert built["status"] == "built" and built["note"]["uploaded_name"].startswith("Visit note ")
+    monkeypatch.setattr(api, "SHOW_PHI", True)
+    assert [i["name"] for i in site.c.get("/api/uploads").json()["items"]] == ["Sample Pat 11-01.pdf"]
+
+
+def test_a_remittance_saved_under_a_spreadsheet_ending_is_read_as_one(site):
+    r = site.up("remit-777.csv", new_remittance())
+    assert r["status"] == "queued" and r["kind"] == "x12"
+    kept = table(site.db, "SELECT path FROM uploads WHERE kind='x12'")[0][0]
+    assert kept.endswith("remit-777.835")
+    out = cycle(site.db, sync=False)
+    assert out["ingest"]["remits"] == 1
+    done = next(i for i in site.c.get("/api/uploads").json()["items"] if i["name"] == "remit-777.csv")
+    assert done["status"] == "done" and any(ln.startswith("Added 1 payment on") for ln in done["lines"])
+
+
+def test_a_report_whose_rows_name_no_claim_is_turned_away(site):
+    """An AR aging report (and a production report) carries a Claim Status column but no Claim ID, Bill ID or Bill Item
+    Identifier: it is none of the three reports, so it is refused in plain words and not kept."""
+    cols = ["Patient", "Payer", "Claim Status", "Charges", "Balance", "0-30", "31-60", "61-90"]
+    rows = [["Sample, Pat", "Anthem Blue Cross", "Denied", 223.65, 223.65, 0, 223.65, 0],
+            ["Example, Kim", "Humana", "Submitted", 150.00, 150.00, 150.00, 0, 0]]
+    for name, data in (("AR 2026.xlsx", xlsx("AR and Collections", cols, rows, total=4)), ("AR 2026.csv", as_csv(cols, rows))):
+        r = site.up(name, data)
+        assert r["status"] == "rejected" and "no Claim ID, Bill ID or Bill Item Identifier" in r["reason"], r
+    assert ema_exports.detect_family(cols) == "unknown" and ema_exports.detect_family(STATUS_COLS) == "claim_status"
+    root = os.path.join(os.path.dirname(site.db), "uploads")
+    assert [f for _d, _s, fs in os.walk(root) for f in fs] == [] and site.woken == []
+
+
+def test_an_export_too_large_or_shaped_to_look_it_is_refused_before_it_fills_memory(site, monkeypatch):
+    import time
+
+    import openpyxl
+    # a workbook with three rows and one cell a million rows down (5 KB on disk): refused quickly, not read row by row
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Encounter & Charge Lines"])
+    ws.append(CHARGE_COLS)
+    for r in charge_rows():
+        ws.append(r)
+    ws.cell(row=1_048_576, column=21, value="x")
+    b = io.BytesIO()
+    wb.save(b)
+    t0 = time.time()
+    r = site.up("Encounter & Charge Lines.xlsx", b.getvalue())
+    assert r["status"] == "rejected" and "blank lines in a row" in r["reason"] and time.time() - t0 < 30
+    # blank formatted rows below a report are no reason to refuse it
+    wb2 = openpyxl.Workbook()
+    ws2 = wb2.active
+    ws2.append(CHARGE_COLS)
+    for r2 in charge_rows():
+        ws2.append(r2)
+    for i in range(5, 3005):
+        ws2.cell(row=i, column=1).number_format = "0.00"
+    p = site.tmp / "formatted.xlsx"
+    wb2.save(p)
+    assert len(list(ema_exports.iter_rows(str(p)))) == 3
+    # over the size an export may be: refused before it is read
+    monkeypatch.setattr(uploads, "EXPORT_MAX_BYTES", 1000)
+    big = site.up("Encounter & Charge Lines (2).xlsx", xlsx("Encounter & Charge Lines", CHARGE_COLS, charge_rows()))
+    assert big["status"] == "rejected" and "at most" in big["reason"]
+    root = os.path.join(os.path.dirname(site.db), "uploads")
+    assert [f for _d, _s, fs in os.walk(root) for f in fs] == []
+
+
+def test_a_zip_with_a_damaged_file_says_so_and_leaves_nothing_behind(site):
+    """One file in the zip fails its check (the data was damaged): it is listed as not read, the rest is taken, and no
+    part of it is left in the upload folder. Before, the whole upload answered 500 and left 2 MB of it behind."""
+    payload = b"%PDF-1.4 " + b"x" * (3 * 1024 * 1024)
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("week/remit-777.835", new_remittance())
+        zf.writestr("week/big note.pdf", payload)
+    raw = bytearray(z.getvalue())
+    at = raw.index(b"x" * 64) + 2 * 1024 * 1024
+    raw[at] = ord("y")                                  # one byte changed far into the file: its CRC no longer holds
+    r = site.up("week.zip", bytes(raw))
+    st = sorted(f["status"] for f in r["files"])
+    assert r["status"] == "zip" and st == ["queued", "rejected"]
+    bad = next(f for f in r["files"] if f["status"] == "rejected")
+    assert "could not be read" in bad["reason"] and not bad["name"].startswith("big note")
+    incoming = os.path.join(os.path.dirname(site.db), "uploads", ".incoming")
+    assert os.listdir(incoming) == []
+    # a zip that cannot be opened at all: refused in plain words
+    broken = site.up("broken.zip", b"PK\x03\x04" + b"\x00" * 64)
+    assert broken["status"] == "rejected"
+
+
+def test_files_a_stopped_upload_left_behind_are_removed(site):
+    import time
+    folder = os.path.join(os.path.dirname(site.db), "uploads", ".incoming")
+    os.makedirs(folder, exist_ok=True)
+    old, fresh = os.path.join(folder, "old"), os.path.join(folder, "fresh")
+    for f in (old, fresh):
+        with open(f, "wb") as fh:
+            fh.write(b"part of a file")
+    os.utime(old, (time.time() - 2 * 86400, time.time() - 2 * 86400))
+    new = uploads.incoming(site.db)
+    assert not os.path.exists(old) and os.path.exists(fresh) and os.path.exists(new)
+
+
+# ----------------------------------------------------------------------------------------------- the cycle when a feed fails
+class _BrokenDropbox:
+    def list_folder(self, path, recursive=True):
+        from remitwatch.dropbox_sync import DropboxAuthError
+        raise DropboxAuthError("Dropbox token refresh failed 400: invalid_grant")
+        yield  # pragma: no cover
+
+    list_continue = list_folder
+
+
+def _dropbox_env(monkeypatch, tmp_path):
+    for k, v in {"DROPBOX_APP_KEY": "k", "DROPBOX_APP_SECRET": "s", "DROPBOX_REFRESH_TOKEN": "r", "DROPBOX_ROOT_PATH": "/Trizetto Data",
+                 "REMITWATCH_DATA_DIR": str(tmp_path / "mirror")}.items():
+        monkeypatch.setenv(k, v)
+
+
+def test_files_uploaded_by_hand_are_read_while_the_dropbox_feed_fails(site, monkeypatch):
+    """Dropbox refuses the sign-in (a revoked token): the export and the remittance uploaded by hand are still read and
+    analysed in the same cycle, and the cycle still says Dropbox failed."""
+    from remitwatch import dropbox_sync
+    _dropbox_env(monkeypatch, site.tmp)
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: _BrokenDropbox())
+    assert site.up("Encounter & Charge Lines.xlsx", xlsx("Encounter & Charge Lines", CHARGE_COLS, charge_rows()))["status"] == "queued"
+    assert site.up("remit-777.RMT", new_remittance())["status"] == "queued"
+    out = cycle(site.db)
+    assert out["uploads"]["uploads"] == 2 and out["ingest"]["remits"] == 1 and out["ingest"]["ema"] == 1 and "detect" in out
+    assert out["error"].startswith("Dropbox: DropboxAuthError") and "invalid_grant" in out["sync"]["error"]
+    assert table(site.db, "SELECT status FROM uploads") == [("done",), ("done",)]
+    last = site.c.get("/api/uploads").json()["cycle"]
+    assert "invalid_grant" in (last["last_error"] or "")
+
+
+def test_what_dropbox_fetched_before_it_failed_is_read_in_the_same_cycle(site, monkeypatch):
+    """A sync that stops part-way hands back the files it downloaded (on the exception): they are read, not left on disk
+    for the next sync to call unchanged."""
+    from remitwatch import dropbox_sync
+    _dropbox_env(monkeypatch, site.tmp)
+    got = site.tmp / "mirror" / "remit-777.RMT"
+    got.parent.mkdir(parents=True, exist_ok=True)
+    got.write_bytes(new_remittance())
+
+    def part_way(store, **kw):
+        exc = dropbox_sync.DropboxAuthError("the listing stopped: 503")
+        exc.new_files = [str(got)]
+        raise exc
+    monkeypatch.setattr(dropbox_sync, "sync", part_way)
+    out = cycle(site.db)
+    assert out["ingest"]["remits"] == 1 and out["error"].startswith("Dropbox:")
+
+
+def test_the_servers_cycle_reads_trizetto_and_the_uploads_while_dropbox_fails(site, monkeypatch, tmp_path):
+    """The hourly cycle on the server (pipeline.run_cycle, as AWS runs it): Dropbox is down, TriZetto's SFTP holds a new
+    remittance, and a file waits on the Upload page. Both are read, once; the next cycle signs in to TriZetto and reads
+    nothing again."""
+    pytest.importorskip("paramiko")
+    from remitwatch import dropbox_sync
+    from tests import fake_sftp
+    _dropbox_env(monkeypatch, site.tmp)
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: _BrokenDropbox())
+    from tests.test_features import clean_visits
+    from tests.test_remitwatch import remit
+    root = tmp_path / "trizetto"
+    (root / "remits").mkdir(parents=True)
+    (root / "remits" / "r-900.RMT").write_bytes(remit("".join(clean_visits(900, 2, "99213", "150.00", "80.00", dos="20261104")), "160.00",
+                                                      seg_count=99, isa_ctrl="000000900", pay_date="20261113"))
+    f = fake_sftp.FakeSFTP(str(root))
+    try:
+        for k, v in f.env().items():
+            monkeypatch.setenv(k, v)
+        assert site.up("remit-777.RMT", new_remittance())["status"] == "queued"
+        first = cycle(site.db)
+        assert first["trizetto"].get("remits") == 1 and first["uploads"]["uploads"] == 1 and first["ingest"]["remits"] == 2, first
+        assert "detect" in first and first["error"].startswith("Dropbox:")
+        again = cycle(site.db)
+        assert again["ingest"]["remits"] == 0 and not again["trizetto"].get("error"), again
+        assert len(table(site.db, "SELECT payment_date FROM transactions WHERE payment_date IN ('2026-11-12','2026-11-13')")) == 2
+    finally:
+        f.stop()
+
+
+def test_a_server_with_only_the_fax_line_still_runs_its_daily_cycle(monkeypatch, tmp_path):
+    """No Dropbox, no TriZetto, no interval: with the fax line set up, the follow-ups, retries and the payers' faxes still
+    need the daily run, as Vercel's daily call gives them."""
+    from remitwatch import fax, pipeline
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "TRIZETTO_SFTP_USER", "TRIZETTO_SFTP_PASSWORD",
+              "REMITWATCH_SYNC_INTERVAL_MINUTES"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(fax, "configured", lambda env=None: False)
+    assert pipeline.start_scheduler_from_env(str(tmp_path / "s.sqlite")) is False
+    monkeypatch.setattr(fax, "configured", lambda env=None: True)
+    try:
+        assert pipeline.start_scheduler_from_env(str(tmp_path / "s.sqlite")) is True and pipeline.SCHEDULER.is_alive()
+        assert pipeline.SCHEDULER.interval == pipeline.DAILY_MINUTES
+    finally:
+        pipeline.SCHEDULER.stop()
+
+
 # ----------------------------------------------------------------------------------------------- what is not read, and why
 def test_files_that_are_not_read_say_why_and_are_not_kept(site, monkeypatch):
     import openpyxl
