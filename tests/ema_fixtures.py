@@ -109,12 +109,16 @@ def production_row(**kw: Any) -> dict:
     payer = kw.get("payer", PAYERS["bcbs"])
     patient_side = isinstance(payer, str) and payer.lower() == "patient"
     link = kw.get("link", None if patient_side else link_no(1))
-    m = {k: float(kw.get(k, 0) or 0) for k in ("charges", "ins_paid", "pat_paid", "contractual", "noncontractual", "pat_adj")}
+    def num(v: Any) -> float:
+        return float(v) if isinstance(v, (int, float)) else 0.0
+    # a money keyword given as text (say "abc") is written as given, to test what the reader does with it
+    m = {k: (float(kw.get(k) or 0) if not isinstance(kw.get(k), str) else kw[k])
+         for k in ("charges", "ins_paid", "pat_paid", "contractual", "noncontractual", "pat_adj")}
     if not any(k in kw for k in ("charges", "ins_paid", "pat_paid", "contractual", "noncontractual", "pat_adj")):
         m["charges"] = 150.0
-    payments = kw.get("payments", m["ins_paid"] + m["pat_paid"])
-    ins_adj = kw.get("ins_adj", m["contractual"] + m["noncontractual"])
-    adjustments = kw.get("adjustments", ins_adj + m["pat_adj"])
+    payments = kw.get("payments", num(m["ins_paid"]) + num(m["pat_paid"]))
+    ins_adj = kw.get("ins_adj", num(m["contractual"]) + num(m["noncontractual"]))
+    adjustments = kw.get("adjustments", num(ins_adj) + num(m["pat_adj"]))
     return {
         "Posted Date": kw.get("posted", D(2026, 3, 4)), "Service Date": kw.get("svc", D(2026, 3, 2)),
         "CPT/Product": kw.get("cpt", "99213"), "CPT/Product Description (Custom)": kw.get("desc", "Office visit, test"),
@@ -129,7 +133,7 @@ def production_row(**kw: Any) -> dict:
         "Primary Payer": kw.get("primary", PAYERS["bcbs"]), "Secondary Payer": kw.get("secondary", "None"),
         "Unit Allowable": kw.get("unit_allowable", 150.0), "Patient DOB": dob, "Charges": m["charges"],
         "Adjustments": adjustments, "Contractual Adjustments": m["contractual"], "Insurance Adjustments": ins_adj,
-        "Insurance Charges": kw.get("ins_charges", 0.0 if patient_side else m["charges"]), "Insurance Payments": m["ins_paid"],
+        "Insurance Charges": kw.get("ins_charges", 0.0 if patient_side else num(m["charges"])), "Insurance Payments": m["ins_paid"],
         "Local Tax": 0.0, "Non- Contractual Adjustments": m["noncontractual"], "Patient Adjustments": m["pat_adj"],
         "Patient Payments": m["pat_paid"], "Payment Allowed Amount": kw.get("allowed", 0.0),
     }
@@ -208,7 +212,11 @@ def _xlsx_value(col: str, v: Any) -> Any:
 
 
 def _columns_of(rows: list[dict], columns: list[str] | None, base: list[str]) -> list[str]:
-    cols = list(columns or base)
+    """The columns written: exactly `columns` when given (to leave one out, or name one twice), else the report's own
+    columns plus any extra a row carries (aging buckets)."""
+    if columns is not None:
+        return list(columns)
+    cols = list(base)
     for r in rows:
         for k in r:
             if k not in cols:

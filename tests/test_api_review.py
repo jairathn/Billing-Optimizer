@@ -416,6 +416,43 @@ def test_the_note_lookups_carry_the_names_switch_the_lookups_reason_and_the_batc
     assert mark == "Build packets from EMA: Only the name agrees with the claim: a person confirms the note in the item."
 
 
+def _send_ready(api, monkeypatch) -> None:
+    """Everything appeals_send checks before the note, made ready: remittances current, the practice's details, a fax line
+    and the payer's number. Nothing is faxed in these tests: each stops at the note."""
+    from remitwatch import fax
+    monkeypatch.setattr(api, "_data_behind_days", lambda: 0)
+    monkeypatch.setattr(api, "_practice_missing", lambda: [])
+    monkeypatch.setattr(api, "_payer_number", lambda pg: "8005550142")
+    monkeypatch.setattr(fax, "provider", lambda env=None: object())
+
+
+def test_a_name_only_match_is_held_with_the_lookups_own_words(notes_site, monkeypatch):
+    from tests.test_uploads import NOTE, note_pdf
+    c = notes_site.c
+    assert c.post("/api/uploads", content=note_pdf(NOTE), headers=dict(XHR, **{"X-File-Name": "a.pdf"})).status_code == 200
+    _send_ready(notes_site.api, monkeypatch)
+    out = c.post("/api/appeals/send", json={"finding_id": notes_site.fid}, headers=XHR).json()
+    assert out["status"] == "held" and out["code"] == "ambiguous" and out["reason"].startswith("Only the name agrees with the claim."), out
+
+
+def test_two_patients_of_one_name_are_told_apart_only_where_names_are_shown(notes_site, monkeypatch):
+    """Two notes for the visit's date under the claim's patient name, with two patient IDs: with names off nothing tells the
+    two apart, so the note is attached by hand; with names on each candidate says who it is, and a person's pick builds."""
+    from tests.test_uploads import NOTE, note_pdf
+    c, api = notes_site.c, notes_site.api
+    other = [NOTE[0], "Patient: Pat Sample    DOB: 03/04/1970    Patient ID: EMA99", *NOTE[2:]]
+    for name, lines in (("a.pdf", NOTE), ("b.pdf", other)):
+        assert c.post("/api/uploads", content=note_pdf(lines), headers=dict(XHR, **{"X-File-Name": name})).status_code == 200
+    r = c.post("/api/appeals/from_ema", json={"finding_id": notes_site.fid, "use_ai": False}, headers=XHR).json()
+    assert r["status"] == "ambiguous" and r["candidates"] == [] and "attach it to the item" in r["reason"], r
+    monkeypatch.setattr(api, "SHOW_PHI", True)
+    r = c.post("/api/appeals/from_ema", json={"finding_id": notes_site.fid, "use_ai": False}, headers=XHR).json()
+    assert r["status"] == "ambiguous" and sorted(x["patient"]["birth_date"] for x in r["candidates"]) == ["1960-01-02", "1970-03-04"], r
+    pick = next(x for x in r["candidates"] if x["patient"]["birth_date"] == "1970-03-04")
+    built = c.post("/api/appeals/from_ema", json={"finding_id": notes_site.fid, "document_id": pick["id"], "use_ai": False}, headers=XHR).json()
+    assert built["status"] == "built", built
+
+
 def test_the_ready_queue_keeps_only_items_the_batch_can_build(notes_site, monkeypatch):
     api = notes_site.api
     monkeypatch.setattr(api, "_note_ready", lambda items: {i["finding_id"]: "ambiguous" for i in items})

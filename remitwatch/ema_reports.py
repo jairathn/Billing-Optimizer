@@ -190,14 +190,28 @@ def _read_names(report: str, names: Sequence[str]) -> set[str]:
 KNOWN_NAMES = frozenset(PRODUCTION_REQUIRED + PRODUCTION_OPTIONAL + PRODUCTION_NEVER + AR_REQUIRED + AR_OPTIONAL + AR_NEVER)
 
 
+def _near(report: str, names: set[str]) -> bool:
+    """A layout that is plainly the report with a column or two taken out: every core name but at most two, and at least
+    three quarters of the required names. It is recognised so that it is refused with the missing columns named, never
+    read as a weekly export."""
+    lay = LAYOUTS[report]
+    return (len(set(lay["core"]) - names) <= 2 and len(set(lay["required"]) & names) >= 0.75 * len(lay["required"]))
+
+
 def detect_report(columns: Sequence[Any]) -> str | None:
-    """'production' or 'ar_report' when the column names hold every core name of one of the two reports, else None.
-    Production is tested first; a layout with an Activity Type column is an Encounter & Charge Lines export, not
-    Production. ema_exports.detect_family calls this before its own family test."""
+    """'production' or 'ar_report' when the column names hold every core name of one of the two reports (or all but two
+    of them, with three quarters of the required names: a report with columns taken out, refused later with the missing
+    columns named), else None. Production is tested first; a layout with an Activity Type column is an Encounter & Charge
+    Lines export, not Production. ema_exports.detect_family calls this before its own family test."""
     names = {norm(c) for c in columns if c is not None}
-    if set(PRODUCTION_CORE) <= names and "activity type" not in names:
+    production_ok = "activity type" not in names
+    if set(PRODUCTION_CORE) <= names and production_ok:
         return "production"
     if set(AR_CORE) <= names:
+        return "ar_report"
+    if production_ok and _near("production", names):
+        return "production"
+    if _near("ar_report", names):
         return "ar_report"
     return None
 
@@ -268,13 +282,21 @@ def _text_records(head: bytes, truncated: bool, delimiter: str, limit: int) -> l
 
 
 def _find_header(rows: Iterable[Sequence[Any]]) -> tuple[str, int, Sequence[Any]] | None:
+    """The first of the first HEADER_SCAN rows that holds a report's core names; failing that, the first that is a near
+    match (a report with columns taken out)."""
+    near = None
     for i, row in enumerate(rows):
         if i >= HEADER_SCAN:
             break
-        rep = detect_report([c for c in row if c is not None])
-        if rep:
-            return rep, i, row
-    return None
+        cells = [c for c in row if c is not None]
+        names = {norm(c) for c in cells}
+        if ("activity type" not in names and set(PRODUCTION_CORE) <= names) or set(AR_CORE) <= names:
+            return detect_report(cells), i, row
+        if near is None:
+            rep = detect_report(cells)
+            if rep:
+                near = (rep, i, row)
+    return near
 
 
 def _known_count(row: Sequence[Any]) -> int:
@@ -282,8 +304,14 @@ def _known_count(row: Sequence[Any]) -> int:
 
 
 # --------------------------------------------------------------------------------------------------------- recognition
+def _path(src: Any) -> Any:
+    """A path given as a pathlib.Path (or any path-like) as plain text; anything else as it is."""
+    return os.fspath(src) if isinstance(src, os.PathLike) else src
+
+
 def _head_of(src: str | bytes | BinaryIO, n: int = PEEK_BYTES) -> tuple[bytes, bool]:
     """The first n bytes of a source, and whether there is more."""
+    src = _path(src)
     if isinstance(src, (bytes, bytearray, memoryview)):
         b = bytes(src)
         return b[:n], len(b) > n
@@ -314,6 +342,7 @@ def _zip_names(src: str | bytes | BinaryIO) -> list[str] | None:
 
 
 def _zip_source(src: str | bytes | BinaryIO) -> Any:
+    src = _path(src)
     if isinstance(src, (bytes, bytearray, memoryview)):
         return io.BytesIO(bytes(src))
     return src
@@ -434,6 +463,7 @@ def is_plain_zip(src: str | bytes) -> bool:
 
 @contextmanager
 def _open(src: str | bytes | BinaryIO, rec: Recognized) -> Iterator[BinaryIO]:
+    src = _path(src)
     if rec.member:
         zf = zipfile.ZipFile(_zip_source(src))
         try:
@@ -1198,7 +1228,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create every EMA table and index, and add any column a table made by an earlier build lacks. Safe on every start;
     the same tables in a compact (in-memory) store."""
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-    conn.executescript(DDL)
+    statements = [x.strip() for x in DDL.split(";") if x.strip()]
+    conn.executescript(";\n".join(x for x in statements if x.upper().startswith("CREATE TABLE")) + ";")
     for table, cols in _expected_columns().items():
         have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         for name, decl in cols:
@@ -1206,6 +1237,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
                 if table == "ema_ar_items" and name == "absent_since" and "gone_since" in have:
                     conn.execute("UPDATE ema_ar_items SET absent_since = gone_since")
+    conn.commit()
+    conn.executescript(";\n".join(x for x in statements if x.upper().startswith("CREATE INDEX")) + ";")
     conn.commit()
 
 
@@ -1251,6 +1284,7 @@ SERVING_META_FILTER = "key NOT LIKE 'sync:cursor%' AND key NOT LIKE 'cache:%' AN
 def file_id_of(src: str | bytes | BinaryIO) -> str:
     """The SHA-256 of a file's bytes, read in 1 MB pieces: a path, bytes, or a binary stream (read to its end)."""
     h = hashlib.sha256()
+    src = _path(src)
     if isinstance(src, (bytes, bytearray, memoryview)):
         h.update(src)
     elif isinstance(src, str):
@@ -1300,11 +1334,12 @@ def _first_rows(rows: Iterator[Sequence[Any]], positions: Sequence[int | None]) 
 
 
 def _blank(row: Sequence[Any]) -> bool:
+    """A line with nothing in it: every cell empty or a placeholder ("-", "None")."""
     for c in row:
         if c is None:
             continue
         if isinstance(c, str):
-            if c.strip():
+            if c.strip() not in _NA:
                 return False
         else:
             return False
@@ -1443,13 +1478,13 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
                 if svc is _MISS:
                     svc = dates[v] = _date(v, order)
                 if posted is None or posted is _BAD or svc is None or svc is _BAD:
-                    c["bad_dates"] += (posted is _BAD) + (svc is _BAD)
                     if _blank(row):
                         blank += 1
                     elif _total_line(row):
                         total += 1
                     else:
                         no_date += 1
+                        c["bad_dates"] += (posted is _BAD) + (svc is _BAD)
                     continue
                 if len(dates) > 20_000:
                     dates.clear()
