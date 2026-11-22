@@ -2635,7 +2635,7 @@ def _note_batch_since() -> str | None:
     r = one(f"""SELECT MIN(service_date) d FROM findings WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
                 AND claim_key IS NOT NULL AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""", tuple(params))
     d = (r or {}).get("d")
-    return d if d and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(d)[:10]) else None
+    return str(d)[:10] if d and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(d)[:10]) else None
 
 
 def _note_ready(items: list[dict]) -> dict[str, str]:
