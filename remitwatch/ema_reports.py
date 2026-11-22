@@ -1798,6 +1798,8 @@ def supersede_waiting(conn: sqlite3.Connection, file_id: str, *, reason: str, re
 def waiting(conn: sqlite3.Connection, report: str | None = None) -> list[dict]:
     """The reports to read, oldest first, each with its origin (a server path, an upload id, or a Dropbox id, path,
     content hash and size)."""
+    if not _table(conn, "ema_report_files"):
+        return []
     sql = "SELECT * FROM ema_report_files WHERE status IN ('waiting','reread')"
     args: tuple = ()
     if report:
@@ -1809,9 +1811,11 @@ def waiting(conn: sqlite3.Connection, report: str | None = None) -> list[dict]:
     for r in cur.fetchall():
         d = dict(zip(names, r))
         try:
-            d["origin"] = json.loads(d["origin"]) if d.get("origin") else {}
+            origin = json.loads(d["origin"]) if d.get("origin") else {}
         except ValueError:
-            d["origin"] = {}
+            origin = {}
+        d = _public(d)
+        d["origin"] = origin
         out.append(d)
     return out
 
@@ -1819,6 +1823,8 @@ def waiting(conn: sqlite3.Connection, report: str | None = None) -> list[dict]:
 def coverage(conn: sqlite3.Connection) -> dict:
     """What the reports on file cover: the boxes of the current Production files and their newest as_of, and per A/R
     service year the current snapshot (as_of, file, rows, aging window)."""
+    if not _table(conn, "ema_report_files") or not _table(conn, "ema_ar"):
+        return {"production": [], "production_as_of": None, "ar": {}}
     prod = [{"file_id": r[0], "scope": r[1], "svc_lo": r[2], "svc_hi": r[3], "posted_lo": r[4], "posted_hi": r[5], "as_of": r[6]}
             for r in conn.execute("""SELECT file_id, scope, svc_lo, svc_hi, posted_lo, posted_hi, as_of FROM ema_report_files
                                      WHERE report='production' AND status IN ('current','partly_replaced') ORDER BY as_of, file_id""")]
@@ -1834,7 +1840,10 @@ def coverage(conn: sqlite3.Connection) -> dict:
 
 
 def _meta_json(conn: sqlite3.Connection, key: str, default: Any) -> Any:
-    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    try:
+        r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return default
     if not r or not r[0]:
         return default
     try:
@@ -1846,9 +1855,11 @@ def _meta_json(conn: sqlite3.Connection, key: str, default: Any) -> Any:
 def catalog(conn: sqlite3.Connection) -> dict:
     """The reports on file for GET /api/ema/reports and the Data tab: every catalog row (never its origin), the held ones,
     how many wait, the switch, the claim address template, coverage, unknown status words and possible misread exports."""
-    cur = conn.execute("SELECT * FROM ema_report_files ORDER BY COALESCE(applied_at, received_at) DESC, file_id")
-    names = [d[0] for d in cur.description]
-    files = [_public(dict(zip(names, r))) for r in cur.fetchall()]
+    files: list[dict] = []
+    if _table(conn, "ema_report_files"):
+        cur = conn.execute("SELECT * FROM ema_report_files ORDER BY COALESCE(applied_at, received_at) DESC, file_id")
+        names = [d[0] for d in cur.description]
+        files = [_public(dict(zip(names, r))) for r in cur.fetchall()]
     return {"files": files, "held": [f for f in files if f["status"] == "held"],
             "waiting": sum(1 for f in files if f["status"] in ("waiting", "reread")),
             "switch": switch(), "reads": {r: reads(r) for r in REPORTS}, "claim_url": claim_url_template(conn),
@@ -2050,7 +2061,7 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
     source_name, container = _names_of(path, rec)
     try:
         from . import ema_ledger        # noqa: PLC0415  (Production needs the ledger; until it ships the file waits)
-    except ImportError:
+    except Exception:                   # noqa: BLE001  (missing, or not importable on this build: the file waits)
         ema_ledger = None
     if ema_ledger is None or ledger is None or not hasattr(ema_ledger, "apply_production_file"):
         reason = "Production is read once the posting ledger is set up on this host."
