@@ -176,7 +176,7 @@ table.wl input.sel,#selAll{width:20px;height:20px}
 nav a .bdg{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:var(--bad);color:var(--accent-ink);font-size:11px;font-weight:700;text-align:center;line-height:16px}
 nav a .bdg[hidden]{display:none}
 nav .gap{flex:1 1 12px}nav a.ref{font-size:13px}
-@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]),nav .gap{display:none}nav a{padding:6px 8px}
+@media(min-width:641px) and (max-width:1359px){nav a.ref:not([data-tab=more]):not([data-tab=results]),nav .gap{display:none}nav a{padding:6px 8px}
   nav[data-cur=progress] a[data-tab=more],nav[data-cur=data] a[data-tab=more],nav[data-cur=providers] a[data-tab=more]{background:var(--chip);color:var(--ink);font-weight:600}}
 .mid-only{display:none}@media(min-width:641px) and (max-width:1359px){.mid-only{display:flex}}
 a.pile{color:var(--muted);text-decoration:none}a.pile:hover{text-decoration:underline;color:var(--accent)}
@@ -254,6 +254,9 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
 <script src="/static/today.js"></script>
+<script src="/static/results.js"></script>
+<script src="/static/data.js"></script>
+<script src="/static/policy.js"></script>
 <script src="/static/desk.js"></script>
 <script src="/static/claim.js"></script>
 <script src="/static/calc_model.js"></script>
@@ -267,9 +270,10 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
 // Today first, then the billing team's categories, the Worklist and Bigger wins; Progress, Data, Providers and More to the
 // right in smaller type. The analysis pages are under More (and open by their address).
 const TABS = [['today','Today'],['denials','Denials'],['bundling','Bundling & modifiers'],['downcoding','Downcoding'],['contracts','Contracts & underpayment'],
-  ['fees','Fees & takebacks'],['worklist','Worklist'],['faxes','Faxes'],['wins','Bigger wins'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
-const REF_TABS = new Set(['progress','data','providers','calculator','more']);
-const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates']];
+  ['fees','Fees & takebacks'],['worklist','Worklist'],['faxes','Faxes'],['wins','Bigger wins'],['results','Results'],['progress','Progress'],['data','Data'],['providers','Providers'],['calculator','Calculator'],['more','More']];
+const REF_TABS = new Set(['results','progress','data','providers','calculator','more']);
+// pages opened by their address or from More, not from the main row; the owner's write-off policy table is one (static/policy.js)
+const CLASSIC = [['overview','Overview'],['alerts','Alerts'],['explorer','Who & what'],['payers','Payers & rates'],['policy','Write-off policy']];
 const ALIASES = {appeals:'worklist'};        // the earlier Appeals queue is the Worklist
 const NEEDS_SUMMARY = new Set(['overview','explorer','payers']);
 const SIGNAL_HELP = {
@@ -339,7 +343,8 @@ const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8
 
 function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || k in ALIASES; }
 function initNav(){
-  $('#nav').innerHTML = TABS.map(([k,l])=>`${k==='progress'?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
+  const firstRef = (TABS.find(t=>REF_TABS.has(t[0]))||[])[0];       // the reference tabs stand apart, to the right
+  $('#nav').innerHTML = TABS.map(([k,l])=>`${k===firstRef?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
     state.tab=a.dataset.tab; location.hash=state.tab; render();});
   $('#yearSel').onchange = e=>{state.year=e.target.value; render();};
@@ -358,7 +363,7 @@ async function loadMeta(){
   const m = state.meta, r = m.remits||{}, runs = (m.runs||[])[0];
   $('#fresh').textContent = `${(r.n||0).toLocaleString()} remits · payments ${r.first_payment||'?'} to ${r.last_payment||'?'} · last analysis ${runs?runs.finished_at.replace('T',' ').slice(0,16):'never'} · files ${m.files?m.files.n:0}`;
   $('#claimFind').placeholder = showPhi() ? 'Find a claim or patient' : 'Find a claim';
-  $('#uploadLink').hidden = !m.uploads;            // a server only: Vercel keeps the Dropbox folder
+  $('#uploadLink').hidden = !(m.uploads || m.report_uploads);     // visit notes by hand on a server; EMA's reports on both hosts
 }
 async function loadSummary(){
   state.summary = await api('/api/summary?'+qs({year:state.year,status:state.status}));
@@ -382,12 +387,17 @@ async function render(){
   const old = $('#view'), v = old.cloneNode(false);      // an older run still holds the old node and can only write into that
   old.replaceWith(v);
   v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
+  // Results (static/results.js), the Data tab (static/data.js, the page's own data(v) until then) and the write-off policy
+  // table (static/policy.js) come from their own scripts: a page whose script is not on this site says so instead
   const fn = {today: todayTab, denials: x=>deskTab(x,'denials'), bundling: x=>deskTab(x,'bundling'), downcoding: x=>deskTab(x,'downcoding'),
-    contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), faxes: faxesTab, wins: winsTab, more: moreTab, overview, payers, data,
+    contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), faxes: faxesTab, wins: winsTab, more: moreTab, overview, payers,
+    data: (typeof dataTab === 'function' ? dataTab : data), results: (typeof resultsTab === 'function' ? resultsTab : notHere('Results')),
+    policy: (typeof policyTab === 'function' ? policyTab : notHere('Write-off policy')),
     alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab, calculator: calculatorTab}[state.tab] || todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
 }
+function notHere(title){ return async v => { v.innerHTML = `<div class="panel"><h2>${esc(title)}</h2><div class="note">This page is not on this site yet. Reload in a few minutes; if it stays like this, the site needs its next update.</div></div>`; }; }
 function sumBy(rows, key){ const m={}; rows.forEach(r=>{m[r[key]]=(m[r[key]]||0)+(r.shortfall_cents||0);}); return m; }
 function sigRows(sigs){ return state.summary.by_signal.filter(r=>sigs.includes(r.signal)); }
 function total(rows){ return rows.reduce((a,r)=>a+(r.shortfall_cents||0),0); }

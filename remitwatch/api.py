@@ -395,8 +395,11 @@ def meta(_: str = Depends(require_auth)):
                            # whether this site reads remittances straight from TriZetto (remitwatch.trizetto): a serverless
                            # host does only with TRIZETTO_SFTP_SERVERLESS=1, whatever login it is given
                            "trizetto": _trizetto_here(),
-                           # whether EMA's exports and visit notes can be uploaded by hand (remitwatch.uploads): a server only
-                           "uploads": not runtime.serverless()}
+                           # whether visit notes can be uploaded by hand (remitwatch.uploads): a server only
+                           "uploads": not runtime.serverless(),
+                           # whether EMA's A/R and Production reports and the weekly exports can be uploaded (remitwatch.api_uploads):
+                           # both hosts, in pieces (the page shows its Upload link when either is true)
+                           "report_uploads": True}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
     if cached:      # the dashboard's copy holds only part of the store; these totals were computed on all of it
         out.update(json.loads(cached["value"]))
@@ -4492,3 +4495,18 @@ def packet_email(packet_id: str, body: dict = Body(default={}), _: str = Depends
 
 from . import api_uploads  # noqa: E402  (unit A2: large files in pieces and the EMA export checklist, remitwatch/api_uploads.py)
 app.include_router(api_uploads.router)
+
+
+def _unit_here(name: str) -> bool:
+    """Whether a page unit's module is in this build (it is being written while this one is). Only its absence is passed
+    over: an error inside the module, or in one it reads, is raised as it is."""
+    from importlib.util import find_spec
+    return find_spec(f"{__package__}.{name}") is not None
+
+
+if _unit_here("api_ema"):
+    from . import api_ema  # noqa: E402  (unit C2: Today's EMA figures, the Data tab, the owner's write-off policy table)
+    app.include_router(api_ema.router)
+if _unit_here("api_results"):
+    from . import api_results  # noqa: E402  (unit R: the Results tab, the scoreboard Today shows, the daily spot checks)
+    app.include_router(api_results.router)
