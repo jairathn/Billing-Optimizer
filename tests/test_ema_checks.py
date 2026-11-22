@@ -321,6 +321,28 @@ def test_an_835_payment_emas_postings_never_show_becomes_an_item(store, ledger, 
     assert csv_rows[1][:2] == ["EN77", "2026-03-30"] and "UNSEEN77" not in json.dumps(csv_rows)
 
 
+def test_an_835_payment_ema_posted_under_another_number_is_not_itemized(store, ledger, tmp_path):
+    """EMA posted the 835's $95.50 on the claim's own EMA claim, under a paper check number no 835 carries: the money was
+    posted, so it is no "not posted" item; it is counted apart. A payment for another amount does not count."""
+    rows = c4_world(store, ledger, tmp_path, [pay(F.link_no(2), "PAPER-77", 95.5, patient=1, posted=D(2026, 4, 2))])
+    remit(store, trace="UNSEEN77", paid_on="2026-03-30", payer="UMR",
+          claims=[{"pcn": F.claim_id(2), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "99213", 150, 95.5)]}])
+    load(store, ledger, tmp_path, rows, [F.ar_row(claim=F.claim_id(2), link=F.link_no(2), patient=1, svc=SVC, current=0, aging=D(2026, 4, 2))])
+    ec.classify_checks(store.conn)
+    assert ec.unposted_remits(store.conn, today=TODAY) == []
+    summary = ec._meta(store.conn, ec.UNPOSTED_KEY)
+    assert (summary["n"], summary["elsewhere_n"], summary["elsewhere_cents"]) == (0, 1, 9550)
+
+
+def test_an_835_payment_ema_posted_for_another_amount_under_another_number_is_still_itemized(store, ledger, tmp_path):
+    rows = c4_world(store, ledger, tmp_path, [pay(F.link_no(2), "PAPER-78", 40, patient=1, posted=D(2026, 4, 2))])
+    tk = remit(store, trace="UNSEEN78", paid_on="2026-03-30", payer="UMR",
+               claims=[{"pcn": F.claim_id(2), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "99213", 150, 95.5)]}])
+    load(store, ledger, tmp_path, rows, [F.ar_row(claim=F.claim_id(2), link=F.link_no(2), patient=1, svc=SVC, current=0, aging=D(2026, 4, 2))])
+    ec.classify_checks(store.conn)
+    assert [i["key_parts"] for i in ec.unposted_remits(store.conn, today=TODAY)] == [(tk,)]
+
+
 def test_c4_needs_production_to_cover_the_payment_and_to_be_fresh(store, ledger, tmp_path):
     rows = c4_world(store, ledger, tmp_path)
     remit(store, trace="UNSEEN78", paid_on="2026-04-15", payer="UMR",          # as_of May 1 is under 21 days after it

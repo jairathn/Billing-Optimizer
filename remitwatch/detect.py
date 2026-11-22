@@ -3107,12 +3107,13 @@ class Detector:
             self.conn.executemany("INSERT INTO temp.dt_keys VALUES (?,?,?)", part)
             self.conn.execute("CREATE INDEX temp.ix_dt_keys ON dt_keys(bill)")
             rows = self.conn.execute("""SELECT k.bill, k.svc, k.cpt, l.link, l.secondary_payer, l.primary_payer, l.payer_group, l.balance,
-                                               COALESCE(l.pat_paid_joined, 0), l.charges
+                                               COALESCE(l.pat_paid_joined, 0), l.charges, l.name_key
                                         FROM temp.dt_keys k JOIN ema_link_map m ON m.bill = k.bill AND COALESCE(m.conflict,0) = 0
                                              AND COALESCE(m.facility,0) = 0
                                         JOIN ema_lines l ON l.link = m.link AND l.svc = k.svc AND l.cpt = k.cpt
                                         WHERE (COALESCE(l.flags,0) & 17) = 0 AND COALESCE(l.facility,0) = 0""").fetchall()
             pays: dict[tuple, list] = defaultdict(list)
+            elsewhere: dict[tuple, list] = defaultdict(list)     # (patient key, date, code) -> payments on the patient's other EMA claims
             if rows:
                 self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
                 self.conn.execute("CREATE TEMP TABLE dt_links (link INTEGER, svc TEXT, cpt TEXT)")
@@ -3122,8 +3123,22 @@ class Detector:
                            JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
                     pays[(lk, svc, cpt)].append((grp, cents))
                 self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
-            for b, svc, cpt, lk, sec, prim, grp, bal, pat, chg in rows:
+                nks = sorted({(r[10], r[1], r[2]) for r in rows if r[10] is not None})
+                if nks:
+                    self.conn.execute("DROP TABLE IF EXISTS temp.dt_nk")
+                    self.conn.execute("CREATE TEMP TABLE dt_nk (nk INTEGER, svc TEXT, cpt TEXT)")
+                    self.conn.executemany("INSERT INTO temp.dt_nk VALUES (?,?,?)", nks)
+                    for nk, svc, cpt, lk, grp, cents in self.conn.execute(
+                            """SELECT l.name_key, l.svc, l.cpt, l.link, y.payer_group, COALESCE(y.ins_paid,0) FROM temp.dt_nk n
+                               JOIN ema_lines l ON l.name_key = n.nk AND l.svc = n.svc AND l.cpt = n.cpt AND COALESCE(l.facility,0) = 0
+                               JOIN ema_line_payments y ON y.link = l.link AND y.svc = l.svc AND y.cpt = l.cpt
+                               WHERE COALESCE(y.ins_paid,0) > 0"""):
+                        elsewhere[(nk, svc, cpt)].append((lk, grp, cents))
+                    self.conn.execute("DROP TABLE IF EXISTS temp.dt_nk")
+            for b, svc, cpt, lk, sec, prim, grp, bal, pat, chg, nk in rows:
                 other = sum(c for g, c in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
+                other += sum(c for olk, g, c in elsewhere.get((nk, svc, cpt), []) if olk != lk and c > 0 and g and grp
+                             and not ec._same_payer(g, grp))
                 out.setdefault((b, svc, cpt), {"link": lk, "secondary_payer": sec, "primary_payer": prim, "payer_group": grp,
                                                "balance": bal or 0, "pat_paid": pat or 0, "charges": chg or 0, "other_paid": other})
             self.conn.execute("DROP TABLE IF EXISTS temp.dt_keys")
@@ -3183,9 +3198,13 @@ class Detector:
             if not sgrp or ec._same_payer(sgrp, l["payer_group"]) or ec._same_payer(sgrp, e["payer_group"]):
                 continue                    # the second payer on file is the first payer itself
             pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
-            owed = min(pr, e["balance"]) - max(0, e["pat_paid"])
-            if owed <= 100 or e["balance"] <= 100:
-                continue                    # the patient paid the share, or EMA shows the line settled
+            owed = pr - max(0, e["pat_paid"])
+            if owed <= 100:
+                continue                    # the patient paid the share
+            # EMA's balance closed with nothing from the patient or a second payer: the share was written off, not billed
+            wrote_off = e["balance"] <= 100
+            if not wrote_off:
+                owed = min(owed, e["balance"])
             paid_on = l.get("payment_date") or l.get("txn_payment_date") or ""
             crossed = l.get("claim_status_code") == "19" or bool(self.crossover_carrier(l["claim_key"]))
             if crossed and (_days_between(paid_on, self.today) or 0) < 45:
@@ -3197,10 +3216,11 @@ class Detector:
             share = ", ".join(w for rc, w in (("1", "deductible"), ("2", "coinsurance"), ("3", "copay"))
                               if any(g == "PR" and c == rc for g, c, _a in self.adj.get(l["line_key"], [])))
             title = (f"{code}: crossed over to {sgrp}, nothing paid by it yet ({_usd(owed)} {share})" if crossed else
-                     f"{code}: {l['payer_group']} paid and left {_usd(owed)} ({share}); {sgrp} is on file and was never billed")
+                     f"{code}: {l['payer_group']} paid and left {_usd(owed)} ({share}); {sgrp} is on file and was never billed"
+                     + ("; EMA wrote the share off" if wrote_off else ""))
             ev = {"first_payer": l["payer_group"], "first_paid_cents": self.standing.get(l["line_key"]), "patient_share_cents": pr,
                   "share": share, "second_payer": sgrp, "second_payer_kind": skind, "ema_balance_cents": e["balance"],
-                  "ema_patient_paid_cents": e["pat_paid"], "crossover": crossed, "ema_link": e["link"],
+                  "ema_patient_paid_cents": e["pat_paid"], "crossover": crossed, "ema_link": e["link"], "ema_wrote_off_share": wrote_off,
                   "basis": "the patient's share the first payer left, less what the patient paid, at most EMA's balance"}
             self._emit("SECONDARY_NOT_BILLED", "denial", "medium" if owed >= 5000 else "low", "review", title, l, owed, owed, None, None, ev)
             f = self.findings.get(_fid("SECONDARY_NOT_BILLED", l["line_key"]))

@@ -230,32 +230,31 @@ class Archive:
     def service(self, bill: str, code: str | None, dos: str | None) -> list[Ans]:
         return self.by_service.get((bill, code, dos), []) if code and dos else []
 
-    def answers_for(self, f: Mapping) -> list[Ans]:
-        """Every answer on the item's service: its bill, its code (the billed one too, where the payer changed it) and its
-        date of service, oldest first."""
-        bill = bill_of(f.get("patient_control_number"))
-        dos = f.get("service_date")
-        out: dict[str, Ans] = {}
-        for code in dict.fromkeys(c for c in (f.get("procedure_code"), f.get("original_procedure_code"), f.get("billed_code")) if c):
-            for a in self.service(bill, code, dos):
-                out[a.line_key] = a
-        return sorted(out.values(), key=lambda a: (a.paid_on or "", a.trace or "", a.line_key))
+    def answers_of(self, a: Ans) -> list[Ans]:
+        """Every answer on the item's service: its bill, the code the practice billed (whatever code the payer answered
+        under) and its date of service, oldest first. A line billed under another code is another service, even where the
+        payer answered both under one code (77600 recoded to 77436 beside a billed 77436)."""
+        code = a.billed_code
+        out = {x.line_key: x for x in self.service(a.bill, code, a.dos) if x.billed_code == code}
+        out[a.line_key] = a
+        return sorted(out.values(), key=lambda x: (x.paid_on or "", x.trace or "", x.line_key))
 
     def cancelled(self) -> dict[str, Ans]:
         """{line_key of an answer: the reversal that cancels it}. A reversal (claim status 22) restates the answer it
         takes back with every amount negated; it cancels the payer's most recent earlier answer of that service with those
-        amounts, on an earlier remittance (a remittance that reverses an answer and answers again carries both)."""
+        amounts, on an earlier remittance (a remittance that reverses an answer and answers again carries both). The payer
+        may answer under another payer id or name than the answer it takes back (_same_payer_loose)."""
         if self._cancelled is not None:
             return self._cancelled
         out: dict[str, Ans] = {}
         groups: dict[tuple, list[Ans]] = defaultdict(list)
         for a in self.lines.values():
-            groups[(a.bill, a.code, a.dos, a.payer)].append(a)
+            groups[(a.bill, a.code, a.dos)].append(a)
         for g in groups.values():
             revs = sorted((x for x in g if x.status == REVERSAL_STATUS), key=lambda x: (x.paid_on or "", x.trace or "", x.line_key))
             for r in revs:
                 want = (-(r.charge or 0), -(r.paid or 0), tuple(sorted((gg, c, -x) for gg, c, x in r.adj)))
-                cands = [a for a in g if a.status != REVERSAL_STATUS and a.line_key not in out
+                cands = [a for a in g if a.status != REVERSAL_STATUS and a.line_key not in out and _same_payer_loose(a, r)
                          and ((a.paid_on or "") < (r.paid_on or "") or ((a.paid_on or "") == (r.paid_on or "") and a.trace != r.trace))
                          and ((a.charge or 0), (a.paid or 0), tuple(sorted(a.adj))) == want]
                 if cands:
@@ -364,12 +363,66 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
                 arch.by_service[(a.bill, a.orig, a.dos)].append(a)
     for v in arch.by_service.values():
         v.sort(key=lambda a: (a.paid_on or "", a.trace or "", a.line_key))
+    _link_submissions(arch)
     if standing is not None:
         for a in arch.lines.values():
             a.standing = max(0, standing.get(a.line_key, 0) or 0)
+        _missed_takebacks(arch)
     else:
         _net_payments(arch)
     return arch
+
+
+def _freq_family(freq: Any) -> str:
+    """A replacement or void (frequency 7 or 8) is another submission than the original (1, or none given)."""
+    return "7" if str(freq or "") in ("7", "8") else "1"
+
+
+def _link_submissions(arch: Archive) -> None:
+    """Claim.halves and Claim.same_id: the payer's answers to one claim id (one submission), by remittance."""
+    by_id: dict[tuple, list[Claim]] = defaultdict(list)
+    for cl in arch.claims.values():
+        if cl.status != REVERSAL_STATUS and cl.pcn:
+            by_id[(cl.pcn, _freq_family(cl.freq))].append(cl)
+    for cls in by_id.values():
+        if len(cls) < 2:
+            continue
+        for cl in cls:
+            mates = [c for c in cls if c is not cl and _same_payer(c, cl)]
+            cl.halves = [c for c in mates if c.trace == cl.trace]
+            cl.same_id = [c for c in mates if c.trace != cl.trace]
+
+
+def _missed_takebacks(arch: Archive) -> None:
+    """Payments the Detector's ledger still counts although a reversal in this archive cancels them: the payer reversed
+    under another payer id (one payer, renamed), or the reversal's line carries no date of its own. Per service and payer,
+    what the reversals took back beyond what the ledger already netted comes off the payments they cancel."""
+    canc = arch.cancelled()
+    pairs: dict[tuple, list[tuple[Ans, Ans]]] = defaultdict(list)
+    for lk, r in canc.items():
+        p = arch.lines.get(lk)
+        if p is not None and (p.paid or 0) > 0 and (r.paid or 0) < 0:
+            pairs[(r.bill, r.code, r.dos)].append((r, p))
+    if not pairs:
+        return
+    rows: dict[tuple, list[Ans]] = defaultdict(list)
+    for a in arch.lines.values():
+        if (a.bill, a.code, a.dos) in pairs and a.status in PAYMENT_STATUSES and (a.paid or 0) > 0:
+            rows[(a.bill, a.code, a.dos)].append(a)
+    for key, prs in pairs.items():
+        revs = {r.line_key: r for r, _p in prs}
+        payers = list(revs.values())
+        pays = [p for p in rows.get(key, []) if any(_same_payer_loose(p, r) for r in payers)]
+        taken = sum(-(r.paid or 0) for r in revs.values())
+        netted = sum(max(0, (p.paid or 0) - p.standing) for p in pays)
+        missing = taken - netted
+        for r, p in sorted(prs, key=lambda rp: (rp[0].paid_on or "", rp[0].line_key)):
+            if missing <= 0:
+                break
+            take = min(p.standing, missing, -(r.paid or 0))
+            if take > 0:
+                p.standing -= take
+                missing -= take
 
 
 def _net_payments(arch: Archive) -> None:
@@ -389,7 +442,7 @@ def _net_payments(arch: Archive) -> None:
     for r in sorted(revs, key=lambda x: (x.paid_on or "", x.line_key)):
         need = -r.paid
         cands = [p for p in pos.get((r.bill, r.code, r.dos), []) if p.standing > 0 and (p.paid_on or "") < (r.paid_on or "")]
-        cands = [p for p in cands if p.payer == r.payer] if r.payer else [p for p in cands if p.paid == need]
+        cands = [p for p in cands if _same_payer_loose(p, r)] if (r.payer or r.payer_name) else [p for p in cands if p.paid == need]
         cands.sort(key=lambda p: (p.paid_on or "", p.line_key), reverse=True)
         cands.sort(key=lambda p: (p.standing != need and p.paid != need, p.pcn != r.pcn))
         for p in cands:
@@ -404,13 +457,26 @@ def _net_payments(arch: Archive) -> None:
 MANY_PAYER_GROUPS = frozenset({"Medicare Supplement carriers", "Self-funded plan TPAs", "Unknown"})
 
 
-def _same_payer(a: Ans, b: Ans) -> bool:
-    """One payer: the same payer id (or name), or the same payer group as the claim filing indicator refines it (one plan
-    under two ids). Medicare's two contractors, a company's commercial plan and its Medicare Advantage plan, or two
-    carriers of a group that holds many payers (the Medigap carriers, the self-funded plans' administrators) are two."""
-    if a.payer and a.payer == b.payer:
+def _name_key(name: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(name or "").upper())
+
+
+def _same_payer(a, b) -> bool:
+    """One payer (Ans or Claim): the same payer name, or the same payer group as the claim filing indicator refines it
+    (one plan under two names) where the group is one payer. The payer id alone is not enough: a clearinghouse's id is
+    shared by many payers (a Medigap carrier and a long-term-care insurer answer under one). Medicare's two contractors,
+    or two carriers of a group that holds many payers (the Medigap carriers, the self-funded plans' administrators), are
+    two."""
+    na = _name_key(a.payer_name)
+    if na and na == _name_key(b.payer_name):
         return True
     return bool(a.group and a.group == b.group and a.group not in MANY_PAYER_GROUPS)
+
+
+def _same_payer_loose(a, b) -> bool:
+    """For pairing a reversal with the answer it restates negated, where the amounts already tie them: _same_payer, or
+    the same payer id (a payer that renamed itself)."""
+    return _same_payer(a, b) or bool(a.payer and a.payer == b.payer)
 
 
 def _units_paid(events: Sequence[Ans]) -> float:
@@ -420,51 +486,96 @@ def _units_paid(events: Sequence[Ans]) -> float:
     return sum(e.unit_count for e in (prim or events))
 
 
-def _claim_lines(a: Ans) -> list[Ans]:
-    """The lines of the item's claim that bill its code on its date: every billed line, the item's own included, and a B13
-    restatement piece for the line it restates; the payer's other restatement pieces (its patient-share and contractual
-    pieces) are parts of that same line and are left out."""
-    return [x for x in a.claim.lines if x.billed_code == a.billed_code and x.dos == a.dos and (not x.piece() or x.restated_cents())]
-
-
-def _units_billed(a: Ans) -> float:
-    """Units the item's claim billed for its code and date, over every line of it (detect.units_billed's rule), except
-    that lines sharing a line control number are one billed line the payer split into pieces (counted once), and a
-    payer's restatement pieces count as the one line they restate."""
-    split: dict[str, float] = {}
-    n = 0.0
-    for x in _claim_lines(a):
+def _billed_groups(rows: Sequence[Ans]) -> dict[tuple, list[Ans]]:
+    """The billed lines among one submission's answers of one billed code and date: {key: answers}. Lines sharing a line
+    control number are one billed line (the payer may split it into pieces); a line with none is one billed line; a
+    payer's restatement pieces (no line control number: the amount paid before as B13, the patient's share, the
+    contractual cut) are parts of the one line with their modifiers, or a billed line of their own where there is none or
+    where they add up to that line's whole charge again (a second unit the payer restated as paid before)."""
+    groups: dict[tuple, list[Ans]] = {}
+    for x in rows:
         if x.lcn:
-            split[x.lcn] = max(split.get(x.lcn, 0), x.billed_units)
+            groups.setdefault(("L", x.lcn), []).append(x)
+        elif not x.piece():
+            groups[("X", x.line_key)] = [x]
+    loose: dict[frozenset, list[Ans]] = defaultdict(list)
+    for x in rows:
+        if not x.lcn and x.piece():
+            loose[x.sig()].append(x)
+    for s, ps in loose.items():
+        real = [k for k, v in groups.items() if k[0] != "P" and v[0].sig() == s]
+        whole = sum(x.charge or 0 for x in ps)
+        if len(real) == 1 and abs(sum(x.charge or 0 for x in groups[real[0]]) - whole) > 100:
+            groups[real[0]] = groups[real[0]] + ps
         else:
-            n += x.billed_units
-    return (n + sum(split.values())) or 1
+            groups[("P", ",".join(sorted(s)))] = ps
+    return groups
 
 
-def _attribute(a: Ans, x: Ans, lines: Sequence[Ans]) -> str:
-    """Which of the item's claim's billed lines an answer x is about: 'own' (the item's line), 'other' (another line of
-    the claim) or '' (it cannot be told). By line control number first; then, where the claim bills the code once on the
-    date, it is the item's line; then by the modifiers that make a line another unit (59, XS, 76, RT, ...), when exactly
-    one line of the claim has them."""
-    if a.lcn and x.lcn:
-        if x.lcn == a.lcn:
+def _groups(a: Ans) -> tuple[dict[tuple, list[Ans]], tuple]:
+    """The billed lines of the item's submission for its billed code and date, and which one is the item's: its claim,
+    the claims the payer split it into on the same remittance (MA15), and the lines the payer's other answers to the same
+    claim id carry (a half answered on another remittance). A line with no charge is the payer's, not a billed line."""
+    rows = [x for cl in [a.claim] + list(a.claim.halves) for x in cl.lines
+            if x.billed_code == a.billed_code and x.dos == a.dos and ((x.charge or 0) > 0 or x is a)]
+    if not any(x is a for x in rows):
+        rows.append(a)
+    groups = _billed_groups(rows)
+    for cl in a.claim.same_id:
+        for x in cl.lines:
+            if x.lcn and x.billed_code == a.billed_code and x.dos == a.dos and (x.charge or 0) > 0 and ("L", x.lcn) not in groups:
+                groups[("L", x.lcn)] = [x]
+    mine = next(k for k, v in groups.items() if any(x is a for x in v))
+    return groups, mine
+
+
+def _units_billed(a: Ans, gm: tuple | None = None) -> float:
+    """Units the item's submission billed for its code and date: each billed line once (detect.units_billed counts every
+    line; a line the payer split into pieces is one)."""
+    groups, _mine = gm or _groups(a)
+    return sum(max(x.billed_units for x in v) for v in groups.values()) or 1
+
+
+def _attribute(a: Ans, x: Ans, gm: tuple | None = None) -> str:
+    """Which billed line of the item's submission an answer x of the same billed code and date is about: 'own' (the
+    item's line), 'other' (another line) or '' (it cannot be told). By line control number first; then, where the
+    submission bills the code once on the date, the item's line; then by the modifiers that make a line another unit
+    (59, XS, 76, RT, ...), when exactly one billed line has x's."""
+    groups, mine = gm or _groups(a)
+    k = next((k for k, v in groups.items() if any(y is x for y in v)), None)
+    if k is None and x.lcn and ("L", x.lcn) in groups:
+        k = ("L", x.lcn)
+    if k is None:
+        if len(groups) <= 1:
             return "own"
-        if any(l.lcn == x.lcn for l in lines if l.line_key != a.line_key):
-            return "other"
-    if len(lines) <= 1:
-        return "own"
-    same = [l for l in lines if l.sig() == x.sig()]
-    if len(same) == 1:
-        return "own" if same[0].line_key == a.line_key else "other"
-    return ""
+        same = [k2 for k2, v in groups.items() if v[0].sig() == x.sig()]
+        if len(same) == 1:
+            k = same[0]
+    if k is None:
+        return ""
+    return "own" if k == mine else "other"
 
 
-def _line_identity(a: Ans) -> str:
-    """Which billed line of its service an answer is, for telling repeats of one line from other units: '*' when its
-    claim bills the code once on the date, else its line control number, else its unit-making modifiers."""
-    if len(_claim_lines(a)) <= 1:
+def _line_identity(a: Ans, arch: Archive) -> str:
+    """Which billed line of its service an answer is, for telling repeats of one line from other units: '*' when no answer
+    of the payer shows the code billed more than once on the date; else its unit-making modifiers, where they tell the
+    billed lines apart (77401 and 77401-59); else its line control number."""
+    n, distinct = 1, True
+    for cl in arch.by_bill.get(a.bill, []):
+        if cl.status == REVERSAL_STATUS or not _same_payer(cl, a.claim):
+            continue
+        rows = [x for x in cl.lines if x.billed_code == a.billed_code and x.dos == a.dos and (x.charge or 0) > 0]
+        if len(rows) < 2:
+            continue
+        g = _billed_groups(rows)
+        n = max(n, len(g))
+        if len(g) > 1 and len({v[0].sig() for v in g.values()}) < len(g):
+            distinct = False
+    if n <= 1:
         return "*"
-    return ("L:" + a.lcn) if a.lcn else ("S:" + ",".join(sorted(a.sig())))
+    if distinct or not a.lcn:
+        return "S:" + ",".join(sorted(a.sig()))
+    return "L:" + a.lcn
 
 
 def _per_unit(paid: Sequence[Ans], fallback: float | None) -> float | None:

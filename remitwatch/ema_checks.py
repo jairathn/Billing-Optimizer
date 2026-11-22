@@ -883,7 +883,7 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
     t = fr["today"]
     summary: dict = {"as_of": fr["production_as_of"], "fresh": fr["production_fresh"], "n": 0, "cents": 0, "short_n": 0,
                      "short_cents": 0, "offset_n": 0, "offset_cents": 0, "over_n": 0, "over_cents": 0, "damaged_n": 0,
-                     "damaged_cents": 0, "by_group": {}, "by_month": {}, "rows": []}
+                     "damaged_cents": 0, "elsewhere_n": 0, "elsewhere_cents": 0, "by_group": {}, "by_month": {}, "rows": []}
     if not _full_store(conn) or not fr["production_fresh"] or not _table(conn, "transactions"):
         if save and _full_store(conn):
             _set_meta(conn, UNPOSTED_KEY, summary)
@@ -931,6 +931,14 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
         d["covered"] = _remit_covered(boxes, d["paid_on"], info["svcs"])
         d["svcs"], d["pcns"] = info["svcs"], sorted(set(info["pcns"]))
     diffs = [d for d in diffs if d["covered"]]
+    # a payment EMA posted under another check number: every claim of the trace has EMA insurance payments of its amount
+    # (within $1) on its own EMA claims, 7 days before to 120 days after the 835's date. Not "never posted": counted apart
+    elsewhere = _posted_elsewhere(conn, [d for d in diffs if d["unmatched"]])
+    for d in diffs:
+        if d["tk"] in elsewhere:
+            summary["elsewhere_n"] += 1
+            summary["elsewhere_cents"] += d["diff"]
+    diffs = [d for d in diffs if d["tk"] not in elsewhere]
     # differences of one payer that offset within 60 days are one payment posted under another number
     who = lambda d: d["payer"] if d["grp"] in MANY_PAYER_GROUPS else d["grp"]      # noqa: E731
     by_payer: dict[str, list] = defaultdict(list)
@@ -1002,6 +1010,56 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
     if save:
         _set_meta(conn, UNPOSTED_KEY, summary)
         conn.commit()
+    return out
+
+
+def _posted_elsewhere(conn: sqlite3.Connection, diffs: list[dict]) -> set[str]:
+    """The 835 payments (transaction keys) among these whose every claim EMA posted, for its amount within $1, under
+    another check number no 835 carries, on the claim's own EMA claims (the map: no conflict, never the ASC's facility
+    claim), from 7 days before to 120 days after the 835's payment date."""
+    out: set[str] = set()
+    tks = sorted({d["tk"] for d in diffs})
+    if not tks:
+        return out
+    when = {d["tk"]: d["paid_on"] for d in diffs}
+    claims: dict[str, list] = defaultdict(list)
+    for part in _chunks(tks):
+        _temp(conn, "ec_pe", ["tk TEXT PRIMARY KEY"], [(x,) for x in part])
+        for tk, pcn, paid in conn.execute("""SELECT c.transaction_key, c.patient_control_number, COALESCE(c.paid_cents, 0) FROM claims c
+                                             WHERE c.transaction_key IN (SELECT tk FROM temp.ec_pe)"""):
+            claims[tk].append((pcn, paid))
+    _drop(conn, "ec_pe")
+    bills = sorted({_bill(pcn) for v in claims.values() for pcn, _p in v if pcn})
+    links: dict[str, set] = defaultdict(set)
+    for part in _chunks(bills):
+        _temp(conn, "ec_peb", ["bill TEXT PRIMARY KEY"], [(b,) for b in part])
+        for b, lk in conn.execute("""SELECT bill, link FROM ema_link_map WHERE bill IN (SELECT bill FROM temp.ec_peb)
+                                     AND COALESCE(conflict, 0) = 0 AND COALESCE(facility, 0) = 0"""):
+            links[b].add(lk)
+    _drop(conn, "ec_peb")
+    pays: dict[int, list] = defaultdict(list)
+    lks = sorted({lk for v in links.values() for lk in v})
+    for part in _chunks(lks):
+        _temp(conn, "ec_pel", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for lk, posted, cents in conn.execute("""SELECT link, posted, SUM(COALESCE(ins_paid, 0)) FROM ema_line_payments
+                                                 WHERE link IN (SELECT link FROM temp.ec_pel) AND COALESCE(ins_paid, 0) <> 0
+                                                   AND COALESCE(in_835, 0) = 0
+                                                 GROUP BY link, posted, check_no"""):
+            pays[lk].append((posted, cents or 0))
+    _drop(conn, "ec_pel")
+    for tk, cl in claims.items():
+        paid_on = when.get(tk)
+        lo, hi = _add(paid_on, -7) or "", _add(paid_on, 120) or ""
+        ok = bool(cl)
+        for pcn, paid in cl:
+            if paid <= 0:
+                continue
+            got = sum(c for lk in links.get(_bill(pcn) or "", ()) for posted, c in pays.get(lk, []) if lo <= (posted or "") <= hi)
+            if abs(got - paid) > 100:
+                ok = False
+                break
+        if ok and any(paid > 0 for _p, paid in cl):
+            out.add(tk)
     return out
 
 

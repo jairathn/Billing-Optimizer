@@ -977,4 +977,4 @@ def test_the_upload_page_serves_its_script_and_says_what_happens_to_the_files(bu
     words = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page))
     assert "a file that does not arrive whole is not kept" in words
     assert "RemitWatch knows a file by its checksum, the same way whether it was uploaded or found in the Dropbox folder" in words
-    assert "—" not in page and "—" not in js                     # no em dashes in what people read
+    assert "\u2014" not in page and "\u2014" not in js                     # no em dashes in what people read

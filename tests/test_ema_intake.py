@@ -541,7 +541,7 @@ def test_the_attempt_is_written_before_the_read_and_a_file_three_runs_could_not_
     monkeypatch.setattr(el, "apply_production_file", real)
     out = cycle(state, client)
     conn = state_store(state)
-    row = conn.execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?", (sha(newer),)).fetchone()
+    row = tuple(conn.execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?", (sha(newer),)).fetchone())
     assert row == ("held", el.ATTEMPT_HOLD_REASON) and "ema_apply" not in out
 
 
@@ -589,7 +589,7 @@ def test_a_raw_production_csv_too_big_for_the_site_waits_and_its_zip_closes_it(v
     conn = state_store(state)
     entry = client._entry(big)
     pid = er.provisional_id(entry["content_hash"])
-    assert conn.execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?", (pid,)).fetchone() == \
+    assert tuple(conn.execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?", (pid,)).fetchone()) == \
         ("waiting", cloud.BIG_REPORT_REASON)
     assert cloud.has_new_files(state, client) is False
     write(root / DATA / "Reports" / "2026 Production(Sheet1).zip", F.zipped("2026 Production(Sheet1).csv", data))
@@ -678,9 +678,11 @@ def test_uploads_in_the_state_folder_are_read_before_dropbox_one_production_file
     first = cycle(state, client)
     assert first["intake"]["read"] == 2 and first["intake"]["remaining"] == 1 and first["more"] is True
     names = {m["name"] for m in state.list("intake")}
-    assert f"intake/done/{pa}.json" in names and f"intake/done/{pb}.json" in names and f"intake/{pc}.json" in names
+    assert f"intake/done/{pa}.json" in names                 # the A/R, and one of the two Production files; the other waits
+    waits = [p for p in (pb, pc) if f"intake/{p}.json" in names]
+    assert len(waits) == 1 and f"intake/done/{({pb, pc} - set(waits)).pop()}.json" in names
     second = cycle(state, client)
-    assert second["intake"]["read"] == 1
+    assert second["intake"]["read"] == 1 and f"intake/done/{waits[0]}.json" in {m["name"] for m in state.list("intake")}
     cat = catalog(state_store(state))
     assert cat[sha(ar)] == cat[sha(p25)] == cat[sha(p26)] == "current"
     done = json.loads(state.get(f"intake/done/{pc}.json"))
