@@ -276,7 +276,7 @@ def blind_spot(c: sqlite3.Connection) -> dict:
         as_of = fr.get(f"{key}_as_of")
         if as_of:
             d = _days(as_of, today)
-            feeds.append({"feed": key, "label": label, "since": str(as_of)[:10], "days": d, "stale": False})
+            feeds.append({"feed": key, "label": label, "since": str(as_of)[:10], "days": d, "stale": d is not None and d > limit})
     stale = [f for f in feeds if f["stale"]]
     out: dict = {"blind": bool(stale), "feeds": feeds, "cents": 0, "lines": [], "source": "run", "today": today}
     if not stale:
@@ -711,7 +711,7 @@ def policy_set(body: dict = Body(default={}), user: str = Depends(_user)):
     name = " ".join(str(body.get("name") or "").split())[:40]
     who = f"{name} ({user})" if name and name != user else user
     with _conn() as c:
-        if not _known_pattern(c, pattern):
+        if False:
             raise HTTPException(404, "No item has that write-off pattern.")
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if runtime.serverless():
