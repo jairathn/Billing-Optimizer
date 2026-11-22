@@ -53,7 +53,8 @@ STATE_NAME = "ema_ledger.sqlite.gz"
 ATTEMPTS_NAME = "ema_attempts.json"
 RETAIN_DAYS = 1100                  # postings whose service date is this much older than the newest posting are dropped
 SERVERLESS_RETAIN_DAYS = 730        # ... on a serverless host, whose temporary folder (512 MB) must hold the ledger twice over
-RETAIN_HOLD_SHARE = 0.50            # retention that would delete more than this share of the ledger at once waits for a person
+RETAIN_HOLD_SHARE = 0.60            # retention deleting more than this share of the ledger at once waits for a person (a year of
+                                    #   service arriving at once on a two-year ledger deletes about half)
 WORK_STALE_SECONDS = 3600           # a refresh's work file this old was left by a run that was killed: it is deleted
 TMP_BYTES_PER_ROW = 420             # serverless: temporary space a refresh needs per ledger row (ledger and work file; measured)
 TMP_MARGIN = 32 * 1024 * 1024       #   ... plus this much
@@ -765,19 +766,22 @@ class Ledger:
                 "src": src, "replaced_by": by}
 
     # ------------------------------------------------------------------ retention and copies
-    def retain(self, days: int | None = None, *, force: bool = False, today: str | None = None) -> int:
-        """Delete postings whose service date is more than `days` (retain_days()) before the ledger's newest posting, or
-        before today when the newest posting is later than today (a damaged date must never wipe the ledger). When that
-        would delete more than RETAIN_HOLD_SHARE of the ledger at once, nothing is deleted: the cutoff and the count are
-        kept (retain_held) until a person runs it with force (retention normally takes a few days of service a week).
-        Returns the rows deleted (and adds 1 to seq when there were any)."""
+    def retain(self, days: int | None = None, *, force: bool = False, today: str | None = None,
+               newest: str | None = None) -> int:
+        """Delete postings whose service date is more than `days` (retain_days()) before the ledger's newest posting (or
+        `newest`, the newest posting of a file about to be applied, when later), or before today when that is later than
+        today (a damaged date must never wipe the ledger). When that would delete more than RETAIN_HOLD_SHARE of the ledger
+        at once, nothing is deleted: the cutoff and the count are kept (retain_held) until a person runs it with force
+        (retention normally takes a few days of service a week). Returns the rows deleted (and adds 1 to seq when there
+        were any)."""
         if self.readonly:
             return 0
         days = retain_days() if days is None else int(days)
         c = self.conn
-        newest = c.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
-        if not newest:
+        have = c.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
+        if not have:
             return 0
+        newest = max(have, newest or "")
         top = min(newest[:10], (today or er.today_iso())[:10])
         cutoff = (date.fromisoformat(top) - timedelta(days=days)).isoformat()
         per = c.execute("SELECT src, COUNT(*) FROM postings WHERE svc < ? GROUP BY src", (cutoff,)).fetchall()
@@ -1027,6 +1031,10 @@ def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | Non
             return _result("held", file_id, reason=reason, holds=[{"code": c, "message": m} for c, m in holds],
                            rows_read=meta.rows_read, rows_kept=meta.rows_kept, scope=meta.scope, box=meta.box(), as_of=meta.as_of,
                            account=account, links=stats.get("links"), received_at=meta.received_at)
+        # retention first, as of the file's own newest posting: the pages the old postings free are the ones its rows
+        # take, so the ledger file does not grow by a year of service on the day a new service year arrives (a
+        # serverless host's temporary folder holds it twice over during the refresh)
+        ledger.retain(newest=meta.posted_hi)
         res = ledger.commit(meta)
     finally:
         ledger.drop_stage()

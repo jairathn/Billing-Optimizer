@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import time
+import types
 
 import pytest
 
@@ -32,7 +33,7 @@ def _env(monkeypatch):
     monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
     monkeypatch.setenv("REMITWATCH_MODE", "server")
     for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES",
-              "REMITWATCH_EMA_LEDGER", "REMITWATCH_EMA_REPORT_KEEP"):
+              "REMITWATCH_EMA_LEDGER", "REMITWATCH_EMA_REPORT_KEEP", "REMITWATCH_EMA_RETAIN_DAYS"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -939,3 +940,153 @@ def test_a_ledger_written_by_another_version_is_not_opened(tmp_path):
         el.Ledger.open(p)
     with pytest.raises(FileNotFoundError):
         el.Ledger.open(str(tmp_path / "none.sqlite"), readonly=True)
+
+
+# ================================================================================= 10. what a damaged file or a crash can do
+def year_rows(year, n, last_posted, extra=()):
+    payers = [P["bcbs"], P["medicare"], P["commercial"]]
+    out = []
+    for i in range(n):
+        svc = D(year, 1 + i % 10, 2)
+        out.append(F.production_row(charges=150, posted=svc, svc=svc, link=F.link_no(year * 1000 + i), patient=i % 4,
+                                    payer=payers[i % 3], primary=payers[i % 3]))
+        out.append(F.production_row(ins_paid=80, check=F.check_no(i % 7), posted=min(D(svc.year, svc.month, 20), last_posted),
+                                    svc=svc, link=F.link_no(year * 1000 + i), patient=i % 4, payer=payers[i % 3],
+                                    primary=payers[i % 3]))
+    return out + list(extra)
+
+
+@pytest.mark.parametrize("bad_posted", ["71234", 71234])
+def test_a_damaged_posted_date_never_wipes_the_ledger_or_blocks_the_next_export(store, ledger, tmp_path, monkeypatch, bad_posted):
+    """One row of the 2026 file carries the posted date 71234: as text a damaged cell, as an .xlsx number the year 2095.
+    It is left out, so the file's as_of stays its real newest posting, retention deletes nothing, and next month's export
+    of 2026 is read (it was 'superseded' until 2095, and every posting of both years was deleted)."""
+    monkeypatch.setattr(er, "today_iso", lambda: "2026-12-31")
+    assert apply(store, ledger, prod_file(tmp_path, year_rows(2025, 150, D(2026, 11, 20))))["status"] == "current"
+    bad = F.production_row(ins_paid=10, check=F.check_no(99), posted=bad_posted, svc=D(2026, 5, 2), link=F.link_no(999999))
+    rows26 = year_rows(2026, 150, D(2026, 11, 20), extra=[bad])
+    p26 = (F.write(str(tmp_path / "prod2026.xlsx"), F.production_xlsx(rows26)) if isinstance(bad_posted, int)
+           else prod_file(tmp_path, rows26))
+    r = apply(store, ledger, p26)
+    assert r["status"] == "current" and r["as_of"] == "2026-10-20" and r["rows_applied"] == 300
+    assert r["account"]["left"]["no_date"] == 1
+    n = one(ledger.conn, "SELECT COUNT(*) FROM postings")[0]
+    out = el.refresh(store, ledger, log=Log())
+    assert out["retained"] == 0 and one(ledger.conn, "SELECT COUNT(*) FROM postings") == (n,) == (600,)
+    later = F.production_row(ins_paid=20, check=F.check_no(5), posted=D(2026, 12, 20), svc=D(2026, 11, 2), link=F.link_no(5))
+    r2 = apply(store, ledger, prod_file(tmp_path, year_rows(2026, 160, D(2026, 12, 20), extra=[later])))
+    assert r2["status"] == "current" and r2["rows_applied"] == 321 and r2["as_of"] == "2026-12-20"
+
+
+def test_retention_counts_from_today_at_most_and_waits_for_a_person_before_a_mass_delete(store, ledger, tmp_path, monkeypatch):
+    rows_ = [F.production_row(link=F.link_no(i), svc=D(2026, 3, 2), posted=D(2026, 4, 1), ins_paid=5, check=F.check_no(1))
+             for i in range(10)]
+    apply(store, ledger, prod_file(tmp_path, rows_))
+    src = one(ledger.conn, "SELECT src FROM ledger_files")[0]
+    # a posting dated far ahead (a ledger written before the readers left such dates out): retention counts from today
+    ledger.conn.execute("INSERT INTO postings (src, posted, svc, cpt, link, flags) VALUES (?, '2095-01-10', '2026-03-02', "
+                        "'99213', ?, 0)", (src, F.link_no(99)))
+    assert ledger.retain(today="2026-12-31") == 0 and one(ledger.conn, "SELECT COUNT(*) FROM postings") == (11,)
+    # with today itself far ahead, retention would delete the whole ledger at once: it waits for a person instead
+    assert ledger.retain(today="2095-01-10") == 0 and one(ledger.conn, "SELECT COUNT(*) FROM postings") == (11,)
+    held = ledger.retain_held()
+    assert held["rows"] == 11 and held["of"] == 11 and held["cutoff"] == "2092-01-06"
+    monkeypatch.setattr(er, "today_iso", lambda: "2095-01-10")
+    out = el.refresh(store, ledger, log=Log())
+    assert out["retained"] == 0 and out["retain_held"]["rows"] == 11
+    assert json.loads(one(store.conn, "SELECT value FROM meta WHERE key='ema:retain_held'")[0])["rows"] == 11
+    monkeypatch.setattr(er, "today_iso", lambda: "2026-12-31")
+    el.refresh(store, ledger, log=Log())                       # the clock is right again: nothing waits
+    assert ledger.retain_held() is None and one(store.conn, "SELECT COUNT(*) FROM meta WHERE key='ema:retain_held'") == (0,)
+    assert ledger.retain(today="2095-01-10", force=True) == 11  # a person may run it anyway (the CLI)
+
+
+def test_retention_days_follow_the_host_and_the_setting(monkeypatch):
+    assert el.retain_days() == el.RETAIN_DAYS == 1100
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    assert el.retain_days() == el.SERVERLESS_RETAIN_DAYS == 730
+    monkeypatch.setenv("REMITWATCH_EMA_RETAIN_DAYS", "900")
+    assert el.retain_days() == 900
+    monkeypatch.setenv("REMITWATCH_EMA_RETAIN_DAYS", "30")
+    assert el.retain_days() == 366                              # never less than a year of service
+    monkeypatch.setenv("REMITWATCH_EMA_RETAIN_DAYS", "many")
+    assert el.retain_days() == 730
+
+
+def test_a_production_csv_saved_by_excel_is_held_h7(store, ledger, tmp_path):
+    """Excel writes 12-digit check numbers in scientific notation: those checks match no remittance, so every payment on
+    them would read as not posted in EMA. More than ten of them (and 0.5% of the rows with a check) hold the file."""
+    rows_ = [charge(F.link_no(i)) for i in range(30)]
+    rows_ += [payment(F.link_no(i), f"9.0000{i % 10}E+11", 80) for i in range(12)]
+    res = apply(store, ledger, prod_file(tmp_path, rows_))
+    assert res["status"] == "held" and [h["code"] for h in res["holds"]] == ["H7"]
+    assert "12 check numbers were changed by a spreadsheet" in res["reason"]
+    few = [charge(F.link_no(i)) for i in range(30)] + [payment(F.link_no(i), f"9.0000{i}E+11", 80) for i in range(3)]
+    assert apply(store, ledger, prod_file(tmp_path, few))["status"] == "current"
+
+
+def test_the_work_file_of_a_killed_refresh_is_deleted_on_the_next_open(tmp_path):
+    folder = tmp_path / "ledger"
+    folder.mkdir()
+    old = folder / "ema_refresh-123-abcd.sqlite"
+    young = folder / "ema_refresh-456-ef01.sqlite"
+    for f in (old, young):
+        f.write_bytes(b"x" * 100)
+    os.utime(old, (time.time() - 2 * el.WORK_STALE_SECONDS,) * 2)
+    el.Ledger.open(str(folder / "ema_ledger.sqlite")).close()
+    assert not old.exists() and young.exists()              # a live refresh of another process is never touched
+
+
+def test_a_serverless_refresh_lets_the_ledger_go_before_part_b_and_sorts_in_memory(tmp_path, monkeypatch):
+    """The temporary folder never holds the ledger and the larger half of the refresh's work at once: once Part A is
+    done the ledger is saved to the state folder and its scratch copy deleted (release), and SQLite sorts in memory.
+    Part B and the publish need nothing from the ledger: the routine reasons of a line with an item are still kept."""
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    store = memory_store()
+    state = LocalState(str(tmp_path / "state"))
+    tmp = tmp_path / "tmp"
+    h = el.LedgerHandle(state, tmp_dir=str(tmp))
+    lg = h.open()
+    add_finding(store, F.claim_id(1))
+    add_remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 80)]}])
+    big = str(tmp_path / "big.csv")
+    F.big_production_csv(big, 20_000)
+    assert apply(store, lg, big, force=True)["status"] == "current"
+    assert apply(store, lg, prod_file(tmp_path, [charge(F.link_no(1)), payment(F.link_no(1), F.check_no(1), 80),
+                                                 F.production_row(link=F.link_no(1), contractual=70, reason="CO-45",
+                                                                  posted=D(2026, 4, 1))]))["status"] == "current"
+    sizes = {"ledger": os.path.getsize(lg.path)}
+    seen: dict = {}
+    real_b = el._part_b
+
+    def spy_b(conn, **kw):
+        seen["ledger_gone"] = not os.path.exists(lg.path)
+        seen["temp_store"] = conn.execute("PRAGMA temp_store").fetchone()[0]
+        out = real_b(conn, **kw)
+        seen["work_end_of_b"] = sum(os.path.getsize(tmp / f) for f in os.listdir(tmp) if f.startswith(el.WORK_PREFIX))
+        return out
+    monkeypatch.setattr(el, "_part_b", spy_b)
+    out = el.refresh(store, lg, log=Log(), release=h.save)
+    store.conn.commit()
+    assert out["released"] and seen["ledger_gone"] and seen["temp_store"] == 2          # 2: SQLite's MEMORY
+    assert seen["work_end_of_b"] > 0 and not os.path.exists(h.path)
+    assert one(store.conn, "SELECT value FROM meta WHERE key='ema:ledger_rev'") == (state.meta(el.STATE_NAME)["rev"],)
+    assert not h.behind(store.conn) and h.ledger is None
+    assert ("CO", "45") in {(r[0], r[1]) for r in store.conn.execute(
+        "SELECT grp, code FROM ema_line_reasons WHERE link=?", (F.link_no(1),))}         # a routine reason of an item's line
+    assert sizes["ledger"] > 0
+    store.close()
+
+
+def test_a_file_too_large_for_the_temporary_folder_is_held_h8(store, ledger, tmp_path, monkeypatch):
+    """On a serverless host a file whose summaries would not fit the temporary folder is held with that reason, not
+    tried until the attempts run out and then called too slow."""
+    p = prod_file(tmp_path, [charge(F.link_no(1 + i)) for i in range(40)])
+    monkeypatch.setattr(el.shutil, "disk_usage", lambda _p: types.SimpleNamespace(free=1024 * 1024, total=0, used=0))
+    rec = er.recognize(p, "p.csv")
+    res = el.apply_production_file(store, p, rec, file_id=er.file_id_of(p), via="t", ledger=ledger, serverless=True, log=Log())
+    assert res["status"] == "held" and [h["code"] for h in res["holds"]] == ["H8"]
+    assert "temporary space" in res["reason"] and "slow" not in res["reason"]
+    assert el.apply_production_file(store, p, rec, file_id=er.file_id_of(p), via="t", ledger=ledger, serverless=False,
+                                    log=Log())["status"] == "current"
