@@ -148,30 +148,49 @@ def apply_event(conn: sqlite3.Connection, a: dict) -> bool:
 
 # Hide rules: a reason a payer is known not to pay (a visit with modifier 57 at a payer that never pays it) leaves the lists.
 # Its open items go to Let go with the rule's note, and so do new ones after each analysis; an item a person has worked or
-# reopened is left alone. Removing the rule reopens what it hid.
+# reopened is left alone. Removing the rule reopens what it hid. A removed rule stays as a row with the date it was removed
+# (removed_at), so that journal entries applied again later (a serverless instance loading a new copy, a cycle whose
+# journal delete failed), in any order, change nothing: an add or a remove older than the rule's last change is skipped.
 HIDE_DDL = """
 CREATE TABLE IF NOT EXISTS hide_rules (
-    payer_group TEXT, signal TEXT, actor TEXT, at TEXT, note TEXT, PRIMARY KEY (payer_group, signal)
+    payer_group TEXT, signal TEXT, actor TEXT, at TEXT, note TEXT, removed_at TEXT, PRIMARY KEY (payer_group, signal)
 );
 """
 HIDE_ACTOR = "hide rule"
 # Never hidden wholesale for a payer: a claim no payer answered (or one rejected before reaching the payer) is not a
 # reason the payer won't pay. It is money nobody has asked for yet, so each one is let go only by a person, one at a time.
 NEVER_HIDDEN = frozenset({"NO_ANSWER", "REJECTED_PRE_PAYER"})
+# What decided an item's status last, for SQL over `findings f`: a line in its history that changes no status (a payer's
+# fax read, a follow-up faxed) does not count, so an item the payer wrote about is still the rule's to bring back.
+DECIDING_KINDS = "('manual','hidden','unhidden','paid_on_later_remit','reopened')"
+LAST_DECISION = (f"(SELECT e.kind FROM finding_events e WHERE e.finding_id=f.finding_id AND e.kind IN {DECIDING_KINDS} "
+                 "ORDER BY e.at DESC, e.id DESC LIMIT 1)")
 
 
 def ensure_hide_rules(conn: sqlite3.Connection) -> None:
     conn.executescript(HIDE_DDL)
+    if "removed_at" not in {r[1] for r in conn.execute("PRAGMA table_info(hide_rules)")}:
+        conn.execute("ALTER TABLE hide_rules ADD COLUMN removed_at TEXT")     # a store made before removed rules were kept
+
+
+def rules_in_force(conn: sqlite3.Connection) -> str:
+    """SQL that keeps the rules in force (not removed): every rule, in a store made before removed rules were kept."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(hide_rules)")}
+    return "removed_at IS NULL" if "removed_at" in have else "1=1"
 
 
 def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str) -> int:
-    """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands)."""
+    """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands) and any
+    whose status was decided after `at` (an entry applied again must not undo what came after it)."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "findings" not in have or signal in NEVER_HIDDEN:
         return 0
-    touched = "AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='manual')" if "finding_events" in have else ""
+    touched, params = "", [payer_group, signal]
+    if "finding_events" in have:
+        touched = f"AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='manual' OR (kind IN {DECIDING_KINDS} AND at > ?))"
+        params.append(at)
     ids = [r[0] for r in conn.execute(f"""SELECT finding_id FROM findings WHERE payer_group=? AND signal=? AND status='open'
-                                          AND COALESCE(stale,0)=0 {touched}""", (payer_group, signal))]
+                                          AND COALESCE(stale,0)=0 {touched}""", tuple(params))]
     for fid in ids:
         conn.execute("UPDATE findings SET status='dismissed', status_changed_at=? WHERE finding_id=?", (at, fid))
         if "finding_events" in have:
@@ -181,37 +200,42 @@ def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note
 
 
 def apply_hide_rule(conn: sqlite3.Connection, a: dict) -> None:
-    """Add a rule and hide what it covers, or remove one and reopen what it hid (and nothing a person has changed since)."""
+    """Add a rule and hide what it covers, or remove one and reopen what it hid (and nothing a person has changed since).
+    An entry older than the rule's last change (added or removed) is skipped, so applying the journal again is harmless."""
     ensure_hide_rules(conn)
     pg, sig, at = a["payer_group"], a["signal"], a.get("at") or _now()
+    row = conn.execute("SELECT at, removed_at FROM hide_rules WHERE payer_group=? AND signal=?", (pg, sig)).fetchone()
+    if row and max(row[0] or "", row[1] or "") > at:
+        return
     if a.get("op") == "remove":
-        conn.execute("DELETE FROM hide_rules WHERE payer_group=? AND signal=?", (pg, sig))
+        if row:
+            conn.execute("UPDATE hide_rules SET removed_at=? WHERE payer_group=? AND signal=?", (at, pg, sig))
+        else:           # a copy that never had the rule keeps the date too, so an older add applied after this one is skipped
+            conn.execute("INSERT INTO hide_rules (payer_group, signal, actor, at, note, removed_at) VALUES (?,?,?,NULL,'',?)",
+                         (pg, sig, a.get("actor") or "", at))
         have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "finding_events" not in have:
+        if "finding_events" not in have or "findings" not in have:
             return
-        # what decided its status last: a line in its history that changes no status (a payer's fax read, a follow-up faxed)
-        # does not count, so an item the payer wrote about still comes back
-        for (fid,) in conn.execute("""SELECT f.finding_id FROM findings f WHERE f.payer_group=? AND f.signal=? AND f.status='dismissed'
-                                        AND (SELECT e.kind FROM finding_events e WHERE e.finding_id=f.finding_id
-                                               AND e.kind IN ('manual','hidden','unhidden','paid_on_later_remit','reopened')
-                                             ORDER BY e.at DESC, e.id DESC LIMIT 1)='hidden'""",
-                                     (pg, sig)).fetchall():
+        for (fid,) in conn.execute(f"""SELECT f.finding_id FROM findings f WHERE f.payer_group=? AND f.signal=? AND f.status='dismissed'
+                                         AND {LAST_DECISION}='hidden'""", (pg, sig)).fetchall():
             conn.execute("UPDATE findings SET status='open', status_changed_at=? WHERE finding_id=?", (at, fid))
             conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) "
                          "VALUES (?,?,'unhidden','dismissed','open',NULL,?,?)", (fid, at, a.get("actor") or "", "rule removed"))
         return
     note = (a.get("note") or "").strip()[:300] or f"Hidden: {pg} is not expected to pay these"
-    conn.execute("INSERT OR REPLACE INTO hide_rules (payer_group, signal, actor, at, note) VALUES (?,?,?,?,?)", (pg, sig, a.get("actor") or "", at, note))
+    conn.execute("INSERT OR REPLACE INTO hide_rules (payer_group, signal, actor, at, note, removed_at) VALUES (?,?,?,?,?,NULL)",
+                 (pg, sig, a.get("actor") or "", at, note))
     _hide_matching(conn, pg, sig, note, at)
 
 
 def apply_hide_rules(conn: sqlite3.Connection) -> int:
-    """After an analysis: every rule hides the new items it covers."""
+    """After an analysis: every rule in force hides the new items it covers."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "hide_rules" not in have:
         return 0
     at = _now()
-    return sum(_hide_matching(conn, pg, sig, note, at) for pg, sig, note in conn.execute("SELECT payer_group, signal, note FROM hide_rules").fetchall())
+    return sum(_hide_matching(conn, pg, sig, note, at) for pg, sig, note in
+               conn.execute(f"SELECT payer_group, signal, note FROM hide_rules WHERE {rules_in_force(conn)}").fetchall())
 
 
 def apply_lesson(conn: sqlite3.Connection, rec: dict) -> None:
@@ -300,8 +324,10 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
                 trizetto.forget_refusal(conn)
             return True
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        # the kind of refusal goes with it, so Today says "refused the password" only when TriZetto refused a password
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                      (trizetto.REFUSED_META, json.dumps({"who": action.get("who") or "", "at": action.get("at") or _now(),
-                                                         "detail": str(action.get("detail") or "")[:300]})))
+                                                         "detail": str(action.get("detail") or "")[:300],
+                                                         "kind": str(action.get("refused_kind") or "")})))
         return True
     return False

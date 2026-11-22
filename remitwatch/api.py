@@ -370,6 +370,11 @@ def health():
     return {"ok": os.path.exists(DB_PATH), "mode": "server", "version": __version__, "time": datetime.now(timezone.utc).isoformat()}
 
 
+def _trizetto_here() -> bool:
+    from . import trizetto
+    return trizetto.configured()
+
+
 @app.get("/api/meta")
 def meta(_: str = Depends(require_auth)):
     out: dict[str, Any] = {"version": __version__, "show_phi": SHOW_PHI, "mode": "serverless" if runtime.serverless() else "server",
@@ -379,8 +384,9 @@ def meta(_: str = Depends(require_auth)):
                            "modmed": bool(os.environ.get("MODMED_CLIENT_ID") and (os.environ.get("MODMED_PRIVATE_KEY") or os.environ.get("MODMED_CLIENT_SECRET"))),
                            # whether appeals go out by fax (remitwatch.fax)
                            "fax": bool(os.environ.get("SRFAX_ACCESS_ID") and os.environ.get("SRFAX_ACCESS_PWD")),
-                           # whether remittances come straight from TriZetto (remitwatch.trizetto)
-                           "trizetto": bool(os.environ.get("TRIZETTO_SFTP_USER") and os.environ.get("TRIZETTO_SFTP_PASSWORD")),
+                           # whether this site reads remittances straight from TriZetto (remitwatch.trizetto): a serverless
+                           # host does only with TRIZETTO_SFTP_SERVERLESS=1, whatever login it is given
+                           "trizetto": _trizetto_here(),
                            # whether EMA's exports and visit notes can be uploaded by hand (remitwatch.uploads): a server only
                            "uploads": not runtime.serverless()}
     cached = one("SELECT value FROM meta WHERE key='cache:meta'") if has_table("meta") else None
@@ -424,7 +430,8 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
     out["by_actionable"] = rows(f"SELECT actionable, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY actionable ORDER BY shortfall_cents DESC", tuple(params))
     out["by_handling"] = rows(f"SELECT COALESCE(ema_handling,'unknown') ema_handling, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY 1 ORDER BY shortfall_cents DESC", tuple(params))
     out["resolved_by_later_remit"] = one("SELECT COUNT(*) n, SUM(recovered_cents) shortfall_cents FROM findings WHERE status='resolved' AND auto_note IS NOT NULL")
-    out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < date('now') THEN 'expired' WHEN appeal_deadline < date('now','+30 days') THEN 'due_30d' WHEN appeal_deadline < date('now','+90 days') THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') GROUP BY 1")
+    # an item the rules no longer find (stale: kept only for its notes and history) is in no total, so not in these either
+    out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < date('now') THEN 'expired' WHEN appeal_deadline < date('now','+30 days') THEN 'due_30d' WHEN appeal_deadline < date('now','+90 days') THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') GROUP BY 1")
     # a routine-rate finding counts by its claims' own deadlines, each finding once per bucket it touches
     buckets = {r["bucket"]: r for r in out["deadlines"]}
     seen: dict[str, set] = {}
@@ -697,14 +704,67 @@ def _with_patient(items: list[dict]) -> list[dict]:
         for c in rows("SELECT claim_key, patient_last, patient_first, patient_middle, patient_id, patient_id_qual, insured_id, insured_id_qual "
                       f"FROM claims WHERE claim_key IN ({','.join('?' * len(part))})", tuple(part)):
             who[c["claim_key"]] = c
+    # a claim no payer has answered (Chase, Fix and resubmit) has no remittance: EMA's rows say who it is about
+    ema = _ema_people([r.get("patient_control_number") for r in items if not r.get("claim_key")])
     for r in items:
         c = who.get(r.get("claim_key"))
-        if SHOW_PHI:
+        if c is None and r.get("patient_control_number") in ema:
+            r.update(_who_ema(ema[r["patient_control_number"]]))
+        elif SHOW_PHI:
             r["patient"] = _name(c["patient_last"], c["patient_first"], c["patient_middle"]) if c else ""
             r["member_id"] = _member(c) if c else ""
         else:
             r["patient"] = _initials(c["patient_last"], c["patient_first"]) if c else ""
     return items
+
+
+def _ema_people(claim_ids: list) -> dict[str, dict]:
+    """Who each claim no payer has answered is about, from EMA's rows (it has no remittance to say so): the member ID EMA
+    holds for that claim (the policy number on its newest row), and the patient's name from a remittance for another
+    claim of the same EMA patient, when there is one. {claim ID: {patient_last, patient_first, patient_middle, member_id}}"""
+    ids = sorted({str(x) for x in claim_ids if x})
+    if not ids or not has_table("ema_rows"):
+        return {}
+    newest: dict[str, dict] = {}
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        for e in rows(f"""SELECT claim_id, policy_number, patient_id FROM ema_rows WHERE claim_id IN ({','.join('?' * len(part))})
+                          ORDER BY claim_id, COALESCE(transaction_date, posted_date, service_date, ''), row_index""", tuple(part)):
+            d = newest.setdefault(e["claim_id"], {})
+            if (e["policy_number"] or "").strip():
+                d["member_id"] = e["policy_number"].strip()
+            if (e["patient_id"] or "").strip():
+                d["ema_patient"] = e["patient_id"].strip()
+    pids = sorted({d["ema_patient"] for d in newest.values() if d.get("ema_patient")})
+    names: dict[str, dict] = {}
+    for i in range(0, len(pids), 500):
+        part = pids[i:i + 500]
+        for n in rows(f"""SELECT e.patient_id pid, c.patient_last, c.patient_first, c.patient_middle FROM ema_rows e
+                          JOIN claims c ON c.patient_control_number = e.claim_id
+                          WHERE e.patient_id IN ({','.join('?' * len(part))}) AND COALESCE(c.patient_last,'') != ''
+                          ORDER BY c.payment_date""", tuple(part)):
+            names[n["pid"]] = n                 # the newest remittance's spelling wins
+    out = {}
+    for cid, d in newest.items():
+        n = names.get(d.get("ema_patient") or "") or {}
+        out[cid] = {"patient_last": n.get("patient_last"), "patient_first": n.get("patient_first"),
+                    "patient_middle": n.get("patient_middle"), "member_id": d.get("member_id") or ""}
+    return out
+
+
+def _ema_first(claim_ids: list) -> dict:
+    """_ema_people for a bill's submissions: the newest one that names the patient, else the newest with a member ID."""
+    people = _ema_people(claim_ids)
+    found = [people[c] for c in sorted(people, reverse=True)]
+    return next((p for p in found if p.get("patient_last")), None) or next((p for p in found if p.get("member_id")), {})
+
+
+def _who_ema(e: dict) -> dict:
+    """_who for a claim known only from EMA's rows (_ema_people): initials, or with names shown the name and member ID."""
+    if not SHOW_PHI:
+        return {"patient": _initials(e.get("patient_last"), e.get("patient_first")) if e.get("patient_last") else ""}
+    return {"patient": _name(e.get("patient_last"), e.get("patient_first"), e.get("patient_middle")) if e.get("patient_last") else "",
+            "member_id": e.get("member_id") or ""}
 
 
 @app.get("/api/findings")
@@ -830,6 +890,16 @@ def _worklist_csv(data: list[dict], deadline: str | None, w: str, params: list) 
     return StreamingResponse(chunks(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=remitwatch-worklist.csv"})
 
 
+def _shown_note_name(p: dict | None) -> dict | None:
+    """A packet as the page shows it: the note's file name is often the patient's name, so with names switched off it is
+    shown by its kind only ("Visit note.pdf", as remitwatch.uploads.shown_name shows an uploaded note). What is kept and
+    what goes to the payer are unchanged."""
+    name = (p or {}).get("note_name")
+    if p is not None and name and not SHOW_PHI and name != "pasted note":
+        p["note_name"] = "Visit note" + os.path.splitext(str(name))[1].lower()[:6]
+    return p
+
+
 def _packets_for(finding_id: str) -> list[dict]:
     import re
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", finding_id or ""):
@@ -838,11 +908,11 @@ def _packets_for(finding_id: str) -> list[dict]:
         from . import cloud
         st = cloud.SERVING_COPY.state(fast=True)        # part of opening a finding: must not wait on a slow Dropbox
         try:
-            return cloud.list_packets(st, finding_id) if st is not None else []
+            return [_shown_note_name(p) for p in cloud.list_packets(st, finding_id)] if st is not None else []
         except Exception:
             return []
-    return rows("SELECT packet_id, created_at, mode, subject, note_name, emailed_to, emailed_at FROM appeal_packets WHERE finding_id=? ORDER BY created_at DESC",
-                (finding_id,)) if has_table("appeal_packets") else []
+    return [_shown_note_name(p) for p in rows("SELECT packet_id, created_at, mode, subject, note_name, emailed_to, emailed_at FROM appeal_packets "
+                                              "WHERE finding_id=? ORDER BY created_at DESC", (finding_id,))] if has_table("appeal_packets") else []
 
 
 CLAIM_PUBLIC_COLS = ("claim_key", "transaction_key", "patient_control_number", "claim_status_code", "charge_cents", "paid_cents",
@@ -898,6 +968,11 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
         if pcn:
             out["history"] = rows(f"SELECT c.claim_key, c.claim_status_code, c.charge_cents, c.paid_cents, c.payment_date, c.payer_name, c.trace_number FROM claims c JOIN transactions t ON t.transaction_key=c.transaction_key WHERE c.patient_control_number=? AND t.superseded=0 ORDER BY {PAYER_ORDER}", (pcn,))
             out["ema"] = rows("SELECT family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents, claim_status, activity_type, carc, rarc, adjustment_status, adjustment_subtype, provider, payer, denial_category, previously_denied FROM ema_rows WHERE claim_id=? ORDER BY family, service_date, row_index", (pcn,))
+    elif f.get("patient_control_number"):
+        # a claim no payer has answered has no remittance: who it is about comes from EMA's rows (no payer claim number yet)
+        e = _ema_people([f["patient_control_number"]]).get(f["patient_control_number"]) or {}
+        if e.get("patient_last") or (SHOW_PHI and e.get("member_id")):
+            out["claim"] = dict(_who_ema(e), from_ema=True)
     from .detect import bill_of
     bill = bill_of(f["patient_control_number"]) if f.get("patient_control_number") else (_bill_of_reference((f["evidence"] or {}).get("reference")) if f.get("signal") == "TAKEBACK" else None)
     if bill and _bill_ok(bill):
@@ -950,12 +1025,39 @@ def _record_status(ids: list[str], status: str, notes: str | None, recovered_cen
         conn.close()
 
 
+# Let go and Lost take a claim off every list. A claim the payer never answered, or one rejected before it reached the
+# payer (actions.NEVER_HIDDEN), is money nobody has asked for yet: it is let go one at a time, with a note, never in bulk.
+# The page asks for the note; the server holds to the same rule. Only here, not in actions.apply_status: journal entries
+# written before the rule must still replay.
+LET_GO = ("dismissed", "lost")
+
+
+def _one_at_a_time(ids: list) -> list[str]:
+    """Which of these findings are such claims, read on the copy the dashboard shows (on Vercel, the serving copy)."""
+    from .actions import NEVER_HIDDEN
+    ids = [str(i) for i in ids]
+    sigs = sorted(NEVER_HIDDEN)
+    conn = db()
+    try:
+        out: list[str] = []
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            out += [r[0] for r in conn.execute(f"""SELECT finding_id FROM findings WHERE finding_id IN ({','.join('?' * len(part))})
+                                                   AND signal IN ({','.join('?' * len(sigs))})""", (*part, *sigs))]
+        return out
+    finally:
+        conn.close()
+
+
 @app.post("/api/findings/{finding_id}/status", dependencies=[Depends(require_xhr)])
 async def set_status(finding_id: str, request: Request, user: str = Depends(require_auth)):
     body = await request.json()
     status = body.get("status")
     if status not in STATUSES:
         raise HTTPException(400, "bad status")
+    if status in LET_GO and not str(body.get("notes") or "").strip() and await asyncio.to_thread(_one_at_a_time, [finding_id]):
+        raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
+                                 "only with a note. Say why.")
     rec = body.get("recovered_cents")
     n = await asyncio.to_thread(_record_status, [finding_id], status, body.get("notes"), int(rec) if rec not in (None, "") else None, user)
     if not n:
@@ -968,8 +1070,11 @@ async def bulk_status(request: Request, user: str = Depends(require_auth)):
     body = await request.json()
     ids = body.get("ids") or []
     status = body.get("status")
-    if status not in STATUSES or not ids or len(ids) > 5000:
+    if status not in STATUSES or not ids or not isinstance(ids, list) or len(ids) > 5000:
         raise HTTPException(400, "bad request")
+    if status in LET_GO and await asyncio.to_thread(_one_at_a_time, ids):
+        raise HTTPException(400, "Claims the payer never answered, or rejected before reaching it, are let go one at a time, "
+                                 "with a note. Open each one.")
     n = await asyncio.to_thread(_record_status, list(ids), status, body.get("notes"), None, user)
     return {"ok": True, "updated": n}
 
@@ -1247,7 +1352,7 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
             lks = {r["line_key"] for r in rows(f"SELECT line_key FROM lines WHERE claim_key IN ({','.join('?' * len(keys))})", tuple(keys))} if keys else set()
             _plb, tbs, pats = _bill_extras(pcns, {x["payer_claim_control_number"] for x in rem if x.get("payer_claim_control_number")}, lks)
             open_ids |= {x["finding_id"] for x in tbs + pats if x["status"] in ("open", "in_progress")}
-        who = _who(rem[-1]) if rem else {"patient": ""}
+        who = _who(rem[-1]) if rem else _who_ema(_ema_first(ema_ids))
         items.append(dict(who, bill=b, claim_ids=sorted(set(pcns) | set(ema_ids)), payers=sorted({x["payer_name"] for x in rem if x["payer_name"]}), remits=len(rem),
                           first_payment=rem[0]["payment_date"] if rem else None, last_payment=rem[-1]["payment_date"] if rem else None,
                           charge_cents=max(((x["charge_cents"] or 0) for x in rem), default=0), paid_cents=sum((x["paid_cents"] or 0) for x in rem),
@@ -1310,7 +1415,7 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
     ema = rows(f"""SELECT claim_id, family, source_name, service_date, cpt, modifiers, units, charges_cents, payments_cents, adjustments_cents, allowed_cents,
                           claim_status, activity_type, carc, rarc, adjustment_status, denial_category, posted_date, claim_submission_date, transaction_date
                    FROM ema_rows WHERE claim_id IN ({qe}) ORDER BY claim_id, family, service_date, row_index""", tuple(ids)) if has_table("ema_rows") and ids else []
-    who = _who(rem[-1]) if rem else {"patient": ""}
+    who = _who(rem[-1]) if rem else _who_ema(_ema_first(ema_ids))     # a bill no payer has answered yet: EMA says who
     return dict(who, bill=bill, claim_ids=ids, answered=pcns, remits=remits, findings=findings + takebacks + patterns, taken_back=plb, ema=ema)
 
 
@@ -2472,7 +2577,7 @@ def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes |
             pass        # the packet matters more than the lesson
     if runtime.serverless() and detail["finding"].get("finding_id"):
         _queue_mark(detail["finding"]["finding_id"], "packet", "An appeal packet was built for it.")
-    return packet
+    return _shown_note_name(packet)
 
 
 QUEUE_RETRY_DAYS = 3        # an item "Build packets from EMA" found no note for (or more than one) is tried again after this
@@ -2507,7 +2612,7 @@ def _note_lookup(key, pick: Any = None, since: str | None = None) -> dict:
         from . import uploads
         conn = db()
         try:
-            res = uploads.find_note(conn, key, pick)
+            res = uploads.find_note(conn, key, pick, reveal=SHOW_PHI)
         finally:
             conn.close()
         if res["status"] != "not_found" or (pick and pick.startswith(uploads.DOC_PREFIX)):
@@ -2516,7 +2621,21 @@ def _note_lookup(key, pick: Any = None, since: str | None = None) -> dict:
             return res
     elif pick and pick.startswith("upload-"):
         pick = None
-    return modmed.note_for_claim(modmed.client(), key, pick=pick, budget=200, since=since)
+    # with names shown, each candidate carries the patient's name, birth date and IDs, so a person can tell two patients
+    # apart (and a pick between them is accepted); with names hidden such a pick is refused and the note is attached by hand
+    return modmed.note_for_claim(modmed.client(), key, pick=pick, budget=200, since=since, reveal=SHOW_PHI)
+
+
+def _note_batch_since() -> str | None:
+    """The first date of service among the open items that rest on the visit note, as "Build packets from EMA" works
+    through them: where ModMed lets this app only export, one export from that day serves every item of a batch instead
+    of a new one for each earlier claim (modmed.note_for_claim, `since`)."""
+    from .insights import kind_sql
+    cond, params = kind_sql("note")
+    r = one(f"""SELECT MIN(service_date) d FROM findings WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
+                AND claim_key IS NOT NULL AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""", tuple(params))
+    d = (r or {}).get("d")
+    return d if d and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(d)[:10]) else None
 
 
 def _note_ready(items: list[dict]) -> dict[str, str]:
@@ -2585,8 +2704,8 @@ def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_aut
     out = {k: v for k, v in res.items() if k != "note"}
     if res["status"] != "found":
         if body.get("skip_if_packet"):         # the batch: the next press, and the nightly run, go on to the items behind it
-            _queue_mark(fid, "note_lookup", "Build packets from EMA: " + ("more than one note that day, a person picks one in the item"
-                                                                          if res["status"] == "ambiguous" else (res.get("reason") or "no signed note found")))
+            _queue_mark(fid, "note_lookup", "Build packets from EMA: " + (res.get("reason") or (
+                "more than one note fits, a person picks one in the item" if res["status"] == "ambiguous" else "no signed note found")))
         return out
     note = res["note"]
     packet = _store_packet(detail, raw_claim, note["filename"], note["data"], None, body.get("use_ai", True) not in (False, 0, "0"))
@@ -2618,7 +2737,7 @@ def appeals_ema_queue(limit: int = Query(20, ge=1, le=200), ready: int = Query(0
     if ready:
         got = _note_ready(items)
         items = [{k: v for k, v in i.items() if k not in ("claim_key", "patient_control_number")}
-                 for i in items if got.get(i["finding_id"]) in ("found", "ambiguous")][:limit]
+                 for i in items if got.get(i["finding_id"]) == "found"][:limit]       # an ambiguous one needs a person
     return {"items": items, "since": min((i["service_date"] for i in items if i.get("service_date")), default=None)}
 
 
@@ -2786,14 +2905,30 @@ def modmed_test(_: str = Depends(require_auth)):
 @app.post("/api/trizetto/test", dependencies=[Depends(require_xhr)])
 def trizetto_test(_: str = Depends(require_auth)):
     """Every step of the TriZetto connection, for /setup: settings, the server and its key, the sign-in, the files there,
-    one remittance read. Only file names, counts and dates come back."""
+    one remittance read. Only file names, counts and dates come back. While TriZetto's refusal of these settings is held
+    (trizetto.refusal) the test does not sign in: each press would send the refused password again, and TriZetto locks a
+    login after a few failures (it may be the login ModMed uses too). It says until when instead. A new password is tried
+    at once, and the hold ends by itself a day after the refusal."""
     from . import trizetto
-    known = (one("SELECT value FROM meta WHERE key=?", (trizetto.HOSTKEY_META,)) or {}).get("value") if has_table("meta") else None
-    out = trizetto.check(known=known)
+    # the store that holds the sign-in hold and the server's key: the live store on a server; on a serverless host this
+    # instance's copy of the dashboard's tables (cloud.SERVING_TABLES carries meta)
+    conn = db()
+    try:
+        try:
+            r = conn.execute("SELECT value FROM meta WHERE key=?", (trizetto.HOSTKEY_META,)).fetchone()
+            known = r[0] if r else None
+        except sqlite3.OperationalError:
+            known = None                        # no meta table yet: a store before its first run
+        out = trizetto.check(known=known, conn=conn)
+    finally:
+        conn.close()
+    if out.get("held") or out.get("not_here"):
+        return JSONResponse(out, headers={"Cache-Control": "no-store"})     # nothing was tried, so nothing changes
     # a sign-in that works now ends a hold left by an earlier refusal (whatever else is still to fix); a refusal here holds the
     # scheduled runs for a day from now; a hold still in place is shown. On a server, in the store the cycles read; on a
     # serverless host, through the journal (this instance's copy at once, the store at the next run)
     signed_in = any(x["step"] == "Sign-in" and x["ok"] for x in out.get("steps", []))
+    kind = str(out.get("refused_kind") or "")
     if runtime.serverless():
         from .cloud import SERVING_COPY
         try:
@@ -2803,7 +2938,7 @@ def trizetto_test(_: str = Depends(require_auth)):
                 _record_action({"kind": "trizetto_hold", "op": "clear"})
             elif out.get("refused"):
                 _record_action({"kind": "trizetto_hold", "op": "set", "who": trizetto.credential_tag(trizetto.Settings.from_env()),
-                                "detail": out["refused"]})
+                                "detail": out["refused"], "refused_kind": kind})
         except Exception as exc:
             out["hold_note"] = f"The hold could not be recorded just now ({type(exc).__name__}); the next run decides by itself."
     elif has_table("meta") or out.get("refused"):
@@ -2812,7 +2947,7 @@ def trizetto_test(_: str = Depends(require_auth)):
             if signed_in:
                 trizetto.forget_refusal(conn)
             elif out.get("refused"):
-                trizetto.remember_refusal(conn, trizetto.Settings.from_env(), out["refused"])
+                trizetto.remember_refusal(conn, trizetto.Settings.from_env(), out["refused"], kind=kind)
         finally:
             conn.close()
     if not signed_in and has_table("meta"):
@@ -2836,7 +2971,9 @@ def jwks_document():
     except modmed.ModMedError as exc:
         raise HTTPException(503, str(exc))
     if not doc:
-        raise HTTPException(404, "No key is set yet: add MODMED_PRIVATE_KEY in Vercel (Settings, Environment Variables) and redeploy.")
+        raise HTTPException(404, "No key is set yet: add MODMED_PRIVATE_KEY in Vercel (Settings, Environment Variables), then redeploy."
+                            if runtime.serverless() else
+                            "No key is set yet: add MODMED_PRIVATE_KEY on the server with sudo bash /opt/remitwatch/deploy/aws/configure.sh, which restarts the site.")
     return JSONResponse(doc, headers={"Cache-Control": "public, max-age=300"})
 
 
@@ -3374,15 +3511,16 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         from . import modmed
         key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))
         pick = body.get("document_id")
+        since = str(body.get("since") or "")[:10]
         try:
-            res = _note_lookup(key, pick)
+            res = _note_lookup(key, pick, since=since if re.fullmatch(r"\d{4}-\d{2}-\d{2}", since) else _note_batch_since())
         except modmed.NotConfigured:
             return held("no_ema", "EMA is not connected, so the visit note cannot be read: connect it on /setup, or upload the note in the item.")
         except modmed.ModMedError as exc:
             return held("ema_error", f"EMA did not give the note: {exc}")
-        if res["status"] == "ambiguous":
-            return held("ambiguous", ("More than one uploaded note fits that visit" if res.get("source") == "upload" else "EMA has more than one note that day")
-                        + ": open the item and pick the right one.", candidates=res.get("candidates"))
+        if res["status"] == "ambiguous":       # the lookup says why: two notes, only the name agrees, two patients, a later note...
+            return held("ambiguous", res.get("reason") or "More than one note fits that visit: open the item and pick the right one.",
+                        candidates=res.get("candidates"))
         if res["status"] != "found":
             return held("no_note", res["reason"] if res.get("source") == "upload" else
                         "EMA has no signed note for this visit: sign it in EMA, or upload the note on the Upload page or in the item.")
@@ -4080,16 +4218,30 @@ def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = D
 # --------------------------------------------------------------------------- reasons hidden for a payer (actions.apply_hide_rule)
 @app.get("/api/hide")
 def hide_list(_: str = Depends(require_auth)):
-    """The reasons hidden for a payer, with how many items each hides now."""
+    """The reasons hidden for a payer, with how many items each hides now: the items the rule itself let go and that
+    Show again brings back, not the ones a person let go by hand."""
+    from .actions import LAST_DECISION
     from .insights import SHORT_LABELS
     if not has_table("hide_rules"):
         return {"rules": []}
     out = []
-    for r in rows("SELECT payer_group, signal, actor, at, note FROM hide_rules ORDER BY at DESC"):
-        n = one("""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE payer_group=? AND signal=? AND status='dismissed'
-                   AND COALESCE(stale,0)=0""", (r["payer_group"], r["signal"])) or {}
+    events = has_table("finding_events")
+    for r in rows(f"SELECT payer_group, signal, actor, at, note FROM hide_rules WHERE {_rules_in_force()} ORDER BY at DESC"):
+        n = one(f"""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings f WHERE f.payer_group=? AND f.signal=?
+                    AND f.status='dismissed' AND COALESCE(f.stale,0)=0 AND {LAST_DECISION if events else "'hidden'"}='hidden'""",
+                (r["payer_group"], r["signal"])) or {}
         out.append(dict(r, label=SHORT_LABELS.get(r["signal"], r["signal"]), n=n.get("n") or 0, cents=n.get("cents") or 0))
     return {"rules": out}
+
+
+def _rules_in_force() -> str:
+    """SQL that keeps the hide rules in force: a removed one stays in the table, dated (actions.apply_hide_rule)."""
+    from .actions import rules_in_force
+    conn = db()
+    try:
+        return rules_in_force(conn)
+    finally:
+        conn.close()
 
 
 @app.post("/api/hide", dependencies=[Depends(require_xhr)])
@@ -4100,7 +4252,7 @@ def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
     if not pg or not sig or len(pg) > 200 or not re.fullmatch(r"[A-Z0-9_]{2,60}", sig):
         raise HTTPException(400, "payer_group and signal are required")
     if body.get("remove"):
-        if not (has_table("hide_rules") and one("SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=?", (pg, sig))):
+        if not (has_table("hide_rules") and one(f"SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=? AND {_rules_in_force()}", (pg, sig))):
             raise HTTPException(404, "No such rule.")
         _record_action({"kind": "hide_rule", "op": "remove", "payer_group": pg, "signal": sig, "actor": user})
         return {"ok": True}
@@ -4169,7 +4321,7 @@ def packets(finding_id: Optional[str] = None, _: str = Depends(require_auth)):
     from .notes import list_packets
     conn = db()
     try:
-        return list_packets(conn, finding_id)
+        return [_shown_note_name(p) for p in list_packets(conn, finding_id)]
     finally:
         conn.close()
 
@@ -4188,7 +4340,7 @@ def packet_get(packet_id: str, _: str = Depends(require_auth)):
             conn.close()
     if not p:
         raise HTTPException(404, "packet not found")
-    return p
+    return _shown_note_name(p)
 
 
 @app.get("/api/packets/{packet_id}/pdf")
