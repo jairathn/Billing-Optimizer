@@ -61,7 +61,6 @@ denial       NOT_SENT                  a claim that never left EMA (Batched for 
              EMA_DENIED                a denial only EMA saw: no remittance on file (C5)
              FORWARDED_TO_CARRIER      CO-B11 (or claim status 19 naming a carrier): the claim went on to another carrier
              SECONDARY_NOT_BILLED      the primary paid and left a balance a secondary should pay; nothing from the secondary
-             EMA_UNDERPAID             a payment EMA posted on a check no 835 carries, below the payer's own consistent rate
 fees         REMIT_NOT_POSTED          an 835 payment EMA never posted, or posted short (C4)
 contract     EMA_DENIAL_AS_CONTRACTUAL a payer's denials EMA writes off as contractual (C7; outside the money totals)
 refund       CREDIT_BALANCE            insurance paid more than a line was owed: refund or recoupment, the owner decides
@@ -205,7 +204,7 @@ EM_SQL = ",".join(f"'{c}'" for c in sorted(EM_CODES))
 AUTO_NOTE_PREFIX = "Paid on a later remittance"
 # items from EMA's reports alone, or carrying their own facts: the line outcome (ema_checks.line_outcomes) is worked out
 # for the denials only EMA saw, never for these (an EMA payment on their own line is what they are about)
-EMA_NATIVE_SIGNALS = ("NOT_SENT", "REMIT_NOT_POSTED", "EMA_DENIAL_AS_CONTRACTUAL", "EMA_UNDERPAID", "SECONDARY_NOT_BILLED",
+EMA_NATIVE_SIGNALS = ("NOT_SENT", "REMIT_NOT_POSTED", "EMA_DENIAL_AS_CONTRACTUAL", "SECONDARY_NOT_BILLED",
                       "CREDIT_BALANCE")
 EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's reports (counts by step, failed steps)
 POLICY_SUMMARY_KEY = "ema:policy_summary"   # meta: the write-off pattern table for the owner's policy (O11), from the run
@@ -3086,12 +3085,12 @@ class Detector:
 
     def run_more_rules(self) -> None:
         """The rules the practice-manager trace and the independent answer key found missing, which need EMA's reports:
-        a secondary never billed, credit balances to refund, and short payments on checks no 835 carries."""
+        a secondary never billed and credit balances to refund. Short payments on checks no 835 carries are not judged:
+        EMA's lines carry no modifier and no provider, and a trial rule agreed with the answer key on 43 of 409 items."""
         if not self.ema_on:
             return
         self._ema_step("secondary_not_billed", self.run_secondary_not_billed)
         self._ema_step("credit_balances", self.run_credit_balances)
-        self._ema_step("ema_underpaid", self.run_ema_underpaid)
 
     def _ema_lines_for(self, keys: list[tuple]) -> dict[tuple, dict]:
         """EMA's line for each (bill, date, code) of a remittance, through the map (no conflict, never the ASC's facility
@@ -3239,7 +3238,6 @@ class Detector:
         write-down, by more than $1 on the claim as a whole (a line's credit that another line of the claim absorbs is a
         posting to the wrong line, not a refund). One item per EMA claim: who overpaid (the payer whose money exceeds what
         was owed, else the patient), how much, the lines. A Medicare credit is due back within 60 days of being found."""
-        from . import ema_reports as er
         rows = self.conn.execute("""SELECT link, MIN(svc), SUM(COALESCE(balance,0)), SUM(COALESCE(charges,0)), SUM(COALESCE(ins_paid,0)),
                                            SUM(COALESCE(pat_paid_joined,0)), MAX(payer_group), MAX(payer_kind), MAX(primary_payer),
                                            MAX(claim_id), MAX(bill), MAX(as_of), MIN(COALESCE(balance,0)), MAX(last_posted)
@@ -3277,96 +3275,6 @@ class Detector:
                 f["deadline_basis"] = ("Medicare expects an overpayment back within 60 days of finding it (42 CFR 401.305); counted "
                                        "from the report that shows it")
             self.ema_counts["CREDIT_BALANCE"] += 1
-
-    def run_ema_underpaid(self) -> None:
-        """Short payments EMA posted on checks no 835 carries (the underpayment rule, run on EMA's postings where no
-        remittance exists): a line of one unit, paid by one payer, every payment of it under a check with no 835, on no
-        remittance line at all, whose allowed amount is below the payer's own consistent rate for the code (its lowest
-        across provider types and places of service, from at least 20 lines with a 40 percent share; a second surgical
-        procedure of the day at the payer's usual reduction) by at least $2 and 5 percent, and not paid its charge. EMA's
-        report gives no allowed amount per payer answer, so the allowed amount is taken as the larger of what was paid plus
-        the sequestration and the charge less the payer's fee-schedule reduction (CO-45): on lines an 835 also carries,
-        that flags 1,058 lines the 835 shows short against 3 it does not."""
-        from . import ema_checks as ec
-        from .ema_reports import bill_of_claim
-        rows = self.conn.execute("""SELECT l.link, l.svc, l.cpt, l.ins_paid, l.charges, l.payer_group, l.payer_kind, l.claim_id, l.bill,
-                                           l.as_of
-                                    FROM ema_lines l
-                                    WHERE (COALESCE(l.flags,0) & 17) = 0 AND COALESCE(l.facility,0) = 0 AND COALESCE(l.ins_paid,0) > 0
-                                      AND COALESCE(l.ins_paid_no835,0) >= COALESCE(l.ins_paid,0) AND COALESCE(l.units,1) BETWEEN 0.5 AND 1.5
-                                      AND l.svc >= ?""", (_add_days(self.today, -800) or "",)).fetchall()
-        if not rows:
-            return
-        best: dict[tuple, int] = {}         # the payer's lowest consistent rate for a code and year
-        for (grp, year, code, _tier, _pos), r in self.rates.items():
-            if r["n"] >= 20 and r["share"] >= 0.4:
-                k = (grp, year, code)
-                best[k] = min(best.get(k, r["mode"]), r["mode"])
-        on_835 = {(bill_of_claim(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code")) for l in self.lines}
-        rows = [r for r in rows if (r[8], r[1], r[2]) not in on_835 and best.get((r[5], (r[1] or "")[:4], r[2]))]
-        if not rows:
-            return
-        cuts: dict[tuple, list] = defaultdict(lambda: [0, 0])      # (link, svc, cpt) -> [sequestration, CO-45 reduction]
-        keys = sorted({(r[0], r[1], r[2]) for r in rows})
-        for i in range(0, len(keys), 300):
-            part = keys[i:i + 300]
-            q = " OR ".join("(link=? AND svc=? AND cpt=?)" for _k in part)
-            for lk, svc, cpt, grp, code, contr, nonc in self.conn.execute(
-                    f"SELECT link, svc, cpt, grp, code, contractual, noncontractual FROM ema_line_reasons WHERE {q}", [x for k in part for x in k]):
-                if code == "253":
-                    cuts[(lk, svc, cpt)][0] += (contr or 0) + (nonc or 0)
-                elif grp == "CO" and code == "45":
-                    cuts[(lk, svc, cpt)][1] += contr or 0
-        lags = ec._lags(self.conn)
-        by_day: dict[tuple, list] = defaultdict(list)
-        for r in rows:
-            by_day[(r[0], r[1])].append(r)
-        for (lk, svc), day_rows in by_day.items():
-            priced = [(r, best[(r[5], (svc or "")[:4], r[2])]) for r in day_rows]
-            surg = sorted((x for x in priced if is_surgical(x[0][2])), key=lambda x: -x[1])
-            rank = {x[0][2]: i + 1 for i, x in enumerate(surg)}
-            for r, rate in priced:
-                _lk, _svc, cpt, paid, chg, grp, kind, cid, bill, as_of = r
-                seq, co45 = cuts.get((lk, svc, cpt), (0, 0))
-                # with no fee-schedule reduction posted, the allowed amount is unknown: taken as the charge, so never short
-                allowed = max(paid + seq, (chg or 0) - co45)
-                if chg and allowed >= chg:
-                    continue                # paid the charge: the fee is below the rate, nothing to appeal
-                exp = rate
-                if rank.get(cpt, 0) >= 2 and cpt not in ADD_ON_CODES:
-                    exp = int(round(rate * self.mppr_pct({"payer_group": grp, "surg_rank": rank[cpt]})[0]))
-                short = exp - allowed
-                if short < max(200, 0.05 * exp):
-                    continue
-                pay = self.conn.execute("""SELECT MIN(posted), MAX(payer), COUNT(DISTINCT payer_group) FROM ema_line_payments
-                                           WHERE link=? AND svc=? AND cpt=? AND COALESCE(ins_paid,0) > 0""", (lk, svc, cpt)).fetchone()
-                if not pay or (pay[2] or 0) != 1:
-                    continue                # two payers on the line: the second one's share is not an underpayment
-                posted = pay[0]
-                rule = appeal_rule(grp, kind)
-                start = _add_days(posted, -ec._lag(lags, grp, "p95")) if posted else None
-                claim = {"patient_control_number": cid or bill, "payer_name": pay[1] or grp, "payer_group": grp, "payer_kind": kind,
-                         "service_date": svc, "year": (svc or "")[:4], "procedure_code": cpt, "charge_cents": chg,
-                         "allowed_cents": allowed, "paid_cents": paid, "payment_date": posted}
-                ev = {"usual_cents": exp, "allowed_cents": allowed, "paid_cents": paid,
-                      "allowed_basis": "the larger of what was paid plus the sequestration and the charge less the fee-schedule reduction (CO-45)",
-                      "basis": (f"{grp}'s own consistent rate for {cpt} in {svc[:4]} (its lowest across provider types and places of service)"
-                                + (" at its usual second-procedure share" if exp != rate else "")),
-                      "ema_link": lk, "no_835": True, "posted": posted, "ema_as_of": as_of}
-                self._emit("EMA_UNDERPAID", "underpayment", "medium", "appeal",
-                           f"{cpt} allowed {_usd(allowed)} vs usual {_usd(exp)} ({grp}, EMA posting with no 835)", None, exp, short,
-                           None, None, ev, key_parts=(lk, svc, cpt), claim=claim)
-                f = self.findings.get(_fid("EMA_UNDERPAID", lk, svc, cpt))
-                if f is None:
-                    continue
-                f["appeal_deadline"] = _add_days(start, rule["days"]) if start else None
-                f["deadline_basis"] = (f"{rule['label']}" + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
-                                       + f". Counted from EMA's posting ({posted}) less its usual delay; the EOB's date can be earlier") if start else None
-                legal = legal_deadline(start, rule) if start else None
-                f["legal_deadline"] = legal if legal and legal != f["appeal_deadline"] else None
-                f["ema_link"], f["source"] = lk, "ema"
-                f["hint"] = "No remittance on file for this payment: get the EOB from the payer's portal before asking for the usual rate"
-                self.ema_counts["EMA_UNDERPAID"] += 1
 
     # ------------------------------------------------------------------ hooks for the archive-only rules (unit B2)
     # remitwatch.archive_rules acts on the run's items at these four points; each is a no-op until its hook is wired.

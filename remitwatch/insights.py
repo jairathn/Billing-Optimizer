@@ -64,7 +64,7 @@ _WORK_OF = {
     "note": {"EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24", "DENIED_MEDICAL_NECESSITY", "DENIED_FREQUENCY", "DENIED_LEVEL_OF_SERVICE",
              "DOWNCODE_SVC06", "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE", "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED"},
     "rule": {"PROCEDURE_BUNDLED", "ADDON_BUNDLED"},
-    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS", "EMA_UNDERPAID"},
+    "rate": {"UNDERPAID_VS_OWN_RATE", "SECOND_RATE", "MPPR_EXCESS"},
     "check": {"DENIED_NONCOVERED", "DENIED_DUPLICATE_UNPAID", "DENIED_PROVIDER", "DENIED_TIMELY_FILING", "DENIED_OTHER", "DENIED_MISSING_PRIMARY",
               "CODE_CHANGED", "EMA_DENIAL_AS_CONTRACTUAL", "CREDIT_BALANCE"},
 }
@@ -135,7 +135,6 @@ SIGNAL_LABELS: dict[str, tuple[str, str]] = {
                                   "Have EMA post this reason as a denial, not a contractual adjustment, so it reaches the denial queue."),
     "FORWARDED_TO_CARRIER": ("Sent on by the payer to another carrier", "Expect the other carrier's payment; ask it for the claim if none comes by the follow-up date."),
     "SECONDARY_NOT_BILLED": ("Second payer never billed", "Send the claim to the second payer with the first payer's remittance."),
-    "EMA_UNDERPAID": ("Paid below this payer's usual rate (no 835)", "Get the EOB from the payer's portal, then ask the payer to reprocess at its usual rate."),
     "CREDIT_BALANCE": ("Insurance paid more than was owed", "Decide with the owner: refund the payer, or let it recoup. Medicare credits are due back within 60 days."),
 }
 STATUS_LABELS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
@@ -160,7 +159,7 @@ SHORT_LABELS: dict[str, str] = {
     "SEQUESTRATION": "Federal 2 percent reduction", "NOT_SENT": "Not sent from EMA", "EMA_DENIED": "EMA denial, no 835",
     "REMIT_NOT_POSTED": "Payment not posted", "EMA_DENIAL_AS_CONTRACTUAL": "Denials posted as contractual",
     "FORWARDED_TO_CARRIER": "Sent on to another carrier", "SECONDARY_NOT_BILLED": "Second payer never billed",
-    "EMA_UNDERPAID": "Paid short, no 835", "CREDIT_BALANCE": "Credit to refund or recoup",
+    "CREDIT_BALANCE": "Credit to refund or recoup",
 }
 
 

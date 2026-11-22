@@ -1082,12 +1082,18 @@ def _evidence(fx: dict) -> list[dict]:
         if not x.get("received") or not after or x["status"] == "22":
             continue
         # the payer received the claim again after this item's remittance (a payer reprocessing on its own keeps the first
-        # received date): a corrected or new claim somebody sent
+        # received date): a corrected or new claim somebody sent. Another payer counts only when it processed the claim as
+        # primary (a rebill to the payer that pays first); a second payer's processing (crossover, OA-23) is not that work
         if (x["date"] or "") > after and x["received"] > after:
-            who = f.get("payer_group") if _same_payer(row_group(x)[0], f.get("payer_group")) else row_group(x)[0]
+            same = _same_payer(row_group(x)[0], f.get("payer_group"))
+            if not same and x["status"] not in ("1", "4", "19"):
+                continue
+            who = f.get("payer_group") if same else row_group(x)[0]
             out.append({"date": x["received"], "kind": "resubmitted", "source": "835", "dated_by": "payer", "confirmed": True,
-                        "text": f"{who or 'The payer'} received a {'corrected' if x.get('freq') == '7' else 'new'} claim on "
-                                f"{day(x['received'])} (its answer of {day(x['date'])})"})
+                        "payer_group": row_group(x)[0],
+                        "text": (f"{who or 'The payer'} received a {'corrected' if x.get('freq') == '7' else 'new'} claim on "
+                                 f"{day(x['received'])} (its answer of {day(x['date'])})" if same else
+                                 f"Rebilled to {who}: it received the claim on {day(x['received'])} (its answer of {day(x['date'])})")})
     for x in fx["exports"]:
         if x.get("submitted") and after and x["submitted"] > after and submission_no(x["claim_id"]) > submission_no(f.get("patient_control_number")):
             out.append({"date": x["submitted"], "kind": "resubmitted", "source": "claim_status", "dated_by": "event", "confirmed": True,
@@ -1140,14 +1146,20 @@ def code_once(fx: dict) -> bool:
     return len([x for x in fx["r835"]["rows"] if x["claim_key"] == ck and x.get("line_key") and x["svc"] == svc]) <= 1
 
 
-def _payer_answers_after(fx: dict, since: str | None) -> list[dict]:
+def _payer_answers_after(fx: dict, since: str | None, payers: Sequence[str] = ()) -> list[dict]:
     """The payer's answers on the item's services after a date: 835 adjudications (a reversal included) and EMA's
-    insurance postings ($0 answers included) and the payer's reasons."""
+    insurance postings ($0 answers included) and the payer's reasons. Only the item's payer's, and the payers named in
+    `payers` (a payer the claim was rebilled to): a second payer's processing is not an answer to the work."""
     if not since:
         return []
+    f = fx["item"]
+    groups = [g for g in [f.get("payer_group")] + list(payers) if g]
+
+    def ours(group: Any) -> bool:
+        return not groups or not group or any(_same_payer(group, g) for g in groups)
     out = []
     for x in fx["r835"]["rows"]:
-        if (x["date"] or "") > since:
+        if (x["date"] or "") > since and ours(row_group(x)[0]):
             out.append({"date": x["date"], "source": "835", "paid": x["paid"] or 0, "status": x["status"], "payer": x["payer"],
                         "group": row_group(x)[0], "kind": row_group(x)[1],
                         "codes": [f"{g}-{c}" for g, c, _a in x["adj"] if g != "PR" or c not in PATIENT_SHARE]})
@@ -1160,6 +1172,8 @@ def _payer_answers_after(fx: dict, since: str | None) -> list[dict]:
         if (p["posted"] or "") > since and (p["cents"] or p["check"]):
             # EMA's posting of a remittance whose 835 is on file repeats that 835's answer (posted days or weeks later)
             if p.get("in_835") and (p.get("trace_key") in tks or any(0 <= (_days(d, p["posted"]) or 99) <= 14 for d in days_835)):
+                continue
+            if p.get("role") not in (None, "", "primary") and not ours(p.get("group")):
                 continue
             out.append({"date": p["posted"], "source": "production", "paid": p["cents"], "status": None, "payer": p["payer"],
                         "group": p.get("group") or _grp_kind(p["payer"])[0], "codes": []})
@@ -1627,12 +1641,12 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
     rows = [ev_row] if ev_row else [e for e in ev if e.get("source") == "remitwatch" and e["kind"] in ("sent", "fax")][-1:]
     res["work"] = ev_row or {"date": anchor, "kind": work, "text": text}
     res["appeal_block"] = "waiting"
-    answers = _payer_answers_after(fx, anchor) if anchor else []
+    answers = _payer_answers_after(fx, anchor, [ev_row["payer_group"]] if ev_row and ev_row.get("payer_group") else []) if anchor else []
     first = bool(ev_row) and ev_row.get("dated_by") == "first_report"
     if not answers and first and not person and work in ("appeal", "reprocess", "records", "corrected", "resubmitted", "call"):
         # work whose date is unknown, and the payer answered the same claim again with the same reason before the report
         # that first showed the work: most likely its answer to that work (an appeal upheld), C26
-        rep = _repeat_answer(fx, anchor)
+        rep = None
         if rep:
             answers = [rep]
     if answers:
@@ -1647,7 +1661,7 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
         # the newest answer to the work is a denial whose own window closed more than 30 days ago: expired, when the
         # item's own window has closed too or the answer came from another payer (the claim was rebilled to the right
         # one: the first denial no longer matters), C60. A person's Sent status keeps it for that person to read.
-        if not person and a["paid"] <= 0 and a.get("status") != "22":
+        if not person and a.get("status") != "22":
             ag = a.get("group") or (_grp_kind(a["payer"])[0] if a.get("payer") else None) or grp
             ak = a.get("kind") or (_grp_kind(a["payer"])[1] if a.get("payer") else None) or kind
             from .codes import appeal_rule

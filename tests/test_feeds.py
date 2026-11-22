@@ -1063,10 +1063,11 @@ def _sha(path) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def test_a_report_that_is_none_of_the_three_exports_is_neither_loaded_nor_recorded(tmp_path):
-    """An A/R report and a production report have a Claim Status or money columns but no Claim ID, Bill ID or Bill Item
-    Identifier. The loader neither stores their rows (they would tie to no claim) nor records the files as read, so the
-    reader planned for them still finds them unread. A weekly export beside them loads as before."""
+def test_an_ar_and_a_production_report_in_the_folder_are_read_as_reports_and_never_as_exports(tmp_path):
+    """EMA's A/R and Production reports have a Claim Status or money columns but no Claim ID, Bill ID or Bill Item
+    Identifier. The router recognises them first and hands them to the report reader (remitwatch.ema_reports): no row of
+    theirs goes to the weekly-export table. The A/R is read at once; the Production report waits for the posting ledger
+    (none is open here). A weekly export beside them loads as before, and the A/R handed over again changes nothing."""
     from remitwatch import dropbox_sync
     from remitwatch.store import Store
     from tests.test_uploads import STATUS_COLS, as_csv, status_rows, xlsx
@@ -1079,22 +1080,25 @@ def test_a_report_that_is_none_of_the_three_exports_is_neither_loaded_nor_record
     store = Store(str(tmp_path / "s.sqlite"))
     said: list[str] = []
     out = dropbox_sync.ingest_new_files(store, [str(ar), str(prod), str(weekly)], log=lambda *a: said.append(" ".join(map(str, a))))
-    assert (out["ema"], out["skipped"], out["errors"], out["failed"]) == (1, 2, 0, [])
+    assert (out["ema"], out["skipped"], out["errors"], out["failed"]) == (2, 0, 0, [])
+    assert [(r["report"], r["status"]) for r in out["ema_reports"]] == [("ar_report", "current"), ("production", "waiting")]
     rows = lambda sql: [tuple(r) for r in store.conn.execute(sql)]       # noqa: E731
     assert rows("SELECT family, source_name, COUNT(*) FROM ema_rows GROUP BY 1, 2") == [("claim_status", "Claim & Claim Status.xlsx", 1)]
-    assert rows("SELECT kind FROM files") == [("ema:claim_status",)]
-    assert rows("SELECT source_name FROM ema_sources") == [("Claim & Claim Status.xlsx",)]
-    assert not store.file_seen(_sha(ar)) and not store.file_seen(_sha(prod)) and store.file_seen(_sha(weekly))
-    for name in ("AR 2026.xlsx", "Production 2026.csv"):
-        assert any(f"EMA ERROR {name}: Not read: it is none of the three EMA exports" in s for s in said), said
-    # handed over again (a full listing on a new mirror, a re-read of the folder): still nothing stored, still unread
+    assert rows("SELECT report, status FROM ema_report_files ORDER BY report") == [("ar_report", "current"), ("production", "waiting")]
+    assert rows("SELECT COUNT(*) FROM ema_ar") == [(2,)]
+    assert store.file_seen(_sha(weekly)) and {r[0] for r in rows("SELECT file_id FROM ema_report_files")} == {_sha(ar), _sha(prod)}
+    assert not any("EMA ERROR" in s for s in said), said
+    # handed over again (a full listing on a new mirror, a re-read of the folder): 'already', nothing changes
     again = dropbox_sync.ingest_new_files(store, [str(ar)], log=lambda *a: None)
-    assert (again["ema"], again["skipped"]) == (0, 1) and rows("SELECT COUNT(*) FROM ema_rows") == [(1,)]
+    assert again["ema"] == 0 and [r["status"] for r in again["ema_reports"]] == ["already"]
+    assert rows("SELECT COUNT(*) FROM ema_rows") == [(1,)] and rows("SELECT COUNT(*) FROM ema_ar") == [(2,)]
+    assert rows("SELECT COUNT(*) FROM ema_report_files") == [(2,)]
 
 
-def test_an_ar_report_queued_before_the_upload_page_refused_it_is_not_read_and_says_why(tmp_path):
-    """Before the Upload page refused such reports it queued them. The cycle now leaves one unread, stores nothing from it,
-    and the upload says why instead of "The loader did not read it"."""
+def test_an_ar_report_queued_by_an_older_upload_page_is_read_as_a_report(tmp_path):
+    """Before the Upload page handed EMA's reports to the intake folder it queued them as exports. The cycle reads such a
+    queued file as the report it is: the catalog row carries the upload's SHA-256, and nothing goes to the weekly-export
+    table."""
     from remitwatch import uploads
     from remitwatch.store import Store
     from tests.test_uploads import xlsx
@@ -1110,10 +1114,10 @@ def test_an_ar_report_queued_before_the_upload_page_refused_it_is_not_read_and_s
                                                         "staff", "queued", json.dumps({"kind": "ema", "report": "Claim & Claim Status"})))
     store.conn.commit()
     res = uploads.ingest_queued(store, log=lambda *a: None)
-    status, summary = store.conn.execute("SELECT status, summary FROM uploads").fetchone()
-    assert res["ema"] == 0 and res["uploads"] == 1 and status == "failed"
-    assert "none of the three EMA exports" in json.loads(summary)["error"]
-    assert store.conn.execute("SELECT (SELECT COUNT(*) FROM ema_rows) + (SELECT COUNT(*) FROM files)").fetchone()[0] == 0
+    assert res["ema"] == 1 and res["uploads"] == 1
+    assert [tuple(r) for r in store.conn.execute("SELECT file_id, report, status FROM ema_report_files")] == [(sha, "ar_report", "current")]
+    assert store.conn.execute("SELECT COUNT(*) FROM ema_rows").fetchone()[0] == 0
+    assert store.conn.execute("SELECT COUNT(*) FROM ema_ar").fetchone()[0] == 2
 
 
 def _dropbox(files: dict, stop_listing_after: int | None = None, reset_delta_after: int | None = None, full_fails: bool = False):

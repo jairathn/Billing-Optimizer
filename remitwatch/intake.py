@@ -157,8 +157,16 @@ def report_lines(res: dict) -> list[str]:
     return [f"{title}: {st}."]
 
 
+# The hand-off's words for what became of a pair (the Upload page reads them): applied, already, held, refused, waiting,
+# not_read, failed. The reader's own word stays beside it as 'outcome' (a catalog status such as current or superseded,
+# or read / not_read / too_large for a file that is no report).
+RESULT_WORDS = {"current": "applied", "partly_replaced": "applied", "replaced": "applied", "superseded": "applied",
+                "read": "applied", "already": "already", "held": "held", "refused": "refused", "discarded": "refused",
+                "waiting": "waiting", "not_read": "not_read", "too_large": "not_read", "failed": "failed", "error": "failed"}
+
+
 def _result(status: str, lines: Iterable[str], **kw: Any) -> dict:
-    return dict(kw, status=status, lines=[str(x) for x in lines][:MAX_LINES], at=_now())
+    return dict(kw, status=RESULT_WORDS.get(status, status), outcome=status, lines=[str(x) for x in lines][:MAX_LINES], at=_now())
 
 
 def _summarise(res: dict) -> dict:
@@ -237,7 +245,7 @@ def read_file(store, path: str, *, name: str, origin: dict, file_id: str, ledger
         zipped, rec, report = False, "refused", True
     if report:
         if production is not None and is_production(path, name):
-            return production(path, None if rec == "refused" else rec, file_id=file_id, origin=origin, name=name)
+            return production(path, None if rec == "refused" else rec, file_id=file_id, origin=origin, name=name, log=log)
         kw: dict = {"name": name} if _takes_name() else {}
         return er.ingest_file(store, path, None if rec in (None, "refused") or zipped else rec, via="upload", origin=origin,
                               ledger=ledger, deadline=deadline, log=log, **kw)
@@ -379,7 +387,7 @@ def process_ready(store, data_dir: str | None = None, *, ledger=None, deadline: 
         res = _server_pair(store, src, os.path.join(done, pair), sc, ledger=ledger, deadline=deadline, log=log)
         _close_pair(data_dir, pair, sc, res)
         out["results"].append({"pair": pair, **{k: res.get(k) for k in ("status", "report", "file_id")}})
-        if res["status"] in ("refused", "not_read", "changed"):
+        if res["status"] in ("refused", "not_read", "failed"):
             out["refused"] += 1
         else:
             out["read"] += 1
@@ -388,8 +396,24 @@ def process_ready(store, data_dir: str | None = None, *, ledger=None, deadline: 
     return out
 
 
+def _no_names(log, sc: dict, pair: str):
+    """The readers' log lines with the upload's own file name replaced by its upload id: a person's file name can carry
+    a patient's name, and no log line names an upload."""
+    names = sorted({n for n in (str(sc.get("name") or ""), os.path.basename(str(sc.get("name") or "").replace("\\", "/")),
+                                _plain_name(sc, pair), pair, safe_name(pair)) if len(n) > 2}, key=len, reverse=True)
+    stand_in = f"upload {upload_id_of(pair) or 'file'}"
+
+    def say(*a: Any) -> None:
+        text = " ".join(str(x) for x in a)
+        for n in names:
+            text = text.replace(n, stand_in)
+        log(text)
+    return say
+
+
 def _server_pair(store, src: str, dest: str, sc: dict, *, ledger, deadline, log) -> dict:
     pair = os.path.basename(src)
+    log = _no_names(log, sc, pair)
     gz = bool(sc.get("gz"))
     try:
         h = hash_file(src, gz)
@@ -401,7 +425,7 @@ def _server_pair(store, src: str, dest: str, sc: dict, *, ledger, deadline, log)
         return _result("refused", ["Not read: the file changed on the way (it does not match what the page sent). Upload it "
                                    "again."])
     os.replace(src, dest)            # the kept copy: a held file, a re-read or the clean-up of a misread file reads it here
-    origin = {"path": dest, "upload_id": upload_id_of(pair), "user": sc.get("user") or "", "name": sc.get("name") or "",
+    origin = {"path": dest, "upload_id": upload_id_of(pair), "pair": pair, "user": sc.get("user") or "", "name": sc.get("name") or "",
               "size": h.size, "content_hash": h.content_hash()}
     work = os.path.dirname(dest)     # a file that is no report is read under its own name in done/read-<upload id>/
     try:
@@ -449,7 +473,7 @@ def _finish_orphans(store, data_dir: str, *, ledger, log, out: dict) -> None:
             sc = None
         if sc is None:
             continue
-        origin = {"path": kept, "upload_id": upload_id_of(pair), "user": sc.get("user") or "", "name": sc.get("name") or "",
+        origin = {"path": kept, "upload_id": upload_id_of(pair), "pair": pair, "user": sc.get("user") or "", "name": sc.get("name") or "",
                   "size": sc.get("size")}
         try:
             res = _summarise(read_file(store, kept, name=_plain_name(sc, pair), origin=origin, file_id=sc["sha256"], ledger=ledger,
@@ -505,12 +529,14 @@ def state_pending(state) -> list[dict]:
 
 
 def process_state(store, state, *, production: Production | None = None, ledger=None, deadline: float | None = None,
-                  max_bytes: int | None = None, tmp_dir: str | None = None, log=print) -> dict:
+                  max_bytes: int | None = None, tmp_dir: str | None = None, defer_close: bool = False, log=print) -> dict:
     """Read every complete pair in the state folder's intake/ (a serverless host), oldest first, before the run looks
     at Dropbox: download the file to scratch space, checking the SHA-256 of its original bytes as it arrives (a .gz is
     unpacked as it is read), read it with origin 'upload' (a Production report through `production`, the run's slot),
-    then move the pair to intake/done/ with the result in its sidecar. A file larger than `max_bytes` as stored waits
-    there with a plain message. Returns counts as process_ready does."""
+    then move the pair to intake/done/ with the result in its sidecar. With `defer_close` the moves wait in
+    out['to_close'] for close_state_pairs(), which the run calls once its store image is saved: a run stopped before
+    that leaves the pair in intake/ and the next run reads it again ('already' when it was applied). A file larger than
+    `max_bytes` as stored is moved to done/ with a plain message. Returns counts as process_ready does."""
     from . import runtime
     out: dict = {"pairs": 0, "read": 0, "refused": 0, "changed": False, "results": []}
     todo = state_pending(state)
@@ -535,9 +561,12 @@ def process_state(store, state, *, production: Production | None = None, ledger=
             out["pairs"] -= 1
             out["remaining"] = out.get("remaining", 0) + 1
             continue
-        _close_state_pair(state, pair, sc, res)
+        if defer_close:
+            out.setdefault("to_close", []).append((pair, sc, res))
+        else:
+            _close_state_pair(state, pair, sc, res)
         out["results"].append({"pair": pair, **{k: res.get(k) for k in ("status", "report", "file_id")}})
-        if res["status"] in ("refused", "not_read", "too_large"):
+        if res["status"] in ("refused", "not_read", "failed"):
             out["refused"] += 1
         else:
             out["read"] += 1
@@ -547,6 +576,7 @@ def process_state(store, state, *, production: Production | None = None, ledger=
 
 
 def _state_pair(store, state, pair: str, sc: dict, work: str, *, production, ledger, deadline, max_bytes, log) -> dict:
+    log = _no_names(log, sc, pair)
     gz = bool(sc.get("gz"))
     stored = sc.get("stored")
     if max_bytes is not None and stored is not None and int(stored) > max_bytes:
@@ -570,7 +600,7 @@ def _state_pair(store, state, pair: str, sc: dict, work: str, *, production, led
     if h.sha256() != sc["sha256"] or (sc.get("size") is not None and int(sc["size"]) != h.size):
         return _result("refused", ["Not read: the file changed on the way (it does not match what the page sent). Upload it "
                                    "again."])
-    origin = {"state_path": f"{STATE_INTAKE}/{DONE}/{pair}", "upload_id": upload_id_of(pair), "user": sc.get("user") or "",
+    origin = {"state_path": f"{STATE_INTAKE}/{DONE}/{pair}", "upload_id": upload_id_of(pair), "pair": pair, "user": sc.get("user") or "",
               "name": sc.get("name") or "", "size": h.size, "content_hash": h.content_hash()}
     try:
         res = read_file(store, local, name=_plain_name(sc, pair), origin=origin, file_id=h.sha256(), ledger=ledger,
@@ -594,6 +624,15 @@ def _close_state_pair(state, pair: str, sc: dict, result: dict) -> None:
     state.move(f"{STATE_INTAKE}/{pair}", f"{STATE_INTAKE}/{DONE}/{pair}")
     state.put(f"{STATE_INTAKE}/{DONE}/{pair}.json", json.dumps(body, ensure_ascii=False).encode("utf-8"))
     state.delete(f"{STATE_INTAKE}/{pair}.json")
+
+
+def close_state_pairs(state, to_close: Iterable[tuple]) -> int:
+    """Move the pairs a run read to intake/done/ with their results (after the run saved its store image)."""
+    n = 0
+    for pair, sc, res in to_close or []:
+        _close_state_pair(state, pair, sc, res)
+        n += 1
+    return n
 
 
 def later(reason: str) -> dict:

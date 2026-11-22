@@ -70,6 +70,17 @@ def _ckey(code: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(code or "").upper())
 
 
+def _same_reason(a: Any, b: Any) -> bool:
+    """Two reason codes are one when their codes agree and their groups agree or one has none (EMA's exports write
+    'CO-197', 'CO 197' or '197')."""
+    def split(x: Any) -> tuple[str, str]:
+        t = _ckey(x)
+        m = re.fullmatch(r"(CO|PR|OA|PI|CR)?([A-Z0-9]+)", t)
+        return (m.group(1) or "", m.group(2)) if m else ("", t)
+    (ga, ca), (gb, cb) = split(a), split(b)
+    return bool(ca) and ca == cb and (not ga or not gb or ga == gb)
+
+
 def _codes(adj: Sequence, rmk: Sequence = (), status: str | None = None) -> list[dict]:
     out = []
     for g, c, a in adj:
@@ -258,7 +269,7 @@ def _rows_production(conn: sqlite3.Connection, fx: dict, ledger: Any) -> tuple[l
         return out, {}, notes
     rdays = _remit_days(fx)
     era = _era_writeoffs(conn, f)
-    era_wo = {_ckey(h["carc"]): h for h in era if h["status"] == "WRITE_OFF"}
+    era_wo = [h for h in era if h["status"] == "WRITE_OFF"]
     first_remit = min(rdays) if rdays else None
     itemized = {"charges": 0, "ins_paid": 0, "contractual": 0, "noncontractual": 0, "pat_paid": 0, "pat_adj": 0}
 
@@ -278,7 +289,7 @@ def _rows_production(conn: sqlite3.Connection, fx: dict, ledger: Any) -> tuple[l
                         else ", before the remittance was posted")
                 tags.append("adj_later" if gap and gap > 0 else "adj_before")
         rule = ""
-        if grp and _ckey(k) in era_wo and "adj_at_posting" in tags:
+        if grp and any(_same_reason(k, h["carc"]) for h in era_wo) and "adj_at_posting" in tags:
             rule = ". EMA's posting rule wrote this off (EMA's ERA export shows WRITE_OFF)"
             tags.append("rule_proven")
         meaning = _meaning(k) if grp else ""
@@ -704,6 +715,9 @@ def _story(conn: sqlite3.Connection, fx: dict, ledger: Any) -> dict:
         for i, r in enumerate(rows[start:], start + 1):
             r["n"] = i
     notes += _feed_notes(fx)
+    if _is_copy(conn):
+        notes.append("This site keeps the remittances of the item's own claim; the daily run's full store holds every remittance of "
+                     "the bill, and the state above was worked out there.")
     return {"rows": rows, "balance": bal, "reconciles": bal["reconciles"], "gap_cents": bal["gap_cents"], "twin": twin, "notes": notes,
             "mode": "server" if ledger is not None else "summary", "finding_id": fx["item"]["finding_id"]}
 
@@ -823,9 +837,18 @@ def _refs(ns: Sequence[int]) -> str:
     return "(rows " + ", ".join(str(n) for n in ns) + ")"
 
 
+def _is_copy(conn: sqlite3.Connection) -> bool:
+    """The serverless dashboard's copy of the store (cloud.build_serving marks it): it keeps only part of the remittances."""
+    try:
+        return conn.execute("SELECT 1 FROM meta WHERE key = 'cache:built'").fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
 def _state_of(conn: sqlite3.Connection, fx: dict, today: str | None) -> dict:
     """The state the detection run stored on the item, with state_of's reasons; state_of's own answer when none is stored.
-    When the newest data no longer gives the stored state, the stored one is explained and the live one kept beside it."""
+    When the newest data no longer gives the stored state, the stored one is explained and the live one kept beside it; on
+    the dashboard's copy, which keeps only part of the remittances, the stored state stands alone."""
     t = S._today(today)
     fx["_conn"] = conn
     try:
@@ -838,10 +861,12 @@ def _state_of(conn: sqlite3.Connection, fx: dict, today: str | None) -> dict:
     if stored["work_state"] == live["work_state"]:
         return dict(live, stored=True, follow_up_on=stored.get("follow_up_on") or live.get("follow_up_on"),
                     state_basis=stored.get("state_basis") or live.get("state_basis"))
-    return dict(live, stored=True, work_state=stored["work_state"], label=stored["label"], rule="stored",
-                state_basis=stored.get("state_basis") or "", follow_up_on=stored.get("follow_up_on"),
-                live={"work_state": live["work_state"], "rule": live.get("rule"), "state_basis": live.get("state_basis"),
-                      "label": live.get("label")})
+    out = dict(live, stored=True, work_state=stored["work_state"], label=stored["label"], rule="stored",
+               state_basis=stored.get("state_basis") or "", follow_up_on=stored.get("follow_up_on"), proof=None, answered=None)
+    if not _is_copy(conn):
+        out["live"] = {"work_state": live["work_state"], "rule": live.get("rule"), "state_basis": live.get("state_basis"),
+                       "label": live.get("label")}
+    return out
 
 
 def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: str | None) -> dict:
@@ -856,10 +881,12 @@ def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: s
     ns: list[int] = []
     ema_pay = any(r["source"] == "production" and r["kind"] == "payment" for r in rows)
     if rule == "stored":
-        live = st.get("live") or {}
-        sent = (f"{S.LABELS.get(state, state)}: {st.get('state_basis') or 'as the last detection run stored it'}. On the newest data "
-                f"RemitWatch would say {live.get('label') or live.get('work_state')}: {live.get('state_basis') or ''}; the next run updates it.")
-        strength, why = "inferred", "the state the last detection run stored"
+        live = st.get("live")
+        sent = f"{S.LABELS.get(state, state)}: {st.get('state_basis') or 'as the last detection run stored it'}."
+        if live:
+            sent += (f" On the newest data RemitWatch would say {live.get('label') or live.get('work_state')}: "
+                     f"{live.get('state_basis') or ''}; the next run updates it.")
+        strength, why = ("inferred", "the state the last detection run stored") if live else ("one_source", "the daily run's state")
     elif state == "done":
         if rule == "paid_later_ema":
             ns = _mark(rows, f"pay:{proof.get('date')}:{proof.get('check_tail')}")
@@ -1425,26 +1452,39 @@ def _payer_paid_like(conn: sqlite3.Connection, f: dict) -> dict | None:
     """The same payer paid this code on the patient's other claims of the same bill (another date of a treatment course,
     another fraction): {'n', 'dates', 'paid'}, the evidence that the denial is the payer's error. None when it did not."""
     b = S.bill_of(f.get("patient_control_number"))
-    code = f.get("procedure_code")
-    if not b or not code or not S._table(conn, "claims") or not S._table(conn, "lines"):
+    code, svc0 = f.get("procedure_code"), f.get("service_date")
+    if not code or not svc0 or not S._table(conn, "claims") or not S._table(conn, "lines"):
         return None
     grp = f.get("payer_group")
-    hits = []
-    for pcn, st, svc, paid, payer, cfi in conn.execute(
+    rows = []
+    if b:
+        rows += conn.execute(
             """SELECT c.patient_control_number, c.claim_status_code, COALESCE(l.service_date, c.statement_from), l.paid_cents, c.payer_name,
-                      c.claim_filing_indicator
+                      c.claim_filing_indicator, 1
                FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key JOIN lines l ON l.claim_key = c.claim_key
                WHERE c.patient_control_number >= ? AND c.patient_control_number < ? AND l.procedure_code = ? AND COALESCE(t.superseded, 0) = 0
-                 AND COALESCE(l.paid_cents, 0) > 0""", (b, b + "~", code)):
-        if S.bill_of(pcn) != b or str(st) == "22" or svc == f.get("service_date"):
+                 AND COALESCE(l.paid_cents, 0) > 0""", (b, b + "~", code)).fetchall()
+    if "patient_id" in S._cols(conn, "claims") and f.get("claim_key"):
+        pid = conn.execute("SELECT patient_id FROM claims WHERE claim_key = ?", (f["claim_key"],)).fetchone()
+        if pid and pid[0]:
+            # the patient's other claims of a course (each fraction or visit its own claim), within 120 days either side
+            rows += conn.execute(
+                """SELECT c.patient_control_number, c.claim_status_code, COALESCE(l.service_date, c.statement_from), l.paid_cents, c.payer_name,
+                          c.claim_filing_indicator, 0
+                   FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = c.transaction_key
+                   WHERE l.procedure_code = ? AND c.patient_id = ? AND COALESCE(t.superseded, 0) = 0 AND COALESCE(l.paid_cents, 0) > 0
+                     AND l.service_date BETWEEN ? AND ?""", (code, pid[0], S._add(svc0, -120), S._add(svc0, 120))).fetchall()
+    hits = {}
+    for pcn, st, svc, paid, payer, cfi, same_bill in rows:
+        if (same_bill and S.bill_of(pcn) != b) or str(st) == "22" or svc == svc0:
             continue
         if grp and not S._same_payer(S.row_group({"payer": payer, "cfi": cfi})[0], grp):
             continue
-        hits.append((svc, paid))
+        hits.setdefault(svc, paid)
     if not hits:
         return None
-    hits.sort()
-    return {"n": len(hits), "dates": [h[0] for h in hits[:4]], "paid": hits[0][1]}
+    dates = sorted(hits)
+    return {"n": len(dates), "dates": dates[:4], "paid": hits[dates[0]]}
 
 
 def _appeal_needs(conn: sqlite3.Connection, f: dict, fx: dict) -> tuple[list[str], str]:
@@ -1457,8 +1497,9 @@ def _appeal_needs(conn: sqlite3.Connection, f: dict, fx: dict) -> tuple[list[str
     rarcs = {x.strip() for x in str(f.get("rarc") or "").split(",") if x.strip()}
     note = f"the visit note of {svc}"
     like = _payer_paid_like(conn, f) if sig in ("PROCEDURE_BUNDLED", "ADDON_BUNDLED", "DENIED_NONCOVERED", "DENIED_MEDICAL_NECESSITY") else None
-    paid_like = (f" {f.get('payer_group') or 'The payer'} paid {code} for this patient on {like['n']} other date(s) of the same bill "
-                 f"({', '.join(day(d) for d in like['dates'])}) with nothing different: ask it to pay this one the same way." if like else "")
+    paid_like = (f" {f.get('payer_group') or 'The payer'} paid {code} for this patient on {like['n']} other "
+                 f"{'date' if like['n'] == 1 else 'dates'} ({', '.join(day(d) for d in like['dates'])}" + (", ..." if like["n"] > 4 else "")
+                 + ") with nothing different: ask it to pay this one the same way." if like else "")
     if sig.startswith("DOWNCODE") or sig == "CODE_CHANGED":
         return ([note, "the AMA CPT E/M table (medical decision making or time) with the rows that apply highlighted"],
                 f"The note supports {f.get('original_procedure_code') or code} as billed: medical decision making (or time) meets that level.")
@@ -1606,8 +1647,9 @@ def _recovery_step(f: dict, rec: dict) -> str | None:
         return None
     grp = f.get("payer_group") or "the payer"
     short = f.get("category") in S.SHORT
-    what = (f"{f.get('procedure_code') or 'this code'}, " + ("paid short" if f.get("category") == "underpayment" else "paid at a lower level")
-            if short and not f.get("carc") else f"{f.get('procedure_code') or 'this code'} with {f.get('carc') or f.get('signal')}")
+    code = f.get("procedure_code") or "whole claims"
+    what = (f"{code}, " + ("paid short" if f.get("category") == "underpayment" else "paid at a lower level")
+            if short and not f.get("carc") else f"{code} with {f.get('carc') or f.get('signal')}")
     if rec["paid"] == 0 and rec["n"] >= 10 and short:
         return (f"{grp} has paid none of {rec['n']} earlier items like this ({what}): unless this one differs, it is unlikely to change "
                 "the amount.")
@@ -1664,9 +1706,15 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                     steps.append(era)
                     buttons.append("request_era")
             if tot["n"] and tot["balance"] > 0:
-                steps.append(f"EMA still shows {usd(tot['balance'])} open on this line: if it is the patient's share (deductible, "
-                             "coinsurance or copay), put it on the patient's next statement; if it is the payer's, the line is not settled.")
-                buttons.append("mark_billed")
+                unj = [r for r in story.get("rows") or [] if "patient_unjoined" in r["tags"] and (r["amount_cents"] or 0) > 0]
+                if unj:
+                    steps.append(f"EMA still shows {usd(tot['balance'])} open on this line, but the patient paid {usd(sum(r['amount_cents'] for r in unj))} "
+                                 f"for this date and code that EMA ties to no claim {_refs([r['n'] for r in unj])}: check those payments "
+                                 "before billing the patient anything.")
+                else:
+                    steps.append(f"EMA still shows {usd(tot['balance'])} open on this line: if it is the patient's share (deductible, "
+                                 "coinsurance or copay), put it on the patient's next statement; if it is the payer's, the line is not settled.")
+                    buttons.append("mark_billed")
             if st.get("rule") in ("auto_closed",) or f.get("auto_note"):
                 buttons.append("reopen")
         elif st["work_state"] == "accepted":
@@ -1799,7 +1847,7 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             steps.append(f"When you send it, reverse EMA's write-off of {usd(o.get('written_off') or o.get('contractual_routine'))} "
                          f"({', '.join(o.get('carcs') or []) or 'the denial'}) so the line shows open until the payer answers.")
         rs = _recovery_step(f, rec) if route in ("appeal", "corrected", "rate", "decide") else None
-        if rs:
+        if rs and not (rec.get("paid") == 0 and route == "appeal" and _payer_paid_like(conn, f)):
             steps.append(rs)
         if deadline:
             left = S._days(t, deadline)
@@ -1972,7 +2020,7 @@ def _cob_step(f: dict, fx: dict, story: dict, expected: int) -> tuple[str, list[
              "reprocess the claim.",
              "In EMA, post this remittance (the reversal and the denial) so the line shows open until the plan that pays first is billed."]
     if allowed:
-        expected = min(expected or allowed, allowed)
+        expected = allowed      # what the plans allowed for the visit, not the usual rate (C13)
     return (f"Coordination of benefits: find the plan that pays first and bill it; {grp} says it is not the primary payer.", steps,
             "Biller; front desk for the patient's update", expected)
 
@@ -2131,7 +2179,8 @@ def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:
         denials = sorted(x["date"] for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key") and (x["paid"] or 0) <= 0
                          and x["date"] and x["date"] < f["payment_date"] and S._same_payer(S.row_group(x)[0], grp)
                          and any(c == str(f.get("carc") or "") for _g, c, _a in x["adj"]))
-        if denials:
+        if denials and re.search(r"\b(original|initial)\b", a["label"] or "", re.I):
+            # the payer counts its window from the original determination: a later answer of the same claim does not restart it
             out.append({"what": "first denial of this service", "date": S._add(denials[0], a["days"]),
                         "basis": f"{_short(a['label'])}, counted from the first denial of this service ({day(denials[0])}) to be safe"})
         cr = corrected_rule(grp, kind, f.get("rarc"), f.get("signal"), f.get("carc"))

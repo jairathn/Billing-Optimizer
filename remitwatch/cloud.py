@@ -500,38 +500,41 @@ class ProductionSlot:
         self.used = False
         self.pending: list[str] | None = None       # file ids applied, waiting for finish()
         self.saved: list[str] = []                  # file ids whose attempts go once the store image is saved
+        self.drop: list[str] = []                   # Production files whose kept upload copy goes once all is saved
         self.seq0: int | None = None
         self.out: dict = {}
 
-    def _wait(self, path: str, rec, *, via: str, origin: dict, name: str, reason: str) -> dict:
+    def _wait(self, path: str, rec, *, via: str, origin: dict, name: str, reason: str, log=None) -> dict:
         from . import ema_reports as er
         kw = {"name": name} if _takes(er.ingest_file, "name") else {}
         if _takes(er.ingest_file, "wait_reason"):
             kw["wait_reason"] = reason
-        return er.ingest_file(self.store, path, rec, via=via, origin=origin, ledger=None, log=self.log, **kw)
+        return er.ingest_file(self.store, path, rec, via=via, origin=origin, ledger=None, log=log or self.log, **kw)
 
     def apply(self, path: str, rec=None, *, file_id: str | None = None, origin: dict, name: str, via: str = "dropbox",
-              leave: bool = False) -> dict:
+              leave: bool = False, log=None) -> dict:
         """Read one Production report into the ledger, or keep it waiting: when this host does not read Production (the
         switch), when the run has applied one already or has too little time left (`leave`: return intake.later() so
-        an intake pair stays where it is), or when three runs have started it without finishing (it is held)."""
+        an intake pair stays where it is), or when three runs have started it without finishing (it is held). `log`
+        replaces the run's own for this file (an upload's lines name its upload id, never its file name)."""
         from . import ema_ledger, ema_reports as er
         from .intake import later
         conn = self.store.conn
+        say = log or self.log
         if not er.reads("production"):
-            return self._wait(path, rec, via=via, origin=origin, name=name, reason="")
+            return self._wait(path, rec, via=via, origin=origin, name=name, reason="", log=say)
         if self.used or time.time() > self.deadline:
             if leave:
                 return later(PRODUCTION_LATER)
-            return self._wait(path, rec, via=via, origin=origin, name=name, reason=PRODUCTION_LATER)
+            return self._wait(path, rec, via=via, origin=origin, name=name, reason=PRODUCTION_LATER, log=say)
         fids = production_ids(path, name) or ([file_id] if file_id else [])
         self.handle = self.handle or ema_ledger.LedgerHandle(self.state)
         h = self.handle
         if any(h.attempts(f) >= ema_ledger.MAX_ATTEMPTS for f in fids):
-            res = self._wait(path, rec, via=via, origin=origin, name=name, reason=ema_ledger.ATTEMPT_HOLD_REASON)
+            res = self._wait(path, rec, via=via, origin=origin, name=name, reason=ema_ledger.ATTEMPT_HOLD_REASON, log=say)
             for f in fids:
                 ema_ledger.hold_slow_file(self.store, f)
-            self.log(f"  EMA Production {name}: held after {ema_ledger.MAX_ATTEMPTS} runs that did not finish reading it")
+            say(f"  EMA Production {name}: held after {ema_ledger.MAX_ATTEMPTS} runs that did not finish reading it")
             return dict(res, status="held", reason=ema_ledger.ATTEMPT_HOLD_REASON)
         for f in fids:
             h.note_attempt(f)               # in the state folder, before a byte of it is read
@@ -541,7 +544,7 @@ class ProductionSlot:
         self.seq0 = lg.seq()
         kw = {"name": name} if _takes(er.ingest_file, "name") else {}
         try:
-            res = er.ingest_file(self.store, path, rec, via=via, origin=origin, ledger=lg, deadline=self.deadline, log=self.log, **kw)
+            res = er.ingest_file(self.store, path, rec, via=via, origin=origin, ledger=lg, deadline=self.deadline, log=say, **kw)
         except BaseException:
             h.discard()
             raise
@@ -569,6 +572,10 @@ class ProductionSlot:
             return False
         h, conn = self.handle, self.store.conn
         try:
+            drop = list(h.ledger.copies_to_drop())
+        except Exception:       # noqa: BLE001  (a kept copy stays: nothing depends on its going)
+            drop = []
+        try:
             r = ema_ledger.refresh(self.store, h.ledger, log=self.log, release=lambda: h.save())
             if h.ledger is not None:        # nothing to recompute: the ledger is saved all the same (it changed)
                 h.save(conn)
@@ -582,6 +589,7 @@ class ProductionSlot:
         out["ema_apply"] = {"files": len(self.pending), "refresh_seconds": r.get("seconds"),
                             "part_a": bool(r.get("part_a")), "part_b": bool(r.get("part_b"))}
         self.saved, self.pending = list(self.pending), None
+        self.drop = drop
         return True
 
     def clear_attempts(self) -> None:
@@ -592,6 +600,30 @@ class ProductionSlot:
                 self.handle.clear_attempt(f)
         self.saved = []
 
+    def drop_copies(self) -> int:
+        """After the saves: the kept upload copies (intake/done/<pair>) of Production files that newer files replaced whole
+        (REMITWATCH_EMA_REPORT_KEEP of them, as on the server) are deleted from the state folder. The catalog row and the
+        done sidecar stay. Never a file outside intake/done/."""
+        n = 0
+        for fid in self.drop:
+            r = self.store.conn.execute("SELECT origin FROM ema_report_files WHERE file_id=?", (fid,)).fetchone()
+            try:
+                sp = (json.loads(r[0]) if r and r[0] else {}).get("state_path")
+            except ValueError:
+                sp = None
+            if not sp or not sp.startswith("intake/done/") or sp.endswith(".json"):
+                continue
+            try:
+                if self.state.meta(sp):
+                    self.state.delete(sp)
+                    n += 1
+            except Exception:       # noqa: BLE001  (tried again after the next Production file)
+                pass
+        self.drop = []
+        if n:
+            self.log(f"  {n} kept upload cop{'y' if n == 1 else 'ies'} of replaced Production files removed")
+        return n
+
 
 def _takes(fn, arg: str) -> bool:
     import inspect
@@ -599,6 +631,19 @@ def _takes(fn, arg: str) -> bool:
         return arg in inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return False
+
+
+def copy_howto(state, conn) -> bool:
+    """Copy the state folder's "How we pull this in our EMA" boxes (uploads.HOWTO_STATE) into the store's meta
+    (uploads.HOWTO_META) when they differ. Not committed here. True when the store changed."""
+    from . import uploads
+    doc = uploads.howto_read_state(state)
+    if doc is None:
+        return False
+    if uploads.howto_read_conn(conn) == doc:
+        return False
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (uploads.HOWTO_META, json.dumps(doc)))
+    return True
 
 
 def repair_ledger(store, state, log=print) -> dict | None:
@@ -1440,6 +1485,13 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                 ema_dirty = True
         except Exception as exc:       # noqa: BLE001
             out["ema_repair"] = {"error": type(exc).__name__}
+        # the practice's "How we pull this in our EMA" boxes (the Upload page keeps them in the state folder): a copy in the
+        # store, so a move to the server keeps them
+        howto_changed = False
+        try:
+            howto_changed = copy_howto(state, conn)
+        except Exception as exc:       # noqa: BLE001
+            out["ema_howto"] = {"error": type(exc).__name__}
         # one Production file per run, read in the time it leaves for its summaries and the saves (75 s)
         slot = ProductionSlot(store, state, deadline=t0 + budget - 75, log=log)
 
@@ -1455,11 +1507,11 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         up_in: dict = {}
         try:
             up_in = intake.process_state(store, state, production=lambda p, rec, **kw: slot.apply(p, rec, via="upload", leave=True, **kw),
-                                         deadline=t0 + budget * 0.5, max_bytes=MAX_FILE_BYTES, log=log)
+                                         deadline=t0 + budget * 0.5, max_bytes=MAX_FILE_BYTES, defer_close=True, log=log)
         except Exception as exc:       # noqa: BLE001
             up_in = {"error": type(exc).__name__}
         if up_in.get("pairs") or up_in.get("error") or up_in.get("remaining"):
-            out["intake"] = {k: v for k, v in up_in.items() if k != "results"}
+            out["intake"] = {k: v for k, v in up_in.items() if k not in ("results", "to_close")}
 
         # TriZetto first (remitwatch.trizetto): the remittances straight from the clearinghouse, the freshest source
         tz: dict = {}
@@ -1588,11 +1640,17 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             data_rev = str(int(data_rev or 0) + 1)
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cloud:data_rev', ?)", (data_rev,))
             conn.commit()
-        if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed") or ema_dirty:
+        if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed") or ema_dirty \
+                or howto_changed:
             t2 = time.time()
             meta = save_raw(state, store)
             out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
             slot.clear_attempts()           # the Production file read this run is in the saved ledger and store
+        # the uploads read this run go to intake/done/ now that what they changed is saved (a run stopped before this
+        # point reads them again: 'already' once applied)
+        intake.close_state_pairs(state, up_in.get("to_close") or [])
+        if applied:
+            slot.drop_copies()
         if shown_changed or serving_stale:
             out["serving"] = save_serving(state, conn)
             state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "build": SERVING_BUILD, "at": _now()}).encode())

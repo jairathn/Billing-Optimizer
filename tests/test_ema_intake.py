@@ -636,7 +636,8 @@ def test_an_upload_handed_to_the_server_is_read_moved_to_done_and_says_what_beca
     assert out["intake"]["pairs"] == 2 and out["intake"]["read"] == 1 and out["intake"]["refused"] == 1
     done = intake.done_dir(os.path.dirname(db))
     res = json.load(open(os.path.join(done, p_ar + ".json")))
-    assert res["result"]["status"] == "current" and res["result"]["file_id"] == sha(ar) and res["user"] == "staff"
+    assert res["result"]["status"] == "applied" and res["result"]["outcome"] == "current"
+    assert res["result"]["file_id"] == sha(ar) and res["user"] == "staff"
     assert res["result"]["lines"][0].startswith("Read as the A/R report")
     bad = json.load(open(os.path.join(done, p_bad + ".json")))
     assert bad["result"]["status"] == "refused" and "changed on the way" in bad["result"]["lines"][0]
@@ -649,6 +650,39 @@ def test_an_upload_handed_to_the_server_is_read_moved_to_done_and_says_what_beca
         assert s.conn.execute("SELECT via FROM ema_report_files WHERE file_id=?", (sha(ar),)).fetchone()[0] == "upload"
     finally:
         s.close()
+
+
+def test_no_log_line_names_an_upload_on_either_host(tmp_path, vercel, monkeypatch):
+    """A person's file name can carry a patient's name: the readers' lines about an upload name its upload id instead."""
+    named = "Doe Jane AR 2026.xlsx"                     # invented
+    ar = F.ar_xlsx(ar_rows())
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    pair = _pair(intake.ready_dir(os.path.dirname(db)), named, ar)
+    said: list[str] = []
+    pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: said.append(" ".join(map(str, a))))
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    pair2 = _pair(root / "RemitWatch-state" / "intake", "Doe Jane 2026 Production.csv", F.production_csv(prod_rows(2026)), gz=True)
+    cloud.run_cloud_cycle(state, client, email=False, budget_s=600, log=lambda *a: said.append(" ".join(map(str, a))))
+    assert said and not [s for s in said if "Doe" in s], [s for s in said if "Doe" in s]
+    assert any(f"upload {intake.upload_id_of(pair)}" in s for s in said)
+    assert any(f"upload {intake.upload_id_of(pair2)}" in s for s in said)
+
+
+def test_the_how_to_boxes_kept_in_the_state_folder_reach_the_store_once(vercel):
+    """The Upload page keeps the practice's "How we pull this in our EMA" boxes in the state folder on Vercel; the run
+    copies them into the store (so a move to the server keeps them), and an unchanged copy saves nothing."""
+    from remitwatch import uploads
+    root, client, state = vercel
+    cycle(state, client)
+    doc = {"ar": {"text": "Reports, then A/R, all columns", "by": "staff", "at": "2026-11-20T10:00:00+00:00"}}
+    state.put(uploads.HOWTO_STATE, json.dumps(doc).encode())
+    rev = state.meta(cloud.RAW)["rev"]
+    cycle(state, client)
+    assert uploads.howto_read_conn(state_store(state)) == doc and state.meta(cloud.RAW)["rev"] != rev
+    rev = state.meta(cloud.RAW)["rev"]
+    cycle(state, client)
+    assert state.meta(cloud.RAW)["rev"] == rev
 
 
 def test_kick_asks_the_scheduler_for_a_cycle(tmp_path, monkeypatch):
@@ -686,9 +720,29 @@ def test_uploads_in_the_state_folder_are_read_before_dropbox_one_production_file
     cat = catalog(state_store(state))
     assert cat[sha(ar)] == cat[sha(p25)] == cat[sha(p26)] == "current"
     done = json.loads(state.get(f"intake/done/{pc}.json"))
-    assert done["result"]["status"] == "current" and done["result"]["rows_applied"] == 12
+    assert done["result"]["status"] == "applied" and done["result"]["rows_applied"] == 12
     origin = json.loads(state_store(state).execute("SELECT origin FROM ema_report_files WHERE file_id=?", (sha(p26),)).fetchone()[0])
     assert origin["state_path"] == f"intake/done/{pc}"
+
+
+def test_a_kept_upload_copy_goes_once_newer_files_replace_it_whole_on_vercel(vercel, monkeypatch):
+    """REMITWATCH_EMA_REPORT_KEEP on Vercel as on the server: the kept copy of an uploaded Production file goes from
+    intake/done/ once enough newer files cover its rows; its done sidecar and catalog row stay."""
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    monkeypatch.setenv("REMITWATCH_EMA_REPORT_KEEP", "1")
+    folder = root / "RemitWatch-state" / "intake"
+    old = F.production_csv(prod_rows(2026))
+    pa = _pair(folder, "2026 Production.csv", old, gz=True)
+    cycle(state, client)
+    assert state.meta(f"intake/done/{pa}") is not None
+    new = F.production_csv(prod_rows(2026, extra_paid=5.0))         # the same year exported again, a payment changed
+    pb = _pair(folder, "2026 Production again.csv", new, gz=True)
+    cycle(state, client)
+    cat = catalog(state_store(state))
+    assert cat[sha(new)] == "current" and cat[sha(old)] in ("replaced", "superseded")
+    assert state.meta(f"intake/done/{pa}") is None and state.meta(f"intake/done/{pa}.json") is not None
+    assert state.meta(f"intake/done/{pb}") is not None
 
 
 # ================================================================================================ de-duplication
@@ -751,7 +805,7 @@ def test_a_gzipped_upload_is_read_as_it_unpacks_under_its_own_name_on_a_server(t
     finally:
         s.close()
     assert ledger_rows(el.ledger_path(db)) == 12
-    assert json.load(open(os.path.join(intake.done_dir(os.path.dirname(db)), pair + ".json")))["result"]["status"] == "current"
+    assert json.load(open(os.path.join(intake.done_dir(os.path.dirname(db)), pair + ".json")))["result"]["status"] == "applied"
     # the same file arrives in the Dropbox mirror later: already read, nothing changes
     again = dropbox_sync.ingest_new_files(open_store(db), [write(tmp_path / "mirror" / "2026 Production(Sheet1).csv", data)],
                                           log=lambda *a: None, ledger=el.Ledger.open(el.ledger_path(db)))
@@ -770,7 +824,7 @@ def test_a_gzipped_report_in_dropbox_and_one_uploaded_take_the_serverless_slot(v
     out = cycle(state, client)
     assert out["intake"]["read"] == 1 and out["ema_apply"]["files"] == 1
     assert catalog(state_store(state))[sha(d25)] == "current"
-    assert json.loads(state.get(f"intake/done/{pair}.json"))["result"]["status"] == "current"
+    assert json.loads(state.get(f"intake/done/{pair}.json"))["result"]["status"] == "applied"
 
 
 def test_an_upload_first_then_the_same_raw_csv_too_big_for_the_site_is_already_read(vercel, monkeypatch):

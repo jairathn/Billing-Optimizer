@@ -852,9 +852,25 @@ def cmd_import_cloud(args: argparse.Namespace) -> int:
     from .api import ensure_server_schema
     ensure_server_schema(args.db)           # the dashboard's own tables, where the old store had none yet
     ledger = _import_ledger(st, args.db)
+    howto = _import_howto(st, args.db)
     print(json.dumps(dict(details, store=args.db, packets_moved=packets, reports_moved=reports, dropbox_position=bool(cur),
-                          journal_left_behind=waiting, posting_ledger=ledger, **base), indent=1))
+                          journal_left_behind=waiting, posting_ledger=ledger, howto_boxes=howto, **base), indent=1))
     return 0
+
+
+def _import_howto(st, db: str) -> bool:
+    """The Upload page's "How we pull this in our EMA" boxes kept in the state folder become this server's (meta)."""
+    import sqlite3
+
+    from . import cloud
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        changed = cloud.copy_howto(st, conn)
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
 
 
 def _import_ledger(st, db: str) -> dict | None:

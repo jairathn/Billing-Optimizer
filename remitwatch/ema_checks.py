@@ -1630,6 +1630,26 @@ def _bills_with_835(conn: sqlite3.Connection, bills: Iterable[str]) -> set[str]:
     return got
 
 
+def _paid_on_other_links(conn: sqlite3.Connection, keys: set[tuple]) -> dict[tuple, dict[int, int]]:
+    """{(name key, date, code): {EMA claim number: insurance money}} for these keys, on claims that are not the ASC's
+    facility claims: what each of EMA's claims for that patient, date and code was paid."""
+    out: dict[tuple, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    nks = sorted({k[0] for k in keys if k[0] is not None})
+    if not nks:
+        return out
+    for part in _chunks(nks):
+        _temp(conn, "ec_pk", ["name_key INTEGER PRIMARY KEY"], [(x,) for x in part])
+        for nk, svc, cpt, lk, cents in conn.execute(
+                """SELECT y.name_key, y.svc, y.cpt, y.link, SUM(COALESCE(y.ins_paid, 0)) FROM ema_line_payments y
+                   LEFT JOIN ema_link_map m ON m.link = y.link
+                   WHERE y.name_key IN (SELECT name_key FROM temp.ec_pk) AND COALESCE(m.facility, 0) = 0
+                   GROUP BY y.name_key, y.svc, y.cpt, y.link"""):
+            if (nk, svc, cpt) in keys and cents:
+                out[(nk, svc, cpt)][lk] += cents
+    _drop(conn, "ec_pk")
+    return out
+
+
 def _name_day_codes_835(conn: sqlite3.Connection, keys: set[tuple]) -> set[tuple]:
     """The (name key, date, code) keys among these that an 835 line carries (its code or original code; the corrected
     name counts too)."""
@@ -2392,7 +2412,9 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
          whose twin carries that key, are judged by their own checks);
       3. not paid since: insurance payments after the first denial posting, and the denying payer's own payments posted that
          same day (C6 counts them too: a line paid on the posting that carried the adjustment was paid, not denied), are
-         under half of what it is expected to bring.
+         under half of what it is expected to bring;
+      4. not paid on another claim: insurance payments for the same patient, date and code on another of EMA's claims (a
+         resubmission; never the ASC's facility claim) are under half of it too.
     Left out: G2211, 99024 and charges of $1 or less, products, patient-side rows, voided lines, denials that net to 0.
     One EMA_DENIED item per (claim number, reason class). Expected: the usual rate x units, else EMA's allowed amount,
     else the charge x the group's paid/charge ratio, else 45% of the charge, capped at the charge; when another payer
@@ -2452,6 +2474,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     by_bill = _lines_835_by_bill(conn, {ln["bill"] for ln in mapped})
     nk_keys = {(ln["name_key"], ln["svc"], ln["cpt"]) for ln in lines if not (ln["facility"] or 0) and ln["name_key"] is not None}
     seen_nk = _name_day_codes_835(conn, nk_keys)
+    paid_elsewhere = _paid_on_other_links(conn, nk_keys)
     claim_ids = _claim_id_of_links(conn, {ln["link"] for ln in lines})
     items: dict[tuple, dict] = {}
     for ln in lines:
@@ -2535,6 +2558,12 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             continue
         if not expected:
             continue
+        # 4. not paid on another claim: the same patient, date and code paid on another of EMA's claims (a resubmission;
+        # never the ASC's facility claim)
+        if not (ln["facility"] or 0) and ln["name_key"] is not None:
+            got = sum(v for lk2, v in paid_elsewhere.get((ln["name_key"], ln["svc"], ln["cpt"]), {}).items() if lk2 != ln["link"])
+            if got >= PAID_SINCE_SHARE * expected:
+                continue
         ik = (ln["link"], cls)
         it = items.setdefault(ik, {"lines": [], "group": dgrp, "kind": dkind, "payer": top[3], "facility": ln["facility"] or 0,
                                    "bill": ln["bill"] if ln["map_method"] != "conflict" else None, "link": ln["link"],

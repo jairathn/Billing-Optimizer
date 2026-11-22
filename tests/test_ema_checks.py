@@ -807,6 +807,36 @@ def test_a_denial_paid_since_is_no_item_and_an_ar_denial_with_no_reason_is(store
     assert items[0]["heir_keys"] == [("EMA_OPEN_CLAIM", F.claim_id(3))]
 
 
+def test_the_denying_payers_payment_posted_the_same_day_reads_as_paid_since(store, ledger, tmp_path):
+    """The denying payer paid the line on the posting that carried the adjustment: it was paid, not denied (C6 counts that
+    payment as paid too, so the item would close the run it opened). Another payer's payment that day is still a payment
+    before the denial: the denial stays an item, sized at what was left."""
+    rows = c5_rows(link=2) + [pay(F.link_no(2), "PAPER-5", 90, patient=1, payer=P["commercial"], posted=D(2026, 4, 10))]
+    rows += c5_rows(link=3, patient=2) + [pay(F.link_no(3), "MCR-9", 90, patient=2, payer=P["medicare"], posted=D(2026, 4, 10))]
+    denial_world(store, ledger, tmp_path, rows)
+    items = c5(store, rate=lambda g, c, y: 7000)
+    assert [i["key_parts"][0] for i in items] == [F.link_no(3)]
+    assert items[0]["expected_cents"] == 6000 and "after the first payer's payment" in items[0]["evidence"]["expected_basis"][0]
+
+
+def test_a_denial_paid_on_another_claim_for_the_same_patient_date_and_code_is_no_item(store, ledger, tmp_path):
+    """A resubmission under a new EMA claim was paid: the denial on the first claim is not money to chase. The ASC's
+    facility claim for the same patient, date and code never pays the professional line."""
+    paid_again = [charge(F.link_no(3), patient=1, payer=P["commercial"], primary=P["commercial"]),
+                  pay(F.link_no(3), "PAPER-6", 90, patient=1, payer=P["commercial"], posted=D(2026, 4, 25))]
+    denial_world(store, ledger, tmp_path, c5_rows(link=2) + paid_again)
+    assert [i for i in c5(store, rate=lambda g, c, y: 7000) if i["key_parts"][0] == F.link_no(2)] == []
+
+
+def test_a_payment_on_the_ascs_facility_claim_never_reads_as_paid_on_another_claim(store, ledger, tmp_path):
+    ar = [F.ar_row(claim=F.claim_id(3, facility=True), link=F.link_no(3), status="Paid", denial=0, current=0, patient=1,
+                   primary=P["commercial"])]
+    facility = [charge(F.link_no(3), patient=1, payer=P["commercial"], primary=P["commercial"]),
+                pay(F.link_no(3), "PAPER-7", 90, patient=1, payer=P["commercial"], posted=D(2026, 4, 25))]
+    denial_world(store, ledger, tmp_path, c5_rows(link=2) + facility, ar_rows=ar)
+    assert [i["key_parts"][0] for i in c5(store, rate=lambda g, c, y: 7000)] == [F.link_no(2)]
+
+
 def test_the_ascs_facility_claim_is_titled_as_such(store, ledger, tmp_path):
     ar = [F.ar_row(claim=F.claim_id(2, facility=True), link=F.link_no(2), status="Denied", denial=0, current=150, patient=1,
                    primary=P["commercial"])]

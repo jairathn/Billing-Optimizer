@@ -394,6 +394,24 @@ def test_a_second_payer_on_file_that_was_never_billed_is_an_item(store, ledger, 
     assert items(store, "signal='SECONDARY_NOT_BILLED' AND COALESCE(stale,0)=0") == []
 
 
+def test_a_second_payers_share_ema_wrote_off_is_still_an_item(store, ledger, tmp_path):
+    """EMA closed the balance with a write-off, with nothing from the patient or the second payer: the share was never
+    billed, it is not settled."""
+    remit(store, trace="777000223", paid_on="2026-04-01",
+          claims=[{"pcn": F.claim_id(9), "last": "SAMPLE", "first": "DELTA",
+                   "lines": [(S, "99213", 150, 90, [("CO", "45", 30), ("PR", "2", 30)], {"allowed_cents": 12000})]}])
+    rows = [charge(F.link_no(9), patient=2, secondary=P["commercial"]),
+            pay(F.link_no(9), "777000223", 90, patient=2, posted=D(2026, 4, 3), secondary=P["commercial"]),
+            adj(F.link_no(9), "CO-45", 30, patient=2, posted=D(2026, 4, 3), contractual=True, secondary=P["commercial"]),
+            adj(F.link_no(9), "OA-23", 30, patient=2, posted=D(2026, 4, 10), secondary=P["commercial"])]
+    ar = [F.ar_row(claim=F.claim_id(9), link=F.link_no(9), status="Payment Pending", current=0, aging=D(2026, 4, 3), svc=SVC,
+                   patient=2, secondary=P["commercial"])]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    run(store)
+    f = one(store, "signal='SECONDARY_NOT_BILLED'")
+    assert f["shortfall_cents"] == 3000 and json.loads(f["evidence"])["ema_wrote_off_share"] is True
+
+
 def test_a_credit_balance_is_a_refund_item_outside_the_money_to_recoup(store, ledger, tmp_path):
     rows = [charge(F.link_no(6), amount=100, patient=2),
             pay(F.link_no(6), "PAPER-61", 100, patient=2, posted=D(2026, 3, 20)),
@@ -404,22 +422,6 @@ def test_a_credit_balance_is_a_refund_item_outside_the_money_to_recoup(store, le
     assert f["category"] == "refund" and f["shortfall_cents"] == 6000 and f["source"] == "ema" and f["ema_link"] == F.link_no(6)
     ev = json.loads(f["evidence"])
     assert ev["overpaid_by"] == BCBS and ev["credit_cents"] == 6000 and "owner" in ev["next_step"]
-
-
-def test_a_short_payment_with_no_835_is_held_to_the_payers_own_rate(store, ledger, tmp_path):
-    for n in range(20):
-        remit(store, trace=f"77710{n:04d}", paid_on="2026-02-10",
-              claims=[{"pcn": F.claim_id(100 + n), "last": f"RATE{n}", "first": "ECHO", "member": f"M{n:011d}",
-                       "lines": [("2026-02-02", "99214", 200, 120, [("CO", "45", 80)], {"allowed_cents": 12000})]}])
-    rows = [charge(F.link_no(5), cpt="99214", amount=200, patient=2),
-            pay(F.link_no(5), "PAPER-51", 90, cpt="99214", patient=2, posted=D(2026, 3, 25), allowed=90),
-            adj(F.link_no(5), "CO-45", 110, cpt="99214", patient=2, posted=D(2026, 3, 25), contractual=True)]
-    denial_world(store, ledger, tmp_path, rows)
-    run(store)
-    f = one(store, "signal='EMA_UNDERPAID'")
-    assert (f["expected_cents"], f["shortfall_cents"], f["allowed_cents"]) == (12000, 3000, 9000)
-    assert f["category"] == "underpayment" and f["actionable"] == "appeal" and f["appeal_deadline"] and f["source"] == "ema"
-    assert "no remittance" in f["hint"].lower()
 
 
 def test_co_b11_is_a_claim_sent_on_to_another_carrier_not_a_service_the_plan_excludes(store):
