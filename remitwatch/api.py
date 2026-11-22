@@ -3500,6 +3500,18 @@ def _send_fax(prov, f: dict, number: str, doc: bytes, pages: int, *, packet_id: 
     return rec
 
 
+BULK_PAUSED = ("Sending many appeals at once is paused until RemitWatch checks EMA's payments (the next update): some items "
+               "it lists were paid on checks with no remittance, and a letter would go to the payer for nothing. Open an item "
+               "and use Appeal by fax there, after checking in EMA that it is still unpaid.")
+
+
+def bulk_appeals_on() -> bool:
+    """Bulk appeal faxing (Appeal everything appealable, and Appeal by fax on ticked items). Off unless
+    REMITWATCH_BULK_APPEAL=1: until RemitWatch reads EMA's payments it cannot tell a paid line from an unpaid one, so only
+    an appeal a person opens and checks one at a time goes out."""
+    return os.environ.get("REMITWATCH_BULK_APPEAL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.post("/api/appeals/send", dependencies=[Depends(require_xhr)])
 def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth)):
     """One item all the way to the payer: the visit note from EMA where the appeal rests on it (Claude reviews it and
@@ -3521,6 +3533,8 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
 
     def held(code: str, reason: str, **kw) -> dict:
         return dict(out, status="held", code=code, reason=reason, **kw)
+    if body.get("bulk") and not bulk_appeals_on():
+        return held("bulk_paused", BULK_PAUSED)
     if kind not in fax.APPEALABLE:
         return held("not_appealable", {"fix": "This one is corrected in EMA and sent again as a claim, not appealed.",
                                        "auth": "This one needs the authorization record, or a retro-authorization, first.",
@@ -3654,6 +3668,9 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
     details, EMA)."""
     from . import fax, modmed
     from .insights import work_type
+    if not bulk_appeals_on():
+        return {"paused": BULK_PAUSED, "items": [], "payers": [], "fax": fax.configured(),
+                "practice_missing": [], "modmed": False, "review": False}
     cond, params = _appealable_cond()
     where = f"""{cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
                 AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""" + (" AND payer_group=?" if payer else "")

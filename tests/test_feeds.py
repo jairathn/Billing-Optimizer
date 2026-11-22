@@ -556,6 +556,39 @@ def test_a_host_that_holds_the_line_without_speaking_ssh_is_a_failed_step_not_a_
             c.close()
 
 
+@pytest.mark.parametrize("cause, says_wait", [(TimeoutError(), True), (ConnectionResetError(104, "reset"), False)])
+def test_a_silent_host_reads_the_same_whichever_clock_fires_first(monkeypatch, cause, says_wait):
+    """A host that never speaks SSH is caught by start_client's own clock or, a moment earlier under load, by paramiko's
+    banner clock (an SSHException raised from a timeout). Both are the same situation and give the same message, so the
+    test above cannot pass or fail on the machine's load. A banner error from anything else (the host hung up) keeps the
+    general message. Invented settings; paramiko's handshake is replaced, the socket is real."""
+    paramiko = pytest.importorskip("paramiko")
+    import socket
+
+    ls = socket.socket()
+    ls.bind(("127.0.0.1", 0))
+    ls.listen(1)
+
+    def start_client(self, event=None, timeout=None):
+        try:
+            raise cause
+        except OSError as exc:      # what paramiko's _check_banner does: the read's error becomes the context
+            raise paramiko.SSHException("Error reading SSH protocol banner" + str(exc))
+
+    monkeypatch.setattr(paramiko.Transport, "start_client", start_client)
+    s = trizetto.Settings.from_env({"TRIZETTO_SFTP_HOST": "127.0.0.1", "TRIZETTO_SFTP_PORT": str(ls.getsockname()[1]),
+                                    "TRIZETTO_SFTP_USER": "RWLOGIN", "TRIZETTO_SFTP_PASSWORD": "pw-invented-0001"})
+    try:
+        with pytest.raises(trizetto.TriZettoError) as got:
+            trizetto.Session(s, timeout=2)._handshake(set())
+    finally:
+        ls.close()
+    if says_wait:
+        assert "did not complete the SSH handshake within 2 s; nothing was sent." in str(got.value)
+    else:
+        assert str(got.value) == "127.0.0.1 did not complete the SSH handshake (SSHException)."
+
+
 def test_a_hold_says_its_times_in_plain_words():
     """The hold's times read "2026-11-23 19:32 UTC", never "2026-11-23 19:32+00:00 UTC"."""
     text = trizetto.held_text({"at": "2026-11-22T19:32:05+00:00", "retry_at": "2026-11-23T19:32+00:00", "kind": "password"})

@@ -260,6 +260,11 @@ class Session:
                 pass
             if isinstance(exc, TriZettoError):
                 raise
+            if isinstance(exc, paramiko.SSHException) and "protocol banner" in str(exc) \
+                    and isinstance(exc.__cause__ or exc.__context__, TimeoutError):
+                # the same silent host as above, caught by paramiko's own banner clock before start_client's clock (which
+                # of the two fires first depends on the machine's load): one situation, one message
+                raise TriZettoError(f"{self.s.host} did not complete the SSH handshake within {self.timeout:g} s; nothing was sent.") from exc
             raise TriZettoError(f"{self.s.host} did not complete the SSH handshake ({type(exc).__name__}).") from exc
         return t
 
