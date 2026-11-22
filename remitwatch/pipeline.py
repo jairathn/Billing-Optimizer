@@ -13,12 +13,21 @@ two never overlap:
 The scheduler runs each cycle in a child process. Detection holds every
 service line in memory, and a child process gives that memory back when it
 finishes and keeps a failure away from the dashboard.
+
+A run that ends without releasing its lock (its container stopped, the memory
+limit killed it) leaves the lock behind, and every cycle would be refused for
+up to LOCK_STALE_MINUTES. So the scheduler removes the locks of a child that
+ended, and ends its running child when the server stops; and the server's
+start removes the locks of runs that ended with its last container
+(clear_locks_left_behind), as the deploy script does after its own swaps.
 """
 from __future__ import annotations
 
 import json
 import os
 import secrets
+import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -30,8 +39,12 @@ from .store import Store
 LOCK_KEY = "pipeline:lock"
 LAST_KEY = "pipeline:last_cycle"
 REPORT_KEY = "pipeline:last_report"
+SERVERS_KEY = "pipeline:servers"        # the containers (host names) the web server started in on this store, newest last
+SERVERS_KEPT = 10
 CHILD_TIMEOUT_SECONDS = 170 * 60        # a cycle the scheduler started is stopped after this long
 LOCK_STALE_MINUTES = 180                # a lock with no heartbeat for this long was left behind by a crash; longer than the child timeout
+STOP_WAIT_SECONDS = 3                   # when the server stops, the time its running cycle gets to end before it is killed
+BOOT_MARGIN_SECONDS = 120               # a lock last refreshed this long before the machine started was left by the restart
 
 
 def _now() -> str:
@@ -51,9 +64,19 @@ def _meta_set(conn, key: str, value) -> None:
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value if isinstance(value, str) else json.dumps(value, default=str)))
 
 
+def _host() -> str:
+    """The name of the machine or container this process runs in. Docker names each container after its own ID, so a
+    lock says which container its run was in: a process in another container cannot be seen from this one."""
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
+
+
 def acquire_lock(conn) -> str | None:
     """Take the pipeline lock and return its token, or None when another cycle holds it. The holder refreshes a heartbeat;
-    a lock whose heartbeat is three hours old was left behind by a crash and is taken over."""
+    a lock whose heartbeat is three hours old was left behind by a crash and is taken over. The lock keeps the shape the
+    deploy script reads (pid, started, heartbeat) and says which container took it (host)."""
     conn.execute("BEGIN IMMEDIATE")
     try:
         raw = _meta_get(conn, LOCK_KEY)
@@ -67,7 +90,7 @@ def acquire_lock(conn) -> str | None:
             except Exception:
                 pass
         token = secrets.token_hex(8)
-        _meta_set(conn, LOCK_KEY, {"started": _now(), "heartbeat": _now(), "pid": os.getpid(), "token": token})
+        _meta_set(conn, LOCK_KEY, {"started": _now(), "heartbeat": _now(), "pid": os.getpid(), "token": token, "host": _host()})
         conn.execute("COMMIT")
         return token
     except Exception:
