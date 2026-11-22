@@ -17,8 +17,14 @@ import io
 import json
 import os
 import re
+import signal
+import socket
 import sqlite3
 import stat
+import subprocess
+import sys
+import threading
+import time
 import zipfile
 
 import pytest
@@ -477,6 +483,7 @@ def test_notes_are_matched_by_patient_and_date_or_by_a_person(site, monkeypatch)
     r = c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False}, headers=XHR).json()
     assert r["status"] == "built" and r["source"] == "upload" and r["note"]["id"] == "upload-" + attached["note"]["note_id"]
     assert r["identified_by"] == ["a person"] and r["others"] == []
+    from_attached = r["packet"]["packet_id"]
     # attached to the item too: both are the person's, and the progress note is the one used (as with EMA's API)
     again = site.up("visit.pdf", note_pdf(NOTE), finding_id=fid)
     assert again["note"]["matched_by"] == "person"
@@ -485,12 +492,20 @@ def test_notes_are_matched_by_patient_and_date_or_by_a_person(site, monkeypatch)
     # the person can switch to the other one, as with EMA's notes
     r2 = c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False, "document_id": r["others"][0]["id"]}, headers=XHR).json()
     assert r2["status"] == "built" and r2["note"]["id"] == r["others"][0]["id"]
-    # taken back: the file goes, the packet built from it stays
+    # taken back: the file goes; the packet built from it stays with the item for the record, and is not faxed from now
+    # on (as the page says when the note is taken back): the appeal code reads the upload marked removed and the note's
+    # row gone (tests/test_fax.py faxes such an item and finds its packet built again from the note in its place)
+    import remitwatch.api as api
     nid = attached["note"]["note_id"]
-    path = table(site.db, f"SELECT path FROM uploaded_notes WHERE note_id='{nid}'")[0][0]
+    path, sha = table(site.db, f"SELECT path, sha256 FROM uploaded_notes WHERE note_id='{nid}'")[0]
+    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=True) is None
     assert c.post(f"/api/uploads/notes/{nid}/remove", headers=XHR).json() == {"removed": True}
     assert not os.path.exists(path) and c.get(f"/api/uploads/notes/{nid}/file").status_code == 404
     assert len(c.get(f"/api/packets?finding_id={fid}").json()) == 3            # each packet built stays
+    assert table(site.db, f"SELECT status FROM uploads WHERE upload_id='{sha}'") == [("removed",)]
+    assert table(site.db, f"SELECT 1 FROM uploaded_notes WHERE note_id='{nid}'") == []
+    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=True) \
+        == "The note it was built from was taken back."
     # a note view, for checking it is the right one
     gid = good["note"]["note_id"]
     v = c.get(f"/api/uploads/notes/{gid}/file")
@@ -856,7 +871,201 @@ def test_a_server_with_only_the_fax_line_still_runs_its_daily_cycle(monkeypatch,
         pipeline.SCHEDULER.stop()
 
 
+# ----------------------------------------------------------------------------------------------- a run that ends with its container
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# A stand-in for a cycle in its own process: it takes the cycle's lock as run_cycle does, and the fax run's lock as the
+# cycle's fax step does (both with its own process number), says so, and then runs until something ends it. Its command
+# line names remitwatch, as a real cycle's does.
+STAND_IN = ("import json, os, sys, time\n"
+            "from datetime import datetime, timezone\n"
+            "from remitwatch import pipeline\n"
+            "from remitwatch.store import Store\n"
+            "s = Store(sys.argv[1])\n"
+            "assert pipeline.acquire_lock(s.conn)\n"
+            "now = datetime.now(timezone.utc).isoformat(timespec='seconds')\n"
+            "s.conn.execute(\"INSERT OR REPLACE INTO meta (key, value) VALUES ('fax:lock', ?)\",\n"
+            "               (json.dumps({'token': 'f1', 'started': now, 'heartbeat': now, 'pid': os.getpid(), 'who': 'cycle'}),))\n"
+            "s.conn.commit()\n"
+            "print('held', flush=True)\n"
+            "time.sleep(120)\n")
+NO_FEED = ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "TRIZETTO_SFTP_USER", "TRIZETTO_SFTP_PASSWORD",
+           "REMITWATCH_SYNC_INTERVAL_MINUTES", "SMTP_HOST", "ALERT_WEBHOOK_URL")
+
+
+def _locks(db: str) -> dict:
+    conn = sqlite3.connect(db)
+    try:
+        return {k: json.loads(v) for k, v in conn.execute("SELECT key, value FROM meta WHERE key LIKE '%:lock'")}
+    finally:
+        conn.close()
+
+
+def _until(check, seconds: float = 30) -> bool:
+    end = time.time() + seconds
+    while time.time() < end:
+        if check():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _scheduler(db: str, monkeypatch):
+    """A scheduler whose cycles are the stand-in, started as the real one starts them."""
+    from remitwatch import pipeline
+    from remitwatch.store import Store
+    for k in NO_FEED:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("PYTHONPATH", ROOT)
+    Store(db).close()
+    s = pipeline.Scheduler()
+    s.db_path = db
+    s.argv = lambda path: [sys.executable, "-c", STAND_IN, path, "remitwatch-cycle-stand-in"]
+    t = threading.Thread(target=s.run_child, args=("schedule",), daemon=True)
+    t.start()
+    assert _until(lambda: set(_locks(db)) == {"pipeline:lock", "fax:lock"}), _locks(db)
+    child = next(iter(s._children.values()))[0]
+    assert _locks(db)["pipeline:lock"]["pid"] == child.pid == _locks(db)["fax:lock"]["pid"]
+    return s, t, child
+
+
+def test_a_cycle_running_when_the_server_stops_is_ended_and_its_locks_freed(tmp_path, monkeypatch):
+    """docker compose stop or restart, up -d after a change to .env, a reboot: the server stops, and the container ends
+    the cycle the scheduler started. That cycle never released its lock, so every cycle after it was refused for up to
+    three hours. The scheduler now ends its cycle itself when the server stops, and frees the locks it held (the cycle's,
+    and the fax run's)."""
+    from remitwatch import pipeline
+    db = str(tmp_path / "remitwatch.sqlite")
+    s, t, child = _scheduler(db, monkeypatch)
+    try:
+        assert cycle(db, sync=False) == {"skipped": "another cycle is running"}
+        s.stop()                                                    # the server's shutdown (api.lifespan)
+        assert child.poll() is not None                             # ended by the scheduler, not left to the container
+        assert _locks(db) == {}
+        t.join(10)
+        assert not t.is_alive() and s._children == {}
+        out = cycle(db, sync=False)                                 # the next start's first cycle runs at once
+        assert "skipped" not in out and "error" not in out, out
+        assert pipeline.status(db)["running"] is False
+    finally:
+        child.kill()
+
+
+def test_a_cycle_the_system_killed_frees_its_locks_at_once(tmp_path, monkeypatch):
+    """The system can kill a cycle while the server runs on (the memory limit, during a detection run on a large store):
+    its locks are freed as soon as the scheduler sees it end, not three hours later. A lock another process took with
+    the same number before this cycle started is not the cycle's, and stays."""
+    db = str(tmp_path / "remitwatch.sqlite")
+    s, t, child = _scheduler(db, monkeypatch)
+    try:
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO meta (key, value) VALUES ('older:lock', ?)",
+                     (json.dumps({"pid": child.pid, "started": "2026-01-02T03:04:05+00:00", "token": "x"}),))
+        conn.commit()
+        conn.close()
+        os.kill(child.pid, signal.SIGKILL)                          # as the kernel's memory limit does
+        t.join(10)
+        assert not t.is_alive() and child.returncode == -signal.SIGKILL
+        assert set(_locks(db)) == {"older:lock"}
+        assert "skipped" not in cycle(db, sync=False)
+    finally:
+        child.kill()
+
+
+def test_the_servers_start_frees_the_locks_of_runs_that_ended_with_its_last_container(tmp_path, monkeypatch):
+    """A power cut, AWS's own recovery, or a stop that took longer than Docker waits: nothing ran at the shutdown, and
+    the cycle's locks stayed. The server's next start finds the locks such runs left and frees them, by the deploy
+    script's rule for a run in this container. A run that still goes keeps its lock, here or in another container
+    (docker compose run), which this one cannot see."""
+    from remitwatch import fax, pipeline
+    from remitwatch.store import Store
+    for k in NO_FEED:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(fax, "configured", lambda env=None: False)
+    monkeypatch.setenv("PYTHONPATH", ROOT)
+    monkeypatch.chdir(tmp_path)
+    assert pipeline.start_scheduler_from_env("none.sqlite") is False and not (tmp_path / "none.sqlite").exists()   # no store: none made
+    bare = sqlite3.connect(tmp_path / "bare.sqlite")
+    bare.execute("CREATE TABLE t (a)")
+    bare.commit()
+    bare.close()
+    assert pipeline.start_scheduler_from_env(str(tmp_path / "bare.sqlite")) is False                   # no meta table: no failure
+    db = str(tmp_path / "remitwatch.sqlite")
+    Store(db).close()
+    # a cycle in this container, ended with it: its process is gone, its locks stay, and the next cycle is refused
+    ended = subprocess.Popen([sys.executable, "-c", STAND_IN, db, "remitwatch-cycle-stand-in"], stdout=subprocess.PIPE, text=True)
+    assert ended.stdout.readline().strip() == "held"
+    ended.kill()
+    ended.wait()
+    assert set(_locks(db)) == {"pipeline:lock", "fax:lock"} and _locks(db)["pipeline:lock"]["host"] == socket.gethostname()
+    assert cycle(db, sync=False) == {"skipped": "another cycle is running"}
+    # other runs' locks beside them
+    going = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "remitwatch-backup-stand-in"])
+    try:
+        time.sleep(0.3)
+        now = dt.datetime.now(dt.timezone.utc)
+        iso = lambda d: d.isoformat(timespec="seconds")             # noqa: E731
+        old = "2001-01-02T03:04:05+00:00"                           # before this machine started
+        rows = {
+            "backup:lock": {"pid": going.pid, "started": iso(now), "heartbeat": iso(now), "token": "b", "who": "backup"},  # going here
+            "reused:lock": {"pid": going.pid, "started": iso(now - dt.timedelta(hours=1)), "host": socket.gethostname()},  # its number, given to another since
+            "away:lock": {"pid": 4242, "started": iso(now), "heartbeat": iso(now), "host": "run-container-1"},  # going in another container
+            "boot:lock": {"pid": 4242, "started": old, "heartbeat": old, "host": "run-container-2"},  # another container, before the machine started
+            "was:lock": {"pid": going.pid, "started": iso(now), "heartbeat": iso(now), "host": "app-container-0"},  # the server's last container
+            "manual:lock": {"heartbeat": iso(now)},                 # no process number: it goes stale by its own rule
+        }
+        conn = sqlite3.connect(db)
+        for k, v in rows.items():
+            conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (k, json.dumps(v)))
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (pipeline.SERVERS_KEY, json.dumps(["app-container-0"])))
+        conn.commit()
+        conn.close()
+        assert pipeline.start_scheduler_from_env(db) is False      # nothing to pull from: no scheduler, the locks are looked at all the same
+        assert set(_locks(db)) == {"backup:lock", "away:lock", "manual:lock"}
+        assert table(db, f"SELECT value FROM meta WHERE key='{pipeline.SERVERS_KEY}'") == [(json.dumps(["app-container-0", socket.gethostname()]),)]
+        out = cycle(db, sync=False)                                 # the cycle runs again at once
+        assert "skipped" not in out and "error" not in out, out
+        # each start records its container once, and only the last ten
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE meta SET value=? WHERE key=?", (json.dumps([f"c{i}" for i in range(15)] + [socket.gethostname()]), pipeline.SERVERS_KEY))
+        conn.commit()
+        conn.close()
+        pipeline.start_scheduler_from_env(db)
+        kept = json.loads(table(db, f"SELECT value FROM meta WHERE key='{pipeline.SERVERS_KEY}'")[0][0])
+        assert len(kept) == pipeline.SERVERS_KEPT and kept[-1] == socket.gethostname() and kept.count(socket.gethostname()) == 1
+        assert set(_locks(db)) == {"backup:lock", "away:lock", "manual:lock"}
+    finally:
+        going.kill()
+        going.wait()
+
+
 # ----------------------------------------------------------------------------------------------- what is not read, and why
+def test_a_report_queued_before_the_page_refused_it_says_once_why_it_is_not_read(tmp_path):
+    """Before the page refused them, an A/R or production report was queued as a Claim & Claim Status export. The cycle
+    now leaves it unread (dropbox_sync) and the upload says why in the loader's words, once, with no guess at a report.
+    The file stays in the upload folder, for the reader planned for these reports."""
+    from remitwatch.store import Store
+    store = Store(str(tmp_path / "s.sqlite"))
+    uploads.ensure_schema(store.conn)
+    data = xlsx("A/R Report", ["Patient Name", "Claim Status", "Charges", "Payments", "Balance"], [["Sample, Pat", "Open", 100.0, 0.0, 100.0]])
+    p = tmp_path / "uploads" / "exports" / "AR 2026.xlsx"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+    store.conn.execute("INSERT INTO uploads (upload_id, stored_sha, kind, name, path, size, uploaded_at, uploaded_by, status, summary) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)", (sha, sha, "ema", "AR 2026.xlsx", str(p), len(data), "2026-11-20T10:00:00+00:00", "staff",
+                                                        "queued", json.dumps({"kind": "ema", "report": "Claim & Claim Status", "rows": 1, "format": "xlsx"})))
+    store.conn.commit()
+    assert uploads.ingest_queued(store, log=lambda *a: None)["uploads"] == 1
+    [item] = uploads.history(store.conn)
+    assert item["status"] == "failed" and len(item["lines"]) == 1, item["lines"]
+    assert item["lines"][0].startswith("Not read: it is none of the three EMA exports") and "Not read: Not read" not in item["lines"][0]
+    assert "Claim & Claim Status export" not in item["lines"][0] and p.exists()
+    # any other failure keeps its own line under what the file held
+    lines = uploads.describe({"kind": "ema", "report": "Claim & Claim Status", "rows": 3, "format": "csv", "error": "The kept file is gone."}, "failed")
+    assert lines == ["Claim & Claim Status export (CSV): 3 rows.", "Not read: The kept file is gone."]
+    store.close()
+
+
 def test_files_that_are_not_read_say_why_and_are_not_kept(site, monkeypatch):
     import openpyxl
     wb = openpyxl.Workbook()
@@ -923,6 +1132,38 @@ def test_the_page_and_its_guide_need_the_login(site, monkeypatch):
     # the dashboard links the page only where uploads are taken
     index = open(os.path.join(os.path.dirname(api.__file__), "static", "index.html")).read()
     assert '<a id="uploadLink" href="/upload" hidden' in index and "$('#uploadLink').hidden = !m.uploads;" in index
+
+
+def test_the_guide_never_sends_anyone_to_download_remittances_in_the_portal(site):
+    """docs/TRIZETTO_REQUEST.md: nobody downloads, re-downloads or re-sends a remittance in TriZetto's portal ("Show
+    Archived", then "Download Selected"), because that can send it to ModMed a second time. Missing ERAs are asked for in
+    writing and re-sent to RemitWatch's own login. ERA files the practice already has can still be dropped on the page."""
+    page = site.c.get("/upload").text
+    words = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page))
+    guide = words[words.index("When remittances stop coming"):words.index("Visit notes, as items need them")]
+    assert ("Ask TriZetto in writing (the portal's Contact Us) to re-send the missing ERA (835) files to the RemitWatch login "
+            "(docs/TRIZETTO_REQUEST.md, point 4).") in guide
+    assert "Do not download them in the portal yourself, not even archived ones: that can send them to ModMed again." in guide
+    assert "ERA files you already have can be dropped here" in guide
+    # no sentence on the page tells anyone to download from the portal: each that names both forbids it
+    for sentence in re.split(r"(?<=[.!?])\s+", words):
+        if "portal" in sentence.lower() and "download" in sentence.lower():
+            assert sentence.startswith("Do not"), sentence
+    # the point the page sends people to is still that point of the request
+    request = open(os.path.join(ROOT, "docs", "TRIZETTO_REQUEST.md")).read()
+    assert "\n4. Missing remittances." in request
+
+
+def test_taking_a_note_back_says_its_packet_is_not_faxed(site):
+    """The confirmation used to say a packet built from the note "stays with its item", and the appeal then faxed it with
+    the note taken back. Such a packet is no longer faxed (test_notes_are_matched_by_patient_and_date_or_by_a_person,
+    tests/test_fax.py), and the page says so."""
+    page = site.c.get("/upload").text
+    assert ("Take this note back? Its file is deleted from the server. A packet built from it is not faxed from now on. "
+            "The next appeal builds it again from the note in its place.") in page
+    assert "stays with its item" not in page
+    doc = " ".join(uploads.remove_note.__doc__.split())
+    assert "already built from it stays" not in doc and "it is not faxed from now on" in doc
 
 
 def test_vercel_keeps_working_and_says_uploads_belong_to_the_server(tmp_path, monkeypatch):

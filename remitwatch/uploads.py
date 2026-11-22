@@ -608,6 +608,10 @@ def _n(x: int, one: str, many: str | None = None) -> str:
 def describe(s: dict, status: str, reveal: bool = False, note: dict | None = None, conn: sqlite3.Connection | None = None) -> list[str]:
     """What the person reads about one upload, in plain words: what was in it, what was (or will be) added, what was
     already there, and what was left out and why."""
+    if status == "failed" and str(s.get("error") or "").startswith("Not read"):
+        # the loader found it is none of the files RemitWatch reads (an A/R or production report queued before the page
+        # refused them): its own words say what it is and why, and the report this page guessed then is not repeated
+        return [str(s["error"])]
     out: list[str] = []
     if s.get("kind") == "ema":
         span = "" if not s.get("service_from") else f", visits on {_day(s['service_from'])}" if s["service_from"] == s.get("service_to") \
@@ -1015,8 +1019,10 @@ def choose(conn: sqlite3.Connection, note_id: str, pick: int | None = None, find
 
 
 def remove_note(conn: sqlite3.Connection, note_id: str) -> bool:
-    """Take a note back (attached to the wrong visit, or the wrong file): the file and its row go. A packet already built
-    from it stays with its item."""
+    """Take a note back (attached to the wrong visit, or the wrong file): the file and its row go, and its upload is marked
+    'removed'. A packet built from it stays with its item for the record, but it is not faxed from now on: the appeal code
+    sees the note was taken back (api._packet_problem reads the upload's status and the missing row), and the next appeal
+    builds the packet again from the note in its place."""
     ensure_schema(conn)
     n = _note_row(conn, note_id=note_id)
     if not n:

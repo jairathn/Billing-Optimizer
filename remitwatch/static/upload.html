@@ -81,7 +81,7 @@ details summary{cursor:pointer;font-weight:600}
     </ol>
     <div class="small">Why six weeks: a visit shows up in a report only once its bill exists, so a week pulled the day it ends misses every visit billed later. Repeating six weeks each time catches them; RemitWatch keeps each row once, so the overlap never counts twice. After each upload the summary says what was new, what it had already, and what it left out (the report's title lines, a totals line) and why. If a column it uses is missing, the summary names it.</div>
     <h3>When remittances stop coming</h3>
-    <div class="small">The Data tab says when the newest remittance is days old. Download the missing ERA (835) files for those dates from TriZetto's portal and drop them here (a .zip of them is fine). A remittance RemitWatch has already is recognised by its content and not counted twice.</div>
+    <div class="small">The Data tab says when the newest remittance is days old. Ask TriZetto in writing (the portal's Contact Us) to re-send the missing ERA (835) files to the RemitWatch login (docs/TRIZETTO_REQUEST.md, point 4). Do not download them in the portal yourself, not even archived ones: that can send them to ModMed again. ERA files you already have can be dropped here (a .zip of them is fine). A remittance RemitWatch has already is recognised by its content and not counted twice.</div>
     <h3>Visit notes, as items need them</h3>
     <div class="small">For each row under "Visit notes appeals are waiting for": in EMA open the patient's visit on that date of service, and print or save the signed note as a PDF (one PDF per visit). Drop the PDFs here together; each is matched by the patient's name and the date of service it states, and the summary says which visit it went to. A note that states the patient's EMA Patient ID (or record number) goes into the appeal by itself. One that matches only by name and date waits for a person: two patients can share a name and a visit day, so open the item and confirm the note there, or attach it with the row's Attach note button. A scanned page (a picture, no text) cannot be read either way: attach it with the row's Attach note button. When a note fits more than one visit, pick the right one under Uploaded. Then the item's appeal goes as it would with a note from EMA: open it, or use Appeal everything appealable.</div>
     <h3>What happens to the files</h3>
@@ -164,7 +164,7 @@ function bindNoteTools(el){
     catch(e){ alert('Not saved: ' + e.message); }
   });
   el.querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => {
-    if(!confirm('Take this note back? Its file is deleted from the server. A packet already built from it stays with its item.')) return;
+    if(!confirm('Take this note back? Its file is deleted from the server. A packet built from it is not faxed from now on. The next appeal builds it again from the note in its place.')) return;
     try { await api(`/api/uploads/notes/${b.dataset.remove}/remove`, {method: 'POST', body: '{}'}); b.closest('.card').remove(); refresh(); }
     catch(e){ alert('Not removed: ' + e.message); }
   });
