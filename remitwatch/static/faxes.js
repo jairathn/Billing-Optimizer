@@ -13,7 +13,7 @@ const FAX_DECISION = {overturned:['Overturned','ok'], partially_overturned:['Par
 const HOLDS = [
   ['practice', 'The practice\'s details are missing from the letters'], ['no_fax', 'The fax line is not set up'],
   ['stale', 'The remittances are behind: these may have been paid since'], ['check_code', 'Check in EMA which code went out first (open each one)'], ['no_number', 'No fax number saved for the payer'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
-  ['ambiguous', 'More than one note that day: pick one in the item'], ['no_note', 'No visit note yet (from EMA, or uploaded on the Upload page)'],
+  ['ambiguous', 'The visit note needs a person to pick it or attach it: open each item'], ['no_note', 'No visit note yet (from EMA, or uploaded on the Upload page)'],
   ['review_no', 'Claude\'s review: the note does not support it (counted in Suggested templates)'], ['review_fix', 'Correct and resubmit instead'],
   ['review_caution', 'Claude\'s review has doubts: a person reads the packet first'], ['quotes', 'Claude quoted words the note does not have: a person checks the packet'],
   ['blanks', 'The letter still has blanks'], ['fax_error', 'The fax line refused it'], ['expired', 'Filing window closed'],
@@ -217,7 +217,7 @@ function bindFaxDrawer(id, d){
     if(r.status === 'sent'){ state.brief = null; state.dirty = true; openDetail(id); return; }
     msg.className = 'small sev-medium';
     msg.innerHTML = esc(r.reason || 'Not sent.') + (r.code === 'no_number' ? ' <a href="#faxes" id="fxGoNums">Open the Faxes page</a>' : '')
-      + ((r.candidates||[]).length ? ' Use "Get the note from EMA" below to pick it.' : '');
+      + ((r.candidates||[]).length ? ' Open "Build the appeal from the visit note" below and pick it there.' : '');
     if(r.code === 'check_code') msg.innerHTML += ' <button id="fxCode">It went out as billed: fax it</button>';
     if(r.code === 'stale') msg.innerHTML += ' <button id="fxStale">Still unpaid in EMA: fax it anyway</button>';
     const g = d.querySelector('#fxGoNums'); if(g) g.onclick = e => { e.preventDefault(); closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); };

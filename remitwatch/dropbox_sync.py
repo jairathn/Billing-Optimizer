@@ -366,9 +366,20 @@ def local_path(data_dir: str, entry: dict) -> str:
     return os.path.join(data_dir, rel)
 
 
+def _hand_back(exc: BaseException, files: list[str]) -> None:
+    """Attach the files a failed sync already downloaded to its exception (exc.new_files), for the caller to read in the
+    same cycle (pipeline.run_cycle does). They are in the mirror now, so the next listing calls them unchanged and would
+    never hand them over again."""
+    try:
+        exc.new_files = list(dict.fromkeys(list(files) + list(getattr(exc, "new_files", None) or [])))     # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
 def sync(store, client: DropboxClient | None = None, root_path: str | None = None, data_dir: str | None = None,
          full: bool = False, log=print) -> dict:
-    """Mirror new/changed wanted files from Dropbox into data_dir. Returns a summary with the list of new local files."""
+    """Mirror new/changed wanted files from Dropbox into data_dir. Returns a summary with the list of new local files.
+    When it fails part-way, the files it downloaded before the failure are on the exception, as `new_files`."""
     client = client or DropboxClient()
     root_path = root_path or os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data")
     data_dir = data_dir or os.environ.get("REMITWATCH_DATA_DIR", "data/dropbox")
@@ -376,8 +387,8 @@ def sync(store, client: DropboxClient | None = None, root_path: str | None = Non
     cursor = None if full else (conn.execute("SELECT value FROM meta WHERE key='sync:cursor'").fetchone() or [None])[0]
     stats = {"listed": 0, "wanted": 0, "downloaded": 0, "unchanged": 0, "errors": 0, "new_files": [], "mode": "delta" if cursor else "full"}
     t0 = time.time()
-    try:
-        entries = client.list_continue(cursor) if cursor else client.list_folder(root_path, recursive=True)
+
+    def mirror(entries: Iterable[dict]) -> None:
         for e in entries:
             stats["listed"] += 1
             if not wanted(e):
@@ -396,19 +407,30 @@ def sync(store, client: DropboxClient | None = None, root_path: str | None = Non
             except Exception as exc:
                 stats["errors"] += 1
                 log(f"  ERROR {e.get('path_display')}: {exc}")
-        new_cursor = getattr(client, "last_cursor", None)
-    except Exception as exc:
-        if cursor and "reset" in str(exc).lower():
+    try:
+        try:
+            mirror(client.list_continue(cursor) if cursor else client.list_folder(root_path, recursive=True))
+        except Exception as exc:
+            if not (cursor and "reset" in str(exc).lower()):
+                raise
+            # Dropbox dropped the position: list the whole folder in this same run. What the delta listing already
+            # downloaded stays in stats, since the full listing finds it in the mirror and calls it unchanged.
             log("cursor reset by Dropbox; doing a full listing")
             conn.execute("DELETE FROM meta WHERE key='sync:cursor'")
             conn.commit()
-            return sync(store, client, root_path, data_dir, full=True, log=log)
+            stats["mode"] = "full"
+            mirror(client.list_folder(root_path, recursive=True))
+        new_cursor = getattr(client, "last_cursor", None)
+        if new_cursor:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:cursor', ?)", (new_cursor,))
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:last_run', ?)", (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),))
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:last_stats', ?)", (json.dumps({k: v for k, v in stats.items() if k != 'new_files'}),))
+        conn.commit()
+    except Exception as exc:
+        # the position saved before this run still stands (a store that could not record the new one also lists the same
+        # entries again), so these files would never come back from a listing: the caller reads them in this cycle
+        _hand_back(exc, stats["new_files"])
         raise
-    if new_cursor:
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:cursor', ?)", (new_cursor,))
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:last_run', ?)", (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),))
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync:last_stats', ?)", (json.dumps({k: v for k, v in stats.items() if k != 'new_files'}),))
-    conn.commit()
     stats["seconds"] = round(time.time() - t0, 1)
     return stats
 
@@ -430,7 +452,19 @@ def ingest_new_files(store, paths: list[str], log=print) -> dict:
                     out["skipped"] += 1
                     continue
                 acct: dict = {}
-                rows = list(iter_rows(p, acct))
+                it = iter_rows(p, acct)
+                first = next(it, None)          # reads the file and its column names (acct) before any row is converted
+                if (acct.get("family") or "unknown") == "unknown":
+                    # none of EMA's three exports (an A/R or a production report, or another spreadsheet): neither loaded
+                    # nor recorded, so it is not stored as rows that tie to no claim, and it can be read once RemitWatch
+                    # has a reader for it. The line below is also what the Upload page shows for a file queued before
+                    # the page refused such reports.
+                    out["skipped"] += 1
+                    log(f"  EMA ERROR {os.path.basename(p)}: Not read: it is none of the three EMA exports RemitWatch reads "
+                        "(Encounter & Charge Lines, ERA & Payment Lines, Claim & Claim Status). It has no Claim ID, Bill ID or "
+                        "Bill Item Identifier column (an A/R or a production report has none). Nothing from it is stored.")
+                    continue
+                rows = ([first] if first is not None else []) + list(it)
                 r = store.ingest_ema_rows(rows)
                 left = {k: v for k, v in (acct.get("left") or {}).items() if v}
                 if left or acct.get("above"):

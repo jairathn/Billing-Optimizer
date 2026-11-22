@@ -1,6 +1,6 @@
-"""Keeping the lists current: remittances straight from TriZetto's SFTP, a run when the dashboard opens on old data, no
-appeal faxed while the remittances are behind, and a reason hidden for a payer (Alex: "we know which payers don't pay
-that")."""
+"""Keeping the lists current: remittances straight from TriZetto's SFTP, what a Dropbox sync hands over (and what it leaves
+unread), a run when the dashboard opens on old data, no appeal faxed while the remittances are behind, and a reason hidden
+for a payer (the biller: "we know which payers don't pay that")."""
 from __future__ import annotations
 
 import json

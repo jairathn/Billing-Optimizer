@@ -189,7 +189,7 @@ async function progressTab(v){
     <div class="panel"><h2>By payer</h2><table><thead><tr><th>Payer</th><th class="num">Findings</th><th class="num">Identified</th><th class="num">Recovered</th><th class="num">Paid later</th><th class="num">Avg days to payment</th><th class="num">Being worked</th><th class="num">Lost</th><th class="num">Open</th><th class="num">Still appealable</th></tr></thead>
       <tbody>${p.by_payer.map(r=>`<tr class="row" data-p="${esc(r.payer_group)}"><td>${esc(r.payer_group)}</td><td class="num">${r.n.toLocaleString()}</td><td class="num">${money(r.cents)}</td><td class="num">${money(r.recovered_cents)}</td><td class="num">${pct(r.resolved_n/r.n,0)}</td><td class="num">${r.avg_days==null?'–':r.avg_days}</td><td class="num">${r.working_n}</td><td class="num">${r.lost_n}</td><td class="num">${money(r.open_cents)}</td><td class="num">${money(r.live_cents)}</td></tr>`).join('')}</tbody></table></div>
     <div class="panel"><h2>Activity</h2><table class="small"><thead><tr><th>When</th><th>What</th><th>Payer</th><th>Finding</th><th class="num">Amount</th><th>By</th></tr></thead>
-      <tbody>${p.events.map(e=>`<tr class="row" data-id="${e.finding_id}"><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${e.kind==='fax' ? '<b>Fax</b>' : `${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>`}${e.kind==='paid_on_later_remit'?' (paid on a later remit)':''}</td><td>${esc(e.payer_group||'')}</td><td>${esc(e.signal||'')} ${esc(e.procedure_code||'')}</td><td class="num">${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No status changes yet. Mark findings appealed, resolved or lost from their detail panel and they show up here.</td></tr>'}</tbody></table></div>`;
+      <tbody>${p.events.map(e=>`<tr class="row" data-id="${esc(e.finding_id)}"><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${eventWhat(e)}${e.kind==='paid_on_later_remit'?' (paid on a later remit)':''}</td><td>${esc(e.payer_group||'')}</td><td>${esc(e.signal||'')} ${esc(e.procedure_code||'')}</td><td class="num">${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No status changes yet. Mark findings appealed, resolved or lost from their detail panel and they show up here.</td></tr>'}</tbody></table></div>`;
   // each card opens the Worklist list of its own number
   const KPI_GO = {working:{status:'in_progress,appealed', deadline:'', sort:'deadline'}, open:{deadline:'valid', sort:'deadline'}, closed:{deadline:'expired', sort:'deadline'}};
   v.querySelectorAll('.kpi').forEach(k=>k.onclick=()=>{ const go = KPI_GO[k.dataset.go]; if(go) goWork(go); });
@@ -270,7 +270,7 @@ function drawerExtras(f, r){
   const datedOpen = !!f.appeal_deadline && f.appeal_deadline >= site;
   const wroteOff = f.written_off_cents ? `<div class="note sev-medium"><b>Written off in EMA.</b> ${money2(f.written_off_cents)} of the money in dispute on this ${f.line_key ? 'line' : 'claim'} is written off (or moved to the patient) in EMA${f.written_off_on ? ', as of ' + esc(f.written_off_on) : ''}${!['open','in_progress'].includes(f.status) ? '.' : datedOpen ? '. The payer can still be asked for it: work it, and reverse the write-off in EMA when the payer pays.' : f.appeal_deadline ? '. Its filing window has closed.' : '. No filing date is on file for it: check the payer\'s rules before working it.'}</div>` : '';
   const notes = `${f.stale?'<div class="note sev-medium">The current rules no longer produce this finding. It is kept because someone worked it.</div>':''}${wroteOff}${why}${windows}${later}`;
-  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${e.kind==='fax' ? '<b>Fax</b>' : `${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>`}</td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
+  const history = (r.events||[]).length?`<h3 class="small">History</h3><table class="small"><tbody>${r.events.map(e=>`<tr><td>${String(e.at).replace('T',' ').slice(0,16)}</td><td>${eventWhat(e)}</td><td>${money2(e.amount_cents)}</td><td>${esc(e.actor||'')}</td><td>${esc(e.note||'')}</td></tr>`).join('')}</tbody></table>`:'';
   const factsHtml = `${claims}
     <table class="small">${facts.map(([k,val])=>`<tr><td>${k}</td><td>${esc(val)}</td></tr>`).join('')}
       <tr><td>Filing window</td><td>${f.appeal_deadline?'by <b>'+esc(f.appeal_deadline)+'</b>. ':''}${esc(f.deadline_basis||'')}</td></tr></table>${history}`;
@@ -282,7 +282,14 @@ function drawerExtras(f, r){
       <div id="noteOut">${(r.packets||[]).length?`<div class="small"><b>Earlier packets:</b> ${r.packets.map(p=>`<a href="/api/packets/${p.packet_id}/pdf">${String(p.created_at).slice(0,10)} ${esc(p.note_name||'')}</a>${p.emailed_to?' (emailed to '+esc(p.emailed_to)+')':''}`).join(' · ')}</div>`:''}</div>` : '';
   return {notes, facts: factsHtml, builder};
 }
-const REC_LABEL = {appeal:['Appeal','ok'], appeal_with_caution:['Appeal with caution','sev-medium'], do_not_appeal:['Do not appeal','sev-high'], correct_and_resubmit:['Correct and resubmit','sev-medium'], review_manually:['Review by hand','muted']};
+// One line of an item's history (its panel, and Activity on Progress): a status change, from → to, or what happened with
+// no change of status: a fax, the visit note looked up by "Build packets from EMA" (none found, or a person has to choose),
+// or a packet built by it (on a serverless host).
+const EVENT_WORDS = {fax:'Fax', note_lookup:'Note lookup', packet:'Packet built'};
+function eventWhat(e){
+  return EVENT_WORDS[e.kind] ? `<b>${EVENT_WORDS[e.kind]}</b>` : `${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>`;
+}
+const REC_LABEL ={appeal:['Appeal','ok'], appeal_with_caution:['Appeal with caution','sev-medium'], do_not_appeal:['Do not appeal','sev-high'], correct_and_resubmit:['Correct and resubmit','sev-medium'], review_manually:['Review by hand','muted']};
 function packetHtml(p){
   const a = p.analysis || {}; const rec = REC_LABEL[a.recommendation] || [a.recommendation||'', 'muted'];
   const el = (label, e) => (!e || e.level==='not_applicable') ? '' : `<tr><td>${label}</td><td><b>${esc(e.level)}</b></td><td>${esc(e.rationale)}${(e.quotes||[]).map(q=>`<div class="muted"><i>“${esc(q)}”</i></div>`).join('')}</td></tr>`;
@@ -304,32 +311,81 @@ function showPacket(out, p){
   out.querySelector('#pkCopy').onclick = () => navigator.clipboard.writeText(p.letter);
   out.querySelector('#pkSend').onclick = async () => { const res = await post('/api/packets/'+p.packet_id+'/email', {to: out.querySelector('#pkTo').value}); out.querySelector('#pkMsg').textContent = res.sent ? 'sent to '+res.to : 'not sent: '+res.reason; };
 }
-// The note for this claim, read from ModMed EMA (/api/appeals/from_ema): built into a packet as an uploaded note would be;
-// more than one note that day, the person picks; the day's other notes stay one click away
+// ---------------------------------------------------------------- the visit note behind an appeal, from EMA or uploaded
+// Words for what ties a note to the claim's patient (modmed.find_note's identified_by: "EMA patient ID", "medical record
+// number", "name", or "a person" when someone chose the note or attached it to the item).
+const NOTE_PERSON = 'a person';
+const noteAnd = xs => xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+// in the message for a packet built: "patient identified by EMA patient ID and name"
+function noteIdWords(ids){
+  const all = (ids||[]).filter(Boolean), rest = all.filter(x => x !== NOTE_PERSON), person = all.includes(NOTE_PERSON);
+  if(!rest.length) return person ? 'the note chosen by a person' : '';
+  return `patient identified by ${noteAnd(rest)}${person ? ', and the note chosen by a person' : ''}`;
+}
+// over one patient's notes, when more than one patient fits the claim: what of the claim agrees with this patient's record
+function noteAgreeWords(ids){
+  const all = (ids||[]).filter(Boolean), rest = all.filter(x => x !== NOTE_PERSON);
+  if(all.includes(NOTE_PERSON)) return 'attached to this claim by a person';
+  return rest.length ? `the claim's ${noteAnd(rest)} ${rest.length > 1 ? 'agree' : 'agrees'}` : 'the name agrees only in part';
+}
+// who a patient is, only where the site shows names (a candidate's patient): "Sample Pat, born 1980-01-02, ID 12345"
+function notePatient(p){
+  if(!p) return '';
+  const ids = (p.ids||[]).filter(Boolean);
+  return [p.name || '', p.birth_date ? 'born ' + p.birth_date : '', ids.length ? `${ids.length > 1 ? 'IDs' : 'ID'} ${ids.join(', ')}` : ''].filter(Boolean).map(esc).join(', ');
+}
+// The notes a person can pick from. When more than one patient fits the claim the rows come in groups, "Patient 1",
+// "Patient 2" (patient_n), each saying who the patient is where names are shown and what of the claim agrees with them.
+// A row that may not be this visit's note (a later note that names no visit, a document that is not a visit note, a file
+// that does not read: pick_only) says so. o.who false: no line over a single patient's notes.
+function notePickList(list, label, o){
+  o = o || {};
+  const groups = [];
+  (list||[]).forEach(c => { const k = Number(c.patient_n) || 1; let g = groups.find(x => x.k === k); if(!g) groups.push(g = {k, rows: []}); g.rows.push(c); });
+  groups.sort((a, b) => a.k - b.k);
+  const several = groups.length > 1;
+  const row = c => `<tr><td>${esc(c.date||'')}${c.written && c.written !== c.date ? `<div class="muted">written ${esc(c.written)}</div>` : ''}</td>
+    <td>${esc(c.type||'Note')}${c.pick_only ? '<div class="sev-medium">check first: may not be this visit\'s note</div>' : ''}</td>
+    <td>${esc(c.author||'')}</td><td><button data-ema-pick="${esc(c.id)}">${esc(label)}</button></td></tr>`;
+  return groups.map(g => {
+    const first = g.rows[0], who = notePatient(first.patient);
+    const agree = several && Array.isArray(first.identified_by) ? ` · ${esc(noteAgreeWords(first.identified_by))}` : '';
+    const head = several || (who && o.who !== false) ? `<div class="small" style="margin-top:8px"><b>${several ? 'Patient ' + g.k : 'Patient'}</b>${who ? ': ' + who : ''}${agree}</div>` : '';
+    return `${head}<table class="small" style="margin-top:4px"><tbody>${g.rows.map(row).join('')}</tbody></table>`;
+  }).join('');
+}
+// The note for this claim, read from ModMed EMA or uploaded on the Upload page (/api/appeals/from_ema), built into a packet
+// as an attached note would be. When a person has to choose (more than one note, only the name agrees, a later note or a
+// document that is not a visit note), the notes come back to pick from, grouped by patient. With none to pick from (two
+// patients fit and names are switched off here) only the reason shows: the note is attached by hand. The patient's other
+// documents stay one click away under a packet built.
 async function noteFromEma(id, d, documentId){
   const out = d.querySelector('#noteOut'), msg = d.querySelector('#emaMsg'), btn = d.querySelector('#noteEma'), ai = d.querySelector('#noteAi');
   if(!out) return;
   if(btn) btn.disabled = true;
   msg.textContent = '';
   out.innerHTML = '<div class="muted small">Finding the visit note and building the packet. A review takes about a minute.</div>';
-  const pickList = (list, label) => `<table class="small" style="margin-top:4px"><tbody>${list.map(c => `<tr><td>${esc(c.date||'')}</td><td>${esc(c.type||'Note')}</td><td>${esc(c.author||'')}</td><td><button data-ema-pick="${esc(c.id)}">${label}</button></td></tr>`).join('')}</tbody></table>`;
   const bindPicks = el => el.querySelectorAll('[data-ema-pick]').forEach(b => b.onclick = () => noteFromEma(id, d, b.dataset.emaPick));
   try {
     const r = await post('/api/appeals/from_ema', {finding_id: id, use_ai: ai ? ai.checked : true, document_id: documentId || null});
     if(r.status === 'built'){
       showPacket(out, r.packet);
       const n = r.note || {};
-      msg.innerHTML = (r.source === 'upload' ? `Built from the note uploaded from EMA${n.uploaded_name ? ' (' + esc(n.uploaded_name) + ')' : ''}: ${esc(n.type||'note')}${n.date?' of '+esc(n.date):''}.`
-          : `Built from EMA: ${esc(n.type||'note')}${n.date?' of '+esc(n.date):''}${n.author?' by '+esc(n.author):''} (patient found by ${esc(r.found_by||'')}).`)
-        + ((r.others||[]).length ? ` Other notes that day:${pickList(r.others, 'Use this one instead')}` : '');
+      const what = `${esc(n.type||'note')}${n.date?' of '+esc(n.date):''}`;
+      const how = noteIdWords(r.identified_by || n.identified_by) || (r.found_by ? 'patient found by ' + r.found_by : '');
+      msg.innerHTML = (r.source === 'upload' ? `Built from the note uploaded from EMA${n.uploaded_name ? ' (' + esc(n.uploaded_name) + ')' : ''}: ${what}`
+          : `Built from EMA: ${what}${n.author?' by '+esc(n.author):''}`) + (how ? ` (${esc(how)})` : '') + '.'
+        + (n.pick_only ? ' <span class="sev-medium">Check first that it is this visit\'s note.</span>' : '')
+        + ((r.others||[]).length ? ` The patient's other documents:${notePickList(r.others, 'Use this one instead', {who: false})}` : '');
       bindPicks(msg);
     } else if(r.status === 'ambiguous'){
-      out.innerHTML = `<div class="small sev-medium">${esc(r.reason)}</div>${pickList(r.candidates||[], 'Use this note')}`;
+      const cands = r.candidates || [];
+      out.innerHTML = `<div class="small sev-medium">${esc(r.reason || 'A person has to choose the note.')}</div>${cands.length ? notePickList(cands, 'Use this note') : ''}`;
       bindPicks(out);
     } else {
-      out.innerHTML = `<div class="small sev-medium">${esc(r.reason || 'No note was found in EMA.')}${r.source === 'upload' ? '' : ' Attach it below instead.'}</div>`;
+      out.innerHTML = `<div class="small sev-medium">${esc(r.reason || 'No note was found in EMA.')}${r.source === 'upload' ? '' : ' Attach it above instead.'}</div>`;
     }
-  } catch(e){ out.innerHTML = `<div class="sev-high small">Could not read EMA: ${esc(e.message)}</div>`; }
+  } catch(e){ out.innerHTML = `<div class="sev-high small">Could not get the note: ${esc(e.message)}</div>`; }
   if(btn) btn.disabled = false;
 }
 function bindDrawerExtras(id, d){

@@ -568,6 +568,15 @@ function closeDetail(){
   if(back && back.isConnected) back.focus();
 }
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('#drawer').classList.contains('open') && !$('#modal').classList.contains('open')) closeDetail(); });
+// The first rows of an item's Claim details: who the claim is about, then its claim IDs. A claim no payer has answered is
+// known only from EMA's rows (from_ema): it has no remittance, so no payer claim number, and the line above the fold
+// already gives its EMA claim ID, so its Claim row is left out.
+function claimWhoRows(f, cl, phi){
+  const who = phi ? [cl.patient ? `<b>${esc(cl.patient)}</b>` : '', cl.member_id ? 'member ID ' + esc(cl.member_id) : '', cl.insured ? 'insured ' + esc(cl.insured) : ''].filter(Boolean).join(' · ')
+    : `${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`;
+  return `<tr><td>Patient</td><td>${who}</td></tr>`
+    + (cl.from_ema ? '' : `<tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b>${cl.payer_claim_control_number ? ' · payer claim # ' + esc(cl.payer_claim_control_number) : ''}</td></tr>`);
+}
 async function openDetail(id){
   const d = $('#drawer'); d.classList.add('open'); d.inert = false; d.innerHTML='<div class="muted">loading…</div>';
   const from = document.activeElement; if(from && from.closest && from.closest('#view')) state.detailFrom = from.closest('tr.row') || from;
@@ -589,8 +598,7 @@ async function openDetail(id){
     ${r.bill ? `<div class="small" style="margin:6px 0"><a href="#" id="openClaim">${f.signal === 'TAKEBACK' ? 'See the claim this was taken from: every remittance, line and adjustment' : 'See the whole claim: every remittance, line and adjustment'}</a></div>` : ''}
     <details class="dfold"><summary>Claim details</summary>
     <table class="small">
-      ${r.claim?`<tr><td>Patient</td><td>${showPhi()?`<b>${esc(cl.patient||'')}</b>${cl.member_id?' · member ID '+esc(cl.member_id):''}${cl.insured?' · insured '+esc(cl.insured):''}`:`${esc(cl.patient||'')} <span class="muted">(initials; names are switched off on this site)</span>`}</td></tr>
-      <tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b> · payer claim # ${esc(cl.payer_claim_control_number)}</td></tr>`:''}
+      ${r.claim ? claimWhoRows(f, cl, showPhi()) : ''}
       <tr><td>Payer</td><td>${esc(f.payer_name)} (${esc(f.payer_group)}, ${esc(f.payer_kind)})${rem.payer_contact_phone||rem.payer_contact_url?' · '+esc(rem.payer_contact_phone||'')+' '+esc(rem.payer_contact_url||''):''}</td></tr>
       ${r.remit?`<tr><td>Remit</td><td>trace ${esc(rem.trace_number)} · paid ${esc(rem.payment_date)} · ${esc(rem.payment_method)} ${money2(rem.payment_amount_cents)} · file ${esc(rem.source_name||'')}</td></tr>`:''}
       ${f.claim_key?`<tr><td>Service</td><td>DOS ${esc(f.service_date)} · provider ${esc(f.rendering_provider_name||'')} (${esc(f.rendering_provider_npi)}, ${esc(f.provider_tier)})</td></tr>`

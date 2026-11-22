@@ -515,7 +515,8 @@ async function feesDetails(el){
 }
 
 // "Build packets from EMA": the next items that need the visit note (open, window still open, no packet yet), one at a
-// time, each read from ModMed EMA and reviewed into a packet. An item with more than one note that day waits for a person.
+// time, each read from ModMed EMA and reviewed into a packet. An item whose note a person has to pick or attach (more than
+// one note, only the name agrees with the claim, two patients fit, a later note) waits for a person.
 async function emaBatch(btn, box){
   btn.disabled = true;
   let q;
@@ -535,7 +536,7 @@ async function emaBatch(btn, box){
     }
   }
   const parts = [`${n.built} packet${n.built === 1 ? '' : 's'} built`];
-  if(n.ambiguous) parts.push(`${n.ambiguous} with more than one note that day (open the item to pick)`);
+  if(n.ambiguous) parts.push(`${n.ambiguous} whose note a person has to pick or attach (open the item)`);
   if(n.not_found) parts.push(byHand ? `${n.not_found} with no note uploaded` : `${n.not_found} with no signed note found in EMA`);
   if(n.skipped) parts.push(`${n.skipped} already had one`);
   if(n.failed) parts.push(`${n.failed} failed`);

@@ -85,13 +85,18 @@ async function openClaim(id, backTo){
     ${c.ema.length ? `<details class="dfold" ${emaOnly?'open':''}><summary>ModMed EMA rows for this claim (${num(c.ema.length)})</summary><div class="scroll"><table class="small"><thead><tr><th>Family</th><th>Claim</th><th>Date</th><th>CPT</th><th class="num">Charge</th><th class="num">Paid</th><th class="num">Adjusted</th><th>Status and handling</th><th>Posted</th></tr></thead>
       <tbody>${c.ema.map(e=>`<tr><td>${esc(e.family)}${e.activity_type?' · '+esc(e.activity_type):''}</td><td class="code">${esc(e.claim_id)}</td><td class="day">${esc(e.service_date||'')}</td><td class="code">${esc(e.cpt||'')}${mods(e.modifiers)}</td><td class="num">${money2(e.charges_cents)}</td><td class="num">${money2(e.payments_cents)}</td><td class="num">${money2(e.adjustments_cents)}</td><td>${esc([e.claim_status, e.carc, e.adjustment_status, e.denial_category].filter(Boolean).join(' · '))}</td><td class="day">${esc(String(e.posted_date||e.transaction_date||'').slice(0,10))}</td></tr>`).join('')}</tbody></table></div></details>`
       : (emaOnly ? '' : '<div class="small muted" style="margin-top:8px">No EMA export rows for this claim.</div>')}`;
-  const sub = `${esc(c.patient||'')}${c.member_id?' · member ID '+esc(c.member_id):''}${c.patient?' · ':''}${pl(c.remits.length, 'remittance')}${(c.claim_ids||[]).length>1?' · submissions '+c.claim_ids.map(esc).join(', '):''}`;
-  const dd = claimShell(`Claim ${esc(c.bill)}`, sub, body);
+  const dd = claimShell(`Claim ${esc(c.bill)}`, claimSub(c), body);
   const bk = dd.querySelector('#claimBack'); if(bk) bk.onclick = () => openDetail(backTo);
   // an item opened from here keeps the walk of the list behind: the drawer walks only an item that is on that list
   dd.querySelectorAll('tr[data-fid], a.line-item').forEach(el=>{ const go = e => { if(e) e.preventDefault(); openDetail(el.dataset.fid); };
     el.onclick = go; el.onkeydown = e => { if(e.key==='Enter'){ go(e); } }; });
   const csv = dd.querySelector('#claimCsv'); if(csv) csv.onclick = () => claimCsv(c);
+}
+// the line under the claim's title: who it is about, how many remittances, its submissions. A bill no payer has answered
+// can have a member ID from EMA's rows and no name (names shown): each part is left out when it is blank
+function claimSub(c){
+  return [esc(c.patient||''), c.member_id ? 'member ID ' + esc(c.member_id) : '', pl((c.remits||[]).length, 'remittance'),
+    (c.claim_ids||[]).length > 1 ? 'submissions ' + c.claim_ids.map(esc).join(', ') : ''].filter(Boolean).join(' · ');
 }
 // every remittance as a claim row (its claim-level adjustments and remarks), then its lines; a missing amount is blank
 function claimCsv(c){
