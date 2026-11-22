@@ -70,9 +70,9 @@ def _client(tmp_path, monkeypatch):
     st.close()
     monkeypatch.setattr(api, "DB_PATH", db)
     monkeypatch.setattr(api, "PASSWORD", PW)
-    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "USERNAME", "staff")
     monkeypatch.delenv("REMITWATCH_MODE", raising=False)
-    return TestClient(api.app), ("oda", PW)
+    return TestClient(api.app), ("staff", PW)
 
 
 def test_every_number_on_a_category_page_opens_a_list_of_exactly_that_many(tmp_path, monkeypatch):
@@ -271,10 +271,10 @@ def test_payment_fees_are_one_request_per_payer_about_its_payments(tmp_path, mon
     st.close()
     monkeypatch.setattr(api, "DB_PATH", str(tmp_path / "s.sqlite"))
     monkeypatch.setattr(api, "PASSWORD", PW)
-    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "USERNAME", "staff")
     monkeypatch.delenv("REMITWATCH_MODE", raising=False)
     from fastapi.testclient import TestClient
-    tc, auth = TestClient(api.app), ("oda", PW)
+    tc, auth = TestClient(api.app), ("staff", PW)
     fp = tc.get("/api/fees/payers", auth=auth).json()
     by = {p["payer_name"]: p for p in fp["payers"]}
     assert [p["payer_name"] for p in fp["payers"]] == ["CARRIER ONE", "CARRIER TWO"]            # the 12-month total first; the one asked is apart
@@ -317,9 +317,9 @@ def test_asking_a_payer_keeps_its_fees_in_the_history_and_counts_once_on_today(t
     st.close()
     monkeypatch.setattr(api, "DB_PATH", str(tmp_path / "s.sqlite"))
     monkeypatch.setattr(api, "PASSWORD", PW)
-    monkeypatch.setattr(api, "USERNAME", "oda")
+    monkeypatch.setattr(api, "USERNAME", "staff")
     monkeypatch.delenv("REMITWATCH_MODE", raising=False)
-    tc, auth = TestClient(api.app), ("oda", PW)
+    tc, auth = TestClient(api.app), ("staff", PW)
     before = tc.get("/api/fees/payers", auth=auth).json()
     brief0 = tc.get("/api/brief", auth=auth).json()
     one = [p for p in before["payers"] if p["payer_name"] == "CARRIER ONE"][0]
@@ -559,7 +559,7 @@ def test_the_note_given_for_a_claim_let_go_is_kept_in_its_history(tmp_path, monk
         assert r.status_code == 200, r.text
         d = tc.get(f"/api/findings/{fid}", auth=auth).json()
         assert d["finding"]["status"] == "dismissed" and d["finding"]["notes"] == note
-        assert [(e["to_status"], e["note"], e["actor"]) for e in d["events"]] == [("dismissed", note, "oda")]
+        assert [(e["to_status"], e["note"], e["actor"]) for e in d["events"]] == [("dismissed", note, "staff")]
     assert tc.get("/api/brief", auth=auth).json()["no_answer"]["chase"]["n"] == 0
 
 
@@ -578,3 +578,282 @@ def test_the_pages_say_what_the_two_reasons_with_no_payer_answer_are(page_steps)
     page = open(os.path.join(os.path.dirname(insights.__file__), "static", "index.html"), encoding="utf-8").read()
     card = next(line for line in page.splitlines() if "kpi('Denied, never paid'" in line)
     assert "sigRows(['NO_ANSWER','REJECTED_PRE_PAYER'])" in card and "not claims unanswered or rejected before the payer" in card
+
+
+# --------------------------------------------------------------------------- the visit note a person picks, and the item's history
+# The page's own code (index.html's helpers and the Claim details rows, features.js, today.js, desk.js, claim.js, faxes.js) in
+# node, on a stand-in for the page whose elements are read back from the HTML the code writes (tags, ids, classes and data-
+# attributes), so the buttons it draws can be pressed. The answers of the server are canned. It prints what each step drew
+# and sent. Usage: node <this file> <static dir>. Every patient, ID and payer is invented.
+NOTE_PAGE_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/, /const palette = [^\n]*\n/, /function kpi\([^\n]*\n/,
+  /function claimWhoRows\(f, cl, phi\)\{[\s\S]*?\n\}\n/].map(re => grab(html, re)).join('\n');
+const unesc = s => String(s).replace(/&(amp|lt|gt|quot|#39);/g, (m, k) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" }[k]));
+const camel = k => k.replace(/-([a-z])/g, (m, c) => c.toUpperCase());
+// an element: what the code sets (innerHTML, textContent, className, onclick, disabled) and, from the HTML it is given, its
+// elements as children, so querySelector finds them
+class El {
+  constructor(tag, o = {}, parent = null) {
+    Object.assign(this, { tag, id: o.id || '', cls: o.cls || [], dataset: o.data || {}, disabled: !!o.disabled, checked: !!o.checked, value: o.value, parent, kids: [], _html: '', _text: '' });
+    if (parent) parent.kids.push(this);
+  }
+  set innerHTML(h) {
+    this._html = String(h); this._text = ''; this.kids = [];
+    for (const m of this._html.matchAll(/<([a-zA-Z][\w-]*)((?:\s+[\w-]+(?:="[^"]*")?)*)\s*\/?>/g)) {
+      const a = m[2], attr = n => { const x = a.match(new RegExp('\\s' + n + '="([^"]*)"')); return x ? unesc(x[1]) : undefined; };
+      const data = {}; for (const d of a.matchAll(/\sdata-([\w-]+)(?:="([^"]*)")?/g)) data[camel(d[1])] = d[2] === undefined ? '' : unesc(d[2]);
+      new El(m[1].toLowerCase(), { id: attr('id') || '', cls: (attr('class') || '').split(/\s+/).filter(Boolean), data, disabled: /\sdisabled\b/.test(a), checked: /\schecked\b/.test(a) }, this);
+    }
+  }
+  get innerHTML() { return this._html; }
+  set textContent(t) { this._text = String(t); this._html = ''; this.kids = []; }
+  get textContent() { return this._text || unesc(this._html.replace(/<[^>]*>/g, '')); }
+  set className(c) { this.cls = String(c).split(/\s+/).filter(Boolean); }
+  get className() { return this.cls.join(' '); }
+  matches(sel) {
+    const tag = (sel.match(/^[a-z]+/) || [''])[0], id = (sel.match(/#([\w-]+)/) || [])[1], cls = [...sel.matchAll(/\.([\w-]+)/g)].map(m => m[1]);
+    const data = [...sel.matchAll(/\[data-([\w-]+)(?:="([^"]*)")?\]/g)];
+    return (!tag || tag === this.tag) && (!id || id === this.id) && cls.every(c => this.cls.includes(c))
+      && data.every(([, k, val]) => camel(k) in this.dataset && (val === undefined || this.dataset[camel(k)] === val));
+  }
+  all() { return this.kids.flatMap(k => [k, ...k.all()]); }
+  querySelectorAll(sel) { return this.all().filter(e => e.matches(sel)); }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  closest(sel) { for (let e = this; e; e = e.parent) if (e.matches(sel)) return e; return null; }
+}
+const make = h => { const e = new El('div'); e.innerHTML = h; return e; };
+// the server: canned answers by the start of the address, in order; what was sent is kept
+const sent = [], replies = {};
+const ctx = { console, Promise, setTimeout: (fn) => fn(), state: { meta: { modmed: true, show_phi: true }, brief: null, filt: {}, charts: {} },
+  alert: () => {}, confirm: () => true, prompt: () => null, navigator: { clipboard: { writeText: () => {} } }, CSS: { escape: s => s }, location: {},
+  api: async (p, o) => {
+    const body = o && o.body ? JSON.parse(o.body) : null; sent.push(body ? { path: p, body } : { path: p });
+    const k = Object.keys(replies).find(x => p.startsWith(x)), r = k && replies[k].length ? replies[k].shift() : undefined;
+    if (r instanceof Error) throw r;
+    return r;
+  },
+  render: async () => {}, openDetail: id => { sent.push({ open: id }); }, closeDetail: () => {}, chart: () => {}, goWork: () => {} };
+vm.createContext(ctx);
+for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js'), read('claim.js'), read('faxes.js')]) vm.runInContext(src, ctx);
+const out = [];
+const step = async (name, canned, fn) => { sent.length = 0; for (const k of Object.keys(replies)) delete replies[k]; Object.assign(replies, canned); out.push({ name, got: await fn(), sent: sent.slice() }); };
+// the note builder in an item's panel, as drawerExtras draws it: the EMA button, its message, the review box, the result
+const panel = () => make('<button id="noteEma"></button><div id="emaMsg" class="small muted"></div><input type="checkbox" id="noteAi" checked><div id="noteOut"></div>');
+const shown = d => ({ msg: d.querySelector('#emaMsg').innerHTML, out: d.querySelector('#noteOut').innerHTML,
+  picks: d.querySelectorAll('[data-ema-pick]').map(b => b.dataset.emaPick), button_free: !d.querySelector('#noteEma').disabled });
+const PACKET = { packet_id: 'pk1', letter: 'To the plan: please reprocess.', analysis: { recommendation: 'appeal', mode: 'template' } };
+const who = (name, birth_date, ids) => ({ name, birth_date, ids });
+const cand = (id, n, o = {}) => Object.assign({ id, date: '2026-09-14', written: '2026-09-14', type: 'Progress note', author: 'Clinician A', tie: 'encounter',
+  status: 'final', patient_n: n, identified_by: ['name'], pick_only: false }, o);
+(async () => {
+  // more than one patient fits the claim, names shown: the notes in two groups, each saying who the patient is
+  const twins = [cand('doc-a', 1, { patient: who('Sample Pat', '1961-03-04', ['P-1001']), identified_by: ['EMA patient ID', 'name'] }),
+    cand('doc-b', 2, { patient: who('Sample Pat', '1990-07-08', ['P-2002', 'M-77']), identified_by: ['name'], written: '2026-09-15' }),
+    cand('doc-c', 2, { patient: who('Sample Pat', '1990-07-08', ['P-2002', 'M-77']), identified_by: ['name'], type: 'Letter', date: '2026-09-16', written: '2026-09-16', tie: 'after', pick_only: true })];
+  const d1 = panel();
+  await step('two patients, names shown', { '/api/appeals/from_ema': [{ status: 'ambiguous', found_by: 'name', candidates: twins,
+    reason: 'More than one patient who fits the claim has a note that day. Check who each is, then pick the note.' }] }, async () => { await ctx.noteFromEma('f1', d1); return shown(d1); });
+  await step('two patients, the second patient picked', { '/api/appeals/from_ema': [{ status: 'built', found_by: 'name', identified_by: ['name', 'a person'], packet: PACKET,
+    note: Object.assign(cand('doc-b', 2, { patient: twins[1].patient }), { identified_by: ['name', 'a person'] }), others: [twins[2]] }] },
+    async () => { await d1.querySelector('[data-ema-pick="doc-b"]').onclick(); return shown(d1); });
+  // two patients fit and names are switched off: nothing to pick from, the note is attached by hand
+  const d2 = panel();
+  await step('two patients, names off', { '/api/appeals/from_ema': [{ status: 'ambiguous', found_by: 'name', candidates: [],
+    reason: 'More than one patient in EMA fits this claim, and names are switched off here, so they cannot be told apart. Save the visit note from EMA and attach it to the item.' }] },
+    async () => { await ctx.noteFromEma('f2', d2); return shown(d2); });
+  // one patient, only the name agrees, names shown: one group, with who the patient is; a later note that names no visit is marked
+  const d3 = panel();
+  await step('one patient, only the name agrees', { '/api/appeals/from_ema': [{ status: 'ambiguous', found_by: 'name', identified_by: ['name'],
+    candidates: [cand('doc-d', 1, { patient: who('Sample Pat', '1961-03-04', ['P-1001']) }), cand('doc-e', 1, { patient: who('Sample Pat', '1961-03-04', ['P-1001']), type: 'Progress note', date: '2026-09-17', written: '2026-09-17', tie: 'after', pick_only: true })],
+    reason: 'Only the name agrees with the claim. A note goes out by itself only when two identifiers agree. Check that the note is this patient\'s, then pick it.' }] },
+    async () => { await ctx.noteFromEma('f3', d3); return shown(d3); });
+  // built by itself: the message says what identified the patient; the patient's other documents stay one click away
+  const d4 = panel();
+  await step('built from EMA', { '/api/appeals/from_ema': [{ status: 'built', found_by: 'EMA patient ID', identified_by: ['EMA patient ID', 'name'], packet: PACKET,
+    note: cand('doc-f', 1, { patient: who('Sample Pat', '1961-03-04', ['P-1001']), identified_by: ['EMA patient ID', 'name'] }),
+    others: [cand('doc-g', 1, { patient: who('Sample Pat', '1961-03-04', ['P-1001']), type: 'Consent form', pick_only: true, identified_by: ['EMA patient ID', 'name'] })] }] },
+    async () => { await ctx.noteFromEma('f4', d4); return shown(d4); });
+  const d5 = panel();
+  await step('built from a note attached to the item', { '/api/appeals/from_ema': [{ status: 'built', source: 'upload', found_by: 'EMA patient ID', identified_by: ['a person'], packet: PACKET,
+    note: cand('upload-n1', 1, { type: 'Visit note', author: 'uploaded by a biller', identified_by: ['a person'], uploaded_name: 'Visit note.pdf' }), others: [] }] },
+    async () => { await ctx.noteFromEma('f5', d5); return shown(d5); });
+  const d6 = panel();
+  await step('built, an older server', { '/api/appeals/from_ema': [{ status: 'built', found_by: 'name', packet: PACKET, note: { id: 'doc-h', type: 'Progress note', date: '2026-09-14' } }] },
+    async () => { await ctx.noteFromEma('f6', d6); return shown(d6); });
+  const d7 = panel();
+  await step('no note in EMA', { '/api/appeals/from_ema': [{ status: 'not_found', candidates: [], reason: 'EMA has no signed note for 2026-09-14 for this patient.' }] },
+    async () => { await ctx.noteFromEma('f7', d7); return shown(d7); });
+  const d8 = panel();
+  await step('EMA did not answer', { '/api/appeals/from_ema': [new Error('EMA did not answer in time.')] }, async () => { await ctx.noteFromEma('f8', d8); return shown(d8); });
+  // the item's history and Progress's Activity: lines that change no status say what happened
+  const events = [{ at: '2026-11-20T10:00:00', kind: 'note_lookup', from_status: 'open', to_status: 'open', actor: 'packets', note: 'Build packets from EMA: Only the name agrees with the claim.', finding_id: 'h1' },
+    { at: '2026-11-20T09:00:00', kind: 'packet', from_status: 'open', to_status: 'open', actor: 'packets', note: 'An appeal packet was built for it.', finding_id: 'h1' },
+    { at: '2026-11-19T09:00:00', kind: 'fax', from_status: 'appealed', to_status: 'appealed', actor: 'fax', note: 'Second request faxed.', finding_id: 'h1' },
+    { at: '2026-11-18T09:00:00', kind: 'manual', from_status: 'open', to_status: 'appealed', actor: 'biller', note: '', finding_id: 'h1' },
+    { at: '2026-11-17T09:00:00', kind: 'paid_on_later_remit', from_status: 'appealed', to_status: 'resolved', actor: 'system', note: '', finding_id: 'h2' }];
+  const rows = h => [...h.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map(m => [...m[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(c => unesc(c[1].replace(/<[^>]*>/g, '')).trim()));
+  await step('history in the panel', {}, async () => rows(ctx.drawerExtras({ signal: 'DENIED_AUTH', status: 'open', evidence: {} }, { events }).facts).filter(r => r.length === 5).map(r => r[1]));
+  const prog = { pipeline: [], live: { n: 0, cents: 0 }, expired: { n: 0, cents: 0 }, by_payer: [], events, recovered_by_month: [], cohorts: [], downcode_trend: [], visit_lines: [] };
+  const pv = new El('main');
+  await step('activity on Progress', { '/api/progress': [prog] }, async () => { await ctx.progressTab(pv); return rows(pv.innerHTML).filter(r => r.length === 6).map(r => r[1]); });
+  // Claim details: a claim known only from EMA's rows has no payer claim number, and no Claim row
+  const cell = h => rows('<table>' + h + '</table>').map(r => r.join(': '));
+  await step('claim details', {}, async () => ({
+    ema_names: cell(ctx.claimWhoRows({ patient_control_number: 'CB0000900C017' }, { patient: 'Sample Pat', member_id: 'M00000009', from_ema: true }, true)),
+    ema_member_only: cell(ctx.claimWhoRows({ patient_control_number: 'CB0000900C017' }, { patient: '', member_id: 'M00000009', from_ema: true }, true)),
+    ema_initials: cell(ctx.claimWhoRows({ patient_control_number: 'CB0000900C017' }, { patient: 'S.P.', from_ema: true }, false)),
+    remit_names: cell(ctx.claimWhoRows({ patient_control_number: 'CB0000500C017' }, { patient: 'Sample Pat', member_id: 'M00000001', insured: 'Sample Lee', payer_claim_control_number: 'PCN-123' }, true)),
+    remit_no_number: cell(ctx.claimWhoRows({ patient_control_number: 'CB0000500C017' }, { patient: 'S.P.', payer_claim_control_number: '' }, false)) }));
+  await step('claim view title line', {}, async () => ({
+    member_only: unesc(ctx.claimSub({ patient: '', member_id: 'M00000009', remits: [], claim_ids: ['CB0000900C017'] })),
+    names: unesc(ctx.claimSub({ patient: 'Sample Pat', member_id: 'M00000001', remits: [{}, {}], claim_ids: ['CB0000500C017', 'CB0000500C024'] })),
+    initials: unesc(ctx.claimSub({ patient: 'S.P.', remits: [{}], claim_ids: ['CB0000500C017'] })) }));
+  // Appeal by fax: items held because a person has to pick or attach the note
+  const held = (finding_id, reason, candidates) => ({ finding_id, status: 'held', code: 'ambiguous', reason, candidates, payer_group: 'Plan A', cents: 11760 });
+  const box = new El('div');
+  await step('fax summary', {}, async () => { ctx.faxSummary(box, [held('a1', 'Only the name agrees with the claim. Check that the note is this patient\'s, then pick it.', [cand('doc-a', 1)]),
+    held('a2', 'More than one patient in EMA fits this claim, and names are switched off here, so they cannot be told apart. Save the visit note from EMA and attach it to the item.', [])], 0, {});
+    return box.textContent.replace(/\s+/g, ' '); });
+  const fx = () => make('<button id="fxOne"></button><div id="fxOneMsg" class="small"></div>');
+  const f9 = fx();
+  await step('fax from the panel, a note to pick', { '/api/appeals/send': [held('a1', 'Only the name agrees with the claim. Check that the note is this patient\'s, then pick it.', [cand('doc-a', 1)])] },
+    async () => { ctx.bindFaxDrawer('a1', f9); await f9.querySelector('#fxOne').onclick(); return f9.querySelector('#fxOneMsg').textContent; });
+  const f10 = fx();
+  await step('fax from the panel, a note to attach', { '/api/appeals/send': [held('a2', 'More than one patient in EMA fits this claim, and names are switched off here, so they cannot be told apart. Save the visit note from EMA and attach it to the item.', [])] },
+    async () => { ctx.bindFaxDrawer('a2', f10); await f10.querySelector('#fxOne').onclick(); return f10.querySelector('#fxOneMsg').textContent; });
+  // Build packets from EMA: what the batch could not build says why
+  const bt = new El('button'), bx = new El('span');
+  await step('build packets from EMA', { '/api/appeals/ema_queue': [{ items: [{ finding_id: 'q1' }, { finding_id: 'q2' }, { finding_id: 'q3' }], since: '2026-09-01' }],
+    '/api/appeals/from_ema': [{ status: 'built' }, { status: 'ambiguous', reason: 'Only the name agrees with the claim.', candidates: [] }, { status: 'not_found', reason: 'EMA has no signed note.' }] },
+    async () => { await ctx.emaBatch(bt, bx); return bx.textContent; });
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+@pytest.fixture(scope="module")
+def note_steps(tmp_path_factory):
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    script = tmp_path_factory.mktemp("page") / "note_page.js"
+    script.write_text(NOTE_PAGE_JS, encoding="utf-8")
+    res = subprocess.run(["node", str(script), os.path.join(os.path.dirname(insights.__file__), "static")], capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr[-3000:]
+    return {s["name"]: s for s in json.loads(res.stdout)}
+
+
+def _text(html: str) -> str:
+    """What a person reads: inline tags dropped, every other tag a space."""
+    import html as htmllib
+    import re
+    inline = re.sub(r"</?(?:b|i|em|strong|span|a|sup)\b[^>]*>", "", html)
+    return re.sub(r"\s+", " ", htmllib.unescape(re.sub(r"<[^>]+>", " ", inline))).strip()
+
+
+def test_two_patients_notes_come_in_groups_that_say_who_each_patient_is(note_steps):
+    """When more than one patient fits the claim and names are shown, the notes to pick from come in groups, Patient 1 and
+    Patient 2, each over its own notes with the patient's name, birth date and IDs and what of the claim agrees with them,
+    so two patients of one name can be told apart. A document that may not be this visit's note is marked. A pick builds
+    from that note, and the message says the note was chosen by a person."""
+    s = note_steps["two patients, names shown"]["got"]
+    text = _text(s["out"])
+    assert text.startswith("More than one patient who fits the claim has a note that day.")
+    one = text.index("Patient 1: Sample Pat, born 1961-03-04, ID P-1001 · the claim's EMA patient ID and name agree")
+    two = text.index("Patient 2: Sample Pat, born 1990-07-08, IDs P-2002, M-77 · the claim's name agrees")
+    assert one < two
+    assert s["picks"] == ["doc-a", "doc-b", "doc-c"]
+    # each note sits under its own patient: doc-a under Patient 1, doc-b and doc-c under Patient 2
+    out = s["out"]
+    assert out.index('data-ema-pick="doc-a"') < out.index("Patient 2") < out.index('data-ema-pick="doc-b"') < out.index('data-ema-pick="doc-c"')
+    # the later letter that names no visit says so, the notes of the day itself do not
+    assert text.count("check first: may not be this visit's note") == 1
+    assert out.index("check first") > out.index('data-ema-pick="doc-b"')
+    # a note of the visit's date written later says when it was written; one written the day it is dated does not
+    assert text.count("written ") == 1 and "2026-09-14 written 2026-09-15 Progress note" in text
+    picked = note_steps["two patients, the second patient picked"]
+    assert picked["sent"] == [{"path": "/api/appeals/from_ema", "body": {"finding_id": "f1", "use_ai": True, "document_id": "doc-b"}}]
+    msg = _text(picked["got"]["msg"])
+    assert msg.startswith("Built from EMA: Progress note of 2026-09-14 by Clinician A (patient identified by name, and the note chosen by a person).")
+    assert "The patient's other documents:" in msg and "check first: may not be this visit's note" in msg and "Patient" not in msg.split("documents:")[1]
+    assert picked["got"]["picks"] == ["doc-c"] and "Download the packet" in picked["got"]["out"]
+
+
+def test_with_names_off_two_patients_show_only_the_reason_and_no_table(note_steps):
+    """Two patients fit the claim and names are switched off: the server gives no notes to pick from. The page shows the
+    reason alone (it says to attach the note by hand), with no empty table and no button."""
+    s = note_steps["two patients, names off"]["got"]
+    assert _text(s["out"]) == ("More than one patient in EMA fits this claim, and names are switched off here, so they cannot be told apart. "
+                               "Save the visit note from EMA and attach it to the item.")
+    assert "<table" not in s["out"] and s["picks"] == [] and s["button_free"]
+
+
+def test_one_patient_found_by_name_only_shows_who_and_marks_a_later_note(note_steps):
+    s = note_steps["one patient, only the name agrees"]["got"]
+    text = _text(s["out"])
+    assert text.startswith("Only the name agrees with the claim.")
+    assert "Patient: Sample Pat, born 1961-03-04, ID P-1001" in text and "Patient 1" not in text and "agree" not in text.split("ID P-1001")[1].split("2026-09-14")[0]
+    assert s["picks"] == ["doc-d", "doc-e"] and text.count("check first: may not be this visit's note") == 1
+
+
+def test_the_built_message_says_what_identified_the_patient(note_steps):
+    """A packet built says what tied the note to the claim's patient (identified_by), not only how the patient was found."""
+    built = note_steps["built from EMA"]["got"]
+    msg = _text(built["msg"])
+    assert msg.startswith("Built from EMA: Progress note of 2026-09-14 by Clinician A (patient identified by EMA patient ID and name).")
+    assert "found by" not in msg
+    # the patient's other documents: one patient, so no group line over them; a consent form is marked
+    assert "The patient's other documents:" in msg and "Patient:" not in msg and "check first: may not be this visit's note" in msg
+    assert built["picks"] == ["doc-g"]
+    upload = _text(note_steps["built from a note attached to the item"]["got"]["msg"])
+    assert upload == "Built from the note uploaded from EMA (Visit note.pdf): Visit note of 2026-09-14 (the note chosen by a person)."
+    # an older server's answer has no identified_by: what found the patient is said as before
+    assert _text(note_steps["built, an older server"]["got"]["msg"]) == "Built from EMA: Progress note of 2026-09-14 (patient found by name)."
+    # no note: the attach box is above the message, and an error says what failed
+    assert _text(note_steps["no note in EMA"]["got"]["out"]) == "EMA has no signed note for 2026-09-14 for this patient. Attach it above instead."
+    assert _text(note_steps["EMA did not answer"]["got"]["out"]) == "Could not get the note: EMA did not answer in time."
+
+
+def test_history_lines_that_change_no_status_say_what_happened(note_steps):
+    """"Build packets from EMA" writes a line when it found no note or a person has to choose (note_lookup), and one when it
+    built a packet (packet). The item's history and Progress's Activity name them as they name a fax, instead of
+    "open → open"."""
+    want = ["Note lookup", "Packet built", "Fax", "open → appealed", "appealed → resolved"]
+    assert note_steps["history in the panel"]["got"] == want
+    assert note_steps["activity on Progress"]["got"] == want[:4] + ["appealed → resolved (paid on a later remit)"]
+
+
+def test_claim_details_of_a_claim_no_payer_answered_have_no_empty_payer_claim_number(note_steps):
+    """A claim known only from EMA's rows (from_ema: no remittance) shows who it is about and no Claim row with an empty
+    payer claim number; the line above the fold gives its EMA claim ID. A claim with a remittance keeps its Claim row."""
+    s = note_steps["claim details"]["got"]
+    assert s["ema_names"] == ["Patient: Sample Pat · member ID M00000009"]
+    assert s["ema_member_only"] == ["Patient: member ID M00000009"]
+    assert s["ema_initials"] == ["Patient: S.P. (initials; names are switched off on this site)"]
+    assert s["remit_names"] == ["Patient: Sample Pat · member ID M00000001 · insured Sample Lee", "Claim: EMA claim ID CB0000500C017 · payer claim # PCN-123"]
+    assert s["remit_no_number"] == ["Patient: S.P. (initials; names are switched off on this site)", "Claim: EMA claim ID CB0000500C017"]
+    t = note_steps["claim view title line"]["got"]
+    assert t == {"member_only": "member ID M00000009 · 0 remittances", "names": "Sample Pat · member ID M00000001 · 2 remittances · submissions CB0000500C017, CB0000500C024",
+                 "initials": "S.P. · 1 remittance"}
+    page = open(os.path.join(os.path.dirname(insights.__file__), "static", "index.html"), encoding="utf-8").read()
+    assert "${r.claim ? claimWhoRows(f, cl, showPhi()) : ''}" in page
+
+
+def test_held_and_batch_notes_say_a_person_picks_or_attaches_the_note(note_steps):
+    """An item held because its note needs a person is not only "more than one note that day" any more: only the name
+    agrees, two patients fit, or the only document is a later note. The fax summary, the panel and the batch say so."""
+    summary = note_steps["fax summary"]["got"]
+    assert "The visit note needs a person to pick it or attach it: open each item" in summary and "More than one note that day" not in summary
+    pick = note_steps["fax from the panel, a note to pick"]["got"]
+    assert pick.endswith('Open "Build the appeal from the visit note" below and pick it there.')
+    attach = note_steps["fax from the panel, a note to attach"]["got"]
+    assert attach.endswith("Save the visit note from EMA and attach it to the item.") and "pick it there" not in attach
+    batch = note_steps["build packets from EMA"]
+    assert batch["got"] == ("Done: 1 packet built, 1 whose note a person has to pick or attach (open the item), 1 with no signed note found in EMA. "
+                            "Open an item to send its packet.")
+    assert [x.get("body", {}).get("finding_id") for x in batch["sent"] if x["path"] == "/api/appeals/from_ema"] == ["q1", "q2", "q3"]

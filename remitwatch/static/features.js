@@ -342,17 +342,19 @@ function notePickList(list, label, o){
   o = o || {};
   const groups = [];
   (list||[]).forEach(c => { const k = Number(c.patient_n) || 1; let g = groups.find(x => x.k === k); if(!g) groups.push(g = {k, rows: []}); g.rows.push(c); });
+  if(!groups.length) return '';
   groups.sort((a, b) => a.k - b.k);
   const several = groups.length > 1;
-  const row = c => `<tr><td>${esc(c.date||'')}${c.written && c.written !== c.date ? `<div class="muted">written ${esc(c.written)}</div>` : ''}</td>
+  const row = c => `<tr><td class="day">${esc(c.date||'')}${c.written && c.written !== c.date ? `<div class="muted">written ${esc(c.written)}</div>` : ''}</td>
     <td>${esc(c.type||'Note')}${c.pick_only ? '<div class="sev-medium">check first: may not be this visit\'s note</div>' : ''}</td>
-    <td>${esc(c.author||'')}</td><td><button data-ema-pick="${esc(c.id)}">${esc(label)}</button></td></tr>`;
-  return groups.map(g => {
+    <td>${esc(c.author||'')}</td><td><button data-ema-pick="${esc(c.id)}" style="white-space:nowrap">${esc(label)}</button></td></tr>`;
+  // one table, so the columns line up from one patient to the next; each patient's line heads its own notes
+  return `<table class="small" style="margin-top:4px"><tbody>${groups.map(g => {
     const first = g.rows[0], who = notePatient(first.patient);
     const agree = several && Array.isArray(first.identified_by) ? ` · ${esc(noteAgreeWords(first.identified_by))}` : '';
-    const head = several || (who && o.who !== false) ? `<div class="small" style="margin-top:8px"><b>${several ? 'Patient ' + g.k : 'Patient'}</b>${who ? ': ' + who : ''}${agree}</div>` : '';
-    return `${head}<table class="small" style="margin-top:4px"><tbody>${g.rows.map(row).join('')}</tbody></table>`;
-  }).join('');
+    const head = several || (who && o.who !== false) ? `<tr><td colspan="4" style="padding-top:10px"><b>${several ? 'Patient ' + g.k : 'Patient'}</b>${who ? ': ' + who : ''}${agree}</td></tr>` : '';
+    return head + g.rows.map(row).join('');
+  }).join('')}</tbody></table>`;
 }
 // The note for this claim, read from ModMed EMA or uploaded on the Upload page (/api/appeals/from_ema), built into a packet
 // as an attached note would be. When a person has to choose (more than one note, only the name agrees, a later note or a

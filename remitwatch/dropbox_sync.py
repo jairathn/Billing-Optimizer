@@ -435,8 +435,10 @@ def sync(store, client: DropboxClient | None = None, root_path: str | None = Non
     return stats
 
 
-def ingest_new_files(store, paths: list[str], log=print) -> dict:
-    """Route downloaded files to the right loader."""
+def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | None = None) -> dict:
+    """Route downloaded files to the right loader. A spreadsheet that is none of EMA's three exports is left unread and
+    unrecorded (counted in `skipped`); its path is added to `unread` when a list is given, so a caller that remembers what
+    it fetched (cloud.sync_and_ingest) can leave it to be read again."""
     from .ema_exports import TEXT_EXPORTS, export_created, iter_rows
     from .x12_835 import looks_like_x12
 
@@ -460,6 +462,8 @@ def ingest_new_files(store, paths: list[str], log=print) -> dict:
                     # has a reader for it. The line below is also what the Upload page shows for a file queued before
                     # the page refused such reports.
                     out["skipped"] += 1
+                    if unread is not None:
+                        unread.append(p)
                     log(f"  EMA ERROR {os.path.basename(p)}: Not read: it is none of the three EMA exports RemitWatch reads "
                         "(Encounter & Charge Lines, ERA & Payment Lines, Claim & Claim Status). It has no Claim ID, Bill ID or "
                         "Bill Item Identifier column (an A/R or a production report has none). Nothing from it is stored.")

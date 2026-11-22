@@ -872,7 +872,8 @@ def test_the_setup_checks_give_the_steps_for_the_host_they_run_on(tmp_path, monk
     expiry date is flagged, since no reminder can come before the password expires."""
     from remitwatch import cloud
     for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "SRFAX_CALLER_ID", "SRFAX_SENDER_EMAIL",
-              "TRIZETTO_SFTP_PASSWORD_SET", "TRIZETTO_SFTP_PASSWORD_DAYS", "TRIZETTO_SFTP_SERVERLESS", "REMITWATCH_STATE_DIR"):
+              "TRIZETTO_SFTP_PASSWORD_SET", "TRIZETTO_SFTP_PASSWORD_DAYS", "TRIZETTO_SFTP_SERVERLESS", "REMITWATCH_STATE_DIR",
+              "REMITWATCH_FAX_SENDER", "VERCEL"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("REMITWATCH_DB", str(tmp_path / "s.sqlite"))
     monkeypatch.setenv("SRFAX_ACCESS_ID", "100")
@@ -892,8 +893,260 @@ def test_the_setup_checks_give_the_steps_for_the_host_they_run_on(tmp_path, monk
     assert checks()["trizetto"]["detail"] == "set: press Test the TriZetto connection below"
     monkeypatch.setenv("REMITWATCH_MODE", "serverless")
     by = checks()
-    assert "in Vercel" in by["fax"]["fix"] and "redeploy" in by["fax"]["fix"] and "in Vercel" in by["owner_password"]["fix"]
+    assert "in Vercel" in by["owner_password"]["fix"]
     assert by["trizetto"]["ok"] is None and "the server does" in by["trizetto"]["detail"]
+    # the Vercel site that sends the faxes (REMITWATCH_FAX_SENDER=serverless) is told about Vercel's settings for the line
+    monkeypatch.setenv("REMITWATCH_FAX_SENDER", "serverless")
+    assert "in Vercel" in checks()["fax"]["fix"] and "redeploy" in checks()["fax"]["fix"]
+
+
+def test_the_fax_line_on_setup_says_which_site_sends(tmp_path, monkeypatch):
+    """The fax line can be set up on both sites, and only the site REMITWATCH_FAX_SENDER names sends. /setup's fax line says
+    so on the other one: who sends, that this site sends nothing, and nothing to fix. A value that names no site pauses
+    faxing on that site, so it is a fault, with the fix for the host it runs on."""
+    from remitwatch import cloud
+    for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "REMITWATCH_STATE_DIR", "VERCEL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("REMITWATCH_DB", str(tmp_path / "s.sqlite"))
+    for k, v in {"SRFAX_ACCESS_ID": "100", "SRFAX_ACCESS_PWD": "invented-fax-pw", "SRFAX_CALLER_ID": "2705550101",
+                 "SRFAX_SENDER_EMAIL": "fax-notices@example.com"}.items():
+        monkeypatch.setenv(k, v)
+
+    def line(mode: str, sender: str | None = None):
+        monkeypatch.setenv("REMITWATCH_MODE", mode)
+        if sender is None:
+            monkeypatch.delenv("REMITWATCH_FAX_SENDER", raising=False)
+        else:
+            monkeypatch.setenv("REMITWATCH_FAX_SENDER", sender)
+        out = cloud.setup_status(probe=False)
+        return next(c for c in out["checks"] if c["key"] == "fax"), out["fax"]
+    row, fx = line("server")                            # the server sends by default
+    assert row["ok"] is True and row["detail"].startswith("set: faxes go out from 2705550101")
+    assert fx == {"configured": True, "sends": True, "not_here": None}
+    row, fx = line("serverless")                        # the Vercel site with the same settings sends nothing, and says so
+    assert row["ok"] is None and row["fix"] == "" and fx["sends"] is False and fx["configured"] is True
+    assert row["detail"] == ("set, but faxes are sent by the practice's server, not by this site (REMITWATCH_FAX_SENDER=server). "
+                             "This site shows them and sends nothing.")
+    assert fx["not_here"] == "Faxes are sent by the practice's server, not by this site (REMITWATCH_FAX_SENDER=server). This site shows them and sends nothing."
+    row, fx = line("server", "serverless")              # named the other way round: the server sends nothing
+    assert row["ok"] is None and "sent by the Vercel site, not by this site" in row["detail"] and fx["sends"] is False
+    assert line("serverless", "serverless")[0]["ok"] is True
+    row, _ = line("server", "none")                     # paused on purpose: said, nothing to fix
+    assert row["ok"] is None and row["detail"].startswith("set, but faxing is paused") and row["fix"] == ""
+    row, _ = line("server", "servr")                    # a typo pauses faxing too: a fault, fixed in the server's .env
+    assert row["ok"] is False and row["detail"].endswith("It says 'servr', which names no site.")
+    assert row["fix"].startswith("Set REMITWATCH_FAX_SENDER in the server's .env to server") and row["fix"].endswith("(docker compose up -d).")
+    row, _ = line("serverless", "Vercel")
+    assert row["ok"] is False and row["fix"].startswith("Set REMITWATCH_FAX_SENDER in Vercel") and row["fix"].endswith("Then redeploy.")
+    monkeypatch.delenv("SRFAX_ACCESS_ID")
+    row, fx = line("serverless", "servr")               # no fax line here: nothing to say about who sends
+    assert row["ok"] is None and row["detail"].startswith("not set") and fx == {"configured": False, "sends": False, "not_here": None}
+
+
+def test_the_setup_page_and_the_settings_file_name_the_one_fax_sender():
+    """The fax panel says which site sends and shows why this one does not; .env.example lists REMITWATCH_FAX_SENDER with
+    the fax line's settings and says what each value means."""
+    page = open(os.path.join(ROOT, "remitwatch", "static", "setup.html"), encoding="utf-8").read()
+    panel = page[page.index('id="faxp"'):page.index('id="load"')]
+    for said in ("<code>REMITWATCH_FAX_SENDER</code>", "<code>server</code>", "<code>serverless</code>", "<code>none</code> pauses faxing",
+                 "sends nothing", 'id="fxWhere"'):
+        assert said in panel, said
+    assert "—" not in panel and "const fxWhere = s.fax && s.fax.not_here;" in page and "esc(fxWhere)" in page
+    lines = open(os.path.join(ROOT, ".env.example"), encoding="utf-8").read().splitlines()
+    at = lines.index("REMITWATCH_FAX_SENDER=server")
+    assert "Fax line" in next(ln for ln in reversed(lines[:at]) if ln.startswith("# ----"))
+    above = " ".join(ln for ln in lines[at - 3:at] if ln.startswith("#"))
+    for said in ("server (the default)", "serverless: the Vercel site", "none: faxing is paused", "sends nothing"):
+        assert said in above, said
+
+
+# --------------------------------------------------------------------------- what a Dropbox sync hands over
+# An A/R report and a production report as EMA lays them out (column names only; every value is invented). Neither names
+# a claim, a bill or a bill item the way the three weekly exports do.
+AR_COLS = ["A/R Claim ID", "Responsible Party", "A/R Balance Type", "Current A/R ($) (Aging)", "Service Date", "Coverage Type",
+           "Claim Link", "Claim Status", "CPT/Product", "Primary Payer", "Patient Name", "Denial Amount", "Last Billing Note"]
+PRODUCTION_COLS = ["Posted Date", "Service Date", "CPT/Product", "Check Number", "Claim Link", "Insurance Payments", "Patient Payments",
+                   "Contractual Adjustments", "Adjustment Reason Code", "Payer", "Charges", "Non- Contractual Adjustments",
+                   "Patient Adjustments", "Patient Name", "Patient DOB"]
+
+
+def _ar_rows() -> list[list]:
+    import datetime as dt
+    return [[9000001, "Insurance", "Debit", 223.65, dt.datetime(2026, 10, 1), "Primary", "https://example.ema.test/claim/1", "Denied",
+             "99214", "Anthem Blue Cross", "SAMPLE, PAT", 223.65, "sent again"],
+            [9000002, "Patient", "Debit", 40.00, dt.datetime(2026, 10, 2), "Primary", "https://example.ema.test/claim/2", "Paid",
+             "99213", "Anthem Blue Cross", "SAMPLE, ROW", None, None]]
+
+
+def _production_rows() -> list[list]:
+    import datetime as dt
+    return [[dt.datetime(2026, 10, 9), dt.datetime(2026, 10, 1), "99214", "CHK000123", "https://example.ema.test/claim/1", 117.60, 0.0,
+             106.05, "CO-45", "Anthem Blue Cross", 223.65, 0.0, 0.0, "SAMPLE, PAT", dt.datetime(1960, 1, 1)]]
+
+
+def _remit_bytes(i: int, pay_date: str = "20261118") -> bytes:
+    return remit(claim(i, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20261101"), dos="20261101"),
+                 "117.60", seg_count=99, isa_ctrl=f"{i:09d}", pay_date=pay_date)
+
+
+def _sha(path) -> str:
+    import hashlib
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def test_a_report_that_is_none_of_the_three_exports_is_neither_loaded_nor_recorded(tmp_path):
+    """An A/R report and a production report have a Claim Status or money columns but no Claim ID, Bill ID or Bill Item
+    Identifier. The loader neither stores their rows (they would tie to no claim) nor records the files as read, so the
+    reader planned for them still finds them unread. A weekly export beside them loads as before."""
+    from remitwatch import dropbox_sync
+    from remitwatch.store import Store
+    from tests.test_uploads import STATUS_COLS, as_csv, status_rows, xlsx
+    ar = tmp_path / "AR 2026.xlsx"
+    ar.write_bytes(xlsx("A/R Report", AR_COLS, _ar_rows()))
+    prod = tmp_path / "Production 2026.csv"
+    prod.write_bytes(as_csv(PRODUCTION_COLS, _production_rows()))
+    weekly = tmp_path / "Claim & Claim Status.xlsx"
+    weekly.write_bytes(xlsx("Claim & Claim Status", STATUS_COLS, status_rows()))
+    store = Store(str(tmp_path / "s.sqlite"))
+    said: list[str] = []
+    out = dropbox_sync.ingest_new_files(store, [str(ar), str(prod), str(weekly)], log=lambda *a: said.append(" ".join(map(str, a))))
+    assert (out["ema"], out["skipped"], out["errors"], out["failed"]) == (1, 2, 0, [])
+    rows = lambda sql: [tuple(r) for r in store.conn.execute(sql)]       # noqa: E731
+    assert rows("SELECT family, source_name, COUNT(*) FROM ema_rows GROUP BY 1, 2") == [("claim_status", "Claim & Claim Status.xlsx", 1)]
+    assert rows("SELECT kind FROM files") == [("ema:claim_status",)]
+    assert rows("SELECT source_name FROM ema_sources") == [("Claim & Claim Status.xlsx",)]
+    assert not store.file_seen(_sha(ar)) and not store.file_seen(_sha(prod)) and store.file_seen(_sha(weekly))
+    for name in ("AR 2026.xlsx", "Production 2026.csv"):
+        assert any(f"EMA ERROR {name}: Not read: it is none of the three EMA exports" in s for s in said), said
+    # handed over again (a full listing on a new mirror, a re-read of the folder): still nothing stored, still unread
+    again = dropbox_sync.ingest_new_files(store, [str(ar)], log=lambda *a: None)
+    assert (again["ema"], again["skipped"]) == (0, 1) and rows("SELECT COUNT(*) FROM ema_rows") == [(1,)]
+
+
+def test_an_ar_report_queued_before_the_upload_page_refused_it_is_not_read_and_says_why(tmp_path):
+    """Before the Upload page refused such reports it queued them. The cycle now leaves one unread, stores nothing from it,
+    and the upload says why instead of "The loader did not read it"."""
+    from remitwatch import uploads
+    from remitwatch.store import Store
+    from tests.test_uploads import xlsx
+    store = Store(str(tmp_path / "s.sqlite"))
+    uploads.ensure_schema(store.conn)
+    data = xlsx("A/R Report", AR_COLS, _ar_rows())
+    p = tmp_path / "uploads" / "exports" / "AR 2026.xlsx"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(data)
+    sha = _sha(p)
+    store.conn.execute("INSERT INTO uploads (upload_id, stored_sha, kind, name, path, size, uploaded_at, uploaded_by, status, summary) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)", (sha, sha, "ema", "AR 2026.xlsx", str(p), len(data), "2026-11-20T10:00:00+00:00",
+                                                        "staff", "queued", json.dumps({"kind": "ema", "report": "Claim & Claim Status"})))
+    store.conn.commit()
+    res = uploads.ingest_queued(store, log=lambda *a: None)
+    status, summary = store.conn.execute("SELECT status, summary FROM uploads").fetchone()
+    assert res["ema"] == 0 and res["uploads"] == 1 and status == "failed"
+    assert "none of the three EMA exports" in json.loads(summary)["error"]
+    assert store.conn.execute("SELECT (SELECT COUNT(*) FROM ema_rows) + (SELECT COUNT(*) FROM files)").fetchone()[0] == 0
+
+
+def _dropbox(files: dict, stop_listing_after: int | None = None, reset_delta_after: int | None = None, full_fails: bool = False):
+    """The Dropbox folder sync() lists (tests/test_sync.py's stand-in): the listing can stop after so many entries (an
+    outage), the saved position can be dropped part-way through a delta listing (Dropbox's "reset"), and the full listing
+    can fail."""
+    from tests.test_sync import FakeClient
+
+    class Folder(FakeClient):
+        def _cut(self, after: int | None, exc: Exception):
+            for n, e in enumerate(self._entries()):
+                if after is not None and n == after:
+                    raise exc
+                yield e
+
+        def list_folder(self, path, recursive=True):
+            self.calls.append("list_folder")
+            if full_fails:
+                raise RuntimeError("Dropbox files/list_folder failed 503: busy")
+            yield from self._cut(stop_listing_after, RuntimeError("Dropbox files/list_folder/continue failed 503: busy"))
+            self.last_cursor = "cursor-1"
+
+        def list_continue(self, cursor):
+            self.calls.append("list_continue:" + cursor)
+            yield from self._cut(reset_delta_after, RuntimeError('Dropbox files/list_folder/continue failed 409: {"error_summary": "reset/"}'))
+            self.last_cursor = "cursor-2"
+    return Folder(files)
+
+
+def _names(paths) -> list[str]:
+    return [os.path.basename(p) for p in paths]
+
+
+def test_a_sync_that_stops_part_way_hands_back_what_it_already_downloaded(tmp_path):
+    """Dropbox stops answering after two remittances were downloaded. The saved position does not move, so the next
+    listing names them again, finds them in the mirror and calls them unchanged: the failed sync hands them over on its
+    exception (new_files), for the cycle to read at once."""
+    from remitwatch.dropbox_sync import sync
+    from remitwatch.store import Store
+    files = {f"/Trizetto Data/Trizetto/remit_{i}.RMT": _remit_bytes(i) for i in (500, 501, 502)}
+    store = Store(str(tmp_path / "s.sqlite"))
+    kw = {"root_path": "/Trizetto Data", "data_dir": str(tmp_path / "mirror"), "log": lambda *a: None}
+    with pytest.raises(RuntimeError) as err:
+        sync(store, client=_dropbox(files, stop_listing_after=2), **kw)
+    got = err.value.new_files
+    assert _names(got) == ["remit_500.RMT", "remit_501.RMT"] and all(os.path.exists(p) for p in got)
+    assert store.conn.execute("SELECT value FROM meta WHERE key='sync:cursor'").fetchone() is None
+    after = sync(store, client=_dropbox(files), **kw)
+    assert after["unchanged"] == 2 and _names(after["new_files"]) == ["remit_502.RMT"]
+
+
+def test_the_servers_cycle_reads_in_the_same_cycle_what_a_failed_sync_downloaded(tmp_path, monkeypatch):
+    """The hourly cycle (pipeline.run_cycle, as the server runs it) with the real sync: Dropbox fails after two new
+    remittances came down. Both are read and analysed in that cycle, the cycle still reports the Dropbox failure, and the
+    next cycle reads only the one file it had not reached."""
+    from remitwatch import dropbox_sync
+    from tests.test_uploads import cycle, make_store
+    db = make_store(tmp_path / "feed")
+    for k, v in {"DROPBOX_APP_KEY": "k", "DROPBOX_APP_SECRET": "s", "DROPBOX_REFRESH_TOKEN": "r", "DROPBOX_ROOT_PATH": "/Trizetto Data",
+                 "REMITWATCH_DATA_DIR": str(tmp_path / "mirror")}.items():
+        monkeypatch.setenv(k, v)
+    for k in ("TRIZETTO_SFTP_USER", "TRIZETTO_SFTP_PASSWORD"):
+        monkeypatch.delenv(k, raising=False)
+    files = {f"/Trizetto Data/Trizetto/remit_{i}.RMT": _remit_bytes(i, pay_date=f"202611{i - 480}") for i in (500, 501, 502)}
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: _dropbox(files, stop_listing_after=2))
+    first = cycle(db)
+    assert first["ingest"]["remits"] == 2 and first["error"].startswith("Dropbox:") and "detect" in first, first
+    monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: _dropbox(files))
+    second = cycle(db)
+    assert second["ingest"]["remits"] == 1 and not second.get("error"), second
+    import sqlite3
+    conn = sqlite3.connect(db)
+    try:
+        days = [r[0] for r in conn.execute("SELECT payment_date FROM transactions WHERE payment_date >= '2026-11-20' ORDER BY 1")]
+    finally:
+        conn.close()
+    assert days == ["2026-11-20", "2026-11-21", "2026-11-22"]
+
+
+def test_a_dropped_position_lists_the_folder_again_and_keeps_what_the_delta_had_downloaded(tmp_path):
+    """Dropbox drops the saved position part-way through a delta listing: the whole folder is listed again in the same
+    run. The file the delta listing had already downloaded is still handed over, though the full listing finds it in the
+    mirror; and when the full listing fails as well, it is on the exception."""
+    from remitwatch.dropbox_sync import sync
+    from remitwatch.store import Store
+    files = {f"/Trizetto Data/Trizetto/remit_{i}.RMT": _remit_bytes(i) for i in (600, 601)}
+    kw = {"root_path": "/Trizetto Data", "log": lambda *a: None}
+    store = Store(str(tmp_path / "s.sqlite"))
+    store.conn.execute("INSERT INTO meta (key, value) VALUES ('sync:cursor', 'cursor-0')")
+    store.conn.commit()
+    client = _dropbox(files, reset_delta_after=1)
+    st = sync(store, client=client, data_dir=str(tmp_path / "m1"), **kw)
+    assert [c for c in client.calls if c != "download"] == ["list_continue:cursor-0", "list_folder"] and st["mode"] == "full"
+    assert _names(st["new_files"]) == ["remit_600.RMT", "remit_601.RMT"] and st["downloaded"] == 2 and st["unchanged"] == 1
+    assert store.conn.execute("SELECT value FROM meta WHERE key='sync:cursor'").fetchone()[0] == "cursor-1"
+    other = Store(str(tmp_path / "t.sqlite"))
+    other.conn.execute("INSERT INTO meta (key, value) VALUES ('sync:cursor', 'cursor-0')")
+    other.conn.commit()
+    with pytest.raises(RuntimeError) as err:
+        sync(other, client=_dropbox(files, reset_delta_after=1, full_fails=True), data_dir=str(tmp_path / "m2"), **kw)
+    assert _names(err.value.new_files) == ["remit_600.RMT"]
 
 
 def test_these_tests_load_without_paramiko():

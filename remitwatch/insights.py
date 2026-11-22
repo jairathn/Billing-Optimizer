@@ -37,9 +37,11 @@ WORK_TYPES: list[dict] = [
      "how": "Paid less than this payer usually pays for the code. Ask it to reprocess at its usual rate; one request can list every claim for the same code."},
     {"key": "chase", "label": "Chase the payer", "needs": "The payer's portal or phone line",
      "short": "Find out where the claim is: the payer's portal, or call.",
+     # the date an unanswered claim sent on time shows runs the payer's appeal window past its first-filing limit
+     # (detect.run_ema_open_claims), so a claim the payer has no record of is sent again by that limit, not by that date
      "how": "EMA shows the claim sent and unpaid, and no answer from the payer has come back. Look it up on the payer's portal "
-            "(or call). Not on file: send it again before the date shown. Rejected: correct it in EMA and send it again. Denied "
-            "or paid: get the remittance or the EOB and work it here."},
+            "(or call). Not on file: send it again within the first-filing limit (see the filing window on the item). Rejected: "
+            "correct it in EMA and send it again. Denied or paid: get the remittance or the EOB and work it here."},
     {"key": "check", "label": "Check first", "needs": "A look at the claim",
      "short": "Decide: other payer, the patient, appeal, or let go.",
      "how": "Something a person has to decide: bill another payer or the patient, fix an enrollment, find an earlier payment, or let it go."},
@@ -98,7 +100,8 @@ SIGNAL_LABELS: dict[str, tuple[str, str]] = {
     "DENIED_DUPLICATE_UNPAID": ("Denied as a duplicate, but never paid", "Look for the first claim's payment; if none was ever paid, ask the payer to reprocess."),
     "DENIED_OTHER": ("Paid $0 for another reason", "Read the reason on the item, then fix and resubmit, appeal, or let it go."),
     "NO_ANSWER": ("Sent, and the payer never answered", "Look the claim up on the payer's portal or call. If the payer has no record of it, send it "
-                                                        "again before the date shown; if it was denied or paid, get the remittance and work it here."),
+                                                        "again within the first-filing limit (see the filing window on the item); if it was "
+                                                        "denied or paid, get the remittance and work it here."),
     "REJECTED_PRE_PAYER": ("Rejected before it reached the payer", "Correct the claim in EMA and send it again before the date shown."),
     "CLAIM_DENIED_UNPAID": ("Whole claim denied and never paid", "Read the reason: fix and resubmit if it names an error, appeal if not, let it go if the payer is right."),
     "UNDERPAID_VS_OWN_RATE": ("Paid less than this payer usually pays", "Ask the payer to reprocess at its usual rate; one request can list every claim for the code."),

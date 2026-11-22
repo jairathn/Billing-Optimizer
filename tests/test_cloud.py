@@ -323,6 +323,7 @@ def site(box, monkeypatch):
     write_remits(root / DATA, visits_with_downcodes())
     cycle(state, client)
     monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.delenv("REMITWATCH_ALLOW_OPEN", raising=False)       # the deployed site: never a developer's machine
     monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
     monkeypatch.setenv("CRON_SECRET", "s3cret-value-for-the-scheduler")
     monkeypatch.setenv("REMITWATCH_PASSWORD", PW)
@@ -470,6 +471,24 @@ def test_setup_checklist_reports_what_is_missing(site, monkeypatch):
     assert got.json() == {"refresh_token": "RT", "missing_permissions": ["files.content.write"]} and got.headers["cache-control"] == "no-store"
 
 
+def test_the_setup_checklist_says_this_site_sends_no_faxes_while_the_server_does(site, monkeypatch):
+    """The fax line's settings copied to the Vercel site: its checklist says the server sends the faxes and this site sends
+    none (REMITWATCH_FAX_SENDER), as a note, not a fault; named as the sender, it is the one that sends."""
+    tc, auth, _api, _state = site
+    for k, v in {"SRFAX_ACCESS_ID": "100", "SRFAX_ACCESS_PWD": "invented-fax-pw", "SRFAX_CALLER_ID": "2705550101",
+                 "SRFAX_SENDER_EMAIL": "fax-notices@example.com"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("REMITWATCH_FAX_SENDER", raising=False)
+    s = tc.get("/api/setup/status", headers=auth).json()
+    fx = next(c for c in s["checks"] if c["key"] == "fax")
+    assert fx["ok"] is None and fx["fix"] == "" and "sent by the practice's server, not by this site" in fx["detail"]
+    assert s["fax"]["sends"] is False and s["fax"]["not_here"].startswith("Faxes are sent by the practice's server")
+    monkeypatch.setenv("REMITWATCH_FAX_SENDER", "serverless")
+    s = tc.get("/api/setup/status", headers=auth).json()
+    fx = next(c for c in s["checks"] if c["key"] == "fax")
+    assert fx["ok"] is True and fx["detail"].startswith("set: faxes go out from") and s["fax"] == {"configured": True, "sends": True, "not_here": None}
+
+
 def test_missing_permission_is_reported_in_plain_words():
     from remitwatch.dropbox_sync import DropboxAuthError, DropboxClient
 
@@ -519,6 +538,31 @@ def test_an_unreadable_file_is_remembered_and_starts_nothing_again(box, monkeypa
     big = cycle(state, client)
     assert big["ingest"]["failed"] == ["huge000.RMT (too large)"] and big["ingest"]["downloaded"] == 0 and big["ingest"]["remits"] == 0
     assert cloud.has_new_files(state, client) is False
+
+
+def test_a_report_no_reader_reads_yet_is_neither_stored_nor_remembered_as_seen(box):
+    """An A/R report in the data folder (none of the three weekly EMA exports): the run fetches it but stores no row of it,
+    records no file and does not remember it as seen, so a later listing of the whole folder hands it over again, to the
+    reader made for it by then. A listing of what changed does not name it again, so it is not fetched on every run."""
+    from tests.test_feeds import AR_COLS, _ar_rows
+    from tests.test_uploads import xlsx
+    root, client, state = box
+    write_remits(root / DATA, visits_with_downcodes())
+    (root / DATA / "AR and Collections Reports from EMA").mkdir(parents=True)
+    (root / DATA / "AR and Collections Reports from EMA" / "AR 2026.xlsx").write_bytes(xlsx("A/R Report", AR_COLS, _ar_rows()))
+    out = cycle(state, client)
+    assert (out["ingest"]["downloaded"], out["ingest"]["remits"], out["ingest"]["ema"], out["ingest"]["skipped"]) == (7, 6, 0, 1)
+    assert out["ingest"]["failed"] == [] and out["ingest"]["errors"] == 0
+    conn = raw_conn(state)
+    assert conn.execute("SELECT (SELECT COUNT(*) FROM ema_rows) + (SELECT COUNT(*) FROM ema_sources)").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM files WHERE kind LIKE 'ema%'").fetchone()[0] == 0
+    seen = [r[0] for r in conn.execute("SELECT path FROM dropbox_seen")]
+    assert len(seen) == 6 and not any(p.endswith("AR 2026.xlsx") for p in seen)
+    again = cycle(state, client)
+    assert again["ingest"]["mode"] == "delta" and again["ingest"]["downloaded"] == 0
+    state.delete(cloud.CURSOR)                          # Dropbox dropped the position: the whole folder is listed again
+    full = cycle(state, client)
+    assert (full["ingest"]["mode"], full["ingest"]["downloaded"], full["ingest"]["skipped"], full["ingest"]["remits"]) == ("full", 1, 1, 0)
 
 
 def test_a_download_that_may_work_later_holds_the_position_and_one_that_cannot_does_not(box):

@@ -309,10 +309,16 @@ def _ingest_batch(store, items: list[tuple], log) -> dict:
         if when:
             os.utime(p, (when, when))
         paths.append(p)
+    unread: list[str] = []
     try:
-        return ingest_new_files(store, paths, log=log)
+        res = ingest_new_files(store, paths, log=log, unread=unread)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+    if unread:
+        # which items were left unread (a report none of the readers reads yet): the callers do not remember those as seen
+        at = {p: i for i, p in enumerate(paths)}
+        res["unread_items"] = sorted(at[p] for p in unread if p in at)
+    return res
 
 
 def _add(total: dict, part: dict) -> None:
@@ -352,7 +358,9 @@ def ingest_zip(store, client, root: str, deadline: float, out: dict, log) -> Non
             part = _ingest_batch(store, batch, log)
             _add(out, part)
             out["failed"] = (out.get("failed") or []) + [f"{n} (could not be read)" for n in part.get("failed") or []]
-            conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)", rows)
+            left = set(part.get("unread_items") or [])         # not remembered: read once a reader for it exists
+            conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)",
+                             [r for i, r in enumerate(rows) if i not in left])
             conn.commit()
             batch.clear()
             rows.clear()
@@ -438,7 +446,7 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
         chunk = todo[i:i + 400]
         with ThreadPoolExecutor(max_workers=12) as ex:
             got = list(ex.map(fetch, chunk))
-        items, rows = [], []
+        items, item_rows, rows = [], [], []
         for e, data in got:
             if isinstance(data, Exception):
                 log(f"  download failed {e.get('name')}: {data}")
@@ -451,13 +459,18 @@ def sync_and_ingest(store, client, state, deadline: float, full: bool = False, l
                     out["download_errors"] += 1         # a timeout or a busy server: try again on a later run
                 continue
             items.append((e.get("name") or "file", data, _epoch(e.get("client_modified") or e.get("server_modified"))))
-            rows.append((e.get("id") or e.get("path_lower"), e.get("content_hash"), e.get("path_display"), _now()))
+            item_rows.append((e.get("id") or e.get("path_lower"), e.get("content_hash"), e.get("path_display"), _now()))
         out["downloaded"] += len(items)
         if items:
             part = _ingest_batch(store, items, log)
             _add(out, part)
             out["failed"] += [f"{n} (could not be read)" for n in part.get("failed") or []]
-        conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)", rows)
+            # A report none of the readers reads yet (an A/R or a production report) is not remembered as seen, as it is
+            # not recorded in the store either: a later listing of the whole folder hands it over again, to the reader
+            # made for it by then. A listing of what changed does not name it again, so it is not fetched every run.
+            left = set(part.get("unread_items") or [])
+            item_rows = [r for n, r in enumerate(item_rows) if n not in left]
+        conn.executemany("INSERT OR REPLACE INTO dropbox_seen (id, content_hash, path, at) VALUES (?,?,?,?)", rows + item_rows)
         conn.commit()
     # A file that was fetched is remembered in the store whether or not it could be read, so the store must be saved.
     out["seen_changed"] = bool(out["downloaded"] or out["failed"] or mark)
@@ -1321,13 +1334,28 @@ def setup_status(base_url: str | None = None, probe: bool = True) -> dict:
                    "not set: notes are attached by hand. To connect EMA, follow docs/OPERATIONS.md, Connecting ModMed EMA"),
         f"Paste the whole key into MODMED_PRIVATE_KEY again, BEGIN and END lines included, {apply}." if mm_bad else "")
     out["modmed"] = {"configured": mm_on, "key": bool(env("MODMED_PRIVATE_KEY")), "kid": mm_key.rsplit("id ", 1)[-1] if mm_key else None}
-    fx_on, fx_line = bool(env("SRFAX_ACCESS_ID") and env("SRFAX_ACCESS_PWD")), env("SRFAX_CALLER_ID") or ""
-    add("fax", "Fax line: appeals faxed, payers' answers read (optional)", bool(fx_line and env("SRFAX_SENDER_EMAIL")) if fx_on else None,
-        (f"set: faxes go out from {fx_line}, and letters give it for the payer's answer; press Test the fax line below"
-         if fx_line and env("SRFAX_SENDER_EMAIL") else "set, but SRFAX_CALLER_ID (the line's own number) or SRFAX_SENDER_EMAIL is missing")
-        if fx_on else "not set: appeal packets are downloaded and sent by hand. To fax them, follow docs/OPERATIONS.md, Faxing appeals",
-        f"Set SRFAX_CALLER_ID to the SRFax fax number and SRFAX_SENDER_EMAIL to the address SRFax sends its notices to {where}, {apply}.")
-    out["fax"] = {"configured": fx_on}
+    # One site sends faxes (fax.sender, REMITWATCH_FAX_SENDER): the line can be set up on both, and the other one shows the
+    # Faxes page and opens the faxes that came in, but sends nothing
+    from . import fax
+    fx_on, fx_line = fax.line() is not None, env("SRFAX_CALLER_ID") or ""
+    fx_away = fax.not_here()
+    fx_raw = (env(fax.SENDER_SETTING) or "").strip()
+    fx_typo = bool(fx_raw) and fx_raw.lower() not in ("server", "serverless", "none")     # a typo pauses faxing on this site
+    if not fx_on:
+        fx_ok, fx_detail = None, "not set: appeal packets are downloaded and sent by hand. To fax them, follow docs/OPERATIONS.md, Faxing appeals"
+        fx_fix = ""
+    elif fx_away:
+        fx_ok = False if fx_typo else None
+        fx_detail = f"set, but {fx_away[0].lower()}{fx_away[1:]}" + (f" It says '{fx_raw}', which names no site." if fx_typo else "")
+        fx_fix = (f"Set {fax.SENDER_SETTING} {where} to server (the practice's server sends, the default) or serverless (the "
+                  f"Vercel site sends); none pauses faxing. Then {apply.removeprefix('then ')}." if fx_typo else "")
+    else:
+        fx_ok = bool(fx_line and env("SRFAX_SENDER_EMAIL"))
+        fx_detail = (f"set: faxes go out from {fx_line}, and letters give it for the payer's answer; press Test the fax line below"
+                     if fx_ok else "set, but SRFAX_CALLER_ID (the line's own number) or SRFAX_SENDER_EMAIL is missing")
+        fx_fix = f"Set SRFAX_CALLER_ID to the SRFax fax number and SRFAX_SENDER_EMAIL to the address SRFax sends its notices to {where}, {apply}."
+    add("fax", "Fax line: appeals faxed, payers' answers read (optional)", fx_ok, fx_detail, fx_fix)
+    out["fax"] = {"configured": fx_on, "sends": fax.configured(), "not_here": fx_away}
     # TriZetto is read by one site only: the server, or a serverless host switched on for it (trizetto.here), because each
     # site keeps its own hold on a refused password and its own reminder before the password expires
     tz_set = bool(env("TRIZETTO_SFTP_USER") and env("TRIZETTO_SFTP_PASSWORD"))

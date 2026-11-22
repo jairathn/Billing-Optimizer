@@ -260,3 +260,43 @@ def test_the_amount_filter_leaves_out_exactly_the_small_items_the_home_screen_co
     assert any(not r["shortfall_cents"] for r in big["items"])          # an item whose value is not known is not hidden
     counts = tc.get("/api/worklist/counts", params=dict(p, min=20), auth=auth).json()
     assert counts["n"] == big["total"]
+
+
+def _ema_row(conn, claim: str, n: int, **kw) -> None:
+    """One EMA export row as the loaders store it: by default a 99214 charge to Anthem, seen Aug 17 and billed Aug 19, 2026."""
+    row = {"row_fingerprint": f"ins{n}", "family": "charge_lines", "source_name": "Encounter & Charge Lines.xlsx", "source_sha256": "charges",
+           "row_index": n, "claim_id": claim, "activity_type": "Charge", "bill_item_id": f"ins-i{n}", "cpt": "99214",
+           "service_date": "2026-08-17", "bill_created": "2026-08-19", "charges_cents": 22365, "payer": "Anthem Blue Cross",
+           "payer_id": "00660", "patient_id": f"P{claim[4:9]}", "provider": "Provider, Test", "units": 1.0}
+    if kw.get("family", "charge_lines") != "charge_lines":
+        row.update(activity_type=None, bill_item_id=None, charges_cents=None, bill_created=None, source_name="Claim & Claim Status.xlsx",
+                   source_sha256="status")
+    row.update(kw)
+    conn.execute(f"INSERT INTO ema_rows ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+
+
+def test_an_unanswered_claim_is_sent_again_within_the_first_filing_limit_not_by_the_date_shown(tmp_path):
+    """A claim sent on time that the payer never answered shows a date that runs the payer's appeal window past the
+    first-filing limit (two more years for Anthem). Its next step, and the steps for "Chase the payer", point to the
+    first-filing limit in the item's filing window: "before the date shown" would promise two years that do not exist. A
+    claim rejected before it reached the payer is dated by that limit itself, so its step keeps the date shown."""
+    import re
+    st = build_store(tmp_path, [claim(i, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~", dos="20261020"), dos="20261020")
+                                for i in range(1, 26)], pay_date="20261110")
+    _ema_row(st.conn, "CB0000T01C017", 1)
+    _ema_row(st.conn, "CB0000T01C017", 2, family="claim_status", claim_status="Submitted", claim_submission_date="2026-08-19")
+    _ema_row(st.conn, "CB0000T02C017", 3)
+    _ema_row(st.conn, "CB0000T02C017", 4, family="claim_status", claim_status="Rejected")
+    st.conn.commit()
+    Detector(st, run_id="unanswered").run()
+    f = {r["signal"]: dict(r) for r in st.query("SELECT signal, appeal_deadline, deadline_basis FROM findings "
+                                                "WHERE signal IN ('NO_ANSWER', 'REJECTED_PRE_PAYER')")}
+    limit = re.search(r"send it again by (\d{4}-\d{2}-\d{2}), the first-filing limit", f["NO_ANSWER"]["deadline_basis"]).group(1)
+    assert f["NO_ANSWER"]["appeal_deadline"] >= "2028-01-01" > limit            # the date shown is not the limit
+    assert f["REJECTED_PRE_PAYER"]["appeal_deadline"] == limit                  # here it is the limit
+    b = insights.brief(st.conn, today="2026-11-13")
+    chase = next(t for t in b["work_types"] if t["key"] == "chase")["how"]
+    for text in (b["labels"]["NO_ANSWER"]["next"], chase):
+        assert "send it again within the first-filing limit (see the filing window on the item)" in text and "before the date shown" not in text
+    assert "send it again before the date shown" in b["labels"]["REJECTED_PRE_PAYER"]["next"]
+    st.close()

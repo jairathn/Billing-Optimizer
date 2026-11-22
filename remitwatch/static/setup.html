@@ -95,6 +95,8 @@ a{color:var(--accent)}
       <li><code>SRFAX_CALLER_ID</code>: the fax number SRFax gives the account. Letters give it as the practice's fax, so payers answer to it and their answers are read here.</li>
       <li><code>SRFAX_SENDER_EMAIL</code>: where SRFax sends its own delivery notices.</li>
     </ol>
+    <div class="small muted">Only one site sends faxes, so no fax goes out twice. <code>REMITWATCH_FAX_SENDER</code> names it: <code>server</code> (the practice's server, the default) or <code>serverless</code> (the Vercel site; set it there when no server runs). <code>none</code> pauses faxing. The other site shows the Faxes page and opens the faxes that came in, and sends nothing.</div>
+    <div id="fxWhere" class="small" style="display:none;margin-top:6px"></div>
     <div class="row"><button class="primary" id="fxTest">Test the fax line</button><span id="fxMsg" class="small muted"></span></div>
     <table id="fxSteps"></table>
   </div>
@@ -158,6 +160,9 @@ async function check(){
   $('#load').style.display = s.ready ? '' : 'none';
   $('#modmed').style.display = s.locked ? 'none' : '';
   $('#faxp').style.display = s.locked ? 'none' : '';
+  const fxWhere = s.fax && s.fax.not_here;      // the line is set up here, but another site sends (or faxing is paused)
+  $('#fxWhere').innerHTML = fxWhere ? `<b>This site:</b> ${esc(fxWhere)}` : '';
+  $('#fxWhere').style.display = fxWhere ? '' : 'none';
   $('#tzp').style.display = s.locked ? 'none' : '';
   $('#jwksUrl').textContent = location.origin + '/.well-known/jwks.json';
   $('#ready').innerHTML = s.locked ? '<span class="no">This site is locked until a dashboard password is set.</span>' : (s.ready ? '<span class="ok">Required settings are complete.</span>' : '<span class="muted">Fix the items marked ✗ from the top down.</span>');
