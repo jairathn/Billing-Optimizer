@@ -194,8 +194,9 @@ copy that runs. The installer refuses a script that does not parse, and the copy
   would overwrite a file git does not track there (a local override, or `.env` itself): nothing is overwritten, and the
   log says so once. Put the files back (`sudo git checkout -- .`) or make the change on main; move an untracked file out
   of the way. `.env` is never touched.
-- One deploy at a time: a tick that finds one running (or `configure.sh` running) skips. After each attempt, images and
-  build cache that nothing uses any more are pruned, and the build logs beyond the last 30, so the disk does not fill.
+- One deploy at a time: a tick that finds one running (or `configure.sh` running) skips. After each attempt, images that
+  nothing uses any more are pruned, with build cache no build has used for 30 days and the build logs beyond the last
+  30, so the disk does not fill.
 
 Reading its log: one line per deploy, tab-separated: time (UTC), the commit it came from, the commit it went to, the
 result, and the detail.

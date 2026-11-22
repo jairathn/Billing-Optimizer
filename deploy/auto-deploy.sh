@@ -250,9 +250,10 @@ rollback() {    # result why: after a swap that failed, the previous images and 
 }
 
 prune() {       # images no container uses and no name points at (the ones a swap replaced or a rollback dropped), build
-                # cache nothing uses, and build logs beyond the last 30: the disk does not fill with old versions
+                # cache no build has used for 30 days, and build logs beyond the last 30: the disk does not fill with old
+                # versions, and the next build still finds this one's layers
   "$DOCKER" image prune -f >/dev/null 2>&1 || true
-  "$DOCKER" builder prune -f >/dev/null 2>&1 || true
+  "$DOCKER" builder prune -af --filter until=720h >/dev/null 2>&1 || true
   ls -1t "$STATE/builds" 2>/dev/null | tail -n +31 | while IFS= read -r f; do rm -f "$STATE/builds/$f"; done
 }
 

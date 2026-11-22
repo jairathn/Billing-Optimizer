@@ -53,6 +53,10 @@ ask() {     # name kind question [default]. kind: text; secret; password (made w
             # days, or TriZetto's words for it). A value that cannot be used is asked for again; Enter keeps what is there.
   local name=$1 kind=$2 question=$3 default=${4:-} cur value line why
   cur=$(current "$name")
+  if [ -n "$cur" ] && ! why=$(fits "$name" "$cur"); then      # the site refuses the one set now: it must be replaced
+    printf "\n  The %s set now cannot be used: it %s." "$name" "$why"
+    [ "$kind" = password ] && cur=""                           # Enter then makes one
+  fi
   while :; do
     case "$kind" in
       text|days) printf "\n%s\n  %s [%s]: " "$question" "$name" "${cur:-${default:-not set}}"; IFS= read -r value ;;

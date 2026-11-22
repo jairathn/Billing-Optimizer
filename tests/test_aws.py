@@ -315,6 +315,18 @@ def test_passwords_the_site_would_refuse_are_asked_for_again(tmp_path):
     assert "short1" not in screen and "a-long-enough-pass-1" not in screen
 
 
+def test_a_dashboard_password_the_site_now_refuses_is_replaced(tmp_path):
+    """A short password left from before locks the site (remitwatch.api.password_problem): configure.sh says so, and
+    Enter makes a new one instead of keeping it."""
+    repo, env = _configure_repo(tmp_path)
+    (tmp_path / "store").write_text("data\n")
+    (repo / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\nREMITWATCH_PASSWORD='shortpw'\n")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {"AUTODEPLOY": "n"})
+    assert code == 0 and "REMITWATCH_PASSWORD set now cannot be used" in screen and "shortpw" not in screen
+    new = _env_values(repo)["REMITWATCH_PASSWORD"]
+    assert len(new) == 32 and screen.count(new) == 1
+
+
 def test_a_password_lifetime_in_trizettos_words_is_read_by_the_apps_own_rules(tmp_path):
     """configure.sh stores a number of days, read by remitwatch.insights.password_days (the rule the data checks use),
     and asks again for words that rule cannot read instead of storing 0, which would turn the reminder off."""
