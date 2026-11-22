@@ -237,6 +237,31 @@ def _csv_bytes(rows: list[dict], cols: list[str], *, crlf: bool, bom: bool, titl
     return (b"\xef\xbb\xbf" + data) if bom else data
 
 
+# openpyxl stamps every save with the clock (docProps/core.xml "modified" and each zip entry's time), so two workbooks
+# built from the same rows a second apart had different bytes and a test that saves the same rows twice failed now and then.
+# Fixture workbooks get one fixed time instead: the same rows always give the same file.
+FIXED_SAVE_TIME = dt.datetime(2026, 1, 1, 0, 0, 0)
+
+
+def stable_xlsx(data: bytes) -> bytes:
+    """The workbook with its save time and zip entry times set to FIXED_SAVE_TIME."""
+    import re
+
+    stamp = FIXED_SAVE_TIME.strftime("%Y-%m-%dT%H:%M:%SZ").encode()
+    src = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            body = src.read(info.filename)
+            if info.filename == "docProps/core.xml":
+                body = re.sub(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)", rb"\g<1>" + stamp + rb"\g<2>", body)
+            entry = zipfile.ZipInfo(info.filename, date_time=FIXED_SAVE_TIME.timetuple()[:6])
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.external_attr = info.external_attr
+            dst.writestr(entry, body)
+    return out.getvalue()
+
+
 def _xlsx_bytes(rows: list[dict], cols: list[str], *, title: str | None, created: dt.datetime | None, sheet: str) -> bytes:
     import openpyxl
 
@@ -249,11 +274,10 @@ def _xlsx_bytes(rows: list[dict], cols: list[str], *, title: str | None, created
     ws.append(cols)
     for r in rows:
         ws.append([_xlsx_value(c, r.get(c)) for c in cols])
-    if created:
-        wb.properties.created = created
+    wb.properties.created = created or FIXED_SAVE_TIME
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue()
+    return stable_xlsx(out.getvalue())
 
 
 def production_csv(rows: Iterable[dict], *, crlf: bool = True, bom: bool = False, title: str | None = None, delimiter: str = ",",
@@ -288,13 +312,14 @@ def weekly_xlsx(family: str, rows: list[list]) -> bytes:
     import openpyxl
 
     wb = openpyxl.Workbook()
+    wb.properties.created = FIXED_SAVE_TIME
     ws = wb.active
     ws.append(WEEKLY_COLUMNS[family])
     for r in rows:
         ws.append(r)
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue()
+    return stable_xlsx(out.getvalue())
 
 
 def genuine_status_export(n: int = 23) -> bytes:
@@ -303,6 +328,7 @@ def genuine_status_export(n: int = 23) -> bytes:
     import openpyxl
 
     wb = openpyxl.Workbook()
+    wb.properties.created = FIXED_SAVE_TIME
     ws = wb.active
     ws.append(GENUINE_STATUS_COLUMNS)
     for i in range(n):
@@ -310,7 +336,7 @@ def genuine_status_export(n: int = 23) -> bytes:
                    "99213", "Primary", "Test Office", "Test Unit", 150.0, 0.0, 25.0 if i % 3 == 0 else 0.0])
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue()
+    return stable_xlsx(out.getvalue())
 
 
 def zipped(name: Any, data: bytes | None = None) -> bytes:

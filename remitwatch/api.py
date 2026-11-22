@@ -676,8 +676,8 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
             who = "(" + " AND ".join(parts) + ")"
             name_only, name_params = who, list(who_params)
             number = re.sub(r"[\s\-]", "", q)
-            digits = bool(re.search(r"\d", number))
-            if digits:
+            has_digit = bool(re.search(r"\d", number))
+            if has_digit:
                 # or part of a member number, typed with or without the spaces and dashes a card prints, whichever way
                 # the payer wrote it
                 bare = "REPLACE(REPLACE(c.{k}_id,'-',''),' ','')"
@@ -695,7 +695,7 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
                        f"SELECT e2.patient_id FROM ema_rows e2 WHERE COALESCE(e2.patient_id,'') != '' AND e2.claim_id IN ("
                        f"SELECT c.patient_control_number FROM claims c WHERE {name_only})))")
                 ema_params = name_params
-                if digits:
+                if has_digit:
                     ema += (f" OR patient_control_number IN (SELECT e.claim_id FROM ema_rows e WHERE e.claim_id IN ({mine}) "
                             "AND REPLACE(REPLACE(e.policy_number,'-',''),' ','') LIKE ?)")
                     ema_params = ema_params + [f"%{number}%"]
