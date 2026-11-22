@@ -432,7 +432,7 @@ def coarse_dates(value: Any, ref: date | None = None) -> Any:
 # ------------------------------------------------------------------------------------------------------------ errors
 def _rel(path: str) -> str:
     """A frame's file as a path inside the repository or a library, never a home folder's name."""
-    p = (path or "").replace("\\", "/")
+    p = "/" + (path or "").replace("\\", "/").lstrip("/")
     for marker in ("/remitwatch/", "/tests/", "/api/", "/scripts/"):
         if marker in p:
             return marker.strip("/") + "/" + p.split(marker, 1)[1]
@@ -1658,6 +1658,29 @@ def _kind_of(ch: dict, b: dict, a: dict) -> str:
     return "status"
 
 
+_DATE_FIELDS = ("follow_up_on", "appeal_deadline", "legal_deadline", "recovered_date", "ema_outcome_on")
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _safe_change(change: dict) -> dict:
+    """A decision's {field: [before, after]}: the item's own values are kept (it lives in the store, beside the item:
+    dates of its deadlines included; a bundle cuts them to months), anything else is scrubbed."""
+    out = {}
+    for field, pair in (change or {}).items():
+        f = SCRUB.key(field)
+        vals = pair if isinstance(pair, (list, tuple)) else [pair]
+        kept = []
+        for v in vals:
+            if v is None or isinstance(v, (bool, int, float)):
+                kept.append(v)
+            elif field in _DATE_FIELDS and isinstance(v, str) and _ISO_DAY.fullmatch(v[:10]) and len(v) <= 25:
+                kept.append(v)
+            else:
+                kept.append(scrub(v, field))
+        out[f] = kept
+    return out
+
+
 def _slug(s: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")[:40] or "unknown"
 
@@ -1826,7 +1849,7 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
     def add(fid: str, kind: str, rule: str, change: dict, evidence: list) -> None:
         counts[kind] += 1
         by_rule[rule] += 1
-        out_rows.append((fid, at, run_id, step, kind, rule, version, _jl(scrub(change)), _jl(evidence)))
+        out_rows.append((fid, at, run_id, step, kind, rule, version, _jl(_safe_change(change)), _jl(evidence)))
     for f in raised:
         r = rowd(acols, after.rows[f])
         d = det.get(f, {})
@@ -1909,7 +1932,7 @@ def record_changes(conn: sqlite3.Connection, run_id: str, changes: Iterable[dict
         if not fid:
             continue
         rows.append((fid, at, run_id, scrub(step, "step"), scrub(c.get("kind") or "status", "kind"), scrub(c.get("rule") or step, "rule"),
-                     c.get("rule_version") or rule_version, _jl(scrub(c.get("change") or {})), _jl(scrub(c.get("evidence") or []))))
+                     c.get("rule_version") or rule_version, _jl(_safe_change(c.get("change") or {})), _jl(scrub(c.get("evidence") or []))))
     if rows:
         ensure_schema(conn)
         conn.executemany("INSERT INTO item_decisions (finding_id, at, run_id, step, kind, rule, rule_version, change, evidence) "
@@ -1998,19 +2021,32 @@ def panel(conn: sqlite3.Connection | None, logs_dir: Any = None, *, now: datetim
 _LOGGING_CALLS = re.compile(r"(log|print|warn|caught|error|record|note|event|append|exception)", re.I)
 
 
+_BROAD = {"Exception", "BaseException"}
+
+
+def _broad(t: ast.expr | None) -> bool:
+    """A bare except, or one that catches Exception or BaseException (alone or in a tuple): what can hide a code bug.
+    A handler for one named exception (ProcessLookupError, ValueError on a parse) is the code's own control flow."""
+    if t is None:
+        return True
+    names = t.elts if isinstance(t, ast.Tuple) else [t]
+    return any((isinstance(n, ast.Name) and n.id in _BROAD) or (isinstance(n, ast.Attribute) and n.attr in _BROAD) for n in names)
+
+
 def silent_excepts(paths: Iterable[str]) -> list[dict]:
-    """except blocks that swallow an exception without a word: their body is only pass, continue, break, a bare return
-    or a constant. A block that logs, records the error, assigns, calls anything or raises is not counted. Returns
-    [{"file", "line", "handler"}]."""
+    """Bare or broad except blocks (Exception, BaseException) that swallow an exception without a word: their body is
+    only pass, continue, break, a return of a constant or a constant. A block that logs, records the error, assigns,
+    calls anything or raises is not counted. Returns [{"file", "line", "handler"}]."""
     out = []
     for path in paths:
         try:
             with open(path, encoding="utf-8") as fh:
                 tree = ast.parse(fh.read(), filename=path)
-        except (OSError, SyntaxError):
+        except (OSError, SyntaxError) as exc:
+            out.append({"file": _rel(path), "line": 0, "handler": f"not parsed: {type(exc).__name__}"})
             continue
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ExceptHandler):
+            if not isinstance(node, ast.ExceptHandler) or not _broad(node.type):
                 continue
             if all(_silent_stmt(s) for s in node.body):
                 typ = ast.unparse(node.type) if node.type is not None else "(bare)"

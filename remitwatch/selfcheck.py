@@ -722,11 +722,16 @@ def check_facility_twin(conn: sqlite3.Connection, today: str) -> dict:
     if "auto_note" not in cols:
         return _skip("facility_twin", "the store keeps no automatic notes")
     fac = _facility_links(conn)
+    link_col = "ema_link" if "ema_link" in cols else "NULL"
     offs = []
-    for fid, pcn, ev, cents in conn.execute("""SELECT finding_id, patient_control_number, evidence, COALESCE(shortfall_cents, 0)
-                                              FROM findings WHERE status = 'resolved' AND auto_note IS NOT NULL
-                                                AND COALESCE(stale, 0) = 0"""):
-        if is_facility(pcn):
+    for fid, pcn, own_link, ev, cents in conn.execute(f"""SELECT finding_id, patient_control_number, {link_col}, evidence,
+                                                         COALESCE(shortfall_cents, 0) FROM findings
+                                                         WHERE status = 'resolved' AND auto_note IS NOT NULL AND COALESCE(stale, 0) = 0"""):
+        try:
+            own_link = int(own_link) if own_link is not None else None
+        except (TypeError, ValueError):
+            own_link = None
+        if is_facility(pcn) or (own_link is not None and own_link in fac):
             continue                    # the surgery center's own item: its own claim may close it
         pl = _ev(ev).get("paid_later") or {}
         if not isinstance(pl, dict):
@@ -736,7 +741,7 @@ def check_facility_twin(conn: sqlite3.Connection, today: str) -> dict:
             link = int(link) if link is not None else None
         except (TypeError, ValueError):
             link = None
-        if is_facility(pl.get("claim")) or (link is not None and link in fac):
+        if is_facility(pl.get("claim")) or (link is not None and link in fac and link != own_link):
             offs.append((fid, cents, fid))
     return _result("facility_twin", offs)
 
@@ -813,7 +818,7 @@ def _work_now_money(conn: sqlite3.Connection, where: str = "", args: Sequence = 
     want = ["finding_id", "signal", "category", "status", "patient_control_number", "service_date", "procedure_code",
             "original_procedure_code", "billed_code", "payment_date", "payer_group", "shortfall_cents", "expected_cents",
             "paid_cents", "transaction_key", "line_key", "ema_link", "work_state", "appeal_deadline", "legal_deadline",
-            "state_basis", "carc", "claim_key", "evidence", "payer_kind", "first_seen"]
+            "state_basis", "carc", "claim_key", "evidence", "payer_kind", "first_seen", "appeal_block", "modifiers"]
     sel = ", ".join(c if c in cols else f"NULL AS {c}" for c in want)
     cur = conn.execute(f"""SELECT {sel} FROM findings WHERE COALESCE(stale, 0) = 0 AND status = 'open'
                            AND work_state = 'work_now' AND category IN ('denial','bundling','downcoding','underpayment') {where}""",
@@ -827,19 +832,38 @@ def check_precision_guard(conn: sqlite3.Connection, today: str) -> dict:
     if "work_state" not in cols:
         return _skip("precision_guard", "the store keeps no states yet")
     items = [it for it in _work_now_money(conn) if (it.get("shortfall_cents") or 0) > 0
-             and it.get("signal") not in CLAIM_SIGNALS + NOT_A_DENIAL]
-    later = later_payments(conn, items)
+             and it.get("signal") not in CLAIM_SIGNALS + NOT_A_DENIAL and not _credit_work(it)]
+    # one service (bill, date of service, code) can carry several items (lines of the same code, resubmissions): the money
+    # paid on it after the earliest of them must cover all of them, or the guard cannot tell which line it paid
+    groups: dict[tuple, list] = defaultdict(list)
+    for it in items:
+        groups[(bill_of(it.get("patient_control_number")), str(it.get("service_date") or "")[:10],
+                tuple(sorted(_codes_of(it))))].append(it)
+    reps = []
+    for members in groups.values():
+        first = min(members, key=lambda x: (str(x.get("payment_date") or ""), x["finding_id"]))
+        reps.append(dict(first, finding_id="group:" + first["finding_id"], line_key=None))
+    later = later_payments(conn, reps)
     offs = []
     by_signal: Counter = Counter()
-    for it in items:
-        got = later.get(it["finding_id"])
-        short = int(it.get("shortfall_cents") or 0)
-        if not got or got["total"] <= 0:
+    for key, members in groups.items():
+        first = min(members, key=lambda x: (str(x.get("payment_date") or ""), x["finding_id"]))
+        got = later.get("group:" + first["finding_id"])
+        short = sum(int(m.get("shortfall_cents") or 0) for m in members)
+        if not got or got["total"] <= 0 or short <= 0:
             continue
         if got["total"] >= max(short - 100, int(short * LATER_PAID_SHARE)):
-            offs.append((it["finding_id"], min(got["total"], short), it["finding_id"]))
-            by_signal[it.get("signal")] += 1
-    return _result("precision_guard", offs, info={"checked": len(items), "by_signal": dict(by_signal.most_common(10))})
+            for m in members:
+                offs.append((m["finding_id"], int(m.get("shortfall_cents") or 0), m["finding_id"]))
+                by_signal[m.get("signal")] += 1
+    return _result("precision_guard", offs, info={"checked": len(items), "services": len(groups),
+                                                 "by_signal": dict(by_signal.most_common(10))})
+
+
+def _credit_work(it: dict) -> bool:
+    """An item whose work is a credit to refund (states.py: appeal_block 'credit'), not money to collect."""
+    return it.get("appeal_block") == "credit" or str(it.get("state_basis") or "").startswith("EMA shows a credit")
+
 
 
 def _grace_days() -> int:
@@ -1108,6 +1132,26 @@ def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dic
     return _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10))})
 
 
+def _stored_results(conn: sqlite3.Connection) -> list[dict]:
+    """The checks other steps ran and kept in meta: the money checks (check_ledger, while the store's EMA summaries are of
+    the ledger revision they were measured on) and the dashboard copy's check (check_serving, from the last save)."""
+    out = []
+    money = meta_get(conn, K_MONEY, {}) or {}
+    current = money.get("ledger_seq") is None or str(money.get("ledger_seq")) == str(meta_get(conn, "ema:ledger_seq"))
+    for m in (money.get("checks") or []):
+        if isinstance(m, dict) and m.get("id") in CHECKS:
+            r = dict(m, keys=[tuple(k) for k in m.get("keys") or []])
+            if not current:
+                r.update(status="skip", text=f"{CHECKS[r['id']][3]}: measured on an earlier ledger revision; checked again "
+                                             "when the ledger is next open")
+            out.append(r)
+    sv = meta_get(conn, "selfcheck:serving")
+    if isinstance(sv, dict) and sv.get("status") in ("ok", "fail"):
+        out.append(_result("serving_copy", [(f"copy:{i}", 0, None) for i in range(int(sv.get("n") or 0))],
+                           status=sv["status"], text=sv.get("text"), examples=[]))
+    return out
+
+
 def _baseline(conn: sqlite3.Connection) -> dict[str, set[str]]:
     out: dict[str, set[str]] = defaultdict(set)
     for cid, key in conn.execute("SELECT check_id, key FROM selfcheck_baseline"):
@@ -1119,7 +1163,7 @@ def _set_baseline(conn: sqlite3.Connection, results: list[dict], at: str, accept
                   only: Iterable[str] | None = None) -> None:
     keep = set(only) if only is not None else None
     for r in results:
-        if r["severity"] != "critical" or r["status"] == "skip" or (keep is not None and r["id"] not in keep):
+        if r["severity"] != "critical" or r["status"] not in ("ok", "fail") or (keep is not None and r["id"] not in keep):
             continue
         if accepted_by is None:
             conn.execute("DELETE FROM selfcheck_baseline WHERE check_id = ? AND accepted_by IS NULL", (r["id"],))
@@ -1240,23 +1284,33 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     held_info: dict = {}
     can_hold = not first and len(before) > 0 and _has_table(conn, SNAPSHOT, "temp")
     held = bool(hold_ids) and can_hold
+    track: dict = {}
     if held:
         held_info = _hold(conn, rid, at)
+        _log("safe_mode", counts={"held_items": held_info.get("held_items"), "held_closures": held_info.get("held_closures")},
+             detail={"checks": hold_ids, "run_id": rid})
     elif van_new and not first:
         kept = _keep_vanished(conn, van_new, rid, at)
+        _log("kept_vanished", counts={"kept": kept}, detail={"examples": van_new[:EXAMPLES]})
     if not held:
         # this run is the last good one: its offenders are the baseline (a person's acceptances stay)
         _set_baseline(conn, results, at)
         if before:
-            _update_track(conn, before, _after_rows(conn), t, rid)
+            try:
+                track = _update_track(conn, before, _after_rows(conn), t, rid)
+            except Exception as exc:       # noqa: BLE001  (the track record waits for the next run; the checks stand)
+                _caught(exc, "track")
         conn.execute("DELETE FROM selfcheck_held")
     safe = _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_hold)
     summary = _store_results(conn, results, rid, t, mode, held, first, kept, at)
     conn.execute(f"DROP TABLE IF EXISTS temp.{SNAPSHOT}")
     conn.commit()
-    return {"run_id": rid, "held": held, "first": first, "hold_checks": hold_ids, "kept": kept,
-            "failing": [r["id"] for r in results if r["status"] == "fail"], "new": {k: len(v) for k, v in new_by.items()},
-            "checks": summary, "safe_mode": safe, "seconds": round(time.time() - ctx.get("t0", time.time()), 1)}
+    _log("checks", counts={"failing": sum(1 for r in results if r["status"] == "fail"), "kept": kept, "held": int(held)},
+         detail={r["id"]: r["status"] for r in results})
+    return {"run_id": rid, "held": held, "first": first, "hold_checks": hold_ids, "kept": kept, "track": track,
+            "failing": [r["id"] for r in results if r["status"] == "fail"], "errors": [r["id"] for r in results if r["status"] == "error"],
+            "new": {k: len(v) for k, v in new_by.items()}, "checks": summary, "safe_mode": safe,
+            "seconds": round(time.time() - ctx.get("t0", time.time()), 1)}
 
 
 def _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_hold) -> dict:
@@ -1547,16 +1601,19 @@ def _ledger_store(conn: sqlite3.Connection, lc: sqlite3.Connection, *, sample: i
                                                         GROUP BY 1, 2, 3"""):
         store[(month, payer, measure)] += int(cents or 0)
     led = defaultdict(int)
-    for month, payer, product, ins, pat, chg in lc.execute(
-            """SELECT substr(p.posted, 1, 7), COALESCE(n.name, ''), ((p.flags & 1) <> 0), SUM(COALESCE(p.ins_paid, 0)),
-                      SUM(COALESCE(p.pat_paid, 0)), SUM(COALESCE(p.charges, 0))
-               FROM postings p LEFT JOIN names n ON n.id = p.payer GROUP BY 1, 2, 3"""):
-        if ins:
-            led[(month, payer, "ins_paid")] += int(ins)
-        if pat:
-            led[(month, payer, "pat_paid")] += int(pat)
-        if chg:
-            led[(month, payer, "product" if product else "charges")] += int(chg)
+    names = {i: n for i, n in lc.execute("SELECT id, name FROM names")}
+    for pm in [m for (m,) in lc.execute("SELECT DISTINCT substr(posted, 1, 7) FROM postings") if m]:
+        for month, payer, product, ins, pat, chg in lc.execute(
+                """SELECT substr(posted, 1, 7), payer, ((flags & 1) <> 0), SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)),
+                          SUM(COALESCE(charges, 0))
+                   FROM postings WHERE posted >= ? AND posted < ? GROUP BY 1, 2, 3""", (pm + "-01", pm + "-32")):
+            payer = names.get(payer) or ""
+            if ins:
+                led[(month, payer, "ins_paid")] += int(ins)
+            if pat:
+                led[(month, payer, "pat_paid")] += int(pat)
+            if chg:
+                led[(month, payer, "product" if product else "charges")] += int(chg)
     diff_cells = 0
     for k in set(store) | set(led):
         d = store.get(k, 0) - led.get(k, 0)
@@ -1569,8 +1626,9 @@ def _ledger_store(conn: sqlite3.Connection, lc: sqlite3.Connection, *, sample: i
     if _has_table(conn, "ema_report_files") and _has_table(lc, "ledger_files"):
         cat = {fid: (st, live) for fid, st, live in conn.execute(
             "SELECT file_id, status, live_rows FROM ema_report_files WHERE report = 'production'")}
+        per_src = {src: n for src, n in lc.execute("SELECT src, COUNT(*) FROM postings GROUP BY src")}
         for fid, st, live, src in lc.execute("SELECT file_id, status, live_rows, src FROM ledger_files"):
-            got = lc.execute("SELECT COUNT(*) FROM postings WHERE src = ?", (src,)).fetchone()[0]
+            got = per_src.get(src, 0)
             if st in ("current", "partly_replaced") and (live or 0) != got:
                 offs.append((f"file:{str(fid)[:16]}:ledger", abs((live or 0) - got), None))
             c = cat.get(fid)
@@ -1625,16 +1683,24 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
     posting's money goes to one piece by its own column and reason:
       charges = insurer paid + patient paid + contractual (routine) + written off (by reason: EMA's rule at posting, a person
       later, timely filing) + patient adjustments + open (lines with a balance) - credits (lines paid past their charge)
-    The pieces are summed by separate rules over the postings and the open and credit pieces from the lines' own balances,
-    so a posting counted twice or in no piece shows as a cell whose pieces do not add up (critical past $1). Postings that
-    belong to no line (patient money with no claim number that matches no single line) are a visible gap of their own,
-    by cell. Stored in selfcheck_money."""
+    The pieces are summed by separate rules (a reason class the rules do not know lands in no piece) and the open and
+    credit pieces come from each line's own balance, so a posting counted twice or in no piece shows as a cell whose pieces
+    do not add up (critical past $1). Postings that belong to no line (patient money with no claim number that matches no
+    single line, insurance money with no claim number) are a visible gap of their own, by cell. One service month at a
+    time (the ledger's service-date index), so neither memory nor the temporary folder holds more than a month's lines.
+    Stored in selfcheck_money."""
     if not _has_table(lc, "postings"):
         return {"check": _skip("money_conservation", "no posting ledger"), "cells": 0}
     from . import ema_reports as er
     rc = _reason_class_fn()
-    lc.create_function("sc_class", 3, lambda g, c, k: rc(g, c, k), deterministic=True)
     names = {i: n for i, n in lc.execute("SELECT id, name FROM names")}
+    # each posting's reason class (ema_ledger.reason_class), worked out once per distinct (group, code, kind)
+    lc.execute("DROP TABLE IF EXISTS temp.sc_cls")
+    lc.execute("CREATE TEMP TABLE sc_cls (grp TEXT, code TEXT, kind INTEGER, cls TEXT)")
+    lc.executemany("INSERT INTO temp.sc_cls VALUES (?,?,?,?)",
+                   [(g or "", c or "", k if k is not None else -1, rc(g, c, names.get(k)))
+                    for g, c, k in lc.execute("SELECT DISTINCT grp, code, kind FROM postings").fetchall()])
+    lc.execute("CREATE UNIQUE INDEX temp.ix_sc_cls ON sc_cls(grp, code, kind)")
     group_cache: dict[Any, str] = {}
 
     def group(name_id: Any) -> str:
@@ -1642,65 +1708,69 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
             nm = names.get(name_id)
             try:
                 group_cache[name_id] = er.payer_group_of(conn, nm)[0] if nm else "No payer named"
-            except Exception:          # noqa: BLE001
+            except Exception as exc:          # noqa: BLE001  (an unreadable payer name is its own group)
+                _caught(exc, "payer_group")
                 group_cache[name_id] = str(nm or "No payer named")
         return group_cache[name_id]
-    lc.execute("DROP TABLE IF EXISTS temp.sc_ans")
-    lc.execute("""CREATE TEMP TABLE sc_ans AS SELECT DISTINCT link, svc, COALESCE(cpt, '') AS cpt, posted FROM postings
-                  WHERE link IS NOT NULL AND check_no IS NOT NULL""")
-    lc.execute("CREATE INDEX temp.ix_sc_ans ON sc_ans(link, svc, cpt, posted)")
-    kind_names = {i: n for i, n in names.items()}
-    lc.create_function("sc_kind", 1, lambda k: kind_names.get(k), deterministic=True)
-    # per line: the pieces and the line's cell key (its newest primary payer)
+    routine = ",".join(f"'{c}'" for c in ROUTINE_CLASSES)
+    money = "COALESCE(p.contractual, 0) + COALESCE(p.noncontractual, 0)"
+    months = [m for (m,) in lc.execute("SELECT DISTINCT substr(svc, 1, 7) FROM postings ORDER BY 1") if m]
     cells: dict[tuple, Counter] = defaultdict(Counter)
     line_rows = 0
-    for (svc_m, prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, n_rows, link_bal) in lc.execute(
-            """SELECT substr(p.svc, 1, 7), (SELECT q.primary_payer FROM postings q WHERE q.link = p.link AND q.svc = p.svc
-                                            AND COALESCE(q.cpt, '') = COALESCE(p.cpt, '') AND q.primary_payer IS NOT NULL
-                                            ORDER BY q.posted DESC, q.rowid DESC LIMIT 1),
-                      SUM(COALESCE(p.charges, 0)), SUM(COALESCE(p.ins_paid, 0)), SUM(COALESCE(p.pat_paid, 0)),
-                      SUM(CASE WHEN sc_class(p.grp, p.code, sc_kind(p.kind)) IN ('none','routine','patient','ema_kind')
-                               THEN COALESCE(p.contractual, 0) + COALESCE(p.noncontractual, 0) ELSE 0 END),
-                      SUM(CASE WHEN sc_class(p.grp, p.code, sc_kind(p.kind)) NOT IN ('none','routine','patient','ema_kind','timely')
-                                AND EXISTS (SELECT 1 FROM sc_ans a WHERE a.link = p.link AND a.svc = p.svc
-                                            AND a.cpt = COALESCE(p.cpt, '') AND a.posted = p.posted)
-                               THEN COALESCE(p.contractual, 0) + COALESCE(p.noncontractual, 0) ELSE 0 END),
-                      SUM(CASE WHEN sc_class(p.grp, p.code, sc_kind(p.kind)) NOT IN ('none','routine','patient','ema_kind','timely')
-                                AND NOT EXISTS (SELECT 1 FROM sc_ans a WHERE a.link = p.link AND a.svc = p.svc
-                                            AND a.cpt = COALESCE(p.cpt, '') AND a.posted = p.posted)
-                               THEN COALESCE(p.contractual, 0) + COALESCE(p.noncontractual, 0) ELSE 0 END),
-                      SUM(CASE WHEN sc_class(p.grp, p.code, sc_kind(p.kind)) = 'timely'
-                               THEN COALESCE(p.contractual, 0) + COALESCE(p.noncontractual, 0) ELSE 0 END),
-                      SUM(COALESCE(p.pat_adj, 0)), COUNT(*),
-                      SUM(COALESCE(p.charges, 0) - COALESCE(p.ins_paid, 0) - COALESCE(p.pat_paid, 0) - COALESCE(p.contractual, 0)
-                          - COALESCE(p.noncontractual, 0) - COALESCE(p.pat_adj, 0))
-               FROM postings p WHERE p.link IS NOT NULL GROUP BY p.link, p.svc, COALESCE(p.cpt, '')"""):
-        line_rows += 1
-        c = cells[(svc_m, group(prim))]
-        c["charges"] += chg or 0
-        c["ins_paid"] += ins or 0
-        c["pat_paid"] += pat or 0
-        c["contractual"] += contr_r or 0
-        c["wo_at_posting"] += wo_post or 0
-        c["wo_later"] += wo_later or 0
-        c["wo_timely"] += timely or 0
-        c["pat_adj"] += padj or 0
-        c["lines"] += 1
-        bal = link_bal or 0
-        if bal > 0:
-            c["open"] += bal
-        elif bal < 0:
-            c["credit"] += -bal
-    # postings that belong to no line: their own visible gap, in the cell of their service month and payer
-    for (svc_m, payer, prim, chg, ins, pat, adj, n_rows) in lc.execute(
-            """SELECT substr(svc, 1, 7), payer, primary_payer, SUM(COALESCE(charges, 0)), SUM(COALESCE(ins_paid, 0)),
-                      SUM(COALESCE(pat_paid, 0)), SUM(COALESCE(contractual, 0) + COALESCE(noncontractual, 0) + COALESCE(pat_adj, 0)), COUNT(*)
-               FROM postings WHERE link IS NULL GROUP BY 1, 2, 3"""):
-        c = cells[(svc_m, group(prim if prim is not None else payer))]
-        c["unlinked_charges"] += chg or 0
-        c["unlinked_money"] += (ins or 0) + (pat or 0) + (adj or 0)
-        c["unlinked_rows"] += n_rows or 0
-    lc.execute("DROP TABLE IF EXISTS temp.sc_ans")
+    for m in months:
+        lo, hi = m + "-01", m + "-32"
+        for tb in ("sc_ans", "sc_prim"):
+            lc.execute(f"DROP TABLE IF EXISTS temp.{tb}")
+        lc.execute("""CREATE TEMP TABLE sc_ans AS SELECT DISTINCT link, svc, COALESCE(cpt, '') AS cpt, posted FROM postings
+                      WHERE svc >= ? AND svc < ? AND link IS NOT NULL AND check_no IS NOT NULL""", (lo, hi))
+        lc.execute("CREATE INDEX temp.ix_sc_ans ON sc_ans(link, svc, cpt, posted)")
+        lc.execute("""CREATE TEMP TABLE sc_prim AS SELECT link, svc, COALESCE(cpt, '') AS cpt, primary_payer AS prim,
+                             MAX(posted || printf('%012d', rowid)) AS k
+                      FROM postings WHERE svc >= ? AND svc < ? AND link IS NOT NULL AND primary_payer IS NOT NULL
+                      GROUP BY link, svc, COALESCE(cpt, '')""", (lo, hi))
+        lc.execute("CREATE UNIQUE INDEX temp.ix_sc_prim ON sc_prim(link, svc, cpt)")
+        for (prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal) in lc.execute(
+                f"""SELECT pr.prim, SUM(COALESCE(p.charges, 0)), SUM(COALESCE(p.ins_paid, 0)), SUM(COALESCE(p.pat_paid, 0)),
+                           SUM(CASE WHEN x.cls IN ({routine}) THEN {money} ELSE 0 END),
+                           SUM(CASE WHEN x.cls NOT IN ({routine}, 'timely') AND a.posted IS NOT NULL THEN {money} ELSE 0 END),
+                           SUM(CASE WHEN x.cls NOT IN ({routine}, 'timely') AND a.posted IS NULL THEN {money} ELSE 0 END),
+                           SUM(CASE WHEN x.cls = 'timely' THEN {money} ELSE 0 END),
+                           SUM(COALESCE(p.pat_adj, 0)),
+                           SUM(COALESCE(p.charges, 0) - COALESCE(p.ins_paid, 0) - COALESCE(p.pat_paid, 0) - COALESCE(p.contractual, 0)
+                               - COALESCE(p.noncontractual, 0) - COALESCE(p.pat_adj, 0))
+                    FROM postings p
+                    LEFT JOIN temp.sc_cls x ON x.grp = COALESCE(p.grp, '') AND x.code = COALESCE(p.code, '')
+                         AND x.kind = COALESCE(p.kind, -1)
+                    LEFT JOIN temp.sc_ans a ON a.link = p.link AND a.svc = p.svc AND a.cpt = COALESCE(p.cpt, '') AND a.posted = p.posted
+                    LEFT JOIN temp.sc_prim pr ON pr.link = p.link AND pr.svc = p.svc AND pr.cpt = COALESCE(p.cpt, '')
+                    WHERE p.svc >= ? AND p.svc < ? AND p.link IS NOT NULL
+                    GROUP BY p.link, p.svc, COALESCE(p.cpt, '')""", (lo, hi)):
+            line_rows += 1
+            c = cells[(m, group(prim))]
+            c["charges"] += chg or 0
+            c["ins_paid"] += ins or 0
+            c["pat_paid"] += pat or 0
+            c["contractual"] += contr_r or 0
+            c["wo_at_posting"] += wo_post or 0
+            c["wo_later"] += wo_later or 0
+            c["wo_timely"] += timely or 0
+            c["pat_adj"] += padj or 0
+            c["lines"] += 1
+            if (bal or 0) > 0:
+                c["open"] += bal
+            elif (bal or 0) < 0:
+                c["credit"] += -bal
+        # postings that belong to no line: their own visible gap, in the cell of their service month and payer
+        for (payer, prim, chg, ins, pat, adj, n_rows) in lc.execute(
+                """SELECT payer, primary_payer, SUM(COALESCE(charges, 0)), SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)),
+                          SUM(COALESCE(contractual, 0) + COALESCE(noncontractual, 0) + COALESCE(pat_adj, 0)), COUNT(*)
+                   FROM postings WHERE svc >= ? AND svc < ? AND link IS NULL GROUP BY 1, 2""", (lo, hi)):
+            c = cells[(m, group(prim if prim is not None else payer))]
+            c["unlinked_charges"] += chg or 0
+            c["unlinked_money"] += (ins or 0) + (pat or 0) + (adj or 0)
+            c["unlinked_rows"] += n_rows or 0
+    for tb in ("sc_ans", "sc_prim", "sc_cls"):
+        lc.execute(f"DROP TABLE IF EXISTS temp.{tb}")
     offs, gaps = [], []
     conn.execute("DELETE FROM selfcheck_money")
     rows = []
@@ -1723,12 +1793,12 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
         tot.update(c)
     summary = {"cells": len(cells), "lines": line_rows, "since": SERVICE_FROM[:7],
                "totals_since": {k: int(v) for k, v in tot.items()},
-               "cells_off": [{"cell": k, "gap_cents": c} for k, c, _f in offs][:50],
+               "cells_off": [{"cell": k, "gap_cents": c} for k, c in [(o[0], o[1]) for o in offs]][:50],
                "unlinked": sorted(gaps, key=lambda x: -abs(x["unlinked_money_cents"]))[:50],
                "unlinked_money_cents": int(sum(c["unlinked_money"] for c in cells.values())),
                "unlinked_since_cents": int(tot.get("unlinked_money", 0))}
     text = (f"{_n(len(cells), 'month and payer cell')} checked; " +
-            ("every one adds up to its charges" if not offs else f"{_n(len(offs), 'cell')} do not add up ({usd0(sum(c for _k, c, _f in offs))})") +
+            ("every one adds up to its charges" if not offs else f"{_n(len(offs), 'cell')} do not add up ({usd0(sum(o[1] for o in offs))})") +
             f"; {usd0(summary['unlinked_since_cents'])} of patient or insurance money since {SERVICE_FROM[:7]} sits on no line")
     summary["check"] = _result("money_conservation", offs, info={"cells": len(cells), "lines": line_rows,
                                                                  "unlinked_since_cents": summary["unlinked_since_cents"]},
@@ -2007,15 +2077,7 @@ def _denial_cases(conn: sqlite3.Connection, newest: str) -> list[tuple]:
                             WHERE COALESCE(t.superseded, 0) = 0 AND l.claim_status_code IN ('1','19')
                               AND COALESCE(l.paid_cents, 0) = 0 AND COALESCE(l.charge_cents, 0) > 0
                               AND l.payment_date <= ?""", (mature,)).fetchall()
-    # what each payer group usually allows for a code (median of its paid one-unit lines): the denied line's expected amount
-    rates: dict[tuple, list] = defaultdict(list)
-    for name, cfi, code, allowed in conn.execute(
-            """SELECT l.payer_name, c.claim_filing_indicator, COALESCE(l.original_procedure_code, l.procedure_code),
-                      COALESCE(l.allowed_cents, l.paid_cents) FROM lines l JOIN claims c ON c.claim_key = l.claim_key
-               WHERE l.claim_status_code IN ('1','19') AND COALESCE(l.paid_cents, 0) > 0 AND COALESCE(l.paid_units, 1) <= 1"""):
-        if allowed and allowed > 0:
-            rates[(_group_kind(name, cfi)[0], code)].append(int(allowed))
-    med = {k: _pct(v, 50) for k, v in rates.items() if len(v) >= 3}
+    med = _usual_rates(conn, since=None)
     out = []
     for lk, pcn, b, svc, code, mods, paid_on, name, cfi, carc, charge in rows:
         grp = _group_kind(name, cfi)[0]
@@ -2391,16 +2453,30 @@ def _cov_denials(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list,
     return out, None
 
 
-def _usual_rates(conn: sqlite3.Connection) -> dict:
-    rates: dict[tuple, list] = defaultdict(list)
-    for name, cfi, code, allowed in conn.execute(
+def _usual_rates(conn: sqlite3.Connection, since: str | None = "default") -> dict:
+    """What each payer group usually allows for a code: the median allowed amount of its paid one-unit lines (from
+    `since`, by default the year before the gates' population), with at least 3 lines. {(payer group, code): cents}."""
+    lo = _add(SERVICE_FROM, -365) if since == "default" else (since or "0000")
+    counts: dict[tuple, Counter] = defaultdict(Counter)
+    for name, cfi, code, allowed, n in conn.execute(
             """SELECT l.payer_name, c.claim_filing_indicator, COALESCE(l.original_procedure_code, l.procedure_code),
-                      COALESCE(l.allowed_cents, l.paid_cents) FROM lines l JOIN claims c ON c.claim_key = l.claim_key
+                      COALESCE(l.allowed_cents, l.paid_cents), COUNT(*) FROM lines l JOIN claims c ON c.claim_key = l.claim_key
                WHERE l.claim_status_code IN ('1','19') AND COALESCE(l.paid_cents, 0) > 0 AND COALESCE(l.paid_units, 1) <= 1
-                 AND l.service_date >= ?""", (_add(SERVICE_FROM, -365),)):
+                 AND l.service_date >= ? GROUP BY 1, 2, 3, 4""", (lo,)):
         if allowed and allowed > 0:
-            rates[(_group_kind(name, cfi)[0], code)].append(int(allowed))
-    return {k: _pct(v, 50) for k, v in rates.items() if len(v) >= 3}
+            counts[(_group_kind(name, cfi)[0], code)][int(allowed)] += n
+    out = {}
+    for k, cnt in counts.items():
+        total = sum(cnt.values())
+        if total < 3:
+            continue
+        half, run = (total + 1) // 2, 0
+        for amount in sorted(cnt):
+            run += cnt[amount]
+            if run >= half:
+                out[k] = amount
+                break
+    return out
 
 
 def _cov_auto_writeoffs(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list, str | None]:
@@ -2472,22 +2548,30 @@ def _cov_unposted(conn: sqlite3.Connection, today: str, idx: dict) -> tuple[list
     newest_prod = conn.execute("SELECT MAX(last_posted) FROM ema_checks").fetchone()[0] or today
     cut = _add(min(today, newest_prod), -21)
     out = []
+    unposted = []
     for tk, trace, paid_on, cents, method, payer in conn.execute(
             """SELECT transaction_key, trace_number, payment_date, COALESCE(payment_amount_cents, 0), payment_method, payer_name
                FROM transactions WHERE COALESCE(superseded, 0) = 0 AND payment_date >= ? AND payment_date <= ?
                  AND COALESCE(payment_amount_cents, 0) > 0 AND COALESCE(payment_method, '') <> 'NON'""", (SERVICE_FROM, cut)):
-        if _digits(trace) in posted:
-            continue
-        held = None
-        for pcn, svc, code in conn.execute("""SELECT c.patient_control_number, l.service_date, COALESCE(l.original_procedure_code, l.procedure_code)
-                                              FROM claims c JOIN lines l ON l.claim_key = c.claim_key WHERE c.transaction_key = ?
-                                                AND COALESCE(l.paid_cents, 0) > 0""", (tk,)):
+        if _digits(trace) not in posted:
+            unposted.append((tk, paid_on, cents, payer))
+    held_of: dict[str, str | None] = {}
+    if unposted:
+        conn.execute("DROP TABLE IF EXISTS temp.sc_tk")
+        conn.execute("CREATE TEMP TABLE sc_tk (tk TEXT PRIMARY KEY)")
+        conn.executemany("INSERT OR IGNORE INTO temp.sc_tk VALUES (?)", [(u[0],) for u in unposted])
+        for tk, pcn, svc, code in conn.execute(
+                """SELECT c.transaction_key, c.patient_control_number, l.service_date, COALESCE(l.original_procedure_code, l.procedure_code)
+                   FROM temp.sc_tk k JOIN claims c ON c.transaction_key = k.tk JOIN lines l ON l.claim_key = c.claim_key
+                   WHERE COALESCE(l.paid_cents, 0) > 0"""):
             h = _covered(idx["service"].get((bill_of(pcn), str(svc)[:10], code)))
-            if h == "listed" or (h and not held):
-                held = h
+            if h == "listed" or (h and not held_of.get(tk)):
+                held_of[tk] = h
+        conn.execute("DROP TABLE IF EXISTS temp.sc_tk")
+    for tk, paid_on, cents, payer in unposted:
         out.append({"key": f"check:{tk}", "category": "era_payment_not_posted", "reason": "check_not_posted",
                     "payer_group": _group_kind(payer)[0], "month": str(paid_on)[:7], "cents": int(cents), "deadline": None,
-                    "held": held})
+                    "held": held_of.get(tk)})
     return out, None
 
 
@@ -2838,18 +2922,23 @@ def _pw_credentialing(conn: sqlite3.Connection, asof: str, covered: set) -> list
     new = {npi for npi, d in first.items() if d and d >= (_add(asof, -180) or "")}
     if not new:
         return []
-    marks = ",".join("?" * len(PROVIDER_CARCS))
-    rmarks = ",".join("?" * len(PROVIDER_RARCS))
+    # the claims a payer denied for enrollment or credentialing: one pass over the reasons and remarks (indexed temp tables,
+    # so the compact store, which keeps no index on them, is not rescanned line by line)
+    conn.execute("DROP TABLE IF EXISTS temp.sc_cred")
+    conn.execute("CREATE TEMP TABLE sc_cred (claim_key TEXT PRIMARY KEY)")
+    conn.execute(f"""INSERT OR IGNORE INTO temp.sc_cred SELECT claim_key FROM adjustments WHERE claim_key IS NOT NULL
+                     AND reason_code IN ({','.join('?' * len(PROVIDER_CARCS))})""", sorted(PROVIDER_CARCS))
+    if _has_table(conn, "remarks"):
+        conn.execute(f"""INSERT OR IGNORE INTO temp.sc_cred SELECT claim_key FROM remarks WHERE claim_key IS NOT NULL
+                         AND code IN ({','.join('?' * len(PROVIDER_RARCS))})""", sorted(PROVIDER_RARCS))
     hits: dict[tuple, list] = defaultdict(list)
     for npi, name, cfi, charge, lk in conn.execute(
-            f"""SELECT l.rendering_provider_npi, l.payer_name, c.claim_filing_indicator, COALESCE(l.charge_cents, 0), l.line_key
-                FROM lines l JOIN claims c ON c.claim_key = l.claim_key
-                WHERE l.payment_date > ? AND l.payment_date <= ? AND COALESCE(l.paid_cents, 0) = 0
-                  AND (EXISTS (SELECT 1 FROM adjustments a WHERE a.claim_key = l.claim_key AND a.reason_code IN ({marks}))
-                       OR EXISTS (SELECT 1 FROM remarks m WHERE m.claim_key = l.claim_key AND m.code IN ({rmarks})))""",
-            (r0, asof, *sorted(PROVIDER_CARCS), *sorted(PROVIDER_RARCS))):
+            """SELECT l.rendering_provider_npi, l.payer_name, c.claim_filing_indicator, COALESCE(l.charge_cents, 0), l.line_key
+               FROM temp.sc_cred d JOIN claims c ON c.claim_key = d.claim_key JOIN lines l ON l.claim_key = c.claim_key
+               WHERE l.payment_date > ? AND l.payment_date <= ? AND COALESCE(l.paid_cents, 0) = 0""", (r0, asof)):
         if npi in new:
             hits[(npi, _group_kind(name, cfi)[0])].append((charge, lk))
+    conn.execute("DROP TABLE IF EXISTS temp.sc_cred")
     names = _provider_names(conn)
     out = []
     for (npi, grp), rows in hits.items():

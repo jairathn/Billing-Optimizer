@@ -99,6 +99,8 @@ WORK_KINDS = {"fax": "Fax or appeal sent through RemitWatch", "sent": "Corrected
 EVENT_WORK = {"sent": "sent", "resubmitted": "sent", "corrected": "sent", "appeal": "sent", "mark_sent": "sent",
               "call": "call", "portal": "call", "outcome": "call", "log_outcome": "call",
               "posted": "posted", "mark_posted": "posted", "billed": "billed", "mark_billed": "billed", "fix": "fix"}
+WORK_PHRASES = {"fax": "fax sent through RemitWatch", "sent": "claim or appeal marked Sent", "call": "call or portal check",
+                "posted": "payment marked posted", "billed": "billing of the patient or second payer", "fix": "fix recorded"}
 WAIT_OF = {"fax": "fax", "sent": "sent", "call": "call", "posted": "call", "billed": "secondary", "fix": "corrected"}
 SYSTEM_ACTORS = frozenset({"system", "hide rule", "packets", "fax", "remitwatch"})
 # a fix noted on an item (a note on a pattern item that says what was fixed): the marker on the denial-rate chart
@@ -727,7 +729,7 @@ def _bucket(conn: sqlite3.Connection, ev_date: str, works: list[dict], signals: 
 
 def _rule_text(bucket: str, ev: dict, credit: dict | None, win: int | None, F: str, signals: set) -> str:
     if bucket == "a" and credit:
-        return (f"{ev['text']}: {_days(credit['date'], ev['date'])} days after the {WORK_KINDS[credit['kind']].lower()} of "
+        return (f"{ev['text']}: {_days(credit['date'], ev['date'])} days after the {WORK_PHRASES.get(credit['kind'], 'work')} of "
                 f"{credit['date']} by {credit['who']}, inside the payer's {win}-day answer time")
     if bucket == "b":
         what = ("a second payer nobody had billed" if "SECONDARY_NOT_BILLED" in signals else
@@ -862,31 +864,34 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     # an unposted payment found posted, on an item no 835 or EMA line ties to another
     for fid, evs in found.items():
         if fid not in group_of:
+            group_of[fid] = fid
+            group_events[fid], group_members[fid] = list(evs), [fid]
             settle(fid, [fid], list(evs))
-    # a person who marked an item Paid, where no payment record shows the money: their amount, on their day
-    for fid, r in reg.items():
-        if fid in group_of and out_items.get(group_of[fid], {}).get("returned"):
-            continue
-        st, rec_c, rec_d = r.get("last_status"), None, None
-        if st != "resolved":
-            continue
-        row = conn.execute("SELECT recovered_cents, recovered_date, auto_note FROM findings WHERE finding_id=?", (fid,)).fetchone() \
-            if _table(conn, "findings") else None
-        if not row or row[2] or not (row[0] or 0) > 0 or not row[1]:
-            continue
-        rec_c, rec_d = int(row[0]), str(row[1])[:10]
-        if not r["F"] or rec_d <= r["F"]:
-            continue
-        e = {"id": ("mark", fid), "date": rec_d, "cents": rec_c, "kind": "mark", "source": "person", "payer": r.get("payer_group") or "",
-             "text": f"Marked Paid ({usd(rec_c)}) on {rec_d} by a person; no payment record shows it yet"}
-        if fid in group_of:
-            winner = group_of[fid]
-            mem = out_items[winner]["members"] if winner in out_items else [fid]
-        else:
-            winner, mem = fid, [fid]
-        if winner in out_items and out_items[winner]["returned"]:
-            continue
-        settle(winner if winner in reg else fid, mem, [e])
+    # a person who marked an item Paid, where no payment record of its group shows money: their amount, on their day (one
+    # mark per group, the earliest-raised item's, so two people marking the same line Paid count it once)
+    marks: dict[str, tuple] = {}
+    if _table(conn, "findings"):
+        resolved = [fid for fid, r in reg.items() if r.get("last_status") == "resolved" and r["F"]]
+        for part in _chunks(sorted(resolved)):
+            _temp_ids(conn, "rs_pm", part)
+            for fid, rc, rd, auto in conn.execute("""SELECT finding_id, recovered_cents, recovered_date, auto_note FROM findings
+                                                     WHERE status='resolved' AND finding_id IN (SELECT id FROM temp.rs_pm)"""):
+                r = reg[fid]
+                if auto or not (rc or 0) > 0 or not rd or str(rd)[:10] <= r["F"]:
+                    continue
+                winner = group_of.get(fid, fid)
+                if (out_items.get(winner) or {}).get("returned"):
+                    continue
+                e = {"id": ("mark", fid), "date": str(rd)[:10], "cents": int(rc), "kind": "mark", "source": "person",
+                     "payer": r.get("payer_group") or "",
+                     "text": f"Marked Paid ({usd(rc)}) on {str(rd)[:10]} by a person; no payment record shows it yet"}
+                if winner not in marks or (r["F"], fid) < marks[winner][0]:
+                    marks[winner] = ((r["F"], fid), e)
+        _drop(conn, "rs_pm")
+    for winner, (_k, e) in marks.items():
+        mem = group_members.get(winner) or [winner]
+        group_of.setdefault(winner, winner)
+        settle(winner, mem, list(group_events.get(winner) or []) + [e])
     return {"items": out_items, "groups": group_of, "work": work, "denied_again": denied_again, "answered": answered,
             "candidates": len(cands), "newest": newest, "errors": errors}
 
@@ -957,7 +962,14 @@ def lift(reg: dict, att: dict, today: Any = None) -> dict:
     w_n, w_k = len(worked), sum(1 for p in worked if p["paid"])
     u_n, u_k = len(unworked), sum(1 for p in unworked if p["paid"])
     w_ret = sum(p["ret"] for p in worked)
-    return {"worked": {"n": w_n, "paid": w_k, "rate": _pct(w_k, w_n), "returned_cents": w_ret, "stake_cents": sum(p["stake"] for p in worked)},
+
+    def entries(ps: list) -> list:
+        return sorted(([p["fid"], p["ret"]] for p in ps), key=lambda x: (-x[1], x[0]))
+    lists = {"lift:worked": entries(worked), "lift:worked:paid": entries([p for p in worked if p["paid"]]),
+             "lift:unworked": entries(unworked), "lift:unworked:paid": entries([p for p in unworked if p["paid"]]),
+             "lift:z": entries(zpop), "lift:z:paid": entries([p for p in zpop if p["paid"]])}
+    return {"lists": lists,
+            "worked": {"n": w_n, "paid": w_k, "rate": _pct(w_k, w_n), "returned_cents": w_ret, "stake_cents": sum(p["stake"] for p in worked)},
             "unworked": {"n": u_n, "paid": u_k, "rate": _pct(u_k, u_n), "returned_cents": sum(p["ret"] for p in unworked),
                          "stake_cents": sum(p["stake"] for p in unworked)},
             "predicted_paid": round(pred_n, 1), "predicted_cents": int(round(pred_cents)),
@@ -1204,13 +1216,13 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
     return out, lists
 
 
-def _hours_counts(conn: sqlite3.Connection, att: dict) -> tuple[dict, dict]:
+def _hours_counts(conn: sqlite3.Connection, att: dict, today: str) -> tuple[dict, dict]:
     """What the hours-saved estimate multiplies: items RemitWatch proved settled or closed by itself, appeal packets built,
     faxes sent, and repeat listings folded into one item."""
     lists: dict[str, list] = {}
     invest: list = []
-    if _table(conn, "findings"):
-        w, p = live_sql("hours:investigate", _today())
+    if _table(conn, "findings") and "work_state" in _cols(conn, "findings"):
+        w, p = live_sql("hours:investigate", today)
         invest = [r[0] for r in conn.execute(f"SELECT finding_id FROM findings f WHERE {w} ORDER BY finding_id", p)]
     packets: set = set()
     n_packets = 0
@@ -1566,13 +1578,12 @@ def compute(conn: sqlite3.Connection, today: Any = None, *, errors: list | None 
     att = attribute(conn, t, registry=reg, errors=errors)
     lf = lift(reg, att, t)
     money, lists = _money(conn, reg, att, lf, t)
-    for k, v in (("lift:worked", [p for p in reg if att["work"].get(p)]),):
-        lists[k] = [[f, (att["items"].get(att["groups"].get(f, f)) or {}).get("returned", 0)] for f in sorted(v) if reg[f]["returnable"]]
+    lists.update(lf.pop("lists"))
     work, wl = _work_done(conn, reg, att, t)
     lists.update(wl)
     outcomes, ol = _outcomes(conn, reg, att, t)
     lists.update(ol)
-    hours, hl = _hours_counts(conn, att)
+    hours, hl = _hours_counts(conn, att, t)
     lists.update(hl)
     lost, ll = _lost(reg)
     lists.update(ll)
@@ -1691,7 +1702,7 @@ def refresh(conn: sqlite3.Connection, *, today: Any = None, run_id: Any = None, 
     payload, lists = compute(conn, t, errors=errors)
     live = live_figures(conn, t)
     _weeks_payload(payload)
-    payload.update(rev=rev, run_id=run_id, host=host, seconds=round(time.time() - t0, 1))
+    payload.update(rev=rev, run_id=run_id, host=host, seconds=round(time.time() - t0, 1), detect_run=detect_run(conn))
     _set_meta(conn, DASH_KEY, payload)
     _set_meta(conn, LISTS_KEY, lists)
     out["snapshot"] = snapshot(conn, payload, live, t, read_settings(conn))
@@ -1752,9 +1763,25 @@ def dashboard(conn: sqlite3.Connection) -> dict | None:
 
 
 def stale(conn: sqlite3.Connection, today: Any = None) -> bool:
-    """Whether the stored figures rest on older data than the store holds now (a server works them out again then)."""
+    """Whether the stored figures rest on older data than the store holds now."""
     d = dashboard(conn)
     return d is None or d.get("rev") != data_rev(conn, today)
+
+
+def detect_run(conn: sqlite3.Connection) -> str | None:
+    """When the newest analysis finished (the figures are worked out again after each one)."""
+    if not _table(conn, "detection_runs"):
+        return None
+    r = conn.execute("SELECT MAX(finished_at) FROM detection_runs").fetchone()
+    return r[0] if r else None
+
+
+def needs_compute(conn: sqlite3.Connection) -> bool:
+    """A server's page works the figures out itself only before the first run that did, or after an analysis that came
+    after them (new data). Work a person recorded since shows after the next analysis; the run's own step (refresh) keeps
+    them current on both hosts."""
+    d = dashboard(conn)
+    return d is None or d.get("detect_run") != detect_run(conn)
 
 
 def hours_saved(counts: dict, settings: dict) -> dict:

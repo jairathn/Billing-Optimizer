@@ -1924,16 +1924,11 @@ def data_health(conn: sqlite3.Connection) -> list[dict]:
 def panel(conn: sqlite3.Connection, state: Any = None) -> dict:
     """The Data tab's "Store size and memory" panel, from what the runs recorded in meta (never measured on the
     dashboard's copy): the hot store's size and largest tables, peak memory against the budget, the last runs, the
-    archive's files and what the last run retired, the horizon in force."""
-    ensure_schema(conn)
+    archive's files and what the last run retired, the horizon in force. It writes nothing (the dashboard's copy may be
+    read-only)."""
     hist = history(conn)
     last = hist[-1] if hist else {}
     s = _meta_json(conn, META_SUMMARY, {})
-    if not s:
-        try:
-            s = summary(conn)
-        except sqlite3.Error:
-            s = {}
     hz = _meta_json(conn, META_HORIZON, {})
     where = _meta(conn, META_WHERE)
     if not where and state is not None:

@@ -137,12 +137,14 @@ async function todayTab(v){
 // ---------------------------------------------------------------- Today: the blind spot, the scoreboard, the counts by state
 // The health checks the blind-spot banner already says, in dollars, while a feed is behind
 const TD_BLIND_KEYS = new Set(['feed', 'ema_ar_stale', 'ema_production_stale']);
-const TD_SCORE = [['recovered_cents', 'Recovered', 'Money that came back on items RemitWatch flagged or worked'],
-  ['lost_cents', 'Lost to deadlines', 'Items whose last window closed while they waited for work'],
-  ['at_risk_cents', 'At risk in 14 days', 'Items to work whose window closes within 14 days'],
-  ['given_up_cents', 'Given up without a decision', 'Written off with no person deciding and no owner policy']];
-const TD_STATES = [['todo', 'Work now', 'Needs a person this week, follow-ups due included'], ['followup_due', 'Follow-ups due', "In Work now: the payer's time to answer has passed"],
-  ['waiting', 'Waiting', 'Sent or worked; the payer still has time']];
+// [figure, label, one-line hint under the number, the longer words on hover]
+const TD_SCORE = [['recovered_cents', 'Recovered', 'came back after flagging', 'Money that came back on items RemitWatch flagged or worked'],
+  ['lost_cents', 'Lost to deadlines', 'windows closed, unworked', 'Items whose last window closed while they waited for work'],
+  ['at_risk_cents', 'At risk in 14 days', 'windows closing soon', 'Items to work now whose window closes within 14 days'],
+  ['given_up_cents', 'Given up without a decision', 'written off, nobody decided', 'Written off with no person deciding and no owner policy covering it']];
+const TD_STATES = [['todo', 'Work now', 'this week, follow-ups too', 'Items that need a person this week, the follow-ups that came due included'],
+  ['followup_due', 'Follow-ups due', 'the payer had its time', "Part of Work now: work was done and the payer's usual time to answer has passed"],
+  ['waiting', 'Waiting', 'on the payer', 'Sent or worked; the payer still has time to answer']];
 const TD_QUIET = [['done', 'done'], ['accepted', 'accepted'], ['expired', 'expired'], ['cant_check', "can't be checked"]];
 
 // What the site cannot check while a feed (the remittances, EMA's A/R or Production report) is behind, in dollars. Any page
@@ -159,17 +161,18 @@ async function tdBlindBanner(el, given){
   el.innerHTML = tdBlindHtml(bl);
   el.querySelectorAll('.go-data').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab='data'; location.hash='data'; render(); });
 }
-function tdTile(key, label, hint, x, cls){
+function tdTile(key, label, hint, x, cls, more){
   const n = x && x.n != null ? x.n : null;
-  return `<div class="tile ${cls||''}" role="button" tabindex="0" data-td="${esc(key)}" title="${esc(hint)}"><span class="t-l">${esc(label)}</span>
+  const upper = x && x.upper_cents ? ` Up to ${money(x.upper_cents)} of the dollars is an estimate (charge less paid), not a priced amount.` : '';
+  return `<div class="tile ${cls||''}" role="button" tabindex="0" data-td="${esc(key)}" title="${esc((more||hint) + upper)}"><span class="t-l">${esc(label)}</span>
     <span class="t-v">${n == null ? '–' : Number(n).toLocaleString()}${n ? `<small>${short$(x.cents)}</small>` : ''}</span><span class="t-s">${esc(hint)}</span></div>`;
 }
 function tdScoreHtml(sb){
   // unit R's scoreboard: a figure the route does not give yet shows a dash, never a zero
   const s = sb || {}, basis = s.basis || {};
-  return `<div class="tiles" id="tdScore" aria-label="The money scoreboard">${TD_SCORE.map(([k, label, hint]) => {
+  return `<div class="tiles" id="tdScore" aria-label="The money scoreboard">${TD_SCORE.map(([k, label, hint, more]) => {
     const c = s[k], key = k.replace(/_cents$/, '');
-    return `<div class="tile ${k==='lost_cents'&&c?'t-red':''}${k==='at_risk_cents'&&c?' t-amber':''}" role="button" tabindex="0" data-score="${esc(key)}" title="${esc(basis[key] || hint)}">
+    return `<div class="tile ${k==='lost_cents'&&c?'t-red':''}${k==='at_risk_cents'&&c?' t-amber':''}" role="button" tabindex="0" data-score="${esc(key)}" title="${esc(basis[key] || more)}">
       <span class="t-l">${esc(label)}</span><span class="t-v">${c == null ? '–' : money(c)}</span><span class="t-s">${esc(hint)}</span></div>`; }).join('')}</div>`;
 }
 function tdStatesHtml(td){
@@ -179,9 +182,10 @@ function tdStatesHtml(td){
   const other = td.other || {}, post = other.post || {}, refund = other.refund || {};
   const also = [post.n ? `<a href="#" data-td="post">${esc(pl(post.n, 'payment'))} to post in EMA</a>` : '', refund.n ? `<a href="#" data-td="refund">${esc(pl(refund.n, 'credit'))} to refund</a>` : ''].filter(Boolean);
   return `<div class="tiles" id="tdStates" aria-label="Items by state">
-      ${TD_STATES.map(([k, label, hint]) => tdTile(k, label, hint, st[k], k==='followup_due' && (st[k]||{}).n ? 't-amber' : '')).join('')}
-      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', "EMA wrote them off when the denial posted; nobody worked them", aw, aw.n ? 't-red' : '') : ''}
-      ${un ? tdTile('unworked', 'Nobody has worked these', `No work in EMA or here in the 21 days to ${longDate(un.data_through)}`, un, '') : ''}
+      ${TD_STATES.map(([k, label, hint, more]) => tdTile(k, label, hint, st[k], k==='followup_due' && (st[k]||{}).n ? 't-amber' : '', more)).join('')}
+      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', 'EMA wrote off, nobody worked', aw, aw.n ? 't-red' : '',
+        "EMA's posting rule wrote the denial off the day it posted, nobody worked it, and its window is still open") : ''}
+      ${un ? tdTile('unworked', 'Nobody has worked these', 'no work in 21 days', un, '', `No work in EMA or here in the 21 days to ${longDate(un.data_through)}`) : ''}
     </div>
     ${quiet.length || also.length ? `<div class="oneline">${quiet.length ? 'Not on today\'s list: ' + quiet.join(', ') + '.' : ''}${also.length ? ' Also: ' + also.join(', ') + '.' : ''}</div>` : ''}`;
 }

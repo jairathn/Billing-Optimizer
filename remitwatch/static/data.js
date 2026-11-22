@@ -12,6 +12,8 @@ const DT_STATUS = {current: ['Current', 'ok'], partly_replaced: ['Current, partl
 const DT_SHOW = 8;          // catalog rows shown before "Show all"
 
 function dtDay(d){ return d ? longDate(String(d).slice(0, 10)) : ''; }
+// a phone (390 px): lists instead of wide tables, so each row's button stays on screen
+function dtNarrow(){ return typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth <= 640; }
 function dtAge(days, limit){ if(days == null) return ''; const cls = days > limit ? 'sev-high' : 'ok'; return `<span class="${cls}">${esc(pl(days, 'day'))} old</span>`; }
 function dtScope(f){
   if(f.scope === 'posted' && (f.posted_lo || f.posted_hi)) return `posted ${dtDay(f.posted_lo)} to ${dtDay(f.posted_hi)}`;
@@ -93,6 +95,12 @@ function dtEmaHtml(e){
 
 function dtFileRow(x){
   const st = DT_STATUS[x.status] || [x.status, ''];
+  if(dtNarrow()){
+    const rows = x.rows_applied != null ? x.rows_applied : x.rows_read;
+    return `<div class="check"><div><b>${esc(DT_REPORT[x.report] || x.report || '')}</b> <span class="small muted">${esc(x.source_name||'')}</span>
+      <div class="small">${[dtScope(x), x.as_of ? 'as of ' + dtDay(x.as_of) : '', rows != null ? pl(rows, 'row') : ''].filter(Boolean).join(' · ')}</div>
+      <div class="small"><span class="${st[1]}">${esc(st[0])}</span>${x.decided_by ? ` · ${esc(x.decision === 'discard' ? 'Discarded' : 'Apply chosen')} by ${esc(x.decided_by)} on ${dtDay(x.decided_at)}` : ''} · ${esc(x.from||'')}</div></div></div>`;
+  }
   const rows = x.rows_applied != null ? Number(x.rows_applied).toLocaleString() : (x.rows_read != null ? Number(x.rows_read).toLocaleString() : '');
   const repl = (x.replaced||[]).length ? `<div class="small muted">replaced ${esc(pl(x.replaced.length, 'earlier file'))}</div>` : '';
   return `<tr><td>${esc(DT_REPORT[x.report] || x.report || '')}<div class="small muted">${esc(x.source_name||'')}</div></td><td class="small">${dtScope(x)}${x.aging_window===30?'<div class="sev-medium">0 to 30 days only</div>':''}</td>
@@ -115,8 +123,9 @@ function dtReportsHtml(e){
     ${heldHtml}
     ${waiting.length ? `<div class="small">${esc(pl(waiting.length, 'report'))} ${waiting.length===1?'waits':'wait'} to be read: ${waiting.map(x=>esc(x.status_reason || 'the next run reads it')).filter((t,i,a)=>a.indexOf(t)===i).join(' ')}</div>` : ''}
     <details class="dfold" ${held.length ? 'open' : ''}><summary>${esc(pl(files.length, 'report file'))} on file</summary>
-    <div class="scroll"><table class="small"><thead><tr><th>Report</th><th>Covers</th><th>As of</th><th class="num">Rows</th><th>Status</th><th>From</th></tr></thead>
-    <tbody id="dtFiles">${files.slice(0, DT_SHOW).map(dtFileRow).join('')}</tbody></table></div>
+    ${dtNarrow() ? `<div id="dtFiles">${files.slice(0, DT_SHOW).map(dtFileRow).join('')}</div>`
+      : `<div class="scroll"><table class="small"><thead><tr><th>Report</th><th>Covers</th><th>As of</th><th class="num">Rows</th><th>Status</th><th>From</th></tr></thead>
+    <tbody id="dtFiles">${files.slice(0, DT_SHOW).map(dtFileRow).join('')}</tbody></table></div>`}
     ${files.length > DT_SHOW ? `<button class="ghost" id="dtAllFiles">Show all ${files.length}</button>` : ''}</details>
     ${nr.length ? `<div class="small muted" style="margin-top:6px">${esc(pl(nr.length, 'file'))} the site did not read: not one of EMA's reports or weekly exports, or too big for this site${nr[0].ingested_at ? ` (the newest ${dtDay(nr[0].ingested_at)})` : ''}.</div>` : ''}
     ${(cat.misread_suspects||[]).length ? `<div class="small sev-medium">${esc(pl(cat.misread_suspects.length, 'earlier file'))} may be a report read as a weekly export; the maintainer can check.</div>` : ''}
@@ -132,9 +141,10 @@ function dtMissingHtml(e){
   const since = r.since_feed_stopped || {};
   return `<div class="panel" id="dtMissing"><div class="panel-head"><h2>Payments with no remittance</h2><span class="small muted">EMA posted ${money(c1.unmatched_cents)} of insurance payments that no 835 on file carries. Without the remittance nobody can see what the payer denied, cut or wrote off on those claims.</span></div>
     ${since.cents ? `<div class="small"><b>${money(since.cents)}</b> of it was posted after the newest remittance (${esc(pl(since.checks, 'check'))}): the feed is behind.</div>` : ''}
-    ${rows.length ? `<h3 class="small" style="margin:10px 0 4px">Remittances to ask for</h3><div class="scroll"><table class="small"><thead><tr><th>Payer</th><th>Posted in</th><th>Why there is none</th><th class="num">Checks</th><th class="num">Dollars</th><th></th></tr></thead>
-      <tbody>${rows.map((x,i)=>`<tr><td>${esc(x.payer_group)}</td><td>${esc(rwMonth(x.month))}</td><td>${esc(x.why)}<div class="muted">${esc(x.ask)}</div></td><td class="num">${Number(x.checks).toLocaleString()}</td><td class="num">${money2(x.cents)}</td>
-        <td><button class="small dtAsk" data-i="${i}">Copy the request</button></td></tr>`).join('')}</tbody></table></div>
+    ${rows.length ? `<h3 class="small" style="margin:10px 0 4px">Remittances to ask for</h3>
+      <div class="batches">${rows.map((x,i)=>`<div class="batch"><div class="b-main"><b>${esc(x.payer_group)}</b><div class="small">${esc(x.why)}</div><div class="small muted">${esc(x.ask)}</div></div>
+        <div class="b-num small">posted in<div><b>${esc(rwMonth(x.month))}</b></div></div><div class="b-due small">${esc(pl(x.checks, 'check'))}</div>
+        <div class="b-prog"><b>${money2(x.cents)}</b></div><button class="small dtAsk" data-i="${i}">Copy the request</button></div>`).join('')}</div>
       <textarea id="dtAskText" class="small" rows="5" style="width:100%;margin-top:6px" hidden readonly aria-label="The request text"></textarea>` : ''}
     <details class="dfold"><summary>By cause</summary><table class="small"><thead><tr><th>Cause</th><th class="num">Checks</th><th class="num">Dollars</th></tr></thead>
       <tbody>${causes.map(([k,x])=>`<tr><td>${esc((words[k]||{}).why || k)}</td><td class="num">${Number(x.checks||0).toLocaleString()}</td><td class="num">${money(x.cents)}</td></tr>`).join('')}</tbody></table>
@@ -224,9 +234,10 @@ async function dtRequestText(x){
     (got.rows||[]).forEach(r=>lines.push(`- check ${r.check_number}, posted ${r.first_posted}, ${r.payer}, ${money2(r.cents)}`));
     page += 1;
   } while((got.rows||[]).length && lines.length < got.count && page < 40);
+  const one = lines.length === 1;
   const head = x.cause === 'no_era' || x.cause === 'no_era_va'
-    ? `Please set up electronic remittances (835) for ${x.payer_group}. These ${lines.length} payments posted in ${rwMonth(x.month)} came with no remittance:`
-    : `Please send again the 835 remittances for these ${lines.length} checks from ${x.payer_group}, posted in ${rwMonth(x.month)} (${money2(x.cents)} in all):`;
+    ? `Please set up electronic remittances (835) for ${x.payer_group}. ${one ? 'This payment' : `These ${lines.length} payments`} posted in ${rwMonth(x.month)} came with no remittance:`
+    : `Please send again the 835 ${one ? 'remittance for this check' : `remittances for these ${lines.length} checks`} from ${x.payer_group}, posted in ${rwMonth(x.month)} (${money2(x.cents)} in all):`;
   return head + '\n' + lines.join('\n');
 }
 

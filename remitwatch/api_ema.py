@@ -241,9 +241,11 @@ def count(go: dict) -> dict:
         w, params = _where(c, go)
         r = c.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings{w}", params).fetchone()
         upper = 0
-        if r[0] and "evidence" in _cols(c, "findings"):
+        if r[0] and {"evidence", "written_off_cents"} <= _cols(c, "findings"):
+            # only a line EMA wrote off can carry the bound, so the JSON is read for those rows alone
             upper = c.execute(f"""SELECT COALESCE(SUM(shortfall_cents),0) FROM findings{w}{' AND' if w else ' WHERE'}
-                                  json_extract(evidence, '$.written_off_basis') = 'charge_less_paid'""", params).fetchone()[0]
+                                  COALESCE(written_off_cents,0) > 0
+                                  AND json_extract(evidence, '$.written_off_basis') = 'charge_less_paid'""", params).fetchone()[0]
     delta = 0
     if r[0]:
         delta, _each = a._pattern_cents(w, params, go.get("deadline", "valid") or None)

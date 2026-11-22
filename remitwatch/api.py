@@ -1160,15 +1160,26 @@ def finding_detail(finding_id: str, _: str = "ok"):
 
 
 @app.get("/api/findings/{finding_id}")
-def finding_page(finding_id: str, story: int = Query(1, ge=0, le=1), _: str = Depends(require_auth)):
-    """An item's panel: finding_detail, and with it the item's story, verdict and next step (remitwatch.story.explain, one
-    gathering of its facts: `explain`) and what EMA's reports hold on its claim (remitwatch.ema_checks.claim_block:
-    `ema_block`). On a server the posting ledger is opened read-only, so the story lists every EMA posting; on Vercel the
-    dashboard's copy shows EMA's summaries and says the postings are kept on the server. story=0 leaves both out."""
+def finding_page(finding_id: str, story: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
+    """An item's panel: finding_detail. story=1 adds what /api/findings/{id}/explain gives, in the same answer."""
     out = finding_detail(finding_id, "ok")
     if story:
         out.update(_explained(out["finding"]))
     return out
+
+
+@app.get("/api/findings/{finding_id}/explain")
+def finding_explain(finding_id: str, _: str = Depends(require_auth)):
+    """The item's story, verdict and next step (remitwatch.story.explain, one gathering of its facts: `explain`) and what
+    EMA's reports hold on its claim (remitwatch.ema_checks.claim_block: `ema_block`). The panel asks for it beside the
+    finding itself, so the item's own facts show at once. On a server the posting ledger is opened read-only and the story
+    lists every EMA posting; on Vercel the dashboard's copy shows EMA's summaries and says the postings are kept on the
+    server (and that the state shown was worked out on the daily run's full store)."""
+    f = one("SELECT finding_id, patient_control_number, ema_link FROM findings WHERE finding_id=?", (finding_id,)) \
+        if "ema_link" in _columns() else one("SELECT finding_id, patient_control_number FROM findings WHERE finding_id=?", (finding_id,))
+    if not f:
+        raise HTTPException(404, "finding not found")
+    return dict(_explained(f), finding_id=finding_id)
 
 
 def _ledger_readonly():
@@ -2057,6 +2068,7 @@ CLAIM_CATEGORIES = ",".join(BADGE_CATEGORIES)          # the four claim pages to
 STATE_TILES = (
     ("todo", "todo", None),                     # work now and follow-ups due: the list a page opens with
     ("todo_week", "todo", "week"),              # of those, the ones whose filing window closes within 7 days
+    ("todo_decide", "todo", "decide"),          # of those, the ones with no filing date: a person says what they are
     ("waiting", "waiting", None),               # a person or EMA shows the work was done: waiting on the payer
     ("followup_due", "followup_due", None),     # waiting, and its follow-up day has come
     ("done", "done", None), ("accepted", "accepted", None), ("st_expired", "expired", None), ("cant_check", "cant_check", None),
@@ -2117,8 +2129,8 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
          signal: Optional[str] = Query(None, max_length=400), paid: int = Query(0, ge=0, le=3650), tiles: int = Query(1, ge=0, le=1),
          kind: Optional[str] = Query(None, max_length=20), reason: Optional[str] = Query(None, max_length=60), q: Optional[str] = None,
          year: Optional[str] = Query(None, max_length=4), handling: Optional[str] = Query(None, max_length=40),
-         ema: Optional[str] = Query(None, max_length=40), state: Optional[str] = Query(None, max_length=120), request: Request = None,
-         _: str = Depends(require_auth)):
+         ema: Optional[str] = Query(None, max_length=40), state: Optional[str] = Query(None, max_length=120),
+         tileset: str = Query("all", pattern="^(all|state)$"), request: Request = None, _: str = Depends(require_auth)):
     """A category page in one call: its tiles (closes in 7 and 30 days, window open, to decide, older with no date, window
     closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), its state tiles (STATE_TILES:
     work now with the follow-ups due, of those what closes in 7 days, waiting, follow-ups due, done, accepted, expired,
@@ -2131,8 +2143,10 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
         out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid, _search_text(request, q), year,
                                                          handling or None, ema or None, state or None)}
         if tiles:
+            # tileset=state: the state tiles the pages draw, and every item to do (the page's "any window" line); all: the
+            # filing-date tiles too, as an earlier page and the counts elsewhere read them
             out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year, handling or None, ema or None)
-                            for name, st, dl in DESK_TILES}
+                            for name, st, dl in DESK_TILES if tileset == "all" or name == "all"}
             out["tiles"].update({name: _bucket(category, payer, None, dl, min, reason or signal, kind, year, handling or None, ema or None, sv)
                                  for name, sv, dl in STATE_TILES})
         return out
