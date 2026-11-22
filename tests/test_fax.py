@@ -582,6 +582,17 @@ def _number(c, number, purpose="appeal", payer="Anthem / BCBS", headers=None):
     return c.post("/api/faxes/payer", json={"payer_group": payer, "purpose": purpose, "number": number}, headers=dict(XHR, **(headers or {})))
 
 
+class RunStopped(Exception):
+    """The run stopped part-way through a send: a deploy, a restart, a person pressing Ctrl-C. The send code treats
+    anything but the fax service's own answer the same way, so this one stands for all of them. It is an Exception on
+    purpose. Since Starlette 1.10 the test client runs the app as a task in its own event loop. A KeyboardInterrupt
+    raised in a route stops that loop, and the client then hands back CancelledError instead of the interruption."""
+
+
+def _stops_before_the_line(to, pdf, filename):
+    raise RunStopped("the run stopped before SRFax had it")
+
+
 # --------------------------------------------------------------------------- one site sends
 def test_one_site_sends_the_faxes():
     creds = {"SRFAX_ACCESS_ID": "1", "SRFAX_ACCESS_PWD": "x"}
@@ -720,12 +731,10 @@ def test_a_send_that_never_reached_the_line_goes_again_once(site, monkeypatch):
     rate = site.ids["UNDERPAID_VS_OWN_RATE"]
     _number(c, PAYER_FAX)
     real_send = line.send
-
-    def cut(to, pdf, filename):
-        raise KeyboardInterrupt          # the run stopped before SRFax had it
-    monkeypatch.setattr(line, "send", cut)
-    with pytest.raises(KeyboardInterrupt):
+    monkeypatch.setattr(line, "send", _stops_before_the_line)
+    with pytest.raises(RunStopped):
         _send(c, rate)
+    assert _rows(site.db, "SELECT status, provider_id FROM faxes") == [("sending", None)]      # reserved, never settled
     monkeypatch.setattr(line, "send", real_send)
     assert _send(c, rate)["status"] == "skipped" and line.sent == {}          # not settled: nothing goes yet
     line.outbox_down = True
@@ -749,8 +758,8 @@ def test_a_person_settles_a_send_the_line_cannot_tell_about(site, monkeypatch):
     rate = site.ids["UNDERPAID_VS_OWN_RATE"]
     _number(c, PAYER_FAX)
     real_send = line.send
-    monkeypatch.setattr(line, "send", lambda to, pdf, filename: (_ for _ in ()).throw(KeyboardInterrupt()))
-    with pytest.raises(KeyboardInterrupt):
+    monkeypatch.setattr(line, "send", _stops_before_the_line)
+    with pytest.raises(RunStopped):
         _send(c, rate)
     monkeypatch.setattr(line, "send", real_send)
     key = _rows(site.db, "SELECT fax_key FROM faxes")[0][0]

@@ -649,3 +649,21 @@ def test_the_checkpoint_keeps_the_owner_decisions_and_no_personal_remarks():
     assert "Git history still holds the TriZetto Site ID and the practice's tax ID" in text
     assert "That is the owner's decision" in text
     assert "annoyed" not in text
+
+
+def test_the_readme_says_where_patient_data_goes():
+    """README.md, "PHI": every place patient data leaves the store is named with the agreement that covers it."""
+    import inspect
+
+    from remitwatch import fax, uploads
+    phi = flat("README.md").split("## PHI", 1)[1]
+    # a payer's fax goes to Claude whole, as the PDF it is; the cover sheet names no patient
+    assert '"application/pdf"' in inspect.getsource(fax.classify)
+    assert "patient" not in inspect.signature(fax.cover_sheet).parameters
+    assert "Every fax a payer sends back goes to Claude whole" in phi and "the cover sheet names no patient" in phi
+    # uploads stay beside the store (on the server, /data/uploads), and the note review is scrubbed by default
+    assert uploads.upload_dir("/data/remitwatch.sqlite") == "/data/uploads" or os.environ.get("REMITWATCH_UPLOAD_DIR")
+    assert "`/data/uploads`" in phi and "`/data/backups`" in phi
+    for words in ("SRFax (its own BAA", "Anthropic (the practice's BAA", "ModMed EMA", "`APPEAL_EMAIL_DOMAINS`", "`REMITWATCH_NOTE_SCRUB=1`",
+                  "`REMITWATCH_NOTE_SEND_SCANS=1`", "never contain patient data"):
+        assert words in phi, words
