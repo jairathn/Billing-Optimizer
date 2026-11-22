@@ -444,6 +444,16 @@ def test_caddy_takes_more_than_the_app_does_in_caddys_own_units():
     assert f"{_caddy_bytes(big):,} bytes" in runbook
 
 
+def test_the_runbook_applies_a_changed_env_by_making_the_app_again():
+    """`docker compose restart` keeps the settings a container was made with: a new password or login in .env would not
+    take effect. `up -d` makes the app again from .env. Every command runs as root (Docker and .env are root's)."""
+    runbook = open(os.path.join(HERE, "docs", "SERVER_RUNBOOK.md")).read()
+    block = runbook[runbook.index("## Everyday commands"):runbook.index("## What runs by itself")]
+    assert "restart app" not in runbook and re.search(r"sudo docker compose up -d +# after changing \.env", block)
+    commands = [ln for ln in block.splitlines() if ln.strip().startswith(("docker", "sudo"))]
+    assert commands and all(ln.startswith("sudo ") for ln in commands)
+
+
 def test_the_runbooks_restore_brings_back_the_copy_and_not_what_it_undoes(tmp_path):
     """A run stopped halfway leaves its last changes in the store's -wal file. The runbook's restore must not let SQLite
     lay them over the restored copy: the copy is what comes back, whole, with no run lock in it."""

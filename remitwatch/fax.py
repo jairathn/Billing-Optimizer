@@ -245,7 +245,7 @@ def provider(env: dict | None = None) -> Provider | None:
     """The fax service, on the one deployment that sends faxes (REMITWATCH_FAX_SENDER); None anywhere else, or when none is
     set up (packets are then built but not sent). Two sites with copies of one store would each send the same faxes."""
     e = os.environ if env is None else env
-    return line(e) if sender(e) == _host(e) else None
+    return line(e)
 
 
 def configured(env: dict | None = None) -> bool:
