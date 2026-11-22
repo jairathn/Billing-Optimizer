@@ -409,6 +409,7 @@ const BRIEF = { today: '2026-11-22', work_types: [], claim_kinds: {}, labels: { 
   REJECTED_PRE_PAYER: { label: 'Rejected before it reached the payer', work: 'fix' }, DENIED_MEDICAL_NECESSITY: { label: 'Denied as not medically necessary', work: 'note' },
   DENIED_AUTH: { label: 'Denied: no authorization', work: 'auth' } } };
 function page() {             // the list as deskTab draws it: the bar, then one row per item with the attributes rowHtml gives it
+  ctx.state.brief = BRIEF;    // the day the rows are dated from is the brief's, never the clock's (a change empties state.brief)
   const v = new El('main'), bar = new El('div', { id: 'bulk', cls: ['bulk'], hidden: true }, v);
   new El('span', { id: 'bulkN' }, bar); new El('button', { id: 'bulkFax' }, bar);
   for (const s of ['in_progress', 'appealed', 'dismissed', 'open']) new El('button', { data: { bulk: s } }, bar);

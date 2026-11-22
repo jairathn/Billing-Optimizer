@@ -543,7 +543,7 @@ async function emaBatch(btn, box){
   btn.disabled = false;
 }
 
-// ---------------------------------------------------------------- reasons hidden for a payer (Alex: "we know which payers don't pay that")
+// ---------------------------------------------------------------- reasons hidden for a payer (the biller: "we know which payers don't pay that")
 async function hideReason(payer, signal, label, after){
   const note = prompt(`Hide “${label}” for ${payer}?\n\nIts open items go to Let go, and new ones will too; anything someone has worked stays. Undo it under Hidden.\n\nWhy (shown on each item):`, `${payer} does not pay these`);
   if(note === null) return;
