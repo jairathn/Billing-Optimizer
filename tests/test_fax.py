@@ -983,8 +983,9 @@ def test_the_newest_save_of_a_number_wins_in_any_order():
     new = {"payer_group": "P", "purpose": "appeal", "number": "8005550142", "actor": "b", "at": "2026-11-20T14:11:45.500000+00:00"}
     old = {"payer_group": "P", "purpose": "appeal", "number": "8005550999", "actor": "a", "at": "2026-11-20T14:11:44.100000+00:00"}
     apply_payer_fax(conn, new)
-    apply_payer_fax(conn, old)              # another instance's earlier save, applied after
-    apply_payer_fax(conn, new)              # and the journal replayed
+    apply_payer_fax(conn, old)              # another instance's earlier save, applied after this one's own
+    assert conn.execute("SELECT number FROM payer_fax").fetchone()[0] == "8005550142"
+    apply_payer_fax(conn, new)              # and the journal replayed: nothing changes
     row = conn.execute("SELECT number, history FROM payer_fax").fetchone()
     assert row[0] == "8005550142" and [h["number"] for h in json.loads(row[1])] == ["8005550999", "8005550142"]
     apply_payer_fax(conn, {"payer_group": "P", "purpose": "appeal", "number": "", "actor": "c", "at": "2026-11-21T00:00:00+00:00"})

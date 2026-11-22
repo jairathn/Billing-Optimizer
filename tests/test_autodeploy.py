@@ -289,6 +289,33 @@ def test_an_older_deploy_script_hands_over_to_the_copy_by_itself(box):
     assert (box.lib / "auto-deploy.sh").exists() and "enable --now" not in box.read("systemctl").splitlines()[-1]
 
 
+def test_the_live_servers_older_checker_hands_over_to_the_copy_when_it_deploys_this(tmp_path):
+    """The server already running auto-deploy runs the older checker from its checkout (b3c05a5's deploy/auto-deploy.sh,
+    started by a unit pointed at the checkout). When it deploys this version, it runs the new installer's --units-only
+    itself (deploy/systemd/ changed), which installs the copy and points the timer at it: from the next tick the copy
+    runs, and later commits no longer change what runs as root."""
+    old = {}
+    for rel in ("deploy/auto-deploy.sh", "deploy/install-auto-deploy.sh", "deploy/systemd/remitwatch-deploy.service"):
+        r = subprocess.run(["git", "-C", ROOT, "show", f"b3c05a5:{rel}"], capture_output=True, text=True)
+        if r.returncode != 0:
+            pytest.skip("the older version is not in this clone's history")
+        old[rel] = r.stdout
+    b = Box(tmp_path)
+    new = {rel: (b.dev / rel).read_text() for rel in old}
+    b.commit("the live server's version", old)
+    sh("git", "pull", "-q", "--ff-only", cwd=b.dir, env=b.env)
+    b.boot()
+    b.install("--mark-current")                                  # the older installer: the unit runs the checkout's script
+    assert f"ExecStart=/bin/bash {b.dir}/deploy/auto-deploy.sh" in (b.units / "remitwatch-deploy.service").read_text()
+    this = b.commit("this version", dict(new, **{"remitwatch/api.py": "x = 2\n"}))
+    r = sh("bash", str(b.dir / "deploy" / "auto-deploy.sh"), env=b.env, check=False)    # the older checker's tick
+    assert r.returncode == 0 and b.marker == this and "did not reinstall" not in b.log_lines()[-1], r.stdout + r.stderr
+    assert f"ExecStart=/bin/bash {b.lib}/auto-deploy.sh" in (b.units / "remitwatch-deploy.service").read_text()
+    assert (b.lib / "auto-deploy.sh").read_text() == new["deploy/auto-deploy.sh"] and (b.state / "dir").read_text().strip() == str(b.dir)
+    nxt = b.commit("next", {"remitwatch/api.py": "x = 3\n"})
+    assert b.run().returncode == 0 and b.marker == nxt and b.last()[3] == "deployed"     # the copy's tick
+
+
 def test_nothing_new_on_main_does_nothing(box):
     assert box.run().returncode == 0
     assert box.calls() == [] and box.log_lines() == []
