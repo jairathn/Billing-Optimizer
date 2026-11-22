@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import codecs
 import csv
+import gzip
 import hashlib
 import hmac
 import io
@@ -41,6 +42,7 @@ import sqlite3
 import time
 import unicodedata
 import zipfile
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -238,6 +240,8 @@ class Recognized:
     dimension: int | None = None    # .xlsx: data rows below the header by the sheet's declared dimension
     member: str | None = None       # the member's name when the report came inside a zip
     sheet: str | None = None        # .xlsx: the sheet that holds the report
+    gz: bool = False                # the file is gzipped delimited text (an upload the page compressed): read as it unpacks
+    name: str | None = None         # the report's own name when the file at hand is a working copy under another name
 
 
 def _build(report: str, fmt: str, header_index: int, cells: Sequence[Any], *, delimiter: str | None = None,
@@ -341,6 +345,41 @@ def _is_zip_head(head: bytes) -> bool:
     return head[:4] == b"PK\x03\x04" or head[:4] == b"PK\x05\x06"
 
 
+def _is_gzip_head(head: bytes) -> bool:
+    return head[:2] == b"\x1f\x8b"
+
+
+def _gunzip_head(src: str | bytes | BinaryIO, n: int = PEEK_BYTES) -> tuple[bytes, bool]:
+    """The first n unpacked bytes of a gzipped source (a path, bytes, or a stream put back where it was), and whether
+    there is more. A source that is not whole (the first bytes of a large file) gives what its bytes unpack to."""
+    src = _path(src)
+    d = zlib.decompressobj(31)
+    out = b""
+    try:
+        if isinstance(src, (bytes, bytearray, memoryview)):
+            out = d.decompress(bytes(src), n + 1)
+        else:
+            fh = open(src, "rb") if isinstance(src, str) else src
+            pos = fh.tell() if fh is src and hasattr(fh, "tell") else None
+            try:
+                while len(out) <= n:
+                    piece = d.unconsumed_tail or fh.read(65536)
+                    if not piece:
+                        break
+                    out += d.decompress(piece, n + 1 - len(out))
+            finally:
+                if fh is not src:
+                    fh.close()
+                elif pos is not None and hasattr(fh, "seek"):
+                    try:
+                        fh.seek(pos)
+                    except (OSError, ValueError):
+                        pass
+    except zlib.error:
+        return b"", False
+    return out[:n], len(out) > n
+
+
 def _zip_names(src: str | bytes | BinaryIO) -> list[str] | None:
     try:
         with zipfile.ZipFile(_zip_source(src)) as zf:
@@ -396,6 +435,13 @@ def recognize(src: str | bytes, name: str) -> Recognized | None:
     head, truncated = _head_of(src)
     if not head:
         return None
+    if _is_gzip_head(head):
+        # a gzipped report (the Upload page compresses text reports on the way): recognised from its first unpacked bytes
+        head, truncated = _gunzip_head(src)
+        if not head or _is_zip_head(head) or _is_gzip_head(head) or b"\x00" in head:
+            return None
+        rec = _recognize_text(head, truncated)
+        return replace(rec, gz=True) if rec else None
     if _is_zip_head(head):
         names = _zip_names(src)
         if names is None or "xl/workbook.xml" not in names:
@@ -403,6 +449,11 @@ def recognize(src: str | bytes, name: str) -> Recognized | None:
         return _recognize_xlsx(src)
     if b"\x00" in head:
         return None
+    return _recognize_text(head, truncated)
+
+
+def _recognize_text(head: bytes, truncated: bool) -> Recognized | None:
+    """Delimited text (comma, tab, pipe or semicolon) from its first bytes."""
     best: tuple[int, int, str, str, Sequence[Any]] | None = None
     for d in (",", "\t", "|", ";"):
         hit = _find_header(_text_records(head, truncated, d, HEADER_SCAN))
@@ -486,6 +537,16 @@ def _open(src: str | bytes | BinaryIO, rec: Recognized) -> Iterator[BinaryIO]:
                     yield m
         finally:
             zf.close()
+    elif rec.gz:
+        # a gzipped report: unpacked as it is read, never whole (a 300 MB CSV is about 25 MB gzipped)
+        raw = open(src, "rb") if isinstance(src, str) else (io.BytesIO(bytes(src)) if isinstance(src, (bytes, bytearray, memoryview))
+                                                              else src)
+        try:
+            with gzip.GzipFile(fileobj=raw, mode="rb") as fh:
+                yield fh
+        finally:
+            if raw is not src:
+                raw.close()
     elif isinstance(src, str):
         with open(src, "rb") as fh:
             yield fh
@@ -2087,10 +2148,39 @@ def _member_size(path: str, member: str) -> int | None:
 
 
 def _names_of(path: str, rec: Recognized) -> tuple[str, str | None]:
-    """(the report's own name, the zip it came in or None)."""
+    """(the report's own name, the zip it came in or None). A working copy read under another name (an upload) carries
+    its own in rec.name; a gzipped file is named as it is unpacked."""
     if rec.member:
         return os.path.basename(rec.member), os.path.basename(path)
-    return os.path.basename(path), None
+    if rec.name:
+        return os.path.basename(rec.name), None
+    base = os.path.basename(path)
+    if rec.gz and base.lower().endswith(".gz"):
+        base = base[:-3] or base
+    return base, None
+
+
+def report_id(path: str, rec: Recognized | None = None) -> str:
+    """The catalog id of a report: the SHA-256 of its own bytes (a zip member's, a gzip's unpacked bytes), the same
+    whichever way the same report arrives (an upload the page compressed, the file in Dropbox, a zipped copy)."""
+    if rec is not None and rec.member:
+        return _member_id(path, rec.member)
+    gz = rec.gz if rec is not None else _is_gzip_head(_head_of(path, 2)[0])
+    if gz:
+        with gzip.open(path, "rb") as fh:
+            return file_id_of(fh)
+    return file_id_of(path)
+
+
+def _unpacked_size(path: str) -> int | None:
+    try:
+        n = 0
+        with gzip.open(path, "rb") as fh:
+            for piece in iter(lambda: fh.read(1 << 20), b""):
+                n += len(piece)
+        return n
+    except (OSError, EOFError, zlib.error):
+        return None
 
 
 def _created_at(path: str, rec: Recognized) -> str | None:
@@ -2155,7 +2245,8 @@ def _waiting_reason(report: str) -> str:
 
 
 def ingest_file(store: Any, path: str, rec: Recognized | None = None, *, via: str, origin: dict | None = None,
-                force: bool = False, ledger: Any = None, deadline: float | None = None, log: Any = print) -> dict:
+                force: bool = False, ledger: Any = None, deadline: float | None = None, log: Any = print,
+                name: str | None = None, wait_reason: str | None = None) -> dict:
     """Read one report (or a zip of reports) into RemitWatch: recognise it, record it in the catalog, and apply it (the
     A/R here, Production through ema_ledger.apply_production_file). The same bytes arriving again by any route return
     'already'. A report the switch does not read, or Production with no ledger given, is kept as 'waiting' with its
@@ -2165,19 +2256,27 @@ def ingest_file(store: Any, path: str, rec: Recognized | None = None, *, via: st
     ensure_schema(conn)
     if rec is None:
         if is_plain_zip(path):
-            return _ingest_zip(store, path, via=via, origin=origin, force=force, ledger=ledger, deadline=deadline, log=log)
+            return _ingest_zip(store, path, via=via, origin=origin, force=force, ledger=ledger, deadline=deadline, log=log,
+                               wait_reason=wait_reason)
         try:
-            rec = recognize(path, os.path.basename(path))
+            rec = recognize(path, name or os.path.basename(path))
         except ReportRefused as exc:
-            return _record_refusal(store, file_id_of(path), exc, path=path, rec=None, via=via, origin=origin, log=log)
+            return _record_refusal(store, report_id(path), exc, path=path, rec=None, via=via, origin=origin, log=log)
         if rec is None:
             return _result("not_report")
-    file_id = _member_id(path, rec.member) if rec.member else file_id_of(path)
-    return _ingest_one(store, path, rec, file_id, via=via, origin=origin, force=force, ledger=ledger, deadline=deadline, log=log)
+    if name and not rec.member:
+        rec = replace(rec, name=os.path.basename(name))
+    file_id = report_id(path, rec)
+    res = _ingest_one(store, path, rec, file_id, via=via, origin=origin, force=force, ledger=ledger, deadline=deadline, log=log,
+                      wait_reason=wait_reason)
+    if rec.gz and rec.report == "production" and res.get("status") in ("current", "superseded"):
+        # a raw CSV a serverless host left waiting (too large to read there) is closed by this gzipped copy of it
+        _supersede_raw_twins(conn, _names_of(path, rec)[0], _unpacked_size(path), file_id)
+    return res
 
 
 def _ingest_zip(store: Any, path: str, *, via: str, origin: dict | None, force: bool, ledger: Any, deadline: float | None,
-                log: Any) -> dict:
+                log: Any, wait_reason: str | None = None) -> dict:
     name = os.path.basename(path)
     try:
         recs = recognize_zip(path, name)
@@ -2188,7 +2287,7 @@ def _ingest_zip(store: Any, path: str, *, via: str, origin: dict | None, force: 
     for rec in recs:
         fid = _member_id(path, rec.member)
         res = _ingest_one(store, path, rec, fid, via=via, origin=dict(origin or {}, member=rec.member), force=force,
-                          ledger=ledger, deadline=deadline, log=log)
+                          ledger=ledger, deadline=deadline, log=log, wait_reason=wait_reason)
         members.append(res)
         if rec.report == "production" and res.get("status") in ("current", "superseded"):
             _supersede_raw_twins(store.conn, os.path.basename(rec.member), _member_size(path, rec.member), fid)
@@ -2213,7 +2312,7 @@ def _supersede_raw_twins(conn: sqlite3.Connection, name: str, size: int | None, 
 
 
 def _ingest_one(store: Any, path: str, rec: Recognized, file_id: str, *, via: str, origin: dict | None, force: bool,
-                ledger: Any, deadline: float | None, log: Any) -> dict:
+                ledger: Any, deadline: float | None, log: Any, wait_reason: str | None = None) -> dict:
     conn = store.conn
     source_name, container = _names_of(path, rec)
     row = _catalog_row(conn, file_id)
@@ -2243,7 +2342,7 @@ def _ingest_one(store: Any, path: str, rec: Recognized, file_id: str, *, via: st
     if rec.report == "ar_report":
         return apply_ar(store, path, rec, file_id=file_id, via=via, origin=origin, force=force, log=log)
     return _ingest_production(store, path, rec, file_id, via=via, origin=origin, force=force, ledger=ledger, deadline=deadline,
-                              log=log)
+                              log=log, wait_reason=wait_reason)
 
 
 def _box_dict(box: Any) -> dict:
@@ -2261,7 +2360,7 @@ def _json_safe(d: Any) -> dict:
 
 
 def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, via: str, origin: dict | None, force: bool,
-                       ledger: Any, deadline: float | None, log: Any) -> dict:
+                       ledger: Any, deadline: float | None, log: Any, wait_reason: str | None = None) -> dict:
     conn = store.conn
     source_name, container = _names_of(path, rec)
     try:
@@ -2269,7 +2368,7 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
     except Exception:                   # noqa: BLE001  (missing, or not importable on this build: the file waits)
         ema_ledger = None
     if ema_ledger is None or ledger is None or not hasattr(ema_ledger, "apply_production_file"):
-        reason = "Production is read once the posting ledger is set up on this host."
+        reason = wait_reason or "Production is read once the posting ledger is set up on this host."
         record_waiting(conn, file_id=file_id, report="production", source_name=source_name, via=via, origin=origin or {},
                        reason=reason)
         _catalog_put(conn, file_id, commit=True, container=container, format=rec.fmt, columns=list(rec.columns),
