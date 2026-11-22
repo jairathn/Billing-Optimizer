@@ -828,7 +828,8 @@ def _initials(name: str | None) -> str | None:
 
 # ---------------------------------------------------------------------------------------------------------------- keys
 def key_salt(conn: sqlite3.Connection) -> bytes:
-    """The store's key salt (32 random bytes, meta ema:key_salt), made on first use. It never leaves the store."""
+    """The store's key salt (32 random bytes, meta ema:key_salt), made on first use. It never leaves the store. Only the
+    readers and the ledger make it; a page or a check that only reads uses stored_salt, which never writes."""
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     r = conn.execute("SELECT value FROM meta WHERE key=?", (META_SALT,)).fetchone()
     if r and r[0]:
@@ -836,6 +837,19 @@ def key_salt(conn: sqlite3.Connection) -> bytes:
     conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", (META_SALT, secrets.token_bytes(32).hex()))
     conn.commit()
     return bytes.fromhex(conn.execute("SELECT value FROM meta WHERE key=?", (META_SALT,)).fetchone()[0])
+
+
+def stored_salt(conn: sqlite3.Connection) -> bytes | None:
+    """The store's key salt when it has one, else None; never makes one. The dashboard's copy never holds the salt, and
+    a store that never read a report has none (it holds no keyed row to compare with either)."""
+    try:
+        r = conn.execute("SELECT value FROM meta WHERE key=?", (META_SALT,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    try:
+        return bytes.fromhex(r[0]) if r and r[0] else None
+    except ValueError:
+        return None
 
 
 def salt_fingerprint(salt: bytes) -> str:
@@ -901,17 +915,23 @@ def shape(text: Any) -> str | None:
 _ROUTES: dict[int, list] = {}       # per connection: the payer groupers its SQL functions use (refreshed on learning)
 
 
-def register_functions(conn: sqlite3.Connection, salt: bytes | None = None) -> None:
+def register_functions(conn: sqlite3.Connection, salt: bytes | None = None, *, create: bool = True) -> None:
     """SQL functions the EMA modules use on the store connection: rw_name_key(last, first), rw_status_class(status
     [, has_answer]), rw_bill(claim_id), rw_payer_group(name), rw_payer_kind(name), rw_check_loose(check), rw_shape(text).
-    Without a salt the store's own is used (made on first use)."""
-    salt = salt if salt is not None else key_salt(conn)
+    Without a salt the store's own is used: made on first use when `create` is true (the readers and the ledger), never
+    made when it is false (checks and pages, which only read: on the dashboard's copy, which holds no salt, rw_name_key
+    then gives NULL, and the copy is never written)."""
+    if salt is None:
+        salt = key_salt(conn) if create else stored_salt(conn)
     holder = [_grouper(conn)]
     if id(conn) not in _ROUTES and len(_ROUTES) >= 64:
         _ROUTES.clear()                 # a long-lived process opens many connections; older ones keep what they had
     _ROUTES.setdefault(id(conn), []).append(holder)
     del _ROUTES[id(conn)][:-4]          # registering again replaces older holders of the same connection
-    conn.create_function("rw_name_key", 2, lambda last, first: name_key_parts(salt, last, first), deterministic=True)
+    if salt is None:
+        conn.create_function("rw_name_key", 2, lambda last, first: None, deterministic=True)
+    else:
+        conn.create_function("rw_name_key", 2, lambda last, first: name_key_parts(salt, last, first), deterministic=True)
     conn.create_function("rw_status_class", 1, lambda s: status_class(s), deterministic=True)
     conn.create_function("rw_status_class", 2, lambda s, a: status_class(s, None if a is None else bool(a)), deterministic=True)
     conn.create_function("rw_bill", 1, bill_of_claim, deterministic=True)
@@ -1195,7 +1215,7 @@ CREATE TABLE IF NOT EXISTS ema_ar (file_id TEXT, row_no INTEGER, as_of TEXT, svc
   denial_cents INTEGER, aging_date TEXT, follow_up TEXT, claim_action TEXT, claim_status TEXT, status_class TEXT,
   cpt TEXT, product INTEGER, denial_category TEXT, has_note INTEGER, note_chars INTEGER, note_hash INTEGER,
   primary_payer TEXT, secondary_payer TEXT, payer_group TEXT, payer_kind TEXT, svc TEXT, initials TEXT,
-  name_key INTEGER, mrn_key INTEGER, exposure_cents INTEGER, facility INTEGER, PRIMARY KEY (file_id, row_no));
+  name_key INTEGER, mrn_key INTEGER, exposure_cents INTEGER, facility INTEGER, bucket TEXT, PRIMARY KEY (file_id, row_no));
 CREATE INDEX IF NOT EXISTS ix_ar_claim ON ema_ar(claim_id);
 CREATE INDEX IF NOT EXISTS ix_ar_link ON ema_ar(link);
 CREATE INDEX IF NOT EXISTS ix_ar_year ON ema_ar(svc_year);
@@ -1273,11 +1293,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def bill_sql(col: str) -> str:
+    """SQL for the bill of a claim id column, without a function of RemitWatch's own (so a copy can be built on any
+    connection): the id less a trailing C and up to three digits. bill_of_claim also requires EMA's shape first, so a
+    caller matches both this and the id itself (an id of another shape is its own bill)."""
+    return (f"CASE WHEN {col} GLOB '*C[0-9][0-9][0-9]' THEN substr({col}, 1, length({col}) - 4) "
+            f"WHEN {col} GLOB '*C[0-9][0-9]' THEN substr({col}, 1, length({col}) - 3) "
+            f"WHEN {col} GLOB '*C[0-9]' THEN substr({col}, 1, length({col}) - 2) "
+            f"WHEN {col} GLOB '*C' THEN substr({col}, 1, length({col}) - 1) ELSE {col} END")
+
+
 def serving_tables(conn: sqlite3.Connection | None = None) -> list[tuple[str, str | None, str | None]]:
     """The EMA rows the dashboard's copy holds, as (table, column whitelist, filter) entries for cloud.SERVING_TABLES: no
-    origin, no key or keyed hash in any table, and only the lines, payments and reasons of links the pages can show (links
-    on the A/R, links of bills with findings, and links findings name). The meta filter must also leave out ema:key_salt
-    (SERVING_META_FILTER)."""
+    origin, no key or keyed hash in any table, and only the claim numbers the pages can show: those on the A/R, every
+    claim number of a bill that has an item (any submission of the bill: the map's claim id is only one of them), and the
+    claim numbers items name (EMA-only denials). Their lines, payments, reasons, map rows and events come along. The
+    filters use plain SQL only, so the copy can be built on any connection. The meta filter must also leave out
+    ema:key_salt (SERVING_META_FILTER)."""
     cols = _expected_columns()
 
     def keep(table: str, drop: tuple = ()) -> str:
@@ -1289,9 +1321,13 @@ def serving_tables(conn: sqlite3.Connection | None = None) -> list[tuple[str, st
         except sqlite3.Error:
             have_link = False
     finding_links = " OR link IN (SELECT ema_link FROM main.findings WHERE ema_link IS NOT NULL)" if have_link else ""
+    pcn = "patient_control_number"
+    bills = (f"SELECT {pcn} FROM main.findings WHERE {pcn} IS NOT NULL "
+             f"UNION SELECT {bill_sql(pcn)} FROM main.findings WHERE {pcn} IS NOT NULL")
     links = ("(link IN (SELECT link FROM main.ema_ar WHERE link IS NOT NULL)"
-             " OR link IN (SELECT link FROM main.ema_link_map WHERE claim_id IN (SELECT patient_control_number FROM main.findings"
-             " WHERE patient_control_number IS NOT NULL))" + finding_links + ")")
+             f" OR link IN (SELECT link FROM main.ema_link_map WHERE COALESCE(conflict, 0) = 0 AND bill IN ({bills}))"
+             f" OR link IN (SELECT link FROM main.ema_link_map WHERE claim_id IN (SELECT {pcn} FROM main.findings"
+             f" WHERE {pcn} IS NOT NULL))" + finding_links + ")")
     return [
         ("ema_report_files", keep("ema_report_files", ("origin",)), None),
         ("ema_ar", keep("ema_ar"), None),
@@ -2079,8 +2115,15 @@ def _write_files_row(conn: sqlite3.Connection, file_id: str, path: str, rec: Rec
                  "claims, lines, duplicates, problems, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (file_id, path, source_name, size, mtime, kind, _now(), None, None, rows_applied,
                   max(0, rows_read - rows_applied), None, "ok" if status == "current" else status))
+    # ema_sources is keyed by name and the weekly exports are looked up by it (EMA names every download alike): a report
+    # goes in under a name no export can have, so it never replaces an export's row or its pull time
     conn.execute("INSERT OR REPLACE INTO ema_sources (source_name, sha256, family, created_at, rows, recorded_at) VALUES (?,?,?,?,?,?)",
-                 (source_name, file_id, rec.report, created, rows_kept, _now()))
+                 (source_key(source_name), file_id, rec.report, created, rows_kept, _now()))
+
+
+def source_key(name: str) -> str:
+    """The ema_sources name a report is recorded under ('report:' and its file name), never an export's."""
+    return "report:" + str(name or "")
 
 
 def _record_refusal(store: Any, file_id: str, exc: ReportRefused, *, path: str, rec: Recognized | None, via: str,
@@ -2237,6 +2280,7 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
     box = _box_dict(res.get("box"))
     acct = _json_safe(res.get("account"))
     if status == "already":
+        _repair_store_rows(conn, file_id, path, rec)
         return _result("already", "production", file_id, **{k: v for k, v in res.items() if k not in ("status", "report", "file_id")})
     if status == "waiting":
         record_waiting(conn, file_id=file_id, report="production", source_name=source_name, via=via, origin=origin or {},
@@ -2275,6 +2319,25 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
     out.update({k: v for k, v in res.items() if k not in ("report", "file_id")})
     out["account"] = acct
     return out
+
+
+def _repair_store_rows(conn: sqlite3.Connection, file_id: str, path: str, rec: Recognized) -> None:
+    """A Production file the ledger already holds: a run that died after the ledger's commit and before the store's left
+    the store without its files and ema_sources rows and without the claim address prefix. The catalog row is restored
+    from the ledger (ema_ledger.sync_catalog); the rest is written here from it, so the router stops offering the file
+    and the Data tab lists it."""
+    row = _catalog_row(conn, file_id)
+    if not row or row.get("status") not in DONE_STATUSES:
+        return
+    have_file = conn.execute("SELECT 1 FROM files WHERE sha256=?", (file_id,)).fetchone() is not None
+    have_src = conn.execute("SELECT 1 FROM ema_sources WHERE sha256=?", (file_id,)).fetchone() is not None
+    if not (have_file and have_src):
+        _write_files_row(conn, file_id, path, rec, kind="ema:production", status=row["status"],
+                         rows_read=int(row.get("rows_read") or 0), rows_applied=int(row.get("rows_applied") or 0),
+                         created=row.get("created_at"), rows_kept=int(row.get("rows_kept") or 0))
+        conn.commit()
+    if conn.execute("SELECT 1 FROM meta WHERE key=?", (META_PREFIX,)).fetchone() is None:
+        _learn_prefix_from(conn, path, rec)
 
 
 def _learn_prefix_from(conn: sqlite3.Connection, path: str, rec: Recognized, rows: int = 2000) -> None:
@@ -2642,8 +2705,9 @@ def _scope_of(svc_lo: str | None, posted_lo: str | None) -> str | None:
 def preview(conn: sqlite3.Connection, path: str, rec: Recognized | None = None) -> dict:
     """Say what a report holds before it is read for good (the Upload page): which report, its rows, dates, scope, box and
     as_of, what it would replace or overlap, and any refusal or hold that can be decided without the ledger (the ledger's
-    own holds are decided when the cycle applies the file). Never opens the ledger and changes nothing but the key salt,
-    made on first use. An .xlsx Production export is judged by its column names and declared size only."""
+    own holds are decided when the cycle applies the file). Never opens the ledger and changes nothing (not even the key
+    salt: a store that has none has no snapshot to compare with). An .xlsx Production export is judged by its column
+    names and declared size only."""
     ensure_schema(conn)
     name = os.path.basename(path)
     if rec is None:
@@ -2677,7 +2741,7 @@ def preview(conn: sqlite3.Connection, path: str, rec: Recognized | None = None) 
 
 
 def _preview_ar(conn: sqlite3.Connection, path: str, rec: Recognized, file_id: str) -> dict:
-    salt = key_salt(conn)
+    salt = stored_salt(conn) or secrets.token_bytes(32)      # no salt yet: no snapshot on file either
     register_functions(conn, salt)
     try:
         acct = _stage_ar(conn, path, rec, salt, file_id)

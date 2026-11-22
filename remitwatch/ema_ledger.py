@@ -34,6 +34,7 @@ import io
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import time
 import urllib.parse
@@ -51,6 +52,11 @@ LEDGER_FILE = "ema_ledger.sqlite"
 STATE_NAME = "ema_ledger.sqlite.gz"
 ATTEMPTS_NAME = "ema_attempts.json"
 RETAIN_DAYS = 1100                  # postings whose service date is this much older than the newest posting are dropped
+SERVERLESS_RETAIN_DAYS = 730        # ... on a serverless host, whose temporary folder (512 MB) must hold the ledger twice over
+RETAIN_HOLD_SHARE = 0.50            # retention that would delete more than this share of the ledger at once waits for a person
+WORK_STALE_SECONDS = 3600           # a refresh's work file this old was left by a run that was killed: it is deleted
+TMP_BYTES_PER_ROW = 420             # serverless: temporary space a refresh needs per ledger row (ledger and work file; measured)
+TMP_MARGIN = 32 * 1024 * 1024       #   ... plus this much
 SCOPE_GAP_DAYS = 45                 # posted_lo - svc_lo above this: the file was filtered by posted date
 APPLIED = ("current", "partly_replaced", "replaced", "superseded")      # in the ledger (its box counts for the invariant)
 LIVE = ("current", "partly_replaced")                                   # still holds rows
@@ -80,6 +86,7 @@ META_REV = "ema:ledger_rev"
 META_MAP_DIRTY = er.META_MAP_DIRTY
 META_KEEP_DIRTY = "ema:keep_dirty"
 META_MAP_COVERAGE = "ema:map_coverage"
+META_RETAIN_HELD = "ema:retain_held"        # retention that waits for a person (the Data tab shows it)
 
 # the work database refresh() attaches to the store connection (and the ledger's alias there)
 _W = "emaw"
@@ -138,6 +145,46 @@ def _remove(*paths: str) -> None:
                 os.remove(q)
             except OSError:
                 pass
+
+
+WORK_PREFIX = "ema_refresh-"
+
+
+def clean_work_files(folder: str, older_than: float = WORK_STALE_SECONDS) -> int:
+    """Delete the work files (and their journals) refreshes left in this folder when they were killed (an out-of-memory
+    stop, a container stopped mid-refresh): a live refresh's file is younger than `older_than` seconds. Returns how many
+    went."""
+    n = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    now = time.time()
+    for f in names:
+        if not f.startswith(WORK_PREFIX):
+            continue
+        p = os.path.join(folder, f)
+        try:
+            if now - os.path.getmtime(p) < older_than:
+                continue
+            os.remove(p)
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def retain_days() -> int:
+    """How many days of service the ledger keeps before its newest posting: REMITWATCH_EMA_RETAIN_DAYS when set, else
+    RETAIN_DAYS on a server and SERVERLESS_RETAIN_DAYS on a serverless host (its temporary folder holds the ledger and
+    the refresh's work file; at three service years they do not fit)."""
+    raw = os.environ.get("REMITWATCH_EMA_RETAIN_DAYS", "").strip()
+    if raw:
+        try:
+            return max(366, int(raw))
+        except ValueError:
+            pass
+    return SERVERLESS_RETAIN_DAYS if runtime.serverless() else RETAIN_DAYS
 
 
 def _meta_get(conn: sqlite3.Connection, key: str) -> str | None:
@@ -377,6 +424,7 @@ class Ledger:
             conn.close()
             raise RuntimeError("The posting ledger was written by another version of RemitWatch.")
         lg._remove_stage_file()             # a staging file left by a run that was killed
+        clean_work_files(d)                 # and the work files of refreshes that were killed
         return lg
 
     def __enter__(self) -> "Ledger":
@@ -569,6 +617,26 @@ class Ledger:
             self._remove_stage_file()
 
     # ------------------------------------------------------------------ holds
+    def tmp_need(self, staged_rows: int = 0) -> tuple[int, int]:
+        """(bytes the ledger and a refresh's work file need in the ledger's folder once `staged_rows` more postings are
+        applied, bytes there are for them: what is free plus what the ledger and the staging file hold now). A serverless
+        host's temporary folder is 512 MB, so a file that would not leave room for its own summaries is held there
+        (H8) instead of failing in the refresh, attempt after attempt."""
+        rows = (self.conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0) + max(0, staged_rows)
+        need = rows * TMP_BYTES_PER_ROW + TMP_MARGIN
+        folder = os.path.dirname(os.path.abspath(self.path)) if self.path != ":memory:" else runtime.tmp_dir()
+        try:
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            return need, need
+        held = 0
+        for p in (self.path, self._stage_path()):
+            try:
+                held += os.path.getsize(p)
+            except OSError:
+                pass
+        return need, free + held
+
     def _older_newer(self, mine: Box) -> tuple[list[Box], list[Box]]:
         boxes = [b for b in self.boxes(APPLIED) if b.file_id != mine.file_id and b.meets(mine)]
         return [b for b in boxes if b.order < mine.order], [b for b in boxes if b.order > mine.order]
@@ -584,6 +652,12 @@ class Ledger:
             out.append(("H6", f"Save it as CSV: an Excel Production export of more than {XLSX_MAX_ROWS:,} rows is not read on "
                               "this site."))
         out += er.production_format_holds(stats)
+        if serverless:
+            need, have = self.tmp_need(int(stats.get("rows") or 0))
+            if need > have:
+                out.append(("H8", f"Too large for this site's temporary space: the summaries after it need about {need >> 20:,} MB "
+                                  f"and {have >> 20:,} MB is free. The server reads it; this site keeps "
+                                  f"{retain_days():,} days of postings (REMITWATCH_EMA_RETAIN_DAYS)."))
         share = stats.get("charge_line_share")
         if (meta.scope == "service" and share is not None and int(stats.get("lines") or 0) >= H2_MIN_LINES
                 and share < H2_CHARGE_SHARE):
@@ -691,18 +765,31 @@ class Ledger:
                 "src": src, "replaced_by": by}
 
     # ------------------------------------------------------------------ retention and copies
-    def retain(self, days: int = RETAIN_DAYS) -> int:
-        """Delete postings whose service date is more than `days` before the ledger's newest posting. Returns the rows
-        deleted (and adds 1 to seq when there were any)."""
+    def retain(self, days: int | None = None, *, force: bool = False, today: str | None = None) -> int:
+        """Delete postings whose service date is more than `days` (retain_days()) before the ledger's newest posting, or
+        before today when the newest posting is later than today (a damaged date must never wipe the ledger). When that
+        would delete more than RETAIN_HOLD_SHARE of the ledger at once, nothing is deleted: the cutoff and the count are
+        kept (retain_held) until a person runs it with force (retention normally takes a few days of service a week).
+        Returns the rows deleted (and adds 1 to seq when there were any)."""
         if self.readonly:
             return 0
+        days = retain_days() if days is None else int(days)
         c = self.conn
         newest = c.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
         if not newest:
             return 0
-        cutoff = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
+        top = min(newest[:10], (today or er.today_iso())[:10])
+        cutoff = (date.fromisoformat(top) - timedelta(days=days)).isoformat()
         per = c.execute("SELECT src, COUNT(*) FROM postings WHERE svc < ? GROUP BY src", (cutoff,)).fetchall()
         if not per:
+            if self._meta("retain_held"):
+                self.conn.execute("DELETE FROM ledger_meta WHERE key='retain_held'")
+            return 0
+        gone = sum(k for _src, k in per)
+        total = c.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0
+        if not force and total and gone > RETAIN_HOLD_SHARE * total:
+            self._meta_put("retain_held", json.dumps({"cutoff": cutoff, "rows": gone, "of": total, "days": days, "at": _now()},
+                                                     sort_keys=True))
             return 0
         c.execute("BEGIN IMMEDIATE")
         try:
@@ -713,12 +800,21 @@ class Ledger:
                 c.execute("UPDATE ledger_files SET live_rows=?, status=CASE WHEN ?=0 THEN 'replaced' ELSE status END WHERE src=?",
                           (left, left, src))
             self._meta_put("retained_before", cutoff)
+            c.execute("DELETE FROM ledger_meta WHERE key='retain_held'")
             self._bump()
             c.execute("COMMIT")
         except BaseException:
             c.execute("ROLLBACK")
             raise
         return n
+
+    def retain_held(self) -> dict | None:
+        """Retention that waits for a person: {'cutoff', 'rows', 'of', 'days', 'at'}, or None."""
+        raw = self._meta("retain_held")
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return None
 
     def forget(self, file_id: str) -> int:
         """Take one file out of the ledger (its rows and its record), to read it again (the CLI's --reread). The rows of
@@ -820,10 +916,13 @@ class _Hashing(io.RawIOBase):
 
 
 def _already(store: Any, ledger: Ledger, file_id: str) -> dict | None:
+    """The ledger already holds this file: nothing is read again. The whole catalog is brought in line with the ledger
+    (a run that died between the ledger's commit and the store's lost this file's row and the statuses of the files it
+    replaced); ema_reports then writes the files and ema_sources rows the store lacks."""
     have = ledger.file(file_id)
     if not have or have.get("status") not in APPLIED:
         return None
-    sync_catalog(store, ledger, file_ids=[file_id])
+    sync_catalog(store, ledger)
     box = next((b for b in ledger.boxes(APPLIED) if b.file_id == file_id), None)
     return _result("already", file_id, reason=have.get("status"), rows_read=have.get("rows_read") or 0,
                    rows_kept=have.get("rows") or 0, rows_applied=have.get("rows") or 0, live_rows=have.get("live_rows") or 0,
@@ -1038,13 +1137,16 @@ def keep_rule_sql(lines: str = "ema_lines", payments: str = "main.ema_line_payme
 # ------------------------------------------------------------------------------------------------------- refresh work
 class _Work:
     """A scratch database attached to the store connection for one refresh (in the ledger's folder, or the temporary
-    folder), so intermediate tables never grow the store and are deleted whole when the refresh ends."""
+    folder), so intermediate tables never grow the store and are deleted whole when the refresh ends. On a serverless
+    host SQLite's own sorts stay in memory (temp_store=MEMORY): written to the temporary folder, they took 50 MB of its
+    512 MB at two service years. A server sorts to files, as before."""
 
     def __init__(self, conn: sqlite3.Connection, where: str | None):
         self.conn = conn
         d = where or runtime.tmp_dir()
         os.makedirs(d, exist_ok=True)
-        self.path = os.path.join(d, f"ema_refresh-{os.getpid()}-{secrets.token_hex(4)}.sqlite")
+        clean_work_files(d)
+        self.path = os.path.join(d, f"{WORK_PREFIX}{os.getpid()}-{secrets.token_hex(4)}.sqlite")
         self.temp_store: int | None = None
         self.ledger_attached = False
 
@@ -1052,7 +1154,7 @@ class _Work:
         c = self.conn
         c.commit()
         self.temp_store = c.execute("PRAGMA temp_store").fetchone()[0]
-        c.execute("PRAGMA temp_store=FILE")
+        c.execute("PRAGMA temp_store=MEMORY" if runtime.serverless() else "PRAGMA temp_store=FILE")
         c.execute(f"ATTACH DATABASE ? AS {_W}", (self.path,))
         c.execute(f"PRAGMA {_W}.journal_mode=OFF")
         c.execute(f"PRAGMA {_W}.synchronous=OFF")
@@ -1066,6 +1168,14 @@ class _Work:
         self.conn.execute(f"ATTACH DATABASE ? AS {_L}", (ledger.path,))
         self.conn.execute(f"PRAGMA {_L}.cache_size=-32768")
         self.ledger_attached = True
+
+    def detach_ledger(self) -> None:
+        """Part B and the publish never read the ledger: once Part A is done it is let go, so a serverless run can save
+        and delete its scratch copy before the larger half of the work."""
+        if self.ledger_attached:
+            self.conn.commit()
+            self.conn.execute(f"DETACH DATABASE {_L}")
+            self.ledger_attached = False
 
     def __exit__(self, *exc: Any) -> None:
         c = self.conn
@@ -1115,6 +1225,9 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
     cpt = "COALESCE(p.cpt, '')"
     cptc = "CAST(COALESCE(p.cpt, '') AS TEXT)"          # work tables get declared types, so their indexes are used
     newest = "MAX(p.posted || printf('%012d', p.rowid))"
+    # the months first, while the work file is empty: their grouping is one more full pass over the ledger, and its
+    # intermediate tables are dropped before the line tables are made
+    n_mon = _months(conn, nr, adj)
     # one row per claim line (link, service date, code)
     x(f"""CREATE TABLE {W}.pa_agg AS
         SELECT p.link AS link, p.svc AS svc, {cptc} AS cpt, CAST(MAX(p.person) AS INTEGER) AS person,
@@ -1234,6 +1347,11 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
     n_rsn = _insert_select(conn, f"{W}.pa_rsn", REASON_EXPRS, _reason_tail(f"p.link IS NOT NULL AND ({nr} OR (p.grp IS NULL "
                                                                            "AND p.kind IS NOT NULL))"))
     x(f"CREATE INDEX {W}.ix_pa_rsn ON pa_rsn(link, svc, cpt)")
+    # the routine reasons (and group PR) of every line: the store keeps them only for lines whose bill has an item, which
+    # Part B's map decides; they are read here so the ledger can be let go before Part B
+    x(f"CREATE TABLE {W}.pa_rsr AS SELECT * FROM main.ema_line_reasons WHERE 0")
+    _insert_select(conn, f"{W}.pa_rsr", REASON_EXPRS, _reason_tail(f"p.link IS NOT NULL AND p.grp IS NOT NULL AND NOT {nr}"))
+    x(f"CREATE INDEX {W}.ix_pa_rsr ON pa_rsr(link, svc, cpt)")
     # checks (insurance rows with a check number; never product or patient-side rows)
     x(f"CREATE TABLE {W}.pa_chk AS SELECT * FROM main.ema_checks WHERE 0")
     n_chk = _insert_select(conn, f"{W}.pa_chk", {
@@ -1254,7 +1372,6 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
               cause = (SELECT c.cause FROM main.ema_checks c WHERE c.check_no = pa_chk.check_no AND c.payer = pa_chk.payer),
               pair_trace = (SELECT c.pair_trace FROM main.ema_checks c WHERE c.check_no = pa_chk.check_no AND c.payer = pa_chk.payer)""")
     _drop(conn, "pa_twc")
-    n_mon = _months(conn, nr, adj)
     conn.commit()               # only the work database changed: the store is written in one step by _publish
     return {"lines": n_lines, "payments": n_pay, "reasons": n_rsn, "checks": n_chk, "months": n_mon, "events": n_ev,
             "seconds": round(time.time() - t0, 1)}
@@ -1617,6 +1734,7 @@ def _patient_day(conn: sqlite3.Connection, boxes: Sequence[Box], now: str) -> di
               GROUP BY bill, ck, nk, svc, code)
           GROUP BY bill, nk, svc, code""")
     x(f"CREATE INDEX {W}.ix_pd_key ON pd_key(nk, svc, code)")
+    x(f"CREATE INDEX {W}.ix_pd_key_b ON pd_key(bill)")         # the winners' claim id and code count, per bill
     x(f"""CREATE TABLE {W}.pd_cl AS SELECT l.link AS link, l.svc AS svc, l.cpt AS cpt, l.name_key AS name_key, l.charges AS charges
           FROM {W}.pa_full l WHERE l.name_key IS NOT NULL AND l.link NOT IN (SELECT link FROM {W}.pb_map)""")
     x(f"CREATE INDEX {W}.ix_pd_cl ON pd_cl(name_key, svc, cpt)")
@@ -1744,12 +1862,11 @@ def _publish(conn: sqlite3.Connection, *, part_a: bool, pruned: bool, meta: dict
                       WHERE {lkeep} AND (COALESCE(r.reason_class, 'other') NOT IN ({routine}) OR l.keep IS NULL
                                          OR instr(',' || l.keep || ',', ',finding,') > 0)""").rowcount
         if part_a:
-            # every reason, routine ones too, of the lines whose bill has a finding: read from the ledger
-            fk = "(keep IS NULL OR instr(',' || keep || ',', ',finding,') > 0)"
-            n_rsn += _insert_select(conn, "main.ema_line_reasons", REASON_EXPRS, _reason_tail(
-                f"p.link IN (SELECT link FROM {W}.pa_full WHERE {fk}) AND (p.grp IS NOT NULL OR p.kind IS NOT NULL) "
-                f"AND EXISTS (SELECT 1 FROM {W}.pa_full l WHERE l.link = p.link AND l.svc = p.svc AND l.cpt = COALESCE(p.cpt, '') "
-                f"AND {fk.replace('keep', 'l.keep')})"), verb="INSERT OR IGNORE")
+            # every reason, routine ones too, of the lines whose bill has a finding (Part A read them from the ledger)
+            fk = "(l.keep IS NULL OR instr(',' || l.keep || ',', ',finding,') > 0)"
+            n_rsn += x(f"""INSERT OR IGNORE INTO main.ema_line_reasons ({rc}) SELECT {', '.join('r.' + c for c in rc.split(', '))}
+                           FROM {W}.pa_rsr r JOIN {W}.pa_full l ON l.link = r.link AND l.svc = r.svc AND l.cpt = r.cpt
+                           WHERE {fk}""").rowcount
         x("DELETE FROM main.ema_checks")
         cc = cols("ema_checks")
         n_chk = x(f"INSERT INTO main.ema_checks ({cc}) SELECT {cc} FROM {W}.pa_chk").rowcount
@@ -1796,20 +1913,26 @@ def _ledger_changed(conn: sqlite3.Connection, ledger: Ledger) -> bool:
     return _meta_get(conn, META_KEEP_DIRTY) is not None
 
 
-def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", log: Any = print) -> dict:
+def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", log: Any = print,
+            release: Any = None) -> dict:
     """Bring the store's EMA summaries up to date.
 
     parts: 'auto' runs Part A when a ledger is given and it changed since the store last read it (its seq, or the state
     folder revision on a serverless host, differs from meta ema:ledger_seq / ema:ledger_rev; retention deleted rows; or
     meta ema:keep_dirty is set), and Part B after Part A or when meta ema:map_dirty is set. 'A', 'B' and 'AB' run those
     parts. Part A needs the ledger; Part B reads only the store. With a ledger, retention runs first and the catalog is
-    brought in line with the ledger (sync_catalog). The store changes in one transaction at the end."""
+    brought in line with the ledger (sync_catalog). The store changes in one transaction at the end.
+
+    `release` (serverless): called with no argument as soon as the ledger is no longer needed (after Part A, before Part
+    B), to save the scratch ledger to the state folder and delete it, so the temporary folder never holds the ledger and
+    the larger half of the work at once (LedgerHandle.save). What it returns, the state folder's new revision, is what
+    meta ema:ledger_rev records."""
     conn = store.conn
     er.ensure_schema(conn)
     salt = er.key_salt(conn)
     _register(conn, salt)
     t0 = time.time()
-    out: dict = {"part_a": None, "part_b": None, "retained": 0, "catalog": 0}
+    out: dict = {"part_a": None, "part_b": None, "retained": 0, "catalog": 0, "retain_held": None, "released": False}
     if parts not in ("auto", "A", "B", "AB"):
         raise ValueError("parts is one of auto, A, B, AB")
     if ledger is not None and not ledger.readonly:
@@ -1817,6 +1940,17 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
         if bind:
             log(f"  EMA posting ledger: emptied (keyed for another store); {len(bind)} file(s) to read again")
         out["retained"] = ledger.retain()
+        held = ledger.retain_held()
+        out["retain_held"] = held
+        if held:
+            log(f"  EMA posting ledger: retention waits for a person: it would delete {held['rows']:,} of {held['of']:,} "
+                f"postings at once (service before {held['cutoff']})")
+        if bool(held) != (_meta_get(conn, META_RETAIN_HELD) is not None):
+            if held:
+                _meta_set(conn, META_RETAIN_HELD, json.dumps(held, sort_keys=True))
+            else:
+                conn.execute("DELETE FROM meta WHERE key=?", (META_RETAIN_HELD,))
+            conn.commit()
         out["catalog"] = sync_catalog(store, ledger)
     want_a = parts in ("A", "AB") or (parts == "auto" and ledger is not None and _ledger_changed(conn, ledger))
     if want_a and ledger is None:
@@ -1828,17 +1962,28 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     where = os.path.dirname(os.path.abspath(ledger.path)) if ledger is not None and ledger.path != ":memory:" else None
     meta: dict = {}
     cutoff = None
+
+    def let_go() -> None:
+        if release is not None and not out["released"]:
+            rev = release()
+            out["released"] = True
+            if rev:
+                meta[META_REV] = rev
     with _Work(conn, where) as w:
         if want_a:
             w.attach_ledger(ledger)
             out["part_a"] = _part_a(conn, log)
             newest = conn.execute(f"SELECT MAX(posted) FROM {_L}.postings").fetchone()[0]
             if newest:
-                cutoff = (date.fromisoformat(newest[:10]) - timedelta(days=RETAIN_DAYS)).isoformat()
+                top = min(newest[:10], er.today_iso())
+                cutoff = (date.fromisoformat(top) - timedelta(days=retain_days())).isoformat()
             meta[META_SEQ] = ledger.seq()
             if ledger.rev is not None:
                 meta[META_REV] = ledger.rev
+            w.detach_ledger()
+            let_go()
         else:
+            let_go()
             _copy_store(conn)
         if want_b:
             out["part_b"] = _part_b(conn, full=want_a, boxes=boxes, log=log)

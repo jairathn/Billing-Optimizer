@@ -721,13 +721,16 @@ def test_the_work_tables_lookups_use_their_indexes(store, ledger, tmp_path, monk
         if "pd_key" in tables:
             plan(conn, "patient-day pairs", "SELECT * FROM emaw.pd_key k JOIN emaw.pd_cl e ON e.name_key = k.nk "
                                             "AND e.svc = k.svc AND e.cpt = k.code")
+            plan(conn, "patient-day winners", "SELECT (SELECT MAX(k.pcn) FROM emaw.pd_key k WHERE k.bill = w.bill), "
+                                              "(SELECT COUNT(DISTINCT k.svc || '|' || k.code) FROM emaw.pd_key k WHERE k.bill = w.bill) "
+                                              "FROM emaw.pd_win w")
         return real_drop(conn, *tables)
 
     monkeypatch.setattr(el, "_drop", spy_drop)
     monkeypatch.setattr(el, "_events", spy_a)
     monkeypatch.setattr(el, "_map_lines", spy_b)
     el.refresh(store, ledger, log=Log())
-    assert len(plans) == 8
+    assert len(plans) == 9
     for name, p_ in plans.items():
         scans = [x for x in p_.split(" | ") if x.startswith("SCAN")]
         assert len(scans) <= 1 and "INDEX" in p_, (name, p_)
@@ -750,8 +753,9 @@ def test_ingest_records_the_catalog_and_sync_catalog_repairs_a_lost_store(store,
     store.conn.commit()
     assert apply(store, ledger, p2)["status"] == "already"         # the ledger has it; the catalog row comes back
     assert one(store.conn, "SELECT status, live_rows FROM ema_report_files WHERE file_id=?", r2["file_id"]) == ("current", 2)
-    assert el.sync_catalog(store, ledger) == 1
+    # and so does the status of the file it replaced: the whole catalog is brought in line, not only this file's row
     assert one(store.conn, "SELECT status FROM ema_report_files WHERE file_id=?", r1["file_id"]) == ("replaced",)
+    assert el.sync_catalog(store, ledger) == 0
     # a catalog row the ledger does not hold is read again
     er._catalog_put(store.conn, "f" * 64, commit=True, report="production", status="current", source_name="x.csv")
     el.sync_catalog(store, ledger)

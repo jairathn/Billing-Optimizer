@@ -18,7 +18,7 @@ import datetime as dt
 import io
 import os
 import zipfile
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 TEST_HOST = "example.ema.test"
 CLAIM_PREFIX = f"https://{TEST_HOST}/ema/ws/v9/qlikRedirect/claim/"
@@ -356,18 +356,53 @@ def write(path: str, data: bytes) -> str:
     return path
 
 
-def big_production_csv(path: str, n: int, *, start: dt.date = D(2025, 1, 2)) -> dict:
+def big_production_csv(path: str, n: int, *, start: dt.date = D(2025, 1, 2), iso: bool = False) -> dict:
     """Write a Production CSV of n rows straight to disk (never held in memory), cycling through invented patients,
-    claim numbers, checks and codes. Returns the totals a reader must find: rows, insurance paid, charges (cents),
-    distinct claim numbers."""
+    claim numbers, checks and codes. `iso` writes the dates as YYYY-MM-DD (no date order to decide). Returns the totals a
+    reader must find: rows, insurance paid, charges (cents), distinct claim numbers."""
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh, lineterminator="\r\n")
+        w.writerow(PRODUCTION_COLUMNS)
+        tot = None
+        for r, t in _big_rows(n, start, iso=iso):
+            w.writerow(r)
+            tot = t
+    return _big_totals(tot)
+
+
+def big_production_xlsx(path: str, n: int, *, start: dt.date = D(2025, 1, 2)) -> dict:
+    """The same rows as big_production_csv as an .xlsx workbook with typed dates (written in openpyxl's streaming mode, so
+    a large one is quick to make). Returns the same totals."""
+    import openpyxl
+
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet("Sheet1")
+    ws.append(PRODUCTION_COLUMNS)
+    i_dates = [PRODUCTION_COLUMNS.index(c) for c in ("Posted Date", "Service Date", "Patient DOB")]
+    tot = None
+    for r, t in _big_rows(n, start, iso=True):
+        for i in i_dates:
+            r[i] = dt.datetime.fromisoformat(r[i])
+        ws.append(r)
+        tot = t
+    wb.save(path)
+    return _big_totals(tot)
+
+
+def _big_totals(tot: dict | None) -> dict:
+    tot = dict(tot or {"rows": 0, "ins_paid_cents": 0, "charges_cents": 0, "links": set()})
+    tot["links"] = len(tot["links"])
+    return tot
+
+
+def _big_rows(n: int, start: dt.date, *, iso: bool = False) -> Iterator[tuple[list, dict]]:
     cols = PRODUCTION_COLUMNS
     idx = {c: i for i, c in enumerate(cols)}
     codes_ = ["99213", "99214", "17000", "11102", "G2211", "SERUM TEST"]
     payers = [PAYERS["bcbs"], PAYERS["medicare"], PAYERS["commercial"], "Patient"]
     tot = {"rows": 0, "ins_paid_cents": 0, "charges_cents": 0, "links": set()}
-    with open(path, "w", encoding="utf-8", newline="") as fh:
-        w = csv.writer(fh, lineterminator="\r\n")
-        w.writerow(cols)
+    day = (lambda d: d.isoformat()) if iso else date_text
+    if True:
         for i in range(n):
             svc = start + dt.timedelta(days=(i // 400) % 330)
             posted = svc + dt.timedelta(days=i % 40)
@@ -380,8 +415,8 @@ def big_production_csv(path: str, n: int, *, start: dt.date = D(2025, 1, 2)) -> 
             contractual = (40 + i % 5) if kind == 2 and payer != "Patient" else 0
             link = None if payer == "Patient" else 90_000_000 + (i // 6)
             r = [""] * len(cols)
-            r[idx["Posted Date"]] = date_text(posted)
-            r[idx["Service Date"]] = date_text(svc)
+            r[idx["Posted Date"]] = day(posted)
+            r[idx["Service Date"]] = day(svc)
             r[idx["CPT/Product"]] = codes_[i % len(codes_)]
             r[idx["CPT/Product Description (Custom)"]] = "Test description"
             r[idx["Procedure Count"]] = "1"
@@ -407,7 +442,7 @@ def big_production_csv(path: str, n: int, *, start: dt.date = D(2025, 1, 2)) -> 
             r[idx["Primary Payer"]] = PAYERS["bcbs"]
             r[idx["Secondary Payer"]] = "None"
             r[idx["Unit Allowable"]] = money_text(150)
-            r[idx["Patient DOB"]] = date_text(dob)
+            r[idx["Patient DOB"]] = day(dob)
             r[idx["Charges"]] = money_text(charge)
             r[idx["Adjustments"]] = money_text(contractual)
             r[idx["Contractual Adjustments"]] = money_text(contractual)
@@ -419,11 +454,9 @@ def big_production_csv(path: str, n: int, *, start: dt.date = D(2025, 1, 2)) -> 
             r[idx["Patient Adjustments"]] = money_text(0)
             r[idx["Patient Payments"]] = money_text(pat_paid)
             r[idx["Payment Allowed Amount"]] = money_text(ins_paid)
-            w.writerow(r)
             tot["rows"] += 1
             tot["ins_paid_cents"] += ins_paid * 100
             tot["charges_cents"] += charge * 100
             if link:
                 tot["links"].add(link)
-    tot["links"] = len(tot["links"])
-    return tot
+            yield r, tot
