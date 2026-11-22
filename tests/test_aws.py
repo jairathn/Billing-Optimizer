@@ -423,7 +423,7 @@ def test_the_nightly_update_reboots_only_when_needed_and_never_during_a_deploy(t
     with open(state / "lock", "w") as fh:                                   # a deploy is going: no reboot meanwhile
         fcntl.flock(fh, fcntl.LOCK_EX)
         subprocess.run(["bash", "-c", cmd.replace("-w 3600", "-w 1")], env=env, timeout=30)
-    assert log()[3:] == ["dnf needs-restarting -r"]
+    assert log()[4:] == ["dnf needs-restarting -r"]                          # and no reboot
 
 
 def _caddy_bytes(size):
