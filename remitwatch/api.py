@@ -3654,7 +3654,7 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
             _settle(r, status="failed", error="SRFax has no record of it: the run stopped before it went out.")
         out["settled"] += 1
     for q in rows("SELECT fax_key, provider_id FROM faxes WHERE direction='out' AND status='queued' AND provider=? ORDER BY created_at LIMIT 200", (prov.name,)):
-        if False:
+        if late():
             out["more"] = True
             break
         try:
