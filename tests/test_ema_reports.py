@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tracemalloc
 import types
-import zipfile
 
 import pytest
 
@@ -337,7 +336,6 @@ def test_a_200k_row_csv_streams_in_little_memory(tmp_path):
     rec = er.recognize(p, "big.csv")
     acct = er.Account()
     n = paid = charges = 0
-    links = set()
     tracemalloc.start()
     try:
         for x in er.iter_production(p, rec, salt=SALT, account=acct):
@@ -886,7 +884,10 @@ def test_a_report_the_switch_does_not_read_waits_and_is_read_later(store, tmp_pa
     assert er.catalog(store.conn)["waiting"] == 0
 
 
-def test_production_goes_through_the_ledger_and_the_catalog_records_it(store, tmp_path, monkeypatch):
+@pytest.fixture
+def fake_ledger(monkeypatch):
+    """A stand-in for ema_ledger.apply_production_file (another module owns the ledger): it reads the file with
+    iter_production and reports it applied, as the ledger's result does."""
     import remitwatch
 
     calls = []
@@ -905,13 +906,18 @@ def test_production_goes_through_the_ledger_and_the_catalog_records_it(store, tm
     fake.apply_production_file = apply_production_file
     monkeypatch.setitem(sys.modules, "remitwatch.ema_ledger", fake)
     monkeypatch.setattr(remitwatch, "ema_ledger", fake, raising=False)
+    return calls
+
+
+def test_production_goes_through_the_ledger_and_the_catalog_records_it(store, tmp_path, fake_ledger):
+    calls = fake_ledger
     er._catalog_put(store.conn, "older", commit=True, report="production", status="current")
     p = put(tmp_path, "Production.csv", F.production_csv(prod_rows()))
     opened = []
     res = er.ingest_file(store, p, via="dropbox", ledger=lambda: opened.append(1) or "LEDGER")
     assert res["status"] == "current" and calls[0][1:] == (8, "LEDGER") and opened == [1]
-    row = dict(zip(*[[d[0] for d in store.conn.execute("SELECT * FROM ema_report_files WHERE file_id=?", (res["file_id"],)).description],
-                     store.conn.execute("SELECT * FROM ema_report_files WHERE file_id=?", (res["file_id"],)).fetchone()]))
+    cur = store.conn.execute("SELECT * FROM ema_report_files WHERE file_id=?", (res["file_id"],))
+    row = dict(zip([d[0] for d in cur.description], cur.fetchone()))
     assert (row["status"], row["scope"], row["svc_lo"], row["as_of"], row["rows_applied"]) == ("current", "service", "2026-03-02",
                                                                                                "2026-04-03", 8)
     assert "prefixes" not in row["account"] and "://" not in row["account"]
@@ -920,3 +926,20 @@ def test_production_goes_through_the_ledger_and_the_catalog_records_it(store, tm
     assert er.claim_url_template(store.conn) == F.CLAIM_PREFIX + "{claim}"
     assert er.coverage(store.conn)["production_as_of"] == "2026-04-03"
     assert er.ingest_file(store, p, via="upload", ledger="L")["status"] == "already" and len(calls) == 1
+
+
+def test_a_raw_csv_too_large_for_this_site_waits_until_a_zipped_copy_is_read(store, tmp_path, fake_ledger):
+    data = F.production_csv(prod_rows())
+    head = data[:er.PEEK_BYTES]
+    rec = er.recognize(head, "2026 Production.csv")
+    assert rec.report == "production"
+    pid = er.provisional_id("c" * 64)
+    er.record_waiting(store.conn, file_id=pid, report=rec.report, source_name="2026 Production.csv", via="dropbox",
+                      origin={"dropbox_id": "id:big", "content_hash": "c" * 64}, reason=er.BIG_CSV_REASON, size=len(data))
+    assert er.waiting(store.conn)[0]["status_reason"].startswith("Too large to read on this site")
+    z = put(tmp_path, "2026 Production.zip", F.zipped("2026 Production.csv", data))
+    res = er.ingest_file(store, z, via="dropbox", ledger="L")
+    assert res["members"][0]["status"] == "current"
+    assert one(store.conn, "SELECT status, replaced_by FROM ema_report_files WHERE file_id=?", pid) == ("superseded",
+                                                                                                    res["members"][0]["file_id"])
+    assert not er.waiting(store.conn)

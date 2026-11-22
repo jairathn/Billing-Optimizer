@@ -878,6 +878,8 @@ def register_functions(conn: sqlite3.Connection, salt: bytes | None = None) -> N
     Without a salt the store's own is used (made on first use)."""
     salt = salt if salt is not None else key_salt(conn)
     holder = [_grouper(conn)]
+    if id(conn) not in _ROUTES and len(_ROUTES) >= 64:
+        _ROUTES.clear()                 # a long-lived process opens many connections; older ones keep what they had
     _ROUTES.setdefault(id(conn), []).append(holder)
     del _ROUTES[id(conn)][:-4]          # registering again replaces older holders of the same connection
     conn.create_function("rw_name_key", 2, lambda last, first: name_key_parts(salt, last, first), deterministic=True)
@@ -1682,15 +1684,16 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
                     raise ReportRefused("too_many_rows", f"It has more than {MAX_ROWS:,} rows.", "ar_report")
                 if len(row) < width:
                     row = list(row) + [None] * (width - len(row))
-                svc = dv(row[i_svc])
+                svc = _date(row[i_svc], order)
                 party = _text(row[i_party])
-                if svc is None or not party:
+                if svc is None or svc is _BAD or not party:
                     if _blank(row):
                         blank += 1
                     elif _total_line(row):
                         total += 1
                     else:
                         no_date += 1
+                        c["bad_dates"] += svc is _BAD
                     continue
                 kept += 1
                 svc_lo = svc if svc_lo is None or svc < svc_lo else svc_lo
@@ -1818,6 +1821,17 @@ def record_waiting(conn: sqlite3.Connection, *, file_id: str, report: str, sourc
         _catalog_put(conn, file_id, report=report or row["report"], source_name=source_name or row["source_name"], via=via,
                      origin={**old, **o}, status_reason=reason)
     conn.commit()
+
+
+CANDIDATE_EXTS = (".xlsx", ".csv", ".tsv", ".txt", ".zip")      # the endings the router asks recognize() about first
+BIG_CSV_REASON = ("Too large to read on this site: zip it (about 12-15 MB) and put the zip in the same folder, or let the "
+                  "server read it.")
+
+
+def provisional_id(content_hash: str) -> str:
+    """The catalog id of a report recognised from its first bytes but never downloaded (a raw CSV too large for a
+    serverless host): its SHA-256 is not known, so it goes by its Dropbox content hash until a copy of it is read."""
+    return "dropbox:" + str(content_hash)
 
 
 def supersede_waiting(conn: sqlite3.Connection, file_id: str, *, reason: str, replaced_by: str | None = None) -> bool:
