@@ -1269,7 +1269,8 @@ CREATE TABLE IF NOT EXISTS ema_report_files (file_id TEXT PRIMARY KEY, report TE
   origin TEXT, container TEXT, format TEXT, scope TEXT, svc_lo TEXT, svc_hi TEXT, posted_lo TEXT, posted_hi TEXT,
   as_of TEXT, created_at TEXT, received_at TEXT, applied_at TEXT, rows_read INTEGER, rows_kept INTEGER,
   rows_applied INTEGER, live_rows INTEGER, links INTEGER, account TEXT, columns TEXT, missing TEXT, unused TEXT,
-  status TEXT, status_reason TEXT, attempts INTEGER DEFAULT 0, replaced_by TEXT, decision TEXT, decided_by TEXT, decided_at TEXT);
+  status TEXT, status_reason TEXT, attempts INTEGER DEFAULT 0, replaced_by TEXT, decision TEXT, decided_by TEXT, decided_at TEXT,
+  content_id TEXT, source_kind TEXT);
 CREATE INDEX IF NOT EXISTS ix_erf_status ON ema_report_files(report, status);
 CREATE TABLE IF NOT EXISTS ema_ar (file_id TEXT, row_no INTEGER, as_of TEXT, svc_year TEXT, item_key TEXT,
   coverage TEXT, party TEXT, claim_id TEXT, bill TEXT, link INTEGER, balance_type TEXT, balance_cents INTEGER,
@@ -2034,8 +2035,7 @@ def record_waiting(conn: sqlite3.Connection, *, file_id: str, report: str, sourc
 
 
 CANDIDATE_EXTS = (".xlsx", ".csv", ".tsv", ".txt", ".zip")      # the endings the router asks recognize() about first
-BIG_CSV_REASON = ("Too large to read on this site: zip it (about 12-15 MB) and put the zip in the same folder, or let the "
-                  "server read it.")
+BIG_CSV_REASON = "Too big to read on Vercel: zip or gzip it, or upload it in the app (the app compresses it)."
 
 
 def provisional_id(content_hash: str) -> str:
@@ -2239,6 +2239,15 @@ def _record_refusal(store: Any, file_id: str, exc: ReportRefused, *, path: str, 
     return _result("refused", report, file_id, reason=exc.message, code=exc.code)
 
 
+SOURCE_KINDS = ("file", "upload", "api")       # where an applied batch came from (amendment 10): recorded on each
+
+
+def source_kind_of(via: str | None) -> str:
+    """The source kind of a batch read by a route: an upload, an API pull, or a file (Dropbox, the server's mirror, the
+    command line)."""
+    return via if via in ("upload", "api") else "file"
+
+
 def _waiting_reason(report: str) -> str:
     return (f"This host does not read the {REPORT_NAMES[report]} yet (REMITWATCH_EMA_REPORTS is '{switch()}'). "
             "It is read as soon as that setting allows.")
@@ -2376,16 +2385,24 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
         store.ema_changed = True
         return _result("waiting", "production", file_id, reason=reason)
     lg = ledger() if (callable(ledger) and not hasattr(ledger, "conn")) else ledger
+    new_row = _catalog_row(conn, file_id) is None
     try:
         res = dict(ema_ledger.apply_production_file(store, path, rec, file_id=file_id, via=via, origin=origin, force=force,
-                                                    ledger=lg, deadline=deadline, serverless=runtime.serverless(), log=log) or {})
+                                                    ledger=lg, deadline=deadline, serverless=runtime.serverless(), log=log,
+                                                    source_name=source_name, source_kind=source_kind_of(via)) or {})
     except ReportRefused as exc:
         return _record_refusal(store, file_id, exc, path=path, rec=rec, via=via, origin=origin, log=log)
     status = res.get("status") or "refused"
     box = _box_dict(res.get("box"))
     acct = _json_safe(res.get("account"))
     if status == "already":
-        _repair_store_rows(conn, file_id, path, rec)
+        if res.get("duplicate_of"):
+            # the same rows as a file on file, saved again (another save time, zip times or line endings): nothing changes
+            supersede_waiting(conn, file_id, reason=res.get("reason") or "The same rows as a file already read.",
+                              replaced_by=res["duplicate_of"])
+            log(f"  EMA report {source_name}: already read (the same rows as a file on file)")
+        else:
+            _repair_store_rows(conn, file_id, path, rec)
         return _result("already", "production", file_id, **{k: v for k, v in res.items() if k not in ("status", "report", "file_id")})
     if status == "waiting":
         record_waiting(conn, file_id=file_id, report="production", source_name=source_name, via=via, origin=origin or {},
@@ -2402,7 +2419,10 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
                             rows_read=res.get("rows_read") or acct.get("rows_read") or 0,
                             rows_kept=res.get("rows_kept") or acct.get("rows_kept") or 0,
                             rows_applied=res.get("rows_applied") or 0, live_rows=res.get("live_rows") or 0,
-                            account=acct, status=status, status_reason=res.get("reason"))
+                            account=acct, status=status, status_reason=res.get("reason"),
+                            source_kind=source_kind_of(via), content_id=res.get("content_id"))
+        if new_row and res.get("received_at"):
+            fields["received_at"] = res["received_at"]          # the arrival the ledger orders files by
         if res.get("links") is not None:
             fields["links"] = res.get("links")
         if status in ("current", "superseded"):

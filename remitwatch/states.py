@@ -1311,7 +1311,13 @@ def paid_proof(fx: dict) -> dict | None:
             # claim) and brought at least what this line should: the later denial answers another copy of the claim (a
             # superseded original after the corrected claim was paid, C62), whatever its reason
             takeback = any(p["reason"] in ("WO", "72") and (p["date"] or "") >= (x["date"] or "") for p in fx["r835"].get("plb") or [])
-            if same and settled and (x["paid"] or 0) >= thr and not takeback:
+            # the same line: its line control number (EMA keeps it across submissions), or neither line has one and the
+            # code is on the claim once; a second unit or lesion billed on its own line is never closed by the first one's
+            # payment
+            twin = [y for y in before if _same_payer(row_group(y)[0], denier)
+                    and ((lcns and y.get("lcn") in lcns) or (not lcns and not y.get("lcn") and once))]
+            x = max(twin, key=lambda r: r["date"] or "") if twin else x
+            if twin and settled and (x["paid"] or 0) >= thr and not takeback:
                 return {"rule": "paid_before_same_payer", "cents": x["paid"], "date": x["date"], "payer": x["payer"],
                         "check_tail": x["check_tail"], "source": "835", "watch": True,
                         "text": f"Already paid: {usd(x['paid'])} by {x['payer']} on {day(x['date'])} (check ending {x['check_tail']}), and the "

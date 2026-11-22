@@ -408,7 +408,7 @@ def ingest_zip(store, client, root: str, deadline: float, out: dict, log) -> Non
 
 PRODUCTION_LATER = ("This site reads one Production file per run; this one is read in a following run, which starts by "
                     "itself.")
-BIG_REPORT_REASON = "Too big to read on Vercel: zip or gzip it, or upload it in the app (the app compresses it)."
+from .ema_reports import BIG_CSV_REASON as BIG_REPORT_REASON      # noqa: E402  (one wording: a raw CSV too big for this site)
 BIG_GZ_REASON = ("Too big to read on Vercel even compressed: upload it in the app, or export a shorter date range (a "
                  "Production export by posted date, the last five weeks, is about 20 MB).")
 APPLY_PENDING = "ema:apply_pending"     # a Production file was being applied when the run stopped: the next run repairs

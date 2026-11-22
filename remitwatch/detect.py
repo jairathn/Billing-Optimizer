@@ -1889,7 +1889,7 @@ class Detector:
                         companions = [o for o in self.lines_by_claim[l["claim_key"]] if o["line_key"] != l["line_key"]]
                         comp_codes = sorted({o["procedure_code"] for o in companions if o.get("procedure_code")})
                         globals_ = [GLOBAL_DAYS.get(c) for c in comp_codes]
-                        in_global = top == "B20" or any(r in ("M86", "N525", "M144") for r in rarcs)
+                        in_global = top == "B20" or "M86" in rarcs
                         if "24" in mods and in_global:
                             # a visit inside another surgery's global period: the 24 (unrelated problem) is what decides it
                             sig, sev, act, ttl = "EM_BUNDLED_MOD24", "medium", "appeal", f"{code}-24 denied inside a global period"
@@ -2836,11 +2836,17 @@ class Detector:
         claims = [{"claim_id": cd["pcn"], "sent": cd["sent"], "payer_group": cd.get("grp"),
                    "lines": [(x[1], x[0], x[2]) for x in items if x[1]]} for cd, items in final]
         answers = self._ema_step("claim_answers", ec.claim_answers, self.conn, claims) or {}
+        newest = self.conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0] or ""
         out = []
         for cd, items in final:
             a = answers.get(cd["pcn"]) or {}
             if a.get("answered"):
                 self.ema_counts["export_answered_in_ema"] += 1
+                continue
+            if not cd["rejected"] and (cd.get("due") or "") > newest and a.get("link") is None:
+                # due only by EMA's postings, and EMA's own claim for it was not found: its answer cannot be seen, so the
+                # claim waits until the remittances reach its due day
+                self.ema_counts["export_waits_unfound"] += 1
                 continue
             st = statuses.get(cd["pcn"])
             export_at = str((cd["k"].get("status_at") or ("",))[0] or "")[:10]

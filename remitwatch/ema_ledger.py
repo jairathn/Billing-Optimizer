@@ -348,6 +348,8 @@ class FileMeta:
     rows_read: int = 0
     rows_kept: int = 0
     links: int | None = None
+    content_id: str | None = None       # a hash of its postings in order: the same rows saved again are one batch
+    source_kind: str | None = None      # 'file', 'upload' or 'api' (amendment 10)
 
     @property
     def order(self) -> tuple:
@@ -426,6 +428,10 @@ class Ledger:
         elif schema != LEDGER_SCHEMA:
             conn.close()
             raise RuntimeError("The posting ledger was written by another version of RemitWatch.")
+        have = {r[1] for r in conn.execute("PRAGMA table_info(ledger_files)")}
+        for col in ("content_id", "source_kind"):           # added after the first ledgers were written
+            if col not in have:
+                conn.execute(f"ALTER TABLE ledger_files ADD COLUMN {col} TEXT")
         lg._remove_stage_file()             # a staging file left by a run that was killed
         clean_work_files(d)                 # and the work files of refreshes that were killed
         return lg
@@ -500,6 +506,17 @@ class Ledger:
         cur = self.conn.execute("SELECT * FROM ledger_files WHERE file_id=?", (file_id,))
         r = cur.fetchone()
         return dict(zip([d[0] for d in cur.description], r)) if r else None
+
+    def duplicate_of(self, content_id: str | None, file_id: str | None) -> dict | None:
+        """An applied file whose postings, in order, are exactly these (the same export saved again: another save time,
+        other zip times, other line endings), or None."""
+        if not content_id:
+            return None
+        cur = self.conn.execute("SELECT file_id, applied_at, status FROM ledger_files WHERE content_id=? AND file_id IS NOT ? "
+                                f"AND status IN ({','.join('?' * len(APPLIED))}) ORDER BY src LIMIT 1",
+                                (content_id, file_id, *APPLIED))
+        r = cur.fetchone()
+        return {"file_id": r[0], "applied_at": r[1], "status": r[2]} if r else None
 
     def boxes(self, statuses: tuple = LIVE) -> list[Box]:
         """The boxes of the applied files with these statuses (by default those that still hold rows)."""
@@ -741,9 +758,11 @@ class Ledger:
             c.execute("DELETE FROM ledger_files WHERE file_id=?", (meta.file_id,))
             src = c.execute(
                 "INSERT INTO ledger_files (file_id, scope, svc_lo, svc_hi, posted_lo, posted_hi, as_of, created_at, received_at, "
-                "rows, live_rows, status, source_name, via, rows_read, applied_at, links) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "rows, live_rows, status, source_name, via, rows_read, applied_at, links, content_id, source_kind) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (meta.file_id, mine.scope, meta.svc_lo, meta.svc_hi, meta.posted_lo, meta.posted_hi, meta.as_of, meta.created_at,
-                 meta.received_at, rows, 0, "current", meta.source_name, meta.via, meta.rows_read, now, links)).lastrowid
+                 meta.received_at, rows, 0, "current", meta.source_name, meta.via, meta.rows_read, now, links, meta.content_id,
+                 meta.source_kind)).lastrowid
             c.execute("INSERT OR IGNORE INTO main.names (id, name) SELECT id, name FROM stage.new_names")
             pred, args = mine.sql()
             for b in older:
