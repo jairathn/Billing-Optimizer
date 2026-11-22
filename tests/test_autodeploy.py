@@ -25,11 +25,12 @@ pytestmark = pytest.mark.skipif(not (shutil.which("bash") and shutil.which("git"
 
 FAKE_DOCKER = r'''#!/bin/bash
 # a stand-in for docker. Every call is recorded in $FAKE/calls. It keeps the image each name points at (tag_app,
-# tag_caddy), the container of each service as "<id> <image>" (ctr_app, ctr_caddy; <svc>_stopped when stopped) and the
-# Caddy file Caddy loaded (caddy_loaded). Files in $FAKE make steps fail or change: fail_build, fail_pull_base, fail_up,
-# unhealthy (the app does not answer), busy (keys of the locks of runs going in the app; busy_left counts the checks
-# before they end; busy_after_build, the same but from the build on), stale (locks of runs that ended), caddy_update
-# (the image Caddy's name gets on the next pull).
+# tag_caddy), the container of each service as "<id> <image>" (ctr_app, ctr_caddy; <svc>_stopped when stopped), the
+# commit each app image keeps from its build (commit_<image>: REMITWATCH_COMMIT, as docker-compose.yml passes it and the
+# Dockerfile keeps it) and the Caddy file Caddy loaded (caddy_loaded). Files in $FAKE make steps fail or change:
+# fail_build, fail_pull_base, fail_up, unhealthy (the app does not answer), busy (keys of the locks of runs going in the
+# app; busy_left counts the checks before they end; busy_after_build, the same but from the build on), stale (locks of
+# runs that ended), caddy_update (the image Caddy's name gets on the next pull).
 echo "$*" >> "$FAKE/calls"
 get() { cat "$FAKE/$1" 2>/dev/null; }
 up() {   # service: made again when missing, stopped, or on another image than its name points at now
@@ -48,6 +49,7 @@ case "$1 $2" in
     [ -f "$FAKE/fail_build" ] && { echo "build broke"; exit 1; }
     [ "${3:-}" = --pull ] && [ -f "$FAKE/fail_pull_base" ] && { echo "registry unreachable"; exit 1; }
     echo "app-$(git rev-parse HEAD)" > "$FAKE/tag_app"
+    printf '%s\n' "${REMITWATCH_COMMIT:-}" > "$FAKE/commit_app-$(git rev-parse HEAD)"
     [ -f "$FAKE/busy_after_build" ] && mv "$FAKE/busy_after_build" "$FAKE/busy"     # a run that starts during the build
     exit 0 ;;
   "compose pull")
@@ -140,6 +142,7 @@ class Box:
                         REMITWATCH_DEPLOY_LIB=str(self.lib), REMITWATCH_DEPLOY_POLL="0", REMITWATCH_DEPLOY_HEALTH_WAIT="0",
                         REMITWATCH_DEPLOY_IDLE_WAIT="0",
                         GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.org", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.org")
+        self.env.pop("REMITWATCH_COMMIT", None)         # only what the scripts themselves pass reaches a build
         sh("git", "init", "-q", "--bare", "-b", "main", str(self.origin))
         sh("git", "clone", "-q", str(self.origin), str(self.dev), env=self.env)
         sh("git", "checkout", "-q", "-b", "main", cwd=self.dev, env=self.env)
@@ -191,6 +194,12 @@ class Box:
     def running(self):
         """The commit whose image the app's container was made from."""
         return self.read("ctr_app").split()[1].removeprefix("app-") if self.read("ctr_app") else ""
+
+    @property
+    def running_commit(self):
+        """The commit the running app's image keeps from its build (what /api/health shows), "" for none."""
+        image = self.read("ctr_app").split()[1] if self.read("ctr_app") else ""
+        return self.read(f"commit_{image}").strip() if image else ""
 
     @property
     def marker(self):
@@ -312,8 +321,11 @@ def test_the_live_servers_older_checker_hands_over_to_the_copy_when_it_deploys_t
     assert r.returncode == 0 and b.marker == this and "did not reinstall" not in b.log_lines()[-1], r.stdout + r.stderr
     assert f"ExecStart=/bin/bash {b.lib}/auto-deploy.sh" in (b.units / "remitwatch-deploy.service").read_text()
     assert (b.lib / "auto-deploy.sh").read_text() == new["deploy/auto-deploy.sh"] and (b.state / "dir").read_text().strip() == str(b.dir)
+    # the older checker gives its build no commit: /api/health shows none until the copy builds the next one
+    assert b.running == this and b.running_commit == ""
     nxt = b.commit("next", {"remitwatch/api.py": "x = 3\n"})
     assert b.run().returncode == 0 and b.marker == nxt and b.last()[3] == "deployed"     # the copy's tick
+    assert b.running_commit == nxt
 
 
 def test_nothing_new_on_main_does_nothing(box):
@@ -459,6 +471,63 @@ def test_a_forced_try_that_fails_keeps_the_commit_held(box):
     assert "not deployed again by itself" in r.stdout and box.calls().count("compose up -d") == n
 
 
+def test_the_running_image_keeps_the_commit_it_was_built_from(box):
+    """/api/health shows REMITWATCH_COMMIT, which the app's image keeps from its build: the commit of the files built.
+    A rollback brings back the image that ran before, with its own commit; a change to docs only rebuilds nothing, so the
+    commit shown stays the one whose code runs."""
+    assert box.running_commit == ""                                           # first boot gives its build none
+    one = box.commit("code", {"remitwatch/api.py": "x = 2\n"})
+    assert box.run().returncode == 0 and box.running == one and box.running_commit == one
+    box.write("unhealthy", "")
+    bad = box.commit("does not answer", {"remitwatch/api.py": "x = 3\n"})
+    assert box.run().returncode == 1 and box.last()[3] == "unhealthy"
+    assert box.read(f"commit_app-{bad}").strip() == bad                       # built with its own commit, then put back
+    assert box.running == one and box.running_commit == one
+    (box.fake / "unhealthy").unlink()
+    box.write("fail_pull_base", "")                                           # the build on the base image here, too
+    two = box.commit("fixed", {"remitwatch/api.py": "x = 4\n"})
+    assert box.run().returncode == 0 and "base image could not be refreshed" in box.last()[4]
+    assert box.running == two and box.running_commit == two
+    docs = box.commit("docs", {"docs/SERVER_RUNBOOK.md": "runbook 2\n"})
+    assert box.run().returncode == 0 and box.marker == docs and box.running_commit == two
+
+
+def test_compose_hands_the_commit_to_the_image_and_lets_a_request_finish_when_the_app_stops(tmp_path):
+    """The deploy and configure.sh set REMITWATCH_COMMIT for the build. docker-compose.yml passes it on as a build
+    argument and the Dockerfile keeps it in the image (ENV, which /api/health reads), after every layer that installs or
+    copies anything, so a new commit rebuilds nothing above it. A stop of the app (a deploy, configure.sh, a reboot)
+    waits 120 s for a request in progress: one appeal fax takes about a minute."""
+    steps = []
+    for ln in open(os.path.join(ROOT, "Dockerfile")).read().splitlines():
+        if ln.strip() and not ln.lstrip().startswith("#"):
+            word, _, rest = ln.strip().partition(" ")
+            steps.append((word.upper(), rest.replace(" ", "")))
+    arg = next((i for i, (w, rest) in enumerate(steps) if w == "ARG" and rest.split("=")[0] == "REMITWATCH_COMMIT"), None)
+    keep = next((i for i, (w, rest) in enumerate(steps)
+                 if w == "ENV" and rest in ("REMITWATCH_COMMIT=$REMITWATCH_COMMIT", "REMITWATCH_COMMIT=${REMITWATCH_COMMIT}")), None)
+    assert arg is not None and keep is not None, "the Dockerfile takes REMITWATCH_COMMIT (ARG) and keeps it in the image (ENV)"
+    assert max(i for i, (w, _) in enumerate(steps) if w in ("RUN", "COPY", "ADD")) < arg < keep
+    # docker-compose.yml as Docker Compose itself reads it (no Docker daemon needed)
+    if not shutil.which("docker") or sh("docker", "compose", "version", check=False).returncode != 0:
+        pytest.skip("Docker Compose is not installed here")
+    proj = tmp_path / "proj"
+    (proj / "deploy").mkdir(parents=True)
+    shutil.copy(os.path.join(ROOT, "docker-compose.yml"), proj / "docker-compose.yml")
+    shutil.copy(os.path.join(ROOT, "deploy", "Caddyfile"), proj / "deploy" / "Caddyfile")
+    (proj / ".env").write_text("")
+    sha = "0123456789abcdef0123456789abcdef01234567"                         # invented
+    env = {k: v for k, v in os.environ.items() if k != "REMITWATCH_COMMIT"}
+
+    def services(**extra):
+        r = sh("docker", "compose", "config", "--format", "json", cwd=proj, env=dict(env, **extra))
+        return json.loads(r.stdout)["services"]
+
+    app, caddy = services(REMITWATCH_COMMIT=sha)["app"], services()["caddy"]
+    assert app["build"]["args"] == {"REMITWATCH_COMMIT": sha} and app["stop_grace_period"] == "2m0s"
+    assert services()["app"]["build"]["args"] == {"REMITWATCH_COMMIT": ""}       # a build nobody gives one: none
+    assert "stop_grace_period" not in caddy
+
+
 def test_a_failure_also_reaches_the_alert_webhook_once_and_its_address_stays_secret(box):
     (box.dir / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\nALERT_WEBHOOK_URL='https://hooks.example.org/T0K3N'\n")
     box.write("fail_build", "")
@@ -602,6 +671,7 @@ def test_configure_sh_offers_it_and_holds_the_lock_while_it_runs(tmp_path):
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
     assert "Auto-deploy is on" in r.stdout and b.marker == b.first and "enable --now remitwatch-deploy.timer" in b.read("systemctl")
     assert (b.lib / "auto-deploy.sh").exists()
+    assert b.read(f"commit_app-{b.first}").strip() == b.first             # its build keeps the checkout's commit
     # run again: it is on already, and the record of what runs follows the fresh build
     r = sh("bash", str(b.dir / "deploy" / "aws" / "configure.sh"), env=b.env, input="\n" * 80, check=False)
     assert r.returncode == 0 and "On: each new commit on main is deployed by itself" in r.stdout

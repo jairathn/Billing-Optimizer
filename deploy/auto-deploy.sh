@@ -7,7 +7,8 @@
 # deploy brings one. Each run fetches the branch and, when its newest commit is not the one this server runs, deploys it:
 #   - only docs changed (docs/ and *.md): the files are checked out; nothing is rebuilt or restarted;
 #   - otherwise build first, swap second: the files are checked out, Caddy's image is refreshed, `docker compose build
-#     --pull` runs, and Caddy (the image about to run) checks its file. Only when all of that succeeds, and no data cycle
+#     --pull` runs (the image keeps the commit it is built from, which /api/health shows, as the Vercel site shows its
+#     own), and Caddy (the image about to run) checks its file. Only when all of that succeeds, and no data cycle
 #     or fax run is going in the app, does `docker compose up -d` replace the running containers. It waits up to 5
 #     minutes for a run to end; after that it puts everything back and a later check tries again. Caddy is restarted
 #     when its file changed. The site must then answer through Caddy within 3 minutes. If it does not, the previous
@@ -180,6 +181,11 @@ holding() {     # whether this commit is to be left alone for now (a rollback, o
 }
 
 checkout() { git checkout -q -f -B "$BRANCH" "$1"; }
+
+build_app() {   # [--pull]: the app's image from the files checked out. It keeps their commit (REMITWATCH_COMMIT, passed on
+                # by docker-compose.yml), and /api/health shows it: what this server runs can be seen without a shell
+  REMITWATCH_COMMIT=$(git rev-parse --verify --quiet HEAD) compose build "$@"
+}
 
 hand_changes() {  # prints why the checkout must not be touched: files changed by hand, or files the commit would
                   # overwrite that git does not track here (a local override, or .env itself)
@@ -357,9 +363,9 @@ main() {
   if ! compose pull --quiet caddy >>"$BLOG" 2>&1; then
     note="$note; Caddy's image could not be refreshed (the one here was kept)"
   fi
-  if ! compose build --pull >>"$BLOG" 2>&1; then
+  if ! build_app --pull >>"$BLOG" 2>&1; then
     echo "== the build with fresh base images failed; once more with the ones here" >>"$BLOG"
-    if ! compose build >>"$BLOG" 2>&1; then
+    if ! build_app >>"$BLOG" 2>&1; then
       put_back
       failed build-failed "the running site was left as it was and the files put back; the next check tries again. Output: $BLOG"
       prune

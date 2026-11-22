@@ -115,8 +115,9 @@ def test_the_servers_own_runs_look_after_the_fax_line(tmp_path, monkeypatch, cap
 
 
 FAKE_DOCKER = r"""#!/bin/bash
-# a stand-in for docker: records each call (python given with -c is named by what it does), answers whether the store
-# holds data ($LOGDIR/store: data or empty), and fails the move when $LOGDIR/import_fails exists
+# a stand-in for docker: records each call (python given with -c is named by what it does) and the commit each build is
+# given ($LOGDIR/build_commits: REMITWATCH_COMMIT, "<unset>" when none), answers whether the store holds data
+# ($LOGDIR/store: data or empty), and fails the move when $LOGDIR/import_fails exists
 args=()
 for a in "$@"; do
   case "$a" in
@@ -129,6 +130,7 @@ for a in "$@"; do
   esac
 done
 echo "${args[*]}" >> "$LOGDIR/docker.log"
+case "${args[*]}" in "compose build"*) printf '%s\n' "${REMITWATCH_COMMIT-<unset>}" >> "$LOGDIR/build_commits" ;; esac
 for ((i = 1; i <= $#; i++)); do              # python given with -c: the app's own code runs as it would in its image
   if [ "${!i}" = -c ]; then
     j=$((i + 1)); code=${!j}; shift "$j"
@@ -143,16 +145,19 @@ esac
 exit 0
 """
 
-SECRET_PROMPT = re.compile(r"\s+([A-Z][A-Z0-9_]+), (?:set|not set)")
+SECRET_PROMPT = re.compile(r"\s+([A-Z][A-Z0-9_]+), (?:set|not set|new)")
 TEXT_PROMPT = re.compile(r"\s+([A-Z][A-Z0-9_]+) \[")
 
 
 def _drive(script, cwd, env, answers, timeout=90):
     """Run a script in a terminal, as a person would: wait for each question, answer it by the setting's name (Enter when
-    `answers` has none; a list answers the same question again), and type a secret only once the terminal has stopped
-    showing what is typed, as it does for every secret. Returns the exit code and everything the terminal showed."""
+    `answers` has none; a list answers the same question again; REPLACE answers whether to make a new dashboard password,
+    MOVE and AUTODEPLOY the other yes-or-no questions), and type a secret only once the terminal has stopped showing what
+    is typed, as it does for every secret. A script still waiting at `timeout` (a question nobody answers) is ended.
+    Returns the exit code and everything the terminal showed."""
     import pty
     import select
+    import signal
     import termios
     queues = {k: (list(v) if isinstance(v, list) else [v]) for k, v in answers.items()}
     pid, fd = pty.fork()
@@ -184,6 +189,8 @@ def _drive(script, cwd, env, answers, timeout=90):
             name = TEXT_PROMPT.match(last).group(1)
         elif last.endswith("[Y/n] "):
             name = "MOVE" if "Move the store" in last else "AUTODEPLOY"
+        elif last.endswith("[y/N] "):
+            name = "REPLACE"
         else:
             done, st = os.waitpid(pid, os.WNOHANG)
             if done:
@@ -198,6 +205,8 @@ def _drive(script, cwd, env, answers, timeout=90):
                 time.sleep(0.01)
         os.write(fd, (answer + "\n").encode())
         pending = b""
+    if status is None and time.time() >= deadline:                  # still waiting: end it, or reading on never returns
+        os.kill(pid, signal.SIGKILL)
     while True:                                                     # what is left to show
         try:
             chunk = os.read(fd, 65536)
@@ -315,16 +324,63 @@ def test_passwords_the_site_would_refuse_are_asked_for_again(tmp_path):
     assert "short1" not in screen and "a-long-enough-pass-1" not in screen
 
 
-def test_a_dashboard_password_the_site_now_refuses_is_replaced(tmp_path):
-    """A short password left from before locks the site (remitwatch.api.password_problem): configure.sh says so, and
-    Enter makes a new one instead of keeping it."""
+def test_a_short_dashboard_password_in_use_is_kept_with_a_warning(tmp_path):
+    """The server still accepts a short dashboard password it already has (remitwatch.api.password_warning), so that an
+    update never locks the staff out. configure.sh says it is easy to guess. Enter keeps it, since a new one changes
+    every biller's login; a new one is made only when the person says yes, and one typed must still be 12 or more."""
     repo, env = _configure_repo(tmp_path)
     (tmp_path / "store").write_text("data\n")
     (repo / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\nREMITWATCH_PASSWORD='shortpw'\n")
-    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {"AUTODEPLOY": "n"})
-    assert code == 0 and "REMITWATCH_PASSWORD set now cannot be used" in screen and "shortpw" not in screen
+    script = str(repo / "deploy" / "aws" / "configure.sh")
+    for answer in ("", "n"):                                               # Enter, or no: kept as it is
+        code, screen = _drive(script, str(repo), env, {"REPLACE": answer, "AUTODEPLOY": "n"})
+        assert code == 0, screen[-1500:]
+        assert "is shorter than 12 characters. The site still accepts it, but it is easy to guess." in screen
+        assert "Make a new one now?" in screen and "Kept: everyone signs in with it as before." in screen
+        assert "cannot be used" not in screen and "shown this once" not in screen and "shortpw" not in screen
+        assert _env_values(repo)["REMITWATCH_PASSWORD"] == "shortpw"
+    # yes: a short one typed is asked for again, and Enter then makes one, shown once
+    code, screen = _drive(script, str(repo), env, {"REPLACE": "y", "REMITWATCH_PASSWORD": ["short2", ""], "AUTODEPLOY": "n"})
+    assert code == 0, screen[-1500:]
     new = _env_values(repo)["REMITWATCH_PASSWORD"]
-    assert len(new) == 32 and screen.count(new) == 1
+    assert "REMITWATCH_PASSWORD, new, Enter makes one" in screen
+    assert "must be 12 characters or more. Type it again, or press Enter to have one made." in screen
+    assert len(new) == 32 and screen.count(new) == 1 and "short2" not in screen
+    assert "Broken pipe" not in screen                                     # making one leaves no noise on the screen
+    # from then on there is nothing to say about it
+    code, screen = _drive(script, str(repo), env, {"AUTODEPLOY": "n"})
+    assert code == 0 and "Make a new one now?" not in screen and _env_values(repo)["REMITWATCH_PASSWORD"] == new
+
+
+def test_a_dashboard_password_the_site_refuses_is_replaced(tmp_path):
+    """One the site cannot accept at all (a character a browser cannot send in a login: remitwatch.api.password_problem)
+    leaves the site serving nothing, so nobody signs in with it: configure.sh says so, and Enter makes a new one."""
+    repo, env = _configure_repo(tmp_path)
+    (tmp_path / "store").write_text("data\n")
+    (repo / ".env").write_text("SITE_ADDRESS='remitwatch.example.com'\nREMITWATCH_PASSWORD='p\u00e4ssword-long-enough'\n", encoding="utf-8")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {"AUTODEPLOY": "n"})
+    assert code == 0, screen[-1500:]
+    assert "REMITWATCH_PASSWORD set now cannot be used" in screen and "Make a new one now?" not in screen
+    new = _env_values(repo)["REMITWATCH_PASSWORD"]
+    assert len(new) == 32 and new.isascii() and screen.count(new) == 1
+
+
+def test_configure_sh_builds_the_site_with_the_commit_it_runs(tmp_path):
+    """configure.sh gives its build the checkout's commit (REMITWATCH_COMMIT: the image keeps it, /api/health shows it),
+    and none when files there were changed by hand, since no commit then says what runs."""
+    repo, env = _configure_repo(tmp_path)
+    (tmp_path / "store").write_text("data\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.org"]
+    for args in (["init", "-q"], ["add", "deploy"], ["commit", "-q", "-m", "the checkout"]):
+        subprocess.run(git + args, check=True, capture_output=True)
+    head = subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    built = lambda: (tmp_path / "build_commits").read_text().splitlines()      # noqa: E731
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {"AUTODEPLOY": "n"})
+    assert code == 0 and built() == [head], screen[-1500:]                    # .env, which it wrote, is not git's
+    with open(repo / "deploy" / "auto-deploy.sh", "a") as f:
+        f.write("# changed by hand\n")
+    code, screen = _drive(str(repo / "deploy" / "aws" / "configure.sh"), str(repo), env, {"AUTODEPLOY": "n"})
+    assert code == 0 and built() == [head, ""], screen[-1500:]
 
 
 def test_a_password_lifetime_in_trizettos_words_is_read_by_the_apps_own_rules(tmp_path):
@@ -367,9 +423,12 @@ def test_configure_sh_python_finds_data_and_clears_run_locks(tmp_path):
 
 
 def test_the_aws_template_passes_awss_own_checks():
-    cfnlint = pytest.importorskip("cfnlint")
-    _ = cfnlint
-    r = subprocess.run(["cfn-lint", os.path.join(HERE, "deploy", "aws", "remitwatch.yaml")], capture_output=True, text=True)
+    """AWS's own linter (cfn-lint, in requirements-dev.txt, so it runs in CI): the one installed beside this Python, as a
+    virtual environment puts it, else the one on PATH."""
+    pytest.importorskip("cfnlint")
+    exe = shutil.which("cfn-lint", path=os.path.dirname(sys.executable)) or shutil.which("cfn-lint")
+    cmd = [exe] if exe else [sys.executable, "-c", "import sys; from cfnlint.runner import main; sys.exit(main())"]
+    r = subprocess.run(cmd + [os.path.join(HERE, "deploy", "aws", "remitwatch.yaml")], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout + r.stderr
 
 
@@ -540,6 +599,43 @@ def test_a_new_server_answers_before_its_first_run_and_starts_its_scheduler(tmp_
             assert c.get(path).status_code == 200, path
     # no interval set: still once a day, as Vercel's daily scheduled call
     assert started == [(db, pipeline.DAILY_MINUTES)]
+
+
+def test_health_says_which_commit_each_site_runs_and_nothing_more(tmp_path, monkeypatch):
+    """/api/health answers without a login and says which commit the site runs, in short, so that the server and the
+    Vercel site can be compared: the server the one its image was built from (REMITWATCH_COMMIT), Vercel the one it
+    built (VERCEL_GIT_COMMIT_SHA). None when the site cannot tell, and never anything but a commit hash."""
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api_mod
+    ours, vercels = "0123456789abcdef0123456789abcdef01234567", "fedcba9876543210fedcba9876543210fedcba98"     # invented
+    (tmp_path / "remitwatch.sqlite").write_bytes(b"")
+    monkeypatch.setattr(api_mod, "DB_PATH", str(tmp_path / "remitwatch.sqlite"))
+    monkeypatch.setattr(api_mod, "PASSWORD", "a-long-site-passphrase-1")     # a closed site: health answers all the same
+    monkeypatch.delenv("REMITWATCH_ALLOW_OPEN", raising=False)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    monkeypatch.setenv("REMITWATCH_COMMIT", ours)
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", vercels)                     # not this site's: the server never reads it
+    c = TestClient(api_mod.app)
+    assert c.get("/api/summary").status_code == 401
+    h = c.get("/api/health")
+    assert h.status_code == 200 and h.json()["commit"] == "0123456" and h.json()["mode"] == "server" and h.json()["ok"] is True
+    assert set(h.json()) == {"ok", "mode", "version", "commit", "time"}      # the commit is all that is new
+    monkeypatch.setenv("REMITWATCH_COMMIT", ours.upper() + "\n")             # a hash in capitals is still the hash
+    assert c.get("/api/health").json()["commit"] == "0123456"
+    for value in ("", "  ", "abc12", "not-a-commit", ours + "; more", "g" + ours[1:], "x" * 80):
+        monkeypatch.setenv("REMITWATCH_COMMIT", value)
+        assert c.get("/api/health").json()["commit"] is None, value       # nothing else a setting holds is ever shown
+    monkeypatch.delenv("REMITWATCH_COMMIT")
+    assert c.get("/api/health").json()["commit"] is None
+    # the Vercel site: the commit Vercel built
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.setenv("REMITWATCH_COMMIT", ours)                            # not Vercel's: ignored there
+    h = c.get("/api/health").json()
+    assert h["mode"] == "serverless" and h["commit"] == "fedcba9"
+    assert set(h) == {"ok", "mode", "version", "commit", "runtime", "selftest", "time"}
+    monkeypatch.delenv("VERCEL_GIT_COMMIT_SHA")
+    assert c.get("/api/health").json()["commit"] is None
 
 
 def test_the_scheduler_runs_on_the_interval_set_and_daily_at_least():

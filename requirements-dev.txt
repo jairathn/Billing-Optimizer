@@ -1,3 +1,5 @@
 -r requirements.txt
 pytest>=8
 httpx>=0.27
+# AWS's own checks of deploy/aws/remitwatch.yaml (tests/test_aws.py). Tests only: Vercel installs requirements.txt
+cfn-lint>=1.20,<2

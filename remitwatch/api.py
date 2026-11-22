@@ -364,10 +364,18 @@ if STATIC_DIR.exists():
 # --------------------------------------------------------------------------- health and meta
 @app.get("/api/health")
 def health():
-    if runtime.serverless():
-        return {"ok": True, "mode": "serverless", "version": __version__, "commit": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:7],
+    """Whether the site is up, with no login. `commit` is the commit this site runs, in short, so that the two sites can
+    be compared: on Vercel the one Vercel built (VERCEL_GIT_COMMIT_SHA), on the server the one its image was built from
+    (REMITWATCH_COMMIT, which the automatic deploy and configure.sh give the build). None when the site cannot tell.
+    Only a commit hash is ever shown here, never what else such a setting holds."""
+    serverless = runtime.serverless()
+    sha = (os.environ.get("VERCEL_GIT_COMMIT_SHA" if serverless else "REMITWATCH_COMMIT") or "").strip().lower()
+    commit = sha[:7] if re.fullmatch(r"[0-9a-f]{7,64}", sha) else None
+    if serverless:
+        return {"ok": True, "mode": "serverless", "version": __version__, "commit": commit,
                 "runtime": runtime.describe(), "selftest": runtime.selftest(), "time": datetime.now(timezone.utc).isoformat()}
-    return {"ok": os.path.exists(DB_PATH), "mode": "server", "version": __version__, "time": datetime.now(timezone.utc).isoformat()}
+    return {"ok": os.path.exists(DB_PATH), "mode": "server", "version": __version__, "commit": commit,
+            "time": datetime.now(timezone.utc).isoformat()}
 
 
 def _trizetto_here() -> bool:

@@ -32,7 +32,8 @@ put() {     # name value: written single-quoted, so nothing in it is read as a v
 }
 masked() { [ -n "$1" ] && echo "set" || echo "not set"; }
 
-fits() {    # name value: says why the value cannot be used, and fails (the site itself refuses such passwords)
+fits() {    # name value: says why a value cannot be set, and fails (the site refuses such passwords, all but a dashboard
+            # password it already has: see kept_by_site)
   case "$1" in
     REMITWATCH_PASSWORD|REMITWATCH_OWNER_PASSWORD)
       if [ "${#2}" -lt 12 ]; then echo "must be 12 characters or more"; return 1; fi
@@ -48,20 +49,41 @@ fits() {    # name value: says why the value cannot be used, and fails (the site
   return 0
 }
 
+kept_by_site() {   # value: whether the server still accepts this dashboard password, which it already has, though fits
+                   # refuses it as a new one. It refuses only one a login cannot carry (remitwatch.api.password_problem),
+                   # so that an update never locks the staff out. One with a single quote cannot be kept in .env as it is.
+  case "$1" in *"'"*) return 1 ;; esac
+  [ -z "$(LC_ALL=C tr -d '\000-\177' <<<"$1")" ]
+}
+
 ask() {     # name kind question [default]. kind: text; secret; password (made when left empty, and shown once to be
             # written down); gen (made when left empty, never shown); pem (a private key, pasted); days (a number of
             # days, or TriZetto's words for it). A value that cannot be used is asked for again; Enter keeps what is there.
-  local name=$1 kind=$2 question=$3 default=${4:-} cur value line why
+  local name=$1 kind=$2 question=$3 default=${4:-} cur value line why yn state="" again
   cur=$(current "$name")
-  if [ -n "$cur" ] && ! why=$(fits "$name" "$cur"); then      # the site refuses the one set now: it must be replaced
-    printf "\n  The %s set now cannot be used: it %s." "$name" "$why"
-    [ "$kind" = password ] && cur=""                           # Enter then makes one
+  if [ -n "$cur" ] && ! why=$(fits "$name" "$cur"); then
+    if [ "$name" = REMITWATCH_PASSWORD ] && kept_by_site "$cur"; then
+      # everyone signs in with it: Enter keeps it, and a new one (a new login for every biller) is made only on a yes
+      if [ "${#cur}" -lt 12 ]; then
+        printf "\n  The %s set now is shorter than 12 characters. The site still accepts it, but it is easy to guess.\n" "$name"
+      else
+        printf "\n  The %s set now breaks a rule for a new one: it %s. The site still accepts it.\n" "$name" "$why"
+      fi
+      if ! read -r -p "  Make a new one now? Everyone then signs in with the new one. [y/N] " yn; then yn=n; fi
+      case "$yn" in
+        y|Y|yes|Yes|YES) cur=""; state=new ;;
+        *) echo "  Kept: everyone signs in with it as before."; return 0 ;;
+      esac
+    else                                                       # the site refuses the one set now: it must be replaced
+      printf "\n  The %s set now cannot be used: it %s." "$name" "$why"
+      [ "$kind" = password ] && cur=""                         # Enter then makes one
+    fi
   fi
   while :; do
     case "$kind" in
       text|days) printf "\n%s\n  %s [%s]: " "$question" "$name" "${cur:-${default:-not set}}"; IFS= read -r value ;;
       secret|password|gen)
-              printf "\n%s\n  %s, %s%s: " "$question" "$name" "$(masked "$cur")" "$([ "$kind" != secret ] && [ -z "$cur" ] && echo ', Enter makes one')"
+              printf "\n%s\n  %s, %s%s: " "$question" "$name" "${state:-$(masked "$cur")}" "$([ "$kind" != secret ] && [ -z "$cur" ] && echo ', Enter makes one')"
               IFS= read -rs value; echo ;;
       pem)    printf "\n%s\n  %s, %s. Paste the whole key, BEGIN and END lines included, or press Enter to keep it. It is not shown:\n" "$question" "$name" "$(masked "$cur")"
               value=""
@@ -75,7 +97,7 @@ ask() {     # name kind question [default]. kind: text; secret; password (made w
     esac
     if [ -z "$value" ] && [ -z "$cur" ]; then
       if [ "$kind" = password ] || [ "$kind" = gen ]; then
-        value=$(set +o pipefail; tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom | head -c 32)
+        value=$(set +o pipefail; tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom 2>/dev/null | head -c 32)   # tr ends when head has its 32
         if [ "$kind" = password ]; then
           echo "  made one, shown this once: $value  (write it down: it is the password to sign in)"
         else
@@ -99,7 +121,11 @@ ask() {     # name kind question [default]. kind: text; secret; password (made w
       put "$name" "$value"
       return 0
     fi
-    echo "  $name $why. Type it again, or press Enter to keep it as it is."
+    if [ -n "$cur" ]; then again="press Enter to keep the one set now"
+    elif [ "$kind" = password ] || [ "$kind" = gen ]; then again="press Enter to have one made"
+    elif [ -n "$default" ] && [ "$kind" = text ]; then again="press Enter for $default"
+    else again="press Enter to leave it unset"; fi
+    echo "  $name $why. Type it again, or $again."
   done
 }
 
@@ -129,6 +155,13 @@ from remitwatch.insights import password_days
 d = password_days(sys.argv[1])
 print("" if d is None else d)'
 store_state() { docker compose run --rm --no-deps -T app python -c "$STORE_STATE" 2>/dev/null | tail -n 1 || true; }
+built_from() {      # the commit the site is built from, which /api/health shows (the image keeps it). Nothing when files
+                    # here were changed by hand: then no commit says what runs, and the page shows none
+  local sha
+  sha=$(git -c safe.directory="$PWD" rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
+  [ -z "$(git -c safe.directory="$PWD" status --porcelain --untracked-files=no 2>/dev/null)" ] && echo "$sha"
+  return 0
+}
 lifetime_days() {   # TriZetto's words for how long a password lasts, read by the app itself; nothing when it cannot tell
   docker compose run --rm --no-deps -T app python -c "$PASSWORD_DAYS" "$1" 2>/dev/null | tail -n 1 || true
 }
@@ -200,7 +233,7 @@ ask APPEAL_EMAIL_TO text "Where an appeal packet is emailed when nobody names an
 grep -q '^REMITWATCH_SYNC_INTERVAL_MINUTES=' "$ENV_FILE" || put REMITWATCH_SYNC_INTERVAL_MINUTES 60
 
 echo; echo "== Building the site with these settings"
-if ! docker compose build; then
+if ! REMITWATCH_COMMIT=$(built_from) docker compose build; then
   echo "The build failed (see above). The site runs as it was, with the settings it had; the new ones are saved."
   echo "Run this script again once the build works."
   exit 1

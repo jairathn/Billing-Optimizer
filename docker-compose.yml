@@ -4,12 +4,20 @@
 #   docker compose logs -f app            -> watch it
 services:
   app:
-    build: .
+    build:
+      context: .
+      # the commit the image is built from: kept in the image and shown on /api/health. The automatic deploy and
+      # configure.sh pass it; a build without it shows null there
+      args:
+        REMITWATCH_COMMIT: ${REMITWATCH_COMMIT:-}
     command: serve
     env_file: .env
     expose: ["8000"]
     volumes: ["remitwatch-data:/data"]
     restart: unless-stopped
+    # a stop (a deploy, configure.sh, a reboot) lets a request in progress finish first: one appeal fax takes about
+    # a minute
+    stop_grace_period: 120s
   caddy:
     image: caddy:2
     ports: ["80:80", "443:443"]

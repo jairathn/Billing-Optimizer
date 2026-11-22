@@ -1029,10 +1029,12 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
     adj = "(COALESCE(p.contractual, 0) <> 0 OR COALESCE(p.noncontractual, 0) <> 0)"
     answer = "(COALESCE(p.ins_paid, 0) <> 0 OR p.check_no IS NOT NULL OR p.grp IS NOT NULL)"
     cpt = "COALESCE(p.cpt, '')"
+    cptc = "CAST(COALESCE(p.cpt, '') AS TEXT)"          # work tables get declared types, so their indexes are used
     newest = "MAX(p.posted || printf('%012d', p.rowid))"
     # one row per claim line (link, service date, code)
     x(f"""CREATE TABLE {W}.pa_agg AS
-        SELECT p.link AS link, p.svc AS svc, {cpt} AS cpt, MAX(p.person) AS person, MAX(p.name_key) AS name_key,
+        SELECT p.link AS link, p.svc AS svc, {cptc} AS cpt, CAST(MAX(p.person) AS INTEGER) AS person,
+               CAST(MAX(p.name_key) AS INTEGER) AS name_key,
                SUM(CASE WHEN COALESCE(p.charges, 0) <> 0 THEN p.units END) AS units_c, MAX(p.units) AS units_m,
                SUM(COALESCE(p.charges, 0)) AS charges, SUM(COALESCE(p.ins_charges, 0)) AS ins_charges,
                SUM(COALESCE(p.ins_paid, 0)) AS ins_paid, SUM(COALESCE(p.contractual, 0)) AS contractual,
@@ -1058,23 +1060,24 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
     x(f"CREATE INDEX {W}.ix_pa_agg_pd ON pa_agg(person, svc, cpt)")
     # the newest posting's status, action and payers (bare columns take the row of the single max())
     for name, col in (("pa_st", "status"), ("pa_ac", "action")):
-        x(f"""CREATE TABLE {W}.{name} AS SELECT p.link AS link, p.svc AS svc, {cpt} AS cpt, {newest} AS k, p.{col} AS v
+        x(f"""CREATE TABLE {W}.{name} AS SELECT p.link AS link, p.svc AS svc, {cptc} AS cpt, {newest} AS k, p.{col} AS v
               FROM {L}.postings p WHERE p.link IS NOT NULL AND p.{col} IS NOT NULL GROUP BY p.link, p.svc, {cpt}""")
         x(f"CREATE UNIQUE INDEX {W}.ix_{name} ON {name}(link, svc, cpt)")
-    x(f"""CREATE TABLE {W}.pa_py AS SELECT p.link AS link, p.svc AS svc, {cpt} AS cpt, {newest} AS k,
+    x(f"""CREATE TABLE {W}.pa_py AS SELECT p.link AS link, p.svc AS svc, {cptc} AS cpt, {newest} AS k,
               p.primary_payer AS primary_payer, p.secondary_payer AS secondary_payer, p.plan AS plan
           FROM {L}.postings p WHERE p.link IS NOT NULL AND (p.primary_payer IS NOT NULL OR p.secondary_payer IS NOT NULL
                 OR p.plan IS NOT NULL) GROUP BY p.link, p.svc, {cpt}""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pa_py ON pa_py(link, svc, cpt)")
     # patient-side money, by patient, day and code, joined to the one claim line with the same keys
-    x(f"""CREATE TABLE {W}.pa_pat AS SELECT p.person AS person, p.svc AS svc, {cpt} AS cpt,
+    x(f"""CREATE TABLE {W}.pa_pat AS SELECT p.person AS person, p.svc AS svc, {cptc} AS cpt,
               SUM(COALESCE(p.pat_paid, 0)) AS pat_paid, SUM(COALESCE(p.pat_adj, 0)) AS pat_adj, COUNT(*) AS rows
           FROM {L}.postings p WHERE p.link IS NULL AND (p.flags & 16) <> 0 AND p.person IS NOT NULL
           GROUP BY p.person, p.svc, {cpt}""")
     x(f"""CREATE TABLE {W}.pa_pj AS SELECT g.person AS person, g.svc AS svc, g.cpt AS cpt, g.pat_paid AS pat_paid,
               g.pat_adj AS pat_adj, g.rows AS rows,
-              (SELECT COUNT(*) FROM {W}.pa_agg l WHERE l.person = g.person AND l.svc = g.svc AND l.cpt = g.cpt) AS n,
-              (SELECT MIN(l.link) FROM {W}.pa_agg l WHERE l.person = g.person AND l.svc = g.svc AND l.cpt = g.cpt) AS link
+              CAST((SELECT COUNT(*) FROM {W}.pa_agg l WHERE l.person = g.person AND l.svc = g.svc AND l.cpt = g.cpt) AS INTEGER) AS n,
+              CAST((SELECT MIN(l.link) FROM {W}.pa_agg l WHERE l.person = g.person AND l.svc = g.svc AND l.cpt = g.cpt) AS INTEGER)
+                  AS link
           FROM {W}.pa_pat g""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pa_pj ON pa_pj(person, svc, cpt)")
     x(f"""CREATE TABLE {W}.pa_pad AS SELECT j.link AS link, j.svc AS svc, j.cpt AS cpt, SUM(COALESCE(p.pat_paid, 0)) AS cents
@@ -1086,7 +1089,8 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
           GROUP BY j.link, j.svc, j.cpt""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pa_pad ON pa_pad(link, svc, cpt)")
     # EMA's allowed amount: the largest net allowed of one payer (a second payer's allowed is not added)
-    x(f"""CREATE TABLE {W}.pa_alw AS SELECT link, svc, cpt, MAX(a) AS allowed FROM (
+    x(f"""CREATE TABLE {W}.pa_alw AS SELECT CAST(link AS INTEGER) AS link, CAST(svc AS TEXT) AS svc, CAST(cpt AS TEXT) AS cpt,
+              MAX(a) AS allowed FROM (
               SELECT p.link AS link, p.svc AS svc, {cpt} AS cpt, p.payer AS payer, SUM(p.allowed) AS a
               FROM {L}.postings p WHERE p.link IS NOT NULL AND COALESCE(p.allowed, 0) <> 0 GROUP BY 1, 2, 3, 4)
           GROUP BY link, svc, cpt""")
@@ -1235,7 +1239,8 @@ def _events(conn: sqlite3.Connection) -> int:
     x(f"CREATE TABLE {W}.pa_lk AS SELECT link, MAX(as_of) AS as_of FROM {W}.pa_agg GROUP BY link")
     x(f"CREATE UNIQUE INDEX {W}.ix_pa_lk ON pa_lk(link)")
     x(f"""CREATE TABLE {W}.pa_ev AS
-        SELECT s.link AS link, 'status' AS kind, n.name AS value, l.as_of AS first_seen
+        SELECT CAST(s.link AS INTEGER) AS link, CAST('status' AS TEXT) AS kind, CAST(n.name AS TEXT) AS value,
+               CAST(l.as_of AS TEXT) AS first_seen
         FROM (SELECT link, MAX(k) AS k, v FROM {W}.pa_st GROUP BY link) s
         JOIN {L}.names n ON n.id = s.v JOIN {W}.pa_lk l ON l.link = s.link
         UNION ALL
@@ -1270,9 +1275,10 @@ def _traces(conn: sqlite3.Connection) -> int:
     x = conn.execute
     W = _W
     x(f"""CREATE TABLE {W}.pb_tr AS
-        SELECT t.transaction_key AS tk, rw_ckey(t.trace_number) AS ckey, rw_check_loose(t.trace_number) AS lkey,
-               substr(trim(t.trace_number), -10) AS last10, length(trim(t.trace_number)) AS len, t.payment_date AS paid_on,
-               rw_payer_group(t.payer_name) AS grp, t.claim_paid_total_cents AS paid
+        SELECT t.transaction_key AS tk, CAST(rw_ckey(t.trace_number) AS TEXT) AS ckey,
+               CAST(rw_check_loose(t.trace_number) AS TEXT) AS lkey, CAST(substr(trim(t.trace_number), -10) AS TEXT) AS last10,
+               CAST(length(trim(t.trace_number)) AS INTEGER) AS len, t.payment_date AS paid_on,
+               CAST(rw_payer_group(t.payer_name) AS TEXT) AS grp, t.claim_paid_total_cents AS paid
         FROM main.transactions t
         WHERE COALESCE(t.superseded, 0) = 0 AND t.trace_number IS NOT NULL AND trim(t.trace_number) <> ''""")
     x(f"CREATE INDEX {W}.ix_pb_tr_c ON pb_tr(ckey)")
@@ -1345,7 +1351,8 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
     a, b = VOTE_SHARE
     x(f"CREATE TABLE {W}.pb_old AS SELECT * FROM main.ema_link_map")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_old ON pb_old(link)")
-    x(f"""CREATE TABLE {W}.pb_ar AS SELECT link, claim_id, rw_bill(claim_id) AS bill, rw_is_facility(claim_id) AS fac FROM (
+    x(f"""CREATE TABLE {W}.pb_ar AS SELECT CAST(link AS INTEGER) AS link, CAST(claim_id AS TEXT) AS claim_id,
+              CAST(rw_bill(claim_id) AS TEXT) AS bill, CAST(rw_is_facility(claim_id) AS INTEGER) AS fac FROM (
               SELECT link, MAX(COALESCE(last_seen, '') || '|' || claim_id) AS k, claim_id FROM main.ema_claim_links
               WHERE link IS NOT NULL AND claim_id IS NOT NULL GROUP BY link)""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_ar ON pb_ar(link)")
@@ -1356,24 +1363,26 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
               WHERE m.link IS NULL OR COALESCE(m.conflict, 0) = 1 OR m.bill IS NULL OR l.link IN (SELECT link FROM {W}.pb_ar)""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_need ON pb_need(link)")
     # payment votes
-    x(f"""CREATE TABLE {W}.pb_ck AS SELECT check_no, rw_ckey(check_no) AS ckey FROM (
+    x(f"""CREATE TABLE {W}.pb_ck AS SELECT CAST(check_no AS TEXT) AS check_no, CAST(rw_ckey(check_no) AS TEXT) AS ckey FROM (
               SELECT DISTINCT check_no FROM {W}.pa_pay WHERE in_835 = 1 AND check_no <> '')""")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_ck ON pb_ck(check_no)")
     x(f"CREATE TABLE {W}.pb_tx AS SELECT DISTINCT t.tk AS tk, t.ckey AS ckey FROM {W}.pb_tr t WHERE t.ckey IN (SELECT ckey FROM {W}.pb_ck)")
     x(f"CREATE UNIQUE INDEX {W}.ix_pb_tx ON pb_tx(tk)")
     x(f"""CREATE TABLE {W}.pb_l835 AS
-        SELECT x.ckey AS ckey, COALESCE(l.service_date, c.statement_from) AS svc, l.procedure_code AS code,
-               l.original_procedure_code AS ocode, l.paid_cents AS paid, rw_bill(c.patient_control_number) AS bill,
-               c.patient_control_number AS pcn, rw_name_key(c.patient_last, c.patient_first) AS nk,
-               CASE WHEN c.corrected_patient_last IS NOT NULL OR c.corrected_patient_first IS NOT NULL
+        SELECT x.ckey AS ckey, CAST(COALESCE(l.service_date, c.statement_from) AS TEXT) AS svc, l.procedure_code AS code,
+               l.original_procedure_code AS ocode, l.paid_cents AS paid, CAST(rw_bill(c.patient_control_number) AS TEXT) AS bill,
+               c.patient_control_number AS pcn, CAST(rw_name_key(c.patient_last, c.patient_first) AS INTEGER) AS nk,
+               CAST(CASE WHEN c.corrected_patient_last IS NOT NULL OR c.corrected_patient_first IS NOT NULL
                     THEN rw_name_key(COALESCE(c.corrected_patient_last, c.patient_last),
-                                     COALESCE(c.corrected_patient_first, c.patient_first)) END AS cnk
+                                     COALESCE(c.corrected_patient_first, c.patient_first)) END AS INTEGER) AS cnk
         FROM main.lines l JOIN {W}.pb_tx x ON x.tk = l.transaction_key JOIN main.claims c ON c.claim_key = l.claim_key
         WHERE c.patient_control_number IS NOT NULL""")
     x(f"""CREATE TABLE {W}.pb_k835 AS
-        SELECT ckey, svc, code, paid, bill, pcn, nk, cnk FROM {W}.pb_l835 WHERE code IS NOT NULL
-        UNION ALL SELECT ckey, svc, ocode, paid, bill, pcn, nk, cnk FROM {W}.pb_l835
-                  WHERE ocode IS NOT NULL AND ocode <> COALESCE(code, '')""")
+        SELECT CAST(ckey AS TEXT) AS ckey, CAST(svc AS TEXT) AS svc, CAST(code AS TEXT) AS code, paid, CAST(bill AS TEXT) AS bill,
+               pcn, CAST(nk AS INTEGER) AS nk, CAST(cnk AS INTEGER) AS cnk FROM (
+            SELECT ckey, svc, code, paid, bill, pcn, nk, cnk FROM {W}.pb_l835 WHERE code IS NOT NULL
+            UNION ALL SELECT ckey, svc, ocode, paid, bill, pcn, nk, cnk FROM {W}.pb_l835
+                      WHERE ocode IS NOT NULL AND ocode <> COALESCE(code, ''))""")
     x(f"CREATE INDEX {W}.ix_pb_k835 ON pb_k835(ckey, svc, code)")
     x(f"""CREATE TABLE {W}.pb_cand AS
         SELECT y.link AS link, y.svc AS svc, y.cpt AS cpt, y.check_no AS check_no, y.posted AS posted, y.payer AS payer,
@@ -1385,7 +1394,8 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
           AND y.link NOT IN (SELECT link FROM {W}.pb_ar WHERE fac = 1)""")
     # each payment votes for the bill of the first narrowing (name and amount, name, amount, any) that leaves exactly one
     x(f"""CREATE TABLE {W}.pb_votes AS
-        SELECT link, CASE WHEN n1 = 1 THEN b1 WHEN n2 = 1 THEN b2 WHEN n3 = 1 THEN b3 WHEN n4 = 1 THEN b4 END AS bill,
+        SELECT CAST(link AS INTEGER) AS link,
+               CAST(CASE WHEN n1 = 1 THEN b1 WHEN n2 = 1 THEN b2 WHEN n3 = 1 THEN b3 WHEN n4 = 1 THEN b4 END AS TEXT) AS bill,
                CASE WHEN n1 = 1 THEN p1 WHEN n2 = 1 THEN p2 WHEN n3 = 1 THEN p3 WHEN n4 = 1 THEN p4 END AS pcn
         FROM (SELECT link,
                 COUNT(DISTINCT CASE WHEN sn AND sa THEN bill END) AS n1, MIN(CASE WHEN sn AND sa THEN bill END) AS b1,
@@ -1396,7 +1406,7 @@ def _map(conn: sqlite3.Connection, *, full: bool, boxes: Sequence[Box]) -> dict:
                 MAX(CASE WHEN sa THEN pcn END) AS p3,
                 COUNT(DISTINCT bill) AS n4, MIN(bill) AS b4, MAX(pcn) AS p4
               FROM {W}.pb_cand GROUP BY link, svc, cpt, check_no, posted, payer)""")
-    x(f"""CREATE TABLE {W}.pb_pay AS SELECT link, bill, n AS votes, total, pcn FROM (
+    x(f"""CREATE TABLE {W}.pb_pay AS SELECT CAST(link AS INTEGER) AS link, CAST(bill AS TEXT) AS bill, n AS votes, total, pcn FROM (
               SELECT link, bill, n, pcn, SUM(n) OVER (PARTITION BY link) AS total,
                      ROW_NUMBER() OVER (PARTITION BY link ORDER BY n DESC, bill) AS rk
               FROM (SELECT link, bill, COUNT(*) AS n, MAX(pcn) AS pcn FROM {W}.pb_votes WHERE bill IS NOT NULL GROUP BY link, bill))
@@ -1439,11 +1449,11 @@ def _facility(conn: sqlite3.Connection, *, full: bool, now: str) -> int:
     x = conn.execute
     W = _W
     if not _table_exists(conn, W, "pb_b835"):
-        x(f"CREATE TABLE {W}.pb_b835 AS SELECT DISTINCT rw_bill(patient_control_number) AS bill FROM main.claims "
+        x(f"CREATE TABLE {W}.pb_b835 AS SELECT DISTINCT CAST(rw_bill(patient_control_number) AS TEXT) AS bill FROM main.claims "
           "WHERE patient_control_number IS NOT NULL")
         x(f"CREATE UNIQUE INDEX {W}.ix_pb_b835 ON pb_b835(bill)")
     x(f"DROP TABLE IF EXISTS {W}.pb_fac")
-    x(f"""CREATE TABLE {W}.pb_fac AS SELECT link FROM {W}.pb_ar WHERE fac = 1
+    x(f"""CREATE TABLE {W}.pb_fac AS SELECT CAST(link AS INTEGER) AS link FROM (SELECT link FROM {W}.pb_ar WHERE fac = 1
         UNION SELECT l.link FROM {W}.pa_full l
         JOIN {W}.pa_full t ON t.person = l.person AND t.svc = l.svc AND t.cpt = l.cpt AND t.link <> l.link
         JOIN {W}.pb_map m ON m.link = t.link AND COALESCE(m.conflict, 0) = 0 AND m.bill IN (SELECT bill FROM {W}.pb_b835)
@@ -1452,7 +1462,8 @@ def _facility(conn: sqlite3.Connection, *, full: bool, now: str) -> int:
           AND l.link NOT IN (SELECT link FROM {W}.pb_map WHERE COALESCE(conflict, 0) = 0 AND bill IN (SELECT bill FROM {W}.pb_b835))
           AND NOT EXISTS (SELECT 1 FROM {W}.pa_pay y WHERE y.link = l.link AND y.in_835 = 1)
           AND EXISTS (SELECT 1 FROM {W}.pa_pay pa JOIN {W}.pa_pay pb ON pb.link = t.link AND pb.payer_group = pa.payer_group
-                      AND COALESCE(pb.ins_paid, 0) <> 0 WHERE pa.link = l.link AND COALESCE(pa.ins_paid, 0) <> 0)""")
+                      AND COALESCE(pb.ins_paid, 0) <> 0 WHERE pa.link = l.link AND COALESCE(pa.ins_paid, 0) <> 0))""")
+    x(f"CREATE UNIQUE INDEX {W}.ix_pb_fac ON pb_fac(link)")
     if not full:            # a facility mark from the last full refresh stands (the twin's payments may be pruned since)
         x(f"INSERT INTO {W}.pb_fac SELECT link FROM {W}.pb_old WHERE facility = 1 AND link NOT IN (SELECT link FROM {W}.pb_fac)")
     x(f"UPDATE {W}.pb_map SET facility = 1 WHERE link IN (SELECT link FROM {W}.pb_fac)")
@@ -1472,7 +1483,7 @@ def _patient_day(conn: sqlite3.Connection, boxes: Sequence[Box], now: str) -> di
     cov, args = _coverage_sql(boxes, "svc_min", "paid_max")
     if not cov:
         return {"bills": 0, "mapped": 0, "ties": 0, "charge_mismatch": 0}
-    x(f"""CREATE TABLE {W}.pd_bill AS SELECT bill, MIN(svc) AS svc_min, MAX(paid) AS paid_max FROM (
+    x(f"""CREATE TABLE {W}.pd_bill AS SELECT CAST(bill AS TEXT) AS bill, MIN(svc) AS svc_min, MAX(paid) AS paid_max FROM (
               SELECT rw_bill(c.patient_control_number) AS bill, COALESCE(l.service_date, c.statement_from) AS svc, c.payment_date AS paid
               FROM main.claims c JOIN main.lines l ON l.claim_key = c.claim_key WHERE c.patient_control_number IS NOT NULL)
           GROUP BY bill""")
@@ -1481,16 +1492,18 @@ def _patient_day(conn: sqlite3.Connection, boxes: Sequence[Box], now: str) -> di
     x(f"CREATE UNIQUE INDEX {W}.ix_pd_bill ON pd_bill(bill)")
     bills = conn.execute(f"SELECT COUNT(*) FROM {W}.pd_bill").fetchone()[0]
     x(f"""CREATE TABLE {W}.pd_l AS
-        SELECT rw_bill(c.patient_control_number) AS bill, c.claim_key AS ck, c.patient_control_number AS pcn,
-               rw_name_key(c.patient_last, c.patient_first) AS nk,
-               CASE WHEN c.corrected_patient_last IS NOT NULL OR c.corrected_patient_first IS NOT NULL
+        SELECT CAST(rw_bill(c.patient_control_number) AS TEXT) AS bill, c.claim_key AS ck, c.patient_control_number AS pcn,
+               CAST(rw_name_key(c.patient_last, c.patient_first) AS INTEGER) AS nk,
+               CAST(CASE WHEN c.corrected_patient_last IS NOT NULL OR c.corrected_patient_first IS NOT NULL
                     THEN rw_name_key(COALESCE(c.corrected_patient_last, c.patient_last),
-                                     COALESCE(c.corrected_patient_first, c.patient_first)) END AS cnk,
-               COALESCE(l.service_date, c.statement_from) AS svc, l.procedure_code AS code, l.original_procedure_code AS ocode,
+                                     COALESCE(c.corrected_patient_first, c.patient_first)) END AS INTEGER) AS cnk,
+               CAST(COALESCE(l.service_date, c.statement_from) AS TEXT) AS svc, l.procedure_code AS code,
+               l.original_procedure_code AS ocode,
                l.charge_cents AS charge
         FROM main.claims c JOIN main.lines l ON l.claim_key = c.claim_key
         WHERE c.patient_control_number IS NOT NULL AND rw_bill(c.patient_control_number) IN (SELECT bill FROM {W}.pd_bill)""")
-    x(f"""CREATE TABLE {W}.pd_key AS SELECT bill, nk, svc, code, MAX(charge) AS charge, MAX(pcn) AS pcn FROM (
+    x(f"""CREATE TABLE {W}.pd_key AS SELECT CAST(bill AS TEXT) AS bill, CAST(nk AS INTEGER) AS nk, CAST(svc AS TEXT) AS svc,
+              CAST(code AS TEXT) AS code, MAX(charge) AS charge, MAX(pcn) AS pcn FROM (
               SELECT bill, ck, nk, svc, code, SUM(charge) AS charge, MAX(pcn) AS pcn FROM (
                   SELECT bill, ck, pcn, nk, svc, code, charge FROM {W}.pd_l WHERE nk IS NOT NULL AND code IS NOT NULL
                   UNION ALL SELECT bill, ck, pcn, nk, svc, ocode, charge FROM {W}.pd_l
@@ -1514,7 +1527,7 @@ def _patient_day(conn: sqlite3.Connection, boxes: Sequence[Box], now: str) -> di
                         ELSE 1 END) AS bad
         FROM {W}.pd_key k JOIN {W}.pd_cl e ON e.name_key = k.nk AND e.svc = k.svc AND e.cpt = k.code
         GROUP BY k.bill, e.link""", (CHARGE_TOLERANCE,))
-    x(f"""CREATE TABLE {W}.pd_win AS SELECT bill, link, shared, ties FROM (
+    x(f"""CREATE TABLE {W}.pd_win AS SELECT CAST(bill AS TEXT) AS bill, CAST(link AS INTEGER) AS link, shared, ties FROM (
               SELECT p.bill AS bill, p.link AS link, p.shared AS shared,
                      RANK() OVER (PARTITION BY p.bill ORDER BY p.shared DESC, lk.keys - p.shared ASC) AS rk,
                      COUNT(*) OVER (PARTITION BY p.bill, p.shared, lk.keys - p.shared) AS ties
@@ -1548,7 +1561,7 @@ def _keep(conn: sqlite3.Connection) -> dict:
     W = _W
     fb = _finding_bills_sql(conn)
     if fb:
-        conn.execute(f"CREATE TABLE {W}.pb_fbills AS SELECT DISTINCT bill FROM ({fb}) WHERE bill IS NOT NULL")
+        conn.execute(f"CREATE TABLE {W}.pb_fbills AS SELECT DISTINCT CAST(bill AS TEXT) AS bill FROM ({fb}) WHERE bill IS NOT NULL")
         conn.execute(f"CREATE UNIQUE INDEX {W}.ix_pb_fbills ON pb_fbills(bill)")
     conds = _keep_conditions(f"{W}.pa_full", f"{W}.pa_pay", f"{W}.pb_map", "main.ema_claim_links",
                              f"SELECT bill FROM {W}.pb_fbills" if fb else None)
@@ -1573,7 +1586,7 @@ def _map_coverage(conn: sqlite3.Connection, boxes: Sequence[Box]) -> dict:
     if not cov:
         return {"bills": 0, "mapped": 0, "share": None, "by_method": {}}
     conn.execute(f"DROP TABLE IF EXISTS {W}.mc_bill")
-    conn.execute(f"""CREATE TABLE {W}.mc_bill AS SELECT bill, MIN(svc) AS svc_min, MAX(paid) AS paid_max FROM (
+    conn.execute(f"""CREATE TABLE {W}.mc_bill AS SELECT CAST(bill AS TEXT) AS bill, MIN(svc) AS svc_min, MAX(paid) AS paid_max FROM (
               SELECT rw_bill(c.patient_control_number) AS bill, COALESCE(l.service_date, c.statement_from) AS svc, c.payment_date AS paid
               FROM main.claims c JOIN main.lines l ON l.claim_key = c.claim_key WHERE c.patient_control_number IS NOT NULL)
           GROUP BY bill""")
@@ -1777,7 +1790,8 @@ def mark_facility(conn: sqlite3.Connection) -> int:
         conn.execute(f"CREATE TABLE {_W}.pb_old AS SELECT * FROM main.ema_link_map")
         conn.execute(f"CREATE TABLE {_W}.pb_map AS SELECT * FROM main.ema_link_map")
         conn.execute(f"CREATE UNIQUE INDEX {_W}.ix_pb_map ON pb_map(link)")
-        conn.execute(f"""CREATE TABLE {_W}.pb_ar AS SELECT link, claim_id, rw_bill(claim_id) AS bill, rw_is_facility(claim_id) AS fac FROM (
+        conn.execute(f"""CREATE TABLE {_W}.pb_ar AS SELECT CAST(link AS INTEGER) AS link, CAST(claim_id AS TEXT) AS claim_id,
+                  CAST(rw_bill(claim_id) AS TEXT) AS bill, CAST(rw_is_facility(claim_id) AS INTEGER) AS fac FROM (
                   SELECT link, MAX(COALESCE(last_seen, '') || '|' || claim_id) AS k, claim_id FROM main.ema_claim_links
                   WHERE link IS NOT NULL AND claim_id IS NOT NULL GROUP BY link)""")
         n = _facility(conn, full=False, now=_now())

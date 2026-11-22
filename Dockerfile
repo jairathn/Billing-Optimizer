@@ -8,5 +8,9 @@ COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /data
 VOLUME ["/data"]
 EXPOSE 8000
+# the commit this image is built from (docker-compose.yml passes it), which /api/health shows. Last, so that a new
+# commit rebuilds nothing above it
+ARG REMITWATCH_COMMIT=
+ENV REMITWATCH_COMMIT=$REMITWATCH_COMMIT
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["serve"]
