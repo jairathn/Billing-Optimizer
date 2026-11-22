@@ -74,16 +74,23 @@ function openGuide(){ guideReset(); if(state.tab !== 'today'){ state.tab = 'toda
 
 // ---------------------------------------------------------------- Today
 async function todayTab(v){
-  const b = await brief(true);
+  // the plan (the brief), EMA's counts by state (/api/ema/today), the money scoreboard (/api/results/scoreboard) and the
+  // five EMA exports' ages (/api/ema/exports) come together; a part an older server does not answer is left out
+  const [b, td, sb, ex] = await Promise.all([brief(true), api('/api/ema/today').catch(()=>null), api('/api/results/scoreboard').catch(()=>null),
+    api('/api/ema/exports').catch(()=>null)]);
   if(!b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
-  const w = b.work.total, bad = (b.health||[]).filter(h=>!h.ok);
+  const blind = !!(td && td.blind && td.blind.blind);
+  // while a feed is behind, the blind-spot banner says so in dollars: the health banner does not say it a second time
+  const bad = (b.health||[]).filter(h=>!h.ok && !(blind && TD_BLIND_KEYS.has(h.key)));
+  const w = b.work.total;
   const top = b.batches[0], dec = b.decide, fu = b.follow_ups, done = b.done || {};
   const day = new Date().toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric'});
   const byKind7 = (b.work.types||[]).filter(t=>t.due7_n).sort((x,y)=>y.due7_cents-x.due7_cents);
   const steps = [];
+  // never "all clear" while blind: what closes is what the files on hand show
   steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${Number(w.due7_n).toLocaleString()} items worth ${money(w.due7_cents)} have a filing window that closes within 7 days.`,
       chips: byKind7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' '), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
-    : {n:1, title:'Nothing closes this week', line: w.due30_n ? `${w.due30_n} items worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:true, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
+    : {n:1, title: blind ? 'Nothing closes this week in the payments on file' : 'Nothing closes this week', line: w.due30_n ? `${w.due30_n} items worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:!blind, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
   // money the biller wrote off in EMA while the payer can still be asked for it: the quiet loss
   const wo = b.written_off || {};
   if(wo.n) steps.push({n:steps.length+1, title:'Work what EMA wrote off', line:`${pl(wo.n, 'item')} worth ${money(wo.cents)} ${wo.n===1?'was':'were'} written off in EMA but ${wo.n===1?'is':'are'} still inside the filing window${(wo.payers||[])[0] ? ` (most: ${esc(wo.payers[0].payer_group)}, ${money(wo.payers[0].cents)})` : ''}. Work ${wo.n===1?'it':'them'}, and reverse the write-off in EMA when the payer pays.`,

@@ -464,7 +464,14 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
 FINDING_COLS = ("finding_id, signal, category, severity, actionable, title, patient_control_number, claim_key, line_key, payer_name, payer_group, payer_kind, "
                 "rendering_provider_name, rendering_provider_npi, provider_tier, service_date, payment_date, year, procedure_code, modifiers, original_procedure_code, "
                 "code_category, charge_cents, allowed_cents, paid_cents, expected_cents, shortfall_cents, carc, carc_text, rarc, rarc_text, appeal_deadline, ema_handling, written_off_cents, written_off_on, status, notes, first_seen, last_seen, "
-                "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note, hint")
+                "billed_code, code_pair, level_drop, plan, pos_class, month, modifier_class, location, diagnosis, deadline_basis, recovered_cents, recovered_date, appealed_at, stale, auto_note, hint, "
+                # what EMA's reports say about the item (remitwatch.ema_checks, through detection), its state (remitwatch.states)
+                # and the payer's own limit beside the safe date the item is dated by
+                "written_off_source, written_off_kind, written_off_when, ema_writeoff_evidence, ema_link, ema_status, ema_status_src, ema_as_of, "
+                "ema_balance_cents, ema_worked_on, ema_worked_how, ema_outcome, ema_outcome_on, source, work_state, follow_up_on, state_basis, "
+                "appeal_block, legal_deadline, "
+                # what working it is worth: dollars x the payer's recovery rate for its pattern, with the basis (remitwatch.selfcheck)
+                "expected_value_cents, recovery_rate, recovery_basis")
 
 
 def _day(offset: int) -> str:
@@ -527,6 +534,13 @@ def _finding_cols() -> str:
     return ", ".join(c if c in have else f"NULL AS {c}" for c in (x.strip() for x in FINDING_COLS.split(",")))
 
 
+def _value_sql(cols: set[str] | None = None) -> str:
+    """What working an item is worth, as the lists sort by it: expected_value_cents (its dollars x the payer's recovery
+    rate for its pattern, written by the run) where the run wrote one, else its dollars."""
+    have = cols if cols is not None else _columns()
+    return "COALESCE(expected_value_cents, shortfall_cents)" if "expected_value_cents" in have else "shortfall_cents"
+
+
 EXTRA_FILTERS = {"plan": "COALESCE(plan,'')", "billed_code": "billed_code", "code_pair": "code_pair", "month": "month", "modifier": "modifier_class",
                  "pos": "pos_class", "location": "location", "diagnosis": "diagnosis", "carc": "carc", "tier": "provider_tier",
                  "payer_kind": "payer_kind", "code_category": "code_category", "level_drop": "level_drop", "quarter": None}
@@ -561,9 +575,110 @@ def _has_written_off() -> bool:
     return "written_off_cents" in {r["name"] for r in rows("PRAGMA table_info(findings)")}
 
 
+def _columns() -> set[str]:
+    """The findings table's columns on the copy at hand: a store or dashboard copy saved by an earlier release lacks the
+    newest until the next detection run adds them, and every filter on one of them must still answer (with nothing)."""
+    return {r["name"] for r in rows("PRAGMA table_info(findings)")}
+
+
+# The item states (remitwatch.states, amendment 13.1) a list narrows to, plus 'followup_due' (a waiting item whose
+# follow-up day has come: the state is worked out at each run, the day can pass between two runs) and 'todo' (work now
+# and the follow-ups due: what the Worklist and the category pages open with). Several may be given, comma separated.
+STATES = ("work_now", "waiting", "done", "accepted", "expired", "cant_check")
+STATE_FILTERS = STATES + ("followup_due", "todo")
+STATE_WORDS = {"work_now": "Work now", "waiting": "Waiting", "done": "Done", "accepted": "Accepted", "expired": "Expired",
+               "cant_check": "Can't be checked", "followup_due": "Follow-up due", "todo": "Work now and follow-ups due"}
+# an item the run has not given a state yet (a store saved before states, or a run whose states step failed) is read the
+# way remitwatch.states reads a person's status, and as work to do otherwise: nothing drops off the lists for want of one
+_STATE_GUESS = ("CASE WHEN COALESCE(stale,0)=1 THEN 'done' WHEN status='resolved' THEN 'done' WHEN status IN ('lost','dismissed') "
+                "THEN 'accepted' WHEN status='appealed' THEN 'waiting' ELSE 'work_now' END")
+# EMA's view of an item (needs_ema_checks section 4): each a condition on the findings row's own columns
+EMA_FILTERS = ("written_off", "contractual", "paid_other", "on_ar", "ema_only", "worked", "unworked", "auto_written_off")
+
+
+def _state_sql(states: str | None, cols: set[str], today: str) -> tuple[str, list] | None:
+    """`state=` as one condition: work_now, waiting, done, accepted, expired, cant_check, followup_due, todo (several,
+    comma separated, are any of them). None when nothing is asked; '0' for a name it does not know."""
+    wanted = [x.strip() for x in (states or "").split(",") if x.strip()]
+    if not wanted:
+        return None
+    ws = f"COALESCE(work_state, {_STATE_GUESS})" if "work_state" in cols else _STATE_GUESS
+    due = "(follow_up_on IS NOT NULL AND follow_up_on <= ?)" if "follow_up_on" in cols else "0"
+    parts, params = [], []
+    for x in wanted:
+        if x in STATES:
+            parts.append(f"{ws} = ?")
+            params.append(x)
+        elif x == "followup_due":
+            parts.append(f"({ws} IN ('work_now','waiting') AND {due})")
+            params += [today] if due != "0" else []
+        elif x == "todo":
+            parts.append(f"({ws} = 'work_now' OR ({ws} = 'waiting' AND {due}))")
+            params += [today] if due != "0" else []
+        else:
+            parts.append("0")
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def _ema_sql(ema: str | None, cols: set[str]) -> tuple[str, list] | None:
+    """`ema=` as one condition (needs_ema_checks section 4, so counts, tiles and lists agree): written_off, contractual,
+    paid_other, on_ar, ema_only, worked, unworked (ema_checks.unworked_sql over the day the run measured it to) and
+    auto_written_off. A copy without the column, or a name it does not know, answers with nothing."""
+    if not ema:
+        return None
+    need = {"written_off": "written_off_cents", "contractual": "written_off_kind", "paid_other": "ema_outcome", "on_ar": "ema_link",
+            "ema_only": "source", "worked": "ema_worked_on", "unworked": "ema_worked_on", "auto_written_off": "ema_outcome"}.get(ema)
+    if need is None or need not in cols:
+        return "0", []
+    if ema == "written_off":
+        return "COALESCE(written_off_cents,0) > 0", []
+    if ema == "contractual":
+        return "written_off_kind = 'contractual'", []
+    if ema == "paid_other":
+        return "ema_outcome = 'paid_after_other'", []
+    if ema == "auto_written_off":
+        return "ema_outcome = 'auto_written_off'", []
+    if ema == "ema_only":
+        return "source = 'ema'", []
+    if ema == "worked":
+        return "ema_worked_on IS NOT NULL", []
+    if ema == "on_ar":
+        return ("ema_link IN (SELECT link FROM ema_ar WHERE link IS NOT NULL)", []) if has_table("ema_ar") else ("0", [])
+    # unworked: the day the run measured the number to (meta ema:unworked), so the list holds what Today's number counts
+    from .ema_checks import UNWORKED_KEY, unworked_sql
+    got = one("SELECT value FROM meta WHERE key=?", (UNWORKED_KEY,)) if has_table("meta") else None
+    try:
+        through = (json.loads(got["value"]) or {}).get("data_through") if got else None
+    except (TypeError, ValueError):
+        through = None
+    if not through:
+        return "0", []
+    clause, params = unworked_sql(str(through))
+    return f"({clause})", list(params)
+
+
+def _list_sql(column: str, value: str | None, cols: set[str]) -> tuple[str, list] | None:
+    """One column equal to one of the values given (comma separated); nothing on a copy without the column."""
+    vals = [x.strip() for x in (value or "").split(",") if x.strip()]
+    if not vals:
+        return None
+    if column not in cols:
+        return "0", []
+    return f"{column} IN ({','.join('?' * len(vals))})", vals
+
+
 def _filters(signal, category, payer, year, status, severity, actionable, q, provider, code, deadline, handling=None, extra: dict | None = None,
-             patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0, min_dollars: int = 0):
+             patient_of: str | None = None, kind: str | None = None, live: bool = False, paid_days: int = 0, min_dollars: int = 0, *,
+             ema: str | None = None, state: str | None = None, ema_outcome: str | None = None, source: str | None = None,
+             today: str | None = None):
     where, params = [], []
+    if ema or state or ema_outcome or source:
+        cols = _columns()
+        for got in (_state_sql(state, cols, today or _day(0)), _ema_sql(ema, cols), _list_sql("ema_outcome", ema_outcome, cols),
+                    _list_sql("source", source, cols)):
+            if got is not None:
+                where.append(got[0])
+                params += got[1]
     if min_dollars:
         # the worklist's amount filter hides items known to be worth less (small items are a third of the list and little of the
         # money); an item whose value is not known stays, since it may be large
@@ -801,23 +916,30 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
              provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
              patient_of: Optional[str] = Query(None, max_length=200), sort: str = "shortfall", limit: int = Query(100, ge=1, le=2000),
              offset: int = Query(0, ge=0, le=10**9), kind: Optional[str] = Query(None, max_length=20), live: int = Query(0, ge=0, le=1),
-             paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), request: Request = None, _: str = Depends(require_auth)):
+             paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6), ema: Optional[str] = Query(None, max_length=40),
+             state: Optional[str] = Query(None, max_length=120), work_state: Optional[str] = Query(None, max_length=120),
+             ema_outcome: Optional[str] = Query(None, max_length=200), source: Optional[str] = Query(None, max_length=20),
+             request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind, bool(live), paid, min)
+                         _extra(request), patient_of, kind, bool(live), paid, min, ema=ema, state=state or work_state, ema_outcome=ema_outcome,
+                         source=source)
     delta, each = _pattern_cents(w, params, deadline)
-    due, order_params = "appeal_deadline", []
-    if each and sort in ("deadline", "payer"):
+    due, due_params = "appeal_deadline", []
+    if each:
         # a routine-rate finding sorts by the first of its claims still in range, not by the last
         nxt = [(fid, d) for fid, (_c, d, _n) in each.items() if d]
         if nxt:
             due = "COALESCE(CASE finding_id " + " ".join("WHEN ? THEN ?" for _ in nxt) + " END, appeal_deadline)"
-            order_params = [x for pair in nxt for x in pair] * 3
+            due_params = [x for pair in nxt for x in pair]
     by_due = f"({due}) IS NULL, ({due}) < date('now'), {due} ASC"
-    order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": f"{by_due}, shortfall_cents DESC",
-             "payer": f"payer_group, {by_due}, shortfall_cents DESC", "paid": "payment_date DESC, shortfall_cents DESC",
-             "sent": "COALESCE(appealed_at, status_changed_at) ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
-    if sort not in ("deadline", "payer"):
-        order_params = []
+    value = _value_sql()
+    orders = {"shortfall": f"shortfall_cents DESC, {by_due}", "date": "service_date DESC", "deadline": f"{by_due}, shortfall_cents DESC",
+              "payer": f"payer_group, {by_due}, shortfall_cents DESC", "paid": "payment_date DESC, shortfall_cents DESC",
+              "sent": "COALESCE(appealed_at, status_changed_at) ASC, shortfall_cents DESC",
+              # what working it is worth (dollars x the payer's recovery rate for its pattern), then the date it must be done by
+              "value": f"({value}) IS NULL, {value} DESC, {by_due}"}
+    order = orders.get(sort, orders["shortfall"])
+    order_params = due_params * order.count(due) if due_params else []
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
                               tuple(params) + tuple(order_params) + (limit, offset)))
@@ -844,9 +966,13 @@ def findings_csv(signal: Optional[str] = None, category: Optional[str] = None, p
                  provider: Optional[str] = None, code: Optional[str] = None, deadline: Optional[str] = None, handling: Optional[str] = None,
                  patient_of: Optional[str] = Query(None, max_length=200), kind: Optional[str] = Query(None, max_length=20),
                  live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650), min: int = Query(0, ge=0, le=10**6),
-                 view: str = Query("raw", pattern="^(raw|worklist)$"), request: Request = None, _: str = Depends(require_auth)):
+                 view: str = Query("raw", pattern="^(raw|worklist)$"), ema: Optional[str] = Query(None, max_length=40),
+                 state: Optional[str] = Query(None, max_length=120), work_state: Optional[str] = Query(None, max_length=120),
+                 ema_outcome: Optional[str] = Query(None, max_length=200), source: Optional[str] = Query(None, max_length=20),
+                 request: Request = None, _: str = Depends(require_auth)):
     w, params = _filters(signal, category, payer, year, status, severity, actionable, _search_text(request, q), provider, code, deadline, handling,
-                         _extra(request), patient_of, kind, bool(live), paid, min)
+                         _extra(request), patient_of, kind, bool(live), paid, min, ema=ema, state=state or work_state, ema_outcome=ema_outcome,
+                         source=source)
     data = rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY payer_group, shortfall_cents DESC", tuple(params))
     if view == "worklist":
         return _worklist_csv(data, deadline, w, params)
@@ -953,8 +1079,10 @@ def _initials(last: str | None, first: str | None) -> str:
     return "".join(x[0] for x in (first or "", last or "") if x).upper() or "?"
 
 
-@app.get("/api/findings/{finding_id}")
-def finding_detail(finding_id: str, _: str = Depends(require_auth)):
+def finding_detail(finding_id: str, _: str = "ok"):
+    """One finding with everything its panel shows from the store: the claim (allowlisted columns), its lines, reasons
+    and remarks, its remittances, the EMA export rows, the history, packets and faxes. The routes that build a letter or
+    a fax read it too (without the story: see finding_page)."""
     f = one("SELECT * FROM findings WHERE finding_id=?", (finding_id,))
     if not f:
         raise HTTPException(404, "finding not found")
@@ -1028,6 +1156,76 @@ def finding_detail(finding_id: str, _: str = Depends(require_auth)):
             out["faxes"].append(x)
         sent = [x["created_at"] for x in out["faxes"] if x["direction"] == "out" and x["status"] != "failed"]
         f["faxed_at"] = min(sent) if sent else None      # its follow-ups go by fax by themselves
+    return out
+
+
+@app.get("/api/findings/{finding_id}")
+def finding_page(finding_id: str, story: int = Query(1, ge=0, le=1), _: str = Depends(require_auth)):
+    """An item's panel: finding_detail, and with it the item's story, verdict and next step (remitwatch.story.explain, one
+    gathering of its facts: `explain`) and what EMA's reports hold on its claim (remitwatch.ema_checks.claim_block:
+    `ema_block`). On a server the posting ledger is opened read-only, so the story lists every EMA posting; on Vercel the
+    dashboard's copy shows EMA's summaries and says the postings are kept on the server. story=0 leaves both out."""
+    out = finding_detail(finding_id, "ok")
+    if story:
+        out.update(_explained(out["finding"]))
+    return out
+
+
+def _ledger_readonly():
+    """The posting ledger opened read-only (a server's, beside its store), or None: a serverless host keeps none, and a
+    server has none until its first Production report. Closed by the caller."""
+    if runtime.serverless():
+        return None
+    from . import ema_ledger
+    path = ema_ledger.ledger_path(DB_PATH)
+    if not os.path.exists(path):
+        return None
+    try:
+        return ema_ledger.Ledger.open(path, readonly=True)
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        # the story is told from the store's summaries instead, and says the detail is kept on the server
+        _say(f"api: the posting ledger could not be opened read-only ({type(exc).__name__}); the item panels show EMA's summaries")
+        return None
+
+
+def _say(line: str) -> None:
+    """One line in the server's log (no patient, claim or check number in it: callers pass ids and kinds only)."""
+    import sys
+    print(line, file=sys.stderr, flush=True)
+
+
+def _explained(f: dict, *, claim_key: str | None = None, bill: str | None = None) -> dict:
+    """{'explain': {'story', 'verdict', 'next_step', 'state'}, 'ema_block': claim_block} for an item (f) or, with claim_key,
+    for a whole claim ({'claim_story', 'ema_block'}). A story that cannot be put together leaves the rest of the panel as it
+    is and says why ('explain_error'), and the server's log names the item and the kind of error."""
+    from . import ema_checks as ec
+    from . import story as story_mod
+    from .detect import bill_of
+    out: dict[str, Any] = {}
+    lg = _ledger_readonly()
+    conn = db()
+    conn.row_factory = None
+    try:
+        try:
+            if claim_key:
+                out["claim_story"] = story_mod.item_story(conn, claim_key=claim_key, ledger=lg, today=_day(0))
+            else:
+                out["explain"] = story_mod.explain(conn, f["finding_id"], ledger=lg, today=_day(0))
+        except Exception as exc:        # noqa: BLE001  (shown on the panel and logged: the item's own facts still show)
+            out["explain_error"] = f"The story of this {'claim' if claim_key else 'item'} could not be put together ({type(exc).__name__})."
+            _say(f"api: story failed for {'claim' if claim_key else 'item ' + str(f.get('finding_id'))}: {type(exc).__name__}: {str(exc)[:160]}")
+        try:
+            pcn = (f or {}).get("patient_control_number")
+            links = [int(f["ema_link"])] if (f or {}).get("ema_link") not in (None, "") else []
+            out["ema_block"] = ec.claim_block(conn, claim_id=pcn, bill=bill or (bill_of(pcn) if pcn else None), links=links, ledger=lg)
+        except Exception as exc:        # noqa: BLE001  (a store with no EMA tables yet, or a damaged one: said on the panel)
+            out["ema_block"] = None
+            out["ema_block_error"] = f"EMA's reports for this claim could not be read ({type(exc).__name__})."
+            _say(f"api: claim_block failed: {type(exc).__name__}: {str(exc)[:160]}")
+    finally:
+        conn.close()
+        if lg is not None:
+            lg.close()
     return out
 
 
@@ -1452,7 +1650,12 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
                           claim_status, activity_type, carc, rarc, adjustment_status, denial_category, posted_date, claim_submission_date, transaction_date
                    FROM ema_rows WHERE claim_id IN ({qe}) ORDER BY claim_id, family, service_date, row_index""", tuple(ids)) if has_table("ema_rows") and ids else []
     who = _who(rem[-1]) if rem else _who_ema(_ema_first(ema_ids))     # a bill no payer has answered yet: EMA says who
-    return dict(who, bill=bill, claim_ids=ids, answered=pcns, remits=remits, findings=findings + takebacks + patterns, taken_back=plb, ema=ema)
+    # the claim's story (every remittance and EMA posting on its lines, the balance) and EMA's block for the whole bill
+    newest = (pcns or ema_ids or [bill])[-1]
+    told = _explained({"patient_control_number": newest}, claim_key=newest, bill=bill)
+    return dict(who, bill=bill, claim_ids=ids, answered=pcns, remits=remits, findings=findings + takebacks + patterns, taken_back=plb, ema=ema,
+                story=told.get("claim_story"), ema_block=told.get("ema_block"),
+                **({"story_error": told["explain_error"]} if told.get("explain_error") else {}))
 
 
 # --------------------------------------------------------------------------- payment fees: one request per payer
@@ -1803,16 +2006,19 @@ def brief(_: str = Depends(require_auth)):
 def worklist_counts(category: Optional[str] = None, payer: Optional[str] = None, status: str = "open", deadline: Optional[str] = None,
                     q: Optional[str] = None, signal: Optional[str] = None, live: int = Query(0, ge=0, le=1), paid: int = Query(0, ge=0, le=3650),
                     min: int = Query(0, ge=0, le=10**6), kind: Optional[str] = Query(None, max_length=20), year: Optional[str] = Query(None, max_length=4),
-                    handling: Optional[str] = Query(None, max_length=40), request: Request = None, _: str = Depends(require_auth)):
+                    handling: Optional[str] = Query(None, max_length=40), ema: Optional[str] = Query(None, max_length=40),
+                    state: Optional[str] = Query(None, max_length=120), work_state: Optional[str] = Query(None, max_length=120),
+                    ema_outcome: Optional[str] = Query(None, max_length=200), source: Optional[str] = Query(None, max_length=20),
+                    request: Request = None, _: str = Depends(require_auth)):
     """Items and dollars for each kind of work under the worklist's other filters, so each tab counts what a click on it
     opens, and for each reason (signal), so a reason chip counts what it opens too. Counts only: no patient, claim or date."""
     from .insights import WORK_TYPES, work_type
     w, params = _filters(signal, category, payer, year, status, None, None, _search_text(request, q), None, None, deadline, handling or None, None,
-                         None, kind, bool(live), paid, min)
+                         None, kind, bool(live), paid, min, ema=ema, state=state or work_state, ema_outcome=ema_outcome, source=source)
     out = {t["key"]: {"key": t["key"], "n": 0, "cents": 0} for t in WORK_TYPES}
     by_signal: dict[str, dict] = {}
     for r in rows(f"SELECT signal, actionable, carc, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w} GROUP BY 1,2,3", tuple(params)):
-        k = out[work_type(r["signal"], r["actionable"], r["carc"])]
+        k = out.setdefault(work_type(r["signal"], r["actionable"], r["carc"]), {"key": work_type(r["signal"], r["actionable"], r["carc"]), "n": 0, "cents": 0})
         k["n"] += r["n"]
         k["cents"] += r["cents"]
         sg = by_signal.setdefault(r["signal"] or "", {"signal": r["signal"], "n": 0, "cents": 0})
@@ -1846,24 +2052,39 @@ BADGE_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
 CLAIM_CATEGORIES = ",".join(BADGE_CATEGORIES)          # the four claim pages together: the Worklist
 
 
-def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None, year=None, handling=None) -> dict:
+# A category page's state tiles (amendment 13.1): what to work now (with the follow-ups whose day has come), the part of it
+# that closes within 7 days, what waits on the payer, and the four kinds of item that need no work, each findable
+STATE_TILES = (
+    ("todo", "todo", None),                     # work now and follow-ups due: the list a page opens with
+    ("todo_week", "todo", "week"),              # of those, the ones whose filing window closes within 7 days
+    ("waiting", "waiting", None),               # a person or EMA shows the work was done: waiting on the payer
+    ("followup_due", "followup_due", None),     # waiting, and its follow-up day has come
+    ("done", "done", None), ("accepted", "accepted", None), ("st_expired", "expired", None), ("cant_check", "cant_check", None),
+)
+
+
+def _bucket(category, payer, status, deadline, min_dollars=0, signal=None, kind=None, year=None, handling=None, ema=None, state=None) -> dict:
     """Items and dollars under exactly the filter /api/findings uses for the same choices (live findings only): the
     count line of the list a click opens. A routine-rate pattern counts its claims in range, as the list does."""
-    w, params = _filters(signal, category, payer, year, status, None, None, None, None, None, deadline, handling, None, None, kind, True, 0, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, None, None, None, deadline, handling, None, None, kind, True, 0, min_dollars,
+                         ema=ema, state=state)
     r = one(f"SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}", tuple(params))
     delta, _each = _pattern_cents(w, params, deadline)
     return {"n": r["n"], "cents": (r["cents"] or 0) + (delta if r["n"] else 0)}
 
 
-def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None, year=None, handling=None) -> dict:
+def _desk_kinds(category, payer, status, deadline, min_dollars=0, signal=None, paid_days=0, q=None, year=None, handling=None, ema=None,
+                state=None) -> dict:
     """The kinds of work under one filter, largest dollars first, each with its three biggest payer piles; a pile's count
     and dollars are what the list shows for that kind and payer."""
     from .insights import WORK_TYPES, work_type
-    w, params = _filters(signal, category, payer, year, status, None, None, q, None, None, deadline, handling, None, None, None, True, paid_days, min_dollars)
+    w, params = _filters(signal, category, payer, year, status, None, None, q, None, None, deadline, handling, None, None, None, True, paid_days, min_dollars,
+                         ema=ema, state=state)
     kinds = {t["key"]: {"key": t["key"], "n": 0, "cents": 0, "payers": {}} for t in WORK_TYPES}
     for r in rows(f"""SELECT signal, actionable, carc, payer_group pg, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings{w}
                       GROUP BY 1,2,3,4""", tuple(params)):
-        k = kinds[work_type(r["signal"], r["actionable"], r["carc"])]
+        wt = work_type(r["signal"], r["actionable"], r["carc"])
+        k = kinds.setdefault(wt, {"key": wt, "n": 0, "cents": 0, "payers": {}})
         k["n"] += r["n"]
         k["cents"] += r["cents"]
         p = k["payers"].setdefault(r["pg"], [0, 0])
@@ -1895,19 +2116,25 @@ def desk(category: str = Query(..., max_length=80), payer: Optional[str] = Query
          status: str = Query(TODO_STATUSES, max_length=80), deadline: Optional[str] = Query(None, max_length=20),
          signal: Optional[str] = Query(None, max_length=400), paid: int = Query(0, ge=0, le=3650), tiles: int = Query(1, ge=0, le=1),
          kind: Optional[str] = Query(None, max_length=20), reason: Optional[str] = Query(None, max_length=60), q: Optional[str] = None,
-         year: Optional[str] = Query(None, max_length=4), handling: Optional[str] = Query(None, max_length=40), request: Request = None,
+         year: Optional[str] = Query(None, max_length=4), handling: Optional[str] = Query(None, max_length=40),
+         ema: Optional[str] = Query(None, max_length=40), state: Optional[str] = Query(None, max_length=120), request: Request = None,
          _: str = Depends(require_auth)):
     """A category page in one call: its tiles (closes in 7 and 30 days, window open, to decide, older with no date, window
-    closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), and the kinds of work under
-    the chosen status, filing date, payment window and search with their payer piles. `signal` narrows the whole page;
-    the chosen kind of work and reason narrow the tiles only (a tile click keeps them, and the kinds of work stay listed so
-    another can be chosen). Every number is the count line of the list it opens. Counts only: no patient, claim or date."""
+    closed, every item to do, sent and waiting, follow-ups due, closed in the last 30 days), its state tiles (STATE_TILES:
+    work now with the follow-ups due, of those what closes in 7 days, waiting, follow-ups due, done, accepted, expired,
+    can't be checked), and the kinds of work under the chosen status, state, filing date, payment window and search with
+    their payer piles. `signal` and `ema` narrow the whole page; the chosen kind of work and reason narrow the tiles only (a
+    tile click keeps them, and the kinds of work stay listed so another can be chosen). Every number is the count line of
+    the list it opens. Counts only: no patient, claim or date."""
     token = _WINDOWS_MEMO.set({})
     try:
         out = {"category": category, "scope": _desk_kinds(category, payer, status, deadline or None, min, signal, paid, _search_text(request, q), year,
-                                                         handling or None)}
+                                                         handling or None, ema or None, state or None)}
         if tiles:
-            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year, handling or None) for name, st, dl in DESK_TILES}
+            out["tiles"] = {name: _bucket(category, payer, st, dl, min, reason or signal, kind, year, handling or None, ema or None)
+                            for name, st, dl in DESK_TILES}
+            out["tiles"].update({name: _bucket(category, payer, None, dl, min, reason or signal, kind, year, handling or None, ema or None, sv)
+                                 for name, sv, dl in STATE_TILES})
         return out
     finally:
         _WINDOWS_MEMO.reset(token)
