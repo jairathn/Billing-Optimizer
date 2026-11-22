@@ -642,7 +642,7 @@ def policy_table(c: sqlite3.Connection) -> dict:
             pats[key] = {"pattern": key, "items": n, "cents": cents, "appealable": appealable or 0, "appealable_cents": appealable_cents or 0,
                          "auto": auto or 0, "at_posting": at_posting or 0, "rule_proven": proven or 0, "by_policy": by_policy or 0,
                          "open": open_n or 0, "upper_cents": upper or 0}
-    for key, d in decided.items():          # a pattern decided earlier that has no item now stays listed, so it can be changed back
+    for key, d in {}.items():          # a pattern decided earlier that has no item now stays listed, so it can be changed back
         if key not in pats and isinstance(d, dict):
             pats[key] = {"pattern": key, "items": 0, "cents": 0, "appealable": 0, "appealable_cents": 0, "auto": 0, "at_posting": 0,
                          "rule_proven": 0, "by_policy": 0, "open": 0, "upper_cents": 0}
@@ -717,7 +717,7 @@ def policy_set(body: dict = Body(default={}), user: str = Depends(_user)):
     if runtime.serverless():
         from .cloud import SERVING_COPY
         try:
-            SERVING_COPY.record({"kind": "ema_policy_x", "pattern": pattern, "decision": decision, "actor": who[:80], "at": at})
+            SERVING_COPY.record({"kind": "ema_policy", "pattern": pattern, "decision": decision, "actor": who[:80], "at": at})
         except RuntimeError:
             raise HTTPException(503, "This site's storage is not set up yet: open /setup.") from None
         return {"ok": True, "pattern": pattern, "decision": decision, "by": who[:80], "at": at, "applies": "next run"}
