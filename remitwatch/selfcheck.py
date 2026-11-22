@@ -1216,13 +1216,14 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     before = _before_rows(conn)
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
-    van = check_vanished(conn, before, after)
-    results.append(van)
-    money = meta_get(conn, K_MONEY, {}) or {}
-    for m in (money.get("checks") or []):
-        if isinstance(m, dict) and m.get("id") in CHECKS and m.get("current", True):
-            results.append(dict(m, keys=[tuple(k) for k in m.get("keys") or []]))
+    try:
+        results.append(check_vanished(conn, before, after))
+    except Exception as exc:       # noqa: BLE001
+        _caught(exc, "vanished")
+        results.append(_check_error("vanished", exc))
+    results.extend(_stored_results(conn))
     first = conn.execute("SELECT COUNT(*) FROM selfcheck_runs").fetchone()[0] == 0
+    _apply_acceptances(conn, results)
     base = _baseline(conn)
     new_by: dict[str, list] = {}
     hold_ids: list[str] = []

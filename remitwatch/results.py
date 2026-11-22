@@ -775,6 +775,8 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     found = _found_postings(conn, items)
     out_items: dict[str, dict] = {}
     group_of: dict[str, str] = {}
+    group_events: dict[str, list] = {}
+    group_members: dict[str, list] = {}
     cache: dict = {}
     denied_again: dict[str, str] = {}
     answered: dict[str, str] = {}
@@ -786,7 +788,8 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
         stack: list[list] = []
         took = 0
         kept: list[dict] = []
-        for e in sorted(evs, key=lambda e: (e["date"], str(e["id"]))):
+        # on one day, money in before money out: a reprocessing reverses the old payment and pays the new one together
+        for e in sorted(evs, key=lambda e: (e["date"], e["cents"] < 0, str(e["id"]))):
             if e["cents"] > 0:
                 b, credit, win = _bucket(conn, e["date"], works, signals, r.get("payer_group"), r.get("payer_kind"), cache)
                 rec = dict(e, bucket=b, rule=_rule_text(b, e, credit, win, r["F"], signals),
@@ -817,8 +820,6 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
         total = sum(split.values())
         out_items[winner] = dict(split, returned=total, taken_back=took, events=kept[:12], n_events=len(kept), members=sorted(mem),
                                  F=r["F"])
-        for m in mem:
-            group_of[m] = winner
 
     for root, mem in members.items():
         winner = min(mem, key=lambda m: (items[m]["F"], m))
@@ -826,6 +827,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
         rows: dict = {}
         pays: dict = {}
         for m in mem:
+            group_of[m] = winner
             fx = facts.get(m) or {}
             for x in fx.get("rows", []):
                 rows.setdefault(_row_id(x), x)
@@ -835,6 +837,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
         for m in mem:
             if m in found:
                 evs += found[m]
+        group_events[winner], group_members[winner] = evs, sorted(mem)
         if evs:
             settle(winner, mem, evs)
         # worked items answered again: money after the first work (a win), or a denial after it with no money (a loss)
