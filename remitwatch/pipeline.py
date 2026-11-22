@@ -123,15 +123,136 @@ def release_lock(conn, token: str | None = None) -> bool:
     return True
 
 
-def clear_lock_of_pid(db_path: str, pid: int) -> bool:
-    """After a child process was killed, remove the lock it could not release itself."""
-    store = Store(db_path)
+def _held(value) -> dict:
     try:
-        if _lock_owner(store.conn).get("pid") == pid:
-            return release_lock(store.conn)
+        held = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return held if isinstance(held, dict) else {}
+
+
+def _when(held: dict, *keys: str) -> float | None:
+    """The first of these times the lock gives, in seconds since 1970."""
+    for k in keys:
+        try:
+            return datetime.fromisoformat(held[k]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            pass
+    return None
+
+
+def _run_locks(conn) -> list[tuple[str, str]]:
+    """Every run's lock in the store: the cycle's, the fax run's, the backup's (meta rows whose key ends in ':lock')."""
+    try:
+        return conn.execute("SELECT key, value FROM meta WHERE key LIKE '%:lock'").fetchall()
+    except sqlite3.Error:
+        return []
+
+
+def clear_lock_of_pid(db_path: str, pid: int, since: float | None = None) -> bool:
+    """After a child process ended (killed, or it died), remove the locks it could not release itself: the cycle's, and
+    the fax run's or the backup's when it was in one. `since`: when the child was started; a lock taken before that is
+    another process's that had the same number. Returns whether a lock was removed."""
+    if not pid or not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
         return False
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        gone = False
+        for key, value in _run_locks(conn):
+            held = _held(value)
+            if held.get("pid") != pid:
+                continue
+            if since is not None:
+                took = _when(held, "started", "heartbeat")
+                if took is None or took < since - 5:
+                    continue
+            conn.execute("DELETE FROM meta WHERE key=? AND value=?", (key, value))
+            gone = True
+        conn.commit()
+        return gone
     finally:
-        store.close()
+        conn.close()
+
+
+def _boot_time() -> float:
+    """When this machine started, in seconds since 1970 (Linux)."""
+    with open("/proc/stat") as f:
+        return float(next(int(ln.split()[1]) for ln in f if ln.startswith("btime")))
+
+
+def _began(pid) -> float | None:
+    """When the process with this number started, if one runs here and it is RemitWatch's; None otherwise."""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+            if b"remitwatch" not in f.read():
+                return None
+        with open(f"/proc/{int(pid)}/stat") as f:
+            ticks = int(f.read().rsplit(")", 1)[1].split()[19])
+        return _boot_time() + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, TypeError, IndexError, StopIteration):
+        return None
+
+
+def holder_running(held: dict) -> bool:
+    """Whether the run holding a lock still goes, judged as the deploy script judges it (deploy/auto-deploy.sh, LOCKS_PY):
+    its process runs here, is RemitWatch's, and started no later than the lock was taken (a process that started after it
+    only got the same number). A lock with no process number counts while its heartbeat is under 15 minutes old."""
+    if held.get("pid"):
+        start, took = _began(held["pid"]), _when(held, "started", "heartbeat")
+        return start is not None and (took is None or start <= took + 5)
+    beat = _when(held, "heartbeat", "started")
+    return beat is not None and time.time() - beat < 900
+
+
+def clear_locks_left_behind(db_path: str) -> list[str]:
+    """At the server's start: remove the locks of runs that ended with the server's last container (a restart, `up -d`
+    after a change to .env, a reboot, AWS's own recovery). Without this the next cycle is refused for hours
+    (LOCK_STALE_MINUTES), and the fax run and the backup wait too. A lock with a process number is left behind when:
+      - it was taken in this container (or names none), and its process is gone (holder_running, the deploy's rule);
+      - it was taken in an earlier container of the server (each start records its own, SERVERS_KEY): that container
+        ended before this one started;
+      - it was taken in another container (`docker compose run`), which cannot be seen from here, only when the machine
+        has started since it was last refreshed.
+    A lock with no process number goes stale by its own rule. Records this container. Nothing is done where processes
+    cannot be looked at (no /proc), or when there is no store yet (none is made). Returns the keys removed."""
+    if not os.path.exists("/proc/self/stat") or not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+        return []
+    here = _host()
+    try:
+        boot = _boot_time()
+    except (OSError, ValueError, StopIteration):
+        boot = None
+    out: list[str] = []
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        try:
+            servers = [str(h) for h in json.loads(_meta_get(conn, SERVERS_KEY) or "[]") if h]
+        except (sqlite3.Error, TypeError, ValueError):
+            servers = []
+        for key, value in _run_locks(conn):
+            held = _held(value)
+            if not held.get("pid"):
+                continue
+            host = str(held.get("host") or "")
+            if not host or host == here:
+                gone = not holder_running(held)
+            elif host in servers:
+                gone = True
+            else:
+                beat = _when(held, "heartbeat", "started")
+                gone = boot is not None and beat is not None and beat < boot - BOOT_MARGIN_SECONDS
+            if gone:
+                conn.execute("DELETE FROM meta WHERE key=? AND value=?", (key, value))
+                out.append(key)
+        if here:
+            try:
+                _meta_set(conn, SERVERS_KEY, [h for h in servers if h != here][-(SERVERS_KEPT - 1):] + [here])
+            except sqlite3.Error:
+                pass            # a store with no meta table yet holds no lock either
+        conn.commit()
+    finally:
+        conn.close()
+    return out
 
 
 def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str | None = None, force_detect: bool = False,
@@ -307,9 +428,15 @@ class Scheduler:
         self.db_path = ""
         self.interval = 0
         self._trigger = "schedule"
+        self._children: dict[int, tuple[subprocess.Popen, float, str]] = {}   # running now: pid -> (process, started, store)
+        self._guard = threading.Lock()
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
+
+    def argv(self, db_path: str) -> list[str]:
+        """The command one cycle runs as, in its own process."""
+        return [sys.executable, "-m", "remitwatch.cli", "--db", db_path, "cycle"]
 
     def start(self, db_path: str, interval_minutes: int) -> None:
         if self.is_alive() and not self._stop.is_set():
@@ -323,8 +450,16 @@ class Scheduler:
         self._thread.start()
 
     def stop(self) -> None:
+        """The server stops: no more cycles, and a cycle still running is ended (asked to stop, killed after
+        STOP_WAIT_SECONDS). The container would end it anyway, and a cycle ended that way cannot release its lock: its
+        locks are released here, so the next start's cycles are not refused for hours."""
         self._stop.set()
         self._wake.set()
+        with self._guard:
+            running = list(self._children.values())
+        for proc, started, db_path in running:
+            _end_child(proc)
+            _release_child(db_path, proc.pid, started)
         if self._thread and self._thread.is_alive() and threading.current_thread() is not self._thread:
             self._thread.join(timeout=2)
 
@@ -352,21 +487,45 @@ class Scheduler:
 
     def run_child(self, trigger: str) -> int:
         env = dict(os.environ, REMITWATCH_TRIGGER=trigger)
+        db_path, started = self.db_path, time.time()
         try:
-            proc = subprocess.Popen([sys.executable, "-m", "remitwatch.cli", "--db", self.db_path, "cycle"], env=env,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(self.argv(db_path), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             return -1
+        with self._guard:
+            self._children[proc.pid] = (proc, started, db_path)
         try:
             return proc.wait(timeout=CHILD_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            try:
-                clear_lock_of_pid(self.db_path, proc.pid)      # a killed child cannot release its own lock
-            except Exception:
-                pass
             return -9
+        finally:
+            with self._guard:
+                self._children.pop(proc.pid, None)
+            # a child that ended without releasing its locks (killed: the time limit above, the system's memory limit, a
+            # stop) left them behind: the cycle's, and the fax run's or the backup's when it was in one
+            _release_child(db_path, proc.pid, started)
+
+
+def _end_child(proc: subprocess.Popen) -> None:
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=STOP_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=STOP_WAIT_SECONDS)
+    except Exception:
+        pass
+
+
+def _release_child(db_path: str, pid: int, started: float) -> None:
+    try:
+        clear_lock_of_pid(db_path, pid, since=started)
+    except Exception:
+        pass            # a lock that cannot be removed now is removed at the next start, or goes stale
 
 
 SCHEDULER = Scheduler()
@@ -379,8 +538,16 @@ def start_scheduler_from_env(db_path: str) -> bool:
     """The background cycles on a server: every REMITWATCH_SYNC_INTERVAL_MINUTES (60 is a good value), and at least once
     a day whenever a feed is set up (Dropbox or TriZetto) or the fax line is, as Vercel's daily scheduled calls do;
     Dropbox's webhook and the dashboard's Sync now add cycles in between. Each cycle also looks after the fax line
-    (cli.cmd_cycle): its follow-ups, retries and the payers' faxes."""
+    (cli.cmd_cycle): its follow-ups, retries and the payers' faxes. First, the locks of runs that ended with the server's
+    last container are removed (clear_locks_left_behind)."""
     from . import fax, trizetto
+    try:
+        gone = clear_locks_left_behind(db_path)
+        if gone:
+            print(f"RemitWatch: removed the lock of a run that ended with the server's last container ({', '.join(gone)}).",
+                  file=sys.stderr, flush=True)
+    except Exception as exc:     # never in the way of the server's start: a lock left behind still goes stale by itself
+        print(f"RemitWatch: the run locks could not be checked at start ({type(exc).__name__}).", file=sys.stderr, flush=True)
     try:
         interval = int(os.environ.get("REMITWATCH_SYNC_INTERVAL_MINUTES", "0") or 0)
     except ValueError:
