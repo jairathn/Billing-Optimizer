@@ -1171,7 +1171,8 @@ def test_prepare_send_and_fax_cycle_commands(site, capsys):
     _number(c, PAYER_FAX)
     assert cli.main(["--db", site.db, "send-appeals"]) == 0
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert out["appealable"] == 2 and out.get("sent") == 1 and out.get("held") == 1       # the note packet was built without the review: held
+    # the note's packet was built without the review: built again with it, then faxed; the rate letter needs no note
+    assert out["appealable"] == 2 and out.get("sent") == 2 and len(site.line.sent) == 2
     assert cli.main(["--db", site.db, "fax-cycle"]) == 0
     assert "follow_up" in json.loads(capsys.readouterr().out)
 
