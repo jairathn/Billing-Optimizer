@@ -227,10 +227,20 @@ def cmd_backup(args: argparse.Namespace) -> int:
 
 
 def _fax_run(db: str, budget_s: float = 3600) -> dict:
+    """The fax line looked after (states, retries, faxes in, follow-ups due), under the fax run's lock (api.fax_run): a run
+    already going (the button, the daily call, a cycle started by hand) is left to finish, and nothing is sent twice. The
+    deploy script waits for that lock as for the cycle's (meta key fax:lock)."""
     from . import api, fax
     api.DB_PATH = db
     prov = fax.provider()
-    return {"refresh": api._fax_refresh(prov, budget_s=budget_s / 2), "follow_up": api._send_followups(prov, "scheduled run", budget_s=budget_s / 2)}
+    if prov is None:
+        return {"skipped": fax.not_here() or "The fax line is not set up."}
+    try:
+        with api.fax_run("scheduled run") as lock:
+            return {"refresh": api._fax_refresh(prov, budget_s=budget_s / 2, lock=lock),
+                    "follow_up": api._send_followups(prov, "scheduled run", budget_s=budget_s / 2, lock=lock)}
+    except api.FaxBusy as exc:
+        return {"skipped": str(exc)}
 
 
 def cmd_weekly(args: argparse.Namespace) -> int:
@@ -306,9 +316,11 @@ def cmd_prepare_appeals(args: argparse.Namespace) -> int:
 
     from fastapi import HTTPException
 
-    from . import api
+    from . import api, modmed
     api.DB_PATH = args.db
-    q = api.appeals_ema_queue(limit=args.limit, _="cli")
+    # every argument given, as the button gives them: a route called as a plain function keeps FastAPI's Query(...) objects
+    # for the rest, and those count as set (ready would then mean "uploaded notes only" even with EMA connected)
+    q = api.appeals_ema_queue(limit=args.limit, ready=0 if modmed.Settings.from_env().configured() else 1, _="cli")
     n: Counter = Counter()
     for it in q["items"]:
         try:
@@ -353,10 +365,11 @@ def cmd_send_appeals(args: argparse.Namespace) -> int:
 def cmd_fax_cycle(args: argparse.Namespace) -> int:
     from . import fax
     if not fax.configured():
-        print("The fax line is not set up (SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD).")
+        print(fax.not_here() or "The fax line is not set up (SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD).")
         return 1
-    print(json.dumps(_fax_run(args.db, budget_s=7200), indent=2, default=str))
-    return 0
+    out = _fax_run(args.db, budget_s=7200)
+    print(json.dumps(out, indent=2, default=str))
+    return 0 if "skipped" not in out else 1
 
 
 # What a Vercel site keeps in its Dropbox state folder, and what becomes of each on a server (cmd_import_cloud):

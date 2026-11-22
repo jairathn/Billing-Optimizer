@@ -3,7 +3,8 @@ A stand-in for ModMed's sign-in server and FHIR R4 API, for the tests of remitwa
 127.0.0.1 that checks the app's signed client assertion against its registered public key (or a client secret and API
 key), and serves patients, visits, notes, binaries, clinicians, paging and a Bulk FHIR export. Switches turn on what the
 connector must cope with: searches not allowed (an export-only app), an assertion audience other than the token URL,
-a server that refuses the category parameter, no discovery document. Every patient, note and clinician is made up.
+a server that refuses the category parameter or a count search, no discovery document. Every patient, note and
+clinician is made up.
 """
 from __future__ import annotations
 
@@ -17,10 +18,11 @@ from urllib.parse import parse_qs, urlparse
 class FakeModMed:
     def __init__(self, *, jwk: dict | None = None, client_id: str = "rw-test-client", secret: str | None = None, api_key: str | None = None,
                  aud: str = "token", search_forbidden: bool = False, reject_category: bool = False, discovery: bool = True, page_size: int = 2,
-                 binary_as_json: bool = False, open_binaries: bool = False):
+                 binary_as_json: bool = False, open_binaries: bool = False, reject_summary: bool = False):
         self.jwk, self.client_id, self.secret, self.api_key = jwk, client_id, secret, api_key
         self.aud, self.search_forbidden, self.reject_category, self.discovery, self.page_size = aud, search_forbidden, reject_category, discovery, page_size
         self.binary_as_json = binary_as_json
+        self.reject_summary = reject_summary        # a server that refuses _summary=count (the setup check falls back)
         self.open_binaries = open_binaries          # files served without a token, as a pre-signed storage link is
         self.patients: dict[str, dict] = {}
         self.encounters: dict[str, dict] = {}
@@ -246,6 +248,8 @@ class FakeModMed:
         if self.search_forbidden and parts[0] in ("Patient", "Encounter", "DocumentReference"):
             return self._send(h, 403, self._oo("This application may only use Bulk FHIR"))
         if parts[0] == "Patient":
+            if self.reject_summary and "_summary" in q:
+                return self._send(h, 400, self._oo("Unknown search parameter '_summary'"))
             rows = list(self.patients.values())
             if one("identifier"):
                 rows = [p for p in rows if any(i["value"] == one("identifier") for i in p["identifier"])]

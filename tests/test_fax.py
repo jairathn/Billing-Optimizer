@@ -326,6 +326,8 @@ def _book(rows: list[tuple], finding_status: str = "appealed", payer_kind: str =
     conn.execute("INSERT INTO findings VALUES ('F1', ?, 'Payer', ?, 'S', 't', '2026-01-01', 1000)", (finding_status, payer_kind))
     ensure_fax_tables(conn)
     for i, (direction, day, purpose, level, status, doc) in enumerate(rows):
+        if direction == "in":           # the payer's answer, tied as a fax is tied by itself: by the claim number, from its number
+            doc = dict({"tied_by": "claim_id"}, **(doc or {}))
         apply_fax(conn, {"fax_key": f"k{i}", "direction": direction, "finding_id": "F1", "purpose": purpose, "level": level, "status": status,
                          "created_at": day + "T10:00:00+00:00", "doc": doc or {}})
     return conn
@@ -448,7 +450,10 @@ def test_on_a_serverless_host_the_appeal_goes_out_and_lasts(box, monkeypatch):
     d = tc.get(f"/api/findings/{fid}", headers=h).json()
     assert d["finding"]["status"] == "appealed" and d["faxes"][0]["status"] == "queued"
     kinds = sorted(json.loads(state.get(m["name"]))["kind"] for m in state.list(cloud.ACTIONS))
-    assert kinds == ["fax", "payer_fax", "status"]
+    # the send reserved, then settled with the line's ID (two records of one fax); the packet marked on the item for the
+    # EMA batch; the number; the status
+    assert kinds == ["event", "fax", "fax", "payer_fax", "status"]
+    assert len(state.list("fax-sends")) == 1          # the marker only one instance can write: one send of this appeal
     line.deliver_all()
     assert tc.post("/api/faxes/refresh", headers=h).json()["sent"] == 1
     # the next run folds it all into the store; a new instance sees it

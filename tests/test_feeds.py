@@ -829,7 +829,8 @@ def test_how_long_the_password_lasts_is_read_however_trizetto_writes_it():
     said = {"365 days (1 year)": 365, "180 days (6 months)": 180, "every 90 days, or 3 months": 90, "90 days / 3 months": 90,
             "1 yr": 365, "1y": 365, "six months": 180, "sixty days": 60, "semi-annually": 182, "twice a year": 182,
             "quarterly": 90, "90 calendar days": 90, "1 (one) year": 365, "8 wks": 56, "Passwords expire every 60 days.": 60,
-            "It does not expire": 0, "0": 0, "": 0, "never": 0, "biannually": None, "ask TriZetto": None}
+            "It does not expire": 0, "0": 0, "": 0, "never": 0, "biannually": None, "ask TriZetto": None,
+            "12 months (365 days)": 365, "1 year": 365, "2 years": 730}
     assert {k: password_days(k) for k in said} == said
     import sqlite3
     conn = sqlite3.connect(":memory:")

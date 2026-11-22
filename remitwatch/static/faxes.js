@@ -15,8 +15,11 @@ const HOLDS = [
   ['stale', 'The remittances are behind: these may have been paid since'], ['check_code', 'Check in EMA which code went out first (open each one)'], ['no_number', 'No fax number saved for the payer'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
   ['ambiguous', 'More than one note that day: pick one in the item'], ['no_note', 'No visit note yet (from EMA, or uploaded on the Upload page)'],
   ['review_no', 'Claude\'s review: the note does not support it (counted in Suggested templates)'], ['review_fix', 'Correct and resubmit instead'],
+  ['review_caution', 'Claude\'s review has doubts: a person reads the packet first'], ['quotes', 'Claude quoted words the note does not have: a person checks the packet'],
   ['blanks', 'The letter still has blanks'], ['fax_error', 'The fax line refused it'], ['expired', 'Filing window closed'],
   ['not_appealable', 'Not something a letter settles'], ['no_claim', 'Not tied to one claim'], ['no_packet', 'Packet missing'], ['failed', 'Failed']];
+const FAX_SAYS = [['upheld','Upheld (denied again)'], ['overturned','Overturned (approved)'], ['partially_overturned','Partly overturned'],
+  ['records_request','Asks for records'], ['other','Decides nothing']];
 
 function faxModal(title, body){
   $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px"><h2 style="margin:0">${esc(title)}</h2><button id="closeM" aria-label="Close">✕</button></div>${body}`;
@@ -25,6 +28,41 @@ function faxModal(title, body){
   return $('#modalBox');
 }
 const faxBar = (done, n) => `<div class="bar" style="margin:6px 0"><i style="width:${n ? Math.round(100*done/n) : 0}%"></i></div>`;
+// a US fax number as its ten digits, or '' (the server checks it the same way)
+function faxDigits(n){ let d = String(n||'').replace(/\D/g,''); if(d.length === 11 && d[0] === '1') d = d.slice(1); return d.length === 10 && !'01'.includes(d[0]) ? d : ''; }
+
+// Adding or changing a payer's fax number decides where patient records are faxed: where the site has an owner's password,
+// the call carries it. It is asked for once and kept in memory like the Providers tab's (Lock forgets it).
+function faxAskOwner(where, why){
+  return new Promise(resolve => {
+    where.className = 'small';
+    where.innerHTML = `<div>${esc(why || 'Adding or changing a fax number needs the owner\'s password.')}</div>
+      <input type="password" autocomplete="off" placeholder="Owner's password" style="width:180px"> <button data-ok>Use it</button> <button data-no>Cancel</button>`;
+    const inp = where.querySelector('input'); inp.focus();
+    where.querySelector('[data-ok]').onclick = () => resolve(inp.value);
+    inp.onkeydown = e => { if(e.key === 'Enter') resolve(inp.value); };
+    where.querySelector('[data-no]').onclick = () => { where.innerHTML = ''; resolve(''); };
+  });
+}
+async function faxOwnerPost(path, body, where){
+  const send = key => api(path, {method:'POST', headers: Object.assign({'Content-Type':'application/json'}, key ? {'X-Owner-Password': key} : {}), body: JSON.stringify(body||{})});
+  try { return await send(state.ownerKey || ''); }
+  catch(e){
+    if(e.status !== 403 || !where) throw e;
+    const key = await faxAskOwner(where, e.message);
+    if(!key) throw new Error('Not saved.');
+    const r = await send(key);
+    state.ownerKey = key;
+    if(typeof pvKeyUi === 'function') pvKeyUi();
+    if(typeof pvArmIdle === 'function') pvArmIdle();
+    return r;
+  }
+}
+// the number read back, with the payer and what goes to it, before anything is saved or sent
+function faxReadBack(payer, purpose, digits, extra){
+  return confirm(`${digits ? `Save ${fax10(digits)} as the ${purpose === 'level_2' ? 'second-level' : 'appeal'} fax number of ${payer}?` : `Remove the ${purpose === 'level_2' ? 'second-level' : 'appeal'} fax number of ${payer}?`}`
+    + (extra ? `\n\n${extra}` : '') + (digits ? '\n\nCheck each digit against the payer\'s own papers. A fax with a patient\'s record must not go to a wrong number.' : ''));
+}
 
 // ---------------------------------------------------------------- send: each item through /api/appeals/send, three at a time
 async function appealByFax(ids, opts){
@@ -35,11 +73,15 @@ async function appealByFax(ids, opts){
     <div class="note">For each item: the visit note from EMA where the appeal needs it, Claude's review of it (about a minute), the letter, and the fax to the payer. Keep this page open until it finishes.</div>
     <div id="fxOut"></div>`);
   const res = []; let next = 0, stopped = '';
-  const tally = () => { const s = res.filter(r=>r.status==='sent');
-    box.querySelector('#fxProg').textContent = `${res.length} of ${ids.length} done · ${s.length} faxed (${money(s.reduce((a,r)=>a+(r.cents||0),0))}) · ${res.filter(r=>r.status==='held').length} held${stopped ? ' · stopped: '+stopped : ''}`;
-    box.querySelector('#fxBar').innerHTML = faxBar(res.length, ids.length); };
+  const tally = () => { const s = res.filter(r=>r.status==='sent'), prog = box.querySelector('#fxProg'), bar = box.querySelector('#fxBar');
+    if(!prog || !bar) return;          // the window now shows something else
+    prog.textContent = `${res.length} of ${ids.length} done · ${s.length} faxed (${money(s.reduce((a,r)=>a+(r.cents||0),0))}) · ${res.filter(r=>r.status==='held').length} held${stopped ? ' · stopped: '+stopped : ''}`;
+    bar.innerHTML = faxBar(res.length, ids.length); };
+  // closing the window stops the batch: what is on its way finishes, nothing new starts (the server never faxes one twice)
+  const shown = () => $('#modal').classList.contains('open') && !!box.querySelector('#fxProg');
   async function worker(){
     while(next < ids.length && !stopped){
+      if(!shown()){ stopped = 'the window was closed'; break; }
       const id = ids[next++];
       let r;
       try { r = await post('/api/appeals/send', {finding_id: id, stale_ok: !!opts.staleOk}); }
@@ -53,6 +95,7 @@ async function appealByFax(ids, opts){
   await Promise.all(Array.from({length: Math.min(3, ids.length)}, worker));
   tally();
   state.brief = null; state.dirty = true;
+  if(!box.querySelector('#fxOut')) return;
   faxSummary(box.querySelector('#fxOut'), res, ids.length - res.length, opts);
   if(res.some(r => r.code === 'stale')){
     const out = box.querySelector('#fxOut'), b = document.createElement('div');
@@ -87,9 +130,12 @@ function faxSummary(el, res, notTried, opts){
   el.querySelectorAll('[data-open]').forEach(a => a.onclick = e => { e.preventDefault(); $('#modal').classList.remove('open'); openDetail(a.dataset.open); });
   el.querySelectorAll('[data-fxsave]').forEach(b => b.onclick = async () => {
     const p = b.dataset.fxsave, input = el.querySelector(`[data-fxnum="${CSS.escape(p)}"]`), msg = el.querySelector(`[data-fxmsg="${CSS.escape(p)}"]`);
-    try { await post('/api/faxes/payer', {payer_group: p, number: input.value}); }
+    const d = faxDigits(input.value), items = by.no_number.filter(r => (r.payer_group||'') === p);
+    if(!d){ msg.textContent = 'Type the ten digits of the payer\'s fax number.'; msg.className = 'small sev-high'; return; }
+    if(!faxReadBack(p, 'appeal', d, `Then ${pl(items.length, 'appeal')} ${items.length === 1 ? 'is' : 'are'} faxed to it.`)) return;
+    try { await faxOwnerPost('/api/faxes/payer', {payer_group: p, number: d}, msg); }
     catch(e){ msg.textContent = e.message; msg.className = 'small sev-high'; return; }
-    appealByFax(by.no_number.filter(r => (r.payer_group||'') === p).map(r => r.finding_id), opts);
+    appealByFax(items.map(r => r.finding_id), opts);
   });
   el.querySelector('#fxDone').onclick = () => { $('#modal').classList.remove('open'); if(opts.after) opts.after(); else render(); };
   el.querySelector('#fxFaxes').onclick = () => { $('#modal').classList.remove('open'); state.tab = 'faxes'; location.hash = 'faxes'; render(); };
@@ -105,7 +151,7 @@ async function appealEverything(opts){
   const ready = a.items.filter(i => i.ready), all$ = a.items.reduce((s,i)=>s+i.cents,0), ready$ = ready.reduce((s,i)=>s+i.cents,0);
   const needNote = a.items.filter(i => i.kind !== 'rate').length;
   const warn = [];
-  if(!a.fax) warn.push('The fax line is not set up yet (SRFax: SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD, SRFAX_CALLER_ID in the host\'s settings). Nothing can go until it is.');
+  if(!a.fax) warn.push(a.not_here || 'The fax line is not set up yet (SRFax: SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD, SRFAX_CALLER_ID in the host\'s settings). Nothing can go until it is.');
   if((a.practice_missing||[]).length) warn.push('The letters still lack the practice\'s details: set ' + a.practice_missing.join(', ') + '.');
   const byHand = typeof state !== 'undefined' && state.meta && state.meta.uploads;      // a server takes the notes by hand
   if(needNote && !a.modmed) warn.push(byHand
@@ -124,7 +170,10 @@ async function appealEverything(opts){
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
   box.querySelectorAll('[data-fxsave]').forEach(b => b.onclick = async () => {
     const p = b.dataset.fxsave, input = box.querySelector(`[data-fxnum="${CSS.escape(p)}"]`), msg = box.querySelector(`[data-fxmsg="${CSS.escape(p)}"]`);
-    try { await post('/api/faxes/payer', {payer_group: p, number: input.value}); appealEverything(opts); }
+    const d = faxDigits(input.value);
+    if(!d){ msg.textContent = 'Type the ten digits of the payer\'s fax number.'; msg.className = 'small sev-high'; return; }
+    if(!faxReadBack(p, 'appeal', d)) return;
+    try { await faxOwnerPost('/api/faxes/payer', {payer_group: p, number: d}, msg); appealEverything(opts); }
     catch(e){ msg.textContent = e.message; msg.className = 'small sev-high'; }
   });
   box.querySelector('#fxCancel').onclick = () => $('#modal').classList.remove('open');
@@ -137,39 +186,46 @@ async function appealEverything(opts){
 // ---------------------------------------------------------------- the item's panel
 function faxDrawerHtml(f, r){
   const kind = state.brief ? kindFor(state.brief, f) : '';
-  const can = FAX_KINDS.has(kind) && ['open','in_progress'].includes(f.status) && !!f.claim_key;
   const list = r.faxes || [], line = !!(state.meta && state.meta.fax);
+  const outs = list.filter(x => x.direction !== 'in');
+  // an appeal whose every try failed (a busy line, a number replaced since) can be sent again, to the number saved now
+  const again = FAX_KINDS.has(kind) && f.status === 'appealed' && !!f.claim_key && outs.length > 0 && outs.every(x => x.status === 'failed');
+  const can = (FAX_KINDS.has(kind) && ['open','in_progress'].includes(f.status) && !!f.claim_key) || again;
   if(!can && !list.length && !(line && f.claim_key)) return '';
   const row = x => `<tr><td>${esc(String(x.created_at||'').replace('T',' ').slice(0,16))}</td><td>${x.direction==='in' ? 'From the payer' : 'To ' + esc(fax10(x.number))}</td>
     <td>${x.direction==='in' ? esc(FAX_DOC[x.purpose]||x.purpose||'') + (x.decision && FAX_DECISION[x.decision] ? ` · <span class="${FAX_DECISION[x.decision][1]}">${FAX_DECISION[x.decision][0]}</span>` : '')
       : esc(FAX_PURPOSE[x.purpose]||x.purpose||'') + (x.level > 1 ? ' (level ' + esc(x.level) + ')' : '')}</td>
     <td>${x.direction==='in' ? '' : `<span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status||'')}</span>`}</td>
     <td class="small muted">${esc(x.summary||x.error||'')}</td><td><a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">PDF</a></td></tr>`;
-  return `<div class="fax-box" style="margin:8px 0">${can ? `<div class="actions"><button class="primary" id="fxOne">Appeal by fax</button><span class="small muted">The note from EMA, Claude's review, the letter, faxed to the payer, marked Sent.</span></div>` : ''}
+  return `<div class="fax-box" style="margin:8px 0">${can ? `<div class="actions"><button class="primary" id="fxOne">${again ? 'Send the appeal again' : 'Appeal by fax'}</button><span class="small muted">${again
+      ? 'Its faxes never got through. It goes to the number saved for the payer now.' : 'The note from EMA, Claude\'s review, the letter, faxed to the payer, marked Sent.'}</span></div>` : ''}
     ${list.length ? `<h3 class="small">Faxes</h3><table class="small"><tbody>${list.map(row).join('')}</tbody></table>` : ''}
     ${line && f.claim_key ? '<div><button class="ghost small" id="fxTie">Tie a fax that came in to this item</button></div>' : ''}
     <div id="fxOneMsg" class="small"></div></div>`;
 }
-function fax10(n){ const d = String(n||'').replace(/\D/g,''); return d.length === 10 ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}` : String(n||''); }
+function fax10(n){ const d = faxDigits(n); return d ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}` : String(n||''); }
 function bindFaxDrawer(id, d){
   const b = d.querySelector('#fxOne'); if(!b) return;
-  const go = async confirmed => {
+  // what the person checked in EMA, each answer kept apart: "still unpaid" says nothing about which code went out
+  const said = {};
+  const go = async () => {
     const msg = d.querySelector('#fxOneMsg');
     b.disabled = true; msg.className = 'small muted'; msg.textContent = 'Reading the note, writing the letter and faxing it. About a minute.';
     let r;
-    try { r = await post('/api/appeals/send', {finding_id: id, confirmed: !!confirmed}); }
+    try { r = await post('/api/appeals/send', Object.assign({finding_id: id}, said)); }
     catch(e){ msg.className = 'small sev-high'; msg.textContent = e.message; b.disabled = false; return; }
     if(r.status === 'sent'){ state.brief = null; state.dirty = true; openDetail(id); return; }
     msg.className = 'small sev-medium';
     msg.innerHTML = esc(r.reason || 'Not sent.') + (r.code === 'no_number' ? ' <a href="#faxes" id="fxGoNums">Open the Faxes page</a>' : '')
       + ((r.candidates||[]).length ? ' Use "Get the note from EMA" below to pick it.' : '');
-    if(r.code === 'check_code') msg.innerHTML += ' <button id="fxSure">It went out as billed: fax it</button>';
-    if(r.code === 'stale') msg.innerHTML += ' <button id="fxSure">Still unpaid in EMA: fax it anyway</button>';
+    if(r.code === 'check_code') msg.innerHTML += ' <button id="fxCode">It went out as billed: fax it</button>';
+    if(r.code === 'stale') msg.innerHTML += ' <button id="fxStale">Still unpaid in EMA: fax it anyway</button>';
     const g = d.querySelector('#fxGoNums'); if(g) g.onclick = e => { e.preventDefault(); closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); };
-    const sure = d.querySelector('#fxSure'); if(sure) sure.onclick = () => go(true);
+    const code = d.querySelector('#fxCode'); if(code) code.onclick = () => { said.confirmed = true; go(); };
+    const stale = d.querySelector('#fxStale'); if(stale) stale.onclick = () => { said.stale_ok = true; go(); };
     b.disabled = false;
   };
-  b.onclick = () => go(false);
+  b.onclick = () => go();
 }
 
 // ---------------------------------------------------------------- the Faxes page

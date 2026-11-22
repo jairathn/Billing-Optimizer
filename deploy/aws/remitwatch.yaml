@@ -1,10 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   RemitWatch on one small server: an encrypted disk, a fixed public address, HTTPS only (no SSH: admin through Session
-  Manager in the AWS console), automatic security updates, a daily disk snapshot kept 14 days, and automatic recovery
-  if AWS's hardware fails. On first boot it installs Docker and starts the site from the public repository; then run
-  sudo /opt/remitwatch/deploy/aws/configure.sh in Session Manager to enter the settings. Accept the AWS BAA (AWS Artifact)
-  before any patient data reaches it.
+  Manager in the AWS console), nightly operating system updates (the latest Amazon Linux release, with a reboot when one
+  needs it), a daily disk snapshot kept 14 days, and automatic recovery if AWS's hardware fails. On first boot it
+  installs Docker and starts the site from the public repository; then run sudo /opt/remitwatch/deploy/aws/configure.sh
+  in Session Manager to enter the settings. Accept the AWS BAA (AWS Artifact) before any patient data reaches it. Once
+  the server holds data, never update or delete this stack (docs/AWS_SETUP.md says why).
 
 Parameters:
   SiteAddress:
@@ -86,11 +87,10 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
-            # First boot: Docker, automatic security updates, the site. Settings come after (configure.sh).
+            # First boot: Docker, the site, its automatic deploys, and the nightly system updates. Settings come after
+            # (configure.sh).
             set -euxo pipefail
-            dnf -y install docker git dnf-automatic util-linux
-            sed -i 's/^upgrade_type *=.*/upgrade_type = security/; s/^apply_updates *=.*/apply_updates = yes/' /etc/dnf/automatic.conf
-            systemctl enable --now dnf-automatic.timer
+            dnf -y install docker git util-linux dnf-plugins-core
             systemctl enable --now docker
             mkdir -p /usr/local/lib/docker/cli-plugins
             curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
@@ -106,16 +106,49 @@ Resources:
             docker compose up -d --build
             # auto-deploy: from here on each new commit on the branch is deployed by itself (deploy/auto-deploy.sh)
             bash deploy/install-auto-deploy.sh --mark-current || echo "auto-deploy was not switched on"
+            # System updates. Amazon Linux 2023 stays on the release its image was made from unless told to move, so a
+            # nightly timer moves it to the latest release (AWS's documented dnf --releasever=latest upgrade). When an
+            # update needs a reboot (a new kernel), it reboots in the same quiet hour: never during a deploy, and once a
+            # data cycle or fax run going in the app has ended (it waits up to an hour).
+            cat > /etc/systemd/system/remitwatch-os-update.service <<'UNIT'
+            [Unit]
+            Description=Amazon Linux updates (the latest release), and a reboot when one needs it
+            Wants=network-online.target
+            After=network-online.target
+            [Service]
+            Type=oneshot
+            ExecStart=/usr/bin/dnf -y --releasever=latest upgrade
+            ExecStartPost=/bin/sh -c 'dnf needs-restarting -r >/dev/null 2>&1 && exit 0; mkdir -p /var/lib/remitwatch-deploy; exec flock -w 3600 /var/lib/remitwatch-deploy/lock /bin/sh -c "test -f /usr/local/lib/remitwatch/auto-deploy.sh && /bin/bash /usr/local/lib/remitwatch/auto-deploy.sh --idle 3600; systemctl reboot"'
+            UNIT
+            cat > /etc/systemd/system/remitwatch-os-update.timer <<'UNIT'
+            [Unit]
+            Description=Amazon Linux updates every night
+            [Timer]
+            OnCalendar=*-*-* 08:40:00 UTC
+            RandomizedDelaySec=20min
+            [Install]
+            WantedBy=timers.target
+            UNIT
+            systemctl daemon-reload
+            systemctl enable --now remitwatch-os-update.timer
 
+  # The store, the uploads, the backups and .env live on this server's disk, so the server is never replaced or deleted by
+  # the stack. It launches from the launch template's default version, which CloudFormation never moves: an update of
+  # the template (a parameter, the first-boot steps, a newer Amazon Linux image) adds a version and leaves the running
+  # server as it is. And whatever the stack does, the server and its disk are kept (Retain), not terminated.
   Server:
     Type: AWS::EC2::Instance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
-        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+        Version: !GetAtt LaunchTemplate.DefaultVersionNumber
 
-  Address:
+  Address:                      # the fixed address the DNS record (and any service that allows only it) points at: kept
     Type: AWS::EC2::EIP
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Domain: vpc
       InstanceId: !Ref Server

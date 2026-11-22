@@ -5,9 +5,10 @@ of clicking, most of it waiting. Cost: about $30 to $40 a month (the server, its
 backups), plus about $15 a year for the domain.
 
 What the template builds: one server (2 vCPU, 4 GB) with an encrypted disk, a fixed public address, only HTTPS open (no
-SSH: you reach it from the AWS console), automatic security updates, a snapshot of the disk every day kept for 14 days,
-and automatic recovery if AWS's hardware fails. On first boot it installs Docker and starts RemitWatch from this
-repository, with HTTPS from Let's Encrypt.
+SSH: you reach it from the AWS console), system updates every night (the latest Amazon Linux release, with a reboot in
+the same quiet hour when an update needs one), a snapshot of the disk every day kept for 14 days, and automatic recovery
+if AWS's hardware fails. On first boot it installs Docker and starts RemitWatch from this repository, with HTTPS from
+Let's Encrypt.
 
 Steps 1, 2 and 3 are yours alone (an account, a legal agreement and a purchase in the practice's name). The rest a Claude
 session on your own computer (the Claude desktop app) can do with you if you prefer.
@@ -52,23 +53,58 @@ The site's address will be a name under it, for example `remitwatch.yourpractice
    sudo /opt/remitwatch/deploy/aws/configure.sh
    ```
 
-   It asks for each setting by the same name as on Vercel (have Vercel's **Settings, Environment Variables** open in
-   another tab and copy each value across; press Enter to skip one). Secret values are not shown as you type. It makes
-   the dashboard password and the scheduler secret for you if you leave them empty: write the password down.
+   It asks for the settings by the same names as on Vercel (have Vercel's **Settings, Environment Variables** open in
+   another tab and copy each value across; press Enter to skip one). A few rare ones it does not ask for (some ModMed
+   settings, the tuning ones): it lists them at the end, to copy into `/opt/remitwatch/.env` by hand if Vercel has them.
+   Nothing you type or paste for a secret is shown, the ModMed private key included (a dot per line shows it arrived),
+   and a secret already set is only said to be set. It makes the dashboard password and the scheduler secret for you if
+   you leave them empty, and shows the password once: write it down.
 3. When it asks **Move the store ... from the Vercel site now?**, answer **Y**. It copies the Vercel site's data from
    Dropbox (the findings, everything people marked, payer fax numbers, hidden reasons, appeal packets) and where the
-   site had got to in the Dropbox folder, so nothing is downloaded again.
+   site had got to in the Dropbox folder, so nothing is downloaded again. It asks only while the server's store is
+   empty: once the server has its own data, the script never moves the Vercel site's data onto it again.
 4. It starts the site and prints what is left: open `https://<the address>/setup`, change the Dropbox webhook to the new
    address, give ModMed the new key address (`https://<the address>/.well-known/jwks.json`), and turn the Vercel
    site off so two sites never send the same fax.
 
-Run the script again any time to change a setting.
+Run the script again any time to change a setting. It waits for a data cycle or fax run that is going to end (up to
+10 minutes), then starts the site again with the new settings.
+
+## Never update or delete the stack
+
+Once the server holds data, leave the CloudFormation stack alone: do not update it, and do not delete it. The store,
+the uploads, the backups and the settings are on the server's own disk.
+
+- **A stack made from the older template** (its description, on the stack's **Stack info** tab, says "automatic
+  security updates"; the server running today was made from it) replaces the server with a new, empty one on almost
+  any update: a change to **InstanceType**, **DiskSizeGiB**, **GitRef** or **SiteAddress**, uploading a newer template,
+  or even an update with nothing changed once Amazon has published a newer Amazon Linux image (the template looks the
+  image up again on every update). The fixed address and the DNS record then move to the empty server. The old
+  server's disk is kept, but detached, and must be recovered by hand.
+- **A stack made from the current template** (its description says "nightly operating system updates") keeps the
+  server and its fixed address whatever the stack does: a parameter change or a newer image only changes what a new
+  server would get, and the running server stays as it is. Deleting the stack leaves the server and its address
+  running (they are kept, not deleted).
+
+If an update is ever unavoidable, use **Create change set** first and read it: if the **Server** row says
+**Replacement: True**, do not execute it.
+
+What to do instead:
+
+- **A bigger server**: **EC2**, **Instances**, the RemitWatch server, **Instance state**, **Stop**; then **Actions**,
+  **Instance settings**, **Change instance type**; then **Start**. The site is down for a few minutes.
+- **A bigger disk**: **EC2**, **Volumes**, the server's volume, **Modify volume**, a larger size. Then, in Session
+  Manager: `sudo growpart /dev/nvme0n1 1 && sudo xfs_growfs -d /` (`lsblk` shows the disk's name if it differs).
+- **New first-boot steps** (a later version of the template's user data): run them by hand on the server.
+  `docs/SERVER_RUNBOOK.md` has the ones that matter, such as the nightly system updates.
 
 ## After
 
 - Backups: **EC2**, **Snapshots** shows one a day. To go back to one: make a volume from it and swap it in (or ask).
 - Updates to RemitWatch deploy themselves: every 5 minutes the server looks at main and deploys a new commit (build
-  first, swap only when the build succeeds). How it works and how to read its log: `docs/SERVER_RUNBOOK.md`,
-  "Automatic deploys".
+  first, swap only when the build succeeds and the site answers). How it works and how to read its log:
+  `docs/SERVER_RUNBOOK.md`, "Automatic deploys".
+- Whoever can push to main controls this server, so protect main in GitHub (a required review, no force pushes):
+  `docs/SERVER_RUNBOOK.md`, "Who controls the server".
 - Logs: `cd /opt/remitwatch && sudo docker compose logs --tail 200 app`.
 - If the site does not answer: **EC2**, **Instances**, the RemitWatch server, **Instance state**, **Reboot**.

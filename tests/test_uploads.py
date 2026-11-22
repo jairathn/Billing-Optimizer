@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sqlite3
 import stat
 import zipfile
@@ -215,6 +216,17 @@ def snapshot(db: str) -> dict:
         conn.close()
 
 
+def ema_row(db: str, claim_id: str, patient_id: str, fp: str | None = None) -> None:
+    """The claim's row in a week's EMA export: the claim ID with EMA's patient ID (the Encounter & Charge Lines layout)."""
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("INSERT INTO ema_rows (row_fingerprint, family, claim_id, patient_id) VALUES (?,?,?,?)",
+                     (fp or f"fp-{claim_id}-{patient_id}", "charge_lines", claim_id, patient_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def table(db: str, sql: str) -> list[tuple]:
     conn = sqlite3.connect(db)
     try:
@@ -372,7 +384,9 @@ def test_the_same_file_twice_changes_nothing(site):
 # ----------------------------------------------------------------------------------------------- visit notes
 def test_a_visit_note_uploaded_reaches_the_appeal_as_one_from_emas_api(tmp_path, monkeypatch):
     """The note behind an appeal, once from ModMed's API (FHIR, as the Bulk FHIR app will give it) and once uploaded by
-    hand: the same review, the same letter, the same packet, the same fax."""
+    hand: the same review, the same letter, the same packet, the same fax. And the same caution: with only the name and
+    the date to go by, both hold the item for a person; once the week's export gives the claim EMA's patient ID (which
+    the uploaded note states too), both send it."""
     from fastapi.testclient import TestClient
 
     import remitwatch.api as api
@@ -422,6 +436,9 @@ def test_a_visit_note_uploaded_reaches_the_appeal_as_one_from_emas_api(tmp_path,
         try:
             fid = c.get("/api/findings?signal=DENIED_MEDICAL_NECESSITY").json()["items"][0]["finding_id"]
             assert c.post("/api/faxes/payer", json={"payer_group": "Anthem / BCBS", "number": "(800) 555-0142"}, headers=XHR).status_code == 200
+            held = c.post("/api/appeals/send", json={"finding_id": fid, "stale_ok": True}, headers=XHR).json()
+            assert held["status"] == "held" and held["code"] == "ambiguous" and not line.sent, held
+            ema_row(db, DENIED, "EMA77")
             out = c.post("/api/appeals/send", json={"finding_id": fid, "stale_ok": True}, headers=XHR).json()
             assert out["status"] == "sent", out
             p = c.get(f"/api/packets/{out['packet_id']}").json()
@@ -453,11 +470,18 @@ def test_notes_are_matched_by_patient_and_date_or_by_a_person(site, monkeypatch)
     need = c.get("/api/uploads/needed").json()
     assert need["items"][0]["note"] == "found" and need["covered"] == 1
     assert c.get("/api/appeals/ema_queue?ready=1").json()["items"][0]["finding_id"] == fid
-    # the text note for the same visit: two notes that day, the progress note is the one used (as with EMA's API)
+    # the text note for the same visit, matched by its name and date only (this claim has no EMA patient ID to check the
+    # note's against): it waits for a person, and the note the person attached is the one used meanwhile
     good = site.up("visit.pdf", note_pdf(NOTE))
-    assert good["status"] == "matched"
+    assert good["status"] == "matched" and good["note"]["confirm"] is True and "once a person confirms it" in good["lines"][0]
     r = c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False}, headers=XHR).json()
-    assert r["status"] == "built" and r["source"] == "upload" and r["note"]["type"] == "Progress note" and len(r["others"]) == 1
+    assert r["status"] == "built" and r["source"] == "upload" and r["note"]["id"] == "upload-" + attached["note"]["note_id"]
+    assert r["identified_by"] == ["a person"] and r["others"] == []
+    # attached to the item too: both are the person's, and the progress note is the one used (as with EMA's API)
+    again = site.up("visit.pdf", note_pdf(NOTE), finding_id=fid)
+    assert again["note"]["matched_by"] == "person"
+    r = c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False}, headers=XHR).json()
+    assert r["status"] == "built" and r["note"]["type"] == "Progress note" and len(r["others"]) == 1
     # the person can switch to the other one, as with EMA's notes
     r2 = c.post("/api/appeals/from_ema", json={"finding_id": fid, "use_ai": False, "document_id": r["others"][0]["id"]}, headers=XHR).json()
     assert r2["status"] == "built" and r2["note"]["id"] == r["others"][0]["id"]
@@ -466,7 +490,7 @@ def test_notes_are_matched_by_patient_and_date_or_by_a_person(site, monkeypatch)
     path = table(site.db, f"SELECT path FROM uploaded_notes WHERE note_id='{nid}'")[0][0]
     assert c.post(f"/api/uploads/notes/{nid}/remove", headers=XHR).json() == {"removed": True}
     assert not os.path.exists(path) and c.get(f"/api/uploads/notes/{nid}/file").status_code == 404
-    assert len(c.get(f"/api/packets?finding_id={fid}").json()) == 2
+    assert len(c.get(f"/api/packets?finding_id={fid}").json()) == 3            # each packet built stays
     # a note view, for checking it is the right one
     gid = good["note"]["note_id"]
     v = c.get(f"/api/uploads/notes/{gid}/file")
@@ -532,7 +556,11 @@ def test_a_zip_of_exports_remittances_and_notes(site):
         zf.writestr("__MACOSX/._junk", b"x")
     r = site.up("week.zip", z.getvalue())
     st = {f["name"]: f["status"] for f in r["files"]}
-    assert st == {"Encounter & Charge Lines.xlsx": "queued", "remit-777.835": "queued", "Sample visit.pdf": "matched", "inner.zip": "rejected"}
+    # names are switched off on this site: a note and a zip are shown by kind and a short id, never under their own names
+    note_name = next(n for n in st if n.startswith("Visit note "))
+    zip_name = next(n for n in st if n.startswith("Zip "))
+    assert st == {"Encounter & Charge Lines.xlsx": "queued", "remit-777.835": "queued", note_name: "matched", zip_name: "rejected"}
+    assert note_name.endswith(".pdf") and zip_name.endswith(".zip") and r["name"].startswith("Zip ")
     assert r["status"] == "zip" and r["queued"] is True and site.woken == ["upload"]
     out = cycle(site.db, sync=False)
     assert out["uploads"]["uploads"] == 2 and out["ingest"]["remits"] == 1 and out["ingest"]["ema"] == 1
@@ -583,8 +611,12 @@ def test_caddy_takes_large_uploads_only_on_the_upload_route():
     assert "@uploads path /api/uploads /api/uploads/*" in text and "@other not path /api/uploads /api/uploads/*" in text
     big = text[text.index("request_body @uploads"):text.index("@other")]
     small = text[text.index("request_body @other"):]
-    assert "max_size 260MB" in big and "max_size 20MB" in small[:60]
-    assert uploads.MAX_BYTES < 260 * 1024 * 1024
+    assert re.search(r"max_size 20Mi?B", small[:60])
+    # Caddy reads 260MB as 260,000,000 bytes and 260MiB as 260 x 1,048,576: the app's own limit must be the smaller, so
+    # a file too large is refused with the app's plain answer, not Caddy's bare 413
+    n, unit = re.search(r"max_size (\d+)(MiB|MB)", big).groups()
+    assert uploads.MAX_BYTES < int(n) * (1024 * 1024 if unit == "MiB" else 1000 * 1000)
+    assert uploads.MAX_BYTES < 260 * 1000 * 1000                 # under either way of reading 260
     # uploads stay out of the repository: the folder is beside the store, and never tracked
     ignore = open(os.path.join(root, ".gitignore")).read()
     assert "uploads/" in ignore

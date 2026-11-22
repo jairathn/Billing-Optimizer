@@ -42,46 +42,52 @@ fits() {    # name value: says why the value cannot be used, and fails (the site
         echo "must differ from the dashboard password"; return 1
       fi ;;
     *_PORT) case "$2" in *[!0-9]*) echo "must be a number"; return 1 ;; esac ;;
+    REMITWATCH_SHOW_PHI|SMTP_STARTTLS) case "$2" in 0|1) ;; *) echo "must be 1 or 0"; return 1 ;; esac ;;
   esac
+  case "$2" in *"'"*) echo "cannot contain a single quote (')"; return 1 ;; esac
   return 0
 }
 
 ask() {     # name kind question [default]. kind: text; secret; password (made when left empty, and shown once to be
-            # written down); gen (made when left empty, never shown); pem (a private key, pasted)
+            # written down); gen (made when left empty, never shown); pem (a private key, pasted). A value that cannot
+            # be used is asked for again; Enter keeps what is there.
   local name=$1 kind=$2 question=$3 default=${4:-} cur value line why
   cur=$(current "$name")
-  case "$kind" in
-    text)   printf "\n%s\n  %s [%s]: " "$question" "$name" "${cur:-${default:-not set}}"; IFS= read -r value ;;
-    secret|password|gen)
-            printf "\n%s\n  %s, %s%s: " "$question" "$name" "$(masked "$cur")" "$([ "$kind" != secret ] && [ -z "$cur" ] && echo ', Enter makes one')"
-            IFS= read -rs value; echo ;;
-    pem)    printf "\n%s\n  %s, %s. Paste the whole key, BEGIN and END lines included, or press Enter to keep it. It is not shown:\n" "$question" "$name" "$(masked "$cur")"
-            value=""
-            while IFS= read -rs line; do
-              [ -z "$value" ] && [ -z "$line" ] && break
-              value="${value:+$value }$line"
-              printf '.'
-              case "$line" in *"-----END"*) break ;; esac
-            done
-            echo ;;
-  esac
-  if [ -z "$value" ] && [ -z "$cur" ]; then
-    if [ "$kind" = password ] || [ "$kind" = gen ]; then
-      value=$(set +o pipefail; tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom | head -c 32)
-      if [ "$kind" = password ]; then
-        echo "  made one, shown this once: $value  (write it down: it is the password to sign in)"
-      else
-        echo "  made one (kept in .env; nobody needs to type it)"
+  while :; do
+    case "$kind" in
+      text)   printf "\n%s\n  %s [%s]: " "$question" "$name" "${cur:-${default:-not set}}"; IFS= read -r value ;;
+      secret|password|gen)
+              printf "\n%s\n  %s, %s%s: " "$question" "$name" "$(masked "$cur")" "$([ "$kind" != secret ] && [ -z "$cur" ] && echo ', Enter makes one')"
+              IFS= read -rs value; echo ;;
+      pem)    printf "\n%s\n  %s, %s. Paste the whole key, BEGIN and END lines included, or press Enter to keep it. It is not shown:\n" "$question" "$name" "$(masked "$cur")"
+              value=""
+              while IFS= read -rs line; do
+                [ -z "$value" ] && [ -z "$line" ] && break
+                value="${value:+$value }$line"
+                printf '.'
+                case "$line" in *"-----END"*) break ;; esac
+              done
+              echo ;;
+    esac
+    if [ -z "$value" ] && [ -z "$cur" ]; then
+      if [ "$kind" = password ] || [ "$kind" = gen ]; then
+        value=$(set +o pipefail; tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom | head -c 32)
+        if [ "$kind" = password ]; then
+          echo "  made one, shown this once: $value  (write it down: it is the password to sign in)"
+        else
+          echo "  made one (kept in .env; nobody needs to type it)"
+        fi
+      elif [ -n "$default" ] && [ "$kind" = text ]; then
+        value=$default
       fi
-    elif [ -n "$default" ] && [ "$kind" = text ]; then
-      value=$default
     fi
-  fi
-  if [ -n "$value" ]; then
-    case "$value" in *"'"*) echo "  A value cannot contain a single quote ('); $name was left as it was."; return ;; esac
-    if ! why=$(fits "$name" "$value"); then echo "  $name $why; it was left as it was."; return; fi
-    put "$name" "$value"
-  fi
+    [ -z "$value" ] && return 0
+    if why=$(fits "$name" "$value"); then
+      put "$name" "$value"
+      return 0
+    fi
+    echo "  $name $why. Type it again, or press Enter to keep it as it is."
+  done
 }
 
 days_of() {   # how long a password lasts, in days, from TriZetto's own words: the number written with the first unit word

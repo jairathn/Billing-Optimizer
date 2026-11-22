@@ -2433,7 +2433,22 @@ def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes |
             _record_action({"kind": "lesson", "record": les})
         except Exception:
             pass        # the packet matters more than the lesson
+    if runtime.serverless() and detail["finding"].get("finding_id"):
+        _queue_mark(detail["finding"]["finding_id"], "packet", "An appeal packet was built for it.")
     return packet
+
+
+QUEUE_RETRY_DAYS = 3        # an item "Build packets from EMA" found no note for (or more than one) is tried again after this
+
+
+def _queue_mark(finding_id: str, event: str, note: str) -> None:
+    """A line in the item's history that "Build packets from EMA" goes by: 'packet' (one was built: on a serverless host
+    the queue cannot see the packets themselves) or 'note_lookup' (no note, or more than one: left for a few days, so the
+    next press goes on to the items behind it)."""
+    try:
+        _record_action({"kind": "event", "event": event, "finding_id": finding_id, "actor": "packets", "note": note})
+    except Exception:
+        pass        # the packet, or the answer, matters more than the mark
 
 
 # --------------------------------------------------------------------------- ModMed EMA: the visit note behind an appeal
@@ -2517,6 +2532,8 @@ def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_aut
     if not f.get("claim_key"):
         raise HTTPException(400, "This item is not tied to one claim, so it has no visit note to read.")
     if body.get("skip_if_packet") and _has_packet(fid):
+        if runtime.serverless():
+            _queue_mark(fid, "packet", "An appeal packet was built for it.")     # the queue leaves it out from now on
         return {"status": "skipped", "reason": "It already has a packet."}
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
     key = modmed.claim_key(detail, raw_claim, _ema_patient_ids(f.get("patient_control_number")))
@@ -2530,6 +2547,9 @@ def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_aut
         raise HTTPException(502, str(exc))
     out = {k: v for k, v in res.items() if k != "note"}
     if res["status"] != "found":
+        if body.get("skip_if_packet"):         # the batch: the next press, and the nightly run, go on to the items behind it
+            _queue_mark(fid, "note_lookup", "Build packets from EMA: " + ("more than one note that day, a person picks one in the item"
+                                                                          if res["status"] == "ambiguous" else (res.get("reason") or "no signed note found")))
         return out
     note = res["note"]
     packet = _store_packet(detail, raw_claim, note["filename"], note["data"], None, body.get("use_ai", True) not in (False, 0, "0"))
@@ -2546,12 +2566,18 @@ def appeals_ema_queue(limit: int = Query(20, ge=1, le=200), ready: int = Query(0
     from .insights import kind_sql
     cond, params = kind_sql("note")
     skip_built = not runtime.serverless() and has_table("appeal_packets")
+    # left out as well: items with a packet on a serverless host (marked when it was built), and items the batch found no
+    # note (or more than one) for in the last few days: without that, every press works the same first items again
+    marks = has_table("finding_events")
+    since = (datetime.now(timezone.utc) - timedelta(days=QUEUE_RETRY_DAYS)).isoformat(timespec="seconds")
     sql = f"""SELECT finding_id, service_date, appeal_deadline, payer_group, shortfall_cents{", claim_key, patient_control_number" if ready else ""} FROM findings
               WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
                 AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))
                 {"AND finding_id NOT IN (SELECT finding_id FROM appeal_packets WHERE finding_id IS NOT NULL)" if skip_built else ""}
+                {"AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='packet' OR (kind='note_lookup' AND at >= ?))" if marks else ""}
               ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id {"" if ready else "LIMIT ?"}"""
-    items = rows(sql, tuple(params) if ready else (*params, limit))
+    args = (*params, *((since,) if marks else ()))
+    items = rows(sql, args if ready else (*args, limit))
     if ready:
         got = _note_ready(items)
         items = [{k: v for k, v in i.items() if k not in ("claim_key", "patient_control_number")}
@@ -2781,6 +2807,15 @@ def jwks_document():
 FAX_KEY = r"[A-Za-z0-9:_\-.]{1,160}"
 FAX_PURPOSES = ("appeal", "level_2")
 STATUS_WORDS = {"appealed": "already sent", "resolved": "paid or settled", "lost": "marked lost", "dismissed": "let go"}
+# one fax run at a time on a site (the hourly run, the daily call, the Faxes page's buttons): a row in the store's meta
+# table, as the cycle's own lock (pipeline:lock) is, so the deploy script can wait for it too; on a serverless host a file
+# in the state folder
+FAX_LOCK_KEY = "fax:lock"
+FAX_LOCK_FILE = "fax-lock.json"
+FAX_LOCK_STALE_S = 15 * 60          # a lock nobody has refreshed for this long was left by a run that died
+RESERVE_STALE_S = 10 * 60           # a send still not settled after this long is asked of the fax service (_fax_refresh)
+MAX_READS = 3                       # tries at reading a payer's fax before it is left for a person
+RESEND = ("second_request", "next_level", "records", "payment")       # what a person can send again in one click
 
 
 def _now_iso() -> str:
@@ -2838,9 +2873,11 @@ def _appealable_cond() -> tuple[str, list]:
 
 
 def _payer_number(payer_group: str | None, purpose: str = "appeal") -> str:
+    """The number saved now for a payer and purpose: '' when there is none (or it was removed)."""
     if not payer_group or not has_table("payer_fax"):
         return ""
-    return (one("SELECT number FROM payer_fax WHERE payer_group=? AND purpose=?", (payer_group, purpose)) or {}).get("number") or ""
+    from . import fax
+    return fax.digits((one("SELECT number FROM payer_fax WHERE payer_group=? AND purpose=?", (payer_group, purpose)) or {}).get("number"))
 
 
 def _practice_missing() -> list[str]:
@@ -2865,6 +2902,96 @@ def _stored_packet(packet_id: str) -> dict | None:
         conn.close()
 
 
+def _packet_meta(packet_id: str) -> dict | None:
+    """What a stored packet was built from, without its PDF: the review, the note's fingerprint, when."""
+    if runtime.serverless():
+        cloud, st = _cloud_state()
+        p = cloud.get_packet(st, packet_id)
+        return p if p else None
+    if not has_table("appeal_packets"):
+        return None
+    p = one("SELECT packet_id, finding_id, created_at, mode, analysis, note_sha256 FROM appeal_packets WHERE packet_id=?", (packet_id,))
+    if p:
+        try:
+            p["analysis"] = json.loads(p.get("analysis") or "{}")
+        except ValueError:
+            p["analysis"] = {}
+    return p
+
+
+def _same_name(a: str | None, b: str | None) -> bool:
+    n = lambda s: re.sub(r"[^A-Z0-9]", "", (s or "").upper())      # noqa: E731
+    return bool(n(a)) and n(a) == n(b)
+
+
+def _packet_problem(packet_id: str | None, f: dict) -> str | None:
+    """Why a stored packet must not be faxed as it is (it can be built again, or a person takes it), or None: the note an
+    uploaded packet rests on was taken back, matched again, or followed by another note for the visit since it was built;
+    or Claude's review in it was written before its quotations were checked against the note."""
+    meta = _packet_meta(packet_id) if packet_id else None
+    if not meta:
+        return "The packet cannot be found."
+    a = meta.get("analysis") or {}
+    if a.get("mode") == "ai" and "quote_check" not in a:
+        return "It was built before Claude's quotations were checked against the note."
+    if runtime.serverless() or not has_table("uploaded_notes"):
+        return None         # notes are uploaded on a server only
+    built, sha = meta.get("created_at") or "", meta.get("note_sha256")
+    if sha:
+        up = one("SELECT status FROM uploads WHERE upload_id=?", (sha,)) if has_table("uploads") else None
+        n = one("SELECT status, matched_at FROM uploaded_notes WHERE sha256=?", (sha,))
+        if (up and up.get("status") == "removed") or (up and not n):
+            return "The note it was built from was taken back."
+        if n and n.get("status") != "matched":
+            return "The note it was built from is no longer matched to a visit."
+        if n and (n.get("matched_at") or "") > built:
+            return "The note it was built from was matched to a visit again since."
+    claim = one("SELECT patient_last FROM claims WHERE claim_key=?", (f.get("claim_key"),)) if f.get("claim_key") else None
+    if claim and f.get("service_date"):
+        for r in rows("""SELECT patient_last, matched_at FROM uploaded_notes WHERE status='matched' AND service_date=? AND COALESCE(sha256,'') != ?""",
+                      (f["service_date"], sha or "")):
+            if (r["matched_at"] or "") > built and _same_name(r["patient_last"], claim["patient_last"]):
+                return "Another note for this visit was uploaded since."
+    return None
+
+
+def _em_below(supported: str | None, billed: str | None) -> bool:
+    """Whether the visit code the note supports is below the one billed (office visits, new or established)."""
+    s, b = str(supported or ""), str(billed or "")
+    return bool(re.fullmatch(r"992[01]\d", s) and re.fullmatch(r"992[01]\d", b)) and s[:4] == b[:4] and s < b
+
+
+def _review_doubts(a: dict, detail: dict) -> str | None:
+    """What in Claude's review stops an appeal from going by itself: a caution, a note that supports the code only in part or
+    not at all, or a lower code than the one billed. Such a packet would tell the payer the practice concedes it."""
+    if a.get("mode") != "ai":
+        return None
+    from .notes import dispute_context
+    out = []
+    if a.get("recommendation") == "appeal_with_caution":
+        out.append("it says to appeal only with caution")
+    if a.get("supports_billed") == "no":
+        out.append("it finds the note does not support the code billed")
+    elif a.get("supports_billed") == "borderline":
+        out.append("it finds the note supports the code billed only in part")
+    billed = dispute_context(detail)["billed_code"]
+    if _em_below(a.get("supported_code"), billed):
+        out.append(f"it finds the note supports {a.get('supported_code')}, below the {billed} billed")
+    return "; ".join(out) if out else None
+
+
+def _quotes_problem(a: dict) -> str | None:
+    """A review whose quotations were not found in the note (or could not be checked): never faxed by itself."""
+    if a.get("mode") != "ai":
+        return None
+    qc = a.get("quote_check") or {}
+    if qc.get("checked") and not qc.get("missing"):
+        return None
+    if not qc.get("checked"):
+        return qc.get("why") or "Claude's quotations could not be checked against the note."
+    return "Claude's paragraphs quote words the note does not have: " + "; ".join(f'"{q[:80]}"' for q in qc["missing"][:3]) + "."
+
+
 def _faxes_out(finding_id: str, live: bool = True) -> list[dict]:
     """The faxes sent for an item, oldest first; live: leaving out those the payer's line never took."""
     if not has_table("faxes"):
@@ -2874,28 +3001,254 @@ def _faxes_out(finding_id: str, live: bool = True) -> list[dict]:
 
 
 def _fax_doc(prov, f: dict, number: str, packet_pdf: bytes, subject: str | None, front: bytes | None = None,
-             extra: bytes | None = None) -> tuple[bytes, int]:
-    """What goes down the line: the cover sheet, a follow-up's letter when there is one, the packet, and anything the
-    payer sent that the next level needs. Returns the PDF and its pages."""
+             extra: bytes | None = None, level: int = 1) -> tuple[bytes, int]:
+    """What goes down the line: the cover sheet (to the desk of that level), a follow-up's letter when there is one, the
+    packet, and anything the payer sent that the next level needs. Returns the PDF and its pages."""
     from . import fax
     from .appeals import PRACTICE, _desk
     body = fax.merge_pdfs(*(p for p in (front, packet_pdf, extra) if p))
     pages = fax.page_count(body) + 1
-    sheet = fax.cover_sheet(f"{f.get('payer_group') or f.get('payer_name') or ''}, {_desk(f)}", number, PRACTICE, pages, subject)
+    sheet = fax.cover_sheet(f"{f.get('payer_group') or f.get('payer_name') or ''}, {_desk(f, level)}", number, PRACTICE, pages, subject)
     return fax.merge_pdfs(sheet, body), pages
 
 
-def _send_fax(prov, f: dict, number: str, doc: bytes, pages: int, *, packet_id: str, purpose: str, level: int, actor: str,
-              subject: str | None, extra: dict | None = None) -> dict:
-    """Fax a document and record it (the record says how to build it again, for a retry)."""
+# ---- one fax run at a time on a site
+class FaxBusy(Exception):
+    pass
+
+
+def _fax_lock_take(who: str) -> str | None:
+    """Take the fax run's lock; None when another run holds it. One nobody refreshed for FAX_LOCK_STALE_S is taken over."""
+    token = secrets.token_hex(8)
+    now = _now_iso()
+    body = {"token": token, "started": now, "heartbeat": now, "pid": os.getpid(), "who": str(who)[:60]}
+    if runtime.serverless():
+        from .state import Conflict
+        cloud, st = _cloud_state()
+        for _ in range(2):
+            try:
+                st.put(FAX_LOCK_FILE, json.dumps(body).encode(), mode="add")
+                return token
+            except Conflict:
+                m = st.meta(FAX_LOCK_FILE)
+                if m is None:
+                    continue
+                if cloud._age_seconds(m.get("modified")) < FAX_LOCK_STALE_S:
+                    return None
+                try:
+                    st.put(FAX_LOCK_FILE, json.dumps(body).encode(), mode="update", rev=m["rev"])
+                    return token
+                except Conflict:
+                    return None
+        return None
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            r = conn.execute("SELECT value FROM meta WHERE key=?", (FAX_LOCK_KEY,)).fetchone()
+            if r:
+                try:
+                    held = json.loads(r[0])
+                    beat = datetime.fromisoformat(held.get("heartbeat") or held["started"])
+                    fresh = (datetime.now(timezone.utc) - beat).total_seconds() < FAX_LOCK_STALE_S
+                except Exception:
+                    fresh = False
+                if fresh:
+                    conn.execute("ROLLBACK")
+                    return None
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (FAX_LOCK_KEY, json.dumps(body)))
+            conn.execute("COMMIT")
+            return token
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def _fax_lock_beat(token: str | None) -> None:
+    """A long run says it is alive, so its lock is not taken over. A serverless run cannot outlive its function."""
+    if not token or runtime.serverless():
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        try:
+            r = conn.execute("SELECT value FROM meta WHERE key=?", (FAX_LOCK_KEY,)).fetchone()
+            held = json.loads(r[0]) if r else {}
+            if held.get("token") == token:
+                conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?", (json.dumps(dict(held, heartbeat=_now_iso())), FAX_LOCK_KEY, r[0]))
+                conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass            # the run goes on; at worst its lock goes stale and another run may start
+
+
+def _fax_lock_release(token: str) -> None:
+    try:
+        if runtime.serverless():
+            cloud, st = _cloud_state()
+            raw = st.get(FAX_LOCK_FILE)
+            if raw and json.loads(raw).get("token") == token:
+                st.delete(FAX_LOCK_FILE)
+            return
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        try:
+            conn.execute("DELETE FROM meta WHERE key=? AND value LIKE ?", (FAX_LOCK_KEY, f'%"token": "{token}"%'))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass            # a lock that cannot be released goes stale and is taken over
+
+
+class _FaxRun:
+    """`with fax_run(who) as lock:` around a fax run (the line brought up to date, the follow-ups sent). FaxBusy when another
+    run holds it."""
+
+    def __init__(self, who: str):
+        self.who, self.token = who, None
+
+    def __enter__(self) -> str:
+        self.token = _fax_lock_take(self.who)
+        if self.token is None:
+            raise FaxBusy("Another fax run is going (the hourly or daily run, or someone else's button). Try again in a few minutes.")
+        return self.token
+
+    def __exit__(self, *exc) -> None:
+        _fax_lock_release(self.token)
+
+
+def fax_run(who: str) -> _FaxRun:
+    return _FaxRun(who)
+
+
+# ---- one send per thing: reserved before it is made
+class SendBlocked(Exception):
+    """A send that must not go now: something went out, or is going out, for the same item and step, or what it rests on
+    changed (the item, the number) since it was prepared."""
+
+
+def _reservation_key(prov, fid: str, purpose: str, level: int, conn) -> str:
+    """The same item, step and level, and the same count of tries before it: two runs that prepared the same send get the
+    same key, and only one can write it."""
+    n = conn.execute("SELECT COUNT(*) FROM faxes WHERE direction='out' AND finding_id=? AND purpose=? AND COALESCE(level,1)=?",
+                     (fid, purpose, level)).fetchone()[0] + 1
+    return f"out:{prov.name}:{hashlib.sha256(str(fid).encode()).hexdigest()[:16]}:{purpose}:{level}:{n}"
+
+
+def _adopt_marker(st, marker: str, key: str) -> None:
+    """A serverless send's marker with no record of its own, older than any send takes: the run stopped between the two.
+    Its record is written now, as not settled, so the next run asks the fax service whether it went out."""
+    try:
+        m = st.meta(marker)
+        from . import cloud
+        if not m or cloud._age_seconds(m.get("modified")) < RESERVE_STALE_S:
+            return
+        conn = db()
+        try:
+            have = conn.execute("SELECT 1 FROM faxes WHERE fax_key=?", (key,)).fetchone()
+        finally:
+            conn.close()
+        if not have:
+            rec = json.loads(st.get(marker) or b"{}")
+            if rec.get("fax_key") == key:
+                _record_action({"kind": "fax", "record": rec})
+    except Exception:
+        pass
+
+
+def _reserve(prov, f: dict, number: str, *, packet_id: str | None, purpose: str, level: int, actor: str, subject: str | None,
+             extra: dict | None, still_ok=None) -> dict:
+    """Write a send down before it is made, in the one step that also checks nothing went out or is going out for this
+    item, step and level (still_ok(conn): why it must not go now, or None). Two runs, two people, a request sent twice or
+    a run that died between the send and its record: one send. On a server that step is a transaction on the store; on a
+    serverless host a marker file in the state folder, which only one instance can write. Returns the record, in state
+    'sending'; raises SendBlocked."""
     from . import fax
-    pid = prov.send(number, doc, f"{purpose}-{packet_id}"[:60].replace(".", "-") + ".pdf")
+    from .actions import ensure_fax_tables, upsert_fax
+    fid = f.get("finding_id")
+    token = secrets.token_hex(6)
+    filename = (f"{purpose}-{(packet_id or 'letter')[-24:]}".replace(".", "-") + f"-{token}.pdf")
     now = _fax_now()
-    rec = {"fax_key": f"out:{prov.name}:{pid}", "direction": "out", "finding_id": f.get("finding_id"), "packet_id": packet_id,
-           "payer_group": f.get("payer_group"), "number": fax.digits(number), "purpose": purpose, "level": level, "provider": prov.name,
-           "provider_id": pid, "status": "queued", "pages": pages, "error": None, "created_at": now, "updated_at": now,
-           "doc": dict(extra or {}, actor=actor, subject=subject, attempts=(extra or {}).get("attempts", 1), cents=f.get("shortfall_cents"))}
-    _record_action({"kind": "fax", "record": rec})
+    rec = {"direction": "out", "finding_id": fid, "packet_id": packet_id, "payer_group": f.get("payer_group"), "number": fax.digits(number),
+           "purpose": purpose, "level": level, "provider": prov.name, "provider_id": None, "status": "sending", "pages": None, "error": None,
+           "created_at": now, "updated_at": now,
+           "doc": dict(extra or {}, actor=actor, subject=subject, attempts=(extra or {}).get("attempts", 1), cents=f.get("shortfall_cents"),
+                       filename=filename)}
+    if runtime.serverless():
+        from .state import Conflict
+        cloud, st = _cloud_state()
+        conn = db()
+        try:
+            why = still_ok(conn) if still_ok else None
+            if why:
+                raise SendBlocked(why)
+            key = _reservation_key(prov, fid, purpose, level, conn)
+            if conn.execute("SELECT 1 FROM faxes WHERE fax_key=?", (key,)).fetchone():
+                raise SendBlocked("It is being sent already.")
+        finally:
+            conn.close()
+        rec["fax_key"] = key
+        marker = "fax-sends/" + key.replace(":", "_") + ".json"
+        try:
+            st.put(marker, json.dumps(rec, default=str).encode(), mode="add")
+        except Conflict:
+            _adopt_marker(st, marker, key)
+            raise SendBlocked("It is being sent already.")
+        _record_action({"kind": "fax", "record": rec})
+        return rec
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_fax_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            why = still_ok(conn) if still_ok else None
+            if why:
+                raise SendBlocked(why)
+            key = _reservation_key(prov, fid, purpose, level, conn)
+            if conn.execute("SELECT 1 FROM faxes WHERE fax_key=?", (key,)).fetchone():
+                raise SendBlocked("It is being sent already.")
+            rec["fax_key"] = key
+            upsert_fax(conn, rec)
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    return rec
+
+
+def _settle(rec: dict, **changes) -> None:
+    _record_action({"kind": "fax", "record": dict({"fax_key": rec["fax_key"], "updated_at": _fax_now()}, **changes)})
+
+
+def _send_fax(prov, f: dict, number: str, doc: bytes, pages: int, *, packet_id: str, purpose: str, level: int, actor: str,
+              subject: str | None, extra: dict | None = None, still_ok=None) -> dict:
+    """Fax a document and record it: reserved first (_reserve), then sent, then the record brought up to date with the fax
+    service's ID (the record also says how to build it again, for a retry). Raises SendBlocked when it must not go, and
+    fax.FaxError when the service refused it (recorded as a failed try) or did not answer (kept as not settled: the service
+    is asked whether it went out before anything is sent again)."""
+    from . import fax
+    rec = _reserve(prov, f, number, packet_id=packet_id, purpose=purpose, level=level, actor=actor, subject=subject, extra=extra, still_ok=still_ok)
+    try:
+        pid = prov.send(number, doc, rec["doc"]["filename"])
+    except fax.FaxError as exc:
+        if getattr(exc, "maybe_sent", False):
+            _settle(rec, pages=pages, error=f"{str(exc)[:200]} It may have gone out: SRFax is asked before it is sent again.")
+        else:
+            _settle(rec, pages=pages, status="failed", error=str(exc)[:300])
+        raise
+    except BaseException as exc:
+        _settle(rec, pages=pages, error=f"The send stopped ({type(exc).__name__}): SRFax is asked whether it went out before it is sent again.")
+        raise
+    rec.update(provider_id=pid, status="queued", pages=pages)
+    _settle(rec, provider_id=pid, status="queued", pages=pages)
     return rec
 
 
@@ -2904,7 +3257,10 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     """One item all the way to the payer: the visit note from EMA where the appeal rests on it (Claude reviews it and
     writes the paragraphs that justify the claim), the letter, the fax to the payer's confirmed appeal number, and the
     item marked Sent. What cannot go comes back held, with why and what to do. A packet built earlier is reused (one
-    built without the review is built again when the review can now run); rebuild: build it again anyway."""
+    built without the review is built again when the review can now run, and so is one whose note was taken back since);
+    rebuild: build it again anyway. stale_ok: a person checked in EMA that it is still unpaid although the remittances are
+    behind; confirmed: a person checked in EMA that the higher code went out on the claim. An item whose appeal never got
+    through (every try failed) can be sent again, to the number saved now."""
     from . import fax
     fid = str(body.get("finding_id") or "")
     if not re.fullmatch(FAX_KEY, fid):
@@ -2922,13 +3278,15 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
                                        "auth": "This one needs the authorization record, or a retro-authorization, first.",
                                        "check": "This one needs a person to decide first: another payer, the patient, or let it go."}
                     .get(kind, "This one is not an appeal."))
-    if f.get("status") not in ("open", "in_progress"):
+    again = f.get("status") == "appealed" and not _faxes_out(fid) and bool(_faxes_out(fid, live=False))
+    if f.get("status") not in ("open", "in_progress") and not again:
         return dict(out, status="skipped", reason=f"It is {STATUS_WORDS.get(f.get('status'), f.get('status'))}.")
-    # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed
+    # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed. Only a
+    # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
     behind = _data_behind_days()
-    if behind is not None and behind > STALE_APPEAL_DAYS and not body.get("confirmed") and not body.get("stale_ok"):
+    if behind is not None and behind > STALE_APPEAL_DAYS and not body.get("stale_ok"):
         return held("stale", f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since. "
-                             "Get the remittances current first (Data tab, or the TriZetto feed); \"Fax it anyway\" in the item sends it now.")
+                             "Get the remittances current first (Data tab, or the TriZetto feed); \"Still unpaid in EMA: fax it anyway\" in the item sends it now.")
     # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
     # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
@@ -2946,7 +3304,7 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         return held("practice", "The letters still lack the practice's details: set " + ", ".join(missing) + " in the host's settings.")
     prov = fax.provider()
     if prov is None:
-        return held("no_fax", "The fax line is not set up yet: SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD in the host's settings.")
+        return held("no_fax", fax.not_here() or "The fax line is not set up yet: SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD in the host's settings.")
     number = _payer_number(f.get("payer_group"))
     if not number:
         return held("no_number", f"No appeal fax number is saved for {f.get('payer_group') or 'this payer'}. Add it on the Faxes page.")
@@ -2957,6 +3315,8 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     pk = None if body.get("rebuild") else next(iter(_packets_for(fid)), None)
     if pk and pk.get("mode") == "template" and use_ai and os.environ.get("ANTHROPIC_API_KEY") and kind != "rate":
         pk = None           # built before the review could run: now it can
+    if pk and _packet_problem(pk["packet_id"], f):
+        pk = None           # its note was taken back or replaced, or its quotations were never checked: built again from the note now
     note = None
     if pk:
         packet_id = pk["packet_id"]
@@ -2985,19 +3345,47 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     p = _stored_packet(packet_id)
     if not p or not p.get("pdf"):
         return held("no_packet", "The packet could not be read back. Try again.")
+    why = _packet_problem(packet_id, f)
+    if why and "quotations" not in why:
+        return held("no_packet", f"The packet cannot go: {why} Build it again in the item.")
     a = p.get("analysis") or {}
     if a.get("recommendation") == "do_not_appeal":
         return held("review_no", "Claude's review says the note does not support it: " + (a.get("recommendation_reason") or "")
                     + " It is counted in Suggested templates on Bigger wins.")
     if a.get("recommendation") == "correct_and_resubmit":
         return held("review_fix", "Claude's review says to correct the claim and send it again instead: " + (a.get("recommendation_reason") or ""))
+    doubts = _review_doubts(a, detail)
+    if doubts:
+        return held("review_caution", f"Claude's review has doubts: {doubts}. {a.get('recommendation_reason') or ''} "
+                                      "It is not faxed by itself: open the packet, and send it by hand only if a person decides it should go.")
+    quotes = _quotes_problem(a)
+    if quotes:
+        return held("quotes", f"{quotes} It is not faxed by itself: open the packet and check it against the note.")
     blanks = fax.letter_blanks(p.get("letter"))
     if blanks:
         why = a.get("reason") if a.get("mode") == "template" else ""
         return held("blanks", f"The letter still has blanks ({', '.join(blanks[:4])}). " + (why or "Open the item to finish it."))
     try:
         doc, pages = _fax_doc(prov, f, number, p["pdf"], p.get("subject"))
-        sent = _send_fax(prov, f, number, doc, pages, packet_id=packet_id, purpose="appeal", level=1, actor=user, subject=p.get("subject"))
+    except Exception as exc:
+        return held("no_packet", f"The fax could not be put together ({type(exc).__name__}). Build the packet again in the item.")
+
+    def still_ok(conn) -> str | None:
+        # checked again in the step that reserves the send: nothing went out for it meanwhile, it is still open, and the
+        # number the cover sheet names is still the one saved
+        st = conn.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()
+        if not st or (st[0] not in ("open", "in_progress") and not (again and st[0] == "appealed")):
+            return f"It is {STATUS_WORDS.get(st[0], st[0]) if st else 'gone'} now."
+        if conn.execute("SELECT 1 FROM faxes WHERE finding_id=? AND direction='out' AND COALESCE(status,'')!='failed' LIMIT 1", (fid,)).fetchone():
+            return "Its appeal was already faxed."
+        if fax.number_for(conn, f.get("payer_group"), f.get("payer_kind"), 1)["number"] != fax.digits(number):
+            return "The payer's fax number changed while the packet was built: send it again."
+        return None
+    try:
+        sent = _send_fax(prov, f, number, doc, pages, packet_id=packet_id, purpose="appeal", level=1, actor=user, subject=p.get("subject"),
+                         still_ok=still_ok)
+    except SendBlocked as exc:
+        return dict(out, status="skipped", reason=str(exc))
     except fax.FaxError as exc:
         return held("fax_error", str(exc))
     _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages).", None, user)
@@ -3017,7 +3405,7 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
     items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings WHERE {where}
                      ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
                   (*params, *([payer] if payer else []), limit))
-    numbers = {r["payer_group"]: r["number"] for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")} if has_table("payer_fax") else {}
+    numbers = {r["payer_group"]: fax.digits(r["number"]) for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")} if has_table("payer_fax") else {}
     sent = {r["finding_id"] for r in rows("SELECT DISTINCT finding_id FROM faxes WHERE direction='out' AND COALESCE(status,'')!='failed'")} if has_table("faxes") else set()
     by: dict[str, dict] = {}
     out = []
@@ -3031,14 +3419,15 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
         b["cents"] += i["shortfall_cents"] or 0
         b["kinds"][k] = b["kinds"].get(k, 0) + 1
         out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0, "ready": bool(numbers.get(pg))})
-    return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "practice_missing": _practice_missing(),
-            "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+    return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "not_here": fax.not_here(),
+            "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
 @app.get("/api/faxes")
 def faxes_list(_: str = Depends(require_auth)):
-    """The Faxes page: the line, what went out and its state, what came in and what it was matched to, and the follow-ups
-    due. The payer's letters name the patient: those names are shown only where names are switched on."""
+    """The Faxes page: the line, what went out and its state, what came in and what it was matched to (or which items a
+    person should look at), and the follow-ups due. The payer's letters name the patient: those names are shown only where
+    names are switched on."""
     from . import fax
     sent = rows("""SELECT x.fax_key, x.finding_id, x.packet_id, x.payer_group, x.number, x.purpose, x.level, x.provider_id, x.status, x.pages,
                           x.error, x.created_at, x.sent_at, f.title, f.shortfall_cents, f.status item_status
@@ -3047,28 +3436,47 @@ def faxes_list(_: str = Depends(require_auth)):
     got = rows("""SELECT x.fax_key, x.finding_id, x.payer_group, x.number, x.purpose, x.status, x.pages, x.created_at, x.doc, f.title, f.status item_status
                   FROM faxes x LEFT JOIN findings f ON f.finding_id = x.finding_id WHERE x.direction='in' ORDER BY x.created_at DESC LIMIT 400""") \
         if has_table("faxes") else []
+    want: set[str] = set()
     for g in got:
         d = json.loads(g.pop("doc") or "{}")
-        keep = ("document_type", "decision", "payer", "decision_date", "deadline", "amount", "summary", "matches", "error", "received_at")
+        keep = ("document_type", "decision", "payer", "decision_date", "deadline", "amount", "summary", "matches", "error", "received_at",
+                "needs", "tied", "tied_by", "suggested", "procedure_codes")
         g.update({k: d.get(k) for k in keep})
+        want.update(d.get("suggested") or [])
         if SHOW_PHI:
             g["patient"] = _name(d.get("patient_last"), d.get("patient_first"))
             g["claim_numbers"] = d.get("claim_numbers") or []
+    if want:
+        names = {r["finding_id"]: r for r in rows(f"SELECT finding_id, title, payer_group, service_date, procedure_code, patient_control_number FROM findings "
+                                                     f"WHERE finding_id IN ({','.join('?' * len(want))})", tuple(want))}
+        for g in got:       # the items a person may tie it to, said plainly (the claim number only where names are on)
+            g["suggested"] = [{k: v for k, v in names[i].items() if SHOW_PHI or k != "patient_control_number"} for i in g.get("suggested") or [] if i in names]
+    now = datetime.now(timezone.utc)
     for s in sent:
         s["number"] = fax.pretty(s["number"])
+        try:
+            age = (now - datetime.fromisoformat(s["created_at"])).total_seconds()
+        except (TypeError, ValueError):
+            age = 1e9
+        s["unsettled"] = s["status"] == "sending" and age > RESERVE_STALE_S       # a person can say whether it went out
     conn = db()
     try:
         due = fax.followups(conn)
     finally:
         conn.close()
+    for d in due:
+        if d.get("number"):
+            d["number"] = fax.pretty(d["number"])
     prov = fax.provider()
-    return {"configured": prov is not None, "line": fax.pretty(os.environ.get("SRFAX_CALLER_ID")), "practice_missing": _practice_missing(),
+    return {"configured": prov is not None or fax.line() is not None, "sends": prov is not None, "not_here": fax.not_here(),
+            "line": fax.pretty(os.environ.get("SRFAX_CALLER_ID")), "practice_missing": _practice_missing(),
             "review": bool(os.environ.get("ANTHROPIC_API_KEY")), "sent": sent, "received": got, "due": due}
 
 
 @app.get("/api/faxes/payers")
 def fax_payers(_: str = Depends(require_auth)):
-    """Each payer with items to appeal, with its confirmed fax numbers and the phone and website its remittances give
+    """Each payer with items to appeal, with its confirmed fax numbers (who saved each and when, the number it replaced,
+    and whether a person has confirmed a changed one for the follow-ups) and the phone and website its remittances give
     (where to look the numbers up)."""
     from . import fax
     cond, params = _appealable_cond()
@@ -3083,20 +3491,35 @@ def fax_payers(_: str = Depends(require_auth)):
                      GROUP BY 1, 2, 3 ORDER BY n DESC""") if has_table("transactions") else []:
         contact.setdefault(r["payer_group"], {"phone": r["phone"], "url": r["url"]})
     saved: dict[str, dict] = {}
-    for r in rows("SELECT payer_group, purpose, number, confirmed_by, confirmed_at FROM payer_fax") if has_table("payer_fax") else []:
-        saved.setdefault(r["payer_group"], {})[r["purpose"]] = {"number": fax.pretty(r["number"]), "by": r["confirmed_by"], "at": r["confirmed_at"]}
+    for r in rows("SELECT * FROM payer_fax") if has_table("payer_fax") else []:
+        if not fax.digits(r.get("number")):
+            continue            # removed: nothing to show, and nothing is sent there
+        try:
+            hist = json.loads(r.get("history") or "[]")
+        except ValueError:
+            hist = []
+        saved.setdefault(r["payer_group"], {})[r["purpose"]] = {
+            "number": fax.pretty(r["number"]), "by": r["confirmed_by"], "at": r["confirmed_at"], "previous": fax.pretty(r.get("previous")) if r.get("previous") else "",
+            "changed_at": r.get("changed_at"), "confirmed": r.get("auto_ok") is None or bool(r.get("auto_ok")), "checked_by": r.get("checked_by"),
+            "history": [dict(h, number=fax.pretty(h.get("number")) if h.get("number") else "removed") for h in hist[-6:] if isinstance(h, dict)]}
     out = []
     for pg in sorted(set(open_) | set(saved), key=lambda g: -((open_.get(g) or {}).get("cents") or 0)):
         o = open_.get(pg) or {}
         out.append({"payer_group": pg, "payer_kind": o.get("payer_kind"), "n": o.get("n") or 0, "cents": o.get("cents") or 0,
                     "numbers": saved.get(pg, {}), **contact.get(pg, {})})
-    return {"payers": out}
+    return {"payers": out, "owner": bool(OWNER_PASSWORD)}
+
+
+def _owner_actor(user: str) -> str:
+    return f"{user} (owner's password)" if OWNER_PASSWORD else user
 
 
 @app.post("/api/faxes/payer", dependencies=[Depends(require_xhr)])
-def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_auth)):
+def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_owner)):
     """Save a payer's fax number for appeals ('appeal') or for its second level ('level_2'), as a person confirmed it
-    from the payer's own papers; an empty number removes it."""
+    from the payer's own papers; an empty number removes it. A number decides where patient records are faxed, so adding
+    or changing one takes the owner's password where one is set. Who and when are kept. A number that replaces another is
+    not used by a retry or a follow-up until a person confirms it (/api/faxes/payer/confirm)."""
     from . import fax
     pg = str(body.get("payer_group") or "").strip()
     purpose = str(body.get("purpose") or "appeal")
@@ -3105,19 +3528,87 @@ def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_au
         raise HTTPException(400, "payer_group and purpose ('appeal' or 'level_2') are required")
     if number and not fax.digits(number):
         raise HTTPException(400, "That is not a US fax number (ten digits).")
-    if not one("SELECT 1 FROM findings WHERE payer_group=? LIMIT 1", (pg,)) and not _payer_number(pg, purpose):
+    before = _payer_number(pg, purpose)
+    if not one("SELECT 1 FROM findings WHERE payer_group=? LIMIT 1", (pg,)) and not before:
         raise HTTPException(404, "No payer by that name.")
-    _record_action({"kind": "payer_fax", "payer_group": pg, "purpose": purpose, "number": fax.digits(number), "actor": user})
-    return {"ok": True, "number": fax.pretty(number)}
+    _record_action({"kind": "payer_fax", "payer_group": pg, "purpose": purpose, "number": fax.digits(number), "actor": _owner_actor(user), "at": _fax_now()})
+    changed = bool(before) and bool(number) and fax.digits(number) != before
+    return {"ok": True, "number": fax.pretty(number), "previous": fax.pretty(before) if changed else "", "needs_confirm": changed}
 
 
-def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 200.0) -> dict:
-    """Bring the faxes up to date: the state of each fax still going out; another try for one the payer's line did not
-    take; and each new fax in, read by Claude and matched to the items it answers (a line in each one's history)."""
+@app.post("/api/faxes/payer/confirm", dependencies=[Depends(require_xhr)])
+def fax_payer_confirm(body: dict = Body(default={}), user: str = Depends(require_owner)):
+    """A person confirms a payer's changed fax number, as the page showed it: retries and follow-ups may use it from now on."""
+    from . import fax
+    pg, purpose = str(body.get("payer_group") or "").strip(), str(body.get("purpose") or "appeal")
+    if not pg or purpose not in FAX_PURPOSES:
+        raise HTTPException(400, "payer_group and purpose ('appeal' or 'level_2') are required")
+    cur = _payer_number(pg, purpose)
+    if not cur or fax.digits(str(body.get("number") or "")) != cur:
+        raise HTTPException(409, "That is no longer the number saved. Open the Faxes page again.")
+    _record_action({"kind": "payer_fax_check", "payer_group": pg, "purpose": purpose, "number": cur, "actor": _owner_actor(user), "at": _fax_now()})
+    return {"ok": True, "number": fax.pretty(cur)}
+
+
+def _mark_held(r: dict, doc: dict, why: str) -> None:
+    """A failed fax that is not tried again by itself: the reason is kept on it, and the item goes to a person."""
+    if doc.get("held") != why:
+        _record_action({"kind": "fax", "record": {"fax_key": r["fax_key"], "doc": dict(doc, held=why), "updated_at": _fax_now()}})
+
+
+def _retry(prov, r: dict, doc: dict) -> str:
+    """Another try for a fax the payer's line did not take: to the number saved for it now, and only if that is the number
+    it went to (a number replaced or removed since sends nothing: a person decides). Returns 'sent', 'held' or 'skip'."""
+    from . import fax
+    f = one("SELECT * FROM findings WHERE finding_id=?", (r["finding_id"],))
+    if not f or f.get("status") != "appealed":
+        return "skip"
+    level = int(r["level"] or 1)
+    conn = db()
+    try:
+        nb, hold = fax.number_hold(conn, f, level, [r])
+    finally:
+        conn.close()
+    if hold:
+        _mark_held(r, doc, hold)
+        return "held"
+    p = _stored_packet(r["packet_id"]) if r["packet_id"] else None
+    why = "The packet that was faxed cannot be found." if not p or not p.get("pdf") else _packet_problem(r["packet_id"], f)
+    if why:
+        _mark_held(r, doc, f"It was not tried again: {why} Open the item and send it by hand.")
+        return "held"
+    number = nb["number"]
+    front = fax.letter_pdf(*doc["front"]) if doc.get("front") else None
+    body, pages = _fax_doc(prov, f, number, p["pdf"], doc.get("subject"), front, level=level)
+
+    def still_ok(conn) -> str | None:
+        cur = conn.execute("SELECT status FROM faxes WHERE fax_key=?", (r["fax_key"],)).fetchone()
+        if not cur or cur[0] != "failed":
+            return "It is no longer a failed fax."
+        if conn.execute("""SELECT 1 FROM faxes WHERE direction='out' AND finding_id=? AND purpose=? AND COALESCE(level,1)=? AND created_at > ?""",
+                        (r["finding_id"], r["purpose"], level, r["created_at"])).fetchone():
+            return "A later fax already carries it."
+        st = conn.execute("SELECT status FROM findings WHERE finding_id=?", (r["finding_id"],)).fetchone()
+        if not st or st[0] != "appealed":
+            return "The item is no longer marked Sent."
+        if fax.number_for(conn, f.get("payer_group"), f.get("payer_kind"), level)["number"] != number:
+            return "The payer's fax number changed."
+        return None
+    _send_fax(prov, f, number, body, pages, packet_id=r["packet_id"], purpose=r["purpose"], level=level, actor="retry", subject=doc.get("subject"),
+              extra={"attempts": int(doc.get("attempts") or 1) + 1, "front": doc.get("front"), "retry_of": r["fax_key"], "why": doc.get("why"),
+                     "n": doc.get("n")}, still_ok=still_ok)
+    return "sent"
+
+
+def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 200.0, lock: str | None = None) -> dict:
+    """Bring the faxes up to date: a send never settled, asked of the fax service; the state of each fax still going out;
+    another try for one the payer's line did not take; and each new fax in, read by Claude and matched to the items it
+    answers (a line in each one's history), and a fax not read before read again."""
     import time as _time
     from . import fax
     t0 = _time.monotonic()
-    out = {"checked": 0, "sent": 0, "failed": 0, "retried": 0, "received": 0, "matched": 0, "more": False, "errors": []}
+    late = lambda: _time.monotonic() - t0 > budget_s       # noqa: E731
+    out = {"checked": 0, "sent": 0, "failed": 0, "retried": 0, "received": 0, "reread": 0, "matched": 0, "settled": 0, "more": False, "errors": []}
     if not has_table("faxes"):
         conn = db()
         try:
@@ -3126,7 +3617,36 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
             conn.commit()
         finally:
             conn.close()
+    now = datetime.now(timezone.utc)
+    # sends never settled (the run stopped between the send and its record, or SRFax did not answer): asked of SRFax
+    for r in rows("SELECT * FROM faxes WHERE direction='out' AND status='sending' AND provider=? ORDER BY created_at LIMIT 100", (prov.name,)):
+        try:
+            age = (now - datetime.fromisoformat(r["created_at"])).total_seconds()
+        except (TypeError, ValueError):
+            age = 1e9
+        if age < RESERVE_STALE_S:
+            continue
+        if late():
+            out["more"] = True
+            break
+        doc = json.loads(r["doc"] or "{}")
+        try:
+            pid = prov.find_sent(doc.get("filename") or "", r["number"], r["created_at"])
+        except Exception as exc:
+            why = str(exc)[:200] if isinstance(exc, fax.FaxError) else type(exc).__name__
+            if doc.get("unsure") != why:
+                _record_action({"kind": "fax", "record": {"fax_key": r["fax_key"], "doc": dict(doc, unsure=why), "updated_at": _fax_now()}})
+            out["errors"].append(f"Could not tell whether a fax went out: {why}")
+            continue
+        if pid:
+            _settle(r, status="queued", provider_id=pid, error=None)
+        else:
+            _settle(r, status="failed", error="SRFax has no record of it: the run stopped before it went out.")
+        out["settled"] += 1
     for q in rows("SELECT fax_key, provider_id FROM faxes WHERE direction='out' AND status='queued' AND provider=? ORDER BY created_at LIMIT 200", (prov.name,)):
+        if late():
+            out["more"] = True
+            break
         try:
             s = prov.status(q["provider_id"])
         except fax.FaxError as exc:
@@ -3150,167 +3670,306 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
                          SELECT 1 FROM faxes y WHERE y.direction='out' AND y.finding_id = x.finding_id AND y.purpose = x.purpose
                            AND COALESCE(y.level,1) = COALESCE(x.level,1) AND y.created_at > x.created_at)""", (prov.name,)):
         doc = json.loads(r["doc"] or "{}")
-        if int(doc.get("attempts") or 1) >= fax.MAX_ATTEMPTS or not r["finding_id"] or _time.monotonic() - t0 > budget_s:
+        if int(doc.get("attempts") or 1) >= fax.MAX_ATTEMPTS or not r["finding_id"] or doc.get("held"):
             continue
-        f = one("SELECT * FROM findings WHERE finding_id=?", (r["finding_id"],))
-        p = _stored_packet(r["packet_id"]) if r["packet_id"] else None
-        if not f or f.get("status") != "appealed" or not p or not p.get("pdf"):
-            continue
+        if late():
+            out["more"] = True
+            break
+        _fax_lock_beat(lock)
         try:
-            front = fax.letter_pdf(*doc["front"]) if doc.get("front") else None
-            body, pages = _fax_doc(prov, f, r["number"], p["pdf"], doc.get("subject"), front)
-            _send_fax(prov, f, r["number"], body, pages, packet_id=r["packet_id"], purpose=r["purpose"], level=int(r["level"] or 1),
-                      actor="retry", subject=doc.get("subject"), extra={"attempts": int(doc.get("attempts") or 1) + 1, "front": doc.get("front"),
-                                                                         "retry_of": r["fax_key"]})
-            out["retried"] += 1
-        except fax.FaxError as exc:
-            out["errors"].append(str(exc))
-    known = {r["provider_id"] for r in rows("SELECT provider_id FROM faxes WHERE direction='in' AND provider=?", (prov.name,))}
+            if _retry(prov, r, doc) == "sent":
+                out["retried"] += 1
+        except SendBlocked:
+            pass
+        except Exception as exc:        # one fax that cannot go must not stop the others, or the reading of what came in
+            out["errors"].append(f"{type(exc).__name__}: {str(exc)[:200]}")
+    # what came in: new faxes, and those not read before (Claude was off, or could not read it) read again
+    seen = {}
+    for r in rows("SELECT fax_key, provider_id, doc, created_at FROM faxes WHERE direction='in' AND provider=?", (prov.name,)):
+        seen[r["provider_id"]] = (r, json.loads(r["doc"] or "{}"))
+    can_read = use_ai and bool(os.environ.get("ANTHROPIC_API_KEY"))
+    done = {k for k, (_r, d) in seen.items()
+            if (d.get("document_type") and not d.get("error")) or d.get("tied_by") == "person" or int(d.get("tries") or 0) >= MAX_READS or not can_read}
     try:
         inbox = prov.inbox(days)
     except fax.FaxError as exc:
         out["errors"].append(str(exc))
         inbox = []
     for item in inbox:
-        if item["key"] in known:
+        if item["key"] in done:
             continue
-        if _time.monotonic() - t0 > budget_s:
+        if late():
             out["more"] = True
             break
+        _fax_lock_beat(lock)
         try:
             pdf = prov.fetch(item["key"])
         except fax.FaxError as exc:
             out["errors"].append(str(exc))
             continue
+        prev = seen.get(item["key"])
+        tries = int((prev[1] if prev else {}).get("tries") or 0)
         cls: dict = {}
-        if use_ai and os.environ.get("ANTHROPIC_API_KEY"):
+        if can_read:
+            tries += 1
             try:
                 cls = fax.classify(pdf)
             except Exception as exc:
-                cls = {"error": f"Claude could not read it ({type(exc).__name__})"}
+                cls = {"error": f"Claude could not read it ({type(exc).__name__})" + (": it is read again on the next run." if tries < MAX_READS else ".")}
         conn = db()
         try:
-            matches = fax.match_inbound(conn, cls) if cls and not cls.get("error") else []
+            m = fax.match_inbound(conn, cls, item.get("caller")) if cls and not cls.get("error") else \
+                {"tied": [], "how": None, "suggested": [], "needs": None, "matches": []}
         finally:
             conn.close()
-        first = one("SELECT payer_group FROM findings WHERE finding_id=?", (matches[0],)) if matches else None
-        now = _fax_now()
-        _record_action({"kind": "fax", "record": {
-            "fax_key": f"in:{prov.name}:{item['key']}", "direction": "in", "finding_id": matches[0] if matches else None,
-            "payer_group": (first or {}).get("payer_group"), "number": item.get("caller"), "purpose": cls.get("document_type") or "unread",
-            "provider": prov.name, "provider_id": item["key"], "status": "received", "pages": item.get("pages"), "created_at": now,
-            "updated_at": now, "doc": dict(cls, matches=matches, received_at=item.get("received_at"))}})
-        out["received"] += 1
-        if matches:
+        tied = m["tied"]
+        first = one("SELECT payer_group FROM findings WHERE finding_id=?", (tied[0],)) if tied else None
+        now_iso = _fax_now()
+        rec = {"fax_key": f"in:{prov.name}:{item['key']}", "direction": "in", "finding_id": tied[0] if tied else None,
+               "payer_group": (first or {}).get("payer_group"), "number": item.get("caller"), "purpose": cls.get("document_type") or "unread",
+               "provider": prov.name, "provider_id": item["key"], "status": "received", "pages": item.get("pages"), "updated_at": now_iso,
+               "doc": dict(cls, tied=tied, tied_by=m["how"], suggested=m["suggested"], needs=m["needs"], matches=m["matches"],
+                           received_at=item.get("received_at"), tries=tries)}
+        if prev:
+            rec["fax_key"] = prev[0]["fax_key"]          # read again: it keeps the time it came in (follow-ups go by it)
+            out["reread"] += 1
+        else:
+            rec["created_at"] = now_iso
+            out["received"] += 1
+        _record_action({"kind": "fax", "record": rec})
+        if tied:
             out["matched"] += 1
             words = {"appeal_decision": "decision", "records_request": "request for records", "payment_notice": "payment notice",
                      "denial": "denial", "acknowledgement": "acknowledgement"}.get(cls.get("document_type"), "fax")
             note = f"Fax from the payer ({words}" + (f", {cls['decision'].replace('_', ' ')}" if cls.get("decision") not in (None, "", "none") else "") \
                 + f"): {(cls.get('summary') or '')[:300]}"
-            for fid in matches[:5]:
-                _record_action({"kind": "event", "finding_id": fid, "note": note, "actor": "fax", "at": now})
+            for fid in tied:
+                _record_action({"kind": "event", "finding_id": fid, "note": note, "actor": "fax", "at": now_iso})
     return out
 
 
-def _send_followup(prov, d: dict, actor: str) -> dict:
+def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) -> dict:
     """One follow-up from fax.followups: the letter on top, the original packet behind it (and, for the next level, the
-    payer's decision), to the payer's number for that level."""
+    payer's decision), to the number saved now for that level. A send nobody pressed a button for waits for a person when
+    the number is not one it may use (fax.number_hold), and so does a request that says the claim is unpaid while the
+    remittances are behind. person_number: a person pressed send for this one item, with this number in front of them."""
     from . import fax
     from .appeals import PRACTICE
     fid = d["finding_id"]
     out = {"finding_id": fid, "action": d["action"], "payer_group": d.get("payer_group")}
+
+    def held(reason: str) -> dict:
+        return dict(out, status="held", reason=reason)
     if d["action"] == "person":
-        return dict(out, status="held", reason=d["why"])
+        if not (person_number and d.get("resend") in RESEND):
+            return held(d["why"])
+        d = dict(d, action=d["resend"])         # a person sends it again
+        out["action"] = d["action"]
     detail = finding_detail(fid, "ok")
     f = detail["finding"]
-    number = _payer_number(f.get("payer_group"), "level_2") if d["action"] == "next_level" else ""
-    if not number and not (d["action"] == "next_level" and f.get("payer_kind") == "medicare"):
-        number = _payer_number(f.get("payer_group"))
-    if not number:
-        return dict(out, status="held", reason=f"No {'second-level ' if d['action'] == 'next_level' else ''}fax number is saved for "
-                                               f"{f.get('payer_group') or 'this payer'}: add it on the Faxes page.")
+    level = int(d.get("level") or 1)
+    conn = db()
+    try:
+        earlier = [dict(x) for x in conn.execute("SELECT * FROM faxes WHERE direction='out' AND finding_id=? AND COALESCE(level,1)=? ORDER BY created_at",
+                                                 (fid, level))]
+        nb, hold = fax.number_hold(conn, f, level, earlier)
+    finally:
+        conn.close()
+    number = nb["number"]
+    if person_number is not None:
+        if not number:
+            return held(hold or "No fax number is saved for it.")
+        if fax.digits(person_number) != number:
+            return held(f"The fax number for {f.get('payer_group') or 'the payer'} changed while the page was open. Open the Faxes page again.")
+    elif hold:
+        return held(hold)
+    behind = _data_behind_days()
+    if d["action"] in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS:
+        return held(f"The newest remittance RemitWatch has is {behind} days old, so the claim may have been paid since. "
+                    "A request that says it is unpaid waits until the remittances are current.")
+    missing = _practice_missing()
+    if missing:
+        return held("The letters still lack the practice's details: set " + ", ".join(missing) + " in the host's settings.")
     outs = _faxes_out(fid)
     packet_id = next((o["packet_id"] for o in reversed(outs) if o.get("packet_id")), None)
     p = _stored_packet(packet_id) if packet_id else None
     if not p or not p.get("pdf"):
-        return dict(out, status="held", reason="The appeal packet that was faxed cannot be found.")
+        return held("The appeal packet that was faxed cannot be found.")
+    why = _packet_problem(packet_id, f)
+    if why:
+        return held(f"The packet that was faxed cannot go again: {why} Open the item and send it by hand.")
     dec = d.get("decision") or {}
     facts = dict(f, payer_claim_control_number=(detail.get("claim") or {}).get("payer_claim_control_number"))
     title, paras = fax.follow_up_letter(d["action"], facts, outs, {"date": dec.get("decision_date") or dec.get("received")}, PRACTICE, d.get("n") or 1)
+    blanks = fax.letter_blanks(title + "\n" + "\n".join(paras))
+    if blanks:
+        return held(f"The letter still has blanks ({', '.join(blanks[:4])}).")
     extra = None
     if d["action"] == "next_level" and has_table("faxes"):
-        got = one("""SELECT provider_id FROM faxes WHERE direction='in' AND finding_id=? AND provider=? ORDER BY created_at DESC LIMIT 1""",
-                  (fid, prov.name))
-        if got:
+        # the payer's own decision goes with the request: only a fax tied to this item by its claim and from the payer's
+        # number, or by a person (never one matched on a name and a date)
+        conn = db()
+        try:
+            mine = [x for x in fax._ties(conn).get(fid, []) if x.get("provider") == prov.name and x["_doc"].get("decision") == "upheld"]
+        finally:
+            conn.close()
+        if mine:
             try:
-                extra = prov.fetch(got["provider_id"])        # the payer's decision goes with the request for the next level
+                extra = prov.fetch(mine[-1]["provider_id"])
             except fax.FaxError:
                 extra = None
     try:
-        body, pages = _fax_doc(prov, f, number, p["pdf"], title, fax.letter_pdf(title, paras), extra)
-        sent = _send_fax(prov, f, number, body, pages, packet_id=packet_id, purpose=d["action"], level=d["level"], actor=actor, subject=title,
-                         extra={"front": [title, paras], "why": d["why"]})
+        body, pages = _fax_doc(prov, f, number, p["pdf"], title, fax.letter_pdf(title, paras), extra, level=level)
+    except Exception as exc:
+        return held(f"The fax could not be put together ({type(exc).__name__}): open the item and send it by hand.")
+
+    def still_ok(conn) -> str | None:
+        # checked again in the step that reserves the send: still due, by nobody else meanwhile, to the same number
+        now = fax.followups(conn, ids=[fid])
+        hit = next((x for x in now if int(x.get("level") or 1) == level and (x["action"] == d["action"]
+                    or (person_number and x["action"] == "person" and x.get("resend") == d["action"]))), None)
+        if not hit:
+            return "It is no longer due: it was sent, or the payer answered, meanwhile."
+        if fax.number_for(conn, f.get("payer_group"), f.get("payer_kind"), level)["number"] != number:
+            return "The payer's fax number changed meanwhile."
+        if person_number is None and hit.get("hold"):
+            return hit["hold"]
+        return None
+    try:
+        sent = _send_fax(prov, f, number, body, pages, packet_id=packet_id, purpose=d["action"], level=level, actor=actor, subject=title,
+                         extra={"front": [title, paras], "why": d["why"], "n": d.get("n") or 1}, still_ok=still_ok)
+    except SendBlocked as exc:
+        return dict(out, status="skipped", reason=str(exc))
     except fax.FaxError as exc:
-        return dict(out, status="held", reason=str(exc))
+        return held(str(exc))
     _record_action({"kind": "event", "finding_id": fid, "actor": actor,
                     "note": f"{title}: faxed to {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages). Why: {d['why']}."})
     return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), title=title)
 
 
-def _send_followups(prov, actor: str, ids: list[str] | None = None, budget_s: float = 240.0) -> dict:
+def _send_followups(prov, actor: str, ids: list[str] | None = None, budget_s: float = 240.0, person_number: str | None = None,
+                    lock: str | None = None) -> dict:
     import time as _time
     from . import fax
     t0 = _time.monotonic()
     conn = db()
     try:
-        due = fax.followups(conn)
+        due = fax.followups(conn, ids=ids)
     finally:
         conn.close()
-    if ids is not None:
-        due = [d for d in due if d["finding_id"] in set(ids)]
     results, more = [], False
     for d in due:
         if _time.monotonic() - t0 > budget_s:
             more = True
             break
-        results.append(_send_followup(prov, d, actor))
+        _fax_lock_beat(lock)
+        try:
+            results.append(_send_followup(prov, d, actor, person_number=person_number))
+        except Exception as exc:        # one item that cannot go must not stop the ones after it, run after run
+            results.append({"finding_id": d["finding_id"], "action": d["action"], "payer_group": d.get("payer_group"), "status": "held",
+                            "reason": f"It stopped on an error ({type(exc).__name__}: {str(exc)[:160]}). The others went on."})
     return {"results": results, "sent": sum(r["status"] == "sent" for r in results), "held": sum(r["status"] == "held" for r in results), "more": more}
 
 
-@app.post("/api/faxes/refresh", dependencies=[Depends(require_xhr)])
-def faxes_refresh(_: str = Depends(require_auth)):
+def _line_or_503():
     from . import fax
     prov = fax.provider()
     if prov is None:
-        raise HTTPException(503, "The fax line is not set up yet (SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD).")
-    return _fax_refresh(prov)
+        raise HTTPException(503, fax.not_here() or "The fax line is not set up yet (SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD).")
+    return prov
+
+
+@app.post("/api/faxes/refresh", dependencies=[Depends(require_xhr)])
+def faxes_refresh(user: str = Depends(require_auth)):
+    prov = _line_or_503()
+    try:
+        with fax_run(user) as lock:
+            return _fax_refresh(prov, lock=lock)
+    except FaxBusy as exc:
+        raise HTTPException(409, str(exc))
 
 
 @app.post("/api/faxes/follow_up", dependencies=[Depends(require_xhr)])
 def faxes_follow_up(body: dict = Body(default={}), user: str = Depends(require_auth)):
-    """Send the follow-ups that are due (all of them, or the items named)."""
-    from . import fax
-    prov = fax.provider()
-    if prov is None:
-        raise HTTPException(503, "The fax line is not set up yet (SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD).")
+    """Send the follow-ups that are due (all of them, or the items named). number, with one item named: a person sends that
+    one to the number the page showed them, also where a send nobody pressed a button for would wait (a number changed
+    since its last fax; a line that never took it, tried again)."""
+    prov = _line_or_503()
     ids = body.get("finding_ids")
-    return _send_followups(prov, user, [str(i) for i in ids][:500] if isinstance(ids, list) else None)
+    ids = [str(i) for i in ids][:500] if isinstance(ids, list) else None
+    person = str(body.get("number") or "") if ids and len(ids) == 1 and body.get("number") else None
+    try:
+        with fax_run(user) as lock:
+            return _send_followups(prov, user, ids, person_number=person, lock=lock)
+    except FaxBusy as exc:
+        raise HTTPException(409, str(exc))
+
+
+SAYS = {"upheld": ("appeal_decision", "upheld"), "overturned": ("appeal_decision", "overturned"),
+        "partially_overturned": ("appeal_decision", "partially_overturned"), "records_request": ("records_request", "none"),
+        "other": ("other", "none")}
 
 
 @app.post("/api/faxes/match", dependencies=[Depends(require_xhr)])
 def faxes_match(body: dict = Body(default={}), user: str = Depends(require_auth)):
-    """Tie a fax that came in to the item it answers, where reading it did not."""
+    """Tie a fax that came in to the item it answers, where reading it did not (or tied it to the wrong one). says: what the
+    fax decides, as the person read it ('upheld', 'overturned', 'partially_overturned', 'records_request', 'other'); without
+    it, a fax not read yet is read now where Claude can. From then on it answers that item."""
+    from . import fax
     key, fid = str(body.get("fax_key") or ""), str(body.get("finding_id") or "")
     if not re.fullmatch(FAX_KEY, key) or not re.fullmatch(FAX_KEY, fid):
         raise HTTPException(400, "fax_key and finding_id are required")
+    says = body.get("says")
+    if says is not None and says not in SAYS:
+        raise HTTPException(400, "says is one of " + ", ".join(SAYS))
     r = one("SELECT * FROM faxes WHERE fax_key=? AND direction='in'", (key,)) if has_table("faxes") else None
     f = one("SELECT finding_id, payer_group FROM findings WHERE finding_id=?", (fid,))
     if not r or not f:
         raise HTTPException(404, "No such fax or item.")
     doc = json.loads(r["doc"] or "{}")
-    doc["matches"] = [fid] + [m for m in doc.get("matches") or [] if m != fid]
-    _record_action({"kind": "fax", "record": {"fax_key": key, "finding_id": fid, "payer_group": f["payer_group"], "doc": doc, "updated_at": _now_iso()}})
+    if says:
+        doc.update(document_type=SAYS[says][0], decision=SAYS[says][1], read_by=user)
+        doc.pop("error", None)
+    elif (doc.get("error") or not doc.get("document_type")) and os.environ.get("ANTHROPIC_API_KEY"):
+        line = fax.provider() or fax.line()
+        try:
+            got = fax.classify(line.fetch(r["provider_id"])) if line else None
+        except Exception:
+            got = None
+        if got:
+            doc.update(got)
+            doc.pop("error", None)
+    before = [i for i in (doc.get("tied") or ([r["finding_id"]] if r["finding_id"] else [])) if i != fid]
+    doc.update(tied=[fid], tied_by="person", tied_at=_now_iso(), tied_actor=user, needs=None,
+               matches=[fid] + [m for m in doc.get("matches") or [] if m != fid])
+    _record_action({"kind": "fax", "record": {"fax_key": key, "finding_id": fid, "payer_group": f["payer_group"], "doc": doc,
+                                              "purpose": doc.get("document_type") or r["purpose"], "updated_at": _fax_now()}})
     _record_action({"kind": "event", "finding_id": fid, "actor": user, "note": f"Fax from the payer tied to this item: {(doc.get('summary') or '')[:300]}"})
+    for other in before:
+        _record_action({"kind": "event", "finding_id": other, "actor": user, "note": "A payer's fax tied to this item was moved to another item by a person."})
+    return {"ok": True, "read": bool(doc.get("document_type")) and not doc.get("error")}
+
+
+@app.post("/api/faxes/settle", dependencies=[Depends(require_xhr)])
+def faxes_settle(body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """A person says whether a fax whose send never settled went out, from SRFax's own list of sent faxes: it did (it counts
+    as sent) or it did not (it counts as a failed try, and the line tries it again)."""
+    key = str(body.get("fax_key") or "")
+    if not re.fullmatch(FAX_KEY, key) or not isinstance(body.get("went"), bool):
+        raise HTTPException(400, "fax_key and went (true or false) are required")
+    r = one("SELECT * FROM faxes WHERE fax_key=? AND direction='out'", (key,)) if has_table("faxes") else None
+    if not r:
+        raise HTTPException(404, "No such fax.")
+    if r["status"] != "sending":
+        raise HTTPException(409, "That fax is settled already.")
+    doc = dict(json.loads(r["doc"] or "{}"), settled_by=user)
+    if body["went"]:
+        _settle(r, status="sent", sent_at=_fax_now(), error=None, doc=doc)
+    else:
+        _settle(r, status="failed", error="Not sent: a person checked SRFax's sent faxes.", doc=doc)
+    if r["finding_id"]:
+        _record_action({"kind": "event", "finding_id": r["finding_id"], "actor": user,
+                        "note": f"A fax whose send never settled was checked in SRFax: {'it went out' if body['went'] else 'it did not go out'}."})
     return {"ok": True}
 
 
@@ -3322,7 +3981,7 @@ def faxes_pdf(key: str = Query(..., max_length=160), _: str = Depends(require_au
     if not r:
         raise HTTPException(404, "No such fax.")
     if r["direction"] == "in":
-        prov = fax.provider()
+        prov = fax.provider() or fax.line()         # opening a fax that came in sends nothing: any site with the line can
         if prov is None:
             raise HTTPException(503, "The fax line is not set up.")
         try:
@@ -3342,25 +4001,33 @@ def faxes_pdf(key: str = Query(..., max_length=160), _: str = Depends(require_au
 @app.post("/api/faxes/test", dependencies=[Depends(require_xhr)])
 def faxes_test(_: str = Depends(require_auth)):
     from . import fax
-    prov = fax.provider()
+    prov = fax.provider() or fax.line()
     if prov is None:
         return {"ok": False, "steps": [{"step": "Settings", "ok": False, "detail": "SRFAX_ACCESS_ID and SRFAX_ACCESS_PWD are not set"}]}
-    return JSONResponse(prov.check(), headers={"Cache-Control": "no-store"})
+    got = prov.check()
+    if fax.not_here():
+        got = dict(got, steps=list(got.get("steps") or []) + [{"step": "This site", "ok": True, "detail": fax.not_here()}])
+    return JSONResponse(got, headers={"Cache-Control": "no-store"})
 
 
 @app.api_route("/api/cron/faxes", methods=["GET", "POST"], include_in_schema=False)
 def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
-    """Every day: the faxes brought up to date and the follow-ups that are due sent (a week apart for each item)."""
+    """Every day: the faxes brought up to date and the follow-ups that are due sent (a week apart for each item), on the one
+    site that sends faxes (REMITWATCH_FAX_SENDER), and never while another fax run is going."""
     _cron_auth(request, credentials)
     from . import fax
     if runtime.serverless() and runtime.preview():
         raise HTTPException(409, "This is a preview deployment. Only the production site sends faxes.")
     prov = fax.provider()
     if prov is None:
-        return {"skipped": "The fax line is not set up."}
+        return {"skipped": fax.not_here() or "The fax line is not set up."}
     budget = max(60.0, runtime.max_seconds() - 60.0) if runtime.serverless() else 3600.0
-    got = _fax_refresh(prov, budget_s=budget / 2)
-    return {"refresh": got, "follow_up": _send_followups(prov, "daily run", budget_s=budget / 2)}
+    try:
+        with fax_run("daily run") as lock:
+            got = _fax_refresh(prov, budget_s=budget / 2, lock=lock)
+            return {"refresh": got, "follow_up": _send_followups(prov, "daily run", budget_s=budget / 2, lock=lock)}
+    except FaxBusy as exc:
+        return {"skipped": str(exc)}
 
 
 # --------------------------------------------------------------------------- reasons hidden for a payer (actions.apply_hide_rule)

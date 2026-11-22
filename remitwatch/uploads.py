@@ -84,8 +84,8 @@ CREATE TABLE IF NOT EXISTS uploaded_notes (
     status TEXT,                            -- matched, choose (more than one visit fits: a person picks), unmatched
     reason TEXT, patient_last TEXT, patient_first TEXT, ema_patient_id TEXT, service_date TEXT, note_type TEXT, loinc TEXT,
     matched_by TEXT, matched_at TEXT, candidates TEXT, claims TEXT,
-    ids_stated TEXT,                        -- the claim's identifiers (EMA patient ID, record number) the note itself states, or
-                                            -- that a person's attaching it settled: JSON; NULL = not worked out yet
+    ids_stated TEXT,                        -- the identifiers the note itself states (the value after "Patient ID", "MRN" ...),
+                                            -- or for a note a person attached, the claim's: JSON; NULL = not worked out yet
     birth_date TEXT                         -- the birth date the note states, to tell two patients of one name apart
 );
 CREATE INDEX IF NOT EXISTS ix_unotes_dos ON uploaded_notes(service_date);
@@ -346,8 +346,8 @@ def accept(db_path: str, tmp: str, name: str, user: str, sha: str | None = None,
             if kind != "note":
                 raise Rejected("This is not a visit note RemitWatch reads (PDF, Word, text, RTF or HTML).")
             out = _take_note(conn, db_path, tmp, name, sha, user, finding_id, parent, base)
-            out["lines"] = out.get("lines") or _note_lines(out["note"], reveal)
-            out["note"] = _note_public(out["note"], reveal)
+            out["lines"] = out.get("lines") or _note_lines(out["note"], reveal, conn)
+            out["note"] = _note_public(out["note"], reveal, conn)
             out["name"] = shown_name(name, "note", sha, reveal)          # a note is often saved under the patient's name
             return out
         seen = _already(conn, sha)
@@ -580,7 +580,7 @@ def _n(x: int, one: str, many: str | None = None) -> str:
     return f"{x:,} {one if x == 1 else (many or one + 's')}"
 
 
-def describe(s: dict, status: str, reveal: bool = False, note: dict | None = None) -> list[str]:
+def describe(s: dict, status: str, reveal: bool = False, note: dict | None = None, conn: sqlite3.Connection | None = None) -> list[str]:
     """What the person reads about one upload, in plain words: what was in it, what was (or will be) added, what was
     already there, and what was left out and why."""
     out: list[str] = []
@@ -640,24 +640,35 @@ def describe(s: dict, status: str, reveal: bool = False, note: dict | None = Non
     if s.get("error"):
         out.append(f"Not read: {s['error']}")
     if note is not None:
-        out += _note_lines(note, reveal)
+        out += _note_lines(note, reveal, conn)
     return [x for x in out if x]
 
 
-def _confirm(n: dict) -> bool:
-    """Whether an appeal waits for a person before it uses this note: matched by name and date alone, with no identifier
-    on the note agreeing with the claim's."""
-    return n.get("status") == "matched" and n.get("matched_by") != "person" and not json.loads(n.get("ids_stated") or "[]")
+def _confirm(n: dict, conn: sqlite3.Connection | None = None) -> bool:
+    """Whether an appeal waits for a person before it uses this note: matched by name and date, and no identifier the
+    note states agrees with its claims' (EMA's patient ID, the record number). Without the store at hand, a note that
+    states an identifier is taken to agree."""
+    if n.get("status") != "matched" or n.get("matched_by") == "person":
+        return False
+    stated = set(json.loads(n.get("ids_stated") or "[]"))
+    if not stated or conn is None:
+        return not stated
+    pcns = json.loads(n.get("claims") or "[]")
+    known = {modmed._nid(x) for ids in _ema_ids(conn, pcns).values() for x in ids}
+    if pcns and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'").fetchone():
+        known |= {modmed._nid(r[0]) for r in conn.execute(f"SELECT DISTINCT medical_record_number FROM claims WHERE patient_control_number IN "
+                                                         f"({','.join('?' * len(pcns))}) AND medical_record_number IS NOT NULL", pcns)}
+    return not (stated & known)
 
 
-def _note_lines(n: dict, reveal: bool) -> list[str]:
+def _note_lines(n: dict, reveal: bool, conn: sqlite3.Connection | None = None) -> list[str]:
     who = f"{(n.get('patient_first') or '').title()} {(n.get('patient_last') or '').title()}".strip() if reveal else ""
     kind = n.get("note_type") or "Note"
     if n.get("status") == "matched":
         how = "attached by hand" if n.get("matched_by") == "person" else f"matched by {n.get('matched_by') or 'name and date of service'}"
         claims = json.loads(n.get("claims") or "[]")
         then = ("Only the name and the date agree with the claim, so its appeal uses it once a person confirms it in the item "
-                "(or attaches it there)." if _confirm(n) else "Appeals for that visit use it as a note read from EMA.")
+                "(or attaches it there)." if _confirm(n, conn) else "Appeals for that visit use it as a note read from EMA.")
         return [f"{kind} for the visit of {_day(n.get('service_date'))}{(' (' + who + ')') if who else ''}, {how}"
                 f"{': claim ' + ', '.join(claims[:3]) if claims else ''}. {then}"]
     if n.get("status") == "choose":
@@ -743,6 +754,24 @@ def stated_ids(text: str, values) -> list[str]:
     return out
 
 
+ID_FILLER = {"ID", "NO", "NUMBER", "NUM", "IS", "OF", "THE"}
+
+
+def note_ids(text: str) -> list[str]:
+    """The identifiers a note states for its patient: the value just after each "Patient ID", "MRN", "Chart #" or like
+    label, in capitals, letters and digits only. They are compared with the claim's when an appeal looks for its note."""
+    out: list[str] = []
+    for m in ID_LABEL.finditer(text or ""):
+        for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]*", text[m.end(): m.end() + 40]):
+            t = modmed._nid(tok)
+            if t in ID_FILLER or not any(c.isdigit() for c in t):
+                continue            # "Patient ID number: ...": the value comes after; an identifier has a digit
+            if t not in out:
+                out.append(t)
+            break
+    return out[:6]
+
+
 def _name_in(name: str | None, words: str, first_word: bool = False) -> bool:
     n = re.sub(r"[^A-Z0-9]+", " ", (name or "").upper()).strip()
     if first_word:
@@ -768,7 +797,7 @@ def _visits_on(conn: sqlite3.Connection, days: set[str]) -> list[dict]:
         return []
     ds = sorted(days)
     q = f"""SELECT f.finding_id, f.claim_key, f.patient_control_number pcn, f.payer_group,
-                   COALESCE(f.service_date, c.statement_from) dos, c.medical_record_number mrn,
+                   COALESCE(f.service_date, c.statement_from) dos,
                    c.patient_last, c.patient_first, c.corrected_patient_last, c.corrected_patient_first
             FROM findings f JOIN claims c ON c.claim_key = f.claim_key
             WHERE f.claim_key IS NOT NULL AND COALESCE(f.service_date, c.statement_from) IN ({','.join('?' * len(ds))})"""
@@ -831,10 +860,10 @@ def match_text(conn: sqlite3.Connection, text: str) -> dict:
             hs = people[stated[0]] + people.get("", [])
             named = stated
         visits.append(_visit(hs, dos, named[0] if named else ""))
-    dob = birth_date(text)
+    dob, own = birth_date(text), note_ids(text)
     for v in visits:
-        known = ({v["ema_patient_id"]} if v.get("ema_patient_id") else set()) | set(v.pop("mrns", []))
-        v["ids_stated"] = stated_ids(text, known)
+        v.pop("mrns", None)
+        v["ids_stated"] = own
         v["birth_date"] = dob
     if len(visits) == 1:
         return dict(visits[0], status="matched", how="patient name and date of service"
@@ -846,7 +875,7 @@ def _visit(hs: list[dict], dos: str, ema_id: str) -> dict:
     h = hs[0]
     return {"patient_last": h["last"], "patient_first": h["first"], "service_date": dos, "ema_patient_id": ema_id or None,
             "claims": sorted({x["pcn"] for x in hs if x.get("pcn")}), "payers": sorted({x["payer_group"] for x in hs if x.get("payer_group")}),
-            "findings": len({x["finding_id"] for x in hs}), "mrns": sorted({x["mrn"] for x in hs if x.get("mrn")})}
+            "findings": len({x["finding_id"] for x in hs})}
 
 
 def match_finding(conn: sqlite3.Connection, finding_id: str) -> dict:
@@ -865,7 +894,7 @@ def match_finding(conn: sqlite3.Connection, finding_id: str) -> dict:
     # the person tied the note to this claim: its identifiers are the note's from now on
     return {"status": "matched", "how": "person", "patient_last": r[4], "patient_first": r[5], "service_date": r[3],
             "ema_patient_id": pid[0] if len(pid) == 1 else None, "claims": [r[1]] if r[1] else [], "payers": [r[2]] if r[2] else [],
-            "ids_stated": sorted(set(pid if len(pid) == 1 else []) | ({mrn[0]} if mrn and mrn[0] else set()))}
+            "ids_stated": sorted({modmed._nid(x) for x in (pid if len(pid) == 1 else []) + ([mrn[0]] if mrn and mrn[0] else [])} - {""})}
 
 
 def _note_row(conn: sqlite3.Connection, **where) -> dict | None:
@@ -877,9 +906,9 @@ def _note_row(conn: sqlite3.Connection, **where) -> dict | None:
 
 def _set_match(conn: sqlite3.Connection, note_id: str, m: dict, by: str | None = None) -> None:
     if m["status"] == "matched":
-        stated = m.get("ids_stated") or []
-        if by == "person" and m.get("ema_patient_id"):     # a person picked this visit: its EMA patient is the note's
-            stated = sorted(set(stated) | {m["ema_patient_id"]})
+        stated = list(m.get("ids_stated") or [])
+        if by == "person" and m.get("ema_patient_id") and modmed._nid(m["ema_patient_id"]) not in stated:
+            stated.append(modmed._nid(m["ema_patient_id"]))      # a person picked this visit: its EMA patient is the note's
         conn.execute("""UPDATE uploaded_notes SET status='matched', reason=NULL, patient_last=?, patient_first=?, ema_patient_id=?,
                         service_date=?, matched_by=?, matched_at=?, candidates=NULL, claims=?, ids_stated=?,
                         birth_date=COALESCE(?, birth_date) WHERE note_id=?""",
@@ -898,9 +927,14 @@ def _take_note(conn, db_path: str, tmp: str, name: str, sha: str, user: str, fin
     if old:
         if finding_id:
             m = match_finding(conn, finding_id)
-            if not (old["status"] == "matched" and old["service_date"] == m["service_date"]
-                    and modmed._norm(old["patient_last"]) == modmed._norm(m["patient_last"])):
-                _set_match(conn, old["note_id"], m, by="person")
+            had = set(json.loads(old.get("claims") or "[]"))
+            if not (old["status"] == "matched" and old.get("matched_by") == "person" and old["service_date"] == m["service_date"]
+                    and set(m["claims"]) <= had):
+                if old["status"] == "matched" and old.get("matched_by") == "person" and old["service_date"] == m["service_date"]:
+                    # the same visit's other claim: the person's note for both
+                    m = dict(m, claims=sorted(had | set(m["claims"])),
+                             ids_stated=sorted(set(json.loads(old.get("ids_stated") or "[]")) | set(m.get("ids_stated") or [])))
+                _set_match(conn, old["note_id"], m, by="person")      # attached by a person now, whatever matched it before
                 n = _note_row(conn, note_id=old["note_id"])
                 return dict(base, kind="note", note_id=n["note_id"], status=n["status"], note=n)
         seen = {"how": "upload", "at": old["uploaded_at"], "by": old["uploaded_by"], "status": "done"}
@@ -999,10 +1033,10 @@ def rematch(conn: sqlite3.Connection, limit: int = 300) -> dict:
         text = _note_text(path) or ""
         pcns = json.loads(claims or "[]")
         known = {ema_id} if ema_id else set()
-        if pcns and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'").fetchone():
+        if by == "person" and pcns and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims'").fetchone():
             known |= {r[0] for r in conn.execute(f"SELECT DISTINCT medical_record_number FROM claims WHERE patient_control_number IN "
                                                  f"({','.join('?' * len(pcns))}) AND medical_record_number IS NOT NULL", pcns)}
-        stated = sorted(known) if by == "person" else stated_ids(text, known)       # a person settled them, or the note states them
+        stated = sorted({modmed._nid(x) for x in known} - {""}) if by == "person" else note_ids(text)   # a person settled them, or the note states them
         conn.execute("UPDATE uploaded_notes SET ids_stated=?, birth_date=COALESCE(birth_date, ?) WHERE note_id=?",
                      (json.dumps(stated), birth_date(text), note_id))
         out["identifiers"] += 1
@@ -1038,7 +1072,7 @@ class UploadSource(modmed.LiveSource):
             stated = json.loads(n.get("ids_stated") or "[]")
             claims = json.loads(n.get("claims") or "[]")
             person = n.get("matched_by") == "person"
-            ema = n.get("ema_patient_id") if n.get("ema_patient_id") in stated else None
+            ema = n.get("ema_patient_id") if modmed._nid(n.get("ema_patient_id")) in stated else None
             if ema:
                 k = f"e|{ema}"
             elif stated:
@@ -1086,7 +1120,8 @@ class UploadSource(modmed.LiveSource):
         return self.people.get(pid)             # an EMA patient ID is looked for among the identifiers, every record that has it
 
     def patients_by_identifier(self, value: str) -> list[dict]:
-        return [p for p in self.people.values() if any(i.get("value") == value for i in p["identifier"])]
+        v = modmed._nid(value)
+        return [p for p in self.people.values() if v and any(modmed._nid(i.get("value")) == v for i in p["identifier"])]
 
     def patients_by_name(self, family: str, given: str) -> list[dict]:
         return [p for p in self.people.values() if modmed._family_ok(p, family) and modmed._given_ok(p, given)]
@@ -1153,20 +1188,20 @@ def history(conn: sqlite3.Connection, reveal: bool = False, limit: int = 100) ->
         elif u["status"] == "removed":
             lines = ["Taken back: the note was removed."]
         else:
-            lines = describe(s, u["status"], reveal, note=note)
+            lines = describe(s, u["status"], reveal, note=note, conn=conn)
         item = {"upload_id": u["upload_id"], "name": shown_name(u["name"], u["kind"], u["upload_id"], reveal), "kind": u["kind"],
                 "status": u["status"], "uploaded_at": u["uploaded_at"],
                 "uploaded_by": u["uploaded_by"], "done_at": u["done_at"], "lines": lines, "parent": u["parent"]}
         if note:
-            item["note"] = _note_public(note, reveal)
+            item["note"] = _note_public(note, reveal, conn)
         out.append(item)
     return out
 
 
-def _note_public(n: dict, reveal: bool) -> dict:
+def _note_public(n: dict, reveal: bool, conn: sqlite3.Connection | None = None) -> dict:
     out = {k: n.get(k) for k in ("note_id", "status", "service_date", "note_type", "matched_by", "kind")}
     out["claims"] = json.loads(n.get("claims") or "[]")
-    out["confirm"] = _confirm(n)
+    out["confirm"] = _confirm(n, conn)
     if reveal:
         out["patient"] = f"{(n.get('patient_first') or '').title()} {(n.get('patient_last') or '').title()}".strip()
     cands = json.loads(n.get("candidates") or "[]")

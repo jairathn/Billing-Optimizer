@@ -34,8 +34,9 @@ Two ways to build the tables:
                                same addenda, the wage index, a county crosswalk and Addendum B. Only CMS's own columns are
                                read, by their headers. The workbook can be behind CMS: version 77 was set up on 2026-11-06,
                                CMS updated the CY 2027 addenda on 2026-11-10, and 68 codes and 5 counties differed. So
-                               CMS's CSVs are given all the same, and the build stops at the first difference. The workbook
-                               has no wage index for the year before: the crosswalk gives it, or --wage.
+                               CMS's CSVs are given all the same, and the build lists every difference and writes nothing
+                               if there is one. The workbook has no wage index for the year before: the crosswalk gives it,
+                               or --wage.
 
 Either way the tables are written to a scratch folder first, read back, and compared with CMS's CSVs: every code's payment
 indicator, rate, copayment, discounting and comment indicator, every county's CBSA and wage index, the indicator

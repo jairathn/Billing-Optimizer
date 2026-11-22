@@ -312,7 +312,7 @@ def _read(path) -> dict:
 
 
 def _snapshot(*paths) -> dict:
-    return {str(p): open(p, "rb").read() for p in paths}
+    return {str(p): p.read_bytes() for p in paths}
 
 
 def test_the_build_from_cms_files(tmp_path):
@@ -368,14 +368,13 @@ def test_the_check_reads_cms_files_again_and_names_each_difference(tmp_path, mon
     assert _snapshot(out, *(data / n for n in B.TABLES)) == kept
     monkeypatch.undo()
     # the tables changed after the build: a rate, a county's wage index, a code dropped
-    rows = list(csv.reader(open(data / "asc_rates.csv", encoding="utf-8")))
-    head = rows[0]
+    grid = lambda p: list(csv.reader(p.read_text(encoding="utf-8").splitlines()))
+    rows = grid(data / "asc_rates.csv")
     for r in rows:
         if r[0] == "14040":
-            r[head.index("rate_2027")] = "99999"
+            r[rows[0].index("rate_2027")] = "99999"
     _csv(data / "asc_rates.csv", [r for r in rows if r[0] != "C9818"])
-    grid = list(csv.reader(open(data / "asc_counties.csv", encoding="utf-8")))
-    _csv(data / "asc_counties.csv", [r[:5] + ["0.7700"] if r[1] == "LAKESIDE" else r for r in grid])
+    _csv(data / "asc_counties.csv", [r[:5] + ["0.7700"] if r[1] == "LAKESIDE" else r for r in grid(data / "asc_counties.csv")])
     diffs = B.check_against_cms(str(out), str(data), cms)
     assert "2027 14040: rate 99999 (CMS: 100000)" in diffs and "2027 C9818: on CMS's Addendum BB (K2), not in the tables" in diffs
     assert "county 13901 LAKESIDE, GA: wage index 0.7700 (CMS: 0.8600)" in diffs
@@ -482,7 +481,7 @@ def test_the_workbook_is_held_against_cms_files(tmp_path):
     with pytest.raises(SystemExit) as e:
         B.main(["--asca", _workbook(tmp_path / "v77.xlsx", counties=stale_xw, aa=stale_aa)] + _cms_args(f) + ["--out", str(out), "--data-dir", str(data)])
     msg = str(e.value)
-    assert "differ from CMS's own files in 3 places; nothing was written" in msg and "ASCA's workbook is not CMS's latest posting" in msg
+    assert "differ from CMS's own files in 2 places; nothing was written" in msg and "ASCA's workbook is not CMS's latest posting" in msg
     assert "2027 27417: rate None (CMS: 900000), copay None (CMS: 180000)" in msg
     assert "county 13901 LAKESIDE, GA: cbsa 11 (CMS: 50002), wage index 0.7700 (CMS: 0.8600)" in msg
     assert _snapshot(out, *(data / n for n in B.TABLES)) == kept
@@ -645,11 +644,188 @@ def test_a_case_that_cannot_be_priced_is_set_apart():
     assert out["unpriced"] == 3 and out["total"] == {"2026": 0, "2027": 0} and "99999" in out["missing"]
 
 
+def _node(js: str, data=None):
+    """A snippet of JS run with AM (static/asc_model.js) and DATA (the JSON given); it prints one JSON value."""
+    pre = f"const AM=require({json.dumps(os.path.join(STATIC, 'asc_model.js'))});const fs=require('fs');const DATA=JSON.parse(fs.readFileSync(0,'utf8'));"
+    res = subprocess.run([NODE, "-e", pre + js], input=json.dumps(data), capture_output=True, text=True, cwd=ROOT, timeout=60)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def _rule(tmp_path, name: str = "counted", counted: bool = True) -> dict:
+    """The ASC view's payload on the made-up store (_store), in a folder of its own; counted=False: on a copy of the
+    figures built before the provider tables kept the ASC's cases (no provider_payers.asc_cases)."""
+    folder = tmp_path / name
+    folder.mkdir(exist_ok=True)
+    c = sqlite3.connect(_store(folder))
+    try:
+        if not counted:
+            c.execute("ALTER TABLE provider_payers DROP COLUMN asc_cases")
+            c.commit()
+        return calculator.asc_rule(c, 6, "2026-01", "2026-06")
+    finally:
+        c.close()
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_cases_not_counted_are_not_read_as_no_case(tmp_path):
+    d = _rule(tmp_path, "old", counted=False)
+    assert d["cases"] == {"from": None, "mohs": [], "excision": []}
+    counted = _rule(tmp_path)
+    lines = dict(counted, cases=dict(counted["cases"], **{"from": "lines"}))
+    assert _node("process.stdout.write(JSON.stringify(DATA.map(AM.counted)))", [d, counted, lines, {}]) == [False, True, True, False]
+
+
+def test_kind_ratios_fall_back_to_the_service_families_and_take_the_newest_full_year():
+    """What a kind of payer pays the surgeons against Medicare: on the cases' own codes where they have 20 lines or more,
+    else on every code of the same service families; in the newest year with 100 rates or more, else the newest."""
+    c = sqlite3.connect(":memory:")
+    c.execute("CREATE TABLE payer_rates (payer_group TEXT, payer_kind TEXT, year TEXT, code TEXT, tier TEXT, mode_cents INTEGER, "
+              "medicare_cents INTEGER, n INTEGER)")
+    rows = [("Plan C", "commercial", "2025", "14040", "physician", 150, 100, 5), ("Plan C", "commercial", "2025", "17311", "physician", 120, 100, 5),
+            ("Plan C", "commercial", "2025", "13132", "physician", 110, 100, 40),       # a repair, as 14040 is
+            ("Plan C", "commercial", "2025", "17312", "physician", 130, 100, 10),       # a Mohs code, as 17311 is
+            ("Plan C", "commercial", "2025", "99213", "physician", 200, 100, 50),       # a visit: another family, never counted
+            ("State plan", "medicaid", "2025", "14040", "physician", 70, 100, 25),
+            ("Plan C", "commercial", "2026", "14040", "physician", 300, 100, 30)]       # a newer year, but only a few rates
+    rows += [("Filler", "commercial", "2025", f"9{i:04d}", "nonphysician", 100, 100, 1) for i in range(100)]
+    c.executemany("INSERT INTO payer_rates VALUES (?,?,?,?,?,?,?,?)", rows)
+    got = calculator._kind_ratios(c, {"14040", "17311"})
+    assert got == {"commercial": {"ratio": round(7050 / 6000, 4), "lines": 60, "year": "2025", "basis": "families"},
+                   "medicaid": {"ratio": 0.7, "lines": 25, "year": "2025", "basis": "codes"}}
+    c.execute("DELETE FROM payer_rates WHERE payer_group = 'Filler'")                # no year with 100 rates: the newest
+    assert calculator._kind_ratios(c, {"14040", "17311"}) == {"commercial": {"ratio": 3.0, "lines": 30, "year": "2026", "basis": "codes"}}
+    c.close()
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_medicare_advantage_surgeon_fees_follow_the_calculators_ticks(tmp_path):
+    """A Medicare Advantage plan unticked on the Calculator ('moves with Medicare in 2027') keeps its 2026 surgeon fees,
+    by its share of the Medicare Advantage money; the ticks are read from the Calculator's plan."""
+    shares = _node("""process.stdout.write(JSON.stringify([
+        AM.maFollowing(DATA.payers, {}), AM.maFollowing(DATA.payers, {'MA Two': false}), AM.maFollowing(DATA.payers, {'MA One': false, 'MA Two': false}),
+        AM.maFollowing(DATA.even, {}), AM.maFollowing(DATA.even, {'MA Four': true}), AM.maFollowing({'Plan C': DATA.payers['Plan C']}, {}),
+        AM.maFollowing(null, null)]))""",
+                   {"payers": {"MA One": {"kind": "medicare_advantage", "share": 0.3, "indexed": True},
+                               "MA Two": {"kind": "medicare_advantage", "share": 0.1, "indexed": True},
+                               "Plan C": {"kind": "commercial", "share": 0.6, "indexed": False}},
+                    "even": {"MA Three": {"kind": "medicare_advantage", "indexed": True}, "MA Four": {"kind": "medicare_advantage", "indexed": False}}})
+    assert shares == [1, pytest.approx(0.75), 0, 0.5, 1, None, None]
+    c = sqlite3.connect(_store(tmp_path))
+    try:
+        d = calculator.asc_rule(c, 6, "2026-01", "2026-06")
+    finally:
+        c.close()
+    d["cases"]["mohs"].append(["14040 17311", "asc", "medicare_advantage", "IN", 2, 0])
+    moves, held, part, med = [o["kinds"] for o in _node_eval(d, [None, {"kinds": {"medicare_advantage": {"pro_follows": 0}}},
+                                                                 {"kinds": {"medicare_advantage": {"pro_follows": 0.25}}},
+                                                                 {"kinds": {"medicare": {"pro_follows": 0}}}])["out"]]
+    P = lambda k: k["medicare_advantage"]["pro"]
+    assert P(moves)["2027"] != pytest.approx(P(moves)["2026"])                 # Medicare's 2027 schedule moves them
+    assert P(held)["2027"] == pytest.approx(P(moves)["2026"]) and P(held)["2026"] == pytest.approx(P(moves)["2026"])
+    assert P(part)["2027"] == pytest.approx(0.25 * P(moves)["2027"] + 0.75 * P(moves)["2026"])
+    # Medicare's own always moves with its schedule; the ASC's facility fees are another contract, untouched
+    assert med["medicare"]["pro"] == moves["medicare"]["pro"] and held["medicare_advantage"]["fee"] == moves["medicare_advantage"]["fee"]
+
+
+def _codes(n: int) -> list[str]:
+    """n real codes of five digits from the tables (sorted), none of them a Mohs code."""
+    t = ascrates.tables()
+    out = [c for c in t.codes if c.isdigit() and len(c) == 5 and not c.startswith("1731")][:n]
+    assert len(out) == n
+    return out
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_a_long_search_is_cut_at_whole_codes():
+    """67 five-digit codes are 401 characters: cut at 400 the old way, the last became the start of a code and brought in
+    codes nobody asked for. Now the search ends at the last whole code and says how many were left out."""
+    codes = _codes(250)
+    q67 = " ".join(codes[:67])
+    assert len(q67) == 401 and q67[:400].split()[-1] == codes[66][:4]
+    fits = _node("""process.stdout.write(JSON.stringify([AM.fitQuery(DATA.q, 400, 200), AM.fitQuery(DATA.q, 2400, 200),
+        AM.fitQuery(DATA.many, 2400, 200), AM.fitQuery('14040,14041  ,, 11600-11646', 400, 200), AM.fitQuery('', 400, 200),
+        AM.fitQuery(DATA.long + ' 14040', 400, 200), AM.fitQuery(null, 400, 200)]))""", {"q": q67, "many": " ".join(codes), "long": "9" * 500})
+    narrow, wide, many, seps, empty, long, none = fits
+    assert narrow == {"q": " ".join(codes[:66]), "left": 1} and wide == {"q": q67, "left": 0}
+    assert many == {"q": " ".join(codes[:200]), "left": 50}
+    assert seps == {"q": "14040 14041 11600-11646", "left": 0} and empty == none == {"q": "", "left": 0}
+    assert long == {"q": "9" * 400, "left": 1}                    # a first word too long to be a code finds nothing, not everything
+    # what the lookup then answers: exactly the whole codes sent
+    assert [r["code"] for r in ascrates.lookup(narrow["q"], limit=500)["rows"]] == codes[:66]
+    assert ascrates.lookup(long["q"])["total"] == 0
+
+
+PAGE = r"""
+const vm = require('vm');
+const calls = [];
+const el = () => { const kids = {}; return { innerHTML: '', value: '', isConnected: true, style: {}, dataset: {},
+  querySelector(s) { return kids[s] || (kids[s] = el()); }, querySelectorAll() { return []; }, scrollIntoView() {}, addEventListener() {} }; };
+// the server, stubbed: the ASC view's payload, the picker, and the rate lookup taking at most DATA.limit characters
+const api = async p => {
+  const u = new URL(p, 'http://page'), q = u.searchParams.get('q') || '';
+  calls.push([u.pathname, q]);
+  if (u.pathname === '/api/activity/asc_rule') return Object.assign({ ready: true }, DATA.payload);      // as api._activity adds
+  if (u.pathname === '/api/activity/asc_places') return { states: [['IN', 'INDIANA']], counties: { IN: [['WARRICK', '00000']] },
+    home: { state: 'IN', county: 'WARRICK' }, pi: {}, rule_year: '2027', prior_year: '2026' };
+  if (q.length > DATA.limit) { const e = new Error('String should have at most ' + DATA.limit + ' characters'); e.status = 422; throw e; }
+  return { rows: [], total: q.split(' ').filter(Boolean).length, offset: 0, place: null, rule_year: '2027', prior_year: '2026', source: 'CMS' };
+};
+const ctx = { console, URL, AscModel: AM, api, esc: s => String(s == null ? '' : s), money: c => String(c), money2: c => String(c),
+  qs: o => Object.entries(o).filter(([k, v]) => v !== '' && v != null).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&'),
+  document: { getElementById: () => null, createElement: () => ({}), head: { appendChild() {} } },
+  requestAnimationFrame: f => f(), cancelAnimationFrame() {},
+  state: { tab: 'calculator', calc: { months: 6, view: 'asc', data: { payers: DATA.payers }, x: { indexed: DATA.indexed } } } };
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(DATA.page, 'utf8'), ctx);
+const v = el();
+ctx.ascDraw(v).then(() => process.stdout.write(JSON.stringify({ body: v.querySelector('#calcBody').innerHTML,
+  out: v.querySelector('#ascLookOut').innerHTML, calls, ma: ctx.state.calc.asc.s.kinds.medicare_advantage.pro_follows })));
+"""
+MA_PLANS = {"MA One": {"kind": "medicare_advantage", "share": 0.3, "indexed": True}, "MA Two": {"kind": "medicare_advantage", "share": 0.1, "indexed": True}}
+
+
+def _page(payload: dict, limit: int, indexed: dict | None = None) -> dict:
+    return _node(PAGE, {"page": os.path.join(STATIC, "asc.js"), "payload": payload, "limit": limit, "payers": MA_PLANS, "indexed": indexed or {}})
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_page_says_when_the_cases_are_not_counted(tmp_path):
+    p = _page(_rule(tmp_path, "old", counted=False), 400)
+    assert "not in these figures yet" in p["body"] and "Sync and analyse now" in p["body"]
+    # no tiles of $0, no table of cases or codes that would read as no case at the ASC; the rate calculator still answers
+    assert 'id="ascTiles"' not in p["body"] and 'id="ascKinds"' not in p["body"] and 'id="ascCodes"' not in p["body"]
+    assert [c[0] for c in p["calls"]] == ["/api/activity/asc_rule", "/api/activity/asc_places", "/api/activity/asc_rates"]
+    p = _page(_rule(tmp_path), 400, {"MA Two": False})
+    assert 'id="ascTiles"' in p["body"] and "not in these figures yet" not in p["body"]
+    # the Calculator's ticks on the Medicare Advantage plans, read at the visit
+    assert p["ma"] == pytest.approx(0.75) and "25% of its Medicare Advantage money at plans unticked" in p["body"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_page_sends_whole_codes_and_falls_back_to_the_shorter_search(tmp_path):
+    """The rate calculator starts from the codes of the window's cases: 67 of them make 401 characters (as 12 months did
+    on the archive copy)."""
+    d = _rule(tmp_path)
+    own = sorted(k for k in d["codes"] if not k.startswith("1731"))
+    want = sorted(own + [k for k in _codes(120) if k not in own][:67 - len(own)])
+    d["codes"] = {**{k: d["codes"].get(k, {}) for k in want}, **{k: v for k, v in d["codes"].items() if k.startswith("1731")}}
+    assert len(want) == 67 and len(" ".join(want)) == 401
+    # a route that takes 400 characters: the whole search answers 422, then the 66 whole codes that fit are sent
+    p = _page(d, 400)
+    sent = [q for path, q in p["calls"] if path == "/api/activity/asc_rates"]
+    assert sent == [" ".join(want), " ".join(want[:66])]
+    assert "the last code in it was left out" in p["out"] and "66 codes" in p["out"]
+    # a route that takes the longer search: one request, nothing left out
+    p = _page(d, 2400)
+    assert [q for path, q in p["calls"] if path == "/api/activity/asc_rates"] == [" ".join(want)] and "left out" not in p["out"]
+
+
 # --------------------------------------------------------------------------- the routes
 PW, OWNER = "correct-horse-battery-7", "owner-staple-orbit-42"
 
 
-def test_the_routes_are_the_owners(tmp_path, monkeypatch):
+def _client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from remitwatch import api
@@ -657,8 +833,26 @@ def test_the_routes_are_the_owners(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "PASSWORD", PW)
     monkeypatch.setattr(api, "USERNAME", "oda")
     monkeypatch.setattr(api, "OWNER_PASSWORD", OWNER)
-    tc = TestClient(api.app)
-    auth = ("oda", PW)
+    return TestClient(api.app), ("oda", PW)
+
+
+def test_the_page_search_fits_the_route(tmp_path, monkeypatch):
+    """static/asc.js sends whole codes: at most ASC_Q_CODES of them (as many as ascrates._match reads) in ASC_Q_WIDE
+    characters, or in ASC_Q_MAX after a 422. The route takes one of the two lengths and answers 422 past it."""
+    src = open(os.path.join(STATIC, "asc.js"), encoding="utf-8").read()
+    codes, wide, narrow = map(int, re.search(r"const ASC_Q_CODES = (\d+), ASC_Q_WIDE = (\d+), ASC_Q_MAX = (\d+);", src).groups())
+    assert "e.status !== 422" in src and narrow < wide
+    assert ascrates._match(" ".join(["14040"] * codes + ["14041"])) == ["14040"]
+    tc, auth = _client(tmp_path, monkeypatch)
+    status = lambda n: tc.get("/api/activity/asc_rates", params={"q": "1" * n}, auth=auth, headers={"X-Owner-Password": OWNER}).status_code
+    if status(narrow + 1) == 422:
+        assert status(narrow) == 200                     # the route as it stands: the page falls back to the shorter search
+    else:
+        assert status(wide) == 200 and status(wide + 1) == 422
+
+
+def test_the_routes_are_the_owners(tmp_path, monkeypatch):
+    tc, auth = _client(tmp_path, monkeypatch)
     for url in ("/api/activity/asc_rule", "/api/activity/asc_rates?q=14040", "/api/activity/asc_places"):
         assert tc.get(url, auth=auth).status_code == 403, url
         assert tc.get(url).status_code == 401, url
