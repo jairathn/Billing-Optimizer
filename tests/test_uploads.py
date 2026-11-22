@@ -1058,7 +1058,8 @@ def test_a_report_queued_before_the_page_refused_it_says_once_why_it_is_not_read
     assert uploads.ingest_queued(store, log=lambda *a: None)["uploads"] == 1
     [item] = uploads.history(store.conn)
     assert item["status"] == "failed" and len(item["lines"]) == 1, item["lines"]
-    assert item["lines"][0].startswith("Not read: it is none of the three EMA exports") and "Not read: Not read" not in item["lines"][0]
+    # the loader's own words (remitwatch.dropbox_sync), whatever they are, once
+    assert item["lines"][0].startswith("Not read: it is none of the") and "Not read: Not read" not in item["lines"][0]
     assert "Claim & Claim Status export" not in item["lines"][0] and p.exists()
     # any other failure keeps its own line under what the file held
     lines = uploads.describe({"kind": "ema", "report": "Claim & Claim Status", "rows": 3, "format": "csv", "error": "The kept file is gone."}, "failed")

@@ -637,7 +637,7 @@ def _finish(conn: sqlite3.Connection, up: dict, errors: dict) -> None:
     status = "done"
     if not path or not os.path.exists(path):
         status, summary["error"] = "failed", "The kept file is gone from the upload folder."
-    elif f is None:
+    elif f is None or f[3] == "not_read":     # the loader left it unread (and says why), or never got to it
         status = "failed"
         prob = conn.execute("SELECT message FROM problems WHERE source=? ORDER BY id DESC LIMIT 1", (path,)).fetchone()
         summary["error"] = errors.get(os.path.basename(path)) or (prob[0] if prob else "The loader did not read it.")

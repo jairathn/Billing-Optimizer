@@ -213,7 +213,9 @@ PAYER_RULES: list[tuple[str, str, str]] = [
     (r"^AETNA", "Aetna", "commercial"),
     (r"CIGNA.*(MEDICARE|SUPPLEMENT)", "Cigna Medicare Supplement", "supplement"),
     (r"^CIGNA", "Cigna", "commercial"),
-    (r"WELLCARE|AMBETTER", "WellCare / Ambetter (Centene)", "medicare_advantage"),
+    # Ambetter is Centene's marketplace (individual) plan, never Medicare Advantage or Medicaid whatever CLP06 says
+    (r"AMBETTER", "Ambetter (Centene)", "commercial"),
+    (r"WELLCARE", "WellCare / Ambetter (Centene)", "medicare_advantage"),
     (r"TRICARE", "Tricare", "tricare"),
     (r"UMWA", "UMWA Health & Retirement Funds", "commercial"),
     (r"MUTUAL OF OMAHA|MEDICO|GREAT AMERICAN LIFE|AMERICAN ENTERPRISE|BANKERS FIDELITY|WELLABE|PHYSICIANS MUTUAL|"
@@ -485,10 +487,15 @@ LEGAL = {
 MEDICARE_SAME_DAY_EM = {"effective": "2027-01-01", "pct": 0.80, "confirmed": True}
 
 
+FIXED_KIND_GROUPS = frozenset({"Ambetter (Centene)"})
+
+
 def payer_group_kind(name: str | None, cfi: str | None) -> tuple[str, str]:
     """Payer group and kind for a claim: the payer name rules refined by the claim filing indicator (CLP06).
     Medicare Advantage and Medicaid products that share a commercial payer's name get their own group."""
     grp, kind = normalize_payer(name)
+    if grp in FIXED_KIND_GROUPS:
+        return grp, kind            # a plan whose kind its claim filing indicator misreports
     refined = payer_kind_from_cfi(cfi, kind)
     if refined == "medicare" and kind in ("supplement", "commercial", "medicare_advantage", "medicaid"):
         refined = kind          # supplement and commercial carriers sometimes label their claims MB; they are not Medicare itself

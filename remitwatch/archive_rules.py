@@ -68,6 +68,11 @@ REVERSAL_STATUS = "22"
 COST_SHARE_CARCS = frozenset({"1", "2", "3"})           # the patient's deductible, coinsurance and copay: never a denial
 # reasons that only restate a payer's pricing or a prior payer's part (as detect.IGNORE_CARCS): not a denial
 PRICING_CARCS = frozenset({"45", "253", "144", "23", "94", "187", "59", "131", "237", "A2", "P1", "W1", "3", "2", "1"})
+# a restatement piece (a payer repeating part of an earlier answer as its own line) carries one of these and nothing else
+RESTATE_REASONS = PRICING_CARCS | {"B13"}
+# modifiers that make a second line of one code another unit (another site, a repeat procedure), not the same line again
+DISTINCT_MODS = frozenset({"59", "XS", "XE", "XU", "XP", "76", "77", "91", "RT", "LT", "50", "E1", "E2", "E3", "E4", "FA", "F1",
+                           "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "TA", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"})
 TOP_UP_SHARE = 0.95             # a short payment topped up to this share of its shortfall is paid
 SPLIT_SHARE = 0.95              # the halves of a split line allowed this share of the expected amount together: paid
 MIN_DRUG_LINES = 3              # paid lines of the payer's own a drug's expected amount needs
@@ -156,6 +161,29 @@ class Ans:
     @property
     def billed_units(self) -> float:
         return abs(self.orig_units or self.units or 1) or 1
+
+    @property
+    def billed_code(self) -> str | None:
+        """The code the practice billed (the payer may answer under another one)."""
+        return self.orig or self.code
+
+    def sig(self) -> frozenset:
+        """The modifiers that make this line another unit of its code (another site, a repeat procedure)."""
+        return frozenset(m for m in (self.mods or ()) if m in DISTINCT_MODS)
+
+    def piece(self) -> bool:
+        """A restatement piece: a line a payer sends to repeat one amount of an earlier answer (the amount paid before as
+        B13, the patient's share, the contractual cut), unpaid, with no line control number, one reason taking its charge."""
+        if self.lcn or (self.paid or 0) or self.status == REVERSAL_STATUS:
+            return False
+        amts = [(g, r, c) for g, r, c in (self.adj or []) if c]
+        return len(amts) == 1 and amts[0][1] in RESTATE_REASONS and abs(amts[0][2] - (self.charge or 0)) <= 1
+
+    def restated_cents(self) -> int:
+        """What a B13 restatement piece says the payer paid before on its line (0 for any other line)."""
+        if not self.piece():
+            return 0
+        return sum(c for _g, r, c in self.adj if r == "B13")
 
     def pr_cents(self, codes: Iterable[str] | None = None) -> int:
         want = set(codes) if codes else None
@@ -388,19 +416,51 @@ def _units_paid(events: Sequence[Ans]) -> float:
     return sum(e.unit_count for e in (prim or events))
 
 
+def _claim_lines(a: Ans) -> list[Ans]:
+    """The lines of the item's claim that bill its code on its date: every billed line, the item's own included, and a B13
+    restatement piece for the line it restates; the payer's other restatement pieces (its patient-share and contractual
+    pieces) are parts of that same line and are left out."""
+    return [x for x in a.claim.lines if x.billed_code == a.billed_code and x.dos == a.dos and (not x.piece() or x.restated_cents())]
+
+
 def _units_billed(a: Ans) -> float:
     """Units the item's claim billed for its code and date, over every line of it (detect.units_billed's rule), except
-    that lines sharing a line control number are one billed line the payer split into pieces: counted once."""
+    that lines sharing a line control number are one billed line the payer split into pieces (counted once), and a
+    payer's restatement pieces count as the one line they restate."""
     split: dict[str, float] = {}
     n = 0.0
-    for x in a.claim.lines:
-        if x.code != a.code or x.dos != a.dos:
-            continue
+    for x in _claim_lines(a):
         if x.lcn:
             split[x.lcn] = max(split.get(x.lcn, 0), x.billed_units)
         else:
             n += x.billed_units
     return (n + sum(split.values())) or 1
+
+
+def _attribute(a: Ans, x: Ans, lines: Sequence[Ans]) -> str:
+    """Which of the item's claim's billed lines an answer x is about: 'own' (the item's line), 'other' (another line of
+    the claim) or '' (it cannot be told). By line control number first; then, where the claim bills the code once on the
+    date, it is the item's line; then by the modifiers that make a line another unit (59, XS, 76, RT, ...), when exactly
+    one line of the claim has them."""
+    if a.lcn and x.lcn:
+        if x.lcn == a.lcn:
+            return "own"
+        if any(l.lcn == x.lcn for l in lines if l.line_key != a.line_key):
+            return "other"
+    if len(lines) <= 1:
+        return "own"
+    same = [l for l in lines if l.sig() == x.sig()]
+    if len(same) == 1:
+        return "own" if same[0].line_key == a.line_key else "other"
+    return ""
+
+
+def _line_identity(a: Ans) -> str:
+    """Which billed line of its service an answer is, for telling repeats of one line from other units: '*' when its
+    claim bills the code once on the date, else its line control number, else its unit-making modifiers."""
+    if len(_claim_lines(a)) <= 1:
+        return "*"
+    return ("L:" + a.lcn) if a.lcn else ("S:" + ",".join(sorted(a.sig())))
 
 
 def _per_unit(paid: Sequence[Ans], fallback: float | None) -> float | None:
@@ -521,28 +581,44 @@ def _before(x: Ans, a: Ans) -> bool:
 
 
 # ------------------------------------------------------------------------------------- 1. the same payer paid before
+def _restates(x: Ans, pays: Sequence[Ans]) -> Ans | None:
+    """The earlier standing payment a B13 restatement piece repeats (its amount within $1 or 3%), if the archive has it."""
+    amt = x.restated_cents()
+    if not amt:
+        return None
+    return next((p for p in pays if abs((p.paid or 0) - amt) <= max(100, 0.03 * (p.paid or 0))), None)
+
+
 def same_payer_paid_before(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
                            standing: Mapping[str, int] | None = None) -> list[dict]:
-    """A denial, or a short payment, on a service the same payer had already paid (a payment that still stands, dated
-    before the item's remittance): a repeat submission denied again, a duplicate's denial, a replacement claim denied while
-    the original's payment stands (practice-manager case C10). Reclassified with the earlier payment as proof, never
-    closed: the practice contests about one in six of these (a second-level review, a takeback to come). Every billed unit
-    paid before: nothing is owed unless the payer takes the payment back (state 'done'). Fewer units: sized at the units
-    left, at the payer's own rate per unit. A payment by the same payer as secondary only is 'likely'."""
+    """A denial, or a short payment, on a line the same payer had already paid (a payment that still stands, dated before
+    the item's remittance): a repeat submission denied again, a duplicate's denial, a replacement claim denied while the
+    original's payment stands (practice-manager case C10). Reclassified with the earlier payment as proof, never closed:
+    the practice contests about one in six of these (a second-level review, a takeback to come).
+    The payment must be the item's own line's: the same line control number; or the claim billed the code once that day;
+    or the unit-making modifiers (59, XS, 76, RT, ...) point to it; or, where nothing tells the lines apart, the payer's
+    earlier payments cover every unit the claim billed. A payment on another line of the claim is a units question (rule
+    3). The payer's own B13 restatement (it repeats a payment as 'previously paid', C07) counts as its word that the line
+    was paid: 'proven' when the restated payment is in the archive, 'likely' when it is not. The line paid in full before:
+    nothing is owed unless the payer takes the payment back (state 'done'); fewer units than billed: sized at the units
+    left, at the payer's own rate per unit."""
     items = list(items)
     arch = archive or load_archive(conn, items, standing=standing)
     out = []
     for f, a in _line_items(items, arch):
-        before = [x for x in arch.answers_for(f) if x.line_key != a.line_key and x.standing > 0 and _before(x, a) and _same_payer(x, a)]
-        if not before:
+        ans = arch.answers_for(f)
+        same = [x for x in ans if x.line_key != a.line_key and _same_payer(x, a)]
+        before = [x for x in same if x.standing > 0 and _before(x, a)]
+        restating = [x for x in same if x.restated_cents()]
+        if not before and not restating and not a.restated_cents():
             continue
-        prim = [x for x in before if x.status in PRIMARY_STATUSES]
-        strength = "proven" if prim else "likely"
-        first = before[0]
-        proof = [_proof(x, "payment", True) for x in before] + [_proof(a, _kind(a), False)]
-        who = first.payer_name or "The payer"
+        who = (before[0] if before else restating[0] if restating else a).payer_name or "The payer"
         if (f.get("paid_cents") or 0) > 0:
+            if not before:
+                continue
             # a short payment after an earlier one that stands: two payments of one service by one payer
+            first = before[0]
+            proof = [_proof(x, "payment", True) for x in before] + [_proof(a, "payment", False)]
             total = sum(x.standing for x in before) + (a.standing or 0)
             best_allowed = max([x.allowed or 0 for x in before] + [a.allowed or 0])
             expected = f.get("expected_cents") or 0
@@ -553,23 +629,60 @@ def same_payer_paid_before(conn: sqlite3.Connection, items: Iterable[Mapping], *
             if over > 100:
                 hint += f" Together they exceed what the payer allows by {_usd(over)}: a possible overpayment to settle with the payer."
             out.append(_reclass(R_PAID_BEFORE, f, "paid_before", "Already paid by this payer", hint, left,
-                                "work_now" if over > 100 or left > 0 else "done", proof, strength,
+                                "work_now" if over > 100 or left > 0 else "done", proof, "proven" if any(x.status in PRIMARY_STATUSES for x in before) else "likely",
                                 possible_overpayment_cents=max(over, 0) if over > 100 else 0))
             continue
+        lines = _claim_lines(a)
         need = _units_billed(a)
-        got = _units_paid(before)
-        if got >= need:
-            hint = (f"Already paid by {who} on {first.paid_on} ({_usd(sum(x.standing for x in before))}); this is a later denial of "
-                    f"the same service. Nothing is owed unless the payer takes that payment back.")
-            out.append(_reclass(R_PAID_BEFORE, f, "paid_before", "Already paid by this payer, denied again", hint, 0, "done", proof, strength,
-                                units_billed=need, units_paid=got))
-        else:
-            per = _per_unit(prim or before, (f.get("expected_cents") or 0) / max(a.billed_units, 1) or None)
-            size = _cap(per * min(a.billed_units, need - got), f) if per else f.get("shortfall_cents")
-            hint = (f"{who} paid {got:g} of {_units_text(need)} of this service on {first.paid_on}; this denial is of the rest"
-                    + (f", worth about {_usd(size)} at the payer's own rate per unit." if per else "."))
-            out.append(_reclass(R_PAID_BEFORE, f, "paid_before_part", "Partly paid by this payer before", hint, size, "work_now", proof,
-                                strength, units_billed=need, units_paid=got))
+        # the item is the payer's own restatement of an earlier payment (a B13 piece)
+        if a.restated_cents():
+            match = _restates(a, [x for x in same if x.standing > 0 and not _after(x, a)])
+            proof = ([_proof(match, "payment", True)] if match else []) + [_proof(a, "denial", True, f"{who} restated {_usd(a.restated_cents())} "
+                                                                           f"as paid before (B13) on {a.paid_on}")]
+            hint = (f"{who} says it already paid this line {_usd(a.restated_cents())} (B13, previously paid)"
+                    + (f": its payment of {match.paid_on} is on file. " if match else ": that payment's remittance is not on file. ")
+                    + "This is a restatement, not a denial. Nothing is owed unless the payer takes the payment back.")
+            out.append(_reclass(R_PAID_BEFORE, f, "paid_before", "Already paid by this payer (restated)", hint, 0, "done", proof,
+                                "proven" if match else "likely"))
+            continue
+        own = [x for x in before if _attribute(a, x, lines) == "own"]
+        own_restated = [x for x in restating if _attribute(a, x, lines) == "own"]
+        unknown = [x for x in before if _attribute(a, x, lines) == ""]
+        if own:
+            got = _units_paid(own)
+            prim = [x for x in own if x.status in PRIMARY_STATUSES]
+            strength = "proven" if prim else "likely"
+            proof = [_proof(x, "payment", True) for x in own] + [_proof(a, _kind(a), False)]
+            if got >= a.billed_units:
+                hint = (f"Already paid by {who} on {own[0].paid_on} ({_usd(sum(x.standing for x in own))}); this is a later denial of the "
+                        f"same line. Nothing is owed unless the payer takes that payment back.")
+                out.append(_reclass(R_PAID_BEFORE, f, "paid_before", "Already paid by this payer, denied again", hint, 0, "done", proof,
+                                    strength, units_billed=a.billed_units, units_paid=got))
+            else:
+                per = _per_unit(prim or own, (f.get("expected_cents") or 0) / max(a.billed_units, 1) or None)
+                size = _cap(per * (a.billed_units - got), f) if per else f.get("shortfall_cents")
+                hint = (f"{who} paid {got:g} of the {_units_text(a.billed_units)} this line billed, on {own[0].paid_on}; this denial is of "
+                        f"the rest" + (f", worth about {_usd(size)} at the payer's own rate per unit." if per else "."))
+                out.append(_reclass(R_PAID_BEFORE, f, "paid_before_part", "Partly paid by this payer before", hint, size, "work_now", proof,
+                                    strength, units_billed=a.billed_units, units_paid=got))
+        elif own_restated:
+            pays = [x for x in same if x.standing > 0]
+            match = next((m for m in (_restates(x, pays) for x in own_restated) if m), None)
+            r = own_restated[0]
+            proof = ([_proof(match, "payment", True)] if match else []) + [_proof(r, "denial", True, f"{who} restated {_usd(r.restated_cents())} "
+                                                                           f"on this line as paid before (B13) on {r.paid_on}")] + [_proof(a, _kind(a), False)]
+            hint = (f"{who} says it already paid this line {_usd(r.restated_cents())} (B13 on {r.paid_on})"
+                    + (f"; its payment of {match.paid_on} is on file." if match else "; that payment's remittance is not on file.")
+                    + " Nothing is owed unless the payer takes the payment back.")
+            out.append(_reclass(R_PAID_BEFORE, f, "paid_before", "Already paid by this payer (restated)", hint, 0, "done", proof,
+                                "proven" if match else "likely"))
+        elif unknown and _units_paid(unknown) >= need:
+            prim = [x for x in unknown if x.status in PRIMARY_STATUSES]
+            proof = [_proof(x, "payment", True) for x in unknown] + [_proof(a, _kind(a), False)]
+            hint = (f"Already paid by {who} on {unknown[0].paid_on} ({_usd(sum(x.standing for x in unknown))}), every unit the claim billed; "
+                    "this is a later denial of the same service. Nothing is owed unless the payer takes that payment back.")
+            out.append(_reclass(R_PAID_BEFORE, f, "paid_before", "Already paid by this payer, denied again", hint, 0, "done", proof,
+                                "proven" if prim else "likely", units_billed=need, units_paid=_units_paid(unknown)))
     return out
 
 
@@ -578,30 +691,37 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
                            standing: Mapping[str, int] | None = None) -> list[dict]:
     """A payer's denial of a service another payer had already paid as primary (a payment that still stands, before the
     denial or the same day on another remittance): a second payer's answer after the primary paid, or a plan that is not
-    the patient's denying after the primary and the Medigap paid (practice-manager case C09). Not a recoverable denial:
-    the item says who paid, and is sized at what the primary left to the patient that no other payer has paid since
-    (nothing: 'done'). A payment another payer made only as secondary says nothing here: a crossover secondary pays on the
-    primary's answer, and when the primary has since reversed its payment and denied the line (Medicare's takebacks) the
-    denial is real."""
+    the patient's denying after the primary and the Medigap paid (practice-manager case C09). Not a denial of the service:
+    the item says who paid, and is sized at what the primary left to the patient that no secondary has paid or assigned to
+    the patient since (any payer's secondary answer counts, the denying payer's own included). Nothing left: 'done'.
+    Something left: that is all the denial is about (a Medicaid crossover denied for enrollment, a Medigap's denial), and
+    the item stays to work at that size. A payment another payer made only as secondary says nothing here: a crossover
+    secondary pays on the primary's answer, and when the primary has since reversed its payment and denied the line
+    (Medicare's takebacks) the denial is real."""
     items = list(items)
     arch = archive or load_archive(conn, items, standing=standing)
     out = []
     for f, a in _line_items(items, arch, zero_paid=True):
         ans = arch.answers_for(f)
-        others = [x for x in ans if x.line_key != a.line_key and x.standing > 0 and not _same_payer(x, a)]
-        prim = [x for x in others if x.status in PRIMARY_STATUSES
+        prim = [x for x in ans if x.line_key != a.line_key and x.standing > 0 and not _same_payer(x, a) and x.status in PRIMARY_STATUSES
                 and (_before(x, a) or ((x.paid_on or "") == (a.paid_on or "") and x.trace != a.trace))]
         if not prim:
             continue
         p = prim[0]
         share_left = sum(x.pr_cents(COST_SHARE_CARCS) for x in prim)
-        sec = [x for x in others if x.status in SECONDARY_STATUSES]
-        left = max(0, share_left - sum(x.standing for x in sec))
-        proof = [_proof(x, "payment", True) for x in prim] + [_proof(x, "payment", False) for x in sec] + [_proof(a, _kind(a), False)]
+        sec = [x for x in ans if x.line_key != a.line_key and x.status in SECONDARY_STATUSES and (x.standing > 0 or x.pr_cents(COST_SHARE_CARCS))]
+        settled = sum(x.standing for x in sec) + sum(x.pr_cents(COST_SHARE_CARCS) for x in sec)
+        left = max(0, share_left - settled)
+        proof = [_proof(x, "payment", True) for x in prim] + [_proof(x, _kind(x), False) for x in sec] + [_proof(a, _kind(a), False)]
+        paid_sec = [x for x in sec if x.standing > 0]
+        who = a.payer_name or "the payer"
         hint = (f"Paid by {p.payer_name} as primary on {p.paid_on} ({_usd(sum(x.standing for x in prim))})"
-                + (f", and by {sec[0].payer_name} as secondary ({_usd(sum(x.standing for x in sec))})" if sec else "")
-                + f": this denial by {a.payer_name or 'the payer'} is another payer's answer, not a denial to appeal."
-                + (f" {_usd(left)} of the patient's share is not paid by any secondary yet." if left else " Nothing is left to collect from a payer."))
+                + (f", and by {paid_sec[0].payer_name} as secondary ({_usd(sum(x.standing for x in paid_sec))})" if paid_sec else ""))
+        if left:
+            hint += (f": this denial by {who} is about the patient's share the primary left, {_usd(left)}, not the whole service. "
+                     "Fix what it asks and send it as a secondary claim, or bill the patient where the plan allows it (never a Medicaid member).")
+        else:
+            hint += f": this denial by {who} is another payer's answer, not a denial to appeal. Nothing is left to collect from a payer."
         out.append(_reclass(R_OTHER_PAYER, f, "other_payer_paid", "Paid by another payer first", hint, left,
                             "work_now" if left else "done", proof, "proven", paid_by=p.payer_name, patient_share_left_cents=left))
     return out
@@ -610,21 +730,29 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
 # ---------------------------------------------------------------------------------------------------------- 3. units
 def units_split(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: Archive | None = None,
                 standing: Mapping[str, int] | None = None) -> list[dict]:
-    """A denial or a short payment that is a units split across lines of one code (pay per unit against billed units):
-    - zero-paid, and another line of the same code and date on the same claim was paid for every unit the claim billed:
-      the units were paid on that line (closed with it as proof, not counted as a recovery);
-    - zero-paid, and the payer's payments of the service still standing cover some of the units billed: the item is the
-      unit (or units) denied, sized at the payer's own rate per unit (not the full code);
-    - paid short, while another line of the same code and date on the same claim was paid more: measured over the lines
-      together (the payer spread its allowed amount over the units); together at the expected amount it is not short."""
+    """A denial or a short payment that is a units split across lines of one code (pay per unit against billed units).
+    The payer's payments of the service (any claim, any date) are tied to the claim's billed lines as rule 1 ties them
+    (line control number, the code billed once, the unit-making modifiers):
+    - zero-paid, and the item's own line was paid on or after its remittance (another line of the claim was the one
+      denied): closed with that payment as proof;
+    - zero-paid, and the payer paid other lines of the claim but not this one: the item is the unit (or units) denied,
+      sized at the payer's own rate per unit, never above its own expected amount;
+    - zero-paid, payments that cannot be tied to a line: by units, every unit paid with a paid line on the same claim
+      closes it, some units paid makes it the units left;
+    - paid short while another line of the code on the claim was paid: measured over the lines together (a line the payer
+      split into pieces sharing one line control number, or the payer spreading its allowed amount over the units); at
+      the expected amount together it is not short.
+    A line the payer itself restated as paid before (B13) is rule 1's."""
     items = list(items)
     arch = archive or load_archive(conn, items, standing=standing)
     out = []
     for f, a in _line_items(items, arch):
-        siblings = [x for x in a.claim.lines if x.line_key != a.line_key and x.code == a.code and x.dos == a.dos]
+        lines = _claim_lines(a)
+        siblings = [x for x in lines if x.line_key != a.line_key]
         need = _units_billed(a)
         if (f.get("paid_cents") or 0) > 0:
-            paid_sibs = [x for x in siblings if (x.paid or 0) > 0 and x.status in PAYMENT_STATUSES]
+            paid_sibs = [x for x in a.claim.lines if x.line_key != a.line_key and x.billed_code == a.billed_code and x.dos == a.dos
+                         and (x.paid or 0) > 0 and x.status in PAYMENT_STATUSES]
             exp = f.get("expected_cents") or 0
             if not paid_sibs or not exp:
                 continue
@@ -642,23 +770,52 @@ def units_split(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive: 
                 out.append(_close(R_UNITS, f, paid_sibs[0], 0, note, "units paid across lines of the same claim", proof, recovery=False))
             continue
         ans = arch.answers_for(f)
-        pays = [x for x in ans if x.standing > 0 and _same_payer(x, a)]
+        same = [x for x in ans if x.line_key != a.line_key and _same_payer(x, a)]
+        if any(x.restated_cents() and _attribute(a, x, lines) == "own" for x in same):
+            continue                    # the payer restated this line as paid before: rule 1
+        pays = [x for x in same if x.standing > 0]
         if not pays:
             continue
-        got = _units_paid(pays)
-        same_claim = [x for x in pays if x.claim_key == a.claim_key]
+        tag = {x.line_key: _attribute(a, x, lines) for x in pays}
+        own = [x for x in pays if tag[x.line_key] == "own"]
+        other = [x for x in pays if tag[x.line_key] == "other"]
+        unknown = [x for x in pays if tag[x.line_key] == ""]
         proof = [_proof(x, "payment", True) for x in pays] + [_proof(a, _kind(a), False)]
+        who = pays[0].payer_name or "the payer"
+        if own and _units_paid(own) >= a.billed_units:
+            later = [x for x in own if not _before(x, a)]
+            if not later:
+                continue                # paid before: rule 1
+            p = later[0]
+            note = (f"Paid on this line: {p.payer_name or 'the payer'} paid it {_usd(sum(x.standing for x in later))} on {p.paid_on}"
+                    + (f"; the unit it denied was another line of the claim." if siblings else "."))
+            out.append(_close(R_UNITS, f, p, sum(x.standing for x in later), note, "paid on the item's own line",
+                              proof, recovery=(p.paid_on or "") > (a.paid_on or "")))
+            continue
+        if other and not own:
+            got = _units_paid(other)
+            per = _per_unit([x for x in other if x.status in PRIMARY_STATUSES] or other,
+                            (f.get("expected_cents") or 0) / max(a.billed_units, 1) or None)
+            size = _cap(per * a.billed_units, f) if per else f.get("shortfall_cents")
+            hint = (f"{got:g} of {_units_text(need)} of {a.billed_code} paid by {who}, on the claim's other line"
+                    f"{'s' if len({x.lcn or x.line_key for x in other}) > 1 else ''}; this line is the one denied"
+                    + (f", worth about {_usd(size)} at the payer's own rate per unit." if per else "."))
+            out.append(_reclass(R_UNITS, f, "unit_denied", "Units: another line was paid", hint, size, "work_now", proof, "proven",
+                                units_billed=need, units_paid=got))
+            continue
+        got = _units_paid(own + other + unknown)
+        same_claim = [x for x in pays if x.claim_key == a.claim_key]
         if got >= need and same_claim:
             p = same_claim[0]
             note = (f"Paid on another line of the same claim: {p.payer_name or 'the payer'} paid {_units_text(_units_paid(same_claim))} of "
-                    f"{a.code} ({_usd(sum(x.standing for x in same_claim))}) on {p.paid_on}, every unit the claim billed.")
+                    f"{a.billed_code} ({_usd(sum(x.standing for x in same_claim))}) on {p.paid_on}, every unit the claim billed.")
             out.append(_close(R_UNITS, f, p, 0, note, "units paid on another line of the claim", proof, recovery=False))
         elif 0 < got < need:
             per = _per_unit([x for x in pays if x.status in PRIMARY_STATUSES] or pays,
                             (f.get("expected_cents") or 0) / max(a.billed_units, 1) or None)
             mine = min(a.billed_units, need - got)
             size = _cap(per * mine, f) if per else f.get("shortfall_cents")
-            hint = (f"{got:g} of {_units_text(need)} of {a.code} paid by {pays[0].payer_name or 'the payer'}; this line is "
+            hint = (f"{got:g} of {_units_text(need)} of {a.billed_code} paid by {who}; this line is "
                     f"{'the unit' if mine == 1 else f'{mine:g} of the units'} denied"
                     + (f", worth about {_usd(size)} at the payer's own rate per unit." if per else "."))
             out.append(_reclass(R_UNITS, f, "unit_denied", "Units: part paid", hint, size, "work_now", proof, "proven",
@@ -823,17 +980,29 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
                 + (f": {_usd(left)} is still short of the expected {_usd(exp)}." if exp else "."))
         return _reclass(R_SAME_DAY, f, "replaced", "Replaced by a new answer", hint, left, "work_now", proof)
     if new_pays:
+        # which line the new payments are for: the re-adjudicated claim keeps the line control numbers
+        lines = _claim_lines(a)
+        tag = {x.line_key: _attribute(a, x, lines) for x in pays}
+        own = [x for x in pays if tag[x.line_key] == "own"]
+        other = [x for x in pays if tag[x.line_key] == "other"]
         got = _units_paid(pays)
-        if got >= need:
-            p = new_pays[0]
-            amt = sum(x.standing for x in new_pays)
-            note = f"{who} reversed this answer on {r.paid_on} and paid the service {_usd(amt)} on {p.paid_on}."
+        if (own and _units_paid(own) >= a.billed_units) or (not own and not other and got >= need):
+            mine_new = [x for x in new_pays if x in own] or new_pays
+            p = mine_new[0]
+            amt = sum(x.standing for x in mine_new)
+            note = f"{who} reversed this answer on {r.paid_on} and paid this line {_usd(amt)} on {p.paid_on}."
             return _close(R_SAME_DAY, f, p, amt, note, "the payer reversed its answer and paid", proof, recovery=True)
-        per = _per_unit([x for x in pays if x.status in PRIMARY_STATUSES] or pays, (f.get("expected_cents") or 0) / max(a.billed_units, 1) or None)
-        mine = min(a.billed_units, need - got)
-        size = _cap(per * mine, f) if per else f.get("shortfall_cents")
-        hint = (f"{who} reversed this answer on {r.paid_on} and paid {got:g} of {_units_text(need)}; what is left is "
-                f"{'the unit' if mine == 1 else f'{mine:g} units'}" + (f", worth about {_usd(size)} at its own rate per unit." if per else "."))
+        per = _per_unit([x for x in (other or pays) if x.status in PRIMARY_STATUSES] or (other or pays),
+                        (f.get("expected_cents") or 0) / max(a.billed_units, 1) or None)
+        if other and not own:
+            size = _cap(per * a.billed_units, f) if per else f.get("shortfall_cents")
+            hint = (f"{who} reversed this answer on {r.paid_on} and answered again: it paid the claim's other line of {a.billed_code}, "
+                    f"not this one" + (f", worth about {_usd(size)} at its own rate per unit." if per else "."))
+        else:
+            mine = min(a.billed_units, max(need - got, 0)) or a.billed_units
+            size = _cap(per * mine, f) if per else f.get("shortfall_cents")
+            hint = (f"{who} reversed this answer on {r.paid_on} and paid {got:g} of {_units_text(need)}; what is left is "
+                    f"{'the unit' if mine == 1 else f'{mine:g} units'}" + (f", worth about {_usd(size)} at its own rate per unit." if per else "."))
         return _reclass(R_SAME_DAY, f, "units_on_reanswer", "Reversed and partly paid", hint, size, "work_now", proof)
     if carriers:
         same_sig = [g for g in carriers if g.get("signal") == f.get("signal")]
@@ -961,7 +1130,8 @@ def fold_repeat_denials(conn: sqlite3.Connection, items: Iterable[Mapping], *, a
     groups: dict[tuple, list[tuple[Mapping, Ans]]] = defaultdict(list)
     for f, a in _line_items(items, arch, zero_paid=True, categories=("denial", "bundling", "downcoding")):
         billed = f.get("billed_code") or f.get("original_procedure_code") or f.get("procedure_code")
-        groups[(a.bill, billed, a.dos, a.group or a.payer, f.get("signal"))].append((f, a))
+        # one billed line: two lines of one code on a claim (77401 and 77401-59) are two units, never repeats of each other
+        groups[(a.bill, billed, a.dos, a.group or a.payer, f.get("signal"), _line_identity(a))].append((f, a))
     multi = {k: v for k, v in groups.items() if len(v) > 1}
     if worked is None:
         worked = worked_ids(conn, [f["finding_id"] for v in multi.values() for f, _a in v])
@@ -1396,13 +1566,19 @@ def evaluate(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing: Ma
         else:
             by_rule[r] = fn(conn, items, archive=arch, standing=standing)
     primary: dict[str, dict] = {}
-    rank = {k: i for i, k in enumerate(PRECEDENCE)}
+    order = {k: i for i, k in enumerate(PRECEDENCE)}
+
+    def rank(act: dict) -> tuple:
+        # closures and the payer's own replacement of the answer first; then what happened before the answer, a 'proven'
+        # reading ahead of a 'likely' one (Medicare paid as primary outranks a Medigap's own secondary payment)
+        i = order[(act["rule"], act["action"])]
+        return (0 if i <= order[(R_SAME_DAY, "reclassify")] else 1, 0 if act.get("strength") == "proven" else 1, i)
     for r, acts in by_rule.items():
         for act in acts:
             k = (r, act["action"])
-            if act.get("finding_id") and k in rank:
+            if act.get("finding_id") and k in order:
                 cur = primary.get(act["finding_id"])
-                if cur is None or rank[k] < rank[(cur["rule"], cur["action"])]:
+                if cur is None or rank(act) < rank(cur):
                     primary[act["finding_id"]] = act
     closed = {fid for fid, a in primary.items() if a["action"] == "close_with_proof"}
     folds: dict[str, dict] = {fid: a for fid, a in primary.items() if a["action"] == "fold_into"}

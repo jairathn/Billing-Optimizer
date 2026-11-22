@@ -203,6 +203,17 @@ EXTRA_FINDING_COLS = {
 }
 EM_SQL = ",".join(f"'{c}'" for c in sorted(EM_CODES))
 AUTO_NOTE_PREFIX = "Paid on a later remittance"
+# items from EMA's reports alone, or carrying their own facts: the line outcome (ema_checks.line_outcomes) is worked out
+# for the denials only EMA saw, never for these (an EMA payment on their own line is what they are about)
+EMA_NATIVE_SIGNALS = ("NOT_SENT", "REMIT_NOT_POSTED", "EMA_DENIAL_AS_CONTRACTUAL", "EMA_UNDERPAID", "SECONDARY_NOT_BILLED",
+                      "CREDIT_BALANCE")
+EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's reports (counts by step, failed steps)
+POLICY_SUMMARY_KEY = "ema:policy_summary"   # meta: the write-off pattern table for the owner's policy (O11), from the run
+
+
+def _usd(cents) -> str:
+    c = int(cents or 0)
+    return f"-${abs(c) / 100:,.2f}" if c < 0 else f"${c / 100:,.2f}"
 
 FINDINGS_DDL = """
 CREATE TABLE IF NOT EXISTS findings (
@@ -303,7 +314,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     from . import ema_reports; ema_reports.ensure_schema(conn)      # noqa: E702  (EMA's report tables, the dashboard copy's too)
 
 
-ORG_NAME_WORDS =("DERMATOLOG", "ASSOC", " PSC", "CENTER", "CLINIC", "SURGERY", "DERMA")
+ORG_NAME_WORDS = ("DERMATOLOG", "ASSOC", " PSC", "CENTER", "CLINIC", "SURGERY", "DERMA")
 
 
 def best_provider_name(names: Counter) -> str:
@@ -1633,7 +1644,7 @@ class Detector:
         pay_date = base.get("payment_date") or base.get("txn_payment_date")
         plan = base.get("plan") or (base.get("contract_class") or "").strip() or None
         rule = appeal_rule(grp, kind, plan)
-        deadline, deadline_basis = None, None
+        deadline, deadline_basis, legal = None, None, None
         fix = None
         if actionable == "correct_and_resubmit":
             # MA130 and other remarks can sit on the claim (MOA) as well as on the line
@@ -1643,10 +1654,12 @@ class Detector:
             # a corrected claim (a reopening for Medicare Part B) runs on its own clock, from the remittance or the date of service
             start = pay_date if fix["clock"] == "remit" else (self._first_service_day(base) or pay_date)
             deadline = _add_days(start, fix["days"])
+            legal = legal_deadline(start, fix)
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
         elif actionable in ("appeal", "correct_and_resubmit") or signal == "TAKEBACK":
             # a takeback is disputed inside the payer's appeal window from the remittance that took the money back
             deadline = _add_days(pay_date, rule["days"])
+            legal = legal_deadline(pay_date, rule)
             deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
             if signal == "TAKEBACK":
                 deadline_basis += (". Counted from the remittance that took the money back; the payer's overpayment letter, which the "
@@ -1699,7 +1712,8 @@ class Detector:
             "expected_cents": expected, "shortfall_cents": shortfall,
             "carc": carc, "carc_text": carc_text(carc), "rarc": rarc, "rarc_text": rarc_text((rarc or "").split(",")[0]),
             "evidence": json.dumps(evidence, default=str),
-            "appeal_deadline": deadline,
+            "appeal_deadline": deadline, "legal_deadline": legal if (legal and deadline and legal != deadline) else None,
+            "source": "835" if (base.get("line_key") or base.get("claim_key") or base.get("transaction_key")) else None,
             "ema_handling": ema_handling, "written_off_cents": written_off, "written_off_on": written_on,
             "auto_status": "resolved" if resolved_by else None,
             "auto_notes": f"Paid on a later remittance ({resolved_by[0]}, trace {resolved_by[1]}, ${(resolved_by[2] or 0)/100:.2f})" if resolved_by else None,
@@ -2215,7 +2229,7 @@ class Detector:
                     act = "review"
                 elif top in INFO_CARCS or top in CODING_CARCS:
                     act = "correct_and_resubmit"
-                elif top in NONCOV_CARCS or top in DUP_CARCS:
+                elif top in NONCOV_CARCS or top in DUP_CARCS or top in FORWARD_CARCS:
                     act = "review"
                 else:
                     act = "appeal"
@@ -2534,12 +2548,21 @@ class Detector:
                     sent, basis, again_after = nxt, SENT_AGAIN, True
             if not sent or (sent < recent and sent < (oldest or "")):
                 continue                    # sent before the remittances on file begin: nothing here can say it went unanswered
+            grp, kind = self._open_claim_group(k, ema_payer, votes, va_names)
             due = _add_days(sent, NO_ANSWER_DAYS)
-            if not rejected and (not due or due > newest):
-                continue                    # not due yet, or the remittances on file do not reach the day it was due
+            if self.ema_on and due and not unsent and not rejected:
+                # a payer that usually takes longer than that from the visit (EMA's reports measure it) is not late yet
+                usual = _add_days(days[0], self._turnaround_days(grp))
+                if usual and usual > due:
+                    due = usual
+            # the day this payer's answers are known through: the newest remittance, or EMA's postings when Production is
+            # fresh and the payer posts there (ema_checks.answers_through); a payer whose answers stop before the due day waits
+            through = self._answers_through(grp, newest) if self.ema_on else newest
+            if not rejected and (not due or due > (through or newest)):
+                continue                    # not due yet, or the answers on file do not reach the day it was due
             cands.append({"pcn": pcn, "k": k, "b": b, "items": items, "patient": patient, "sent": sent, "basis": basis, "due": due,
                           "again_after": again_after, "rejected": rejected, "unsent": unsent, "gave_up": gave_up, "status": status,
-                          "ema_payer": ema_payer,
+                          "ema_payer": ema_payer, "grp": grp, "kind": kind, "through": through,
                           "bill_answered": bill_last.get(b) if (bill_last.get(b) or "") >= sent else None})
         # one visit chased under two bills (a bill made again): only the newest carries it
         newest_for: dict[int, tuple] = {}
@@ -2550,11 +2573,16 @@ class Detector:
                     mark = (cd["sent"], cd["pcn"])
                     if h not in newest_for or mark > newest_for[h][0]:
                         newest_for[h] = (mark, cd["b"])
+        final = []
         for cd in cands:
             b, patient = cd["b"], cd["patient"]
             items = [x for x in cd["items"] if not (patient and x[1] and newest_for.get(hash((patient, x[1], x[0])), (None, b))[1] != b)]
             if not items:
                 continue                    # chased under the newer bill made for the same visit
+            final.append((cd, items))
+        if self.ema_on and final:
+            final = self._ema_check_open_claims(final)
+        for cd, items in final:
             self._emit_open_claim(cd, items, newest, votes, payer_last, name_last, va_names)
 
     def _emit_open_claim(self, cd: dict, items: list[tuple], newest: str, votes: dict, payer_last: dict, name_last: dict,
@@ -2566,10 +2594,7 @@ class Detector:
         unsent = bool(cd.get("unsent"))
         days = sorted({x[1] for x in items if x[1]} or {d for d in k["days"] if d})
         payer_id = k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None
-        if (payer_id or "").strip().upper() in VA_PAYER_IDS or (not payer_id and " ".join(ema_payer.split()).upper() in va_names):
-            grp, kind = VA_GROUP            # the VA's network, though EMA names its administrator: the VA's limits apply
-        else:
-            grp, kind = votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
+        grp, kind = (cd["grp"], cd["kind"]) if cd.get("grp") else self._open_claim_group(k, ema_payer, votes, va_names)
         rule = filing_rule(grp, kind)
         file_by = _add_days(days[0], rule["days"])
         # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
@@ -2590,6 +2615,8 @@ class Detector:
                 p[3] = int(round(p[3] * self.mppr_pct({"payer_group": grp, "surg_rank": 2 if rank == 2 else 3})[0]))
         lines = [[cpt, dos, charge, rate * units if rate else None] for cpt, dos, charge, rate, units in priced]
         expected = sum(x[3] for x in lines if x[3]) if any(x[3] for x in lines) else None
+        if expected and billed and expected > billed:
+            expected = billed               # never valued above what was billed for it
         codes = sorted({x[0] for x in items})
         top = max(items, key=lambda x: x[2])[0]
         claim = {"patient_control_number": pcn, "payer_name": ema_payer, "payer_group": grp, "payer_kind": kind,
@@ -2602,6 +2629,10 @@ class Detector:
               "days_waiting": _days_between(sent, newest), "payer_last_remittance": last}
         if unsent:
             ev["not_sent"] = True
+        if cd.get("ema_bridge"):
+            ev["ema_bridge"] = cd["ema_bridge"]         # how EMA's claim for it was found: its claim id, its bill or its content
+        if cd.get("through") and cd["through"] != newest:
+            ev["answers_through"] = cd["through"]       # EMA's postings show this payer's answers through this day
         label = f"{', '.join(codes[:5])}{'…' if len(codes) > 5 else ''}"
         # sent on time: past the first-filing date the payer still owes a claim it has, and most take proof of timely filing
         # for one they have no record of (Medicare's year from the date of service is firm). Its date runs the payer's
@@ -2647,6 +2678,10 @@ class Detector:
                        None, None, ev, key_parts=(pcn,), claim=claim, id_signal="EMA_OPEN_CLAIM")
         f = self.findings[_fid("EMA_OPEN_CLAIM", pcn)]
         f["appeal_deadline"], f["deadline_basis"] = deadline, dbasis
+        f["source"] = "ema"
+        if cd.get("ema_link") is not None:
+            f["ema_link"] = cd["ema_link"]
+        self._export_claims.add(pcn)
         if gave_up and billed > pat_paid:   # given up in EMA though no payer answered: what the patient did not pay, written off
             owed = billed - pat_paid
             f["written_off_cents"] = min(expected, owed) if expected else owed
@@ -2669,6 +2704,455 @@ class Detector:
                              "before sending the claim again")
         if hints:
             f["hint"] = ". ".join(hints)
+
+    # ------------------------------------------------------------------ EMA's A/R and Production reports (amendment 4.5)
+    # The checks live in remitwatch.ema_checks, which never imports this module: the Detector passes its own rules in
+    # (rate, ratio, code_once, has_835_finding). Every step runs only when the store holds EMA's reports, and a step that
+    # fails is recorded (meta ema:wiring) and rolled back: the items from the remittances are produced all the same. A
+    # stop at the serverless deadline (every statement interrupted) is never swallowed.
+    def _ema_step(self, name: str, fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except MemoryError:
+            raise
+        except Exception as exc:        # noqa: BLE001  (recorded; the 835 items still come out)
+            if isinstance(exc, sqlite3.OperationalError) and "interrupt" in str(exc).lower():
+                raise
+            if os.environ.get("REMITWATCH_EMA_STRICT") == "1":
+                raise
+            try:
+                self.conn.rollback()
+            except sqlite3.Error:
+                pass
+            self.ema_errors.append({"step": name, "error": f"{type(exc).__name__}: {str(exc)[:160]}"})
+            return None
+
+    def _has_ema_reports(self) -> bool:
+        """Whether EMA's A/R or Production reports have reached this store (their summaries are what the checks read)."""
+        c = self.conn
+        try:
+            if c.execute("SELECT 1 FROM ema_report_files WHERE status IN ('current','partly_replaced') LIMIT 1").fetchone():
+                return True
+            return bool(c.execute("SELECT 1 FROM ema_lines LIMIT 1").fetchone() or c.execute("SELECT 1 FROM ema_ar LIMIT 1").fetchone())
+        except sqlite3.Error:
+            return False
+
+    def _ema_prepare(self) -> None:
+        """Steps 2 and 3: the map of EMA claims to remittance bills brought up to date when new 835s or an A/R arrived
+        (Part B, store only), then the causes of the checks no 835 carries (C1), the payers' answer times and EMA's posting
+        lag, which the later checks read."""
+        self.ema_on = self._has_ema_reports()
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        if self.conn.execute("SELECT 1 FROM meta WHERE key='ema:map_dirty'").fetchone():
+            from . import ema_ledger
+            self._ema_step("map", ema_ledger.refresh, self.store, None, parts="B", log=lambda *_a: None)
+        self._ema_step("classify_checks", ec.classify_checks, self.conn)
+        self._ema_step("turnaround", ec.turnaround, self.conn, today=self.today)
+        self._ema_step("posting_lag", ec.posting_lag, self.conn)
+
+    # the Detector's rules, as ema_checks takes them
+    def _rate(self, payer_group: str | None, code: str | None, year: str | None) -> int | None:
+        """The payer's usual allowed amount for a code in a year (the office setting, any provider type)."""
+        if not code:
+            return None
+        rate, _b, _r = self.usual_rate({"payer_group": payer_group, "year": str(year or ""), "provider_tier": "unknown",
+                                        "pos_class": "office"}, code)
+        return rate
+
+    def _ratio(self, payer_group: str | None, code: str | None) -> float | None:
+        """What a payer group paid of the charge for a code over the newest 12 months of remittances (10 paid lines at least)."""
+        if self.__dict__.get("_ratios") is None:
+            newest = max((l.get("payment_date") or l.get("txn_payment_date") or "" for l in self.lines), default="")
+            since = _add_days(newest[:10], -365) if newest else ""
+            agg: dict[tuple, list] = defaultdict(lambda: [0, 0, 0])
+            for l in self.lines:
+                if l.get("claim_status_code") not in ("1", "19") or (l.get("charge_cents") or 0) <= 0:
+                    continue
+                if (l.get("payment_date") or l.get("txn_payment_date") or "") < (since or ""):
+                    continue
+                a = agg[(l["payer_group"], l.get("procedure_code"))]
+                a[0] += l.get("paid_cents") or 0
+                a[1] += l.get("charge_cents") or 0
+                a[2] += 1 if (l.get("paid_cents") or 0) > 0 else 0
+            self._ratios = {k: max(0.0, min(1.0, v[0] / v[1])) for k, v in agg.items() if v[2] >= 10 and v[1] > 0}
+        return self._ratios.get((payer_group, code))
+
+    def _has_835_finding(self, bill: str | None, svc: str | None, code: str | None) -> bool:
+        """The run already holds an item from the remittances for this bill, date and code (or the whole claim that day)."""
+        if self.__dict__.get("_f835") is None:
+            from .ema_reports import bill_of_claim
+            got: set[tuple] = set()
+            for f in self.findings.values():
+                if not f.get("patient_control_number") or not (f.get("line_key") or f.get("claim_key")):
+                    continue
+                b = bill_of_claim(f["patient_control_number"])
+                if f.get("line_key"):
+                    for cd in {f.get("procedure_code"), f.get("original_procedure_code"), f.get("billed_code")} - {None}:
+                        got.add((b, f.get("service_date"), cd))
+                else:
+                    got.add((b, f.get("service_date"), None))
+                    try:
+                        ev = json.loads(f.get("evidence") or "{}")
+                    except ValueError:
+                        ev = {}
+                    for p in ev.get("unpaid") or []:
+                        if isinstance(p, list) and len(p) == 2:
+                            got.add((b, p[1] or f.get("service_date"), None))
+            self._f835 = got
+        return (bill, svc, code) in self._f835 or (bill, svc, None) in self._f835
+
+    def _turnaround_days(self, group: str | None) -> int:
+        cache = self.__dict__.setdefault("_tat", {})
+        if group not in cache:
+            from . import ema_checks as ec
+            cache[group] = self._ema_step("turnaround_days", ec.turnaround_days, self.conn, group, "svc_p95") or NO_ANSWER_DAYS
+        return cache[group]
+
+    def _answers_through(self, group: str | None, newest: str) -> str:
+        cache = self.__dict__.setdefault("_through", {})
+        if group not in cache:
+            from . import ema_checks as ec
+            cache[group] = self._ema_step("answers_through", ec.answers_through, self.conn, group, newest, today=self.today) or newest
+        return cache[group]
+
+    def _open_claim_group(self, k: dict, ema_payer: str, votes: dict, va_names) -> tuple[str, str]:
+        """Who an unanswered claim went to: the VA's network by its payer id (EMA names the network's administrator), else
+        the group the remittances give the claims EMA names after this payer, else the name's own group."""
+        payer_id = k["payer_ids"].most_common(1)[0][0] if k["payer_ids"] else None
+        if (payer_id or "").strip().upper() in VA_PAYER_IDS or (not payer_id and " ".join(ema_payer.split()).upper() in va_names):
+            return VA_GROUP                 # the VA's network, though EMA names its administrator: the VA's limits apply
+        return votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
+
+    def _ema_check_open_claims(self, final: list[tuple]) -> list[tuple]:
+        """The weekly exports' unanswered claims, checked against EMA's reports before one is listed: a newer status in the
+        A/R or Production (denied, paid, settled, voided, answered: the payer answered; rejected: it never reached the payer;
+        never sent: ema_checks.not_sent lists it), and Production's postings (ema_checks.claim_answers: a payment, a $0
+        answer or a payer's reason posted after the claim was sent answers it; a status alone never does)."""
+        from . import ema_checks as ec
+        pcns = [cd["pcn"] for cd, _items in final]
+        statuses = self._ema_step("claim_statuses", ec.claim_statuses, self.conn, claim_ids=pcns) or {}
+        claims = [{"claim_id": cd["pcn"], "sent": cd["sent"], "payer_group": cd.get("grp"),
+                   "lines": [(x[1], x[0], x[2]) for x in items if x[1]]} for cd, items in final]
+        answers = self._ema_step("claim_answers", ec.claim_answers, self.conn, claims) or {}
+        out = []
+        for cd, items in final:
+            a = answers.get(cd["pcn"]) or {}
+            if a.get("answered"):
+                self.ema_counts["export_answered_in_ema"] += 1
+                continue
+            st = statuses.get(cd["pcn"])
+            export_at = str((cd["k"].get("status_at") or ("",))[0] or "")[:10]
+            if st and str(st.get("as_of") or "")[:10] > export_at:
+                cls = st.get("class")
+                if cls in ("denied", "paid", "settled", "void", "answered"):
+                    self.ema_counts["export_newer_status"] += 1
+                    continue
+                if cls == "not_sent":
+                    self.ema_counts["export_not_sent"] += 1
+                    continue                    # never left EMA after all: listed by ema_checks.not_sent
+                if cls == "rejected" and not cd["rejected"]:
+                    cd = dict(cd, rejected=True, status=st.get("status") or cd["status"])
+                elif cls == "gave_up":
+                    cd = dict(cd, gave_up=True, status=st.get("status") or cd["status"])
+            cd = dict(cd, ema_bridge=a.get("bridge"), ema_link=a.get("link"))
+            if a.get("link") is not None:
+                self._export_links.add(a["link"])
+            out.append((cd, items))
+        return out
+
+    def _emit_proto(self, p: dict) -> str | None:
+        """One proto-finding of ema_checks as an item: _emit, then the deadline, hint, source and EMA claim number the
+        check gives. An item already listed under the same id (the weekly exports' path, an earlier check) wins."""
+        fid = _fid(p.get("id_signal") or p["signal"], *p["key_parts"])
+        if fid in self.findings:
+            return None
+        ev = dict(p.get("evidence") or {})
+        if p.get("ema_heir_keys"):
+            ev["ema_heir_keys"] = [list(h) for h in p["ema_heir_keys"]]
+        claim = dict(p.get("claim") or {})
+        self._emit(p["signal"], p["category"], p["severity"], p["actionable"], p["title"], None, p.get("expected_cents"),
+                   p.get("shortfall_cents"), p.get("carc"), p.get("rarc"), ev, key_parts=tuple(p["key_parts"]), claim=claim,
+                   id_signal=p.get("id_signal"))
+        f = self.findings.get(fid)
+        if f is None:
+            return None
+        f["appeal_deadline"], f["deadline_basis"] = p.get("appeal_deadline"), p.get("deadline_basis")
+        f["legal_deadline"] = None
+        if p["signal"] == "EMA_DENIED" and f["appeal_deadline"]:
+            rule = appeal_rule(claim.get("payer_group"), claim.get("payer_kind"))
+            legal = legal_deadline(_add_days(f["appeal_deadline"], -rule["days"]), rule)
+            f["legal_deadline"] = legal if legal and legal != f["appeal_deadline"] else None
+        if p.get("hint"):
+            f["hint"] = p["hint"]
+        f["source"] = p.get("source") or "ema"
+        if p.get("ema_link") is not None:
+            f["ema_link"] = p["ema_link"]
+        if p.get("heir_keys"):
+            self.__dict__.setdefault("_heirs", {})[fid] = [tuple(h) for h in p["heir_keys"]]
+        self.ema_counts[p["signal"]] += 1
+        return fid
+
+    def _emit_protos(self, name: str, protos) -> int:
+        n = 0
+        for p in protos or []:
+            if self._emit_proto(p):
+                n += 1
+        return n
+
+    def run_ema_report_claims(self) -> None:
+        """Step 5, from the reports: claims that never left EMA (C3b), claims the reports call Rejected (C3f), and claims
+        Production shows no payer answered (G8). A claim the weekly exports' path listed is left to it (that path wins), and
+        so is its EMA claim number."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        skip = set(self._export_claims)
+        for name, fn in (("not_sent", ec.not_sent), ("rejected_claims", ec.rejected_claims), ("unanswered_claims", ec.unanswered_claims)):
+            protos = self._ema_step(name, fn, self.conn, today=self.today, rate=self._rate, skip_claim_ids=skip) or []
+            for p in protos:
+                links = {p.get("ema_link")} | set((p.get("evidence") or {}).get("ema_links") or [])
+                if links & self._export_links:
+                    continue                # the same EMA claim, listed by the weekly exports' path under its claim id
+                if self._emit_proto(p):
+                    cid = (p.get("claim") or {}).get("patient_control_number")
+                    if cid:
+                        skip.add(cid)
+
+    def run_ema_denials(self) -> None:
+        """Step 6 (C5): denials only EMA saw, where no remittance and no item from one covers the line."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        self.__dict__.pop("_f835", None)        # the run's 835 items as they stand now
+        self._emit_protos("ema_denials", self._ema_step("ema_denials", ec.ema_denials, self.conn, today=self.today, rate=self._rate,
+                                                        ratio=self._ratio, has_835_finding=self._has_835_finding))
+
+    def run_ema_contractual(self) -> None:
+        """Step 7 (C7): a payer's denials EMA posts as contractual adjustments (outside the money totals)."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        self._emit_protos("denial_as_contractual",
+                          self._ema_step("denial_as_contractual", ec.denial_as_contractual, self.conn, today=self.today, ratio=self._ratio))
+
+    def _outcome_items(self) -> list[dict]:
+        """The items a line outcome is worked out for: the money items from the remittances (not the claim-level chases)
+        and the denials only EMA saw. Each carries the status a person last gave it (the checks read it)."""
+        from . import ema_checks as ec
+        prev = self.__dict__.get("_prev_status")
+        if prev is None:
+            prev = self._prev_status = {r[0]: r[1] for r in self.conn.execute("SELECT finding_id, status FROM findings")}
+        out = []
+        for f in self.findings.values():
+            if f["signal"] == "EMA_DENIED" or (f["category"] in ec.MONEY_CATEGORIES and f["signal"] not in ec.CLAIM_SIGNALS
+                                               and f["signal"] not in EMA_NATIVE_SIGNALS):
+                f.setdefault("status", prev.get(f["finding_id"]) or "open")
+                f.setdefault("stale", 0)
+                out.append(f)
+        return out
+
+    def run_ema_outcomes(self) -> None:
+        """Step 9, after resolve_elsewhere and the archive rules: each item's line outcome in EMA, once (G3), then what EMA
+        shows paid on checks no 835 carries (C6): the same payer paying at least half of what the item is expected to
+        bring (95% of a shortfall) closes it with the payment as its proof, and a newer pull that no longer shows that
+        payment reopens it; another payer paying a claim that was another payer's to pay (a coordination-of-benefits or
+        eligibility denial, or a line EMA moved to that payer) closes it as rebilled and paid; anything less is a hint. A
+        person's status is never replaced (save)."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        items = self._outcome_items()
+        if not items:
+            return
+        oc = self._ema_step("line_outcomes", ec.line_outcomes, self.conn, items, code_once=self._code_once, today=self.today) or {}
+        self.ema_outcomes = oc
+        pe = self._ema_step("paid_in_ema", ec.paid_in_ema, self.conn, items, oc, closes=EMA_CLOSES) or {}
+        rebill = {fid: r for fid, r in pe.items() if r.get("action") == "hint_other_payer"}
+        moved = self._ema_line_payers([tuple(oc[fid]["lines"][0]) for fid in rebill if (oc.get(fid) or {}).get("lines")]) if rebill else {}
+        for fid, r in pe.items():
+            f = self.findings.get(fid)
+            if f is None or f.get("auto_status"):
+                continue
+            o = oc.get(fid) or {}
+            act = r.get("action")
+            if act == "close" and EMA_CLOSES:
+                self._close_from_ema(f, r, o, "EMA shows it paid", r.get("note") or "")
+                self.ema_counts["c6_closed"] += 1
+            elif act == "hint_other_payer" and EMA_CLOSES and self._rebilled(f, o, moved):
+                payer = r.get("payer") or "another payer"
+                note = (f"Rebilled to {payer}, paid: EMA shows {_usd(r.get('paid_cents'))} paid by {payer} on {r.get('date')} "
+                        f"(check ending {r.get('check_tail') or ''}, no 835). Reopen it if that payment is for something else.")
+                self._close_from_ema(f, r, o, f"rebilled to {payer}, paid", note)
+                self.ema_counts["c6_rebilled"] += 1
+            elif r.get("hint"):
+                f["hint"] = r["hint"]
+                self.ema_counts["c6_" + str(act)] += 1
+
+    def _close_from_ema(self, f: dict, r: dict, o: dict, how: str, note: str) -> None:
+        """Close an item by a payment EMA posted on a check no 835 carries, with that payment as the proof row."""
+        payer, cents, when = r.get("payer") or "insurance", r.get("paid_cents") or 0, r.get("date")
+        detail = {"payment_date": when, "claim": f.get("patient_control_number"), "paid_cents": cents, "how": how,
+                  "trace": f"EMA check ending {r.get('check_tail') or ''}", "source": "EMA Production", "payer": payer,
+                  "ema_link": o.get("link"), "postings_through": o.get("as_of"),
+                  "proof": [{"date": when, "source": "production", "kind": "payment", "payer": payer, "amount_cents": cents,
+                             "codes": [], "text": f"EMA posted {_usd(cents)} from {payer} on a check ending {r.get('check_tail') or ''} "
+                                                  "that no 835 carries", "decisive": True}]}
+        used = ("ema",) + tuple(r.get("used") or (when, r.get("check_tail"), o.get("link")))
+        self._mark_paid(f, when, cents, note, detail, used=used)
+        f["hint"] = None
+
+    def _ema_line_payers(self, keys: list[tuple]) -> dict[tuple, str | None]:
+        """The payer group EMA's line is billed to now (the newest pull), for (EMA claim number, date, code)."""
+        out: dict[tuple, str | None] = {}
+        keys = sorted({k for k in keys if k and len(k) == 3})
+        for i in range(0, len(keys), 300):
+            part = keys[i:i + 300]
+            q = " OR ".join("(link=? AND svc=? AND cpt=?)" for _k in part)
+            for lk, svc, cpt, grp in self.conn.execute(f"SELECT link, svc, cpt, payer_group FROM ema_lines WHERE {q}",
+                                                       [x for k in part for x in k]):
+                out[(lk, svc, cpt)] = grp
+        return out
+
+    def _rebilled(self, f: dict, o: dict, moved: dict) -> bool:
+        """An unpaid denial another payer then paid in full was that payer's to pay: the denial said so (coordination of
+        benefits, eligibility, sent on), or EMA has moved the line to the payer that paid."""
+        from . import ema_checks as ec
+        if f.get("category") != "denial" or (f.get("paid_cents") or 0) > 0:
+            return False
+        if (f.get("carc") or "") in OTHER_PAYER_CARCS:
+            return True
+        payer_now = moved.get(tuple(o["lines"][0])) if o.get("lines") else None
+        paying = next((p.get("group") for p in o.get("payments") or [] if p.get("kind") == "ema" and not p.get("same")), None)
+        return bool(payer_now and paying and ec._same_payer(payer_now, paying) and not ec._same_payer(payer_now, f.get("payer_group")))
+
+    def run_ema_unposted(self) -> None:
+        """Step 10 (C4): 835 payments EMA never posted, or posted short (one item per payment; work type post)."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        self._emit_protos("unposted_remits", self._ema_step("unposted_remits", ec.unposted_remits, self.conn, today=self.today))
+
+    def run_ema_writeoffs(self) -> None:
+        """Step 11: what EMA wrote off on each item's line (C2; the larger of the ERA-lines figure and EMA's own, never a
+        sum), when and how (an automatic write-off on the posting day, with its evidence), and EMA's overlay columns (W2:
+        the claim's newest status as context, the line's balance and outcome, the newest work EMA shows)."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        oc = self.ema_outcomes
+        items = self._outcome_items()
+        wo = self._ema_step("written_off_in_ema", ec.written_off_in_ema, self.conn, items, oc) or {}
+        for fid, w in wo.items():
+            f = self.findings.get(fid)
+            if f is None:
+                continue
+            for k in ("written_off_cents", "written_off_on", "written_off_source", "written_off_kind", "written_off_when"):
+                f[k] = w.get(k)
+            if w.get("evidence_level"):
+                f["ema_writeoff_evidence"] = w["evidence_level"]
+            if w.get("written_off_basis"):
+                ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+                ev["written_off_basis"] = w["written_off_basis"]
+                f["evidence"] = json.dumps(ev, default=str)
+            self.ema_counts["c2_marked"] += 1
+        for fid, o in oc.items():
+            f = self.findings.get(fid)
+            if f is None:
+                continue
+            if o.get("outcome") in ec.WRITE_OFF_OUTCOMES and o.get("pattern"):
+                ev = json.loads(f["evidence"]) if f.get("evidence") else {}
+                ev["writeoff_pattern"], ev["writeoff_carcs"] = o["pattern"], o.get("carcs") or []
+                f["evidence"] = json.dumps(ev, default=str)
+            if o.get("evidence_level") and not f.get("ema_writeoff_evidence"):
+                f["ema_writeoff_evidence"] = o["evidence_level"]
+        ov_items = [f for f in self.findings.values() if f.get("patient_control_number") or f.get("ema_link")]
+        ov = self._ema_step("overlays", ec.overlays, self.conn, ov_items, oc, today=self.today) or {}
+        for fid, o in ov.items():
+            f = self.findings.get(fid)
+            if f is None:
+                continue
+            for k, v in o.items():
+                if k == "ema_link" and v is None:
+                    continue
+                f[k] = v
+
+    # ------------------------------------------------------------------ hooks for the archive-only rules (unit B2)
+    # remitwatch.archive_rules acts on the run's items at these four points; each is a no-op until its hook is wired.
+    def hook_expected(self) -> None:
+        """After the line and claim rules set expected amounts: a fair expected amount where an item has none (drugs and
+        skin substitutes: archive_rules.drug_expected)."""
+        return None
+
+    def hook_archive_rules(self) -> None:
+        """After resolve_elsewhere's own closures and before the EMA outcomes, so a closure the 835 archive proves comes
+        first: closures with proof, reclassifications and items the archive raises (archive_rules.evaluate)."""
+        return None
+
+    def hook_fold(self) -> None:
+        """Before save: repeat listings of one service folded into the item that carries it (archive_rules fold_into)."""
+        return None
+
+    def hook_hide(self) -> None:
+        """After save, where the hide rules are matched: hide rules at payer x code x modifier x reason grain."""
+        return None
+
+    # ------------------------------------------------------------------ after the save: what the pages read
+    def run_ema_summaries(self) -> None:
+        """Step 13, on the saved items: the A/R accounted for (W4, each row's bucket kept for its list), the unworked
+        number (W3), the reconcile summary the Data tab and the dashboard's copy read, and the write-off pattern table
+        for the owner's policy (O11)."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        self._ema_step("ar_accounted", ec.ar_accounted, self.conn, None, today=self.today)
+        fr = self._ema_step("freshness", ec.freshness, self.conn, self.today) or {}
+        through = fr.get("production_as_of") if fr.get("production_fresh") else fr.get("newest_835")
+        if through:
+            cols = ("finding_id", "category", "status", "stale", "appeal_deadline", "ema_worked_on", "shortfall_cents",
+                    "written_off_cents", "written_off_when")
+            rows = [dict(zip(cols, r)) for r in self.conn.execute(f"SELECT {', '.join(cols)} FROM findings WHERE COALESCE(stale,0)=0")]
+            self._ema_step("unworked", ec.unworked, self.conn, rows, data_through=through)
+        self._ema_step("reconcile_summary", ec.reconcile_summary, self.conn, today=self.today)
+        items = [f for f in self.findings.values() if f["finding_id"] in self.ema_outcomes]
+        pol = self._ema_step("policy_summary", ec.policy_summary, self.conn, items, self.ema_outcomes, today=self.today)
+        if pol is not None:
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                              (POLICY_SUMMARY_KEY, json.dumps({"at": self.now, "patterns": pol[:500]}, default=str)))
+            self.conn.commit()
+
+    def _set_states(self, rows: list[dict]) -> None:
+        """Each item's state (remitwatch.states, the one place it is decided: work now, waiting with its follow-up day,
+        done, accepted, expired, can't be checked), with the fact that decided it and why a bulk appeal must leave it out.
+        Worked out on the status the save just settled; a store without the states module leaves the columns empty."""
+        try:
+            from . import states
+        except ImportError:
+            return
+        items = [r for r in rows if r.get("finding_id")]
+        if not items:
+            return
+        got = self._ema_step("states", states.states_of, self.conn, items, outcomes=self.ema_outcomes if self.ema_on else {},
+                             today=self.today) or {}
+        for r in items:
+            st = got.get(r["finding_id"])
+            if not st:
+                continue
+            r["work_state"], r["follow_up_on"] = st.get("work_state"), st.get("follow_up_on")
+            r["state_basis"] = (st.get("state_basis") or "")[:300] or None
+            r["appeal_block"] = st.get("appeal_block")
+            self.ema_counts["state_" + str(st.get("work_state"))] += 1
+
+    def _save_ema_wiring(self) -> None:
+        """What the run did with EMA's reports, for the Data tab and the maintainers: counts by step, and any step that failed."""
+        try:
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                              (EMA_WIRING_KEY, json.dumps({"at": self.now, "on": self.ema_on, "counts": dict(self.ema_counts),
+                                                           "errors": self.ema_errors[:20]}, sort_keys=True)))
+            self.conn.commit()
+        except sqlite3.Error:
+            pass
 
     # ------------------------------------------------------------------ aggregate rules
     def run_aggregate_rules(self) -> None:
@@ -2982,8 +3466,26 @@ class Detector:
         def sub_no(pcn: str | None) -> int:
             m = _SUBMISSION.search(pcn or "")
             return int(m.group(1)) if m else 0
+        # EMA's checks name the items whose work a new item takes (heir_keys): one claim keyed by its EMA claim number before
+        # the A/R knew its claim id, or the chase of a claim whose denial EMA has since posted (an EMA_DENIED item is that
+        # claim's answer). And a denial only EMA saw that a person worked hands its work to the first item from the
+        # remittance that then arrives for its line (its ema_heir_keys: bill, date, code); the EMA item stays, stale.
+        heirs_of: dict[str, list] = self.__dict__.get("_heirs") or {}
+        ema_heirs: dict[tuple, dict] = {}
+        for fid, prev in existing.items():
+            if fid in self.findings or prev.get("signal") != "EMA_DENIED" or not worked(prev) or prev["status"] == "resolved":
+                continue
+            try:
+                keys = json.loads(prev.get("evidence") or "{}").get("ema_heir_keys") or []
+            except ValueError:
+                keys = []
+            for k in keys:
+                if isinstance(k, list) and len(k) == 3:
+                    ema_heirs.setdefault(tuple(k), prev)
+        ema_taken: set[str] = set()
         inherited: set[str] = set()
         rows, events = [], []
+        out_rows: list[dict] = []
         for fid, f in self.findings.items():
             prev = existing.get(fid)
             via_bill = None
@@ -2998,13 +3500,26 @@ class Detector:
                     fam_f = payer_family(f)
                     via_bill = next((w for w in sent_again.get(bill_of(pcn_f), [])
                                      if sub_no(pcn_f) > sub_no(w["patient_control_number"]) and fam_f is not None and payer_family(w) == fam_f), None)
+            if prev is None and heir is None and via_bill is None and heirs_of.get(fid):
+                via_bill = next((w for w in (existing.get(_fid(*h)) for h in heirs_of[fid])
+                                 if w is not None and worked(w) and w["status"] != "resolved"), None)
+            if prev is None and heir is None and via_bill is None and ema_heirs and f.get("line_key") and f.get("patient_control_number"):
+                from .ema_reports import bill_of_claim
+                b_f = bill_of_claim(f["patient_control_number"])
+                for cd in (f.get("procedure_code"), f.get("original_procedure_code"), f.get("billed_code")):
+                    w = ema_heirs.get((b_f, f.get("service_date"), cd)) if cd else None
+                    if w is not None and w["finding_id"] not in ema_taken:
+                        via_bill = w
+                        ema_taken.add(w["finding_id"])
+                        break
             if via_bill is not None:
                 # a new item is a new matter: it starts To do (Started if someone was working the claim), with the notes; never
                 # Sent, Paid or Let go from the earlier item, whose own record stays in its events
                 st0 = "in_progress" if via_bill["status"] in ("in_progress", "appealed") else "open"
                 prev = {"status": st0, "notes": via_bill.get("notes"), "first_seen": self.now, "finding_id": fid}
                 events.append((fid, self.now, "signal_changed", via_bill["status"], st0, f.get("shortfall_cents"), "system",
-                               f"was {via_bill['signal']} on claim {via_bill['patient_control_number']} ({via_bill['status']}), now {f['signal']}",
+                               f"was {via_bill['signal']} on claim {via_bill.get('patient_control_number') or 'the same EMA claim'} "
+                               f"({via_bill['status']}), now {f['signal']}",
                                self.run_id))
             if heir is not None:
                 if heir["finding_id"] not in inherited:
@@ -3053,7 +3568,7 @@ class Detector:
                                f.get("recovered_cents") if st == "resolved" else f.get("shortfall_cents"), "system", auto_note, self.run_id))
             f["status"], f["notes"], f["first_seen"], f["last_seen"], f["stale"] = st, notes, first, self.now, 0
             f["auto_note"], f["prev_status"] = auto_note, prev_status
-            rows.append(tuple(f.get(k) for k in cols))
+            out_rows.append(f)
         # findings a person worked, dismissed or lost that the current rules no longer produce are kept, marked stale, so that
         # no work is lost and a dismissed finding cannot come back as new. Stale rows are left out of every total.
         # Any item a person wrote on is kept, even while open, so no note is lost; an unanswered claim's item stays after its
@@ -3063,7 +3578,22 @@ class Detector:
             if fid in self.findings or fid in inherited or not worked(prev):
                 continue
             prev["stale"] = 0 if (prev.get("signal") in EMA_CLAIM_SIGNALS and prev["status"] == "resolved") else 1
-            rows.append(tuple(prev.get(k) for k in cols))
+            out_rows.append(prev)
+        # every item's state, decided in one place (remitwatch.states) on the status just settled
+        self._set_states(out_rows)
+        rows = [tuple(r.get(k) for k in cols) for r in out_rows]
+        if self.ema_on:
+            # the bills of the items open, started, sent or worked changed: the ledger's next summary keeps their lines
+            from .ema_reports import bill_of_claim
+
+            def live(r: dict) -> bool:
+                return not r.get("stale") and (r.get("status") in ("open", "in_progress", "appealed", "lost", "dismissed")
+                                               or bool(r.get("notes")) or bool(r.get("appealed_at"))
+                                               or (r.get("status") == "resolved" and not r.get("auto_note")))
+            before_b = {bill_of_claim(r["patient_control_number"]) for r in existing.values() if r.get("patient_control_number") and live(r)}
+            after_b = {bill_of_claim(r["patient_control_number"]) for r in out_rows if r.get("patient_control_number") and live(r)}
+            if before_b != after_b:
+                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:keep_dirty', '1')")
         c.execute("DELETE FROM findings")
         c.executemany(f"INSERT INTO findings ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", rows)
         if events:
@@ -3138,21 +3668,36 @@ class Detector:
                     self.conn.commit()
                 except Exception:
                     pass
-        self.load()
+        # the order of the tech lead's amendment 4.5 (EMA's steps do nothing on a store without EMA's reports)
+        self._ema_prepare()             # 2-3: the map when it is dirty; C1 causes, answer times, posting lag
+        self.load()                     # 4
         self.build_baselines()
         self.run_line_rules()
         self.run_claim_rules()
-        self.run_ema_open_claims()
-        self.run_aggregate_rules()
-        self.emit_second_rates()
-        self.resolve_elsewhere()
-        out = self.save()
+        self.hook_expected()
+        self.run_ema_open_claims()      # 5: the weekly exports' unanswered claims, checked against EMA's reports
+        self.run_ema_report_claims()    #    never sent, rejected, unanswered (from the reports)
+        self.run_ema_denials()          # 6: denials only EMA saw (C5)
+        self.run_aggregate_rules()      # 7
+        self.run_ema_contractual()      #    denials posted as contractual (C7)
+        self.emit_second_rates()        # 8
+        self.resolve_elsewhere()        # 9: closures from the archive first
+        self.hook_archive_rules()
+        self.run_ema_outcomes()         #    the line outcomes, once; paid in EMA (C6)
+        self.run_ema_unposted()         # 10: 835 payments EMA never posted (C4)
+        self.run_ema_writeoffs()        # 11: written off in EMA (C2) and the overlays (W2)
+        self.run_more_rules()           #    secondary never billed, credits, EMA-only short payments
+        self.hook_fold()
+        out = self.save()               # 12: heirs, states, keep_dirty
+        self.run_ema_summaries()        # 13: W4, W3, the reconcile summary, the policy table
+        self._save_ema_wiring()
         try:        # reasons hidden for a payer (actions.apply_hide_rule) hide the new items they cover
             from .actions import apply_hide_rules
             if apply_hide_rules(self.conn):
                 self.conn.commit()
         except Exception:
             self.conn.rollback()        # the analysis is saved; the rules run again after the next one
+        self.hook_hide()
         return out
 
 

@@ -255,12 +255,121 @@ def clear_locks_left_behind(db_path: str) -> list[str]:
     return out
 
 
+def _ema_step(out: dict, key: str, fn, *a, **kw):
+    """One EMA step of the cycle: its failure is noted under `key` and the cycle goes on (the reports must never stop the
+    remittances, the analysis or the faxes). Never an exception's message: a converter's message can hold a cell."""
+    try:
+        return fn(*a, **kw)
+    except Exception as exc:       # noqa: BLE001
+        out[key] = {"error": type(exc).__name__}
+        return None
+
+
+def reread_waiting(store, *, ledger=None, data_dir: str | None = None, log=print) -> dict:
+    """Read again what the report catalog keeps waiting (the switch did not read it, Production waited for the ledger, a
+    misread export was queued by the clean-up) and the held files a person chose to apply, from their kept copy on this
+    server: an upload's copy, a file of the Dropbox mirror, or (for an entry brought from the serverless site) the
+    mirror's copy of its Dropbox path. A copy that is gone closes the entry; an entry whose Dropbox file is not in the
+    mirror yet waits for the sync that brings it."""
+    from . import ema_reports as er
+    from .dropbox_sync import local_path
+    conn = store.conn
+    data_dir = data_dir or os.environ.get("REMITWATCH_DATA_DIR", "data/dropbox")
+    out = {"read": 0, "applied": 0, "gone": 0, "left": 0}
+    held = []
+    try:
+        cur = conn.execute("SELECT file_id FROM ema_report_files WHERE status='held' AND decision='apply'")
+        held_ids = [r[0] for r in cur.fetchall()]
+    except Exception:       # noqa: BLE001
+        held_ids = []
+    for fid in held_ids:
+        row = conn.execute("SELECT * FROM ema_report_files WHERE file_id=?", (fid,))
+        names = [d[0] for d in row.description]
+        r = row.fetchone()
+        if r:
+            d = dict(zip(names, r))
+            try:
+                d["origin"] = json.loads(d.get("origin") or "{}")
+            except ValueError:
+                d["origin"] = {}
+            held.append(d)
+    seen = set()
+    for w in er.waiting(conn) + held:
+        if w["file_id"] in seen or not er.reads(w.get("report") or ""):
+            continue
+        seen.add(w["file_id"])
+        o = w.get("origin") or {}
+        path = None
+        if o.get("dropbox_id"):         # kept by the serverless site (import-cloud): its path is a Dropbox path
+            mirror = local_path(data_dir, {"path_display": o.get("path") or "", "name": w.get("source_name") or "file"}) if o.get("path") else None
+            if mirror and os.path.isfile(mirror):
+                path = mirror
+            else:
+                out["left"] += 1            # brought from the serverless site: the sync brings its file into the mirror
+                continue
+        elif o.get("path"):
+            path = o["path"]
+            if not os.path.isfile(path):
+                er.supersede_waiting(conn, w["file_id"], reason="The file is no longer in the folder.")
+                out["gone"] += 1
+                continue
+        else:
+            out["left"] += 1
+            continue
+        res = er.ingest_file(store, path, via=w.get("via") or "mirror", origin=o, ledger=ledger, log=log)
+        out["read"] += 1
+        members = res.get("members") if res.get("status") == "zip" else [res]
+        if any(m.get("status") in ("current", "superseded") for m in members or []):
+            out["applied"] += 1
+            if str(w["file_id"]).startswith("dropbox:"):        # a raw CSV the serverless site recognised from its first bytes
+                er.supersede_waiting(conn, w["file_id"], reason="Read on the server.", replaced_by=(members[0] or {}).get("file_id"))
+        if res.get("status") == "not_report":
+            er.confirm_misread(store, w["file_id"], None)       # a genuine export after all: its queued entry goes
+    return out
+
+
+def drop_kept_copies(store, ledger, db_path: str, log=print) -> int:
+    """The kept upload copies of Production files whose rows newer files have replaced (REMITWATCH_EMA_REPORT_KEEP newer
+    files cover each whole) are deleted; the catalog row stays. Only copies the Upload page made (the intake folder or
+    the uploads folder), never a file of the Dropbox mirror."""
+    data_dir = os.path.dirname(os.path.abspath(db_path))
+    roots = [os.path.join(data_dir, "incoming") + os.sep]
+    try:
+        from .uploads import upload_dir
+        roots.append(os.path.abspath(upload_dir(db_path)) + os.sep)
+    except Exception:       # noqa: BLE001
+        pass
+    n = 0
+    for fid in ledger.copies_to_drop():
+        r = store.conn.execute("SELECT origin FROM ema_report_files WHERE file_id=?", (fid,)).fetchone()
+        try:
+            path = (json.loads(r[0]) if r and r[0] else {}).get("path")
+        except ValueError:
+            path = None
+        if path and os.path.isfile(path) and any(os.path.abspath(path).startswith(root) for root in roots):
+            try:
+                os.remove(path)
+                n += 1
+            except OSError:
+                pass
+    if n:
+        log(f"  {n} kept upload cop{'y' if n == 1 else 'ies'} of replaced Production files removed")
+    return n
+
+
 def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str | None = None, force_detect: bool = False,
               report: bool | None = None, email: bool = True, report_dir: str = "data/reports", log=print) -> dict:
-    """Run one cycle. `report=None` sends the summary report when the last one is at least REMITWATCH_REPORT_EVERY_DAYS old."""
+    """Run one cycle. `report=None` sends the summary report when the last one is at least REMITWATCH_REPORT_EVERY_DAYS old.
+
+    EMA's reports (remitwatch.ema_reports, ema_ledger) take part on the way: the once-per-host clean-up of report rows an
+    older build read as exports, the uploads handed to the intake folder (remitwatch.intake), the report files the
+    Dropbox position passed before this build (once), every Production file of the cycle applied to the posting ledger
+    (opened once, only when one comes), the reports waiting to be read again, and the ledger's summaries refreshed
+    before detection (and once more after it when detection kept new lines)."""
+    from . import ema_ledger, ema_reports, intake
     from .alerts import notify, run_alerts
     from .detect import run_detection
-    from .dropbox_sync import ingest_new_files
+    from .dropbox_sync import ingest_new_files, refind_reports
     from .dropbox_sync import sync as dropbox_sync
 
     store = Store(db_path)
@@ -276,8 +385,23 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             heartbeat(store.conn, token)
         except Exception:
             pass
+
+    lg_box: list = []
+
+    def ledger():                       # the posting ledger, opened once per cycle and only when a Production file comes
+        if not lg_box:
+            lg_box.append(ema_ledger.Ledger.open(ema_ledger.ledger_path(db_path)))
+        return lg_box[0]
     try:
+        mig = _ema_step(out, "ema_migrate", ema_reports.migrate_misread, store, serverless=False, log=beat_log)
+        if mig and not mig.get("skipped") and mig.get("candidates"):
+            out["ema_migrate"] = {k: v for k, v in mig.items() if isinstance(v, int)}
+        # uploads the Upload page handed to the intake folder: read first, in the order they arrived
+        up_in = _ema_step(out, "intake", intake.process_ready, store, ledger=ledger, log=beat_log) or {}
+        if up_in.get("pairs"):
+            out["intake"] = {k: v for k, v in up_in.items() if k != "results"}
         new_files: list[str] = []
+        refound: list[str] = []
         if sync:
             if dropbox_configured():
                 # a Dropbox failure (a revoked token, an outage) must not stop TriZetto, the uploads, the analysis, the
@@ -293,14 +417,18 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                         store.conn.rollback()
                     except Exception:
                         pass
+                if "error" not in out["sync"]:
+                    refound = _ema_step(out, "ema_refind", refind_reports, store, log=beat_log) or []
             else:
                 out["sync"] = {"skipped": "Dropbox credentials are not configured"}
         if local:
             new_files += [os.path.join(dp, f) for dp, _d, fs in os.walk(local) for f in fs]
+        new_files += [p for p in refound if p not in set(new_files)]
         ingested = {"remits": 0, "ema": 0, "claims_837": 0}
         heartbeat(store.conn, token)
         if new_files:
-            ingested = ingest_new_files(store, new_files, log=log)
+            ingested = ingest_new_files(store, new_files, log=log, ledger=ledger, via="mirror",
+                                        origins={p: {"path": p} for p in new_files})
             ingested.pop("remit_stats", None)
             heartbeat(store.conn, token)
         from . import trizetto
@@ -317,7 +445,9 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         # files uploaded by hand (the Upload page, remitwatch.uploads): the same loader, in the same cycle
         from . import uploads
         try:
-            up = uploads.ingest_queued(store, log=beat_log)
+            import inspect
+            takes_ledger = "ledger" in inspect.signature(uploads.ingest_queued).parameters
+            up = uploads.ingest_queued(store, log=beat_log, **({"ledger": ledger} if takes_ledger else {}))
         except Exception as exc:
             up = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
         if up.get("uploads") or up.get("error"):
@@ -325,8 +455,23 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             for k in ("remits", "ema", "claims_837"):
                 ingested[k] = ingested.get(k, 0) + (up.get(k) or 0)
             heartbeat(store.conn, token)
+        # reports waiting to be read again (the switch, the ledger, the clean-up, a held file a person applied)
+        rr = _ema_step(out, "ema_waiting", reread_waiting, store, ledger=ledger, log=beat_log) or {}
+        if rr.get("read") or rr.get("gone"):
+            out["ema_waiting"] = rr
         out["ingest"] = ingested
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
+        changed = changed or bool(up_in.get("changed")) or bool(rr.get("applied"))
+        # the posting ledger's summaries, before detection reads them (cheap when nothing changed: retention, a catalog
+        # check and a number compared)
+        if lg_box or os.path.exists(ema_ledger.ledger_path(db_path)):
+            r = _ema_step(out, "ema_refresh", ema_ledger.refresh, store, ledger(), log=beat_log)
+            if r and (r.get("part_a") or r.get("part_b")):
+                changed = True              # new EMA summaries: detection runs
+                out["ema_refresh"] = {"part_a": bool(r.get("part_a")), "part_b": bool(r.get("part_b")), "seconds": r.get("seconds")}
+            if lg_box:
+                _ema_step(out, "ema_copies", drop_kept_copies, store, lg_box[0], db_path, log=beat_log)
+            heartbeat(store.conn, token)
         has_run = bool(store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='detection_runs'").fetchone()) and \
             bool(store.conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone())
         rules_changed = False
@@ -340,6 +485,13 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             out["detect"] = {"findings": sum(summary.values())}
         store = Store(db_path)
         heartbeat(store.conn, token)
+        if "detect" in out and store.conn.execute("SELECT 1 FROM meta WHERE key=?", (ema_ledger.META_KEEP_DIRTY,)).fetchone() \
+                and (lg_box or os.path.exists(ema_ledger.ledger_path(db_path))):
+            # detection gave new bills an item: their EMA lines are kept now rather than at the next Production file (X10)
+            r = _ema_step(out, "ema_refresh_after", ema_ledger.refresh, store, ledger(), log=beat_log)
+            if r and r.get("part_a"):
+                out["ema_refresh_after"] = {"seconds": r.get("seconds")}
+            heartbeat(store.conn, token)
         if "detect" not in out:         # detection rebuilds the provider tables itself; this covers an upgrade with no new files
             from . import activity
             if activity.stale(store.conn):
@@ -373,6 +525,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         out["finished"] = _now()
         raise
     finally:
+        for lg in lg_box:
+            try:
+                lg.close()
+            except Exception:
+                pass
         try:
             store.conn.execute("SELECT 1")
         except Exception:

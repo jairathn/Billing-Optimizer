@@ -19,6 +19,7 @@ import sys
 import tracemalloc
 import types
 import zipfile
+from unittest import mock
 
 import pytest
 
@@ -805,10 +806,22 @@ def test_file_ids():
 
 
 # ------------------------------------------------------------------------------------------------- 9. misread report rows
+def _old_rows(path):
+    """The rows the export reader made of a file before it refused EMA's reports. The reader now refuses a report
+    (ema_exports.IsReport); the old code read it as an export, so its refusal is switched off here to make those rows."""
+    try:
+        return list(ema_exports.iter_rows(path, {}))
+    except getattr(ema_exports, "IsReport", ()):
+        pass
+    with mock.patch.object(ema_exports, "_refuse_report", lambda p: None, create=True), \
+            mock.patch.object(ema_exports, "detect_family", lambda cols: "unknown"):
+        return list(ema_exports.iter_rows(path, {}))
+
+
 def _old_load(store, path, family="claim_status"):
     """Load a file as the code before the reports did: its rows through the export reader, as Claim & Claim Status (the
     family the old test gave any header with a Claim Status column) or as an unknown layout."""
-    rows = list(ema_exports.iter_rows(path, {}))
+    rows = _old_rows(path)
     for r in rows:
         r["family"] = family
     store.ingest_ema_rows(rows)
@@ -851,7 +864,7 @@ def test_migration_of_an_upload_and_of_unknown_rows(store, tmp_path):
     store.conn.execute("INSERT INTO uploads (upload_id, stored_sha, kind, name, path, status) VALUES (?,?,?,?,?,?)",
                        (sha, sha, "ema", "AR 2026.xlsx", kept, "done"))
     other = put(tmp_path, "odd.xlsx", F.weekly_xlsx("claim_status", []))           # unknown layout rows of a non-report
-    junk = list(ema_exports.iter_rows(F.write(str(tmp_path / "junk.xlsx"), F.production_xlsx(prod_rows())), {}))
+    junk = _old_rows(F.write(str(tmp_path / "junk.xlsx"), F.production_xlsx(prod_rows())))
     for r in junk:
         r["family"] = "unknown"
     store.ingest_ema_rows(junk)

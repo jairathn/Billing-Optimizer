@@ -694,6 +694,50 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
     return out
 
 
+REFIND_KEY = "ema:refind_v1"        # set once the first cycle that reads EMA's reports has looked for the ones it passed
+
+
+def unread_here(store, sha: str) -> bool:
+    """A file of these bytes was never taken in: no files row and no report catalog row has its SHA-256."""
+    if store.file_seen(sha):
+        return False
+    try:
+        return store.conn.execute("SELECT 1 FROM ema_report_files WHERE file_id=?", (sha,)).fetchone() is None
+    except Exception:       # noqa: BLE001
+        return True
+
+
+def refind_reports(store, client: DropboxClient | None = None, root_path: str | None = None, data_dir: str | None = None,
+                   log=print) -> list[str]:
+    """Once per server (meta ema:refind_v1): the Dropbox position moved past files an older build did not read (EMA's
+    A/R and Production reports: a .csv was not even fetched, an A/R .xlsx was fetched and left unread), so no listing of
+    what changed names them again. List the whole folder (every page), bring every file of a report's kind (.xlsx,
+    .csv, .tsv, .zip, .gz) into the mirror, and hand back those whose bytes were never taken in, for the router to
+    recognise and read. The backfill zip and the state folder stay out."""
+    conn = store.conn
+    if conn.execute("SELECT 1 FROM meta WHERE key=?", (REFIND_KEY,)).fetchone():
+        return []
+    client = client or DropboxClient()
+    root_path = root_path or os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data")
+    data_dir = data_dir or os.environ.get("REMITWATCH_DATA_DIR", "data/dropbox")
+    found: list[str] = []
+    for e in client.list_folder(root_path, recursive=True):
+        name = (e.get("name") or "").lower()
+        if not wanted(e) or not name.endswith(tuple(x for x in REPORT_EXTS if x != ".txt")):
+            continue
+        dest = local_path(data_dir, e)
+        if not (os.path.exists(dest) and os.path.getsize(dest) == e.get("size")
+                and (not e.get("content_hash") or dropbox_content_hash(dest) == e["content_hash"])):
+            client.download(e.get("id") or e["path_lower"], dest)
+        if unread_here(store, file_sha256(dest)):
+            found.append(dest)
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (REFIND_KEY, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
+    conn.commit()
+    if found:
+        log(f"  {len(found)} file(s) in the data folder an older build passed without reading: read now")
+    return found
+
+
 def _scratch_dir() -> str:
     from . import runtime
     return runtime.tmp_dir()

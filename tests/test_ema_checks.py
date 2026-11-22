@@ -862,8 +862,10 @@ def test_overlays_read_the_ars_worked_marks_and_a_later_submission(store, ledger
 def test_unworked_equals_its_filter(store):
     from remitwatch import detect
     detect.ensure_schema(store.conn)
-    for col in ("ema_worked_on", "written_off_when"):
-        store.conn.execute(f"ALTER TABLE findings ADD COLUMN {col} TEXT")
+    have = {r[1] for r in store.conn.execute("PRAGMA table_info(findings)")}
+    for col in ("ema_worked_on", "written_off_when"):          # columns the wiring adds to findings; added here when missing
+        if col not in have:
+            store.conn.execute(f"ALTER TABLE findings ADD COLUMN {col} TEXT")
     rows = [("A", "denial", "open", None, None, 1000, None), ("B", "denial", "open", "2026-05-01", None, 2000, None),
             ("C", "bundling", "open", None, "2026-01-01", 3000, None), ("D", "denial", "in_progress", None, None, 4000, None),
             ("E", "fees", "open", None, None, 5000, None), ("F", "denial", "open", "2026-03-01", None, 6000, "2026-12-01"),
