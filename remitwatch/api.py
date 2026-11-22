@@ -3742,6 +3742,77 @@ def bulk_appeals_on() -> bool:
     return os.environ.get("REMITWATCH_BULK_APPEAL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# What "Appeal everything appealable" may send (needs_B.md 1.3, unit B's rule, exactly): an open item to work now, with
+# nothing that blocks an appeal (remitwatch.states' appeal_block: paid, credit, reprocessed, waiting), an appeal by its
+# action, inside its window, never money owed back, and never a claim to chase, fix, post, bill or decide.
+BULK_EXCLUDED_SIGNALS = ("NO_ANSWER", "REJECTED_PRE_PAYER", "NOT_SENT", "REMIT_NOT_POSTED", "SECONDARY_NOT_BILLED", "CREDIT_BALANCE",
+                         "FORWARDED_TO_CARRIER", "EMA_DENIAL_AS_CONTRACTUAL")
+BULK_RULE = ("status='open' AND COALESCE(stale,0)=0 AND work_state='work_now' AND appeal_block IS NULL AND actionable='appeal' "
+             "AND appeal_deadline >= ? AND category <> 'refund' AND signal NOT IN (" + ",".join(f"'{x}'" for x in BULK_EXCLUDED_SIGNALS) + ")")
+# why an appeal must not go (remitwatch.states' appeal_block), in the page's words
+BLOCK_WORDS = {"paid": "it was paid or settled", "credit": "the line carries a credit (money owed back)",
+               "reprocessed": "the payer reprocessed the line after this answer", "waiting": "it waits on the payer's answer to work already done"}
+
+
+def _bulk_ready(cols: set[str]) -> bool:
+    """Whether the store has the columns the bulk rule reads (a store analysed before them sends nothing in bulk)."""
+    return {"work_state", "appeal_block"} <= cols
+
+
+def _left_out_reason(r: dict) -> str:
+    """Why an open item an appeal letter would settle is not in the bulk list: paid, waiting, credit, reprocessed or other."""
+    block = r.get("appeal_block")
+    if block in ("paid", "credit", "reprocessed", "waiting"):
+        return block
+    ws = r.get("work_state")
+    if ws == "done":
+        return "paid"
+    if ws == "waiting":
+        return "waiting"
+    if r.get("category") == "refund" or r.get("signal") == "CREDIT_BALANCE":
+        return "credit"
+    return "other"
+
+
+def _appeal_ok_now(fid: str) -> tuple[bool, str | None]:
+    """The item's own next step (remitwatch.story.next_step) says an appeal may go: never for a line paid, settled, credited,
+    reprocessed or waiting, nor past its last window. (False, why) otherwise; (True, None) when it may."""
+    from . import story as story_mod
+    lg = _ledger_readonly()
+    conn = db()
+    conn.row_factory = None
+    try:
+        nxt = story_mod.next_step(conn, fid, ledger=lg, today=_day(0))
+    except Exception as exc:        # noqa: BLE001  (an item whose story cannot be told is not sent in bulk)
+        _say(f"api: next_step failed for item {fid}: {type(exc).__name__}: {str(exc)[:160]}")
+        return False, "Its next step could not be worked out, so it is not sent in bulk: open it and send it from there."
+    finally:
+        conn.close()
+        if lg is not None:
+            lg.close()
+    if nxt.get("appeal_ok"):
+        return True, None
+    why = BLOCK_WORDS.get(nxt.get("appeal_block") or "")
+    return False, (f"Not appealed: {why}." if why else f"Not appealed: its next step is not an appeal ({nxt.get('action') or 'nothing to send'}).")
+
+
+def _vouch(f: dict) -> dict | None:
+    """W5 (ema_checks.fax_vouch): whether EMA's reports vouch for an item the remittances alone hold as stale (they stopped
+    coming): its line's outcome worked out now, on whichever copy is at hand. None when EMA's reports cannot be read here."""
+    from . import ema_checks as ec
+    conn = db()
+    conn.row_factory = None
+    try:
+        rules = ec.store_rules(conn)
+        oc = ec.line_outcomes(conn, [f], code_once=rules.code_once, today=_day(0))
+        return (ec.fax_vouch(conn, [f], oc, today=_day(0)) or {}).get(f["finding_id"])
+    except Exception as exc:        # noqa: BLE001  (no EMA tables on this copy: nothing vouches, the stale hold stands)
+        _say(f"api: fax_vouch failed for item {f.get('finding_id')}: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+    finally:
+        conn.close()
+
+
 @app.post("/api/appeals/send", dependencies=[Depends(require_xhr)])
 def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth)):
     """One item all the way to the payer: the visit note from EMA where the appeal rests on it (Claude reviews it and
@@ -3765,6 +3836,25 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         return dict(out, status="held", code=code, reason=reason, **kw)
     if body.get("bulk") and not bulk_appeals_on():
         return held("bulk_paused", BULK_PAUSED)
+    if f.get("signal") == "EMA_DENIED":
+        # a denial only EMA's postings show: no remittance carries it, so there is nothing to cite yet (W5)
+        from .ema_checks import NO_REMITTANCE_MESSAGE
+        return held("no_remittance", NO_REMITTANCE_MESSAGE)
+    if body.get("bulk"):
+        # the bulk list's rule, read again on the item as it is now, and the item's own next step (unit B's rule and unit
+        # D's appeal_ok): a paid, settled, credited, reprocessed or waiting line is never appealed in bulk
+        cols = _columns()
+        ok = _bulk_ready(cols) and one(f"SELECT 1 FROM findings WHERE finding_id=? AND {BULK_RULE}", (fid, _day(0))) is not None
+        if not ok:
+            why = BLOCK_WORDS.get(f.get("appeal_block") or "") or (
+                "it is not an open item to work now inside its window" if _bulk_ready(cols) else "this site has not worked out the items' states yet")
+            return held("left_out", f"Not sent in bulk: {why}.")
+        fine, why = _appeal_ok_now(fid)
+        if not fine:
+            return held("left_out", why)
+    if f.get("appeal_block") in BLOCK_WORDS and f.get("status") in ("open", "in_progress"):
+        # one item opened by a person: the same never (amendment 14), said with the reason
+        return held("blocked", f"Not sent: {BLOCK_WORDS[f['appeal_block']]}. Its panel says what to do instead.")
     if kind not in fax.APPEALABLE:
         return held("not_appealable", {"fix": "This one is corrected in EMA and sent again as a claim, not appealed.",
                                        "auth": "This one needs the authorization record, or a retro-authorization, first.",
@@ -3776,9 +3866,17 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed. Only a
     # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
     behind = _data_behind_days()
+    vouched = None
     if behind is not None and behind > STALE_APPEAL_DAYS and not body.get("stale_ok"):
-        return held("stale", f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since. "
-                             "Get the remittances current first (Data tab, or the TriZetto feed); \"Still unpaid in EMA: fax it anyway\" in the item sends it now.")
+        # W5: EMA's Production report can vouch for the item where the remittances stopped coming (still unpaid, on its EMA
+        # claim, nothing posted since); only when neither can is it held
+        v = _vouch(f)
+        if not (v and v.get("vouched")):
+            extra = f" {v['message']}" if v and v.get("message") else ""
+            return held("stale", f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since.{extra} "
+                                 "Get the remittances current first (Data tab, or the TriZetto feed); \"Still unpaid in EMA: fax it anyway\" in the item sends it now.",
+                        vouch=(v or {}).get("code") or "no_ema")
+        vouched = v.get("message")
     # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
     # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
@@ -3811,6 +3909,13 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
     use_ai = body.get("use_ai", True) not in (False, 0, "0")
     pk = None if body.get("rebuild") else next(iter(_packets_for(fid)), None)
+    seen = str(body.get("packet_id") or "")
+    if seen:
+        # the packet the person read in the preview goes as it is, or not at all: never one built behind their back
+        pk = next((p for p in _packets_for(fid) if p.get("packet_id") == seen), None)
+        if pk is None or _packet_problem(seen, f, first=True):
+            return held("packet_changed", "The packet you read can no longer go as it is: build it again and read it before it is sent.")
+        use_ai = False
     if pk and pk.get("mode") == "template" and use_ai and os.environ.get("ANTHROPIC_API_KEY") and kind != "rate":
         pk = None           # built before the review could run: now it can
     if pk and _packet_problem(pk["packet_id"], f, first=True):
@@ -3887,26 +3992,47 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         return dict(out, status="skipped", reason=str(exc))
     except fax.FaxError as exc:
         return held("fax_error", str(exc))
-    _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages).", None, user)
+    _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages)."
+                   + (f" {vouched}" if vouched else ""), None, user)
     return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), pages=pages, note=note)
 
 
 @app.get("/api/appeals/appealable")
 def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit: int = Query(2000, ge=1, le=5000), _: str = Depends(require_auth)):
-    """What "Appeal everything appealable" sends: every open item an appeal letter settles, inside its filing window,
-    soonest window first; and what stands in the way (payers with no fax number yet, the fax line, the practice's
-    details, EMA)."""
+    """What "Appeal everything appealable" sends: unit B's rule exactly (BULK_RULE: open, work now, nothing blocking an
+    appeal, an appeal by its action, inside its window, no refund and no claim to chase, fix, post, bill or decide) for the
+    items an appeal letter settles, soonest window first; each is checked again against its own next step when it is sent.
+    With it, what is left out and why ("Left out: N items (paid M, waiting K, credit C, reprocessed R)", each item listed)
+    and what stands in the way (payers with no fax number yet, the fax line, the practice's details, EMA)."""
     from . import fax, modmed
     from .insights import work_type
     if not bulk_appeals_on():
         return {"paused": BULK_PAUSED, "items": [], "payers": [], "fax": fax.configured(),
                 "practice_missing": [], "modmed": False, "review": False}
     cond, params = _appealable_cond()
-    where = f"""{cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
-                AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""" + (" AND payer_group=?" if payer else "")
-    items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings WHERE {where}
-                     ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
-                  (*params, *([payer] if payer else []), limit))
+    cols = _columns()
+    by_payer = " AND payer_group=?" if payer else ""
+    today = _day(0)
+    if _bulk_ready(cols):
+        items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings
+                         WHERE {cond} AND {BULK_RULE} AND claim_key IS NOT NULL{by_payer}
+                         ORDER BY appeal_deadline, COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
+                      (*params, today, *([payer] if payer else []), limit))
+        # the open items in their windows a letter would settle that the rule leaves out, each with why
+        out_rows = rows(f"""SELECT finding_id, payer_group, signal, category, shortfall_cents, appeal_deadline, work_state, appeal_block FROM findings
+                            WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
+                            AND (appeal_deadline IS NULL OR appeal_deadline >= ?){by_payer}
+                            AND NOT ({BULK_RULE} AND claim_key IS NOT NULL)
+                            ORDER BY COALESCE(shortfall_cents, 0) DESC, finding_id""",
+                        (*params, today, *([payer] if payer else []), today))
+    else:
+        # a store analysed before the states: nothing goes in bulk until the next run has worked them out
+        items = []
+        out_rows = [dict(r, work_state=None, appeal_block=None) for r in rows(
+            f"""SELECT finding_id, payer_group, signal, category, shortfall_cents, appeal_deadline FROM findings
+                WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
+                AND (appeal_deadline IS NULL OR appeal_deadline >= ?){by_payer} ORDER BY COALESCE(shortfall_cents, 0) DESC, finding_id""",
+            (*params, today, *([payer] if payer else [])))]
     numbers = {r["payer_group"]: fax.digits(r["number"]) for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")
                if not fax.shared_group(r["payer_group"])} if has_table("payer_fax") else {}
     sent = {r["finding_id"] for r in rows("SELECT DISTINCT finding_id FROM faxes WHERE direction='out' AND COALESCE(status,'')!='failed'")} if has_table("faxes") else set()
@@ -3926,8 +4052,21 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
         b["kinds"][k] = b["kinds"].get(k, 0) + 1
         out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0, "ready": bool(numbers.get(pg)),
                     "by_hand": bool(by_hand)})
+    left = {"n": 0, "cents": 0, "paid": 0, "waiting": 0, "credit": 0, "reprocessed": 0, "other": 0, "items": []}
+    for r in out_rows:
+        why = _left_out_reason(r)
+        left["n"] += 1
+        left["cents"] += r["shortfall_cents"] or 0
+        left[why] += 1
+        if len(left["items"]) < 500:
+            left["items"].append({"finding_id": r["finding_id"], "payer_group": r["payer_group"], "signal": r["signal"],
+                                  "cents": r["shortfall_cents"] or 0, "reason": why, "words": BLOCK_WORDS.get(why, "not an item to appeal now")})
+    parts = [f"{w} {left[k]}" for k, w in (("paid", "paid"), ("waiting", "waiting"), ("credit", "credit"), ("reprocessed", "reprocessed"),
+                                           ("other", "other")) if left[k]]
+    left["line"] = f"Left out: {left['n']:,} item{'s' if left['n'] != 1 else ''} ({', '.join(parts)})" if left["n"] else ""
     return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "not_here": fax.not_here(),
-            "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+            "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "left_out": left}
 
 
 @app.get("/api/faxes")
@@ -4547,23 +4686,110 @@ def cron_faxes(request: Request, credentials: Optional[HTTPBasicCredentials] = D
         return {"skipped": str(exc)}
 
 
+# --------------------------------------------------------------------------- a person's decision on a held EMA report
+_FILE_ID = re.compile(r"[A-Za-z0-9:_.-]{8,128}")
+
+
+@app.post("/api/ema/reports/{file_id}/decision", dependencies=[Depends(require_xhr)])
+def ema_report_decision(file_id: str, request: Request, body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Apply or discard a report the reader held (a filtered-looking A/R, a Production file that would replace a box with
+    much less, a file three runs could not finish): remitwatch.ema_reports.decide. Apply lets the next run read it again
+    from its kept copy; discard closes it. On a server the decision is made on the store and a run is asked for; on Vercel it
+    goes through the journal (actions.apply, kind ema_report_decision) and a file the ledger held as too slow has its tries
+    cleared (ema_ledger.LedgerHandle.clear_attempt), so the next run reads it again. Body {"decision": "apply"|"discard"}."""
+    decision = str(body.get("decision") or "")
+    if decision not in ("apply", "discard"):
+        raise HTTPException(400, "The decision is apply or discard.")
+    if not _FILE_ID.fullmatch(file_id or ""):
+        raise HTTPException(400, "That is not a report's id.")
+    if not has_table("ema_report_files"):
+        raise HTTPException(404, "No EMA report is on file.")
+    row = one("SELECT status FROM ema_report_files WHERE file_id=?", (file_id,))
+    if row is None:
+        raise HTTPException(404, "No report with that id is on file.")
+    if row["status"] != "held":
+        raise HTTPException(409, "Only a held report waits for a decision." if row["status"] != "refused"
+                            else "A refused report cannot be applied. Export it again from EMA.")
+    if runtime.serverless():
+        from . import cloud, ema_ledger
+        st = cloud.SERVING_COPY.state()
+        if st is None:
+            raise HTTPException(503, "Storage is not connected yet. Open /setup.")
+        cloud.SERVING_COPY.record({"kind": "ema_report_decision", "file_id": file_id, "decision": decision, "actor": user})
+        if decision == "apply":
+            ema_ledger.LedgerHandle(st).clear_attempt(file_id)
+            started = cloud.trigger_cycle(base_url(request), trigger="decision")
+        else:
+            started = False
+        return {"ok": True, "file_id": file_id, "decision": decision, "run_started": bool(started)}
+    from . import ema_reports
+    conn = db()
+    try:
+        res = ema_reports.decide(conn, file_id, decision, user)
+        conn.commit()
+    finally:
+        conn.close()
+    if res.get("error"):
+        raise HTTPException(409, res["error"])
+    started = False
+    if decision == "apply":
+        from . import intake
+        started = intake.kick(os.path.dirname(os.path.abspath(DB_PATH)))
+    return {"ok": True, "file_id": file_id, "decision": decision, "status": res.get("status"), "run_started": bool(started)}
+
+
+# --------------------------------------------------------------------------- a line in an item's history that changes no status
+EVENT_KINDS = {"posted": "Posted in EMA", "era_requested": "ERA asked for", "billed": "Billed", "outcome": "Outcome logged",
+               "instructions": "Instructions copied"}
+
+
+@app.post("/api/findings/{finding_id}/event", dependencies=[Depends(require_xhr)])
+def finding_event(finding_id: str, body: dict = Body(default={}), user: str = Depends(require_auth)):
+    """Write down work done outside RemitWatch that changes no status (a remittance posted in EMA while the denial is still
+    worked, the ERA asked for, a bill sent): one line in the item's history, kept like any other (the journal on Vercel)."""
+    kind = str(body.get("event") or "")
+    if kind not in EVENT_KINDS:
+        raise HTTPException(400, "Unknown event.")
+    if not one("SELECT 1 FROM findings WHERE finding_id=?", (finding_id,)):
+        raise HTTPException(404, "finding not found")
+    note = " ".join(str(body.get("note") or "").split())[:300]
+    _record_action({"kind": "event", "finding_id": finding_id, "event": kind, "note": f"{EVENT_KINDS[kind]}: {note}" if note else EVENT_KINDS[kind],
+                    "actor": user})
+    return {"ok": True}
+
+
 # --------------------------------------------------------------------------- reasons hidden for a payer (actions.apply_hide_rule)
 @app.get("/api/hide")
-def hide_list(_: str = Depends(require_auth)):
-    """The reasons hidden for a payer, with how many items each hides now: the items the rule itself let go and that
-    Show again brings back, not the ones a person let go by hand."""
-    from .actions import LAST_DECISION
+def hide_list(patterns: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
+    """The reasons hidden for a payer (payer x reason x code x modifier x payer's reason code, remitwatch.archive_rules'
+    grain), with how many items each hides now: the items the rule itself let go and that Show again brings back, not the
+    ones a person let go by hand. patterns=1 adds the patterns a person can decide on at that grain, with the share the
+    archive saw paid later (archive_rules.hide_patterns: the column to read before hiding one)."""
+    from .actions import LAST_DECISION, hide_rule_of
+    from .archive_rules import hide_patterns, hide_sql
     from .insights import SHORT_LABELS
-    if not has_table("hide_rules"):
-        return {"rules": []}
-    out = []
-    events = has_table("finding_events")
-    for r in rows(f"SELECT payer_group, signal, actor, at, note FROM hide_rules WHERE {_rules_in_force()} ORDER BY at DESC"):
-        n = one(f"""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings f WHERE f.payer_group=? AND f.signal=?
-                    AND f.status='dismissed' AND COALESCE(f.stale,0)=0 AND {LAST_DECISION if events else "'hidden'"}='hidden'""",
-                (r["payer_group"], r["signal"])) or {}
-        out.append(dict(r, label=SHORT_LABELS.get(r["signal"], r["signal"]), n=n.get("n") or 0, cents=n.get("cents") or 0))
-    return {"rules": out}
+    out: dict[str, Any] = {"rules": []}
+    if has_table("hide_rules"):
+        events = has_table("finding_events")
+        have = {r["name"] for r in rows("PRAGMA table_info(hide_rules)")}
+        grain = [c for c in ("code", "modifier", "reason") if c in have]
+        for r in rows(f"SELECT payer_group, signal, {''.join(c + ', ' for c in grain)}actor, at, note FROM hide_rules "
+                      f"WHERE {_rules_in_force()} ORDER BY at DESC"):
+            rule = hide_rule_of(r)
+            cond, params = hide_sql(rule, alias="f")
+            n = one(f"""SELECT COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings f WHERE {cond}
+                        AND f.status='dismissed' AND COALESCE(f.stale,0)=0 AND {LAST_DECISION if events else "'hidden'"}='hidden'""",
+                    tuple(params)) or {}
+            label = SHORT_LABELS.get(rule["signal"], rule["signal"]) if rule["signal"] != "*" else "Any reason"
+            narrow = [x for x in (rule["code"] if rule["code"] != "*" else "", f"modifier {rule['modifier']}" if rule["modifier"] != "*" else "",
+                                  rule["reason"] if rule["reason"] != "*" else "") if x]
+            out["rules"].append(dict(r, **{k: rule[k] for k in ("signal", "code", "modifier", "reason")},
+                                     label=label + (f" ({', '.join(narrow)})" if narrow else ""), n=n.get("n") or 0, cents=n.get("cents") or 0))
+    if patterns:
+        items = rows("""SELECT finding_id, payer_group, signal, category, status, line_key, paid_cents, billed_code, procedure_code, modifiers,
+                               carc, shortfall_cents, stale FROM findings WHERE category IN ('denial','bundling') AND COALESCE(stale,0)=0""")
+        out["patterns"] = hide_patterns(items)[:200]
+    return out
 
 
 def _rules_in_force() -> str:
@@ -4578,26 +4804,44 @@ def _rules_in_force() -> str:
 
 @app.post("/api/hide", dependencies=[Depends(require_xhr)])
 def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
-    """Hide one reason for one payer: its open items go to Let go with the note, and so do new ones; nothing a person
-    has worked is touched. remove: true takes the rule away and reopens what it hid."""
-    pg, sig = str(body.get("payer_group") or "").strip(), str(body.get("signal") or "").strip()
-    if not pg or not sig or len(pg) > 200 or not re.fullmatch(r"[A-Z0-9_]{2,60}", sig):
+    """Hide one reason for one payer, at payer x reason, and where given x code (one, a comma list, or an '@family') x
+    modifier (one, or 'none') x the payer's reason code: its open items go to Let go with the note, and so do new ones;
+    nothing a person has worked is touched. remove: true takes the rule away and reopens what it hid (what another rule
+    still covers stays hidden). A rule for any reason needs a code or a reason code: a whole payer is never hidden."""
+    from .actions import NEVER_HIDDEN, hide_rule_of
+    from .archive_rules import hide_sql
+    pg = str(body.get("payer_group") or "").strip()
+    sig = str(body.get("signal") or "").strip() or "*"
+    raw = {k: str(body.get(k) or "").strip() or "*" for k in ("code", "modifier", "reason")}
+    if not pg or len(pg) > 200 or not (sig == "*" or re.fullmatch(r"[A-Z0-9_]{2,60}", sig)):
         raise HTTPException(400, "payer_group and signal are required")
+    if not re.fullmatch(r"\*|@[a-z_]{2,30}|[A-Z0-9]{3,7}(,[A-Z0-9]{3,7}){0,19}", raw["code"].upper() if not raw["code"].startswith("@") else raw["code"]) \
+            or not re.fullmatch(r"\*|none|[A-Z0-9]{2}", raw["modifier"] if raw["modifier"] in ("*", "none") else raw["modifier"].upper()) \
+            or not re.fullmatch(r"\*|((CO|PR|OA|PI|CR)-?)?[A-Z0-9]{1,5}", raw["reason"].upper()):
+        raise HTTPException(400, "code, modifier and reason are a code (or a comma list, or an @family), one modifier (or none), "
+                                 "and a reason code (97 or CO-97); leave one out for any")
+    rule = hide_rule_of(dict(raw, payer_group=pg, signal=sig))
+    if rule["signal"] == "*" and rule["code"] == "*" and rule["reason"] == "*":
+        raise HTTPException(400, "Name a reason, a code or the payer's reason code: a whole payer is never hidden.")
+    entry = {"kind": "hide_rule", "payer_group": pg, "signal": rule["signal"], "code": rule["code"], "modifier": rule["modifier"],
+             "reason": rule["reason"], "actor": user}
     if body.get("remove"):
-        if not (has_table("hide_rules") and one(f"SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=? AND {_rules_in_force()}", (pg, sig))):
+        if not (has_table("hide_rules") and one(f"SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=? AND "
+                                                f"COALESCE(code,'*')=? AND COALESCE(modifier,'*')=? AND COALESCE(reason,'*')=? AND {_rules_in_force()}",
+                                                (pg, rule["signal"], rule["code"], rule["modifier"], rule["reason"]))):
             raise HTTPException(404, "No such rule.")
-        _record_action({"kind": "hide_rule", "op": "remove", "payer_group": pg, "signal": sig, "actor": user})
+        _record_action(dict(entry, op="remove"))
         return {"ok": True}
-    from .actions import NEVER_HIDDEN
     if sig in NEVER_HIDDEN:
         raise HTTPException(400, "Claims the payer never answered are not hidden for a payer: each one is money nobody has "
                                  "asked for yet. Let them go one at a time, with a note.")
-    if not one("SELECT 1 FROM findings WHERE payer_group=? AND signal=? LIMIT 1", (pg, sig)):
+    cond, params = hide_sql(rule, alias="f")
+    if not one(f"SELECT 1 FROM findings f WHERE {cond} LIMIT 1", tuple(params)):
         raise HTTPException(404, "Nothing of that kind for that payer.")
-    before = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
-    _record_action({"kind": "hide_rule", "op": "add", "payer_group": pg, "signal": sig, "actor": user,
-                    "note": str(body.get("note") or "")[:300]})
-    after = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
+    count = f"SELECT COUNT(*) n FROM findings f WHERE {cond} AND f.status='open'"
+    before = (one(count, tuple(params)) or {}).get("n") or 0
+    _record_action(dict(entry, op="add", note=str(body.get("note") or "")[:300]))
+    after = (one(count, tuple(params)) or {}).get("n") or 0
     return {"ok": True, "hidden": before - after}
 
 

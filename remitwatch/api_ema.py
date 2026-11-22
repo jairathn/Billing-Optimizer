@@ -48,7 +48,10 @@ MONEY_CATS = "denial,bundling,downcoding,underpayment"       # the Worklist's ow
 TODO = "open,in_progress"
 STATES = ("work_now", "waiting", "done", "accepted", "expired", "cant_check")
 STATE_WORDS = {"work_now": "Work now", "waiting": "Waiting", "done": "Done", "accepted": "Accepted", "expired": "Expired",
-               "cant_check": "Can't be checked", "followup_due": "Follow-ups due"}
+               "cant_check": "Can't be checked", "followup_due": "Follow-ups due", "todo": "Work now"}
+# Today's tiles: what to do now (work now and the follow-ups due: the Worklist's default), the follow-ups due among them,
+# what waits on the payer, and the four states that need nothing today
+TODAY_STATES = ("todo", "followup_due", "waiting", "done", "accepted", "expired", "cant_check")
 EMA_VALUES = ("written_off", "contractual", "paid_other", "on_ar", "ema_only", "worked", "unworked", "auto_written_off")
 FEED_STALE_DAYS = 10            # no payment newer than this: the remittances are behind (insights.data_health's "feed")
 AR_STALE_DAYS = 8               # EMA's A/R older than this is stale (amendment 10; the Upload page's checklist)
@@ -101,6 +104,12 @@ def _conn() -> Iterator[sqlite3.Connection]:
 
 def _table(c: sqlite3.Connection, name: str) -> bool:
     return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def _reports_arrived(c: sqlite3.Connection) -> bool:
+    """Whether any EMA report has reached the site (its catalog has a row: read, held, waiting or refused). The tables
+    themselves exist on every store (ema_reports.ensure_schema), so they say nothing."""
+    return _table(c, "ema_report_files") and c.execute("SELECT 1 FROM ema_report_files LIMIT 1").fetchone() is not None
 
 
 def _cols(c: sqlite3.Connection, table: str) -> set[str]:
@@ -167,8 +176,11 @@ def condition(name: str, value: str, c: sqlite3.Connection | None = None) -> tup
     """The `state=` and `ema=` filters as a condition on a findings row: the rule the Today counts use when api._filters
     does not take them yet (needs_C2.md section 4 gives the same SQL to unit C1). None for an unknown value."""
     if name == "state":
+        due = "(follow_up_on IS NOT NULL AND follow_up_on <= date('now'))"
         if value == "followup_due":
-            return ("follow_up_on IS NOT NULL AND follow_up_on <= date('now') AND work_state IN ('work_now','waiting')", [])
+            return (f"work_state IN ('work_now','waiting') AND {due}", [])
+        if value == "todo":
+            return (f"(work_state = 'work_now' OR (work_state = 'waiting' AND {due}))", [])
         if value in STATES:
             return ("work_state = ?", [value])
         return None
@@ -323,10 +335,11 @@ def blind(user: str = Depends(_user)):
 # --------------------------------------------------------------------------------------------------------- Today
 @router.get("/api/ema/today")
 def today(user: str = Depends(_user)):
-    """Today's counts beside the plan: the money items by state (Work now, follow-ups due, Waiting, and the four that need
-    nothing today), EMA's automatic write-offs still appealable, the items nobody has worked, the payments EMA posted with
-    no remittance last month, the reports' ages and what the run noted. Each count carries the Worklist filter it was
-    counted with (`go`): a click opens exactly that list."""
+    """Today's counts beside the plan: the money items by state (Work now with the follow-ups due, which is the Worklist's
+    default; the follow-ups due among them; Waiting; and the four that need nothing today), EMA's automatic write-offs
+    still appealable, the items nobody has worked, the payments EMA posted with no remittance last month, the reports'
+    ages and what the run noted. Each count carries the Worklist filter it was counted with (`go`): a click opens exactly
+    that list."""
     a = _api()
     with _conn() as c:
         fcols = _cols(c, "findings")
@@ -334,7 +347,7 @@ def today(user: str = Depends(_user)):
         out: dict = {"today": _today(), "ready": ready, "states": {}, "blind": blind_spot(c)}
         rec = _meta(c, "ema:reconcile", {}) or {}
         health = []
-        if _table(c, "ema_report_files"):
+        if _reports_arrived(c):
             try:
                 from . import ema_checks as ec
                 health = ec.data_health(c, today=out["today"])
@@ -349,7 +362,7 @@ def today(user: str = Depends(_user)):
     token = a._WINDOWS_MEMO.set({})
     try:
         if ready:
-            for key in ("work_now", "followup_due", "waiting", "done", "accepted", "expired", "cant_check"):
+            for key in TODAY_STATES:
                 out["states"][key] = dict(count({"state": key, "status": "all", "deadline": ""}), label=STATE_WORDS[key])
         if has_outcome:
             out["auto_written_off"] = count({"ema": "auto_written_off", "status": TODO, "deadline": "valid", "sort": "shortfall"})
@@ -451,7 +464,7 @@ def data(user: str = Depends(_user)):
     835 payments EMA never posted, credits, the A/R accounted for), the re-send requests, what the run noted, and the
     write-off patterns waiting for the owner. A panel whose figures cannot be read says so by the fault's kind."""
     with _conn() as c:
-        if not _table(c, "ema_report_files"):
+        if not _reports_arrived(c):
             return {"ready": False}
         out: dict = {"ready": True, "today": _today(), "fresh": _freshness(c), "blind": blind_spot(c)}
         for name, fn in (("catalog", _catalog), ("reconcile", _reconcile), ("resend", lambda cc: _c1_rows(cc, {})),

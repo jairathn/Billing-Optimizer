@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS archive_rates (payer_group TEXT, year TEXT, code TEXT
     payer_kind TEXT, mode_cents INTEGER, median_cents INTEGER, p10_cents INTEGER, p90_cents INTEGER, n INTEGER,
     mode_share REAL, counts TEXT, PRIMARY KEY (payer_group, year, code, tier, pos_class)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS archive_market (year TEXT, code TEXT, tier TEXT, pos_class TEXT, median_cents INTEGER,
-    n INTEGER, PRIMARY KEY (year, code, tier, pos_class)) WITHOUT ROWID;
+    n INTEGER, medicare_cents INTEGER, PRIMARY KEY (year, code, tier, pos_class)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS archive_pins (bill TEXT PRIMARY KEY, until TEXT, why TEXT, at TEXT);
 CREATE TABLE IF NOT EXISTS archive_requests (bill TEXT, finding_id TEXT, status TEXT, actor TEXT, reason TEXT, at TEXT,
     PRIMARY KEY (bill, at));
@@ -251,19 +251,19 @@ def _d(iso: Any) -> date | None:
 def _months_before(day: str, months: int) -> str:
     """The first day of the month `months` before `day`'s month: the cutoff moves once a month, so a month's bills
     leave together."""
-    d = _d(day) or date.today()
+    d = _d(day) or _d(_today())
     total = d.year * 12 + (d.month - 1) - int(months)
     return date(total // 12, total % 12 + 1, 1).isoformat()
 
 
 def _days_before(day: str, n: int) -> str:
-    d = _d(day) or date.today()
+    d = _d(day) or _d(_today())
     return (d - timedelta(days=int(n))).isoformat()
 
 
 def _exact_months_before(day: str, months: int) -> str:
     """`day` less `months` months (the last day of a shorter month when the day does not exist)."""
-    d = _d(day) or date.today()
+    d = _d(day) or _d(_today())
     total = d.year * 12 + (d.month - 1) - int(months)
     y, m = total // 12, total % 12 + 1
     for dd in (d.day, 30, 29, 28):
@@ -765,8 +765,8 @@ def _batch_keys(conn: sqlite3.Connection, bills: Sequence[str]) -> None:
     if _have(conn, "findings"):
         fcols = set(_cols(conn, "findings"))
         evidence = "f.evidence" if "evidence" in fcols else "NULL"
-        conn.execute(f"""INSERT OR IGNORE INTO temp.arc_bf SELECT f.finding_id, p.bill FROM temp.arc_bp p
-                         JOIN findings f ON f.patient_control_number = p.pcn""")
+        conn.execute("""INSERT OR IGNORE INTO temp.arc_bf SELECT f.finding_id, p.bill FROM temp.arc_bp p
+                        JOIN findings f ON f.patient_control_number = p.pcn""")
         conn.execute(f"""INSERT OR IGNORE INTO temp.arc_bf SELECT f.finding_id, k.bill FROM temp.arc_bc k
                          JOIN findings f ON f.claim_key = k.claim_key
                          WHERE NOT (COALESCE({evidence}, '') LIKE '%"line_keys"%' AND f.patient_control_number IS NULL)""")
@@ -1328,11 +1328,12 @@ def ledger_postings(sink: Any, links: Iterable[int], *, svc_lo: str | None = Non
 
 # --------------------------------------------------------------------------------------------- the frozen baselines
 def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
-    """The hook in Detector.build_baselines, after the market figures and before the Medicare figures and the payer_rates
-    table are built from the rates. For a service year the archive took lines of (locked), the rates, the counts behind
-    them and the cross-payer figures are the ones measured on the whole year before the archive took anything; for every
-    other year old enough to be archived (before today less the floor), a fresh snapshot is kept. Returns {'locked',
-    'overridden', 'snapshot'}."""
+    """The hook in Detector.build_baselines (best right after the market figures, before the Medicare figures and the
+    payer_rates table are built from the rates; at the end of build_baselines works too: it then sets the Medicare
+    figures and the payer_rates rows of those years itself). For a service year the archive took lines of (locked), the
+    rates, the counts behind them, the cross-payer and Medicare figures are the ones measured on the whole year before
+    the archive took anything; for every other year old enough to be archived (before today less the floor), a fresh
+    snapshot is kept. Returns {'locked', 'overridden', 'snapshot'}."""
     conn = det.conn
     ensure_schema(conn)
     today = _today(today or getattr(det, "today", None))
@@ -1344,6 +1345,7 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
     counts = getattr(det, "rate_counts", None)
     market = getattr(det, "market", None)
     kinds = getattr(det, "kinds", None)
+    medicare = getattr(det, "medicare", None)       # set only when called at the end of build_baselines
     if locked:
         q = ",".join("?" * len(locked))
         frozen_rates = {}
@@ -1368,12 +1370,24 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
                 del counts[key]
             for key, cnt in frozen_counts.items():
                 counts[key] = cnt
+        frozen_medicare = {}
+        frozen_market = {}
+        for year, code, tier, pos, med, n, mcare in conn.execute(
+                f"SELECT year, code, tier, pos_class, median_cents, n, medicare_cents FROM archive_market WHERE year IN ({q})",
+                sorted(locked)):
+            if med is not None:
+                frozen_market[(year, code, tier, pos)] = {"median": med, "n": n}
+            if mcare is not None:
+                frozen_medicare[(year, code, tier, pos)] = mcare
         if market is not None:
             for key in [k for k in market if k[0] in locked]:
                 del market[key]
-            for year, code, tier, pos, med, n in conn.execute(
-                    f"SELECT year, code, tier, pos_class, median_cents, n FROM archive_market WHERE year IN ({q})", sorted(locked)):
-                market[(year, code, tier, pos)] = {"median": med, "n": n}
+            market.update(frozen_market)
+        if medicare is not None:
+            for key in [k for k in medicare if k[0] in locked]:
+                del medicare[key]
+            medicare.update(frozen_medicare)
+            _rewrite_payer_rates(det, locked)
     # the snapshot of every year that could be archived before the next run
     top = _months_before(today, MIN_HORIZON_MONTHS)[:4]
     years = {str(l["year"]) for l in getattr(det, "lines", []) if l["year"]} | {k[1] for k in rates} | \
@@ -1389,19 +1403,43 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
             rows.append((key[0], y, key[2], key[3], key[4], (kinds or {}).get(key[0]), r.get("mode"), r.get("median"),
                          r.get("p10"), r.get("p90"), r.get("n"), r.get("share"),
                          _canon({str(a): b for a, b in sorted((cnt or {}).items())})))
-        mrows = [(k[0], k[1], k[2], k[3], v.get("median"), v.get("n")) for k, v in (market or {}).items() if k[0] == y]
+        mkeys = {k for k in (market or {}) if k[0] == y} | {k for k in (medicare or {}) if k[0] == y}
+        mrows = [(k[0], k[1], k[2], k[3], (market or {}).get(k, {}).get("median"), (market or {}).get(k, {}).get("n"),
+                  (medicare or {}).get(k)) for k in mkeys]
         digest = _sha(_canon([sorted(rows, key=str), sorted(mrows, key=str)]))
         if (frozen.get(y) or {}).get("digest") == digest:
             continue
         conn.execute("DELETE FROM archive_rates WHERE year = ?", (y,))
         conn.execute("DELETE FROM archive_market WHERE year = ?", (y,))
         conn.executemany("INSERT OR REPLACE INTO archive_rates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-        conn.executemany("INSERT OR REPLACE INTO archive_market VALUES (?,?,?,?,?,?)", mrows)
+        conn.executemany("INSERT OR REPLACE INTO archive_market VALUES (?,?,?,?,?,?,?)", mrows)
         frozen[y] = {"at": today, "digest": digest, "rates": len(rows)}
         out["snapshot"].append(y)
     if out["snapshot"]:
         _meta_put(conn, META_FROZEN, frozen)
     return out
+
+
+def _rewrite_payer_rates(det: Any, locked: set[str]) -> None:
+    """At the end of build_baselines: the payer_rates rows of the locked years from the frozen rates (the table the
+    pages read), in build_baselines' own form."""
+    conn = det.conn
+    if not _have(conn, "payer_rates") or not locked:
+        return
+    q = ",".join("?" * len(locked))
+    conn.execute(f"DELETE FROM payer_rates WHERE year IN ({q})", sorted(locked))
+    rows = []
+    kinds = getattr(det, "kinds", {}) or {}
+    for (grp, year, code, tier, pos), r in det.rates.items():
+        if year not in locked:
+            continue
+        med = det.medicare.get((year, code, tier, pos))
+        rows.append((grp, kinds.get(grp, "other"), year, code, tier, r["mode"], r["median"], r["p10"], r["p90"], r["n"],
+                     round(r["share"], 3) if r.get("share") is not None else None, med,
+                     round(r["mode"] / med, 4) if med else None, pos))
+    conn.executemany("""INSERT OR REPLACE INTO payer_rates (payer_group, payer_kind, year, code, tier, mode_cents, median_cents,
+                        p10_cents, p90_cents, n, mode_share, medicare_cents, pct_of_medicare, pos_class)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
 
 
 # ------------------------------------------------------------------------------------------------- finding it again
@@ -1770,8 +1808,10 @@ def restore_touched(conn: sqlite3.Connection, *, sink: Any, today: Any = None, r
 
 
 # ----------------------------------------------------------------------------------------------- size and memory
-def _table_sizes(conn: sqlite3.Connection, top: int) -> tuple[list[dict], bool]:
+def _table_sizes(conn: sqlite3.Connection, top: int, use_dbstat: bool = True) -> tuple[list[dict], bool]:
     try:
+        if not use_dbstat:
+            raise sqlite3.OperationalError("dbstat not used")
         rows = conn.execute("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name").fetchall()
         idx = {n: t for n, t in conn.execute("SELECT name, tbl_name FROM sqlite_master WHERE type='index'")}
         by: Counter = Counter()
@@ -1796,14 +1836,14 @@ def _table_sizes(conn: sqlite3.Connection, top: int) -> tuple[list[dict], bool]:
 
 
 def measure(conn: sqlite3.Connection, *, peak: int | None = None, mode: str | None = None, budget: int | None = None,
-            limit_mb: int | None = None, top: int = 8, env: dict | None = None) -> dict:
+            limit_mb: int | None = None, top: int = 8, env: dict | None = None, use_dbstat: bool = True) -> dict:
     """The hot store's size and the run's memory against its budget: {'hot_bytes', 'free_bytes', 'tables': [{table,
     bytes}], 'exact', 'peak_mb', 'budget_mb', 'limit_mb', 'share', 'level' ('ok' | 'warn' | 'over'), 'mode'}. Table sizes
     come from dbstat where SQLite has it (indexes counted with their table), else from row counts and a sample."""
     ps = conn.execute("PRAGMA page_size").fetchone()[0]
     pc = conn.execute("PRAGMA page_count").fetchone()[0]
     fl = conn.execute("PRAGMA freelist_count").fetchone()[0]
-    tables, exact = _table_sizes(conn, top)
+    tables, exact = _table_sizes(conn, top, use_dbstat)
     mode = mode or ("serverless" if serverless(env) else "server")
     bud = budget if budget is not None else budget_mb(mode, limit_mb=limit_mb, env=env)
     share = round(peak / bud, 3) if peak and bud else None
@@ -1816,7 +1856,8 @@ def record_run(conn: sqlite3.Connection, *, run_id: str | None, measured: dict, 
                today: Any = None, seconds: float | None = None) -> dict:
     """Add this run to meta archive:history (the last 120 runs): its size, memory, budget and what it retired."""
     ensure_schema(conn)
-    mb = lambda b: round((b or 0) / 1048576, 1)      # noqa: E731
+    def mb(b: Any) -> float:
+        return round((b or 0) / 1048576, 1)
     entry = {"at": _now(), "day": _today(today), "run_id": run_id, "mode": measured.get("mode"),
              "hot_mb": mb(measured.get("hot_bytes")), "free_mb": mb(measured.get("free_bytes")),
              "peak_mb": measured.get("peak_mb"), "budget_mb": measured.get("budget_mb"), "share": measured.get("share"),
@@ -1843,9 +1884,10 @@ def history(conn: sqlite3.Connection) -> list[dict]:
 
 def _mb_text(mb: Any) -> str:
     try:
-        return f"{float(mb):,.0f} MB"
+        v = float(mb)
     except (TypeError, ValueError):
         return "?"
+    return "under 1 MB" if v < 1 else f"{v:,.0f} MB"
 
 
 def data_health(conn: sqlite3.Connection) -> list[dict]:

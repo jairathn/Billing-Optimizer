@@ -148,14 +148,20 @@ def apply_event(conn: sqlite3.Connection, a: dict) -> bool:
 
 # Hide rules: a reason a payer is known not to pay (a visit with modifier 57 at a payer that never pays it) leaves the lists.
 # Its open items go to Let go with the rule's note, and so do new ones after each analysis; an item a person has worked or
-# reopened is left alone. Removing the rule reopens what it hid. A removed rule stays as a row with the date it was removed
-# (removed_at), so that journal entries applied again later (a serverless instance loading a new copy, a cycle whose
-# journal delete failed), in any order, change nothing: an add or a remove older than the rule's last change is skipped.
+# reopened is left alone. Removing the rule reopens what it hid (and nothing another rule in force still covers). A removed
+# rule stays as a row with the date it was removed (removed_at), so that journal entries applied again later (a serverless
+# instance loading a new copy, a cycle whose journal delete failed), in any order, change nothing: an add or a remove older
+# than the rule's last change is skipped.
+# A rule is payer x signal x code x modifier x reason (remitwatch.archive_rules.hide_rule: '*' for any; a code, a comma
+# list or an '@family'; one modifier or 'none'; a reason with or without its group). A rule saved before the finer grain is
+# the same rule with '*' for code, modifier and reason.
 HIDE_DDL = """
 CREATE TABLE IF NOT EXISTS hide_rules (
-    payer_group TEXT, signal TEXT, actor TEXT, at TEXT, note TEXT, removed_at TEXT, PRIMARY KEY (payer_group, signal)
+    payer_group TEXT, signal TEXT, code TEXT DEFAULT '*', modifier TEXT DEFAULT '*', reason TEXT DEFAULT '*', actor TEXT, at TEXT,
+    note TEXT, removed_at TEXT, PRIMARY KEY (payer_group, signal, code, modifier, reason)
 );
 """
+HIDE_GRAIN = ("code", "modifier", "reason")
 HIDE_ACTOR = "hide rule"
 # Never hidden wholesale for a payer: a claim no payer answered (or one rejected before reaching the payer, or one that
 # never left EMA) is not a reason the payer won't pay; neither is a payment EMA never posted, a second payer nobody
@@ -170,9 +176,22 @@ LAST_DECISION = (f"(SELECT e.kind FROM finding_events e WHERE e.finding_id=f.fin
 
 
 def ensure_hide_rules(conn: sqlite3.Connection) -> None:
+    """The hide_rules table at the five-part grain. A table made before removed rules were kept gains removed_at; one made
+    before the finer grain (keyed by payer and signal) is rebuilt with the five-part key in one transaction, every rule kept
+    as it was ('*' for code, modifier and reason), so it hides and shows again exactly what it did."""
     conn.executescript(HIDE_DDL)
-    if "removed_at" not in {r[1] for r in conn.execute("PRAGMA table_info(hide_rules)")}:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(hide_rules)")}
+    if "removed_at" not in have:
         conn.execute("ALTER TABLE hide_rules ADD COLUMN removed_at TEXT")     # a store made before removed rules were kept
+        have.add("removed_at")
+    if not set(HIDE_GRAIN) <= have:
+        conn.executescript(f"""BEGIN;
+            ALTER TABLE hide_rules RENAME TO hide_rules_payer_signal;
+            {HIDE_DDL}
+            INSERT OR REPLACE INTO hide_rules (payer_group, signal, code, modifier, reason, actor, at, note, removed_at)
+                SELECT payer_group, signal, '*', '*', '*', actor, at, note, removed_at FROM hide_rules_payer_signal;
+            DROP TABLE hide_rules_payer_signal;
+            COMMIT;""")
 
 
 def rules_in_force(conn: sqlite3.Connection) -> str:
@@ -181,18 +200,37 @@ def rules_in_force(conn: sqlite3.Connection) -> str:
     return "removed_at IS NULL" if "removed_at" in have else "1=1"
 
 
-def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str) -> int:
+def hide_rule_of(a: dict) -> dict:
+    """A rule (or a journal entry naming one) in its canonical five-part form (remitwatch.archive_rules.hide_rule); an
+    entry written before the finer grain names payer and signal only."""
+    from .archive_rules import hide_rule
+    return hide_rule(a.get("payer_group") or "", a.get("signal"), a.get("code"), a.get("modifier"), a.get("reason"))
+
+
+def _never(alias: str = "") -> str:
+    a = f"{alias}." if alias else ""
+    return f"{a}signal NOT IN ({','.join(repr(x) for x in sorted(NEVER_HIDDEN))})"
+
+
+def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str, code: str | None = "*",
+                   modifier: str | None = "*", reason: str | None = "*") -> int:
     """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands) and any
-    whose status was decided after `at` (an entry applied again must not undo what came after it)."""
+    whose status was decided after `at` (an entry applied again must not undo what came after it). Never an item of a
+    kind that is let go only one at a time (NEVER_HIDDEN)."""
+    from .archive_rules import hide_sql
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "findings" not in have or signal in NEVER_HIDDEN:
         return 0
-    touched, params = "", [payer_group, signal]
+    rule = hide_rule_of({"payer_group": payer_group, "signal": signal, "code": code, "modifier": modifier, "reason": reason})
+    if not rule["payer_group"]:
+        return 0
+    cond, params = hide_sql(rule, alias="f")
+    touched = ""
     if "finding_events" in have:
-        touched = f"AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='manual' OR (kind IN {DECIDING_KINDS} AND at > ?))"
-        params.append(at)
-    ids = [r[0] for r in conn.execute(f"""SELECT finding_id FROM findings WHERE payer_group=? AND signal=? AND status='open'
-                                          AND COALESCE(stale,0)=0 {touched}""", tuple(params))]
+        touched = f"AND f.finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='manual' OR (kind IN {DECIDING_KINDS} AND at > ?))"
+        params = list(params) + [at]
+    ids = [r[0] for r in conn.execute(f"""SELECT f.finding_id FROM findings f WHERE {cond} AND {_never('f')} AND f.status='open'
+                                          AND COALESCE(f.stale,0)=0 {touched}""", tuple(params))]
     for fid in ids:
         conn.execute("UPDATE findings SET status='dismissed', status_changed_at=? WHERE finding_id=?", (at, fid))
         if "finding_events" in have:
@@ -202,42 +240,58 @@ def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note
 
 
 def apply_hide_rule(conn: sqlite3.Connection, a: dict) -> None:
-    """Add a rule and hide what it covers, or remove one and reopen what it hid (and nothing a person has changed since).
-    An entry older than the rule's last change (added or removed) is skipped, so applying the journal again is harmless."""
+    """Add a rule and hide what it covers, or remove one and reopen what it hid (and nothing a person has changed since,
+    nor what another rule in force still covers). An entry older than the rule's last change (added or removed) is
+    skipped, so applying the journal again is harmless."""
+    from .archive_rules import hide_sql
     ensure_hide_rules(conn)
-    pg, sig, at = a["payer_group"], a["signal"], a.get("at") or _now()
-    row = conn.execute("SELECT at, removed_at FROM hide_rules WHERE payer_group=? AND signal=?", (pg, sig)).fetchone()
+    r = hide_rule_of(a)
+    pg, sig, at = r["payer_group"], r["signal"], a.get("at") or _now()
+    key = (pg, sig, r["code"], r["modifier"], r["reason"])
+    where = "payer_group=? AND signal=? AND code=? AND modifier=? AND reason=?"
+    row = conn.execute(f"SELECT at, removed_at FROM hide_rules WHERE {where}", key).fetchone()
     if row and max(row[0] or "", row[1] or "") > at:
         return
     if a.get("op") == "remove":
         if row:
-            conn.execute("UPDATE hide_rules SET removed_at=? WHERE payer_group=? AND signal=?", (at, pg, sig))
+            conn.execute(f"UPDATE hide_rules SET removed_at=? WHERE {where}", (at, *key))
         else:           # a copy that never had the rule keeps the date too, so an older add applied after this one is skipped
-            conn.execute("INSERT INTO hide_rules (payer_group, signal, actor, at, note, removed_at) VALUES (?,?,?,NULL,'',?)",
-                         (pg, sig, a.get("actor") or "", at))
-        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            conn.execute("INSERT INTO hide_rules (payer_group, signal, code, modifier, reason, actor, at, note, removed_at) "
+                         "VALUES (?,?,?,?,?,?,NULL,'',?)", (*key, a.get("actor") or "", at))
+        have = {x[0] for x in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "finding_events" not in have or "findings" not in have:
             return
-        for (fid,) in conn.execute(f"""SELECT f.finding_id FROM findings f WHERE f.payer_group=? AND f.signal=? AND f.status='dismissed'
-                                         AND {LAST_DECISION}='hidden'""", (pg, sig)).fetchall():
+        cond, params = hide_sql(r, alias="f")
+        others = [hide_sql(o, alias="f") for o in _rules_now(conn) if (o["payer_group"], o["signal"], o["code"], o["modifier"], o["reason"]) != key]
+        still = (" AND NOT (" + " OR ".join(f"({c})" for c, _p in others) + ")") if others else ""
+        for (fid,) in conn.execute(f"""SELECT f.finding_id FROM findings f WHERE {cond} AND f.status='dismissed'
+                                         AND {LAST_DECISION}='hidden'{still}""", (*params, *[x for _c, p in others for x in p])).fetchall():
             conn.execute("UPDATE findings SET status='open', status_changed_at=? WHERE finding_id=?", (at, fid))
             conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) "
                          "VALUES (?,?,'unhidden','dismissed','open',NULL,?,?)", (fid, at, a.get("actor") or "", "rule removed"))
         return
     note = (a.get("note") or "").strip()[:300] or f"Hidden: {pg} is not expected to pay these"
-    conn.execute("INSERT OR REPLACE INTO hide_rules (payer_group, signal, actor, at, note, removed_at) VALUES (?,?,?,?,?,NULL)",
-                 (pg, sig, a.get("actor") or "", at, note))
-    _hide_matching(conn, pg, sig, note, at)
+    conn.execute("INSERT OR REPLACE INTO hide_rules (payer_group, signal, code, modifier, reason, actor, at, note, removed_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,NULL)", (*key, a.get("actor") or "", at, note))
+    _hide_matching(conn, pg, sig, note, at, r["code"], r["modifier"], r["reason"])
+
+
+def _rules_now(conn: sqlite3.Connection) -> list[dict]:
+    """The rules in force, five-part, with their notes (remitwatch.archive_rules.read_hide_rules reads any grain)."""
+    from .archive_rules import read_hide_rules
+    return read_hide_rules(conn)
 
 
 def apply_hide_rules(conn: sqlite3.Connection) -> int:
-    """After an analysis: every rule in force hides the new items it covers."""
+    """After an analysis: every rule in force hides the new items it covers. A table at the old grain is brought to the
+    five-part key first (ensure_hide_rules), on whichever host runs the analysis."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "hide_rules" not in have:
         return 0
+    ensure_hide_rules(conn)
     at = _now()
-    return sum(_hide_matching(conn, pg, sig, note, at) for pg, sig, note in
-               conn.execute(f"SELECT payer_group, signal, note FROM hide_rules WHERE {rules_in_force(conn)}").fetchall())
+    return sum(_hide_matching(conn, r["payer_group"], r["signal"], r.get("note") or "", at, r["code"], r["modifier"], r["reason"])
+               for r in _rules_now(conn))
 
 
 def apply_lesson(conn: sqlite3.Connection, rec: dict) -> None:
@@ -318,6 +372,26 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
         res = ema_reports.decide(conn, str(action.get("file_id") or ""), str(action.get("decision") or ""),
                                  str(action.get("actor") or ""))
         return "error" not in res
+    if kind == "ema_policy":
+        # the owner's write-off policy for one pattern (remitwatch.ema_checks.set_policy's record, with the person's own
+        # time): the newest decision for a pattern wins, so a replay, or an older entry read after a newer one, changes nothing
+        from .ema_checks import POLICY_KEY
+        pattern, decision = str(action.get("pattern") or "")[:200], str(action.get("decision") or "")
+        if not pattern or decision not in ("accept", "pursue"):
+            return True
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (POLICY_KEY,)).fetchone()
+        try:
+            pol = json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            pol = {}
+        pol = pol if isinstance(pol, dict) else {}
+        at = str(action.get("at") or _now())
+        if str((pol.get(pattern) or {}).get("at") or "") > at:
+            return True
+        pol[pattern] = {"decision": decision, "by": str(action.get("actor") or "")[:80], "at": at}
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (POLICY_KEY, json.dumps(pol)))
+        return True
     if kind == "trizetto_hold":
         # the /setup test on a serverless host: a sign-in that worked ends the hold, a refusal starts one (remitwatch.trizetto)
         from . import trizetto

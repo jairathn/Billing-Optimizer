@@ -131,6 +131,84 @@ async function todayTab(v){
   const gw = v.querySelector('#goWins'); if(gw) gw.onclick = () => { state.tab='wins'; location.hash='wins'; render(); };
   const sm = v.querySelector('#seeMissed'); if(sm) sm.onclick = e => { e.preventDefault(); goWork({deadline:'missed', status:'open', sort:'deadline'}); };
   v.querySelectorAll('.see-undated').forEach(a=>a.onclick = e => { e.preventDefault(); goWork({deadline:'older', status:'open,in_progress', sort:'shortfall'}); });
+  tdBind(v, td, sb);
+}
+
+// ---------------------------------------------------------------- Today: the blind spot, the scoreboard, the counts by state
+// The health checks the blind-spot banner already says, in dollars, while a feed is behind
+const TD_BLIND_KEYS = new Set(['feed', 'ema_ar_stale', 'ema_production_stale']);
+const TD_SCORE = [['recovered_cents', 'Recovered', 'Money that came back on items RemitWatch flagged or worked'],
+  ['lost_cents', 'Lost to deadlines', 'Items whose last window closed while they waited for work'],
+  ['at_risk_cents', 'At risk in 14 days', 'Items to work whose window closes within 14 days'],
+  ['given_up_cents', 'Given up without a decision', 'Written off with no person deciding and no owner policy']];
+const TD_STATES = [['todo', 'Work now', 'Needs a person this week, follow-ups due included'], ['followup_due', 'Follow-ups due', "In Work now: the payer's time to answer has passed"],
+  ['waiting', 'Waiting', 'Sent or worked; the payer still has time']];
+const TD_QUIET = [['done', 'done'], ['accepted', 'accepted'], ['expired', 'expired'], ['cant_check', "can't be checked"]];
+
+// What the site cannot check while a feed (the remittances, EMA's A/R or Production report) is behind, in dollars. Any page
+// may show it: tdBlindBanner(el) asks the site, or takes the answer it already has.
+function tdBlindHtml(bl){
+  if(!bl || !bl.blind) return '';
+  const lines = (bl.lines && bl.lines.length) ? bl.lines : [bl.basis || 'A feed is behind: what arrived since is not checked.'];
+  return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${bl.cents ? `: ${money(bl.cents)} the site cannot check` : ''}.</b> ${lines.map(esc).join(' ')} <a href="#data" class="go-data">What to do</a></div>`;
+}
+async function tdBlindBanner(el, given){
+  if(!el) return;
+  let bl = given;
+  if(bl === undefined){ try { bl = await api('/api/ema/blind'); } catch(e){ return; } }
+  el.innerHTML = tdBlindHtml(bl);
+  el.querySelectorAll('.go-data').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab='data'; location.hash='data'; render(); });
+}
+function tdTile(key, label, hint, x, cls){
+  const n = x && x.n != null ? x.n : null;
+  return `<div class="tile ${cls||''}" role="button" tabindex="0" data-td="${esc(key)}" title="${esc(hint)}"><span class="t-l">${esc(label)}</span>
+    <span class="t-v">${n == null ? '–' : Number(n).toLocaleString()}${n ? `<small>${short$(x.cents)}</small>` : ''}</span><span class="t-s">${esc(hint)}</span></div>`;
+}
+function tdScoreHtml(sb){
+  // unit R's scoreboard: a figure the route does not give yet shows a dash, never a zero
+  const s = sb || {}, basis = s.basis || {};
+  return `<div class="tiles" id="tdScore" aria-label="The money scoreboard">${TD_SCORE.map(([k, label, hint]) => {
+    const c = s[k], key = k.replace(/_cents$/, '');
+    return `<div class="tile ${k==='lost_cents'&&c?'t-red':''}${k==='at_risk_cents'&&c?' t-amber':''}" role="button" tabindex="0" data-score="${esc(key)}" title="${esc(basis[key] || hint)}">
+      <span class="t-l">${esc(label)}</span><span class="t-v">${c == null ? '–' : money(c)}</span><span class="t-s">${esc(hint)}</span></div>`; }).join('')}</div>`;
+}
+function tdStatesHtml(td){
+  if(!td.ready) return '';
+  const st = td.states || {}, aw = td.auto_written_off, un = td.unworked;
+  const quiet = TD_QUIET.filter(([k]) => (st[k]||{}).n).map(([k, word]) => `<a href="#" data-td="${k}">${Number(st[k].n).toLocaleString()} ${esc(word)}</a>`);
+  const other = td.other || {}, post = other.post || {}, refund = other.refund || {};
+  const also = [post.n ? `<a href="#" data-td="post">${esc(pl(post.n, 'payment'))} to post in EMA</a>` : '', refund.n ? `<a href="#" data-td="refund">${esc(pl(refund.n, 'credit'))} to refund</a>` : ''].filter(Boolean);
+  return `<div class="tiles" id="tdStates" aria-label="Items by state">
+      ${TD_STATES.map(([k, label, hint]) => tdTile(k, label, hint, st[k], k==='followup_due' && (st[k]||{}).n ? 't-amber' : '')).join('')}
+      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', "EMA wrote them off when the denial posted; nobody worked them", aw, aw.n ? 't-red' : '') : ''}
+      ${un ? tdTile('unworked', 'Nobody has worked these', `No work in EMA or here in the 21 days to ${longDate(un.data_through)}`, un, '') : ''}
+    </div>
+    ${quiet.length || also.length ? `<div class="oneline">${quiet.length ? 'Not on today\'s list: ' + quiet.join(', ') + '.' : ''}${also.length ? ' Also: ' + also.join(', ') + '.' : ''}</div>` : ''}`;
+}
+function tdEmaLine(td, ex){
+  const parts = [];
+  ((ex && ex.exports) || []).forEach(e => { if(e.waiting) parts.push(`${esc(e.title)}: uploaded, waiting to be read`);
+    else if(e.overdue) parts.push(`<span class="sev-high">${esc(e.title)}: ${e.age_days == null ? 'never arrived' : esc(pl(e.age_days, 'day')) + ' old'}</span>`); });
+  const rm = td && td.remits_missing;
+  const missing = rm && rm.ok === false ? `<a href="#data" class="go-data">${esc(rm.title)}</a>` : '';
+  if(!parts.length && !missing) return ex && (ex.exports||[]).length ? `<div class="oneline">EMA's exports are up to date (A/R within 8 days, Production within 14, the weekly exports within 8).</div>` : '';
+  return `<div class="oneline">${parts.length ? `EMA's exports: ${parts.join(' · ')}. <a href="/upload">Upload</a>` : ''}${parts.length && missing ? ' · ' : ''}${missing}</div>`;
+}
+function tdBind(v, td, sb){
+  const st = (td && td.states) || {}, other = (td && td.other) || {};
+  const goOf = k => (st[k] || (td||{})[k] || other[k] || {}).go;
+  v.querySelectorAll('[data-td]').forEach(el => { const go = goOf(el.dataset.td); if(!go){ return; }
+    const open = e => { if(e) e.preventDefault();
+      if(el.dataset.td === 'post' || el.dataset.td === 'refund'){ state.tab = el.dataset.td === 'post' ? 'fees' : 'data'; location.hash = state.tab; render(); return; }
+      goWork(Object.assign({sort:'deadline'}, go)); };
+    el.onclick = open; el.onkeydown = e => { if(e.key === 'Enter' || e.key === ' ') open(e); }; });
+  v.querySelectorAll('[data-score]').forEach(el => { const key = el.dataset.score, o = ((sb||{}).open||{})[key];
+    const open = e => { if(e) e.preventDefault();
+      if(o && typeof o === 'object'){ goWork(o); return; }
+      state.resultsOpen = key; const h = (typeof o === 'string' && o.startsWith('#')) ? o.slice(1) : 'results';
+      state.tab = h.split('/')[0]; location.hash = h; render(); };
+    el.onclick = open; el.onkeydown = e => { if(e.key === 'Enter' || e.key === ' ') open(e); }; });
+  v.querySelectorAll('#tdBlind .go-data, .oneline .go-data').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab='data'; location.hash='data'; render(); });
 }
 function smallLine(b){
   const w = b.work || {}, n = w.small_n || 0; if(!n) return '';

@@ -178,3 +178,562 @@ def build(path, *, fresh: bool = True) -> str:
     assert det.ema_errors == [], det.ema_errors
     s.close()
     return db
+
+
+# ------------------------------------------------------------------------------------------------ the two hosts
+@pytest.fixture(scope="module")
+def worlds(tmp_path_factory):
+    """Built once for the module (each build runs the readers, the ledger and the Detector): a current world, and one
+    whose newest remittance is 25 days old. A test that changes a world works on its own copy (copied)."""
+    out = {}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+        mp.setenv("REMITWATCH_MODE", "server")
+        mp.setenv("REMITWATCH_EMA_STRICT", "1")
+        for k in ("REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_LEDGER", "REMITWATCH_EMA_CLOSES"):
+            mp.delenv(k, raising=False)
+        for name, fresh in (("fresh", True), ("stale", False)):
+            ec._LAST_POST.clear()
+            out[name] = build(str(tmp_path_factory.mktemp(name)), fresh=fresh)
+    return out
+
+
+def copied(worlds, tmp_path, name="fresh") -> str:
+    d = tmp_path / f"w_{name}"
+    d.mkdir()
+    for f in ("store.sqlite", "ema_ledger.sqlite"):
+        src = os.path.join(os.path.dirname(worlds[name]), f)
+        if os.path.exists(src):
+            shutil.copyfile(src, d / f)
+    return str(d / "store.sqlite")
+
+
+def _site(monkeypatch, db, *, serverless=False, tmp=None):
+    """The API on this store: a server reading the store, or a serverless host reading the dashboard's copy of it, built
+    as the run builds it (cloud.save_serving) into a state folder, through a fresh ServingCopy."""
+    from fastapi.testclient import TestClient
+
+    import remitwatch.api as api
+    api.ensure_server_schema(db)
+    monkeypatch.setattr(api, "PASSWORD", "")
+    monkeypatch.setattr(api, "SHOW_PHI", False)
+    monkeypatch.setattr(api, "_FAILED", {})
+    monkeypatch.setattr(api, "DB_PATH", db)
+    if serverless:
+        st = LocalState(str(tmp / "state"))
+        conn = sqlite3.connect(db)
+        try:
+            cloud.save_serving(st, conn)
+        finally:
+            conn.close()
+        monkeypatch.setenv("REMITWATCH_TMP", str(tmp / "scratch"))
+        monkeypatch.setenv("REMITWATCH_STATE_DIR", str(tmp / "state"))
+        monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+        monkeypatch.setattr(cloud, "SERVING_COPY", cloud.ServingCopy())
+    else:
+        monkeypatch.setenv("REMITWATCH_MODE", "server")
+    return TestClient(api.app)
+
+
+@pytest.fixture
+def server(worlds, tmp_path, monkeypatch):
+    db = copied(worlds, tmp_path)
+    return type("Site", (), {"c": _site(monkeypatch, db), "db": db, "tmp": tmp_path})
+
+
+def rows(db, sql, *args):
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+
+
+def fid(db, signal, outcome=None):
+    got = rows(db, "SELECT finding_id FROM findings WHERE signal=? AND (? IS NULL OR ema_outcome=?) ORDER BY finding_id", signal, outcome, outcome)
+    assert len(got) == 1, got
+    return got[0][0]
+
+
+def rerun(db, today=TODAY):
+    """The next detection run on the store (what the daily run does after a decision or a status change)."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+        s = Store(db)
+        try:
+            det = Detector(s, run_id=f"r{next(_N)}", today=today)
+            det.run()
+            assert det.ema_errors == [], det.ema_errors
+        finally:
+            s.close()
+
+
+MONEY = ("denial", "bundling", "downcoding", "underpayment")
+
+
+def sql_count(db, where, *args):
+    """The independent count: the Worklist's scope (the four claim pages, live items) and the condition, straight from
+    the findings table."""
+    n, cents = rows(db, f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE COALESCE(stale,0)=0
+                            AND category IN ('denial','bundling','downcoding','underpayment') AND ({where})""", *args)[0]
+    return n, cents
+
+
+def _list_total(c, go):
+    """The count line of the Worklist this filter opens (desk.js deskTab: the four claim pages, live items), when the
+    list takes the filter (api._filters names state= and ema=); None when it does not yet."""
+    import inspect
+
+    import remitwatch.api as api
+    takes = inspect.signature(api._filters).parameters
+    if any(k in go and k not in takes for k in ("state", "ema")):
+        return None
+    params = {"category": ",".join(MONEY), "live": 1, "status": go.get("status", "open,in_progress"), "deadline": go.get("deadline", "valid"),
+              "limit": 1}
+    for k in ("state", "ema", "signal", "kind", "payer", "handling"):
+        if go.get(k):
+            params[k] = go[k]
+    r = c.get("/api/findings", params=params).json()
+    return r["total"], r["shortfall_cents"] or 0
+
+
+# --------------------------------------------------------------------------------------------------------- Today
+def test_today_counts_each_state_and_each_count_is_the_list_it_opens(server):
+    c, db = server.c, server.db
+    t = c.get("/api/ema/today").json()
+    assert t["ready"] is True and t["today"] == TODAY
+    st = t["states"]
+    assert st["todo"]["n"] == 2 and st["todo"]["cents"] == 9000 + 12000                 # the two written-off denials
+    assert st["done"]["n"] == 1                                                          # paid on a check no 835 carries
+    assert st["waiting"]["n"] == 0 and st["followup_due"]["n"] == 0
+    assert {k: v["label"] for k, v in st.items()} == {"todo": "Work now", "followup_due": "Follow-ups due", "waiting": "Waiting",
+                                                        "done": "Done", "accepted": "Accepted", "expired": "Expired",
+                                                        "cant_check": "Can't be checked"}
+    # every count is the count of the list it opens: the same filter, counted again straight from the table
+    for key in ("waiting", "done", "accepted", "expired", "cant_check"):
+        assert st[key]["go"] == {"state": key, "status": "all", "deadline": ""}
+        assert (st[key]["n"], st[key]["cents"]) == sql_count(db, "work_state = ?", key), key
+    due = "follow_up_on IS NOT NULL AND follow_up_on <= date('now')"
+    assert (st["todo"]["n"], st["todo"]["cents"]) == sql_count(db, f"work_state='work_now' OR (work_state='waiting' AND {due})")
+    assert (st["followup_due"]["n"], st["followup_due"]["cents"]) == sql_count(db, f"{due} AND work_state IN ('work_now','waiting')")
+    aw = t["auto_written_off"]
+    assert (aw["n"], aw["cents"]) == (1, 9000) and aw["go"] == {"ema": "auto_written_off", "status": "open,in_progress", "deadline": "valid",
+                                                                 "sort": "shortfall"}
+    assert (aw["n"], aw["cents"]) == sql_count(db, "ema_outcome='auto_written_off' AND status IN ('open','in_progress') AND appeal_deadline >= date('now')")
+    un = t["unworked"]
+    stored = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:unworked'")[0][0])
+    assert (un["n"], un["cents"], un["data_through"]) == (stored["n"], stored["cents"], stored["data_through"]) == (2, 21000, iso(2))
+    assert t["other"]["post"]["n"] == 1 and t["other"]["post"]["cents"] == 8500           # the 835 payment EMA never posted
+    assert t["other"]["refund"]["n"] == 1 and t["other"]["refund"]["cents"] == 6000       # the credit EMA holds
+    # and the Worklist, once it takes these filters (unit C1), lists exactly what was counted
+    for x in list(st.values()) + [aw, un]:
+        got = _list_total(c, x["go"])
+        assert got is None or got == (x["n"], x["cents"]), (x["go"], got)
+
+
+def test_today_follows_the_state_a_person_and_the_calendar_give(server):
+    c, db = server.c, server.db
+    from remitwatch.actions import apply_status
+    f = fid(db, "DENIED_MISSING_INFO")
+    conn = sqlite3.connect(db)
+    apply_status(conn, f, "appealed", "corrected claim sent", None, "biller")
+    conn.commit()
+    conn.close()
+    rerun(db)
+    st = c.get("/api/ema/today").json()["states"]
+    assert st["waiting"]["n"] == 1 and st["todo"]["n"] == 1 and st["followup_due"]["n"] == 0
+    follow = rows(db, "SELECT follow_up_on FROM findings WHERE finding_id=?", f)[0][0]
+    assert follow and follow >= TODAY
+    # the follow-up day comes before the next run: the item is due today, and counted so, on the list it opens
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET follow_up_on=? WHERE finding_id=?", (iso(1), f))
+    conn.commit()
+    conn.close()
+    st = c.get("/api/ema/today").json()["states"]
+    assert st["followup_due"]["n"] == 1 and st["followup_due"]["cents"] == 12000
+    assert st["todo"]["n"] == 2 and st["todo"]["cents"] == 21000      # Work now holds the follow-up due with the new work
+    assert st["waiting"]["n"] == 1                     # its state stays Waiting until the next run moves it
+
+
+def test_an_auto_write_off_past_its_window_is_not_still_appealable(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET appeal_deadline=? WHERE ema_outcome='auto_written_off'", (iso(1),))
+    conn.commit()
+    conn.close()
+    aw = c.get("/api/ema/today").json()["auto_written_off"]
+    assert (aw["n"], aw["cents"]) == (0, 0)
+
+
+def test_counts_leave_out_items_the_rules_no_longer_find(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE findings SET stale=1 WHERE ema_outcome='auto_written_off'")
+    conn.commit()
+    conn.close()
+    t = c.get("/api/ema/today").json()
+    assert t["states"]["todo"]["n"] == 1 and t["auto_written_off"]["n"] == 0
+
+
+def test_an_upper_bound_amount_is_counted_and_said_apart(server):
+    """An item EMA wrote off on a line no rate prices is sized at charge less paid (ema_checks C2): an upper bound. The
+    count keeps it (it equals the list) and says how much of the dollars is that bound (needs_B 1.6)."""
+    c, db = server.c, server.db
+    f = fid(db, "DENIED_AUTH", "auto_written_off")
+    conn = sqlite3.connect(db)
+    ev = json.loads(conn.execute("SELECT evidence FROM findings WHERE finding_id=?", (f,)).fetchone()[0])
+    ev["written_off_basis"] = "charge_less_paid"
+    conn.execute("UPDATE findings SET evidence=? WHERE finding_id=?", (json.dumps(ev), f))
+    conn.commit()
+    conn.close()
+    t = c.get("/api/ema/today").json()
+    assert t["auto_written_off"]["cents"] == 9000 and t["auto_written_off"]["upper_cents"] == 9000
+    assert t["states"]["todo"]["upper_cents"] == 9000
+    d = c.get("/api/ema/data").json()
+    assert d["upper_bound"] == {"n": 1, "cents": 9000}
+    pat = next(p for p in c.get("/api/ema/policy").json()["patterns"] if p["code"] == "99213")
+    assert pat["upper_cents"] == 9000
+
+
+def test_a_store_before_the_states_has_no_state_counts_and_no_error(server, monkeypatch):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE findings DROP COLUMN work_state")
+    conn.commit()
+    conn.close()
+    t = c.get("/api/ema/today").json()
+    assert t["ready"] is False and t["states"] == {}
+
+
+# ------------------------------------------------------------------------------------------------ the blind spot
+def test_no_blind_spot_while_the_feeds_are_current(server):
+    b = server.c.get("/api/ema/blind").json()
+    assert b["blind"] is False and b["cents"] == 0 and b["lines"] == []
+    assert [f["feed"] for f in b["feeds"]] == ["835", "ar", "production"] and not any(f["stale"] for f in b["feeds"])
+
+
+def test_a_stale_remittance_feed_says_in_dollars_what_cannot_be_checked(worlds, tmp_path, monkeypatch):
+    db = copied(worlds, tmp_path, "stale")
+    c = _site(monkeypatch, db)
+    b = c.get("/api/ema/blind").json()
+    assert b["blind"] is True and b["since"] == iso(25) and b["source"] == "run"
+    feed = next(f for f in b["feeds"] if f["feed"] == "835")
+    assert feed == {"feed": "835", "label": "Remittances (835)", "since": iso(25), "days": 25, "stale": True}
+    # the dollars: what EMA posted after the newest remittance that no 835 explains (the run's figure, meta ema:reconcile)
+    rec = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:reconcile'")[0][0])
+    assert rec["since_feed_stopped"] == {"checks": 1, "cents": 8000}
+    assert b["cents"] == 8000 and "$80" in b["lines"][0] and "1 check" in b["lines"][0] and "cannot check" in b["lines"][0]
+    assert c.get("/api/ema/today").json()["blind"]["blind"] is True
+
+
+def test_a_stale_ema_report_counts_the_work_now_it_may_hide(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE ema_report_files SET as_of=? WHERE report='ar_report'", (iso(20),))
+    conn.execute("UPDATE ema_ar SET as_of=?", (iso(20),))
+    conn.commit()
+    conn.close()
+    b = c.get("/api/ema/blind").json()
+    ar = next(f for f in b["feeds"] if f["feed"] == "ar")
+    assert ar["stale"] is True and ar["days"] == 20 and b["blind"] is True
+    assert b["cents"] == 21000 and "2 items" in b["lines"][0] and "may already be worked" in b["lines"][0]
+
+
+def test_the_runs_own_blind_figure_wins_when_it_is_stored(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    mine = {"at": "2026-01-01T00:00:00+00:00", "blind": True, "cents": 123456, "basis": "Charges with no payer answer since the feed stopped.",
+            "feeds": [{"feed": "835", "since": iso(30), "days": 30, "stale": True}]}
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('selfcheck:blind', ?)", (json.dumps(mine),))
+    conn.commit()
+    conn.close()
+    b = c.get("/api/ema/blind").json()
+    assert b["source"] == "selfcheck" and b["cents"] == 123456 and b["basis"].startswith("Charges")
+
+
+# ------------------------------------------------------------------------------------------------- the Data tab
+def test_the_data_tab_gets_the_runs_figures_in_one_call(server):
+    c, db = server.c, server.db
+    d = c.get("/api/ema/data").json()
+    assert d["ready"] is True and d["blind"]["blind"] is False
+    ar_as_of = rows(db, "SELECT MAX(as_of) FROM ema_report_files WHERE report='ar_report'")[0][0]
+    assert d["fresh"]["ar_as_of"] == ar_as_of and d["fresh"]["ar_days"] == (T - dt.date.fromisoformat(ar_as_of)).days <= 8
+    assert d["fresh"]["production_as_of"] == iso(2) and d["fresh"]["newest_835"] == iso(3)
+    files = d["catalog"]["files"]
+    assert sorted(f["report"] for f in files) == ["ar_report", "production"] and all(f["status"] == "current" for f in files)
+    assert all("origin" not in f for f in files) and {f["from"] for f in files} == {"Read on the server"}
+    assert d["catalog"]["by_status"] == {"current": 2}
+    # the reconcile summary is what the run stored, as it stored it
+    stored = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:reconcile'")[0][0])
+    assert d["reconcile"]["stored"] is True and d["reconcile"]["c1"] == stored["c1"] and d["reconcile"]["w4"] == stored["w4"]
+    # the remittances someone can ask for: by payer, month and cause, with what to ask
+    assert d["resend"] == [{"payer_group": "Testcare Health", "month": iso(5)[:7], "cause": "no_era", "checks": 1, "cents": 8000,
+                            "why": "This payer sends no electronic remittance here",
+                            "ask": "Enroll this payer's electronic remittances (ERA) with TriZetto."}]
+    assert d["wiring"]["errors"] == [] and d["wiring"]["on"] is True
+    assert d["policy"]["patterns"] == 2 and d["policy"]["appealable_cents"] == 21000 and d["policy"]["accepted"] == 0
+    assert d["upper_bound"] == {"n": 0, "cents": 0}
+    assert set(d["cause_words"]) >= {"feed_gap", "after_feed", "no_era", "no_era_va", "separate_payee", "misnumbered", "other"}
+
+
+def test_a_failed_run_step_reaches_the_data_tab(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    w = json.loads(conn.execute("SELECT value FROM meta WHERE key='ema:wiring'").fetchone()[0])
+    w["errors"] = [{"step": "credits", "error": "OperationalError: database is locked"}]
+    conn.execute("UPDATE meta SET value=? WHERE key='ema:wiring'", (json.dumps(w),))
+    conn.commit()
+    conn.close()
+    assert c.get("/api/ema/data").json()["wiring"]["errors"][0]["step"] == "credits"
+    assert c.get("/api/ema/today").json()["wiring_errors"] == 1
+
+
+def test_the_catalog_shows_holds_decisions_replacements_and_files_not_read(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    cur = conn.execute("SELECT file_id FROM ema_report_files WHERE report='ar_report'").fetchone()[0]
+    conn.execute("""INSERT INTO ema_report_files (file_id, report, source_name, via, status, status_reason, as_of, received_at, origin)
+                    VALUES ('heldfile1', 'ar_report', 'AR 2026 again.xlsx', 'upload', 'held', 'This A/R lists far fewer lines than the one on file.',
+                            ?, ?, '{"path": "/data/incoming/done/x"}')""", (iso(1), iso(1)))
+    conn.execute("""INSERT INTO ema_report_files (file_id, report, source_name, via, status, status_reason, decision, decided_by, decided_at, as_of, received_at)
+                    VALUES ('heldfile2', 'production', 'Production week.csv', 'dropbox', 'held', 'Rows do not line up with the header.', 'apply',
+                            'biller', ?, ?, ?)""", (TODAY + "T09:00:00+00:00", iso(1), iso(1)))
+    conn.execute("""INSERT INTO ema_report_files (file_id, report, source_name, via, status, replaced_by, as_of, received_at)
+                    VALUES ('oldfile', 'ar_report', 'AR older.xlsx', 'dropbox', 'replaced', ?, ?, ?)""", (cur, iso(40), iso(40)))
+    conn.execute("INSERT INTO files (sha256, kind, source_name, ingested_at, status) VALUES ('x1', 'ema:unknown', 'notes.xlsx', ?, 'not_read')", (iso(4),))
+    conn.commit()
+    conn.close()
+    cat = c.get("/api/ema/reports").json()
+    held = {f["file_id"]: f for f in cat["held"]}
+    assert set(held) == {"heldfile1", "heldfile2"} and "origin" not in held["heldfile1"]
+    assert held["heldfile1"]["from"] == "Uploaded here" and held["heldfile1"]["status_reason"].startswith("This A/R")
+    assert held["heldfile2"]["decided_by"] == "biller" and held["heldfile2"]["decision"] == "apply"
+    by = {f["file_id"]: f for f in cat["files"]}
+    assert [r["file_id"] for r in by[cur]["replaced"]] == ["oldfile"]
+    assert cat["not_read"] == [{"kind": "ema:unknown", "ingested_at": iso(4), "status": "not_read", "source_name": "notes.xlsx"}]
+    assert cat["by_status"] == {"current": 2, "held": 2, "replaced": 1}
+
+
+def test_each_ar_bucket_lists_exactly_the_rows_it_counts(server):
+    c, db = server.c, server.db
+    w4 = c.get("/api/ema/data").json()["reconcile"]["w4"]
+    assert w4["adds_up"] is True and w4["total"]["n"] == 3
+    seen = 0
+    for bucket, x in w4["buckets"].items():
+        r = c.get("/api/ema/ar", params={"bucket": bucket}).json()
+        assert (r["count"], r["cents"]) == (x["n"], x["cents"]), bucket
+        assert len(r["rows"]) == x["n"] and sum(row["balance_cents"] for row in r["rows"]) == x["cents"], bucket
+        assert r["claim_url"] == F.CLAIM_PREFIX + "{claim}"
+        seen += len(r["rows"])
+    assert seen == w4["total"]["n"]
+    denied = c.get("/api/ema/ar", params={"bucket": "denied_todo"}).json()["rows"][0]
+    assert denied["claim_id"] == F.claim_id(1) and denied["link"] == F.link_no(1) and "patient" not in json.dumps(denied).lower()
+    assert c.get("/api/ema/ar", params={"bucket": "nope"}).status_code == 400
+    # the A/R list never writes: the meta and the buckets are what they were
+    before = rows(db, "SELECT key, value FROM meta ORDER BY key")
+    c.get("/api/ema/ar", params={"bucket": "credits"})
+    assert rows(db, "SELECT key, value FROM meta ORDER BY key") == before
+
+
+def test_the_checks_list_adds_up_to_the_summary_and_makes_the_request(server):
+    c, db = server.c, server.db
+    rec = c.get("/api/ema/reconcile").json()
+    total = 0
+    for cause, x in rec["c1"]["causes"].items():
+        r = c.get("/api/ema/checks", params={"cause": cause}).json()
+        assert (r["count"], r["cents"]) == (x["checks"], x["cents"]), cause
+        total += r["cents"]
+    assert total == rec["c1"]["unmatched_cents"]
+    r = c.get("/api/ema/checks", params={"cause": "no_era", "month": iso(5)[:7], "payer": "Testcare Health"}).json()
+    assert r["rows"] == [{"check_number": "777000555", "first_posted": iso(5), "payer": "Testcare Health", "payer_group": "Testcare Health",
+                          "cents": 8000, "cause": "no_era", "claims": 1}]
+    assert r["ask"].startswith("Enroll")
+    assert c.get("/api/ema/checks", params={"cause": "nope"}).status_code == 400
+    assert c.get("/api/ema/checks", params={"month": "2026-1"}).status_code == 400
+
+
+def test_the_csvs_are_downloads_with_no_patient_names(server):
+    c = server.c
+    for path, header, n in (("/api/ema/checks.csv", "check_number,first_posted,last_posted,ema_payer,payer_group,amount,cause,claims", 4),
+                            ("/api/ema/unposted.csv", "trace_ending,payment_date,payer,payer_group,claims,amount,kind", 1),
+                            ("/api/ema/credits.csv", "initials,service_date,code,amount,age_days,party,coverage,payer_group", 1)):
+        r = c.get(path)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-store", path
+        assert r.headers["content-type"].startswith("text/csv") and "attachment" in r.headers["content-disposition"]
+        lines = r.text.strip().splitlines()
+        assert lines[0] == header and len(lines) == n + 1, (path, lines)
+        for secret in F.SECRET_STRINGS:
+            assert secret not in r.text, (path, secret)
+    unposted = c.get("/api/ema/unposted.csv").text.splitlines()[1].split(",")
+    assert unposted[1] == iso(25) and unposted[5] == "85.00" and unposted[6] == "not_posted"
+    # filtered by cause and dates, as the Data tab asks for one payer's month
+    r = c.get("/api/ema/checks.csv", params={"cause": "no_era", "from": iso(10), "to": TODAY})
+    assert len(r.text.strip().splitlines()) == 2
+    assert c.get("/api/ema/checks.csv", params={"from": "yesterday"}).status_code == 400
+
+
+def test_a_csv_cell_that_could_start_a_formula_is_quoted(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE ema_checks SET payer='=HYPERLINK(\"x\")' WHERE check_no='777000555'")
+    conn.commit()
+    conn.close()
+    assert "'=HYPERLINK" in c.get("/api/ema/checks.csv").text
+
+
+def test_the_pages_answer_before_any_ema_report_arrived(tmp_path, monkeypatch):
+    """A new site: no EMA table yet. Every route answers, says it has nothing, and writes nothing."""
+    from remitwatch.store import Store as S
+    db = str(tmp_path / "empty.sqlite")
+    S(db).close()
+    c = _site(monkeypatch, db)
+    assert c.get("/api/ema/data").json() == {"ready": False}
+    t = c.get("/api/ema/today").json()
+    assert t["blind"]["blind"] is False and t["remits_missing"] is None
+    assert c.get("/api/ema/policy").json()["patterns"] == []
+    assert c.get("/api/ema/reports").json()["files"] == []
+    assert c.get("/api/ema/checks").json()["count"] == 0
+    assert c.get("/api/ema/ar", params={"bucket": "waiting"}).json()["count"] == 0
+
+
+# ------------------------------------------------------------------------------------- the owner's write-off policy
+P_AUTH, P_INFO = f"{BCBS}|99213||CO-197", f"{BCBS}|99214||CO-16"
+
+
+def test_the_policy_table_counts_each_pattern_now_and_lists_its_items(server):
+    c, db = server.c, server.db
+    t = c.get("/api/ema/policy").json()
+    pats = {p["pattern"]: p for p in t["patterns"]}
+    assert [p["pattern"] for p in t["patterns"]] == [P_INFO, P_AUTH]        # most still appealable first
+    a = pats[P_AUTH]
+    assert (a["payer_group"], a["code"], a["modifier"], a["reason"]) == (BCBS, "99213", "", "CO-197")
+    assert (a["items"], a["cents"], a["appealable"], a["appealable_cents"], a["auto"], a["at_posting"]) == (1, 9000, 1, 9000, 1, 1)
+    assert a["decision"] == "pursue" and a["decided_by"] is None and a["pending"] is False
+    # the archive's later-paid share is the run's (meta ema:policy_summary): of the two zero-paid 99213 denials, one paid later
+    stored = {x["pattern"]: x for x in json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:policy_summary'")[0][0])["patterns"]}
+    assert a["later_paid_share"] == stored[P_AUTH]["later_paid_share"] == 0.5
+    assert "authorization" in a["reason_text"].lower()
+    i = pats[P_INFO]
+    assert (i["items"], i["cents"], i["auto"], i["at_posting"]) == (1, 12000, 0, 1)
+    assert t["totals"] == {"items": 2, "cents": 21000, "appealable": 2, "appealable_cents": 21000, "accepted": 0}
+    # a pattern's count is its list
+    for p in t["patterns"]:
+        r = c.get("/api/ema/policy/items", params={"pattern": p["pattern"]}).json()
+        assert (r["count"], r["cents"]) == (p["items"], p["cents"]) and len(r["rows"]) == p["items"]
+        for row in r["rows"]:
+            assert json.loads(rows(db, "SELECT evidence FROM findings WHERE finding_id=?", row["finding_id"])[0][0])["writeoff_pattern"] == p["pattern"]
+            assert row["state_text"] == "Work now" and row["outcome_text"]
+            assert not ({"patient", "patient_last", "member_id"} & set(row))
+    assert c.get("/api/ema/policy/items", params={"pattern": "nobody|00000||CO-1"}).json()["count"] == 0
+
+
+def test_accepting_a_pattern_takes_its_items_off_the_queue_at_the_next_run_and_pursue_brings_them_back(server):
+    c, db = server.c, server.db
+    r = c.post("/api/ema/policy", json={"pattern": P_AUTH, "decision": "accept", "name": "  Owner   Test "}, headers=XHR)
+    assert r.status_code == 200 and r.json()["decision"] == "accept" and r.json()["by"] == "Owner Test (anonymous)"
+    pol = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:writeoff_policy'")[0][0])
+    assert pol[P_AUTH]["decision"] == "accept" and pol[P_AUTH]["by"] == "Owner Test (anonymous)" and pol[P_AUTH]["at"]
+    p = next(x for x in c.get("/api/ema/policy").json()["patterns"] if x["pattern"] == P_AUTH)
+    assert p["decision"] == "accept" and p["pending"] is True and p["decided_by"] == "Owner Test (anonymous)"
+    assert c.get("/api/ema/today").json()["auto_written_off"]["n"] == 1             # the run moves the items, not the click
+    rerun(db)
+    f = fid(db, "DENIED_AUTH", "written_off_by_policy")
+    assert rows(db, "SELECT work_state, status FROM findings WHERE finding_id=?", f)[0] == ("accepted", "open")
+    t = c.get("/api/ema/today").json()
+    assert t["auto_written_off"]["n"] == 0 and t["states"]["accepted"]["n"] == 1 and t["states"]["todo"]["n"] == 1
+    p = next(x for x in c.get("/api/ema/policy").json()["patterns"] if x["pattern"] == P_AUTH)
+    assert (p["items"], p["by_policy"], p["decision"], p["pending"]) == (1, 1, "accept", False)     # still findable, still listed
+    assert c.get("/api/ema/policy/items", params={"pattern": P_AUTH}).json()["rows"][0]["state_text"] == "Accepted"
+    c.post("/api/ema/policy", json={"pattern": P_AUTH, "decision": "pursue"}, headers=XHR)
+    rerun(db)
+    assert fid(db, "DENIED_AUTH", "auto_written_off")
+    assert c.get("/api/ema/today").json()["auto_written_off"]["n"] == 1
+
+
+def test_a_policy_decision_is_refused_when_it_cannot_be_recorded(server):
+    c = server.c
+    assert c.post("/api/ema/policy", json={"pattern": P_AUTH, "decision": "accept"}).status_code == 400          # no XHR header
+    assert c.post("/api/ema/policy", json={"pattern": P_AUTH, "decision": "maybe"}, headers=XHR).status_code == 400
+    assert c.post("/api/ema/policy", json={"pattern": "not a pattern", "decision": "accept"}, headers=XHR).status_code == 400
+    assert c.post("/api/ema/policy", json={"pattern": "x" * 300, "decision": "accept"}, headers=XHR).status_code == 400
+    r = c.post("/api/ema/policy", json={"pattern": "Nobody|00000||CO-1", "decision": "accept"}, headers=XHR)
+    assert r.status_code == 404 and "No item" in r.json()["detail"]
+    assert rows(server.db, "SELECT COUNT(*) FROM meta WHERE key='ema:writeoff_policy'")[0][0] == 0
+
+
+def test_a_pattern_decided_before_keeps_its_row_when_its_items_are_gone(server):
+    c, db = server.c, server.db
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:writeoff_policy', ?)",
+                 (json.dumps({"Old Payer|11102||CO-50": {"decision": "accept", "by": "owner", "at": "2026-01-02T00:00:00+00:00"}}),))
+    conn.commit()
+    conn.close()
+    p = next(x for x in c.get("/api/ema/policy").json()["patterns"] if x["pattern"] == "Old Payer|11102||CO-50")
+    assert (p["items"], p["decision"], p["decided_by"]) == (0, "accept", "owner")
+    r = c.post("/api/ema/policy", json={"pattern": "Old Payer|11102||CO-50", "decision": "pursue"}, headers=XHR)
+    assert r.status_code == 200
+
+
+# ------------------------------------------------------------------------------------------- both hosts the same
+def _same(a, b, path=""):
+    """Both hosts' answers, field by field, but for the few that say which host answered."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        assert set(a) == set(b), (path, set(a) ^ set(b))
+        for k in a:
+            if k in ("at", "built", "switch", "reads"):       # when, and which reports this host reads (its own setting)
+                continue
+            _same(a[k], b[k], f"{path}.{k}")
+    elif isinstance(a, list) and isinstance(b, list):
+        assert len(a) == len(b), path
+        for i, (x, y) in enumerate(zip(a, b)):
+            _same(x, y, f"{path}[{i}]")
+    else:
+        assert a == b, (path, a, b)
+
+
+GETS = ["/api/ema/today", "/api/ema/blind", "/api/ema/data", "/api/ema/reconcile", "/api/ema/reports", "/api/ema/policy",
+        "/api/ema/checks", "/api/ema/checks?cause=no_era", f"/api/ema/policy/items?pattern={P_AUTH}"]
+
+
+def test_the_serverless_host_shows_what_the_server_shows(worlds, tmp_path, monkeypatch):
+    db = copied(worlds, tmp_path)
+    srv = _site(monkeypatch, db)
+    got = {p: srv.get(p).json() for p in GETS}
+    buckets = [b for b, x in got["/api/ema/data"]["reconcile"]["w4"]["buckets"].items() if x["n"]]
+    got.update({f"/api/ema/ar?bucket={b}": srv.get("/api/ema/ar", params={"bucket": b}).json() for b in buckets})
+    csvs = {p: srv.get(p).text for p in ("/api/ema/checks.csv", "/api/ema/unposted.csv", "/api/ema/credits.csv")}
+    (tmp_path / "vercel").mkdir()
+    cloud_c = _site(monkeypatch, db, serverless=True, tmp=tmp_path / "vercel")
+    for p, want in got.items():
+        r = cloud_c.get(p)
+        assert r.status_code == 200, p
+        _same(want, r.json(), p)
+    for p, want in csvs.items():
+        assert cloud_c.get(p).text == want, p
+    # the copy is read, never written: the same bytes before and after every page
+    before = open(cloud.SERVING_COPY.path, "rb").read()
+    for p in got:
+        cloud_c.get(p)
+    assert open(cloud.SERVING_COPY.path, "rb").read() == before
+
+
+def test_a_decision_on_the_serverless_host_goes_through_the_journal_and_reaches_the_store(worlds, tmp_path, monkeypatch):
+    db = copied(worlds, tmp_path)
+    c = _site(monkeypatch, db, serverless=True, tmp=tmp_path)
+    r = c.post("/api/ema/policy", json={"pattern": P_AUTH, "decision": "accept", "name": "Owner"}, headers=XHR)
+    assert r.status_code == 200 and r.json()["applies"] == "next run"
+    st = LocalState(str(tmp_path / "state"))
+    entries = cloud.read_actions(st)
+    assert len(entries) == 1
+    a = entries[0][1]
+    assert {k: a[k] for k in ("kind", "pattern", "decision", "actor")} == {"kind": "ema_policy", "pattern": P_AUTH, "decision": "accept",
+                                                                          "actor": "Owner (anonymous)"} and a["at"]
+    # the page shows the decision at once (the journal is laid over this instance's copy) ...
+    p = next(x for x in c.get("/api/ema/policy").json()["patterns"] if x["pattern"] == P_AUTH)
+    assert (p["decision"], p["decided_by"], p["pending"]) == ("accept", "Owner (anonymous)", True)
+    # ... and the next run folds it into the store, where the run reads it
+    conn = sqlite3.connect(db)
+    done, left, _wrote = cloud.apply_actions(conn, entries)
+    pol = json.loads(conn.execute("SELECT value FROM meta WHERE key='ema:writeoff_policy'").fetchone()[0])
+    conn.close()
+    assert done and not left and pol[P_AUTH]["decision"] == "accept" and pol[P_AUTH]["at"] == a["at"]

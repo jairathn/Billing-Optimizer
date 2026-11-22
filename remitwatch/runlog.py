@@ -188,8 +188,8 @@ class Scrubber:
         return self._vocab
 
     def code_words(self) -> set[str]:
-        """Lowercase words of RemitWatch's own source: a patient name that is also one of them is not masked as a name
-        (the quote and shape rules still apply), so the code's own messages stay readable."""
+        """The words of RemitWatch's own source, lowercased (its messages, its payer and code tables): a capitalized word
+        that is one of them is the code's own (Medicare Advantage, Dropbox, TriZetto), not a person's name."""
         if self._code_words is None:
             words: set[str] = set()
             here = os.path.dirname(os.path.abspath(__file__))
@@ -197,7 +197,7 @@ class Scrubber:
                 for fn in os.listdir(here):
                     if fn.endswith(".py"):
                         with open(os.path.join(here, fn), encoding="utf-8", errors="ignore") as fh:
-                            words |= set(re.findall(r"\b[a-z]{3,}\b", fh.read()))
+                            words |= {w.lower() for w in re.findall(r"[A-Za-z]{3,}", fh.read())}
             except OSError as exc:
                 _note_internal("code_words", exc)
             self._code_words = words
@@ -251,20 +251,61 @@ class Scrubber:
         s = _QUOTED.sub(self._quoted, s)
         s = _LABELED.sub(lambda m: m.group(0)[:m.start(2) - m.start(0)] + "<redacted>", s)
         s = _PATIENT_WORDS.sub(lambda m: m.group(1) + " <name>", s)
-        s = _FILENAME.sub(lambda m: "<file>." + m.group(1).lower(), s)
-        s = _PATH.sub(self._path, s)
         for rx in _DATES:
             s = rx.sub("<date>", s)
+        s = _FILENAME.sub(lambda m: "<file>." + m.group(1).lower(), s)
+        s = _PATH.sub(self._path, s)
         s = _SSN.sub("<id>", s)
         s = _PHONE.sub("<phone>", s)
         s = _GROUPED.sub(protect, s)
         s = _ALNUM.sub(lambda m: "<id>" if _digits_in(m.group(0)) >= 3 and m.group(0).lower() not in _ALNUM_OK else m.group(0), s)
         s = _DIGITS.sub(lambda m: "<n>" if _digits_in(m.group(0)) >= 5 else m.group(0), s)
-        if self.names:
-            names = self.names
-            s = _WORD.sub(lambda m: "<name>" if m.group(0).lower().strip("'-") in names else m.group(0), s)
+        s = self._names(s)
         s = _PLACEHOLDER.sub(lambda m: kept[int(m.group(1))], s)
         return s[:cap] + ("..." if len(s) > cap else "")
+
+    def _names(self, s: str) -> str:
+        """Names that reached the text unquoted: a word the store's patients carry (learn), an ALL-CAPS word of four
+        letters or more (an 835 name), or two capitalized words side by side ("Last, First" or "First Last"), unless the
+        word is one of RemitWatch's own (code_words)."""
+        toks = list(_WORD.finditer(s))
+        if not toks:
+            return s
+        code = self.code_words()
+        names = self.names
+
+        def known(w: str) -> bool:
+            return w.lower().strip("'-") in code
+
+        def cap(w: str) -> bool:
+            return w[:1].isupper()
+        mask = [False] * len(toks)
+        for i, m in enumerate(toks):
+            w = m.group(0)
+            lw = w.lower().strip("'-")
+            if names and lw in names:
+                mask[i] = True
+            elif len(w) >= 4 and w.isupper() and not known(w):
+                mask[i] = True
+            if i + 1 < len(toks) and cap(w):
+                nxt = toks[i + 1].group(0)
+                gap = s[m.end():toks[i + 1].start()]
+                if cap(nxt) and gap in (" ", ", ", ",", "  ") and not (known(w) and known(nxt)):
+                    # the unknown word goes; a known one beside it goes too unless it is an ALL-CAPS word of the code's
+                    # own (ERROR, EMA): "John Smith" loses both, "ERROR Smith" keeps ERROR
+                    for j, x in ((i, w), (i + 1, nxt)):
+                        if not known(x) or not x.isupper():
+                            mask[j] = True
+        if not any(mask):
+            return s
+        out, at = [], 0
+        for m, hide in zip(toks, mask):
+            if hide:
+                out.append(s[at:m.start()])
+                out.append("<name>")
+                at = m.end()
+        out.append(s[at:])
+        return "".join(out)
 
     def _quoted(self, m: re.Match) -> str:
         inner = m.group(2)
@@ -351,7 +392,7 @@ for _k in ("payer_group", "payer", "payer_kind"):
     KEY_SHAPES[_k] = _PAYER
 for _k in ("month", "service_month"):
     KEY_SHAPES[_k] = re.compile(r"\d{4}-\d{2}")
-for _k in ("newest_payment", "newest_payment_date", "last_payment", "first_payment", "as_of", "last_file_ingested", "day",
+for _k in ("newest_payment", "newest_payment_date", "last_payment", "first_payment", "as_of", "asof", "last_file_ingested", "day",
            "window_start", "window_end", "horizon", "pruned_on"):
     KEY_SHAPES[_k] = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -780,6 +821,7 @@ class RunLog:
         self._token = None
         self._finished: str | None = None
         self._logged: dict[int, tuple] = {}
+        self._marker = False
         self._t0 = time.monotonic()
         self.manifest: dict = {
             "schema": SCHEMA, "run_id": self.run_id, "kind": kind, "host_mode": self.host, "trigger": scrub(trigger, "trigger"),
@@ -914,6 +956,7 @@ class RunLog:
                 "steps_done": [s["step"] for s in self.manifest["steps"]][-30:]}
         try:
             self.sink.write_json(f"open/{self.run_id}.json", body)
+            self._marker = True
         except Exception as exc:        # noqa: BLE001
             _note_internal("checkpoint", exc)
 
@@ -969,7 +1012,8 @@ class RunLog:
             _note_internal("write_run", exc)
         try:
             update_index(self.sink, summary_of(m))
-            self.sink.delete(f"open/{self.run_id}.json")
+            if self._marker:
+                self.sink.delete(f"open/{self.run_id}.json")
         except Exception as exc:        # noqa: BLE001
             _note_internal("index", exc)
         try:
@@ -1069,7 +1113,8 @@ def start_run(kind: str = "cycle", *, trigger: str = "manual", conn: sqlite3.Con
             sync_store_from_index(conn, sink)
         except Exception as exc:        # noqa: BLE001
             _note_internal("sync_index", exc)
-    rl.checkpoint("start", force=True)
+    if not getattr(sink, "remote", False):
+        rl.checkpoint("start", force=True)      # a local file: cheap. On a serverless host the first big step writes it
     rl.event("run", "run_start", detail={"kind": kind, "trigger": trigger, "host_mode": rl.host})
     return rl
 
