@@ -709,10 +709,29 @@ def test_a_send_that_never_reached_the_line_goes_again_once(site, monkeypatch):
     unsettled = [s for s in c.get("/api/faxes").json()["sent"] if s["unsettled"]]
     assert len(unsettled) == 1
     line.outbox_down = False
-    assert c.post("/api/faxes/refresh", headers=XHR).json()["settled"] == 1           # SRFax has no such fax: a failed try
-    assert _send(c, rate)["status"] == "sent" and len(line.sent) == 1
-    # a person can settle one by hand too
+    # SRFax has no such fax: a failed try, sent again by the line's own retry (the item was marked Sent when it was
+    # pressed again), once
+    got = c.post("/api/faxes/refresh", headers=XHR).json()
+    assert got["settled"] == 1 and got["retried"] == 1 and len(line.sent) == 1
+    assert _send(c, rate)["status"] == "skipped" and len(line.sent) == 1
+    # settled already: a person's answer is refused
     assert c.post("/api/faxes/settle", json={"fax_key": unsettled[0]["fax_key"], "went": True}, headers=XHR).status_code == 409
+
+
+def test_a_person_settles_a_send_the_line_cannot_tell_about(site, monkeypatch):
+    c, line = site.c, site.line
+    rate = site.ids["UNDERPAID_VS_OWN_RATE"]
+    _number(c, PAYER_FAX)
+    real_send = line.send
+    monkeypatch.setattr(line, "send", lambda to, pdf, filename: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        _send(c, rate)
+    monkeypatch.setattr(line, "send", real_send)
+    key = _rows(site.db, "SELECT fax_key FROM faxes")[0][0]
+    assert c.post("/api/faxes/settle", json={"fax_key": key, "went": "yes"}, headers=XHR).status_code == 400
+    assert c.post("/api/faxes/settle", json={"fax_key": key, "went": False}, headers=XHR).json()["ok"] is True
+    assert _rows(site.db, "SELECT status FROM faxes") == [("failed",)]
+    assert _send(c, rate)["status"] == "sent" and len(line.sent) == 1              # the item never went: it goes now, once
 
 
 # --------------------------------------------------------------------------- whose letter it is
