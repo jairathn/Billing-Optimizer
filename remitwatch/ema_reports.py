@@ -332,12 +332,15 @@ def _recognize_xlsx(src: str | bytes | BinaryIO, member: str | None = None) -> R
                 declared = ws.max_row
             except Exception:   # noqa: BLE001
                 declared = None
-            ws.reset_dimensions()
             rows = []
-            for row in ws.iter_rows(values_only=True):
-                rows.append(row)
-                if len(rows) >= HEADER_SCAN:
-                    break
+            try:
+                ws.reset_dimensions()
+                for row in ws.iter_rows(values_only=True):
+                    rows.append(row)
+                    if len(rows) >= HEADER_SCAN:
+                        break
+            except Exception:   # noqa: BLE001  (a sheet that cannot be read is not a report this module reads)
+                continue
             hit = _find_header(rows)
             if hit:
                 rep, i, row = hit
@@ -494,14 +497,25 @@ def _rows(fh: BinaryIO, rec: Recognized) -> Iterator[Sequence[Any]]:
         except Exception as exc:        # noqa: BLE001
             raise ReportRefused("unreadable", f"The workbook could not be opened ({type(exc).__name__}). Export it again.",
                                 rec.report) from None
+        failed = None
         try:
             ws = wb[rec.sheet] if rec.sheet and rec.sheet in wb.sheetnames else wb.worksheets[0]
             ws.reset_dimensions()
-            for i, row in enumerate(ws.iter_rows(values_only=True)):
+            it = enumerate(ws.iter_rows(values_only=True))
+            while True:
+                try:
+                    i, row = next(it)
+                except StopIteration:
+                    break
+                except Exception as exc:        # noqa: BLE001  (a converter's message can hold the cell's text: never passed on)
+                    failed = type(exc).__name__
+                    break
                 if i > rec.header_index:
                     yield row
         finally:
             wb.close()
+        if failed:
+            raise ReportRefused("unreadable", f"The workbook could not be read to its end ({failed}). Export it again.", rec.report)
         return
     text = io.TextIOWrapper(fh, encoding="utf-8-sig", errors=_ERRORS, newline="")
     try:
@@ -1315,6 +1329,37 @@ def _start_account(account: dict, rec: Recognized) -> None:
                    posted_hi=None, as_of=None, date_order=None, format=rec.fmt)
 
 
+class Posting(NamedTuple):
+    """One Production row, keys only. The field order is the ledger's column order."""
+    posted: str
+    svc: str
+    cpt: str | None
+    units: float | None
+    link: int | None
+    check_no: str | None
+    grp: str | None
+    code: str | None
+    kind: str | None
+    status: str | None
+    action: str | None
+    payer: str | None
+    plan: str | None
+    primary_payer: str | None
+    secondary_payer: str | None
+    pccn: str | None
+    person: int | None
+    name_key: int | None
+    charges: int | None
+    ins_charges: int | None
+    ins_paid: int | None
+    pat_paid: int | None
+    contractual: int | None
+    noncontractual: int | None
+    pat_adj: int | None
+    allowed: int | None
+    flags: int
+
+
 def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, account: dict,
                     deadline: float | None = None) -> Iterator[Posting]:
     """Stream a Production report as Posting tuples (keys only: no name, date of birth, description or staff), one per
@@ -1378,6 +1423,7 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
         rows = _rows(fh, rec)
         buf, order = _first_rows(rows, (i_posted, i_svc, i_dob))
         account["date_order"] = order
+        failed = None
         try:
             for row in itertools.chain(buf, rows):
                 n += 1
@@ -1504,39 +1550,15 @@ def iter_production(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes
                               payer, opt_text(row, i_plan), opt_text(row, i_primary), opt_text(row, i_secondary),
                               opt_text(row, i_pccn), pk[0], pk[1], charges, ins_charges, ins_paid, pat_paid, contractual,
                               noncontractual, pat_adj, allowed, flags)
+        except (ReportRefused, ReadTimeout):
+            raise
+        except Exception as exc:        # noqa: BLE001  (a converter's message can hold a cell's text: never passed on)
+            failed = type(exc).__name__
         finally:
             flush()
-
-
-class Posting(NamedTuple):
-    """One Production row, keys only. The field order is the ledger's column order."""
-    posted: str
-    svc: str
-    cpt: str | None
-    units: float | None
-    link: int | None
-    check_no: str | None
-    grp: str | None
-    code: str | None
-    kind: str | None
-    status: str | None
-    action: str | None
-    payer: str | None
-    plan: str | None
-    primary_payer: str | None
-    secondary_payer: str | None
-    pccn: str | None
-    person: int | None
-    name_key: int | None
-    charges: int | None
-    ins_charges: int | None
-    ins_paid: int | None
-    pat_paid: int | None
-    contractual: int | None
-    noncontractual: int | None
-    pat_adj: int | None
-    allowed: int | None
-    flags: int
+        if failed:
+            raise ReportRefused("unreadable", f"Row {n:,} of the Production report could not be read ({failed}). "
+                                "Export it again from EMA.", 'production')
 
 
 AR_ROW_COLUMNS = ("row_no", "svc_year", "item_key", "coverage", "party", "claim_id", "bill", "link", "balance_type",
@@ -1617,6 +1639,7 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
         rows = _rows(fh, rec)
         buf, order = _first_rows(rows, (i_svc, i_aging, i_follow))
         account["date_order"] = order
+        failed = None
         try:
             for row in itertools.chain(buf, rows):
                 n += 1
@@ -1690,8 +1713,15 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
                     "payer_group": None, "payer_kind": None, "svc": svc, "initials": _initials(name), "name_key": nk,
                     "mrn_key": mk, "exposure_cents": exposure, "facility": 1 if is_facility_claim(claim_id) else 0,
                 }
+        except (ReportRefused, ReadTimeout):
+            raise
+        except Exception as exc:        # noqa: BLE001  (a converter's message can hold a cell's text: never passed on)
+            failed = type(exc).__name__
         finally:
             flush()
+        if failed:
+            raise ReportRefused("unreadable", f"Row {n:,} of the A/R report could not be read ({failed}). "
+                                "Export it again from EMA.", 'ar_report')
 
 
 # ---------------------------------------------------------------------------------------------------------- the catalog
@@ -2345,3 +2375,350 @@ def apply_ar(store: Any, path: str, rec: Recognized, *, file_id: str, via: str, 
     return _result(status, "ar_report", file_id, reason=reason, rows_read=acct["rows_read"], rows_kept=acct["rows_kept"],
                    rows_applied=applied, live_rows=live, scope=scope, as_of=as_of, replaced=replaced, account=dict(acct),
                    box={"years": years, "svc_lo": acct["svc_lo"], "svc_hi": acct["svc_hi"], "as_of": as_of})
+
+
+# -------------------------------------------------------------------------------------------------------------- preview
+def _boxes_meet(a: dict, b: dict) -> bool:
+    """Whether two Production boxes share a (service date, posted date) point. A service box is its service dates by every
+    posting up to its as_of; a posted box is every service date by its posted dates."""
+    def span(box: dict) -> tuple[tuple, tuple]:
+        if box.get("scope") == "posted":
+            return (None, None), (box.get("posted_lo"), box.get("posted_hi"))
+        return (box.get("svc_lo"), box.get("svc_hi")), (None, box.get("as_of"))
+
+    def meet(x: tuple, y: tuple) -> bool:
+        lo = max((v for v in (x[0], y[0]) if v), default=None)
+        hi = min((v for v in (x[1], y[1]) if v), default=None)
+        return lo is None or hi is None or lo <= hi
+    (sa, pa), (sb, pb) = span(a), span(b)
+    return meet(sa, sb) and meet(pa, pb)
+
+
+def _scope_of(svc_lo: str | None, posted_lo: str | None) -> str | None:
+    if not svc_lo or not posted_lo:
+        return None
+    try:
+        from .ema_ledger import scope_of        # noqa: PLC0415  (one rule for both modules once the ledger ships)
+        return scope_of(svc_lo, posted_lo)
+    except Exception:       # noqa: BLE001
+        return "posted" if (date.fromisoformat(posted_lo) - date.fromisoformat(svc_lo)).days > 45 else "service"
+
+
+def preview(conn: sqlite3.Connection, path: str, rec: Recognized | None = None) -> dict:
+    """Say what a report holds before it is read for good (the Upload page): which report, its rows, dates, scope, box and
+    as_of, what it would replace or overlap, and any refusal or hold that can be decided without the ledger (the ledger's
+    own holds are decided when the cycle applies the file). Never opens the ledger and changes nothing but the key salt,
+    made on first use. An .xlsx Production export is judged by its column names and declared size only."""
+    ensure_schema(conn)
+    name = os.path.basename(path)
+    if rec is None:
+        if is_plain_zip(path):
+            try:
+                recs = recognize_zip(path, name)
+            except ReportRefused as exc:
+                return {"kind": "ema_report_zip", "members": [], "refused": exc.message, "code": exc.code}
+            return {"kind": "ema_report_zip", "members": [preview(conn, path, r) for r in recs], "refused": None}
+        try:
+            rec = recognize(path, name)
+        except ReportRefused as exc:
+            return {"kind": "ema_report", "report": exc.report, "refused": exc.message, "code": exc.code, "holds": []}
+        if rec is None:
+            return {"kind": "ema_report", "report": None, "refused": None, "holds": []}
+    fid = _member_id(path, rec.member) if rec.member else file_id_of(path)
+    row = _catalog_row(conn, fid)
+    out: dict = {"kind": "ema_report", "report": rec.report, "report_name": REPORT_NAMES[rec.report], "format": rec.fmt,
+                 "file_id": fid, "name": _names_of(path, rec)[0], "catalog_status": row["status"] if row else None,
+                 "columns": len(rec.columns), "unused_columns": list(rec.unused),
+                 "missing": [{"column": WHY.get(n, (n, ""))[0], "why": WHY.get(n, (n, ""))[1]} for n in rec.missing],
+                 "refused": None, "code": None, "holds": [], "reads_here": reads(rec.report)}
+    if rec.missing:
+        out.update(refused=_missing_message(rec), code="missing_columns")
+        return out
+    try:
+        out.update(_preview_ar(conn, path, rec, fid) if rec.report == "ar_report" else _preview_production(conn, path, rec, fid))
+    except ReportRefused as exc:
+        out.update(refused=exc.message, code=exc.code)
+    return out
+
+
+def _preview_ar(conn: sqlite3.Connection, path: str, rec: Recognized, file_id: str) -> dict:
+    salt = key_salt(conn)
+    register_functions(conn, salt)
+    try:
+        acct = _stage_ar(conn, path, rec, salt, file_id)
+        if not acct.get("rows_kept"):
+            raise ReportRefused("empty", "It holds no line with a service date and a responsible party.", "ar_report")
+        as_of = acct["as_of"]
+        years = [str(y) for y in range(int(acct["svc_lo"][:4]), int(acct["svc_hi"][:4]) + 1)]
+        row = _catalog_row(conn, file_id)
+        mine = (as_of or "", _created_at(path, rec) or "", (row or {}).get("received_at") or _now(), file_id)
+        replaces, behind, current_of = [], [], {}
+        for y in years:
+            cur = conn.execute("SELECT file_id, MAX(as_of) FROM main.ema_ar WHERE svc_year=? GROUP BY file_id", (y,)).fetchone()
+            if cur is None:
+                replaces.append({"year": y, "file_id": None, "as_of": None})
+            elif cur[0] != file_id and mine > _order(conn, cur[0]):
+                replaces.append({"year": y, "file_id": cur[0], "as_of": cur[1]})
+                current_of[y] = cur[0]
+            elif cur[0] != file_id:
+                behind.append({"year": y, "file_id": cur[0], "as_of": cur[1]})
+        holds = _ar_holds(conn, [r["year"] for r in replaces], current_of, as_of)
+        t = conn.execute("""SELECT COUNT(DISTINCT claim_id),
+                                   SUM(CASE WHEN lower(party) LIKE 'insur%' THEN exposure_cents ELSE 0 END),
+                                   SUM(CASE WHEN lower(party) LIKE 'insur%' THEN 0 ELSE exposure_cents END),
+                                   SUM(CASE WHEN lower(party) LIKE 'insur%' AND claim_id IS NULL THEN 1 ELSE 0 END)
+                            FROM temp.ema_ar_stage""").fetchone()
+        return {"rows": acct["rows_read"], "rows_kept": acct["rows_kept"], "claim_ids": t[0] or 0,
+                "insurance_cents": t[1] or 0, "patient_cents": t[2] or 0, "insurance_no_claim": t[3] or 0,
+                "svc_lo": acct["svc_lo"], "svc_hi": acct["svc_hi"], "as_of": as_of, "years": years,
+                "scope": years[0] if len(years) == 1 else f"{years[0]}-{years[-1]}", "aging_window": acct.get("aging_window"),
+                "replaces": replaces, "behind": behind, "holds": [{"code": c, "message": m} for c, m in holds],
+                "account": dict(acct)}
+    finally:
+        conn.rollback()
+        _drop_stage(conn)
+
+
+def _preview_production(conn: sqlite3.Connection, path: str, rec: Recognized, file_id: str) -> dict:
+    holds: list[dict] = []
+    current = coverage(conn)["production"]
+    if rec.fmt == "xlsx":
+        if runtime.serverless() and (rec.dimension or 0) > 120_000:
+            holds.append({"code": "H6", "message": "Save it as CSV: an Excel Production export this large is not read on this site."})
+        return {"rows": rec.dimension, "rows_kept": None, "holds": holds, "overlaps": [],
+                "note": "An Excel Production export is read in full only when the cycle applies it."}
+    acct = Account()
+    payers: set[str] = set()
+    for p in iter_production(path, rec, salt=secrets.token_bytes(32), account=acct):
+        if p.payer and not (p.flags & FLAG_PATIENT_SIDE) and len(payers) < 50:
+            payers.add(p.payer)
+    scope = _scope_of(acct.get("svc_lo"), acct.get("posted_lo"))
+    box = {"scope": scope, "svc_lo": acct.get("svc_lo"), "svc_hi": acct.get("svc_hi"), "posted_lo": acct.get("posted_lo"),
+           "posted_hi": acct.get("posted_hi"), "as_of": acct.get("as_of")}
+    overlaps = [b for b in current if b["file_id"] != file_id and _boxes_meet(box, b)]
+    read = acct.get("rows_read") or 0
+    left = acct.get("left") or {}
+    if read and (left.get("no_date", 0) > 0.01 * read or (acct.get("identity_breaks") or 0) > 0.005 * read):
+        holds.append({"code": "H1", "message": "The layout or format changed."})
+    if not current and (acct.get("rows_kept") or 0) >= 2000 and len(payers) < 3:
+        holds.append({"code": "H5", "message": "It names fewer than three insurers: was it filtered by payer?"})
+    return {"rows": read, "rows_kept": acct.get("rows_kept"), "scope": scope, "box": box, "as_of": acct.get("as_of"),
+            "svc_lo": acct.get("svc_lo"), "svc_hi": acct.get("svc_hi"), "posted_lo": acct.get("posted_lo"),
+            "posted_hi": acct.get("posted_hi"), "insurers": len(payers), "overlaps": overlaps, "holds": holds,
+            "account": dict(acct), "note": "Whether it shrinks or double-filters what is on file is decided when the cycle applies it."}
+
+
+# ------------------------------------------------------------------------------------------------------------ decisions
+def decide(conn: sqlite3.Connection, file_id: str, decision: str, user: str) -> dict:
+    """A person's decision on a held report: 'discard' closes it; 'apply' records the decision and returns
+    {'requeue': origin} so the caller queues the file again (the next read skips holds, never refusals)."""
+    ensure_schema(conn)
+    if decision not in ("apply", "discard"):
+        return {"error": "The decision is apply or discard."}
+    row = _catalog_row(conn, file_id)
+    if row is None:
+        return {"error": "No report with that id is on file."}
+    if row["status"] == "refused":
+        return {"error": "A refused report cannot be applied. Export it again from EMA.", "status": "refused"}
+    if row["status"] != "held":
+        return {"error": "Only a held report waits for a decision.", "status": row["status"]}
+    now = _now()
+    if decision == "discard":
+        _catalog_put(conn, file_id, commit=True, status="discarded", decision="discard", decided_by=user, decided_at=now)
+        return {"file_id": file_id, "status": "discarded"}
+    _catalog_put(conn, file_id, commit=True, decision="apply", decided_by=user, decided_at=now)
+    try:
+        origin = json.loads(row["origin"]) if row.get("origin") else {}
+    except ValueError:
+        origin = {}
+    return {"file_id": file_id, "status": "held", "decision": "apply", "requeue": origin}
+
+
+# -------------------------------------------------------------------------------------------------- misread report rows
+KEYED_ROW = "(claim_id IS NOT NULL OR bill_id IS NOT NULL OR bill_item_id IS NOT NULL OR patient_id IS NOT NULL)"
+
+
+def _table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def _misread_candidates(conn: sqlite3.Connection) -> list[dict]:
+    """Sources the old code read as a Claim & Claim Status export (or as an unknown layout) in which no row names a claim,
+    a bill, a bill item or a patient. A genuine export names one of them on some row; an A/R or Production report never
+    does. Also the files rows of those kinds whose rows all went in under another file's copy."""
+    out: dict[str, dict] = {}
+    if _table(conn, "ema_rows"):
+        for sha, fam, n, keyed, posted, adj in conn.execute(
+                f"""SELECT source_sha256, family, COUNT(*), SUM({KEYED_ROW}), SUM(posted_date IS NOT NULL),
+                           SUM(adjustment_reason IS NOT NULL)
+                    FROM ema_rows WHERE family IN ('claim_status', 'unknown') GROUP BY source_sha256, family"""):
+            if sha is None or keyed:
+                continue
+            out[sha] = {"sha": sha, "family": fam, "rows": n,
+                        "guess": "production" if (posted or adj) else "ar_report", "kind": None, "name": None, "path": None}
+    for sha, kind, name, path in conn.execute(
+            "SELECT sha256, kind, source_name, source_path FROM files WHERE kind IN ('ema:claim_status', 'ema:unknown')"):
+        c = out.get(sha)
+        if c is None:
+            if _table(conn, "ema_rows") and conn.execute("SELECT 1 FROM ema_rows WHERE source_sha256=? LIMIT 1", (sha,)).fetchone():
+                continue                    # rows that name a claim or a bill: a genuine export
+            low = (name or "").lower()
+            c = out[sha] = {"sha": sha, "family": kind.split(":", 1)[1], "rows": 0,
+                            "guess": "production" if low.endswith(TEXT_MEMBERS) else "ar_report"}
+        c.update(kind=kind, name=name, path=path)
+    return list(out.values())
+
+
+def _purge_source(conn: sqlite3.Connection, sha: str) -> None:
+    if _table(conn, "ema_rows"):
+        conn.execute("DELETE FROM ema_rows WHERE source_sha256=?", (sha,))
+    conn.execute("DELETE FROM ema_sources WHERE sha256=?", (sha,))
+    conn.execute("DELETE FROM files WHERE sha256=?", (sha,))
+
+
+def _clear_unknown(conn: sqlite3.Connection, sha: str) -> int:
+    """Rows of an unknown layout feed nothing: they go, and the file is noted as not read."""
+    n = conn.execute("DELETE FROM ema_rows WHERE source_sha256=? AND family='unknown'", (sha,)).rowcount if _table(conn, "ema_rows") else 0
+    conn.execute("UPDATE files SET kind='ema:unknown', status='not_read', lines=0 WHERE sha256=?", (sha,))
+    return n
+
+
+def _set_suspects(conn: sqlite3.Connection, add: list[dict] | None = None, drop: Iterable[str] = ()) -> None:
+    have = {s["sha256"]: s for s in _meta_json(conn, META_SUSPECTS, []) if isinstance(s, dict) and s.get("sha256")}
+    for sha in drop:
+        have.pop(sha, None)
+    for s in add or []:
+        have[s["sha256"]] = s
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (META_SUSPECTS, json.dumps(list(have.values()))))
+
+
+def _upload_copy(conn: sqlite3.Connection, sha: str) -> tuple[str | None, str | None]:
+    if not _table(conn, "uploads"):
+        return None, None
+    r = conn.execute("SELECT upload_id, path FROM uploads WHERE (upload_id=? OR stored_sha=?) AND path IS NOT NULL "
+                     "ORDER BY uploaded_at DESC LIMIT 1", (sha, sha)).fetchone()
+    return (r[0], r[1]) if r else (None, None)
+
+
+def _dropbox_origin(conn: sqlite3.Connection, name: str | None) -> dict | None:
+    """Where the misread file is in Dropbox, by its name: the newest entry the site has seen under that name."""
+    if not name or not _table(conn, "dropbox_seen"):
+        return None
+    best = None
+    for eid, h, p, at in conn.execute("SELECT id, content_hash, path, at FROM dropbox_seen WHERE path LIKE ?", ("%" + name,)):
+        if not p or str(eid).startswith("zip:") or os.path.basename(p) != name:
+            continue
+        if best is None or (at or "") > (best[3] or ""):
+            best = (eid, h, p, at)
+    if best is None:
+        return None
+    return {"dropbox_id": best[0], "path": best[2], "content_hash": best[1], "misread": True}
+
+
+def migrate_misread(store: Any, *, serverless: bool, log: Any = print) -> dict:
+    """Once per host (meta ema:migrated_v1): find what the old code read from the two reports as an export, and put it
+    right. A candidate is confirmed only when its original file is recognised as a report: then its rows, its export
+    record and its files row go, and the file is queued as waiting with its origin, to be read as a report. A candidate
+    whose original is not a report is a genuine export and is not touched; one whose original is gone keeps its rows
+    and is listed as a possible misread report (meta ema:misread_suspects). Rows of an unknown layout are deleted and
+    their file noted as not read. Serverless: the candidate is queued from its Dropbox entry and its rows stay until the
+    fetched file is confirmed (confirm_misread)."""
+    conn = store.conn
+    ensure_schema(conn)
+    if conn.execute("SELECT 1 FROM meta WHERE key=?", (META_MIGRATED,)).fetchone():
+        return {"skipped": True}
+    out = {"candidates": 0, "purged": 0, "queued": 0, "kept": 0, "unknown_rows_deleted": 0, "genuine": 0}
+    suspects: list[dict] = []
+    for c in _misread_candidates(conn):
+        out["candidates"] += 1
+        sha, fam = c["sha"], c["family"]
+        if serverless:
+            origin = _dropbox_origin(conn, c.get("name"))
+            if fam == "unknown":
+                out["unknown_rows_deleted"] += _clear_unknown(conn, sha)
+            if origin:
+                record_waiting(conn, file_id=sha, report=c["guess"], source_name=c.get("name") or "", via="dropbox", origin=origin,
+                               reason="Read before as another export; it is read again as a report once fetched.")
+                out["queued"] += 1
+            elif fam != "unknown":
+                suspects.append({"sha256": sha, "family": fam, "rows": c["rows"], "why": "not found in Dropbox"})
+                out["kept"] += 1
+            continue
+        upload_id, upload_path = _upload_copy(conn, sha)
+        rec: Any = None
+        found = None
+        for p in (c.get("path"), upload_path):
+            if p and os.path.isfile(p) and file_id_of(p) == sha:
+                found = p
+                try:
+                    rec = recognize(p, os.path.basename(p))
+                except ReportRefused:
+                    rec = "refused"         # a report all the same: it is read (and refused) as one
+                break
+        if rec:
+            _purge_source(conn, sha)
+            origin = {"path": found, "misread": True}
+            if upload_id and found == upload_path:
+                origin["upload_id"] = upload_id
+                conn.execute("UPDATE uploads SET status='queued', done_at=NULL WHERE upload_id=?", (upload_id,))
+            report = rec.report if isinstance(rec, Recognized) else c["guess"]
+            record_waiting(conn, file_id=sha, report=report, source_name=c.get("name") or os.path.basename(found), via=(
+                "upload" if "upload_id" in origin else "mirror"), origin=origin,
+                reason="Read before as another export; it is read again as a report.")
+            out["purged"] += 1
+            out["queued"] += 1
+        elif fam == "unknown":
+            out["unknown_rows_deleted"] += _clear_unknown(conn, sha)
+        elif found:
+            out["genuine"] += 1             # the original is a real export that names no claim: left as it is
+        else:
+            suspects.append({"sha256": sha, "family": fam, "rows": c["rows"], "why": "original file gone"})
+            out["kept"] += 1
+    _set_suspects(conn, suspects)
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (META_MIGRATED, _now()))
+    conn.commit()
+    if out["candidates"]:
+        log(f"  EMA reports read before as exports: {out['candidates']} found, {out['queued']} queued to be read again, "
+            f"{out['kept']} kept, {out['genuine']} genuine")
+    return out
+
+
+def confirm_misread(store: Any, sha256: str, rec: Recognized | None) -> bool:
+    """The second half of the clean-up, once a file is in hand: when these exact bytes are recognised as a report and the
+    store still holds rows the old code read from them as an export (no row naming a claim, bill, bill item or patient),
+    those rows, their export record and their files row are removed. Returns whether anything was removed. When the file
+    is not a report, a waiting entry queued for it by migrate_misread is dropped and nothing else changes."""
+    conn = store.conn
+    if rec is None or getattr(rec, "report", None) not in REPORTS:
+        row = _catalog_row(conn, sha256) if _table(conn, "ema_report_files") else None
+        if row and row["status"] == "waiting":
+            try:
+                misread = bool((json.loads(row["origin"]) if row.get("origin") else {}).get("misread"))
+            except ValueError:
+                misread = False
+            if misread:
+                conn.execute("DELETE FROM ema_report_files WHERE file_id=?", (sha256,))
+                conn.commit()
+        return False
+    f = conn.execute("SELECT kind FROM files WHERE sha256=?", (sha256,)).fetchone()
+    has_rows = _table(conn, "ema_rows")
+    fams = {r[0] for r in conn.execute("SELECT DISTINCT family FROM ema_rows WHERE source_sha256=?", (sha256,))} if has_rows else set()
+    if f is None and not fams:
+        return False
+    if f is not None and f[0] in REPORT_KINDS:
+        return False
+    if f is not None and f[0] not in ("ema:claim_status", "ema:unknown") and not fams:
+        return False
+    if fams - {"claim_status", "unknown"}:
+        return False
+    if has_rows and conn.execute(f"SELECT 1 FROM ema_rows WHERE source_sha256=? AND {KEYED_ROW} LIMIT 1", (sha256,)).fetchone():
+        return False
+    _purge_source(conn, sha256)
+    _set_suspects(conn, drop=[sha256])
+    conn.commit()
+    return True
+
+
+def misread_suspects(conn: sqlite3.Connection) -> list[dict]:
+    """Sources that may be a misread report but whose original could not be checked (the Data tab lists them)."""
+    return _meta_json(conn, META_SUSPECTS, [])
