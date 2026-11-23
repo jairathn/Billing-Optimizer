@@ -117,7 +117,7 @@ def test_denied_visit_with_a_lower_level_paid_in_its_place_is_a_line_swap(tmp_pa
     swap = store.query("SELECT * FROM findings WHERE signal='DOWNCODE_LINE_SWAP'")[0]
     assert swap["expected_cents"] == 11760 and swap["shortfall_cents"] == 11760 - 7615
     denied = store.query("SELECT * FROM findings WHERE signal='DOWNCODE_LEVEL_DENIED'")[0]
-    assert denied["code_pair"] == "99214 denied for level" and "two years" in denied["deadline_basis"] and denied["appeal_deadline"] == "2028-04-14"
+    assert denied["code_pair"] == "99214 denied for level" and "two years" in denied["deadline_basis"] and denied["appeal_deadline"] == "2028-04-15"
 
 
 def test_claim_file_shows_a_higher_level_than_the_remit(tmp_path):
@@ -788,7 +788,7 @@ def test_a_payers_routine_lower_rate_is_one_question_and_a_one_off_is_an_appeal(
     p = pattern[0]
     ev = json.loads(p["evidence"])
     # one finding with its claims, still an underpayment, with its claims' filing deadlines (here all the same date)
-    assert (p["category"], p["actionable"], p["shortfall_cents"]) == ("underpayment", "review", 8 * 1760) and p["appeal_deadline"] == "2028-04-14"
+    assert (p["category"], p["actionable"], p["shortfall_cents"]) == ("underpayment", "review", 8 * 1760) and p["appeal_deadline"] == "2028-04-15"
     assert (ev["lines"], ev["amount_cents"], ev["usual_cents"], ev["pct_of_usual"]) == (8, 10000, 11760, 0.85)
     assert "physician assistant or nurse practitioner" in ev["note"] and "before appealing" in ev["note"] and "$100.00 instead of its usual $117.60 on 8 lines" in p["title"]
     assert sorted(c[0] for c in ev["claims"]) == [f"CB{i:07d}C017" for i in range(101, 109)]

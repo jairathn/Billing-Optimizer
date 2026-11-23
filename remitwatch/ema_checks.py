@@ -51,7 +51,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from . import ema_ledger as el
 from . import ema_reports as er
-from .codes import EM_CODES, appeal_rule, filing_rule
+from .codes import EM_CODES, appeal_rule, filing_rule, window_end
 from .ema_reports import status_class  # noqa: F401  (re-exported: the spec's ema_checks.status_class)
 
 # ----------------------------------------------------------------------------------------------------------- constants
@@ -1085,7 +1085,7 @@ def _status_claims(conn: sqlite3.Connection, cls: str) -> dict[str, dict]:
 def _filing(grp: str | None, kind: str | None, svc: str | None) -> tuple[str | None, str]:
     rule = filing_rule(grp, kind)
     limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
-    return _add(svc, rule["days"]), limit
+    return window_end(svc, rule), limit
 
 
 def _priced(rate: Callable | None, grp: str | None, lines: Iterable[tuple]) -> int | None:
@@ -2270,7 +2270,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         lag = _lag(lags, grp, "p95")
         start = _add(it["first"], -lag) if it["first"] else None
         rule = appeal_rule(grp, kind)
-        deadline = _add(start, rule["days"]) if start else None
+        deadline = window_end(start, rule) if start else None
         unconfirmed = "" if rule["verified"] else " (not confirmed against the payer's current manual)"
         dbasis = (f"{rule['label']}{unconfirmed}. Counted from EMA's posting ({it['first']}) less its usual delay of {lag} days; "
                   "the EOB's date can be earlier")
@@ -2346,7 +2346,7 @@ def denial_as_contractual(conn: sqlite3.Connection, *, today: str | None = None,
         it["split"][part] += contr
         totals[part] += contr
         start = _add(first, -_lag(lags, grp, "p95"))
-        if start and (_add(start, appeal_rule(grp, kind)["days"]) or "") >= t:
+        if start and (window_end(start, appeal_rule(grp, kind)) or "") >= t:
             it["inside"] += contr
     out = []
     for (grp, reason, year), it in sorted(groups.items()):
@@ -2443,7 +2443,7 @@ def timely_writeoffs(conn: sqlite3.Connection, *, today: str | None = None) -> d
         if (bill and (bill, svc, cpt) in fkeys) or lk in ekeys:
             out["covered_cents"] += cents
         start = _add(first, -_lag(lags, grp, "p95"))
-        if start and (_add(start, appeal_rule(grp, kind)["days"]) or "") >= t:
+        if start and (window_end(start, appeal_rule(grp, kind)) or "") >= t:
             out["inside_cents"] += cents
     return out
 

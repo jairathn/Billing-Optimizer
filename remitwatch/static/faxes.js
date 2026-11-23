@@ -266,7 +266,7 @@ async function faxesTab(v){
       ${(fx.practice_missing||[]).length ? `<div class="small sev-medium">The letters still lack the practice's details: set ${esc(fx.practice_missing.join(', '))}.</div>` : ''}
       <div id="fxCheckMsg" class="small muted"></div></div>
     <div class="panel"><h2>Follow-ups due <span class="muted small">${num(pushes.length)}</span></h2>
-      <div class="note">An appeal with no decision after the payer's time to answer (60 days for Medicare and Medicare Advantage, 30 for commercial plans) gets a second request, then another every week; an upheld appeal goes to the next level with the payer's decision attached; approved but unpaid after 30 days gets a payment request. The daily run sends these by itself; this button sends them now. A follow-up waits for a person when the payer's number changed since the item's last fax.</div>
+      <div class="note">An appeal with no decision after the payer's time to answer (60 days for Medicare and Medicare Advantage, 30 for commercial plans) gets a second request, then another every week; an upheld appeal goes to the next level with the payer's decision attached; approved but unpaid after 30 days gets a payment request. The daily run sends these by itself; this button sends them now. A follow-up waits for a person when the payer's number changed since the item's last fax. While the remittances are more than two weeks behind, a request that says the claim is unpaid waits for a person who checks it in EMA.</div>
       ${pushes.length ? `<table class="small"><thead><tr><th>Item</th><th>Payer</th><th>Next</th><th>Why</th><th class="num">Amount</th></tr></thead><tbody>${pushes.map(x=>`<tr class="row" data-id="${esc(x.finding_id)}"><td>${esc(x.title||'')}<div class="muted">${esc(x.service_date||'')}</div></td><td>${esc(x.payer_group||'')}</td><td><b>${esc(what(x))}</b></td><td>${esc(x.why)}</td><td class="num">${money2(x.shortfall_cents)}</td></tr>`).join('')}</tbody></table>
         ${sends ? `<div class="actions" style="margin-top:6px"><button class="primary" id="fxPush">${pushes.length === 1 ? 'Send the follow-up now' : `Send the ${num(pushes.length)} follow-ups now`}</button><span id="fxPushMsg" class="small muted"></span></div>` : ''}` : '<div class="muted small">Nothing due. Each appeal sent is checked every day.</div>'}
       ${people.length ? `<h3 class="small" style="margin-top:10px">For a person <span class="muted">${num(people.length)}</span></h3><table class="small"><tbody>${people.map(x=>`<tr class="row" data-id="${esc(x.finding_id)}"><td>${esc(x.title||'')}</td><td>${esc(x.payer_group||'')}</td><td>${esc(x.hold || x.why)}</td><td class="num">${money2(x.shortfall_cents)}</td><td>${personDo(x)}</td></tr>`).join('')}</tbody></table><div id="fxPersonMsg" class="small"></div>` : ''}</div>
@@ -310,7 +310,19 @@ async function faxesTab(v){
     const msg = v.querySelector('#fxPushMsg'); push.disabled = true; msg.textContent = 'Sending…';
     try { const r = await post('/api/faxes/follow_up', {}); msg.textContent = `${pl(r.sent, 'follow-up')} faxed${r.held ? `, ${r.held} held` : ''}${r.more ? '; more next time' : ''}.`;
       const why = (r.results||[]).filter(x=>x.status==='held').map(x=>x.reason); if(why.length) msg.textContent += ' ' + why[0];
-      setTimeout(render, 1200); }
+      // requests held only because the remittances are behind: a person who checked each in EMA sends them
+      const stale = (r.results||[]).filter(x=>x.status==='held' && x.code==='stale').map(x=>x.finding_id);
+      if(stale.length){
+        const b = document.createElement('button'); b.textContent = `Still unpaid in EMA: send the ${stale.length}`; b.style.marginLeft = '6px';
+        b.onclick = async () => {
+          if(!confirm(`You checked in EMA that each of these ${stale.length} claims is still unpaid?`)) return;
+          b.disabled = true;
+          try { const r2 = await post('/api/faxes/follow_up', {finding_ids: stale, stale_ok: true});
+            msg.textContent = `${pl(r2.sent, 'follow-up')} faxed${r2.held ? `, ${r2.held} held` : ''}.`; setTimeout(render, 1200); }
+          catch(e){ msg.textContent = e.message; b.disabled = false; }
+        };
+        msg.appendChild(b);
+      } else setTimeout(render, 1200); }
     catch(e){ msg.textContent = e.message; push.disabled = false; }
   };
   // one item, by a person, to the number in front of them
@@ -318,8 +330,12 @@ async function faxesTab(v){
     const msg = v.querySelector('#fxPersonMsg');
     if(!confirm(`Fax this item's follow-up to ${b.dataset.number}?`)) return;
     b.disabled = true;
-    try { const r = await post('/api/faxes/follow_up', {finding_ids: [b.dataset.send], number: b.dataset.number});
-      const one = (r.results||[])[0] || {};
+    try { let r = await post('/api/faxes/follow_up', {finding_ids: [b.dataset.send], number: b.dataset.number});
+      let one = (r.results||[])[0] || {};
+      if(one.status === 'held' && one.code === 'stale' && confirm((one.reason || '') + '\n\nYou checked in EMA that it is still unpaid?')){
+        r = await post('/api/faxes/follow_up', {finding_ids: [b.dataset.send], number: b.dataset.number, stale_ok: true});
+        one = (r.results||[])[0] || {};
+      }
       msg.className = one.status === 'sent' ? 'small ok' : 'small sev-medium';
       msg.textContent = one.status === 'sent' ? `Faxed to ${one.number}.` : (one.reason || 'Not sent.');
       if(one.status === 'sent') setTimeout(render, 1200); else b.disabled = false; }

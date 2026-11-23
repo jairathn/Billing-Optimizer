@@ -80,15 +80,15 @@ def test_medicare_documentation_denial_is_not_a_clerical_reopening(tmp_path):
     """The reopening clock is applied to every Medicare fix finding. A line denied because documentation is missing or
     deficient (CO-250 with N463 'missing support data', likewise CO-226/251/252) is not a clerical error: a reopening
     takes no documentation (CGS reopening job aid, December 2025; myCGS: 'Documentation is not reviewed'), so the
-    remedy is a redetermination with the documents, 120 days from the remittance, which is what the live release
-    showed. The new date is 245 days later than that window."""
+    remedy is a redetermination with the documents, 120 days from receipt of the remittance, which is presumed 5 days
+    after its date (42 CFR 405.942(a)): 125 days from the remittance date, not the reopening's year."""
     c = clm("AB0000006C017", "1", "150.00", "0.00", cfi="MB", stmt="20260105",
             lines=sv("11102", "150.00", "0.00", dos="20260105", cas="CAS*CO*250*150.00~", rem="LQ*HE*N463~"))
     store = build_remits(tmp_path, [("20260210", [c])], payer="KY MEDICARE", payer_id="15004")
     Detector(store, run_id="r6").run()
     (f,) = findings(store, "DENIED_MISSING_INFO")
     assert f["actionable"] == "correct_and_resubmit" and f["carc"] == "250"
-    assert f["appeal_deadline"] <= "2026-06-10", (
+    assert f["appeal_deadline"] == "2026-06-15", (
         f"documentation denial dated {f['appeal_deadline']} as: {f['deadline_basis'][:110]}")
     store.close()
 

@@ -612,10 +612,10 @@ def test_V1_two_deadline_rules_in_one_pattern_keep_each_claims_own_date(tmp_path
     [p] = findings(store, "signal='SECOND_RATE'")
     ev = p["evidence"]
     print(p["appeal_deadline"], "|", p["hint"], "|", ev["deadlines"], "|", p["deadline_basis"][:140])
-    assert [d for d, _n, _c in ev["deadlines"]] == ["2027-06-13", "2029-01-09"]
-    assert p["appeal_deadline"] == "2029-01-09" and p["hint"] == "Filing windows close 2027-06-13 to 2029-01-09"
+    assert [d for d, _n, _c in ev["deadlines"]] == ["2027-06-13", "2029-01-10"]
+    assert p["appeal_deadline"] == "2029-01-10" and p["hint"] == "Filing windows close 2027-06-13 to 2029-01-10"
     assert sum(n for _d, n, _c in ev["deadlines"]) == 6 and sum(c for _d, _n, c in ev["deadlines"]) == p["shortfall_cents"] == 6 * 1760
-    assert sorted(c[3] for c in ev["claims"]) == ["2027-06-13"] * 3 + ["2029-01-09"] * 3
+    assert sorted(c[3] for c in ev["claims"]) == ["2027-06-13"] * 3 + ["2029-01-10"] * 3
     store.close()
 
 

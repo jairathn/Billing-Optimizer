@@ -25,6 +25,13 @@ async function refreshHeader(){
     state.alertsNew = al.items; state.sync = st;
     const n = al.items.length, hi = al.items.filter(a=>a.severity==='high').length;
     $('#bellBtn').innerHTML = `Alerts <b class="${hi?'sev-high':''}">${n}</b>`;
+    // a run that moved far more work than usual: on every page until someone acknowledges it (Alerts tab)
+    const sw = al.items.find(a => a.kind === 'WORKLIST_SWING'), bn = $('#swingBanner');
+    if(bn){
+      bn.hidden = !sw;
+      if(sw){ bn.className = sw.severity === 'high' ? 'sev-high' : 'sev-medium';
+        bn.innerHTML = `<b>${sw.severity === 'high' ? 'Check before working the new items.' : 'A new release re-checked every claim.'}</b> ${esc(sw.title)} <a href="#alerts">Open the alert</a>`; }
+    }
     const behind = st.days_behind;
     const cls = behind==null ? 'muted' : (behind>14 ? 'sev-high' : (behind>7 ? 'sev-medium' : 'ok'));
     const how = st.running ? 'syncing now' : (st.dropbox_configured ? (st.mode==='serverless' ? 'checks Dropbox daily and when files arrive' : (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand')) : 'Dropbox not connected');
@@ -34,7 +41,7 @@ async function refreshHeader(){
 
 // ---------------------------------------------------------------- alerts
 const ALERT_KIND = {RAMP:'Ramping up', RISING:'Climbing', RESUMED:'Started again', NEW_BEHAVIOR:'New behavior', PROVIDER_TARGETED:'One provider singled out', RATE_CUT:'Rate cut',
-  NEW_REASON_CODE:'New reason code', DEADLINE:'Deadlines', STALE_FEED:'Feed stopped'};
+  NEW_REASON_CODE:'New reason code', DEADLINE:'Deadlines', STALE_FEED:'Feed stopped', WORKLIST_SWING:'Worklist swing'};
 async function alertsTab(v){
   const show = state.filt.alertShow || 'active';
   const res = await api('/api/alerts?status='+show);
