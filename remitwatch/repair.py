@@ -8,7 +8,12 @@ safe mode keeps the last good worklist and holds automatic closures) and turned 
 Remedies (REMEDIES):
   network          transient network trouble or HTTP 5xx/429 from Dropbox, TriZetto or SRFax: the call is tried again
                    after a back-off, within the run's time; then the step is held (Held) and the run carries on with
-                   the rest. A step held on RUNS_BEFORE_ALERT runs in a row raises an alert.
+                   the rest. Once a target is held in a run, its later calls in that run get one plain try each (no
+                   back-off; a success ends the hold), and after PROBES_AFTER_HOLD of those fail, none. A run counts
+                   once however many of its calls were held, and a target held on RUNS_BEFORE_ALERT runs in a row
+                   raises an alert. Only network trouble is tried again: a code bug is raised at once whatever its
+                   message says, and so is anything raised inside a callback wrapped with not_retried (the ingest a
+                   TriZetto pull hands its files to).
   unreadable_file  a file that cannot be read: counted per file (by its content hash); held with its reason after
                    `attempts` failed reads, so later runs skip it while the other files keep going. An alert says
                    which file (by hash and kind) and what to do.
@@ -16,7 +21,9 @@ Remedies (REMEDIES):
                    detection run): rebuilt once from its sources and checked again; still failing, the run asks for
                    safe mode (selfcheck) and an alert is raised.
   killed_run       a run the platform stopped (memory, time): the next run finds its open marker (runlog) and the
-                   cycle's own repair paths (cloud.repair_ledger, the Production attempts) are logged here.
+                   cycle's own repair paths (cloud.repair_ledger, the Production attempts) are logged here. Counted
+                   per step; a later run that finished and passed that step clears the count (read from the run
+                   index when the registry is made, so no hook is needed for it).
   stale_lock       a lock left by a dead run: removed by the existing stale-lock rules (pipeline, cloud), logged here.
   schema           a store missing a column: the migration (ensure_schema) runs, with the columns before and after.
   pressure         memory or time pressure: selfcheck's self-regulation acts; its actions are logged here.
@@ -29,6 +36,8 @@ from __future__ import annotations
 
 import functools
 import json
+import re
+import secrets
 import socket
 import sqlite3
 import time
@@ -41,6 +50,7 @@ from . import runlog
 STATE_FILE = "repair_state.json"
 META_KEY = "repair:state"
 RUNS_BEFORE_ALERT = 3
+PROBES_AFTER_HOLD = 3           # plain tries a held target gets later in the same run before its calls are skipped
 BUNDLE_STEP = ("download the diagnostic bundle from the Data tab (Logs and diagnostics) and give it to Claude Code with the "
                "repository")
 

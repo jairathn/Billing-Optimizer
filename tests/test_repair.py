@@ -20,13 +20,13 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from remitwatch import cloud, pipeline, repair, runlog  # noqa: E402
+from remitwatch import cloud, fax, pipeline, repair, runlog  # noqa: E402
 from remitwatch.detect import EXTRA_FINDING_COLS, FINDINGS_DDL, ensure_schema  # noqa: E402
 from remitwatch.dropbox_sync import DropboxAuthError  # noqa: E402
 from remitwatch.fax import FaxError  # noqa: E402
 from remitwatch.state import LocalState  # noqa: E402
 from remitwatch.store import Store  # noqa: E402
-from remitwatch.trizetto import SignInRefused, Stalled  # noqa: E402
+from remitwatch.trizetto import SignInRefused, Stalled, TriZettoError  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +123,25 @@ def compact_store() -> Store:
     image = blank.to_bytes()
     blank.close()
     return Store.from_bytes(image)
+
+
+def caused(exc: BaseException, cause: BaseException) -> BaseException:
+    """exc raised `from` cause, as a client wraps a network error in its own."""
+    try:
+        try:
+            raise cause
+        except BaseException as inner:
+            raise exc from inner
+    except BaseException as outer:
+        return outer
+
+
+class SSHException(Exception):
+    """Stands for paramiko's SSHException (the classifier goes by the class names)."""
+
+
+class AuthenticationException(SSHException):
+    """paramiko's refused sign-in: an SSHException, but trying it again would send a refused password again."""
 
 
 # ======================================================================================================= what is transient
