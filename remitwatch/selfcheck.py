@@ -2359,7 +2359,8 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str, 
 
 
 def _ar_lines(conn: sqlite3.Connection) -> dict | None:
-    """EMA's newest A/R by line (EMA claim number, date of service, code), the insurance and the patient rows together:
+    """EMA's newest A/R by line (EMA claim number, date of service, code), the money it holds open (a denied line's
+    Denial Amount when its Current A/R is $0), the insurance and the patient rows together:
     {'lines': {(link, svc, cpt): cents}, 'spans': [(first service date, last service date, as-of day)], 'as_of', 'left':
     lines an earlier A/R listed that the newest no longer does}, from each current A/R file of the catalog on its own day, or
     the newest day's rows when the catalog lists none. The span a file covers is its catalog's service dates, else the
@@ -2373,10 +2374,14 @@ def _ar_lines(conn: sqlite3.Connection) -> dict | None:
                  if conn.execute("SELECT 1 FROM ema_ar WHERE file_id = ? LIMIT 1", (f[0],)).fetchone()]
     lines: dict[tuple, int] = defaultdict(int)
     spans = []
+    # what the A/R holds open on the line: its open amount, or for a denied line, which EMA lists with $0 in Current A/R,
+    # the money in Denial Amount (ema_reports keeps that as exposure_cents)
+    held = ("COALESCE(exposure_cents, balance_cents, 0)" if "exposure_cents" in _cols(conn, "ema_ar")
+            else "COALESCE(balance_cents, 0)")
 
     def take(where: str, args: tuple, lo: Any, hi: Any, as_of: Any) -> None:
         svc_lo, svc_hi, row_as_of = conn.execute(f"SELECT MIN(svc), MAX(svc), MAX(as_of) FROM ema_ar WHERE {where}", args).fetchone()
-        for link, svc, cpt, bal in conn.execute(f"""SELECT link, svc, cpt, SUM(COALESCE(balance_cents, 0)) FROM ema_ar
+        for link, svc, cpt, bal in conn.execute(f"""SELECT link, svc, cpt, SUM({held}) FROM ema_ar
                                                     WHERE {where} AND link IS NOT NULL AND COALESCE(facility, 0) = 0
                                                     GROUP BY link, svc, cpt""", args):
             lines[(int(link), str(svc)[:10], cpt or "")] += int(bal or 0)
