@@ -2311,6 +2311,15 @@ def waiting_words(row: dict) -> str:
     return f"not read yet: {why}" if why else "not read yet."
 
 
+def kept_unread(hint: Any) -> str | None:
+    """For an upload of a report this site does not read now (ema_reports.reads): why it is kept and not read, said
+    after "kept and ...". None when this site reads it, or when it is no report: then the next cycle (or run) reads it."""
+    from . import ema_reports
+    if hint in ema_reports.REPORTS and not ema_reports.reads(hint):
+        return waiting_words({"report": hint})
+    return None
+
+
 def _file_read(conn: sqlite3.Connection | None, sha256: str) -> tuple | None:
     """The files row of a file the loader read (kind, ingested_at), or None: one it set aside as not read (a layout it
     does not know, a file too large) is not a file RemitWatch has. The dashboard's copy keeps no status column; there
@@ -2358,9 +2367,10 @@ def known_file(conn: sqlite3.Connection | None, sha256: str, pending: Iterable[d
                             + (" and waits for the next cycle." if r[0] in ("queued", "ready") else ".")}
     for sc in pending:
         if sc.get("sha256") == sha256 and sc.get("pair") != skip_pair:
+            kept = kept_unread(sc.get("report_hint"))
             return {"how": "upload", "status": "waiting", "at": sc.get("received_at"),
                     "line": f"Already have this; nothing changed. This exact file was uploaded on {_day(sc.get('received_at'))} "
-                            f"and waits for the next {_next_read()}."}
+                            + (f"and is kept and {kept}" if kept else f"and waits for the next {_next_read()}.")}
     return None
 
 
@@ -2497,8 +2507,11 @@ def record_view(rec: dict, *, conn: sqlite3.Connection | None = None, pair: tupl
                 applied = "read"
         else:
             sent = f" (sent compressed: {_size_words(rec.get('bytes') or 0)})" if rec.get("gz") else ""
+            kept = kept_unread(rec.get("report_hint"))
             lines.append(f"Received and checked on {_day(rec.get('finished_at'))}: {_size_words(rec.get('size') or 0)}{sent}. "
-                         f"It waits for the next {_next_read()} to read it.")
+                         + (f"It is kept and {kept}" if kept else f"It waits for the next {_next_read()} to read it."))
+            if kept:                    # a report this site does not read: nothing reads it here yet, so nothing to wait for
+                applied = "waiting"
     out.update(lines=lines, checks=checks, applied=applied)
     return out
 
@@ -2626,8 +2639,9 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
     is overdue when the data read is.
 
     Each row's 'flag' is what its chip says: fresh, waiting (an upload the next cycle reads), overdue, stuck (an upload
-    no cycle has read in WAITING_FRESH_DAYS), held or unread (the newest file arrived and was not read). 'age_days' is
-    the age of the newest data read (None when none was read)."""
+    no cycle has read in WAITING_FRESH_DAYS), held or unread (the newest file arrived and was not read, or was uploaded
+    here and is kept because this site does not read that report: ema_reports.reads). 'age_days' is the age of the
+    newest data read (None when none was read)."""
     from . import ema_reports
     today = today or datetime.now(timezone.utc).date()
     seen = arrivals(conn)
@@ -2644,14 +2658,15 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
         fresh = _iso_day(a.get("as_of")) or _iso_day(a.get("read_at"))
         age = (today - fresh).days if fresh else None
         late = age is None or age > e["overdue_days"]
+        reads_here = ema_reports.reads(e["report"]) if e.get("report") else True
         up = waiting.get(e["key"])
         up_day = _iso_day((up or {}).get("received_at"))
         up_age = (today - up_day).days if up_day else None
-        up_fresh = up is not None and up_age is not None and up_age <= WAITING_FRESH_DAYS
-        stuck = up is not None and not up_fresh
+        kept = up is not None and not reads_here    # uploaded here, of a report this site does not read: kept, not read
+        up_fresh = up is not None and reads_here and up_age is not None and up_age <= WAITING_FRESH_DAYS
+        stuck = up is not None and reads_here and not up_fresh
         unread = a.get("status") if a.get("status") in UNREAD else None
         overdue = late and not up_fresh
-        reads_here = ema_reports.reads(e["report"]) if e.get("report") else True
         box = howto.get(e["key"]) or {}
         if a.get("arrived"):
             via = VIA_WORDS.get(a.get("via") or "", "")
@@ -2673,7 +2688,8 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
             last = "Has not arrived yet."
         if up:                           # an upload waiting for the cycle is the newest arrival
             last = (f"Last arrived {_day(up.get('received_at'))} (uploaded here)"
-                    + ("." if up_fresh else f", and no {word} has read it in {_n(up_age or 0, 'day')}.")
+                    + (f", kept and {waiting_words({'report': e['report']})}" if kept else
+                       "." if up_fresh else f", and no {word} has read it in {_n(up_age or 0, 'day')}.")
                     + (f" The one before it, read already, arrived {_day(a['read_at'])}." if a.get("read_at") else ""))
         if up_fresh:
             state = f"Waiting to be read: the next {word} reads it, then this row says what it held."
@@ -2687,8 +2703,10 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
         elif unread == "held" and not up:
             state += " The newest file is held: Apply or Discard it on the Data tab."
         flag = ("waiting" if up_fresh else "overdue" if overdue else "stuck" if stuck else "held" if unread == "held" and not up
-                else "unread" if unread and not up else "fresh")
-        host_line = None if reads_here else (
+                else "unread" if (unread and not up) or kept else "fresh")
+        # said once: the last line already says it of a file kept unread here (waiting_words)
+        said = kept or (unread in ("waiting", "reread") and not up)
+        host_line = None if reads_here or said else (
             f"This site does not read the {e['title']} yet. One uploaded here is kept and read once it does; the practice's "
             "server reads it now.")
         ask = None if (box.get("text") or "").strip() else (

@@ -417,12 +417,21 @@ def retry_call(fn: Callable, *args: Any, remedy: str = "network", target: str = 
     """Call fn(*args, **kwargs), trying again after a transient failure (is_transient) with the remedy's back-off, never
     waiting past `until` (seconds since the epoch: the run's own deadline; named so that a callee's own `deadline`
     argument passes through). Out of tries: the target is counted as failed for this run and Held is raised from the
-    last error, so the caller's existing except block holds the step and the run carries on. A failure that is not
-    transient is raised at once, unchanged."""
+    last error, so the caller's existing except block holds the step and the run carries on. Later calls to a target
+    held in this run get one plain try each, with no back-off (a success ends the hold), and once PROBES_AFTER_HOLD of
+    them failed, Held at once: an outage costs a run one back-off, not one per file. A failure that is not transient
+    is raised at once, unchanged."""
     spec = REMEDIES[remedy]
     n = attempts or spec.attempts
     waits = list(delays if delays is not None else spec.delays)
     run = run or (registry.run if registry is not None else None) or runlog.current()
+    key = Registry.key(remedy, target)
+    holds = getattr(registry, "_run_holds", None) if registry is not None else None
+    probing = holds is not None and key in holds
+    if probing:
+        if holds[key] >= PROBES_AFTER_HOLD:
+            raise Held(remedy, target, None, 0, reason="held earlier in this run; the next run tries it again")
+        n, waits = 1, []
     for i in range(n):
         try:
             value = fn(*args, **kwargs)
@@ -432,8 +441,15 @@ def retry_call(fn: Callable, *args: Any, remedy: str = "network", target: str = 
             wait = waits[min(i, len(waits) - 1)] if waits else 0
             last = i + 1 >= n or (until is not None and clock() + wait >= until)
             if last:
-                if registry is not None:
+                if probing:
+                    holds[key] += 1         # the hold of this run is logged already: a plain try only adds to the count
                     registry.failed(remedy, target, exc)
+                    raise Held(remedy, target, exc, 1, reason=f"held earlier in this run; a plain try failed too "
+                                                              f"({type(exc).__name__})") from exc
+                if registry is not None:
+                    registry.failed(remedy, target, exc, tries=i + 1)
+                    if holds is not None:
+                        holds[key] = 0
                     registry.record(remedy, target, "held", attempt=i + 1, before={"tries": i + 1},
                                     after={"held": True, "carry_on": True}, error=exc, next_step=REMEDIES[remedy].next_step)
                 elif run is not None:
@@ -449,6 +465,8 @@ def retry_call(fn: Callable, *args: Any, remedy: str = "network", target: str = 
         if i and registry is not None:
             registry.record(remedy, target, "repaired", attempt=i + 1, before={"failed_tries": i}, after={"ok": True})
         if registry is not None:
+            if holds is not None:
+                holds.pop(key, None)
             e = registry.entry(remedy, target)
             if e.get("failed_runs") or e.get("status") != "ok":
                 registry.succeeded(remedy, target)
@@ -465,7 +483,9 @@ NEVER_RETRIED = frozenset({"send", "send_fax", "send_packet", "upload", "upload_
 class _Resilient:
     """A client whose calls go through retry_call. A call that returns an iterator (a listing, a download in chunks) is
     tried again only until its first item arrives: once data has flowed, a failure is the caller's to handle. Calls in
-    NEVER_RETRIED, and any call outside `only` when it is given, pass straight through."""
+    NEVER_RETRIED, and any call outside `only` when it is given, pass straight through. The calls named in `only` are
+    the caller's word that they only read: a fax client's "it may have been sent" does not stop them being tried
+    again (fax.SRFax marks every dropped connection so, a status check's too)."""
 
     def __init__(self, client: Any, target: str, opts: dict, only: frozenset | None = None):
         self._client, self._target, self._opts, self._only = client, target, opts, only
@@ -500,12 +520,14 @@ def resilient(client: Any, target: str, *, registry: Registry | None = None, run
               sleep: Callable[[float], None] = time.sleep, attempts: int | None = None, delays: Iterable[float] | None = None,
               only: Iterable[str] | None = None) -> Any:
     """Wrap a Dropbox, TriZetto or SRFax client so each call is tried again after a transient failure. `only` names the
-    calls to wrap (for the fax line: status, inbox, fetch, check, find_sent); a call that sends something that must go
-    once (NEVER_RETRIED: a fax, an upload, a move) is never wrapped."""
+    calls to wrap, and says they only read (for the fax line: status, inbox, fetch, check, find_sent); a call that
+    sends something that must go once (NEVER_RETRIED: a fax, an upload, a move) is never wrapped."""
     if client is None or isinstance(client, _Resilient):
         return client
-    return _Resilient(client, target, {"registry": registry, "run": run, "until": until, "sleep": sleep,
-                                       "attempts": attempts, "delays": delays}, frozenset(only) if only is not None else None)
+    opts = {"registry": registry, "run": run, "until": until, "sleep": sleep, "attempts": attempts, "delays": delays}
+    if only is not None:
+        opts["classify"] = functools.partial(is_transient, read=True)
+    return _Resilient(client, target, opts, frozenset(only) if only is not None else None)
 
 
 def read_file(key: str, fn: Callable, *args: Any, registry: Registry, kind: str = "file", **kwargs: Any) -> Any:
@@ -584,26 +606,66 @@ def rebuild_if_failing(name: str, check: Callable[[], Any], rebuild: Callable[[]
 def note_killed_runs(registry: Registry, killed: list[dict], repaired: dict | None = None) -> int:
     """Runs the platform stopped (runlog.find_killed_runs) and what this run's repair paths did about them
     (cloud.repair_ledger's answer, the Production attempts): logged, and counted toward an alert when runs keep
-    stopping."""
+    stopping at one step (each killed run counts once, under its own id). Saved at once: this run may be stopped too,
+    and its markers are gone once found."""
     for k in killed:
         target = f"step:{k.get('last_step') or 'unknown'}"
         e = registry.failed("killed_run", target, None, reason=f"run {k.get('run_id')} stopped during {k.get('last_step')}",
-                            hold=False)
+                            hold=False, run_id=str(k.get("run_id") or "") or None)
+        if k.get("started_at"):
+            e["last_kill_started"] = max(str(k["started_at"]), str(e.get("last_kill_started") or ""))
         registry.record("killed_run", target, "repaired" if repaired else "noted", attempt=e["attempts"],
                         before={"killed_run": k.get("run_id"), "last_step": k.get("last_step"), "peak_mb": k.get("peak_mb")},
                         after=repaired or {"next": "the cycle's own repair paths run"},
                         next_step=REMEDIES["killed_run"].next_step if e.get("failed_runs", 0) >= REMEDIES["killed_run"].runs_before_alert else None)
         if e.get("failed_runs", 0) >= REMEDIES["killed_run"].runs_before_alert:
             e["status"], e["alert"], e["next_step"] = "exhausted", True, REMEDIES["killed_run"].next_step
-            registry._put(e)
+        registry._put(e)
+    if killed:
+        registry.save()
     return len(killed)
 
 
-def note_run_finished(registry: Registry, last_step_ok: Iterable[str] = ()) -> None:
-    """A run that finished clears the killed-run counts of the steps it passed."""
+def _step_names(steps: Iterable[Any]) -> set[str]:
+    """Step names from names or from a manifest's steps ({"step", "ok"}: only the ones that went well)."""
+    out = set()
+    for s in steps or ():
+        if isinstance(s, dict):
+            if s.get("ok") and s.get("step"):
+                out.add(str(s["step"]))
+        elif s:
+            out.add(str(s))
+    return out
+
+
+def note_run_finished(registry: Registry, last_step_ok: Iterable[Any] = ()) -> None:
+    """A run that finished clears the killed-run counts of the steps it passed (names, or the manifest's steps as they
+    are: only the steps that went well count)."""
+    passed = _step_names(last_step_ok)
     for e in list(registry.state["entries"].values()):
-        if e.get("remedy") == "killed_run" and str(e.get("target", "")).split(":", 1)[-1] in set(last_step_ok):
+        if e.get("remedy") == "killed_run" and str(e.get("target", "")).split(":", 1)[-1] in passed:
             registry.succeeded("killed_run", e["target"])
+
+
+def clear_killed_by_index(registry: Registry, sink: Any = None) -> int:
+    """Killed-run counts cleared by runs that came after the kill, finished, and passed its step (the run index keeps
+    each run's steps that went well). Needs no hook in the cycles: registry_for calls it. Returns how many cleared."""
+    entries = [e for e in registry.state["entries"].values() if e.get("remedy") == "killed_run"]
+    sink = sink if sink is not None else registry.sink
+    if not entries or sink is None:
+        return 0
+    runs = runlog.read_index(sink)
+    n = 0
+    for e in entries:
+        step = str(e.get("target", "")).split(":", 1)[-1]
+        since = str(e.get("last_kill_started") or e.get("last_at") or "")
+        for r in runs:
+            if (r.get("outcome") in ("ok", "partial", "safe_mode") and str(r.get("started_at") or "") > since
+                    and step in (r.get("steps_ok") or [])):
+                registry.succeeded("killed_run", e["target"], after={"status": "ok", "passed_by": r.get("run_id")})
+                n += 1
+                break
+    return n
 
 
 def note_stale_lock(registry: Registry, removed: Iterable[str], how: str) -> int:
@@ -683,26 +745,74 @@ def note_pressure(registry: Registry, actions: Iterable[dict], *, reading: dict 
     return n
 
 
+HELD_REPORT = ("held", "failed")
+DONE_REPORT = ("current", "partly_replaced", "replaced", "superseded")       # ema_reports.DONE_STATUSES
+
+
 def sweep_reports(conn: sqlite3.Connection, registry: Registry, since: str) -> int:
-    """Reports the readers held or refused in this run (ema_report_files): each becomes a held unreadable_file entry
-    with its reason, so the Data tab and the alerts say which file (by hash and kind) and what to do. The readers
-    already keep the other files going."""
+    """Reports the readers held in this run (ema_report_files): each becomes a held unreadable_file entry with its
+    reason, so the Data tab and the alerts say which file (by hash and kind) and what to do. The readers already keep
+    the other files going. A refused report (the wrong file, columns missing) is not a hold here: the Data tab and the
+    Upload page say why, and only a new export helps. Each sweep also ends the holds a person or a later export
+    settled: the file discarded or applied (its catalog row is no longer held), or a later export of the same report
+    and years applied. Returns how many holds it added."""
     try:
-        rows = conn.execute("""SELECT file_id, report, status, status_reason, attempts FROM ema_report_files
-                               WHERE status IN ('held','refused','failed') AND
-                                     (COALESCE(received_at,'') >= ? OR COALESCE(applied_at,'') >= ? OR COALESCE(decided_at,'') >= ?)""",
-                            (since, since, since)).fetchall()
+        rows = conn.execute(f"""SELECT file_id, report, status, status_reason, attempts, scope, received_at FROM ema_report_files
+                                WHERE status IN ({','.join('?' * len(HELD_REPORT))}) AND
+                                      (COALESCE(received_at,'') >= ? OR COALESCE(applied_at,'') >= ? OR COALESCE(decided_at,'') >= ?)""",
+                            (*HELD_REPORT, since, since, since)).fetchall()
     except sqlite3.Error:
         return 0
     n = 0
-    for fid, report, status, reason, attempts in rows:
-        target = f"{report or 'report'}:{str(fid).replace('dropbox:', '')[:16]}"
+    for fid, report, status, reason, attempts, scope, received in rows:
+        short = str(fid).replace("dropbox:", "")[:16]
+        target = f"{report or 'report'}:{short}"
         if registry.held("unreadable_file", target):
             continue
-        registry.failed("unreadable_file", target, None, reason=f"{status}: {reason or 'no reason given'}", hold=True)
+        e = registry.failed("unreadable_file", target, None, reason=f"{status}: {reason or 'no reason given'}", hold=True)
+        e.update(catalog=short, report=report, scope=scope, received_at=received)
+        registry._put(e)
         registry.record("unreadable_file", target, "held", attempt=int(attempts or 1), before={"status": "received"},
                         after={"status": status, "reason": runlog.scrub_text(reason or "", 200)},
                         next_step=REMEDIES["unreadable_file"].next_step)
+        n += 1
+    _release_settled_reports(conn, registry)
+    return n
+
+
+def _release_settled_reports(conn: sqlite3.Connection, registry: Registry) -> int:
+    """End the holds of catalog files that are no longer held: discarded, applied, replaced, or gone; or covered by a
+    later export of the same report and years that was applied. Returns how many it released."""
+    n = 0
+    for e in list(registry.state["entries"].values()):
+        if e.get("remedy") != "unreadable_file":
+            continue
+        short = e.get("catalog")
+        if not short:                   # a hold an earlier build swept from the catalog: "<report>:<16 hex>", "<status>: ..."
+            m = re.fullmatch(r"[a-z_]+:([0-9a-f]{16})", str(e.get("target") or ""))
+            if not (m and str(e.get("reason") or "").startswith(("held:", "refused:", "failed:"))):
+                continue
+            short = m.group(1)
+        try:
+            row = conn.execute("SELECT status, report, scope, received_at FROM ema_report_files "
+                               "WHERE substr(replace(file_id,'dropbox:',''),1,16)=? LIMIT 1", (short,)).fetchone()
+            later = None
+            if row is not None and row[0] in HELD_REPORT and row[2]:
+                later = conn.execute(f"""SELECT 1 FROM ema_report_files WHERE report=? AND scope=? AND COALESCE(received_at,'') > ?
+                                         AND status IN ({','.join('?' * len(DONE_REPORT))}) LIMIT 1""",
+                                     (row[1], row[2], row[3] or "", *DONE_REPORT)).fetchone()
+        except sqlite3.Error as exc:
+            runlog.caught(exc, "repair", level="warning")
+            return n
+        if row is None:
+            by = "the report catalog (the file is gone)"
+        elif row[0] not in HELD_REPORT:
+            by = f"the report catalog (the file is {row[0]})"
+        elif later:
+            by = "a later export of the same report and years"
+        else:
+            continue
+        registry.release("unreadable_file", e["target"], by=by)
         n += 1
     return n
 
@@ -723,6 +833,7 @@ def open_problems(conn: sqlite3.Connection | None = None, sink: Any = None) -> l
     """What could not be repaired automatically, newest first (the Data tab's panel and the alerts)."""
     reg = Registry.__new__(Registry)
     reg.conn, reg.sink, reg.run, reg.now, reg.dirty = conn, sink, None, None, False
+    reg._token, reg._run_holds = "registry-read", {}
     reg.state = {"version": 1, "saved_at": None, "entries": {}}
     reg.load()
     return reg.open_problems()

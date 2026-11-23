@@ -1015,8 +1015,9 @@ def test_a_credit_made_by_a_takeback_ema_never_posted_is_posted_never_refunded(s
     out = story.explain(store.conn, "F1", ledger=ledger, today="2026-05-03")
     n = out["next_step"]
     assert out["state"]["rule"] == "credit_unposted_takeback" and n["route"] == "post", n["action"]
-    assert "refund" not in n["action"].lower().split("not a refund")[0] and not n["appeal_ok"]
-    assert "mark_posted" in n["buttons"]
+    assert n["action"].startswith("Post ") and n["action"].endswith("Nothing is owed back: do not refund it."), n["action"]
+    assert "EMA shows a credit of $60.00 only because it was never posted" in n["action"] and not n["appeal_ok"]
+    assert out["state"]["appeal_block"] == "credit"          # kept out of every bulk appeal
 
 
 def test_a_refund_lists_who_paid_and_never_dates_it_by_the_appeal_window(store):
@@ -1178,7 +1179,7 @@ def test_an_archive_likely_paid_item_is_checked_first_never_appealed(store):
     _fax(store, BCBS)
     out = story.explain(store.conn, "F1", today=TODAY)
     n = out["next_step"]
-    assert out["state"]["rule"] == "check_first" and out["state"]["appeal_block"] == "check_first"
+    assert out["state"]["rule"] == "check_first" and out["state"]["appeal_block"] == "likely_paid"
     assert not n["appeal_ok"] and "fax_payer" not in n["buttons"] and "build_packet" not in n["buttons"], n["buttons"]
     assert n["action"].startswith("Check first"), n["action"]
     assert "nobody has worked it" not in out["verdict"]["sentence"]

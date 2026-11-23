@@ -3861,7 +3861,22 @@ BULK_RULE = ("status='open' AND COALESCE(stale,0)=0 AND work_state='work_now' AN
              "AND appeal_deadline >= ? AND category <> 'refund' AND signal NOT IN (" + ",".join(f"'{x}'" for x in BULK_EXCLUDED_SIGNALS) + ")")
 # why an appeal must not go (remitwatch.states' appeal_block), in the page's words
 BLOCK_WORDS = {"paid": "it was paid or settled", "credit": "the line carries a credit (money owed back)",
-               "reprocessed": "the payer reprocessed the line after this answer", "waiting": "it waits on the payer's answer to work already done"}
+               "reprocessed": "the payer reprocessed the line after this answer", "waiting": "it waits on the payer's answer to work already done",
+               "settled_in_ema": "EMA shows the line settled: find which payer paid before appealing it",
+               "likely_paid": "the archive shows it was likely paid: check it first (EMA, the payer's portal)"}
+# never appealed, whoever asks and whatever the item's status: a line paid, credited or reprocessed (amendment 14); one EMA
+# shows settled, or the archive shows likely paid (orchestrator decision 4), goes only after a person checked it is unpaid
+NEVER_APPEALED = ("paid", "credit", "reprocessed")
+CHECK_FIRST = ("settled_in_ema", "likely_paid")
+# the states in which nothing is appealed: done (paid or settled, with proof), accepted (let go, lost, the owner's policy),
+# expired (past every window)
+CLOSED_STATES = {"done": "it was found paid or settled", "accepted": "it is accepted (let go, lost, or the owner's write-off policy)",
+                 "expired": "every window to appeal it has closed"}
+# why an open item a letter settles is not on the bulk list, in the "Left out" line's words and order
+LEFT_OUT = (("paid", "paid"), ("waiting", "waiting"), ("credit", "credit"), ("reprocessed", "reprocessed"), ("settled", "settled in EMA"),
+            ("likely_paid", "likely paid"), ("no_date", "no filing date"), ("no_state", "state not worked out yet"), ("other", "other"))
+LEFT_OUT_WORDS = dict(BLOCK_WORDS, settled="EMA shows it settled: find which payer paid", no_date="no filing date on file: its panel says what to check",
+                      no_state="the run has not worked out its state yet", other="not an item to appeal now")
 
 
 def _bulk_ready(cols: set[str]) -> bool:
@@ -3870,10 +3885,14 @@ def _bulk_ready(cols: set[str]) -> bool:
 
 
 def _left_out_reason(r: dict) -> str:
-    """Why an open item an appeal letter would settle is not in the bulk list: paid, waiting, credit, reprocessed or other."""
+    """Why an open item an appeal letter would settle is not on the bulk list (LEFT_OUT): paid, waiting, credit,
+    reprocessed, settled (EMA shows the line settled, or the patient paid it), likely paid (the archive), no filing date,
+    no state worked out yet, or other."""
     block = r.get("appeal_block")
-    if block in ("paid", "credit", "reprocessed", "waiting"):
+    if block in ("paid", "credit", "reprocessed", "waiting", "likely_paid"):
         return block
+    if block in ("settled_in_ema", "patient_paid"):
+        return "settled"
     ws = r.get("work_state")
     if ws == "done":
         return "paid"
@@ -3881,6 +3900,10 @@ def _left_out_reason(r: dict) -> str:
         return "waiting"
     if r.get("category") == "refund" or r.get("signal") == "CREDIT_BALANCE":
         return "credit"
+    if r.get("work_state") is None and r.get("state_ready", True):
+        return "no_state"
+    if not r.get("appeal_deadline"):
+        return "no_date"
     return "other"
 
 

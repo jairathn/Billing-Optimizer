@@ -414,7 +414,8 @@ def _finished(store, rec: dict, woke: bool | None, busy: bool = False):
         view = uploads.record_view(rec, conn=c, pair=pair, reveal=_reveal())
     if rec.get("state") == "refused":
         return JSONResponse(dict(view, detail=rec.get("message") or "Not taken."), status_code=422)
-    if rec.get("state") == "finished" and woke is not None and pair and pair[0] == "waiting":
+    if (rec.get("state") == "finished" and woke is not None and pair and pair[0] == "waiting"
+            and not uploads.kept_unread(rec.get("report_hint"))):    # no run reads a report this site does not read
         if store.serverless and busy:
             view["lines"].append("A run is going now. When it ends, the next run starts and reads this file first.")
         elif store.serverless:
