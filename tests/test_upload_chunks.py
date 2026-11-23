@@ -1544,3 +1544,220 @@ def test_the_cycles_clean_up_needs_no_page_and_never_raises(build, monkeypatch):
         raise RuntimeError("/data/incoming/Doe Jane visit.csv: cannot")
     monkeypatch.setattr(uploads.ServerUploads, "sweep", broken)
     assert uploads.sweep_server(site.db) == {"error": "RuntimeError"}
+
+
+def test_the_chips_say_read_only_for_files_remitwatch_read():
+    """The chip of a file the cycle (or run) looked at: green 'read' only when RemitWatch read it; amber when it is
+    kept and not read yet; red when it was not read (refused, too large, none of RemitWatch's files, failed,
+    discarded). A word the page does not know is amber, never green."""
+    got = _node("""
+const U = require(process.argv[1]);
+const words = ['current', 'partly_replaced', 'replaced', 'superseded', 'applied', 'read', 'already', 'held', 'waiting', 'reread',
+  'not_read', 'too_large', 'failed', 'refused', 'discarded', 'something_new'];
+const out = {};
+for (const w of words) out[w] = U.outcomeChip(w);
+out.$finished = U.uploadChip({state: 'finished'});
+out.$finished_not_read = U.uploadChip({state: 'finished', applied: 'not_read'});
+out.$refused = U.uploadChip({state: 'refused'});
+console.log(JSON.stringify(out));""")
+    assert {k for k, v in got.items() if v == "applied"} == {"current", "partly_replaced", "replaced", "superseded", "applied", "read"}
+    assert {k for k, v in got.items() if v == "notread"} == {"not_read", "too_large", "failed", "refused", "discarded", "$finished_not_read"}
+    assert {k for k, v in got.items() if v == "unread"} == {"waiting", "reread", "something_new"}
+    assert got["held"] == "held" and got["already"] == "already" and got["$finished"] == "waiting" and got["$refused"] == "refused"
+    with open(UPLOAD_JS, encoding="utf-8") as fh:
+        js = fh.read()
+    assert "applied: ['read', 'ok']" in js and "notread: ['not read', 'no']" in js and "unread: ['not read yet', 'warn']" in js
+
+
+# ------------------------------------------------------------------------------------- the page in a real browser
+_LAUNCH = r"""
+import sys
+sys.path.insert(0, sys.argv[2])
+from remitwatch import uploads
+uploads.kick_intake = lambda db_path: False          # no cycle on the test's store
+from remitwatch.api import app
+import uvicorn
+uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="info", access_log=True)
+"""
+
+_PAGE_SCRIPT = r"""
+const { chromium } = require('playwright');
+const path = require('path');
+const [base, dir] = process.argv.slice(1);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const out = {errors: []};
+(async () => {
+  const browser = await chromium.launch();
+  const ctx = await browser.newContext({viewport: {width: 1400, height: 1000}});
+  const open = async () => { const p = await ctx.newPage(); p.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+    await p.goto(base + '/upload'); await p.waitForSelector('.export'); return p; };
+  const card = key => `.export[data-key="${key}"] .row-now .card`;
+  const state = (page, key) => page.evaluate(sel => { const c = document.querySelector(sel); if (!c) return null;
+    return {status: c.dataset.status, result: c.dataset.result || null, done: !!c.dataset.done, uploadId: c.dataset.uploadId || null,
+            what: (c.querySelector('[data-what]') || {}).textContent || '', lines: [...c.querySelectorAll('[data-lines] li')].map(li => li.textContent)}; }, card(key));
+  const finished = (page, key, timeout) => page.waitForFunction(sel => { const c = document.querySelector(sel);
+    return c && (c.dataset.done || ['stopped', 'refused', 'wrong', 'already', 'failed'].includes(c.dataset.status)); }, card(key), {timeout, polling: 200});
+  try {
+    // 1. the keyboard opens a row's file chooser from its Upload button (Enter and Space); the input is out of the tab order
+    // (a file chooser is caught only once Playwright has switched on catching them, which takes a round trip: the
+    // listener goes on before the page loads)
+    let page = await ctx.newPage();
+    page.on('pageerror', e => out.errors.push(String(e).slice(0, 200)));
+    let choosers = 0;
+    page.on('filechooser', () => { choosers++; });
+    await page.goto(base + '/upload'); await page.waitForSelector('.export');
+    await page.waitForFunction(() => document.querySelector('#exportsNote').textContent !== '', null, {timeout: 15000});
+    const pressed = async key => { const before = choosers; await page.focus('.export[data-key="ar"] button[data-pick]');
+      await page.keyboard.press(key); for (let i = 0; i < 150 && choosers === before; i++) await sleep(100); return choosers > before; };
+    const enter = await pressed('Enter');
+    const space = await pressed(' ');
+    out.keyboard = {enter, space, tabindex: await page.getAttribute('.export[data-key="ar"] input[data-upload]', 'tabindex')};
+    await page.close();
+    // 2. a visit note dropped before GET /api/uploads has answered: its name never goes in the address
+    page = await ctx.newPage();
+    await page.route('**/api/uploads', async route => { if (route.request().method() === 'GET') await sleep(4000); await route.continue(); });
+    const posts = [];
+    page.on('request', r => { if (r.method() === 'POST' && r.url().includes('/api/uploads')) posts.push(r.url()); });
+    await page.goto(base + '/upload'); await page.waitForSelector('.export');
+    await page.setInputFiles('#files', path.join(dir, 'Doe Jane 2026-01-05 visit.pdf'));
+    await page.waitForFunction(() => { const c = document.querySelector('#now .card'); return c && !['checking', 'sending'].includes(c.dataset.status); },
+                               null, {timeout: 30000, polling: 200});
+    out.name = {posts, status: await page.evaluate(() => document.querySelector('#now .card').dataset.status)};
+    await page.close();
+    // 3. a compressed report whose cut-off upload was compressed elsewhere: sent afresh, then finished
+    page = await open();
+    await page.setInputFiles('.export[data-key="production"] input[data-upload]', path.join(dir, 'prod_fresh.csv'));
+    await finished(page, 'production', 60000);
+    out.fresh = await state(page, 'production');
+    await page.close();
+    // 4. a plain report all of whose pieces arrived, its finish lost and the tab closed: chosen again, it finishes
+    page = await open();
+    let aborted = 0;
+    await page.route('**/api/uploads/*/finish', route => { aborted++; return route.abort('failed'); });
+    await page.setInputFiles('.export[data-key="ar"] input[data-upload]', path.join(dir, 'ar_lost.xlsx'));
+    for (let i = 0; i < 300 && !aborted; i++) await sleep(100);
+    const first = await state(page, 'ar');
+    await page.close();
+    page = await open();
+    await page.setInputFiles('.export[data-key="ar"] input[data-upload]', path.join(dir, 'ar_lost.xlsx'));
+    await finished(page, 'ar', 60000);
+    out.finish_lost = Object.assign(await state(page, 'ar'), {aborted, first_upload: first && first.uploadId});
+    await page.close();
+    // 5. two people edit one "How we pull this" box: the second sees the first one's text, keeps a draft, and saves
+    const a = await open(), b = await open();
+    const row = '.export[data-key="claim_status"]';
+    await a.click(`${row} [data-edit]`); await b.click(`${row} [data-edit]`);
+    await a.fill(`${row} textarea`, 'Step A from the first person.'); await a.click(`${row} [data-save]`);
+    await a.waitForFunction(sel => !document.querySelector(sel + ' textarea'), row, {timeout: 15000});
+    await b.fill(`${row} textarea`, 'Step B from the second person.'); await b.click(`${row} [data-save]`);
+    await b.waitForFunction(sel => { const t = document.querySelector(sel + ' [data-theirs]'); return t && !t.hidden; }, row, {timeout: 15000});
+    out.clash = {theirs: await b.textContent(`${row} [data-theirs]`), draft: await b.inputValue(`${row} textarea`),
+                 msg: await b.textContent(`${row} [data-msg]`)};
+    await b.click(`${row} [data-save]`);
+    await b.waitForFunction(sel => !document.querySelector(sel + ' textarea'), row, {timeout: 15000});
+  } catch (e) { out.errors.push('script: ' + String(e).slice(0, 300)); }
+  await browser.close();
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+def _free_port() -> int:
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_the_page_in_a_browser_keyboard_names_fresh_uploads_lost_finishes_and_box_clashes(tmp_path):
+    """The Upload page in Chromium against the app on a server (an invented, empty store):
+    1. Enter and Space on a row's "Upload the ..." button open its file chooser; the hidden input takes no tab stop.
+    2. A visit note (named, as notes are, after an invented patient) dropped before GET /api/uploads has answered goes
+       with its name in a header: no address, and no line of the access log, holds it.
+    3. A compressed report whose cut-off upload was compressed by another browser (Python's gzip here) is sent afresh
+       (start with new: true) and finishes; the cut-off upload, idle for ten minutes, is let go.
+    4. A plain report all of whose pieces arrived and whose finish was lost (the tab closed): chosen again, it carries
+       on with the server's byte count and finishes.
+    5. Two people edit one "How we pull this in our EMA" box: the second is shown the first one's text, keeps a draft,
+       and the next Save keeps both versions."""
+    import urllib.request
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    if subprocess.run([node, "-e", "require('playwright')"], capture_output=True).returncode:
+        pytest.skip("playwright is not installed for node")
+    data = tmp_path / "data"
+    data.mkdir()
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "Doe Jane 2026-01-05 visit.pdf").write_bytes(b"%PDF-1.4\n% invented\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
+    raw = F.production_csv([F.production_row() for _ in range(120)])
+    (files / "prod_fresh.csv").write_bytes(raw)
+    (files / "ar_lost.xlsx").write_bytes(F.ar_xlsx([F.ar_row() for _ in range(5)], title="A/R report"))
+    env = dict(os.environ, REMITWATCH_DB=str(data / "s.sqlite"), REMITWATCH_ALLOW_OPEN="1", REMITWATCH_PASSWORD="",
+               PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", REMITWATCH_TMP=str(tmp_path / "tmp"))
+    for k in ("REMITWATCH_MODE", "REMITWATCH_STATE_DIR", "VERCEL", "VERCEL_ENV", "REMITWATCH_UPLOAD_MAX_GB"):
+        env.pop(k, None)
+    port = _free_port()
+    base = f"http://127.0.0.1:{port}"
+    log = open(tmp_path / "uvicorn.log", "w")
+    srv = subprocess.Popen([sys.executable, "-u", "-B", "-c", _LAUNCH, str(port), ROOT], cwd=str(tmp_path), env=env, stdout=log,
+                           stderr=subprocess.STDOUT)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(base + "/api/ema/exports", timeout=1).read()
+                break
+            except Exception:
+                time.sleep(0.2)
+
+        def call(method, path, body=None, content=None):
+            req = urllib.request.Request(base + path, method=method, headers=dict(XHR, **{"Content-Type": "application/json"}),
+                                         data=content if content is not None else (json.dumps(body).encode() if body is not None else None))
+            return json.loads(urllib.request.urlopen(req, timeout=30).read() or b"null")
+        # 3. a cut-off upload of the report, compressed by another program (other bytes than the browser makes)
+        sha = hashlib.sha256(raw).hexdigest()
+        seed = call("POST", "/api/uploads/start", {"name": "prod_fresh.csv", "size": len(raw), "gz": True, "report_hint": "production",
+                                                   "sha256": sha})
+        other = gzip.compress(raw, 1)
+        call("POST", f"/api/uploads/chunk?upload_id={seed['upload_id']}&index=0&total=0&sha256={hashlib.sha256(other).hexdigest()}",
+             content=other)
+        rec_path = data / "incoming" / "sessions" / f"{seed['upload_id']}.json"
+        rec = json.loads(rec_path.read_text())
+        rec["updated_at"] = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds")
+        rec_path.write_text(json.dumps(rec))
+        out = subprocess.run([node, "-e", _PAGE_SCRIPT, base, str(files)], capture_output=True, text=True, timeout=400)
+        assert out.returncode == 0, out.stderr[-2000:]
+        res = json.loads(out.stdout.strip().splitlines()[-1])
+        final = call("GET", "/api/ema/exports/claim_status/howto")
+    finally:
+        srv.terminate()
+        srv.wait(15)
+        log.close()
+    assert not res["errors"], res["errors"]
+    # 1. the keyboard
+    assert res["keyboard"] == {"enter": True, "space": True, "tabindex": "-1"}, res["keyboard"]
+    # 2. no name in an address or a log line
+    logged = (tmp_path / "uvicorn.log").read_text()
+    assert res["name"]["posts"] and not [u for u in res["name"]["posts"] if "name=" in u or "Doe" in u], res["name"]
+    named = [line for line in logged.splitlines() if "Doe" in line or "Jane" in line]
+    assert not named and "POST /api/uploads HTTP" in logged, (named[:5], [line for line in logged.splitlines() if "POST" in line][:20])
+    # 3. sent afresh, finished, the cut-off upload let go
+    fresh = res["fresh"]
+    assert fresh["result"] == "waiting" and fresh["uploadId"] != seed["upload_id"], fresh
+    assert "Sending it from the start" in fresh["what"] and "compressed by another browser" in fresh["what"], fresh["what"]
+    assert not rec_path.exists()
+    ready = data / "incoming" / "ready"
+    assert (ready / f"{fresh['uploadId']}__prod_fresh.csv.gz.json").exists()
+    # 4. carried on and finished with the server's own count
+    lost = res["finish_lost"]
+    assert lost["aborted"] >= 1 and lost["result"] == "waiting" and lost["uploadId"] == lost["first_upload"], lost
+    assert "Carrying on: 1 piece had arrived before." in lost["what"]
+    assert json.loads((ready / f"{lost['uploadId']}__ar_lost.xlsx.json").read_text())["size"] == (files / "ar_lost.xlsx").stat().st_size
+    # 5. the box: the other person's text shown, the draft kept, both versions kept
+    clash = res["clash"]
+    assert "Step A from the first person." in clash["theirs"] and clash["draft"] == "Step B from the second person."
+    assert "Their text is shown above" in clash["msg"]
+    assert final["text"] == "Step B from the second person." and final["history"][0]["text"] == "Step A from the first person."

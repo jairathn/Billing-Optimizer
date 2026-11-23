@@ -1177,3 +1177,84 @@ def test_evaluate_and_the_drug_rule_release_the_archive(store):
     finally:
         gc.enable()
     assert res["actions"] and drugs and (mid, after) == (before, before)
+
+
+def test_rule5_a_reanswer_of_the_same_line_under_another_code_is_the_lines_answer(store):
+    """The payer reversed a new-patient visit's denial (B16) and answered the same line again as an established visit, with
+    the same line number and charge (it does not echo the billed code): the visit was paid, closed with that payment; it
+    is not 'billed again under another code'."""
+    den = ln("99203", 104.54, 0, None, [("CO", "B16", 104.54)], mods=("25",), lcn="1")
+    other = ln("11102", 120.00, 90.00, 90.00, [("CO", "45", 30.00)], lcn="2")
+    lk = remit(store, "2026-03-20", [cl("CB0002207C017", [den, other])])[0]
+    remit(store, "2026-04-08", [cl("CB0002207C017", [neg(den), neg(other)], status="22"),
+                                cl("CB0002207C017", [ln("99213", 104.54, 70.92, 70.92, [("CO", "45", 33.62)], mods=("25",), lcn="1"), other])])
+    a = only(ar.same_day_answers(store.conn, [item(store, lk, "DENIED_OTHER", expected=8886)]))
+    assert (a["action"], a["paid_cents"]) == ("close_with_proof", 7092) and "as 99213" in a["note"]
+
+
+def test_rule5_a_downcode_the_deductible_absorbed_is_measured_by_its_allowed_amount(store):
+    """A downcode (billed 99204, allowed as 99203, all on the deductible) that the payer reversed and answered again the same
+    way, under the paid code with the same charge: the gap to the expected amount stands; the deductible settles nothing.
+    Answered again at the expected amount, on the deductible, nothing is short."""
+    dc = ln("99203", 269.12, 0, 79.22, [("CO", "186", 189.90), ("PR", "1", 79.22)], orig="99204", mods=("25",), lcn="1")
+    lk = remit(store, "2026-03-20", [cl("CB0002208C017", [dc])])[0]
+    remit(store, "2026-04-17", [cl("CB0002208C017", [ln("99203", 269.12, 0, 79.22, [("PR", "1", 79.22), ("CO", "45", 189.90)], mods=("25",),
+                                                        lcn="1")]),
+                                cl("CB0002208C017", [neg(dc)], status="22")])
+    f = item(store, lk, "DOWNCODE_SVC06", "downcoding", expected=10350, shortfall=2428)
+    a = only(ar.same_day_answers(store.conn, [f]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"]) == ("replaced", "work_now", 2428)
+    dc2 = ln("99203", 269.12, 0, 79.22, [("CO", "186", 189.90), ("PR", "1", 79.22)], orig="99204", mods=("25",), lcn="1")
+    lk2 = remit(store, "2026-03-20", [cl("CB0002209C017", [dc2])])[0]
+    remit(store, "2026-04-17", [cl("CB0002209C017", [ln("99204", 269.12, 0, 103.50, [("PR", "1", 103.50), ("CO", "45", 165.62)], mods=("25",),
+                                                        lcn="1")]),
+                                cl("CB0002209C017", [neg(dc2)], status="22")])
+    b = only(ar.same_day_answers(store.conn, [item(store, lk2, "DOWNCODE_SVC06", "downcoding", expected=10350, shortfall=2428)]))
+    assert (b["reclass"], b["state_hint"], b["shortfall_cents"]) == ("moved_to_patient", "done", 0)
+    # a later answer of the downcoded line onto the deductible, with no reversal, settles nothing either (branch g is for denials)
+    dc3 = ln("99203", 269.12, 0, 79.22, [("CO", "186", 189.90), ("PR", "1", 79.22)], orig="99204", mods=("25",), lcn="1")
+    lk3 = remit(store, "2026-03-20", [cl("CB0002210C017", [dc3])])[0]
+    remit(store, "2026-04-17", [cl("CB0002210C017", [ln("99203", 269.12, 0, 79.22, [("PR", "1", 79.22), ("CO", "45", 189.90)], orig="99204",
+                                                        mods=("25",), lcn="1")])])
+    assert ar.same_day_answers(store.conn, [item(store, lk3, "DOWNCODE_SVC06", "downcoding", expected=10350, shortfall=2428)]) == []
+
+
+def test_rule5_the_line_the_corrected_claim_kept_is_paid_the_other_dropped(store):
+    """Two identical lines of 76942 denied over the daily maximum. The practice's adjustment request keeps line 1 (the payer's
+    CO-129/N770 note lists it) and drops line 2; the payer pays one 76942 with no line number. Line 1 closes with the
+    payment; line 2 was dropped."""
+    l1 = ln("76942", 92.61, 0, None, [("CO", "222", 92.61)], lcn="1", rem=["N640"])
+    l2 = ln("76942", 92.61, 0, None, [("CO", "222", 92.61)], lcn="2", rem=["N640"])
+    lks = remit(store, "2026-03-20", [cl("CB0002211C017", [l1, l2], freq=None)])
+    remit(store, "2026-04-10", [cl("CB0002211C017", [ln("76942", 92.61, 0, None, [("CO", "129", 92.61)], lcn="1", rem=["N770"])], status="4",
+                                   freq=None)])
+    remit(store, "2026-04-17", [cl("CB0002211C017", [ln("76942", 92.61, 55.67, 69.59, [("PR", "2", 13.92), ("CO", "45", 23.02)])], freq=None),
+                                cl("CB0002211C017", [neg(l1), neg(l2)], status="22", freq=None)])
+    f1, f2 = item(store, lks[0], "DENIED_FREQUENCY", expected=6959), item(store, lks[1], "DENIED_FREQUENCY", expected=6959)
+    acts = {a["finding_id"]: a for a in ar.same_day_answers(store.conn, [f1, f2])}
+    assert (acts[f1["finding_id"]]["action"], acts[f1["finding_id"]]["paid_cents"]) == ("close_with_proof", 5567)
+    assert (acts[f2["finding_id"]]["reclass"], acts[f2["finding_id"]]["state_hint"]) == ("dropped_on_correction", "done")
+
+
+def test_rule2_a_secondary_that_paid_part_of_the_share_at_the_claim_level_declined_the_rest(store):
+    """Medicare paid and left $69.86 (deductible $55.32, coinsurance $14.54). The Medigap's one-line claim pays $14.54 at the
+    claim level while its line denies the deductible part as not covered (CO-96): it processed the share as secondary and
+    declined the rest, which is the patient's. Done, size 0, the share kept."""
+    remit(store, "2026-03-20", [cl("CB0002505C017", [ln("88305", 128.00, 58.12, 128.00, [("CO", "253", 1.19), ("PR", "1", 55.32), ("PR", "2", 14.54)],
+                                                     units=2)], status="19", cfi="MB")], payer="STATE MEDICARE", payer_id="MCR01")
+    lk = remit(store, "2026-05-19", [cl("CB0002505C017", [ln("88305", 128.00, 0, None, [("CO", "96", 55.32), ("CO", "45", 72.68)])],
+                                        claim_paid=14.54, cfi="15")], payer="TEST MEDIGAP CO", payer_id="GAP01")[0]
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_NONCOVERED", expected=12800)]))
+    assert (a["state_hint"], a["shortfall_cents"], a["patient_share_left_cents"]) == ("done", 0, 5532)
+    assert "paid $14.54 of the patient's share as secondary" in a["hint"]
+
+
+def test_rule4_a_restated_short_payment_topped_up_later_closes(store):
+    """The item's own answer restates an earlier payment (its claim paid $0, CO-B13); the payer's later answer raises the
+    allowed amount to the expected one and its claim pays the difference: closed as topped up."""
+    lk = remit(store, "2026-04-01", [cl("CB0002012C017", [ln("17110", 99.31, 79.00, 80.61, [("CO", "172", 18.70), ("CO", "253", 1.61)], lcn="2")],
+                                        claim_paid=0.0, adj=[("CO", "B13", 79.00)])])[0]
+    remit(store, "2026-05-20", [cl("CB0002012C017", [ln("17110", 99.31, 89.54, 91.37, [("CO", "253", 1.83), ("CO", "45", 7.94)], lcn="2")],
+                                   claim_paid=10.54, adj=[("CO", "B13", 79.00)])])
+    a = only(ar.short_pay_topped_up(store.conn, [item(store, lk, "UNDERPAID_VS_OWN_RATE", "underpayment", expected=9137, shortfall=1076)]))
+    assert (a["action"], a["paid_cents"]) == ("close_with_proof", 1054)

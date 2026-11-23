@@ -70,6 +70,12 @@ def _ckey(code: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(code or "").upper())
 
 
+def _poss(name: Any) -> str:
+    """A name as its owner: Anthem / BCBS's, UMWA Health & Retirement Funds' (never Funds's)."""
+    n = str(name or "the payer")
+    return n + ("'" if n.endswith("s") else "'s")
+
+
 def _same_reason(a: Any, b: Any) -> bool:
     """Two reason codes are one when their codes agree and their groups agree or one has none (EMA's exports write
     'CO-197', 'CO 197' or '197')."""
@@ -555,16 +561,23 @@ def _rows_remitwatch(fx: dict) -> list[dict]:
 
 
 # ------------------------------------------------------------------------------------------------- the balance line
-def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict]) -> dict:
+CONTRACTUAL = frozenset({"45", "253", "144", "59", "131", "94", "237", "2", "23"})
+
+
+def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict], server: bool = False) -> dict:
     """charge = insurer paid + patient paid + contractual + written off + open (a credit is a negative open), from EMA's
-    postings when EMA holds the line, else from the 835's standing answer; then checked against what else states an
-    open amount: the itemized rows, the A/R (when no posting came after its pull), the 835's payments (each must be
-    posted in EMA), patient money EMA cannot tie to one claim, and a code billed twice on the claim's date."""
+    postings when EMA holds the line, else from the 835's standing answers of the line (every payer's money, reversals
+    paired); then checked against what else states the line's money: the itemized rows, the A/R (every row of its newest
+    pull, when no posting on the line came after it), the 835 check by check (EMA's money under each check against the
+    835's net under it: a payment EMA never posted, a takeback EMA never posted, a payment posted short or long), patient
+    money EMA cannot tie to one claim, and a code billed twice on the claim's date. Every difference is a gap with its
+    amount and cause; where a figure is kept only on the server, the balance says it cannot be checked here (reconciles
+    None), never that it reconciles."""
     f = fx["item"]
     tot = S._ema_line_totals(fx)
     out: dict = {"basis": None, "as_of": None, "charge_cents": 0, "insurer_paid_cents": 0, "patient_paid_cents": 0,
                  "contractual_cents": 0, "written_off_cents": 0, "patient_adjusted_cents": 0, "open_cents": 0, "credit": False,
-                 "checks": [], "reconciles": True, "gap_cents": 0, "gap_cause": None, "text": ""}
+                 "checks": [], "reconciles": True, "gap_cents": 0, "gap_cause": None, "text": "", "unknown": None}
     gaps: list[tuple[int, str]] = []
     if tot["n"]:
         out.update(basis="production", as_of=max((ln.get("as_of") or "" for ln in fx["ema"]["lines"]), default=None),
@@ -573,6 +586,7 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
         computed = tot["charges"] - tot["ins_paid"] - tot["pat_paid"] - tot["contractual"] - tot["noncontractual"] - tot["pat_adj"]
         out["open_cents"] = computed
         if computed != tot["balance"]:
+            # EMA's summary is defined as this sum: a difference means the summaries themselves are damaged
             gaps.append((tot["balance"] - computed, f"EMA's summary shows {usd(tot['balance'])} open; its parts add up to {usd(computed)}"))
         # the rows listed add up to the summary
         for k, label in (("charges", "charges"), ("ins_paid", "insurance payments"), ("contractual", "contractual adjustments"),
@@ -583,58 +597,87 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
                 gaps.append((want - itemized.get(k, 0), f"the {label} listed ({usd(itemized.get(k, 0))}) differ from EMA's summary ({usd(want)}): "
                                                          "the summary and the ledger were read at different times"))
         out["checks"].append({"source": "rows", "agrees": not any("listed" in g[1] for g in gaps)})
-        # the A/R's balance, when no posting on the line came after its pull
+        # the A/R's balance: every row of the newest pull of each line (primary, secondary, patient), when no posting on the
+        # line came after that pull
         last_post = max((ln.get("last_posted") or "" for ln in fx["ema"]["lines"]), default="")
-        ar_now: dict[tuple, dict] = {}
-        for a in fx["ar"]:
-            if (a.get("party") or "").lower().startswith("insur") or (a.get("party") or "").lower().startswith("pat"):
-                k = (a.get("svc"), a.get("cpt"))
-                if k not in ar_now or (a.get("as_of") or "") > (ar_now[k].get("as_of") or ""):
-                    ar_now[k] = a
         lines_keys = {(ln["svc"], ln["cpt"]) for ln in fx["ema"]["lines"]}
-        ar_rows = [a for k, a in ar_now.items() if k in lines_keys]
+        newest: dict[tuple, str] = {}
+        for a in fx["ar"]:
+            k = (a.get("svc"), a.get("cpt"))
+            if k in lines_keys and (a.get("as_of") or "") > newest.get(k, ""):
+                newest[k] = a.get("as_of") or ""
+        ar_rows = [a for a in fx["ar"] if newest.get((a.get("svc"), a.get("cpt"))) == (a.get("as_of") or "") and (a.get("svc"), a.get("cpt")) in newest]
         if ar_rows:
             as_of = max(a.get("as_of") or "" for a in ar_rows)
             ar_open = sum(a.get("exposure") or 0 for a in ar_rows)
             if last_post <= as_of:
                 agrees = ar_open == computed
-                out["checks"].append({"source": "ar", "as_of": as_of, "open_cents": ar_open, "agrees": agrees})
+                out["checks"].append({"source": "ar", "as_of": as_of, "open_cents": ar_open, "agrees": agrees, "rows": len(ar_rows)})
                 if not agrees:
                     gaps.append((computed - ar_open, f"EMA's A/R of {day(as_of)} shows {usd(ar_open)} open on these lines; the postings add up to "
                                                      f"{usd(computed)}"))
             else:
                 out["checks"].append({"source": "ar", "as_of": as_of, "open_cents": ar_open, "agrees": None,
                                       "why": f"postings after the A/R of {day(as_of)}"})
-        # every 835 payment of the service should be in EMA: under its check, under a number no 835 carries that the checks
-        # table pairs with it (C1 'misnumbered'), or, as the checks' "posted elsewhere" count takes it, as a payment of its
-        # amount (within $1) on the line under a number no 835 carries, from 7 days before to 120 days after the 835's date
+        # the 835, check by check: EMA's money under each check against the 835's net under it (reversals included). A
+        # payment EMA posted under a number no 835 carries counts where the checks table pairs the two (C1 'misnumbered'),
+        # or, as the checks' "posted elsewhere" count takes it, as a payment of its amount (within $1) on the line under a
+        # number no 835 carries, from 7 days before to 120 days after the 835's date
         pays = fx["ema"]["pays"]
-        posted_checks = {p["check_tail"] for p in pays}
         mis = _check_in_835(conn, [(p.get("check"), p.get("payer") or "") for p in pays if p.get("check")])
-        posted_traces = {p.get("trace_key") for p in pays if p.get("trace_key")} | {v[1] for v in mis.values() if v[1]}
+        paired = {v[1] for v in mis.values() if v[1]}
         spare = [p for p in pays if (p["cents"] or 0) > 0 and not p.get("in_835") and not (mis.get((p.get("check"), p.get("payer") or "")) or (False,))[0]]
-        for x in sorted(S.standing_rows(fx["r835"]["rows"]), key=lambda r: (r["date"] or "", r.get("line_key") or "")):
-            if (x["paid"] or 0) > 0 and x.get("line_key") and x.get("check_tail") and x.get("tk") not in posted_traces \
-                    and x["check_tail"] not in posted_checks and str(x.get("method") or "").upper() != "NON":
-                lo, hi = S._add(x["date"], -7) or "", S._add(x["date"], 120) or ""
-                hit = next((p for p in spare if abs((p["cents"] or 0) - x["paid"]) <= 100 and lo <= (p["posted"] or "") <= hi), None)
-                if hit is not None:
-                    spare.remove(hit)
-                    out["checks"].append({"source": "835_elsewhere", "agrees": True,
-                                          "why": f"the 835 of {day(x['date'])} paid {usd(x['paid'])} on {x['code']} (check ending {x['check_tail']}); "
-                                                 f"EMA posted {usd(hit['cents'])} on {day(hit['posted'])} under check ending {hit['check_tail'] or '?'}, "
-                                                 "a number no 835 carries"})
-                    continue
-                gaps.append((x["paid"], f"the 835 of {day(x['date'])} paid {usd(x['paid'])} on {x['code']} (check ending {x['check_tail']}), "
-                                        "and EMA has not posted it"))
+        code = f.get("procedure_code") or "the line"
+        for d in S.check_money(fx):
+            if d["net_835"] == d["ema"]:
+                if d["ema_rows"] or d["net_835"]:
+                    out["checks"].append({"source": "835", "agrees": True, "check_tail": d["trace_tail"], "date": d["date"]})
+                continue
+            tail_ = f"check ending {d['trace_tail']}" if d["trace_tail"] else "its check"
+            if d["ema_rows"] == 0:
+                if str(d.get("method") or "").upper() == "NON" or d["tk"] in paired:
+                    continue        # an informational notice (the money comes on another remittance), or posted under another number
+                if d["net_835"] > 0:
+                    lo, hi = S._add(d["date"], -7) or "", S._add(d["date"], 120) or ""
+                    hit = next((p for p in spare if abs((p["cents"] or 0) - d["net_835"]) <= 100 and lo <= (p["posted"] or "") <= hi), None)
+                    if hit is not None:
+                        spare.remove(hit)
+                        out["checks"].append({"source": "835_elsewhere", "agrees": True,
+                                              "why": f"the 835 of {day(d['date'])} paid {usd(d['net_835'])} on {code} ({tail_}); EMA posted "
+                                                     f"{usd(hit['cents'])} on {day(hit['posted'])} under check ending {hit['check_tail'] or '?'}, "
+                                                     "a number no 835 carries"})
+                        continue
+                    gaps.append((d["net_835"], f"the 835 of {day(d['date'])} paid {usd(d['net_835'])} on {code} ({tail_}), and EMA has not posted it"))
+                else:
+                    gaps.append((-d["net_835"], f"the 835 of {day(d['date'])} took back {usd(-d['net_835'])} on {code} ({tail_}, a reversal), and "
+                                                "EMA has not posted the takeback"))
+                continue
+            diff = d["ema"] - d["net_835"]
+            if diff > 0 and d["reversal"]:
+                gaps.append((diff, f"EMA never posted {_poss(d['group'])} takeback of {usd(diff)} (the 835 of {day(d['date'])}, {tail_}, reverses "
+                                   "an earlier answer of this line)"))
+            elif diff > 0:
+                gaps.append((diff, f"EMA posted {usd(d['ema'])} under {tail_}, {usd(diff)} more than the 835 of {day(d['date'])} paid "
+                                   f"({usd(d['net_835'])})"))
+            else:
+                gaps.append((-diff, f"EMA posted {usd(d['ema'])} under {tail_}, {usd(-diff)} less than the 835 of {day(d['date'])} paid "
+                                    f"({usd(d['net_835'])})"))
+        if not any(d["reversal"] for d in S.check_money(fx)):
+            for p in S.plb_unbooked(fx):
+                gaps.append((abs(p["cents"] or 0), f"{p['payer']} took back {usd(abs(p['cents']))} on {day(p['date'])} (a provider-level "
+                                                   f"adjustment {p['reason']} naming this claim), and EMA shows no takeback on this line"))
         if tot["several"]:
             unj = sum(r["amount_cents"] or 0 for r in rows if "patient_unjoined" in r["tags"])
             why = ("patient money for this patient, date and code cannot be tied to one claim (the surgery center's facility claim, or "
                    "the same code billed twice, shares the key)")
             if unj:
                 gaps.append((unj, f"{why}: {usd(unj)} of it is on file and not counted on this line"))
+            elif server:
+                out["checks"].append({"source": "patient", "agrees": None, "why": why + "; none is on file"})
             else:
-                out["checks"].append({"source": "patient", "agrees": None, "why": why + "; any such money is listed on the server"})
+                out["unknown"] = ("patient money for this date and code is listed on the server and may belong to another claim (the "
+                                  "surgery center's facility claim, or the same code billed twice)")
+                out["checks"].append({"source": "patient", "agrees": None, "why": out["unknown"]})
         if not S.code_once(fx):
             own = S.own_rows(fx)
             own_charge = sum(x["charge"] or 0 for x in own if x.get("line_key"))
@@ -649,27 +692,50 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
                 out["checks"].append({"source": "835_pieces", "agrees": True,
                                       "why": f"the payer split {f.get('procedure_code')} into lines that add up to EMA's charge of {usd(tot['charges'])}"})
     else:
-        stand = [x for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key")]
         own = S.own_rows(fx)
-        base = [x for x in own if x.get("line_key") and not x.get("reversed_by")] or stand
-        if not base and any(x.get("line_key") for x in own):
-            base = [x for x in own if x.get("line_key")]
+        stand = [x for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key")]
+        own_lines = [x for x in own if x.get("line_key")]
+        lcns = {x.get("lcn") for x in own_lines if x.get("lcn")}
+        once = S.code_once(fx)
+        own_keys = {x["line_key"] for x in own_lines}
+        # the line's standing answers: its own, the same line on another submission (its line control number, or the code
+        # billed once on the claim's date), every payer's
+        line = [x for x in stand if x["line_key"] in own_keys or (lcns and x.get("lcn") in lcns) or (once and not lcns)]
+        if not line and own_lines:
+            line = list(own_lines)
             out["reversed_only"] = True
-        if base:
-            x = max(base, key=lambda r: (r["date"] or "", r["line_key"] or ""))
-            co = sum(a for g, c, a in x["adj"] if g == "CO" and c in ("45", "253", "144", "59", "131", "94", "237", "2", "23"))
-            pr = sum(a for g, c, a in x["adj"] if g == "PR")
-            other = sum(a for g, c, a in x["adj"]) - co - pr
-            out.update(basis="835", as_of=x["date"], charge_cents=x["charge"] or 0, insurer_paid_cents=x["paid"] or 0,
-                       contractual_cents=co, written_off_cents=0, patient_paid_cents=0)
-            out["patient_owes_cents"] = pr
-            out["denied_cents"] = other
-            out["open_cents"] = (x["charge"] or 0) - (x["paid"] or 0) - co - pr
-            gap = (x["charge"] or 0) - (x["paid"] or 0) - sum(a for g, c, a in x["adj"])
-            out["checks"].append({"source": "835", "agrees": gap == 0})
-            if gap:
-                gaps.append((gap, f"the 835 line of {day(x['date'])} does not balance: billed {usd(x['charge'])}, paid {usd(x['paid'])}, "
-                                  f"adjusted {usd(sum(a for g, c, a in x['adj']))}"))
+        if line:
+            prim = [x for x in line if x["status"] not in S.SECOND_STATUS] or line
+            paying = [x for x in prim if (x["paid"] or 0) > 0]
+            mine = [x for x in prim if S._same_payer(S.row_group(x)[0], f.get("payer_group"))]
+            # the answer whose reductions stand: the newest that paid (a later denial of a copy does not undo a payment), else
+            # the item's payer's newest
+            ref = max(paying or mine or prim, key=lambda r: (r["date"] or "", r["line_key"] or ""))
+            co = sum(a for g, c, a in ref["adj"] if g == "CO" and c in CONTRACTUAL)
+            pr = sum(a for g, c, a in ref["adj"] if g == "PR")
+            charge = ref["charge"] or 0
+            paid_total = sum(x["paid"] or 0 for x in line)
+            same_grp = [x for x in line if S._same_payer(S.row_group(x)[0], S.row_group(ref)[0])]
+            others_paid = paid_total - sum(x["paid"] or 0 for x in same_grp)
+            # another payer's payment pays the patient's share first (a second payer's coinsurance)
+            pr_left = max(0, pr - max(0, others_paid))
+            open_ = charge - paid_total - co - pr_left
+            payers = {}
+            for x in line:
+                if (x["paid"] or 0):
+                    g = S.row_group(x)[0]
+                    payers[g] = payers.get(g, 0) + (x["paid"] or 0)
+            out.update(basis="835", as_of=max(x["date"] or "" for x in line), charge_cents=charge, insurer_paid_cents=paid_total,
+                       contractual_cents=co, written_off_cents=0, patient_paid_cents=0, payers=payers)
+            out["patient_owes_cents"] = pr_left
+            out["denied_cents"] = open_
+            out["open_cents"] = open_
+            for x in line:
+                gap = (x["charge"] or 0) - (x["paid"] or 0) - sum(a for g, c, a in x["adj"])
+                out["checks"].append({"source": "835", "agrees": gap == 0, "date": x["date"], "check_tail": x.get("check_tail")})
+                if gap:
+                    gaps.append((gap, f"the 835 line of {day(x['date'])} does not balance: billed {usd(x['charge'])}, paid {usd(x['paid'])}, "
+                                      f"adjusted {usd(sum(a for g, c, a in x['adj']))}"))
             if not fx["ema"]["lines"]:
                 o = fx.get("outcome") or {}
                 why = {"not_covered": "EMA's Production reports do not cover this date of service",
@@ -681,7 +747,7 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
             x = max((r for r in own if not r.get("line_key") and r["status"] != "22"), default=None,
                     key=lambda r: (r["date"] or "", r.get("claim_key") or "")) or max(
                 (r for r in own if not r.get("line_key")), key=lambda r: (r["date"] or "", r.get("claim_key") or ""))
-            co = sum(a for g, c, a in x["cadj"] if g == "CO" and c in ("45", "253", "144", "59", "131", "94", "237", "2", "23"))
+            co = sum(a for g, c, a in x["cadj"] if g == "CO" and c in CONTRACTUAL)
             pr = sum(a for g, c, a in x["cadj"] if g == "PR")
             other = sum(a for g, c, a in x["cadj"]) - co - pr
             charge, paid = x.get("claim_charge") or 0, x.get("claim_paid") or 0
@@ -700,9 +766,9 @@ def _balance(conn: sqlite3.Connection, fx: dict, itemized: dict, rows: list[dict
             out["checks"].append({"source": "production", "agrees": None, "why": "no EMA posting is tied to this claim"})
         else:
             out["basis"] = "none"
-    out["gap_cents"] = sum(g for g, _w in gaps)
-    out["gap_items"] = [{"cents": g, "cause": w} for g, w in gaps]
-    out["reconciles"] = not gaps
+    out["gap_cents"] = sum(abs(g) for g, _w in gaps)
+    out["gap_items"] = [{"cents": abs(g), "cause": w} for g, w in gaps]
+    out["reconciles"] = (None if out["unknown"] else True) if not gaps else False
     out["gap_cause"] = "; ".join(w for _g, w in gaps) or None
     out["credit"] = out["open_cents"] < 0
     out["text"] = _balance_text(out)
@@ -718,9 +784,11 @@ def _balance_text(b: dict) -> str:
         open_ = (f"a credit of {usd(-b['open_cents'])}" if b["open_cents"] < 0 else f"open {usd(b['open_cents'])}")
         head = f"Charge {usd(b['charge_cents'])} = " + " + ".join(parts) + f" + {open_} (EMA's postings through {day(b['as_of'])})."
     elif b["basis"] == "835":
-        head = (f"Charge {usd(b['charge_cents'])} = paid {usd(b['insurer_paid_cents'])} + contractual {usd(b['contractual_cents'])} + "
-                f"patient's share {usd(b.get('patient_owes_cents'))} + denied {usd(b.get('denied_cents'))} (the 835 of {day(b['as_of'])}; "
-                "EMA's postings for it are not on file).")
+        payers = b.get("payers") or {}
+        by = (" (" + ", ".join(f"{g} {usd(c)}" for g, c in sorted(payers.items(), key=lambda kv: -kv[1])) + ")") if len(payers) > 1 else ""
+        head = (f"Charge {usd(b['charge_cents'])} = paid {usd(b['insurer_paid_cents'])}{by} + contractual {usd(b['contractual_cents'])} + "
+                f"patient's share {usd(b.get('patient_owes_cents'))} + denied or open {usd(b.get('denied_cents'))} (the 835 answers through "
+                f"{day(b['as_of'])}; EMA's postings for it are not on file).")
     elif b["basis"] == "835_claim":
         head = (f"Claim charge {usd(b['charge_cents'])} = paid {usd(b['insurer_paid_cents'])} + contractual {usd(b['contractual_cents'])} + "
                 f"patient's share {usd(b.get('patient_owes_cents'))} + denied {usd(b.get('denied_cents'))} (the 835 of {day(b['as_of'])} "
@@ -730,6 +798,8 @@ def _balance_text(b: dict) -> str:
                 "to it.")
     else:
         return "No line of money to balance: this item is about a payer, a rate or a fee, not one service."
+    if b["reconciles"] is None:
+        return head + f" It cannot be checked to the cent on this site: {b['unknown']}."
     if b["reconciles"]:
         return head + " It reconciles to the cent."
     return head + f" It does not reconcile: {usd(b['gap_cents'])} apart, because " + (b["gap_cause"] or "of a difference no source explains") + "."
@@ -760,7 +830,7 @@ def _story(conn: sqlite3.Connection, fx: dict, ledger: Any) -> dict:
     if o.get("outcome") == "not_covered":
         notes.append("EMA's Production reports do not cover this date of service (they hold 2025 services on), so EMA must be "
                      "checked by hand for this line.")
-    bal = _balance(conn, fx, itemized, rows)
+    bal = _balance(conn, fx, itemized, rows, server=ledger is not None)
     twin = _twin(fx)
     if twin:
         notes.append(twin["note"])

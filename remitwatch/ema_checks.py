@@ -132,6 +132,7 @@ HIGH_DAYS, HIGH_EXPECTED = 30, 10_000
 
 # C6
 CLOSE_SHARE, SHORT_SHARE = 0.50, 0.95
+PAID_OUTCOMES = ("paid_after", "paid_after_other", "paid_after_partial", "paid_before")
 
 # C7
 AS_CONTRACTUAL_MIN, AS_CONTRACTUAL_LINES, AS_CONTRACTUAL_HIGH = 100_000, 10, 2_500_000
@@ -1363,6 +1364,12 @@ def _priced(rate: Callable | None, grp: str | None, lines: Iterable[tuple]) -> i
     return got if any_ else None
 
 
+def _paid_elsewhere_all(k: dict, paid_other: dict[tuple, int]) -> bool:
+    """Every line of a claim (_status_claims) was paid on another of EMA's claims for the same patient, date and code."""
+    keys = list(k["lines"])
+    return bool(keys) and all(any(paid_other.get((lk, svc, cpt)) for lk in k["links"]) for (cpt, svc) in keys)
+
+
 def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callable | None = None,
              skip_claim_ids: Iterable[str] = ()) -> list[dict]:
     """C3b: claims that never left EMA. A claim (A/R rows or Production lines) whose newest status, across the reports,
@@ -1381,6 +1388,7 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
                               links=[lk for k in claims.values() for lk in k["links"]])
     first_charge = _first_charges(conn, [lk for k in claims.values() for lk in k["links"]])
     first_paid = _first_ins_paid(conn, [lk for k in claims.values() if k.get("secondary") for lk in k["links"]])
+    paid_other = _paid_on_another_claim(conn, [(lk, svc, cpt) for k in claims.values() for lk in k["links"] for (cpt, svc) in k["lines"]])
     made = _bill_created(conn, [k["claim_id"] for k in claims.values() if k["claim_id"]])
     out = []
     for key, k in sorted(claims.items()):
@@ -1412,6 +1420,8 @@ def not_sent(conn: sqlite3.Connection, *, today: str | None = None, rate: Callab
         if age is None or age < need:
             continue
         grp, kind = k["group"] or "Unknown", k["kind"] or "other"
+        if _paid_elsewhere_all(k, paid_other):
+            continue                    # every line was paid on another of EMA's claims: billed and paid there, not stuck here
         file_by, limit = _filing(grp, kind, days_[0])
         lines = sorted(k["lines"].items(), key=lambda kv: (kv[0][1] or "", kv[0][0] or ""))
         codes = sorted({c for (c, _s) in k["lines"] if c})
@@ -1682,6 +1692,7 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
     bills835 = _bills_with_835(conn, {c["bill"] for c in cands if c["bill"]})
     keys = {(ln[4], ln[0], ln[1]) for c in cands for ln in lines[c["link"]] if ln[4] is not None}
     seen835 = _name_day_codes_835(conn, keys)
+    paid_other = _paid_on_another_claim(conn, [(c["link"], ln[0], ln[1]) for c in cands for ln in lines[c["link"]]])
     cid_of = _claim_id_of_links(conn, [c["link"] for c in cands])
     out = []
     for c in cands:
@@ -1691,6 +1702,8 @@ def unanswered_claims(conn: sqlite3.Connection, *, today: str | None = None, ski
             continue
         if any((ln[4], ln[0], ln[1]) in seen835 for ln in ls if ln[4] is not None):
             continue
+        if ls and all(paid_other.get((lk, ln[0], ln[1])) for ln in ls):
+            continue                    # every line was paid on another of EMA's claims: answered there
         cid = cid_of.get(lk)
         if cid and cid in skip:
             continue
@@ -1767,6 +1780,27 @@ def _paid_on_other_links(conn: sqlite3.Connection, keys: set[tuple]) -> dict[tup
             if (nk, svc, cpt) in keys and cents:
                 out[(nk, svc, cpt)][lk] += cents
     _drop(conn, "ec_pk")
+    return out
+
+
+def _paid_on_another_claim(conn: sqlite3.Connection, lines: Iterable[tuple]) -> dict[tuple, int]:
+    """For EMA lines (link, date, code): what insurance paid on ANOTHER of EMA's claims for the same patient, date and code
+    (never the ASC's facility claim): {(link, date, code): cents}. A resubmission, or the same service billed twice."""
+    want = sorted({tuple(x) for x in lines if x and x[0] is not None})
+    nk_of: dict[tuple, int] = {}
+    for part in _chunks(want):
+        _temp(conn, "ec_poc", ["link INTEGER", "svc TEXT", "cpt TEXT"], part, ["link, svc, cpt"])
+        for lk, svc, cpt, nk in conn.execute("""SELECT l.link, l.svc, l.cpt, l.name_key FROM temp.ec_poc x
+                                                JOIN ema_lines l ON l.link = x.link AND l.svc = x.svc AND l.cpt = x.cpt
+                                                WHERE l.name_key IS NOT NULL"""):
+            nk_of[(lk, svc, cpt)] = nk
+    _drop(conn, "ec_poc")
+    paid = _paid_on_other_links(conn, {(nk, k[1], k[2]) for k, nk in nk_of.items()}) if nk_of else {}
+    out: dict[tuple, int] = {}
+    for k, nk in nk_of.items():
+        got = sum(v for lk2, v in paid.get((nk, k[1], k[2]), {}).items() if lk2 != k[0] and v > 0)
+        if got > 0:
+            out[k] = got
     return out
 
 
@@ -2416,6 +2450,21 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
             out[fid] = {"action": "hint_paid_before", "paid_cents": o["paid_before"], "date": b.get("date"),
                         "check_tail": b.get("check_tail"), "payer": payer, "note": hint, "hint": hint, "used": None}
     out.update(_paid_in_ema_shared(shared, outcomes, closes))
+    # a hint, never a closure: the service paid on another of EMA's claims for the same patient, date and code (the store's
+    # copy of EMA's lines and payments is partial, so a payment it does not hold cannot be seen)
+    rest = [(f, outcomes[f["finding_id"]]) for f in findings if f.get("finding_id") in outcomes and f["finding_id"] not in out
+            and not f.get("auto_status") and _wanted(f) and f.get("signal") not in CLAIM_SIGNALS
+            and (outcomes[f["finding_id"]].get("lines") or []) and outcomes[f["finding_id"]].get("covered")
+            and not outcomes[f["finding_id"]].get("facility") and outcomes[f["finding_id"]].get("outcome") not in PAID_OUTCOMES]
+    if rest:
+        elsewhere = _paid_on_another_claim(conn, [tuple(o["lines"][0]) for _f, o in rest])
+        for f, o in rest:
+            got = elsewhere.get(tuple(o["lines"][0])) or 0
+            if got >= _threshold(f):
+                hint = (f"EMA shows {_usd(got)} paid on another of its claims for this patient, date and code: check whether it paid "
+                        "this service (a resubmission, or the service billed twice) before working it")
+                out[f["finding_id"]] = {"action": "hint_paid_elsewhere", "paid_cents": got, "date": None, "check_tail": None,
+                                        "payer": None, "note": hint, "hint": hint, "used": None}
     return out
 
 
@@ -2658,8 +2707,10 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
         for r in conn.execute(f"""SELECT {', '.join('l.' + c for c in _LINE_COLS + more)}
                                   FROM temp.ec_ax x JOIN ema_lines l ON l.link = x.link AND l.svc = x.svc AND l.cpt = x.cpt"""):
             ln = dict(zip(_LINE_COLS + more, r))
-            no_adjustment = (ln["contractual"] or 0) == 0 and (ln["noncontractual"] or 0) == 0
-            if no_adjustment and (ln["flags"] or 0) & 17 == 0 and ln["status_class"] != "void" and (ln["charges"] or 0) > 100:
+            # no payer's reason of its own was posted (a routine contractual reduction, CO-45, may stand beside the A/R's
+            # denial: 27 such Denied rows on real data were never listed)
+            no_reason = (ln["nonroutine"] or 0) < DENIAL_MIN
+            if no_reason and (ln["flags"] or 0) & 17 == 0 and ln["status_class"] != "void" and (ln["charges"] or 0) > 100:
                 ln["ar_denied"] = ar_info[(ln["link"], ln["svc"], ln["cpt"])]
                 lines.append(ln)
         _drop(conn, "ec_ax")
@@ -2766,7 +2817,10 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             if not p[4] or not first_denial:
                 continue
             day = p[1] or ""
-            if day > first_denial or (day == first_denial and _same_payer(p[3], dgrp)):
+            # a payment of the denying payer's posted the day of its denial paid the line (C6 reads it the same way), except
+            # beside an A/R denial with no reason posted: there it is the part the payer paid, the A/R's amount the rest
+            ar_partial = bool(ar_row) and net < DENIAL_MIN
+            if day > first_denial or (day == first_denial and _same_payer(p[3], dgrp) and not ar_partial):
                 paid_after += p[4]
             else:
                 paid_before.append(p)
@@ -2790,6 +2844,8 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
             else:
                 expected, basis = int(round(charge * FALLBACK_SHARE)), "45% of the charge"
         expected = min(expected, charge) if charge > 0 else expected
+        if ar_row and net < DENIAL_MIN and (ar_row[3] or 0) > 0 and expected and expected > ar_row[3]:
+            expected, basis = ar_row[3], "the denial amount on EMA's A/R"      # never worth more than the A/R says was denied
         other_first = [p for p in paid_before if not _same_payer(p[3], dgrp)]
         # the second payer on file denied it, not the line's primary: a second payer owes only the share the first payer
         # left, once that payer has paid. Medicaid as the second payer pays that share only up to its own rate and the member

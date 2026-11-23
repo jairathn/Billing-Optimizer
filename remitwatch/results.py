@@ -664,11 +664,10 @@ def _pair_group(rows: dict) -> None:
     """Which earlier answer each 835 reversal of one group cancels, read again over the group's rows (copies), by the
     rules states.facts_of pairs a bill with (same payer, code and charge, answered on or before the reversal, never a line
     the payer received after the reversal's received date; the same received date first, then the reasons it negates
-    exactly, then the opposite payment, then an earlier remittance, then the newest), with two more: a line of the
-    reversal's own remittance (often the new answer the payer sends with it) is its pair only when no line of an earlier
-    remittance fits, and the same payer by name counts when the filing indicator moved the claim to another of its
-    products (the same payer group is then preferred after the reasons and the amount). Sets 'reverses' and 'reversed_by'
-    on the rows."""
+    exactly, then the opposite payment, then an earlier remittance, then the newest), with one more: the same payer by name
+    counts when the filing indicator moved the claim to another of its products (a reversal then repeats the new
+    product's indicator, and the bill's pairing finds only the new answer sent on the reversal's own remittance); the
+    same payer group is preferred after the reasons and the amount. Sets 'reverses' and 'reversed_by' on the rows."""
     recs = list(rows.values())
     for x in recs:
         x["reversed_by"] = None
@@ -687,9 +686,9 @@ def _pair_group(rows: dict) -> None:
         mirror = sorted((g, c, -a) for g, c, a in (x.get("adj") or []))
 
         def score(o: dict) -> tuple:
-            return (bool(rx) and o.get("received") == rx, not (x.get("tk") and o.get("tk") == x.get("tk")),
-                    bool(mirror) and sorted(o.get("adj") or []) == mirror, _amount(o) == -_amount(x), _same_payer(_row_payer(o), gx),
-                    str(o.get("date") or "") < str(x.get("date") or ""), str(o.get("date") or ""), str(key(o)))
+            return (bool(rx) and o.get("received") == rx, bool(mirror) and sorted(o.get("adj") or []) == mirror,
+                    _amount(o) == -_amount(x), _same_payer(_row_payer(o), gx), str(o.get("date") or "") < str(x.get("date") or ""),
+                    str(o.get("date") or ""), str(key(o)))
         pick = max(cands, key=score)
         pick["reversed_by"] = key(x)
         x["reverses"] = key(pick)

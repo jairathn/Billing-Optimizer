@@ -677,8 +677,32 @@ class Ledger:
         return need, free + sum(sizes)
 
     def _older_newer(self, mine: Box) -> tuple[list[Box], list[Box]]:
-        boxes = [b for b in self.boxes(APPLIED) if b.file_id != mine.file_id and b.meets(mine)]
-        return [b for b in boxes if b.order < mine.order], [b for b in boxes if b.order > mine.order]
+        """The applied files whose boxes meet the staged file's, as (older, newer). Newer is the later as_of, then the
+        later workbook creation time. Two exports of the same day that say nothing more (CSVs) are told apart by what
+        they hold: the later export of a day holds what was posted that day after the earlier one was made, so the one
+        with more postings on that day where the two meet is the newer; only when they hold as many does arrival decide."""
+        older, newer = [], []
+        for b in self.boxes(APPLIED):
+            if b.file_id == mine.file_id or not b.meets(mine):
+                continue
+            later = b.order > mine.order
+            if b.as_of and b.as_of == mine.as_of and b.order[1] == mine.order[1] and self._stage_attached():
+                theirs, ours = self._same_day_rows(b, mine)
+                if theirs != ours:
+                    later = theirs > ours
+            (newer if later else older).append(b)
+        return older, newer
+
+    def _same_day_rows(self, b: Box, mine: Box) -> tuple[int, int]:
+        """(postings of applied file b, postings of the staged file) posted on their shared as_of day, where both boxes
+        hold them."""
+        c = self.conn
+        p_b, a_b = b.sql("s")
+        p_m, a_m = mine.sql("p")
+        ours = c.execute(f"SELECT COUNT(*) FROM stage.rows s WHERE s.posted = ? AND {p_b}", [mine.as_of] + a_b).fetchone()[0]
+        theirs = c.execute(f"SELECT COUNT(*) FROM main.postings p WHERE p.src = ? AND p.posted = ? AND {p_m}",
+                           [b.src, b.as_of] + a_m).fetchone()[0]
+        return int(theirs or 0), int(ours or 0)
 
     def holds(self, meta: FileMeta, stats: dict, *, serverless: bool, fmt: str = "csv",
               dimension: int | None = None) -> list[tuple[str, str]]:

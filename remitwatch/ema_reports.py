@@ -91,6 +91,7 @@ REPORT_NAMES = {"production": "Production report", "ar_report": "A/R report"}
 REPORT_KINDS = ("ema:ar", "ema:production")      # the files.kind of a report that was read as one
 CATALOG_STATUSES = ("waiting", "current", "partly_replaced", "replaced", "superseded", "held", "refused", "discarded", "reread")
 DONE_STATUSES = ("current", "partly_replaced", "replaced", "superseded")
+ZIP_OTHERS_MAX = 20000                  # members of a zip handed to the router (a year of remittances is a few thousand)
 
 META_SALT = "ema:key_salt"
 META_PREFIX = "ema:claim_url_prefix"
@@ -2540,11 +2541,15 @@ def _ingest_zip(store: Any, path: str, *, via: str, origin: dict | None, force: 
     taken = {r.member for r in recs}
     try:
         with zipfile.ZipFile(path) as zf:
-            ignored = [os.path.basename(i.filename) for i in zf.infolist()
-                       if not i.is_dir() and i.filename not in taken and "__MACOSX" not in i.filename]
+            others = [i.filename for i in zf.infolist()
+                      if not i.is_dir() and i.filename not in taken and "__MACOSX" not in i.filename
+                      and not os.path.basename(i.filename).startswith((".", "~$"))]
     except (OSError, zipfile.BadZipFile):
-        ignored = []
-    return {"status": "zip", "members": members, "ignored": ignored[:50]}
+        others = []
+    # 'others': the members that are no report (a week of remittances, the weekly exports), in full, for the router to read
+    # each on its own (dropbox_sync.ingest_new_files); 'ignored' names them for the page
+    return {"status": "zip", "members": members, "ignored": [os.path.basename(o) for o in others[:50]],
+            "others": others[:ZIP_OTHERS_MAX]}
 
 
 def _supersede_raw_twins(conn: sqlite3.Connection, name: str, size: int | None, file_id: str) -> None:
@@ -2565,6 +2570,8 @@ def _ingest_one(store: Any, path: str, rec: Recognized, file_id: str, *, via: st
     if row:
         st = row["status"]
         if st in DONE_STATUSES or st == "discarded":
+            if rec.report == "production" and st in DONE_STATUSES:
+                _restore_rows(store, file_id, path, rec, via=via, origin=origin)
             return _result("already", rec.report, file_id, reason=st, as_of=row.get("as_of"))
         if st == "refused":
             return _result("refused", rec.report, file_id, reason=row.get("status_reason"))
@@ -2639,7 +2646,7 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
                               replaced_by=res["duplicate_of"])
             log(f"  EMA report {source_name}: already read (the same rows as a file on file)")
         else:
-            _repair_store_rows(conn, file_id, path, rec)
+            _restore_rows(store, file_id, path, rec, via=via, origin=origin, ledger=lg)
         return _result("already", "production", file_id, **{k: v for k, v in res.items() if k not in ("status", "report", "file_id")})
     if status == "waiting":
         record_waiting(conn, file_id=file_id, report="production", source_name=source_name, via=via, origin=origin or {},
@@ -2681,6 +2688,35 @@ def _ingest_production(store: Any, path: str, rec: Recognized, file_id: str, *, 
     out.update({k: v for k, v in res.items() if k not in ("report", "file_id")})
     out["account"] = acct
     return out
+
+
+def _restore_rows(store: Any, file_id: str, path: str, rec: Recognized, *, via: str | None, origin: dict | None,
+                  ledger: Any = None) -> None:
+    """A Production file the ledger already holds, met again after a run that applied it and stopped before saving the
+    store: its catalog row comes back from the ledger when the store lost it (ema_ledger.sync_catalog), with where the
+    file is kept (its origin: a later re-read fetches it from there) and how it came when the restored row lacks them;
+    then its files and ema_sources rows (_repair_store_rows)."""
+    conn = store.conn
+    row = _catalog_row(conn, file_id)
+    if row is None and ledger is not None:
+        from . import ema_ledger        # noqa: PLC0415
+        ema_ledger.sync_catalog(store, ledger, [file_id])
+        row = _catalog_row(conn, file_id)
+    if row is None or row.get("status") not in DONE_STATUSES:
+        return
+    try:
+        have = json.loads(row.get("origin") or "{}") if isinstance(row.get("origin"), str) else dict(row.get("origin") or {})
+    except ValueError:
+        have = {}
+    fields: dict = {}
+    if origin and not have:
+        fields["origin"] = dict(origin)
+    if via and not row.get("via"):
+        fields["via"] = via
+    if fields:
+        _catalog_put(conn, file_id, commit=True, **fields)
+        store.ema_changed = True
+    _repair_store_rows(conn, file_id, path, rec)
 
 
 def _repair_store_rows(conn: sqlite3.Connection, file_id: str, path: str, rec: Recognized) -> None:

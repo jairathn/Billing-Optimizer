@@ -40,6 +40,9 @@ REPORT_TIMEOUT = (10, 30)           # (connect, read) seconds for every Dropbox 
 MAX_EXPORT_BYTES = 60 * 1024 * 1024     # one of the three weekly exports is read whole in memory: a larger one is refused
 MAX_X12_BYTES = 64 * 1024 * 1024        # a remittance or claim file is read whole: the real ones are under 200 KB
 REPORT_EXTS = (".xlsx", ".csv", ".tsv", ".txt", ".zip", ".gz")     # endings the router asks the report reader about first
+PENDING_TRIES = 5                   # cycles a fetched file is offered to the readers before it is listed as not read
+ZIP_CHUNK_BYTES = 64 * 1024 * 1024  # the members of a zip are unpacked and read this much at a time (a serverless host's
+                                    # temporary folder is 512 MB)
 
 
 def backfill_zip_name() -> str:
@@ -461,6 +464,7 @@ def sync(store, client: DropboxClient | None = None, root_path: str | None = Non
                 continue
             try:
                 client.download(e.get("id") or e["path_lower"], dest)
+                add_pending(conn, [dest])       # kept until a cycle has read it: the position moves past it now
                 stats["downloaded"] += 1
                 stats["new_files"].append(dest)
                 if stats["downloaded"] % 100 == 0:
@@ -579,7 +583,8 @@ def _gunzip_to(path: str, folder: str, limit: int) -> str | None:
 
 
 def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | None = None, *, origins: dict | None = None,
-                     ledger=None, via: str = "mirror", deadline: float | None = None, wait_reason: str | None = None) -> dict:
+                     ledger=None, via: str = "mirror", deadline: float | None = None, wait_reason: str | None = None,
+                     _in_zip: bool = False) -> dict:
     """Route files to the right reader, EMA's two reports first. Each .xlsx, .csv, .tsv, .txt, .zip or .gz is asked
     whether it is the A/R or the Production report (remitwatch.ema_reports); a report goes to ema_reports.ingest_file,
     with its origin (`origins`, by path) and the ledger opener (`ledger`: a Ledger or a callable; without one a
@@ -587,7 +592,9 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
     before it is read), an X12 file as a remittance or an 837. A spreadsheet that is none of them is recorded as not read
     (files kind 'ema:unknown'), so it is listed on the Data tab and not fetched again. `via` labels where the files came
     from ('mirror' on a server, 'dropbox' from cloud, 'upload', 'cli'). `unread` is kept for callers that pass it: no file
-    is left unread now. Returns counts; 'ema_reports' lists what the report reader made of each report."""
+    is left unread now. A zip of other files (remittances, exports) has each member read on its own. Returns counts;
+    'ema_reports' lists what the report reader made of each report, 'retry' the files whose read raised (a busy database,
+    a full disk), for the server to offer again (sync_pending)."""
     import shutil
     import tempfile
 
@@ -599,6 +606,13 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
     remits: list[str] = []
     scratch: list[str] = []
     queue = list(paths)
+    root_of: dict[str, str] = {}        # a file unpacked from a gzip -> the file it came from
+    retry: list[str] = []               # files whose read raised: offered again by the next cycle (server: sync_pending)
+
+    def again(path: str) -> None:
+        q = root_of.get(path, path)
+        if q not in retry:
+            retry.append(q)
     try:
         while queue:
             p = queue.pop(0)
@@ -611,10 +625,21 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                 except Exception as exc:        # noqa: BLE001  (never the message: a converter's message can hold a cell)
                     out["errors"] += 1
                     out["failed"].append(n)
+                    again(p)
                     log(f"  EMA report ERROR {n}: {type(exc).__name__}")
                     continue
                 if res is not None:
-                    _note_report(out, res, n, log)
+                    others = res.get("others") if res.get("status") == "zip" else None
+                    if others and not _in_zip:
+                        # a zip of other files (a week of remittances, the weekly exports), not only of EMA's reports:
+                        # each member is read on its own, the same bytes never twice (the first-load archive of
+                        # remittances is not this: cloud.ingest_zip reads it, once)
+                        if res.get("members"):
+                            _note_report(out, res, n, log)
+                        _read_zip_members(store, p, others, out=out, log=log, origin=origins.get(p), ledger=ledger,
+                                          via=via, deadline=deadline, wait_reason=wait_reason, again=again)
+                    else:
+                        _note_report(out, res, n, log)
                     continue
                 if low.endswith(".zip"):
                     out["skipped"] += 1
@@ -632,6 +657,7 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                         continue
                     if p in origins:
                         origins[inner] = origins[p]
+                    root_of[inner] = root_of.get(p, p)
                     queue.insert(0, inner)
                     continue
             if low.endswith((".xlsx",) + TEXT_EXPORTS):
@@ -681,10 +707,11 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                     out["failed"].append(f"{n} (too large)")
                     _not_read(store, p, "ema:too_large")
                     log(f"  EMA ERROR {n}: {exc}")
-                except Exception as exc:
+                except Exception as exc:        # noqa: BLE001  (never the message: a converter's message can hold a cell)
                     out["errors"] += 1
                     out["failed"].append(n)
-                    log(f"  EMA ERROR {n}: {exc}")
+                    again(p)
+                    log(f"  EMA ERROR {n}: {type(exc).__name__}")
             elif looks_like_x12(p):
                 if os.path.getsize(p) > MAX_X12_BYTES:
                     out["errors"] += 1
@@ -703,7 +730,8 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                     except Exception as exc:
                         out["errors"] += 1
                         out["failed"].append(n)
-                        log(f"  837 ERROR {n}: {exc}")
+                        again(p)
+                        log(f"  837 ERROR {n}: {type(exc).__name__}")
                 else:
                     remits.append(p)
             else:
@@ -718,6 +746,8 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
     finally:
         for d in scratch:
             shutil.rmtree(d, ignore_errors=True)
+    if retry:
+        out["retry"] = retry
     return out
 
 
@@ -772,6 +802,8 @@ def refind_reports(store, client: DropboxClient | None = None, root_path: str | 
             client.download(e.get("id") or e["path_lower"], dest)
         if unread_here(store, file_sha256(dest)):
             found.append(dest)
+    # pending in the same commit as the flag: a cycle stopped before the readers took them offers them again
+    add_pending(conn, found, commit=False)
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (REFIND_KEY, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
     conn.commit()
     if found:

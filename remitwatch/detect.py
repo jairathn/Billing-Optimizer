@@ -215,6 +215,7 @@ EMA_NATIVE_SIGNALS = ("NOT_SENT", "REMIT_NOT_POSTED", "EMA_DENIAL_AS_CONTRACTUAL
                       "CREDIT_BALANCE")
 EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's reports (counts by step, failed steps)
 UNSEEN_KEY = "ema:unanswered_unseen"        # meta: unanswered claims no source can check yet (count, billed $, due days)
+PAYER_POLICY_KEY = "ema:payer_policy"       # meta: codes a payer never pays, folded out of the work (835 and EMA-only items)
 POLICY_SUMMARY_KEY = "ema:policy_summary"   # meta: the write-off pattern table for the owner's policy (O11), from the run
 PAYMENT_OUTCOMES = ("paid_after", "paid_after_other")   # the line outcomes an EMA closure (C6, rebilled) rests on
 
@@ -1902,6 +1903,17 @@ class Detector:
                                resolved_by=self.later_payment(l, expected=exp))
                     continue
 
+            # ---- the whole charge taken as a contractual reduction (CO-45) with nothing allowed: the payer paid nothing for
+            # the service, a denial in all but name (the answer key's R9), never a fee-schedule cut
+            charge_l = l.get("charge_cents") or 0
+            if paid == 0 and allowed == 0 and pr == 0 and charge_l > 100 and not top and code not in ("99024", "G2211") \
+                    and status in ("1", "19") and sum(a for g, rc, a in adj if rc == "45" and g in ("CO", "PI", "OA")) >= charge_l:
+                exp, basis = self.expected_allowed(l, code)
+                self._emit("DENIED_OTHER", "denial", "low", "review",
+                           f"{code} paid $0: the whole charge was taken as a contractual reduction (CO-45), nothing allowed",
+                           l, exp, exp, "45", rarc, {"basis": basis, "whole_charge_co45": True},
+                           resolved_by=self.later_payment(l, expected=exp))
+                continue
             # ---- zero-paid lines (silent denials inside paid claims)
             if paid == 0 and allowed == 0 and pr == 0 and (l.get("charge_cents") or 0) > 0 and top:
                 exp, basis = self.expected_allowed(l, code)
@@ -2880,14 +2892,17 @@ class Detector:
         return self._ratios.get((payer_group, code))
 
     def _paid_share(self, payer_group: str | None, code: str | None) -> tuple[int, int] | None:
-        """(lines paid, lines answered) for a payer group and code on the 835s of services since 2025 (a payment still
-        standing counts as paid), or None when fewer than 20 are on file. EMA's vocabulary names some groups apart
+        """(lines paid, lines answered) for a payer group and code on the 835s of services since 2025, answered as the
+        primary payer (a payment still standing counts as paid), or None when fewer than 20 are on file. EMA's vocabulary names some groups apart
         ('UnitedHealthcare Medicare Advantage' beside 'UHC Medicare Advantage'): a group of the same family and kind counts."""
         if self.__dict__.get("_share") is None:
             from . import ema_checks as ec
             share: dict[tuple, list] = defaultdict(lambda: [0, 0])
             for l in self.lines:
-                if (l.get("service_date") or "") < ec.POLICY_SINCE or not l.get("procedure_code"):
+                # its answers as the primary payer (paid, or denied as primary): a second payer's payments of the cost share
+                # say nothing of whether the payer pays the code itself
+                if (l.get("service_date") or "") < ec.POLICY_SINCE or not l.get("procedure_code") \
+                        or l.get("claim_status_code") not in ("1", "4", "19"):
                     continue
                 a = share[(l["payer_group"], l["procedure_code"])]
                 a[1] += 1
@@ -2901,6 +2916,36 @@ class Detector:
             hits = [v for (g, c), v in self._share.items() if c == code and ec._family(g) == fam and kinds(g) == kinds(payer_group)]
             got = [sum(v[0] for v in hits), sum(v[1] for v in hits)] if hits else None
         return tuple(got) if got and got[1] >= 20 else None
+
+    def fold_payer_policy(self) -> None:
+        """Denials from the remittances of a code the payer pays on 5% or less of at least 20 lines it answered as primary
+        since 2025 (UHC's G6001, PM case C18; the answer key's R9): the payer's policy, not an appeal per line. They fold
+        into one pattern per payer and code in the owner's table (meta ema:payer_policy), counted with their dollars, and
+        are listed line by line only once the owner chooses 'pursue' for the pattern. Only with EMA's reports on file
+        (the owner's table is built then)."""
+        if not self.ema_on:
+            return
+        from . import ema_checks as ec
+        decisions = ec._meta(self.conn, ec.POLICY_KEY, {}) or {}
+        folded: dict[str, dict] = {}
+        for fid, f in list(self.findings.items()):
+            if not f.get("line_key") or f.get("category") not in ("denial", "bundling") or (f.get("paid_cents") or 0) > 0 \
+                    or f.get("signal") in ("FORWARDED_TO_CARRIER", "SECONDARY_NOT_BILLED") or f.get("auto_status"):
+                continue
+            share = self._paid_share(f.get("payer_group"), f.get("procedure_code"))
+            if not share or share[0] > ec.POLICY_MAX_PAID_SHARE * share[1]:
+                continue
+            key = f"{f.get('payer_group')}|{f.get('procedure_code')}||payer_policy"
+            decision = (decisions.get(key) or {}).get("decision") or "accept"
+            pt = folded.setdefault(key, {"group": f.get("payer_group"), "code": f.get("procedure_code"), "paid": share[0],
+                                         "answered": share[1], "n": 0, "cents": 0, "decision": decision, "default": key not in decisions,
+                                         "source": "835"})
+            pt["n"] += 1
+            pt["cents"] += f.get("shortfall_cents") or 0
+            if decision != "pursue":
+                del self.findings[fid]
+                self.ema_counts["payer_policy_835"] += 1
+        self._policy_835 = folded
 
     def _has_835_finding(self, bill: str | None, svc: str | None, code: str | None) -> bool:
         """The run already holds an item from the remittances for this bill, date and code (or the whole claim that day)."""
@@ -3590,11 +3635,19 @@ class Detector:
                 lo = json.loads((self.conn.execute("SELECT value FROM meta WHERE key=?", (ec.C5_LEFT_OUT_KEY,)).fetchone() or ["{}"])[0])
             except (ValueError, TypeError, sqlite3.Error):
                 lo = {}
+            pats = dict(((lo.get("payer_policy") or {}).get("patterns") or {}))
+            for key, p in (self.__dict__.get("_policy_835") or {}).items():
+                if key in pats:             # the same payer and code from EMA-only denials and from the remittances
+                    pats[key] = dict(pats[key], n=pats[key]["n"] + p["n"], cents=pats[key]["cents"] + p["cents"])
+                else:
+                    pats[key] = p
             extra = [{"pattern": key, "kind": "payer_policy", "items": p.get("n"), "cents": p.get("cents"), "appealable": None,
                       "appealable_cents": None, "at_posting": None, "auto": None, "rule_proven": None,
                       "later_paid_share": round(p["paid"] / p["answered"], 3) if p.get("answered") else None,
                       "paid": p.get("paid"), "answered": p.get("answered"), "decision": p.get("decision"), "default": p.get("default")}
-                     for key, p in ((lo.get("payer_policy") or {}).get("patterns") or {}).items()]
+                     for key, p in pats.items()]
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                              (PAYER_POLICY_KEY, json.dumps({"at": self.now, "patterns": pats}, default=str)))
             pol = list(pol) + sorted(extra, key=lambda x: (-(x["cents"] or 0), x["pattern"]))
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                               (POLICY_SUMMARY_KEY, json.dumps({"at": self.now, "patterns": pol[:500]}, default=str)))
@@ -4174,6 +4227,7 @@ class Detector:
         self.run_line_rules()
         self.run_claim_rules()
         self.hook_expected()
+        self.fold_payer_policy()        #    a payer's policy (a code it never pays as primary) is not an appeal per line
         self.run_ema_open_claims()      # 5: the weekly exports' unanswered claims, checked against EMA's reports
         self.run_ema_report_claims()    #    never sent, rejected, unanswered (from the reports)
         self.run_ema_denials()          # 6: denials only EMA saw (C5)

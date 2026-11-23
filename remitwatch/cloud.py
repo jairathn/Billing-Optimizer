@@ -536,6 +536,14 @@ class ProductionSlot:
                                       log=say)
         self.handle = self.handle or ema_ledger.LedgerHandle(self.state)
         h = self.handle
+        if fids and all((er._catalog_row(conn, f) or {}).get("status") in er.DONE_STATUSES for f in fids):
+            # every report in it is in the ledger already: a run applied it and stopped before saving the store, and
+            # repair_ledger brought the catalog back. It is 'already' (its rows and origin restored), never held, and the
+            # attempts of that run go
+            for f in fids:
+                if h.attempts(f):
+                    h.clear_attempt(f)
+            return self._wait(path, rec, via=via, origin=origin, name=name, reason="", log=say)
         if any(h.attempts(f) >= ema_ledger.MAX_ATTEMPTS for f in fids):
             res = self._wait(path, rec, via=via, origin=origin, name=name, reason=ema_ledger.ATTEMPT_HOLD_REASON, log=say)
             for f in fids:

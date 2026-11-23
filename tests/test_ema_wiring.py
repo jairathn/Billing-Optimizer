@@ -325,7 +325,7 @@ def test_an_835_payment_ema_never_posted_is_an_item_to_post(store, ledger, tmp_p
     f = one(store, "signal='REMIT_NOT_POSTED'")
     assert f["category"] == "fees" and f["source"] == "835" and f["shortfall_cents"] == 12000
     assert insights.work_type(f["signal"], f["actionable"], f["carc"]) == "post"
-    assert f["work_state"] == "work_now" and "post it in EMA" in f["state_basis"]
+    assert f["work_state"] == "work_now" and "posted" in f["state_basis"]       # states.py words it (unit D)
 
 
 # --------------------------------------------------------------------------------------- one run, two hosts
@@ -1168,3 +1168,58 @@ def test_a_second_procedure_cut_deeper_than_the_payers_share_is_mppr_excess(stor
     _mohs_world(store, with_flap=True, allowed=146.28)
     f = one(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(51))
     assert f["signal"] == "MPPR_EXCESS" and f["shortfall_cents"] == 29256 - 14628
+
+
+def test_remittance_denials_of_a_code_the_payer_never_pays_as_primary_are_its_policy(store, ledger, tmp_path):
+    """PM case C18: UHC never paid G6001 as primary (0 of 27 lines it answered as primary; its payments of it were as the
+    second payer). Its denials fold into one pattern in the owner's table and leave the line-by-line work until the owner
+    chooses 'pursue'; a code the payer does pay stays an appeal."""
+    for n in range(22):                      # 22 denials of G6001 as primary, and 6 payments of it as the second payer
+        remit(store, trace=f"7776{n:05d}", paid_on="2026-02-10", payer="UNITEDHEALTHCARE TEST",
+              claims=[{"pcn": F.claim_id(800 + n), "last": f"RAD{n}", "first": "JULIET", "member": f"J{n:011d}",
+                       "lines": [("2026-02-02", "G6001", 260, 0, [("CO", "197", 260)])]}])
+    for n in range(6):
+        remit(store, trace=f"7777{n:05d}", paid_on="2026-02-10", payer="UNITEDHEALTHCARE TEST", status="2",
+              claims=[{"pcn": F.claim_id(850 + n), "last": f"SEC{n}", "first": "KILO", "member": f"K{n:011d}",
+                       "lines": [("2026-02-02", "G6001", 260, 30, [("PR", "2", 0)])]}])
+    remit(store, trace=F.check_no(61), paid_on="2026-03-28", payer="UNITEDHEALTHCARE TEST",
+          claims=[{"pcn": F.claim_id(61), "lines": [(S, "99213", 150, 0, [("CO", "197", 150)])]}])
+    denial_world(store, ledger, tmp_path)
+    det = run(store)
+    assert [f["procedure_code"] for f in items(store, "payer_group='UnitedHealthcare' AND status='open'")] == ["99213"]
+    assert det.ema_counts["payer_policy_835"] == 22
+    pol = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:payer_policy'").fetchone()[0])["patterns"]
+    assert pol["UnitedHealthcare|G6001||payer_policy"]["answered"] == 22 and pol["UnitedHealthcare|G6001||payer_policy"]["paid"] == 0
+    ec.set_policy(store.conn, "UnitedHealthcare|G6001||payer_policy", "pursue", "owner")
+    run(store)
+    assert len(items(store, "payer_group='UnitedHealthcare' AND procedure_code='G6001' AND status='open'")) == 22
+
+
+def test_a_whole_charge_taken_as_contractual_with_nothing_allowed_is_a_denial(store):
+    """CO-45 for the whole charge, $0 allowed and $0 paid: the payer paid nothing for the service, a denial in all but
+    name (23 truth-listed lines, $4,212 on real data, 18 at Anthem). A second payer's whole-charge CO-45 is not (it owes
+    only the share), nor is an ordinary fee-schedule cut."""
+    remit(store, trace=F.check_no(71), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(71), "lines": [(S, "99213", 150, 0, [("CO", "45", 150)], {"allowed_cents": 0})]}])
+    remit(store, trace=F.check_no(72), paid_on="2026-03-28", status="2",
+          claims=[{"pcn": F.claim_id(72), "lines": [(S, "99213", 150, 0, [("CO", "45", 150)], {"allowed_cents": 0})]}])
+    remit(store, trace=F.check_no(73), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(73), "lines": [(S, "99213", 150, 90, [("CO", "45", 60)], {"allowed_cents": 9000})]}])
+    run(store)
+    f = one(store, "signal='DENIED_OTHER'")
+    assert f["patient_control_number"] == F.claim_id(71) and f["carc"] == "45" and json.loads(f["evidence"])["whole_charge_co45"]
+
+
+def test_an_ar_denied_row_beside_a_routine_contractual_reduction_is_an_ema_only_denial(store, ledger, tmp_path):
+    """EMA's A/R holds the line Denied with $40 denied; the payer paid $90 and EMA posted only its routine CO-45 (no reason
+    of the payer's own). It was never listed (34 truth-listed lines, $4,085): it is an EMA-only denial worth at most the $40
+    the A/R says was denied."""
+    kw = dict(patient=1, payer=P["commercial"], primary=P["commercial"], status="Denied")
+    rows = [charge(F.link_no(24), **kw), pay(F.link_no(24), "PAPER-24", 90, posted=D(2026, 4, 3), **kw),
+            adj(F.link_no(24), "CO-45", 20, posted=D(2026, 4, 3), contractual=True, **kw)]
+    ar = [F.ar_row(claim=F.claim_id(24), link=F.link_no(24), status="Denied", denial=40, current=40, aging=D(2026, 4, 3), svc=SVC,
+                   patient=1, primary=P["commercial"])]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    run(store)
+    e = one(store, "signal='EMA_DENIED' AND ema_link=?", F.link_no(24))
+    assert e["shortfall_cents"] == 4000 and "A/R" in e["title"]
