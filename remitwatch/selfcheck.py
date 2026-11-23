@@ -1557,13 +1557,12 @@ def _unpack(parts: list[bytes]) -> list:
     return json.loads(zlib.decompress(b"".join(parts)).decode())
 
 
-def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict]) -> tuple[list[str], int]:
+def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict], before: dict[str, dict],
+              after: dict[str, dict]) -> tuple[list[str], int]:
     """The run's new items to work that a held worklist must still show: not on the worklist before, open and listed, no
     status of their own from this run (an item that inherits a person's work or closes at once is the run's to hold), named
     by no failing critical check, and on no line (or claim-level service) an item of the held worklist already covers.
     Returns (their ids, how many were held back as a flood: more than NEW_WORK_FLOOD allows)."""
-    before = _before_rows(conn)
-    after = _after_rows(conn)
     blocked = {str(k) for r in results if r["severity"] == "critical" and r["status"] == "fail" for k, _c in r.get("keys") or []}
     touched = {f for (f,) in conn.execute("SELECT DISTINCT finding_id FROM finding_events WHERE run_id = ?", (run_id,))} \
         if _has_table(conn, "finding_events") else set()
@@ -1621,7 +1620,8 @@ def _reapply_person_changes(conn: sqlite3.Connection, since_id: int | None) -> i
     return n
 
 
-def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: list[dict]) -> dict:
+def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: list[dict], before: dict[str, dict],
+          after: dict[str, dict]) -> dict:
     """Safe mode: keep the run's items (compressed, selfcheck_held) and events, put the items back as they were before the
     run (temp.sc_before: the last good run's), add the run's new items to work that no failing check names (a hold never
     hides new work), take this run's events out of the item history (they describe changes that were held), put back every
@@ -1640,7 +1640,7 @@ def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: li
     for kind, payload in (("findings", {"cols": cols, "rows": held_rows}), ("events", {"cols": ev_cols, "rows": events})):
         for i, part in enumerate(_pack(payload)):
             conn.execute("INSERT INTO selfcheck_held (run_id, kind, part, data) VALUES (?,?,?,?)", (run_id, kind, i, part))
-    new_ids, flood = _new_work(conn, run_id, results)
+    new_ids, flood = _new_work(conn, run_id, results, before, after)
     for tb in ("sc_new", "sc_new_rows"):
         conn.execute(f"DROP TABLE IF EXISTS temp.{tb}")
     conn.execute("CREATE TEMP TABLE sc_new (finding_id TEXT PRIMARY KEY)")
@@ -1750,7 +1750,7 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     held = bool(hold_ids) and can_hold
     track: dict = {}
     if held:
-        held_info = _hold(conn, rid, at, ctx, results)
+        held_info = _hold(conn, rid, at, ctx, results, before, after)
         _log("safe_mode", counts={"held_items": held_info.get("held_items"), "held_closures": held_info.get("held_closures"),
                                   "new_items": held_info.get("new_items"), "person_changes": held_info.get("person_changes")},
              detail={"checks": hold_ids, "run_id": rid})

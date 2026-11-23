@@ -1760,3 +1760,10 @@ def test_no_page_tells_a_person_to_leave_an_item_for_its_size():
     for name in ("today.js", "data.js", "policy.js"):
         src = open(os.path.join(static, name), encoding="utf-8").read()
         assert "not worth pursuing" not in src and "worth less than" not in src and "amount filter hides" not in src, name
+
+
+def test_the_guides_first_item_opens_work_now():
+    """Review C1-2 (aimed at C2's today.js): the first-visit guide's "Show me the first item" opens the first item of
+    Work now, never one that waits on the payer or a question for the owner."""
+    src = open(os.path.join(os.path.dirname(cloud.__file__), "static", "today.js"), encoding="utf-8").read()
+    assert "goWork({state:'todo', deadline:'valid', sort:'deadline', first:'1'})" in src

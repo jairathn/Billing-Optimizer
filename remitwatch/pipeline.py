@@ -357,7 +357,7 @@ def people_changed_since_detection(conn) -> bool:
     now). Detection's own status changes are stamped with its start, so they never ask for another run."""
     try:
         row = conn.execute("SELECT started_at FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
-    except Exception:       # noqa: BLE001  (no runs table yet: detection runs for that reason anyway)
+    except sqlite3.Error:       # no runs table yet: detection runs for that reason anyway
         return False
     last = row[0] if row else None
     if not last:
@@ -369,15 +369,15 @@ def people_changed_since_detection(conn) -> bool:
         try:
             if conn.execute(sql, args).fetchone():
                 return True
-        except Exception:       # noqa: BLE001  (a store from before the table)
-            pass
+        except sqlite3.Error:   # a store from before the table: nothing of that kind was set
+            continue
+    from .ema_checks import POLICY_KEY
     try:
-        from .ema_checks import POLICY_KEY
         raw = conn.execute("SELECT value FROM meta WHERE key=?", (POLICY_KEY,)).fetchone()
         pol = json.loads(raw[0]) if raw and raw[0] else {}
-        return any(str((v or {}).get("at") or "") > last for v in pol.values() if isinstance(v, dict))
-    except Exception:       # noqa: BLE001
+    except (sqlite3.Error, ValueError, TypeError):      # no policy kept, or one that does not read: nothing to catch up on
         return False
+    return isinstance(pol, dict) and any(str((v or {}).get("at") or "") > last for v in pol.values() if isinstance(v, dict))
 
 
 def sweep_uploads(db_path: str) -> dict:
