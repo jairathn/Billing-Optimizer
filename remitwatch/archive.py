@@ -615,16 +615,16 @@ def _plan_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX temp.ix_arc_xb_bill ON arc_xb(bill)")
     conn.execute("CREATE TEMP TABLE arc_dates (bill TEXT, d TEXT, paid TEXT, claims INTEGER, lines INTEGER, years TEXT)")
     conn.execute("""INSERT INTO temp.arc_dates (bill, d, lines, years)
-                    SELECT k.bill, MAX(COALESCE(l.service_date, l.service_period_end, l.service_period_start)), COUNT(*),
+                    SELECT k.bill, MAX(COALESCE(l.service_date, l.service_period_end, l.service_period_start)) || COALESCE((SELECT '' FROM remarks r WHERE r.claim_key = k.claim_key LIMIT 1), ''), COUNT(*),
                            GROUP_CONCAT(DISTINCT substr(COALESCE(l.service_date, l.service_period_start, l.payment_date), 1, 4))
                     FROM temp.arc_cb k JOIN lines l ON l.claim_key = k.claim_key GROUP BY k.bill""")
     conn.execute("""INSERT INTO temp.arc_dates (bill, d, paid, claims)
                     SELECT k.bill, MAX(COALESCE(c.statement_to, c.statement_from)), MAX(c.payment_date), COUNT(*)
                     FROM temp.arc_cb k JOIN claims c ON c.claim_key = k.claim_key GROUP BY k.bill""")
     if _have(conn, "ema_rows"):
-        conn.execute("""INSERT INTO temp.arc_dates (bill, d, lines)
-                        SELECT x.bill, MAX(e.service_date), COUNT(*) FROM ema_rows e JOIN temp.arc_xb x
-                        ON x.id = e.claim_id AND x.kind = 'ema' GROUP BY x.bill""")
+        conn.execute("""INSERT INTO temp.arc_dates (bill, d, paid, lines)
+                        SELECT x.bill, MAX(e.service_date), MAX(COALESCE(e.posted_date, e.transaction_date)), COUNT(*)
+                        FROM ema_rows e JOIN temp.arc_xb x ON x.id = e.claim_id AND x.kind = 'ema' GROUP BY x.bill""")
     for t in ("claims_837", "lines_837"):
         if _have(conn, t):
             conn.execute(f"""INSERT INTO temp.arc_dates (bill, d, lines)
@@ -644,11 +644,14 @@ def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
         fcols = set(_cols(conn, "findings"))
         sel = ", ".join(c if c in fcols else f"NULL AS {c}" for c in
                         ("finding_id", "patient_control_number", "claim_key", "status", "work_state", "stale", "notes",
-                         "appealed_at", "evidence"))
+                         "appealed_at", "evidence", "line_key", "transaction_key"))
         need_claims: list[str] = []
         pattern_lines: list[str] = []
-        for fid, pcn, ck, status, ws, stale, notes, appealed, ev in conn.execute(f"SELECT {sel} FROM findings"):
+        remits: list[str] = []
+        for fid, pcn, ck, status, ws, stale, notes, appealed, ev, lk, txn in conn.execute(f"SELECT {sel} FROM findings"):
             is_open = _is_open(status, ws, stale)
+            if is_open and txn and not ck and not lk:
+                remits.append(txn)          # a remittance-level item (a payment EMA never posted): its remittance stays whole
             if ev and '"line_keys"' in ev and not pcn and not ck:
                 # a routine-rate pattern: its lines stay while it is open or a person worked it (its lines are its record)
                 if is_open or _worked(status, notes, appealed):
@@ -668,6 +671,14 @@ def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
             part = need_claims[i:i + 500]
             for (b,) in conn.execute(f"SELECT bill FROM temp.arc_cb WHERE claim_key IN ({','.join('?' * len(part))})", part):
                 held.setdefault(b, "open item")
+        if remits:
+            conn.execute("DROP TABLE IF EXISTS temp.arc_tx")
+            conn.execute("CREATE TEMP TABLE arc_tx (transaction_key TEXT PRIMARY KEY)")
+            conn.executemany("INSERT OR IGNORE INTO temp.arc_tx VALUES (?)", [(x,) for x in remits])
+            for (b,) in conn.execute("""SELECT DISTINCT k.bill FROM claims c JOIN temp.arc_cb k ON k.claim_key = c.claim_key
+                                        WHERE c.transaction_key IN (SELECT transaction_key FROM temp.arc_tx)"""):
+                held.setdefault(b, "open item")
+            conn.execute("DROP TABLE IF EXISTS temp.arc_tx")
         if pattern_lines:
             conn.execute("DROP TABLE IF EXISTS temp.arc_pl")
             conn.execute("CREATE TEMP TABLE arc_pl (line_key TEXT PRIMARY KEY)")
@@ -712,8 +723,10 @@ def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: 
     held_counts: Counter = Counter()
     rows = conn.execute("SELECT bill, newest, paid, lines, claims, years FROM temp.arc_bd ORDER BY newest, bill").fetchall()
     for bill, newest, paid, n_lines, n_claims, years in rows:
-        when = newest or paid
-        if not when or str(when)[:10] >= cutoff:
+        # the bill's last activity: its newest service, and its newest remittance or EMA posting (a payment this year on
+        # an old service is part of the payer's recent activity, which the rules measure: the bill stays)
+        when = max(str(newest or "")[:10], str(paid or "")[:10])
+        if not when or not newest or when >= cutoff:
             continue
         if bill in held:
             held_counts[held[bill]] += 1
@@ -723,7 +736,7 @@ def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: 
             waiting_years.update(y for y in ys if y not in frozen)
             out["waiting_rates"] += 1
             continue
-        out["bills"].append((bill, str(when)[:10], int(n_lines or 0), int(n_claims or 0), ys))
+        out["bills"].append((bill, when, int(n_lines or 0), int(n_claims or 0), ys))
         if limit and len(out["bills"]) >= limit:
             break
     out["held"] = dict(held_counts)
@@ -1417,6 +1430,60 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
         out["snapshot"].append(y)
     if out["snapshot"]:
         _meta_put(conn, META_FROZEN, frozen)
+    return out
+
+
+# the items whose inputs never leave the store (provider-level adjustments, EMA's own reports): measured afresh every run
+CARRY_SKIP = ("FEE_SKIM", "TAKEBACK")
+
+
+def _aggregate(f: dict) -> bool:
+    return not f.get("line_key") and not f.get("claim_key") and not f.get("patient_control_number") \
+        and f.get("signal") not in CARRY_SKIP and str(f.get("source") or "") != "ema"
+
+
+def carry_locked_aggregates(det: Any) -> dict:
+    """The hook right before Detector.save: the aggregate items of a locked year (a year the archive took lines of: the
+    payer's yearly totals, its routine second rates, the contract figures) were measured on the whole year. Measured
+    again on what the archive left they would shrink, vanish or appear from nothing, so the stored ones are kept as they
+    were (a person's status and notes stay theirs: save carries them as for any item), a new one is dropped, and an
+    item on a line such a new one took is put back as it was. Pooled items with no year (a payer's multiple-procedure
+    practice) are measured afresh. Returns {'kept', 'dropped', 'put_back'}."""
+    conn = det.conn
+    out = {"kept": 0, "dropped": 0, "put_back": 0}
+    locked = _locked_years(conn)
+    findings = getattr(det, "findings", None)
+    if not locked or findings is None or not _have(conn, "findings"):
+        return out
+    cols = _cols(conn, "findings")
+    q = ",".join("?" * len(locked))
+    stored = {}
+    for r in conn.execute(f"SELECT * FROM findings WHERE year IN ({q}) AND COALESCE(stale,0) = 0", sorted(locked)):
+        d = dict(zip(cols, r))
+        if _aggregate(d):
+            stored[d["finding_id"]] = d
+    taken: set[str] = set()
+    for fid, f in list(findings.items()):
+        if str(f.get("year") or "") in locked and _aggregate(f) and fid not in stored:
+            try:
+                ev = json.loads(f.get("evidence") or "{}") if isinstance(f.get("evidence"), str) else (f.get("evidence") or {})
+            except ValueError:
+                ev = {}
+            taken.update(str(x) for x in (ev.get("line_keys") or []) if x)
+            del findings[fid]
+            out["dropped"] += 1
+    for fid, d in stored.items():
+        findings[fid] = dict(d)
+        out["kept"] += 1
+    if taken:
+        lk = sorted(taken)
+        for i in range(0, len(lk), 500):
+            part = lk[i:i + 500]
+            for r in conn.execute(f"SELECT * FROM findings WHERE line_key IN ({','.join('?' * len(part))}) AND COALESCE(stale,0) = 0", part):
+                d = dict(zip(cols, r))
+                if d["finding_id"] not in findings:
+                    findings[d["finding_id"]] = d
+                    out["put_back"] += 1
     return out
 
 

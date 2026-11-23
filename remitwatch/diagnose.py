@@ -144,6 +144,14 @@ def _read_runs(sink: Any, runs: list[dict], conn: sqlite3.Connection | None) -> 
                     e = runlog._loads(ln)
                     if e and e.get("run_id") in out:
                         out[e["run_id"]][1].append(e)
+    elif isinstance(sink, runlog.StateSink):
+        # one listing of the state folder's runs/, then one download per run (a listing per run would be a Dropbox call each)
+        files = {m["name"].rsplit("/", 1)[-1][:-len(".jsonl.gz")]: m["name"] for m in sink.list("runs") if m["name"].endswith(".jsonl.gz")}
+        for r in runs:
+            name = files.get(r["run_id"])
+            lines = sink.read_lines(name) if name else []
+            if lines:
+                out[r["run_id"]] = (runlog._loads(lines[0]), [e for e in (runlog._loads(x) for x in lines[1:]) if e])
     else:
         for r in runs:
             out[r["run_id"]] = runlog.read_run(sink, r["run_id"])

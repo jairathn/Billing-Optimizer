@@ -631,54 +631,71 @@ def _line_words(x: dict) -> str:
     return (f" for {code}" if code else "") + (f" of {svc}" if svc else "")
 
 
-def _group_events(rows: dict, pays: dict, F: str, own_tk: Any, own_ck: Any) -> list[dict]:
-    """The money on one group's lines after its first flag F: standing 835 payments dated after F (not the remittance
-    that raised the earliest item), less the 835 reversals after F of payments made on or before F; and EMA's insurer
-    postings after F that no 835 carries (a payment an 835 also carries, the same amount within SAME_PAYMENT_DAYS, is that
-    payment)."""
-    ev: list[dict] = []
+def _own(item: dict, x: dict) -> bool:
+    """Whether an 835 row is the remittance an item was raised from (it never counts as money after that item's flag)."""
+    tk, ck = item.get("transaction_key"), item.get("claim_key")
+    return bool((tk and x.get("tk") == tk) or (ck and x.get("claim_key") == ck))
+
+
+def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[str, list[dict]]:
+    """The money on one group's records, each record given to the earliest item that covers it and was flagged before it
+    (never the remittance that raised that item): standing 835 payments, less the 835 reversals after the line's first
+    flag of payments made on or before it; and EMA's insurer postings that no 835 carries (a payment an 835 also
+    carries, the same amount within SAME_PAYMENT_DAYS, is that payment). {finding id: [event, ...]}."""
+    out: dict[str, list[dict]] = defaultdict(list)
+
+    def order(ids: Iterable[str]) -> list[str]:
+        return sorted(set(ids), key=lambda m: (items[m]["F"], m))
     by_key = {(x.get("line_key") or x.get("claim_key")): x for x in rows.values()}
-    standing_835 = []
-    for rid, x in rows.items():
-        if x.get("status") != "22" and not x.get("reversed_by") and _amount(x) > 0 and x.get("date"):
-            standing_835.append(x)
+    standing_835 = [x for x in rows.values() if x.get("status") != "22" and not x.get("reversed_by") and _amount(x) > 0 and x.get("date")]
     for rid, x in sorted(rows.items(), key=lambda kv: (str(kv[1].get("date") or ""), str(kv[0]))):
-        if (own_tk and x.get("tk") == own_tk) or (own_ck and x.get("claim_key") == own_ck):
-            continue
         d = str(x.get("date") or "")[:10]
-        if not d or d <= F:
+        cl = order(claim_of.get(rid) or [])
+        if not d or not cl:
             continue
         if x.get("status") == "22":
+            first = cl[0]
+            F0 = items[first]["F"]
             o = by_key.get(x.get("reverses")) if x.get("reverses") else None
-            if o is None:
+            if d <= F0 or o is None:
                 continue
             od = str(o.get("date") or "")[:10]
             amt = _amount(x)
             took = amt if amt < 0 else -_amount(o)
-            if od and od <= F and took < 0:
-                ev.append({"id": ("835r", rid[1]), "date": d, "cents": took, "kind": "takeback", "source": "835",
-                           "payer": x.get("payer") or "",
-                           "text": f"{x.get('payer') or 'The payer'} took back {usd(-took)}{_line_words(x)} on {d} (paid before the flag)"})
-            continue
-        if x.get("reversed_by"):
+            if od and od <= F0 and took < 0:
+                out[first].append({"id": ("835r", rid[1]), "date": d, "cents": took, "kind": "takeback", "source": "835",
+                                   "payer": x.get("payer") or "",
+                                   "text": f"{x.get('payer') or 'The payer'} took back {usd(-took)}{_line_words(x)} on {d} (paid before the flag)"})
             continue
         amt = _amount(x)
-        if amt > 0:
-            ev.append({"id": rid, "date": d, "cents": amt, "kind": "payment", "source": "835", "payer": x.get("payer") or "",
-                       "text": f"{x.get('payer') or 'The payer'} paid {usd(amt)}{_line_words(x)} on {d} (835 remittance)"})
+        if x.get("reversed_by") or amt <= 0:
+            continue
+        elig = [m for m in cl if d > items[m]["F"] and not _own(items[m]["item"], x)]
+        if elig:
+            out[elig[0]].append({"id": rid, "date": d, "cents": amt, "kind": "payment", "source": "835", "payer": x.get("payer") or "",
+                                 "text": f"{x.get('payer') or 'The payer'} paid {usd(amt)}{_line_words(x)} on {d} (835 remittance)"})
     for pid, p in sorted(pays.items(), key=lambda kv: (str(kv[1].get("posted") or ""), str(kv[0]))):
         posted = str(p.get("posted") or "")[:10]
         cents = int(p.get("cents") or 0)
-        if not posted or posted <= F or p.get("in_835") or not cents:
+        cl = order(claim_of.get(pid) or [])
+        if not posted or p.get("in_835") or not cents or not cl:
             continue
         if cents > 0 and any(_amount(x) == cents and abs(_days(x.get("date"), posted) or 999) <= SAME_PAYMENT_DAYS for x in standing_835):
             continue
+        if cents > 0:
+            elig = [m for m in cl if posted > items[m]["F"]]
+            winner = elig[0] if elig else None
+        else:
+            winner = cl[0] if posted > items[cl[0]]["F"] else None
+        if winner is None:
+            continue
         who = p.get("payer") or p.get("group") or "the payer"
-        ev.append({"id": pid, "date": posted, "cents": cents, "kind": "payment" if cents > 0 else "takeback", "source": "production",
-                   "payer": who, "text": (f"EMA posted {usd(cents)} from {who}{_line_words(p)} on {posted} (a check no 835 carries)" if cents > 0
-                                          else f"EMA posted a takeback of {usd(-cents)} from {who}{_line_words(p)} on {posted}")})
-    ev.sort(key=lambda e: (e["date"], str(e["id"])))
-    return ev
+        out[winner].append({"id": pid, "date": posted, "cents": cents, "kind": "payment" if cents > 0 else "takeback", "source": "production",
+                            "payer": who, "text": (f"EMA posted {usd(cents)} from {who}{_line_words(p)} on {posted} (a check no 835 carries)"
+                                                   if cents > 0 else f"EMA posted a takeback of {usd(-cents)} from {who}{_line_words(p)} on {posted}")})
+    for evs in out.values():
+        evs.sort(key=lambda e: (e["date"], str(e["id"])))
+    return out
 
 
 def _found_postings(conn: sqlite3.Connection, items: dict[str, dict]) -> dict[str, list[dict]]:
@@ -751,8 +768,10 @@ def _rule_text(bucket: str, ev: dict, credit: dict | None, win: int | None, F: s
 
 
 def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | None = None, errors: list | None = None) -> dict:
-    """The top line, item by item. Returns {'items': {winner finding id: {'a', 'b', 'c', 'returned', 'taken_back', 'events',
-    'members', 'F'}}, 'groups': {finding id: winner}, 'work': {finding id: [...]}, 'denied_again': {finding id: date},
+    """The top line, item by item. Each payment record goes to the earliest item that covers it and was flagged before it;
+    items that share a record form a group (the line counted once in the lift and the outcomes). Returns {'items':
+    {finding id: {'a', 'b', 'c', 'returned', 'taken_back', 'events', 'members', 'F'}}, 'groups': {finding id: the group's
+    earliest item}, 'group_members', 'group_money', 'work': {finding id: [...]}, 'denied_again': {finding id: date},
     'answered': {finding id: 'win'|'loss'}, 'candidates': n, 'newest': day, 'errors': [...]}."""
     t = _today(today)
     errors = errors if errors is not None else []
@@ -784,19 +803,25 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
         for p in fx.get("pays", []):
             union(fid, first_of.setdefault(_pay_id(p), fid))
     members: dict[str, list] = defaultdict(list)
+    claim_of: dict[tuple, list] = defaultdict(list)
     for fid in cands:
         members[find(fid)].append(fid)
+        fx = facts.get(fid) or {}
+        for x in fx.get("rows", []):
+            claim_of[_row_id(x)].append(fid)
+        for p in fx.get("pays", []):
+            claim_of[_pay_id(p)].append(fid)
     found = _found_postings(conn, items)
     out_items: dict[str, dict] = {}
     group_of: dict[str, str] = {}
-    group_events: dict[str, list] = {}
     group_members: dict[str, list] = {}
+    item_events: dict[str, list] = {}
     cache: dict = {}
     denied_again: dict[str, str] = {}
     answered: dict[str, str] = {}
 
-    def settle(winner: str, mem: list, evs: list[dict]) -> None:
-        r = items.get(winner) or reg[winner]
+    def settle(fid: str, mem: list, evs: list[dict]) -> None:
+        r = items.get(fid) or reg[fid]
         signals = {reg[m].get("signal") for m in mem if m in reg}
         works = [w for m in mem for w in work.get(m, [])]
         stack: list[list] = []
@@ -831,36 +856,37 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             if rec["cents"] > 0:
                 rec["counted_cents"] = left.get(id(rec), 0)
                 split[rec["bucket"]] += rec["counted_cents"]
-        total = sum(split.values())
-        out_items[winner] = dict(split, returned=total, taken_back=took, events=kept[:12], n_events=len(kept), members=sorted(mem),
-                                 F=r["F"])
+        out_items[fid] = dict(split, returned=sum(split.values()), taken_back=took, events=kept[:12], n_events=len(kept),
+                              members=sorted(mem), F=r["F"])
+        item_events[fid] = list(evs)
 
     for root, mem in members.items():
-        winner = min(mem, key=lambda m: (items[m]["F"], m))
-        F = items[winner]["F"]
+        rep = min(mem, key=lambda m: (items[m]["F"], m))
         rows: dict = {}
         pays: dict = {}
         for m in mem:
-            group_of[m] = winner
+            group_of[m] = rep
             fx = facts.get(m) or {}
             for x in fx.get("rows", []):
                 rows.setdefault(_row_id(x), x)
             for p in fx.get("pays", []):
                 pays.setdefault(_pay_id(p), p)
-        evs = _group_events(rows, pays, F, items[winner]["item"].get("transaction_key"), items[winner]["item"].get("claim_key"))
+        group_members[rep] = sorted(mem)
+        per = _assign_events(rows, pays, claim_of, items)
         for m in mem:
             if m in found:
-                evs += found[m]
-        group_events[winner], group_members[winner] = evs, sorted(mem)
-        if evs:
-            settle(winner, mem, evs)
-        # worked items answered again: money after the first work (a win), or a denial after it with no money (a loss)
+                per[m].extend(found[m])
+        for m, evs in per.items():
+            if evs:
+                settle(m, mem, evs)
+        group_evs = [e for evs in per.values() for e in evs]
+        # worked items answered again: money on the line after the first work (a win), or a denial after it and no money (a loss)
         for m in mem:
             ws = work.get(m) or []
             if not ws:
                 continue
             w0 = ws[0]["date"]
-            paid_after = any(e["cents"] > 0 and e["date"] > w0 for e in evs)
+            paid_after = any(e["cents"] > 0 and e["date"] > w0 for e in group_evs)
             denied = None
             for x in rows.values():
                 d = str(x.get("date") or "")[:10]
@@ -876,11 +902,13 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     # an unposted payment found posted, on an item no 835 or EMA line ties to another
     for fid, evs in found.items():
         if fid not in group_of:
-            group_of[fid] = fid
-            group_events[fid], group_members[fid] = list(evs), [fid]
+            group_of[fid], group_members[fid] = fid, [fid]
             settle(fid, [fid], list(evs))
+
+    def group_money(rep: str) -> int:
+        return sum((out_items.get(m) or {}).get("returned", 0) for m in group_members.get(rep, [rep]))
     # a person who marked an item Paid, where no payment record of its group shows money: their amount, on their day (one
-    # mark per group, the earliest-raised item's, so two people marking the same line Paid count it once)
+    # mark per group, the earliest-raised marked item's, so two people marking the same line Paid count it once)
     marks: dict[str, tuple] = {}
     if _fx(conn):
         resolved = [fid for fid, r in reg.items() if r.get("last_status") == "resolved" and r["F"]]
@@ -891,21 +919,24 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
                 r = reg[fid]
                 if auto or not (rc or 0) > 0 or not rd or str(rd)[:10] <= r["F"]:
                     continue
-                winner = group_of.get(fid, fid)
-                if (out_items.get(winner) or {}).get("returned"):
+                rep = group_of.get(fid, fid)
+                if group_money(rep):
                     continue
                 e = {"id": ("mark", fid), "date": str(rd)[:10], "cents": int(rc), "kind": "mark", "source": "person",
                      "payer": r.get("payer_group") or "",
                      "text": f"Marked Paid ({usd(rc)}) on {str(rd)[:10]} by a person; no payment record shows it yet"}
-                if winner not in marks or (r["F"], fid) < marks[winner][0]:
-                    marks[winner] = ((r["F"], fid), e)
+                if rep not in marks or (r["F"], fid) < marks[rep][0]:
+                    marks[rep] = ((r["F"], fid), e)
         _drop(conn, "rs_pm")
-    for winner, (_k, e) in marks.items():
-        mem = group_members.get(winner) or [winner]
-        group_of.setdefault(winner, winner)
-        settle(winner, mem, list(group_events.get(winner) or []) + [e])
-    return {"items": out_items, "groups": group_of, "work": work, "denied_again": denied_again, "answered": answered,
-            "candidates": len(cands), "newest": newest, "errors": errors}
+    for rep, ((_f, fid), e) in marks.items():
+        mem = group_members.get(rep) or [fid]
+        group_of.setdefault(fid, rep)
+        if items.get(fid) is None and fid not in reg:
+            continue
+        settle(fid, mem, list(item_events.get(fid) or []) + [e])
+    money_of_group = {rep: group_money(rep) for rep in group_members}
+    return {"items": out_items, "groups": group_of, "group_members": group_members, "group_money": money_of_group, "work": work,
+            "denied_again": denied_again, "answered": answered, "candidates": len(cands), "newest": newest, "errors": errors}
 
 
 # ------------------------------------------------------------------------------------------------------------- lift
@@ -933,12 +964,12 @@ def lift(reg: dict, att: dict, today: Any = None) -> dict:
     for fid, r in reg.items():
         if not r["returnable"] or not r["F"]:
             continue
-        winner = groups.get(fid)
-        if winner is not None and winner != fid:
+        rep = groups.get(fid)
+        if rep is not None and rep != fid:
             continue            # its money is its group's: the group is counted once, by its earliest item
-        mem = (money.get(fid) or {}).get("members") or [fid]
+        mem = (att.get("group_members") or {}).get(fid) or [fid]
         worked = any(att["work"].get(m) for m in mem)
-        ret = int((money.get(fid) or {}).get("returned") or 0)
+        ret = int((att.get("group_money") or {}).get(fid, (money.get(fid) or {}).get("returned") or 0) or 0)
         stake = max(int(reg[m].get("flagged_cents") or 0) for m in mem if m in reg) if mem else 0
         pat = _pattern(r)
         band = _band(r["F"], t)
@@ -1177,7 +1208,8 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
             for r in conn.execute(f"SELECT {', '.join(sel)} FROM findings WHERE finding_id IN (SELECT id FROM temp.rs_o)"):
                 cur[r[0]] = dict(zip(sel, r))
         _drop(conn, "rs_o")
-    money = {fid: (att["items"].get(att["groups"].get(fid, fid)) or {}).get("returned", 0) for fid in book}
+    gm = att.get("group_money") or {}
+    money = {fid: gm.get(att["groups"].get(fid, fid), (att["items"].get(fid) or {}).get("returned", 0)) for fid in book}
     closed: dict[str, list] = defaultdict(list)
     cant: dict[str, list] = defaultdict(list)
     waiting_no_money, waited = [], []

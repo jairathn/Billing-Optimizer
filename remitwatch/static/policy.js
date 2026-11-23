@@ -7,6 +7,7 @@
 
 const POL_NAME_KEY = 'rw:policy:name';
 const POL_PAGE = 50;
+const POL_SHOW = 40;        // patterns shown before "Show all" (most dollars still inside a window first); the filter searches all
 
 function polName(){ try { return localStorage.getItem(POL_NAME_KEY) || ''; } catch(e){ return ''; } }
 // a phone (390 px): one card per pattern, so the decision buttons stay on screen
@@ -32,6 +33,7 @@ async function policyTab(v){
       ${polNarrow() ? `<div id="polTable">${pats.map((p,i)=>polCard(p, i)).join('')}</div>`
         : `<div class="scroll"><table class="small" id="polTable"><thead><tr><th>Payer</th><th>Code</th><th>Reason</th><th class="num">Items</th><th class="num">Dollars</th><th class="num">Still appealable</th><th class="num">By EMA's rule</th><th class="num">Paid later before</th><th>Decision</th></tr></thead>
       <tbody>${pats.map((p,i)=>polRow(p, i)).join('')}</tbody></table></div>`}
+      ${pats.length > POL_SHOW ? `<button class="ghost" id="polAll">Show all ${pats.length.toLocaleString()} patterns</button>` : ''}
       <div class="small muted" style="margin-top:6px">"By EMA's rule": items EMA wrote off the day the payer's answer posted, with nothing paid after. "Paid later before": how often this payer paid such a denial later, from the remittance archive.${t.run_at ? ` Counts as of the run on ${esc(longDate(String(t.run_at).slice(0,10)))}; a decision takes effect at the next run.` : ''}</div>
       <div class="todo-err sev-high small" id="polErr" role="alert"></div></div>`
     : `<div class="panel"><div class="empty">No denial written off by EMA's posting rules is on file${t.run_at ? '' : ' yet: the run that reads EMA\'s Production report fills this page'}.</div></div>`}`;
@@ -40,7 +42,7 @@ async function policyTab(v){
 
 function polRow(p, i){
   const reason = `${esc(p.reason || '–')}${p.reason_text ? `<div class="small muted" title="${esc(p.reason_text)}">${esc(p.reason_text.length > 60 ? p.reason_text.slice(0, 57) + '...' : p.reason_text)}</div>` : ''}`;
-  return `<tr data-i="${i}" data-find="${esc((p.payer_group + ' ' + p.code + ' ' + p.reason + ' ' + (p.reason_text||'')).toLowerCase())}">
+  return `<tr data-i="${i}"${i >= POL_SHOW ? ' hidden' : ''} data-find="${esc((p.payer_group + ' ' + p.code + ' ' + p.reason + ' ' + (p.reason_text||'')).toLowerCase())}">
     <td>${esc(p.payer_group || '–')}</td><td>${esc(p.code || '–')}${p.modifier ? '-' + esc(p.modifier) : ''}</td><td>${reason}</td>
     <td class="num">${p.items ? `<a href="#" class="polItems" data-i="${i}" title="List these items">${Number(p.items).toLocaleString()}</a>` : '0'}</td>
     <td class="num">${money(p.cents)}${polUpper(p)}</td>
@@ -67,7 +69,7 @@ function polSegs(p, i){
   return `<div class="segs" role="group" aria-label="Decision"><button class="seg ${acc?'':'on'}" data-dec="pursue" data-i="${i}" aria-pressed="${!acc}">Pursue</button><button class="seg ${acc?'on':''}" data-dec="accept" data-i="${i}" aria-pressed="${acc}">Accept</button></div>${polWhen(p)}`;
 }
 function polCard(p, i){
-  return `<div class="lab-card" data-i="${i}" data-find="${esc((p.payer_group + ' ' + p.code + ' ' + p.reason + ' ' + (p.reason_text||'')).toLowerCase())}">
+  return `<div class="lab-card" data-i="${i}"${i >= POL_SHOW ? ' hidden' : ''} data-find="${esc((p.payer_group + ' ' + p.code + ' ' + p.reason + ' ' + (p.reason_text||'')).toLowerCase())}">
     <div><b>${esc(p.payer_group || '–')}</b> · ${esc(p.code || '–')}${p.modifier ? '-' + esc(p.modifier) : ''} · ${esc(p.reason || '–')}</div>
     ${p.reason_text ? `<div class="small muted">${esc(p.reason_text)}</div>` : ''}
     <div class="small" style="margin:4px 0">${esc(pl(p.items, 'item'))}, ${money(p.cents)}${p.upper_n ? ` (+ up to ${money(p.upper_cents)} not priced)` : ''}${p.appealable ? ` · <b>${money(p.appealable_cents)}</b> still appealable` : ' · none still appealable'} · ${Number(p.auto||0).toLocaleString()} by EMA's rule${p.later_paid_share != null ? ` · ${Math.round(100*p.later_paid_share)}% paid later before` : ''}</div>
@@ -77,10 +79,15 @@ function polCard(p, i){
 }
 
 function polBind(v, pats){
-  const find = v.querySelector('#polFind');
-  if(find) find.oninput = () => { const q = find.value.trim().toLowerCase();
-    v.querySelectorAll('#polTable [data-find]').forEach(tr => { const show = !q || tr.dataset.find.includes(q); tr.hidden = !show;
+  const find = v.querySelector('#polFind'), all = v.querySelector('#polAll');
+  let everyone = !all;
+  // a typed filter searches every pattern; with no filter, the first POL_SHOW until "Show all"
+  const apply = () => { const q = find ? find.value.trim().toLowerCase() : '';
+    v.querySelectorAll('#polTable [data-find]').forEach(tr => { const show = q ? tr.dataset.find.includes(q) : (everyone || Number(tr.dataset.i) < POL_SHOW);
+      tr.hidden = !show;
       const sub = v.querySelector(`.polItemsRow[data-for="${tr.dataset.i}"]`); if(sub && !show) sub.hidden = true; }); };
+  if(find) find.oninput = apply;
+  if(all) all.onclick = () => { everyone = true; all.remove(); apply(); };
   v.querySelectorAll('.polItems').forEach(a=>a.onclick=e=>{ e.preventDefault(); const i = Number(a.dataset.i), row = v.querySelector(`.polItemsRow[data-for="${i}"]`);
     if(!row) return; if(!row.hidden){ row.hidden = true; return; } row.hidden = false; polItems(row.firstElementChild, pats[i], 1); });
   v.querySelectorAll('[data-dec]').forEach(b=>b.onclick=async()=>{

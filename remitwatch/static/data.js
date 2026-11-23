@@ -10,6 +10,7 @@ const DT_STATUS = {current: ['Current', 'ok'], partly_replaced: ['Current, partl
   superseded: ['Replaced by a newer file', 'muted'], held: ['Held: needs a decision', 'sev-high'], waiting: ['Waiting to be read', 'sev-medium'],
   reread: ['Waiting to be read again', 'sev-medium'], refused: ['Refused', 'sev-high'], discarded: ['Discarded', 'muted']};
 const DT_SHOW = 8;          // catalog rows shown before "Show all"
+const DT_ASK_SHOW = 12;     // re-send requests shown before "Show all" (newest month first, most dollars first)
 
 function dtDay(d){ return d ? longDate(String(d).slice(0, 10)) : ''; }
 // a phone (390 px): lists instead of wide tables, so each row's button stays on screen
@@ -142,14 +143,20 @@ function dtMissingHtml(e){
   return `<div class="panel" id="dtMissing"><div class="panel-head"><h2>Payments with no remittance</h2><span class="small muted">EMA posted ${money(c1.unmatched_cents)} of insurance payments that no 835 on file carries. Without the remittance nobody can see what the payer denied, cut or wrote off on those claims.</span></div>
     ${since.cents ? `<div class="small"><b>${money(since.cents)}</b> of it was posted after the newest remittance (${esc(pl(since.checks, 'check'))}): the feed is behind.</div>` : ''}
     ${rows.length ? `<h3 class="small" style="margin:10px 0 4px">Remittances to ask for</h3>
-      <div class="batches">${rows.map((x,i)=>`<div class="batch"><div class="b-main"><b>${esc(x.payer_group)}</b><div class="small">${esc(x.why)}</div><div class="small muted">${esc(x.ask)}</div></div>
-        <div class="b-num small">posted in<div><b>${esc(rwMonth(x.month))}</b></div></div><div class="b-due small">${esc(pl(x.checks, 'check'))}</div>
-        <div class="b-prog"><b>${money2(x.cents)}</b></div><button class="small dtAsk" data-i="${i}">Copy the request</button></div>`).join('')}</div>
+      <div class="batches" id="dtAskList">${rows.slice(0, DT_ASK_SHOW).map(dtAskRow).join('')}</div>
+      ${rows.length > DT_ASK_SHOW ? `<button class="ghost" id="dtAllAsk">Show all ${rows.length.toLocaleString()} requests</button>` : ''}
       <textarea id="dtAskText" class="small" rows="5" style="width:100%;margin-top:6px" hidden readonly aria-label="The request text"></textarea>` : ''}
     <details class="dfold"><summary>By cause</summary><table class="small"><thead><tr><th>Cause</th><th class="num">Checks</th><th class="num">Dollars</th></tr></thead>
       <tbody>${causes.map(([k,x])=>`<tr><td>${esc((words[k]||{}).why || k)}</td><td class="num">${Number(x.checks||0).toLocaleString()}</td><td class="num">${money(x.cents)}</td></tr>`).join('')}</tbody></table>
       ${c1.no_check_cents ? `<div class="small muted">Also ${money(c1.no_check_cents)} posted as insurance payments with no check number at all: no remittance can be matched to those.</div>` : ''}</details>
     <div class="small" style="margin-top:6px"><a href="/api/ema/checks.csv" download>Download every check with no remittance (CSV)</a></div></div>`;
+}
+
+// one payer's checks of one month that came with no remittance, and the button that copies what to ask for
+function dtAskRow(x, i){
+  return `<div class="batch"><div class="b-main"><b>${esc(x.payer_group)}</b><div class="small">${esc(x.why)}</div><div class="small muted">${esc(x.ask)}</div></div>
+    <div class="b-num small">posted in<div><b>${esc(rwMonth(x.month))}</b></div></div><div class="b-due small">${esc(pl(x.checks, 'check'))}</div>
+    <div class="b-prog"><b>${money2(x.cents)}</b></div><button class="small dtAsk" data-i="${i}">Copy the request</button></div>`;
 }
 
 function dtUnpostedHtml(e){
@@ -214,13 +221,16 @@ function dtBind(v, ema){
     catch(err){ box.querySelectorAll('button').forEach(x=>x.disabled = false); if(msg) msg.textContent = 'Not saved: ' + (err.message || 'no answer from the site') + '.'; }
   });
   const rows = Array.isArray(ema.resend) ? ema.resend : [];
-  v.querySelectorAll('.dtAsk').forEach(b=>b.onclick=async()=>{
+  const bindAsk = () => v.querySelectorAll('.dtAsk').forEach(b=>b.onclick=async()=>{
     const x = rows[Number(b.dataset.i)]; if(!x) return;
     b.disabled = true;
     try { const text = await dtRequestText(x); const ta = v.querySelector('#dtAskText'); if(ta){ ta.hidden = false; ta.value = text; } dtCopy(text, b); }
     catch(err){ alert('The checks did not come back: ' + (err.message || 'no answer from the site')); }
     finally { b.disabled = false; }
   });
+  bindAsk();
+  const allAsk = v.querySelector('#dtAllAsk');
+  if(allAsk) allAsk.onclick = () => { v.querySelector('#dtAskList').innerHTML = rows.map(dtAskRow).join(''); allAsk.remove(); bindAsk(); };
   v.querySelectorAll('.dtBucket').forEach(tr=>{ const go = () => dtArRows(v, tr.dataset.bucket, 1, ema);
     tr.onclick = go; tr.onkeydown = e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); go(); } }; });
 }

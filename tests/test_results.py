@@ -333,7 +333,14 @@ def test_a_payment_on_a_service_only_a_later_item_covers_counts_from_that_items_
     remit(store, trace=F.check_no(2), paid_on="2026-04-20",
           claims=[{"pcn": F.claim_id(1, sub=2), "lines": [ln("99213", 150, 90, [("CO", "45", 60)]), ln("11102", 120, 70, [("CO", "45", 50)])]}])
     remit(store, trace=F.check_no(3), paid_on="2026-05-10", claims=[{"pcn": F.claim_id(1, sub=3), "lines": [ln("11102", 120, 30, [("CO", "45", 90)])]}])
+    # a whole-claim answer with no service lines: it answers every service of the claim, so both items read it
+    store.conn.execute("INSERT INTO transactions (transaction_key, trace_number, payment_date, payer_name, superseded) VALUES ('TXW', 'W1', '2026-03-30', 'BLUE CROSS TEST', 0)")
+    store.conn.execute("""INSERT INTO claims (claim_key, transaction_key, patient_control_number, payment_date, statement_from, claim_status_code,
+                          charge_cents, paid_cents, payer_name, claim_filing_indicator) VALUES ('TXW-0', 'TXW', ?, '2026-03-30', '2026-03-02', '4', 27000, 0,
+                          'BLUE CROSS TEST', '12')""", (F.claim_id(1, sub=4),))
+    store.conn.commit()
     run(store)
+    assert money_of(store, "C1")["members"] == ["C1", "L2"]     # one group: they share the whole-claim answer
     assert money_of(store, "C1")["returned"] == 9000            # its own 99213 payment after its flag
     assert money_of(store, "L2")["returned"] == 3000            # 11102: only the payment after May 1
     assert dash(store)["money"]["returned_cents"] == 12000

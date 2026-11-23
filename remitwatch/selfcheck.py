@@ -3491,6 +3491,36 @@ def panel(conn: sqlite3.Connection) -> dict:
             "given_up": gu, "blind": blind, "housekeeping": house, "rates": rates}
 
 
+def banner(conn: sqlite3.Connection) -> dict | None:
+    """The one line every page shows while RemitWatch is blind or in safe mode (from meta, so the dashboard's copy shows
+    it too): {'level': 'blind' | 'safe_mode', 'text'}, or None when there is nothing to say. Never 'all clear' while blind."""
+    safe = meta_get(conn, K_SAFE, {}) or {}
+    blind = meta_get(conn, K_BLIND, {}) or {}
+    parts, level = [], None
+    if safe.get("on"):
+        parts.append("Safe mode: the worklist is the one from before RemitWatch's last run, which it is checking. Nothing was lost.")
+        level = "safe_mode"
+    if blind.get("blind") and blind.get("banner"):
+        parts.append(blind["banner"])
+        level = level or "blind"
+    return {"level": level, "text": " ".join(parts)} if parts else None
+
+
+REQUESTS = ("audit", "accept")
+
+
+def apply_request(conn: sqlite3.Connection, action: dict, *, ledger: Any = None, today: Any = None) -> dict:
+    """A person's request from the Data tab, applied by the run (on a serverless host the page journals it; on a server
+    the route may call this itself): {'kind': 'selfcheck_request', 'what': 'audit'} runs the self-audit now;
+    {'what': 'accept', 'checks': [...], 'user': ...} accepts what the latest checks found (accept_findings)."""
+    what = (action or {}).get("what")
+    if what == "audit":
+        return {"audit": self_audit(conn, today=today, force=True, why="on demand", ledger=ledger)}
+    if what == "accept":
+        return accept_findings(conn, str(action.get("user") or "a person"), action.get("checks"))
+    return {"skipped": f"unknown request {what!r}"}
+
+
 def data_health(conn: sqlite3.Connection, today: Any = None) -> list[dict]:
     """Items for insights.data_health (the Data health list), from meta only: blindness first, then safe mode, the failing
     checks (warnings go here, as the brief asks), and the self-audit's gaps. Each item: key, ok, title, detail, who."""

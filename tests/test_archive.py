@@ -282,6 +282,23 @@ def test_every_open_state_a_pattern_and_a_reopening_keep_their_bill(tmp_path, ki
     store.close()
 
 
+def test_an_old_service_paid_inside_the_horizon_stays_and_an_open_remittance_item_keeps_its_remittance_whole(tmp_path):
+    store = crafted("file", tmp_path)
+    put_claim(store, "KA01AAAAA", "2021-03-01", paid_on="2026-06-01")         # paid this year: the payer's recent activity
+    put_claim(store, "KB01AAAAA", "2021-03-01")
+    put_claim(store, "KC01AAAAA", "2021-03-01")
+    put_claim(store, "KD01AAAAA", "2021-04-01")
+    store.conn.execute("UPDATE claims SET transaction_key='T-SHARED' WHERE patient_control_number IN ('KB01AAAAAC017','KC01AAAAAC017')")
+    store.conn.execute("UPDATE lines SET transaction_key='T-SHARED' WHERE patient_control_number IN ('KB01AAAAAC017','KC01AAAAAC017')")
+    store.conn.execute("""INSERT INTO findings (finding_id, signal, category, transaction_key, status, work_state, shortfall_cents)
+                          VALUES ('remit', 'REMIT_NOT_POSTED', 'fees', 'T-SHARED', 'open', 'work_now', 4000)""")
+    store.conn.commit()
+    freeze_all(store)
+    p = archive.plan(store.conn, today=TODAY)
+    assert [b for b, *_ in p["bills"]] == ["KD01AAAAA"] and p["held"] == {"open item": 2}
+    store.close()
+
+
 def test_nothing_moves_while_the_analysis_is_behind_or_has_never_run(tmp_path):
     store = crafted("file", tmp_path)
     put_claim(store, "KA01AAAAA", "2021-03-01")
@@ -344,6 +361,53 @@ def test_without_a_kept_baseline_no_bill_of_that_year_moves(tmp_path):
     assert res["bills"] == 0 and res["waiting_rates"] == 4 and res["waiting_years"] == ["2022"]
     assert store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 6
     assert any(i["key"] == "archive_waiting" and not i["ok"] for i in archive.data_health(store.conn))
+    store.close()
+
+
+def _sequestered(start: int, n: int, dos: str) -> list[str]:
+    return [claim(start + i, svc("99214", "223.65", "115.25", "117.60", "CAS*CO*45*106.05~CAS*CO*253*2.35~", dos=dos), dos=dos)
+            for i in range(n)]
+
+
+def test_a_locked_years_totals_stay_as_measured_on_the_whole_year(tmp_path, frozen_hook, monkeypatch):
+    """Sequestration withheld in 2023 is a yearly total of the 835 lines. Once the archive takes 2023's bills, the
+    total measured on what is left would vanish; the carried item keeps the whole year's figure."""
+    monkeypatch.setattr(Detector, "save", lambda self, _orig=Detector.save: (archive.carry_locked_aggregates(self), _orig(self))[1])
+    store = Store(":memory:", compact=True)
+    ingest(store, tmp_path, [(_sequestered(1, 12, "20230310"), "20230415"), (visits(100, 4, NEW), "20260415")])
+    detect(store)
+    seq = {r[0]: r[1] for r in store.conn.execute("SELECT finding_id, shortfall_cents FROM findings WHERE signal='SEQUESTRATION'")}
+    assert list(seq.values()) == [12 * 235]
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, horizon=24)
+    assert res["bills"] == 12 and "2023" in archive._locked_years(store.conn)
+    detect(store, "r2")
+    assert {r[0]: r[1] for r in store.conn.execute("SELECT finding_id, shortfall_cents FROM findings WHERE signal='SEQUESTRATION'")} == seq
+    store.close()
+
+
+def test_a_new_pattern_measured_on_what_the_archive_left_is_dropped_and_its_lines_items_come_back(tmp_path):
+    store = crafted("compact", tmp_path)
+    store.conn.execute("""INSERT INTO findings (finding_id, signal, category, year, status, work_state, shortfall_cents, evidence)
+                          VALUES ('total-2023', 'SEQUESTRATION', 'info', '2023', 'open', 'accepted', 2820, '{}')""")
+    store.conn.execute("""INSERT INTO findings (finding_id, signal, category, year, line_key, patient_control_number, status,
+                          work_state, shortfall_cents) VALUES ('one-off', 'UNDERPAID_VS_OWN_RATE', 'underpayment', '2023', 'L-1',
+                          'KA01AAAAAC017', 'open', 'expired', 2760)""")
+    store.conn.commit()
+    archive._meta_put(store.conn, archive.META_LOCKED, ["2023"])
+
+    class Det:
+        conn = store.conn
+        findings = {"new-pattern": {"finding_id": "new-pattern", "signal": "SECOND_RATE", "year": "2023",
+                                    "evidence": json.dumps({"line_keys": ["L-1"]})},
+                    "total-2023": {"finding_id": "total-2023", "signal": "SEQUESTRATION", "year": "2023", "shortfall_cents": 900},
+                    "fees-2023": {"finding_id": "fees-2023", "signal": "FEE_SKIM", "year": "2023", "shortfall_cents": 500},
+                    "now": {"finding_id": "now", "signal": "SEQUESTRATION", "year": "2026", "shortfall_cents": 100}}
+    det = Det()
+    out = archive.carry_locked_aggregates(det)
+    assert out == {"kept": 1, "dropped": 1, "put_back": 1}
+    assert det.findings["total-2023"]["shortfall_cents"] == 2820                   # the whole year's figure
+    assert "new-pattern" not in det.findings and det.findings["one-off"]["shortfall_cents"] == 2760
+    assert det.findings["fees-2023"]["shortfall_cents"] == 500 and det.findings["now"]["shortfall_cents"] == 100
     store.close()
 
 

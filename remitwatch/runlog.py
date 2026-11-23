@@ -1021,14 +1021,15 @@ class RunLog:
             self.sink.write_run(self.run_id, day, m, self.events)
         except Exception as exc:        # noqa: BLE001
             _note_internal("write_run", exc)
+        idx = None
         try:
-            update_index(self.sink, summary_of(m))
+            idx = update_index(self.sink, summary_of(m), whole=True)
             if self._marker:
                 self.sink.delete(f"open/{self.run_id}.json")
         except Exception as exc:        # noqa: BLE001
             _note_internal("index", exc)
         try:
-            prune_logs(self.sink, now=t, run=self)
+            prune_logs(self.sink, now=t, run=self, index=idx)
         except Exception as exc:        # noqa: BLE001
             _note_internal("prune", exc)
         if conn is not None:
@@ -1300,7 +1301,8 @@ def summary_of(m: dict) -> dict:
             "commit": (m.get("code") or {}).get("commit"), "rules_version": (m.get("code") or {}).get("rules_version")}
 
 
-def update_index(sink, entry: dict) -> list[dict]:
+def update_index(sink, entry: dict, whole: bool = False) -> Any:
+    """Add or replace a run's line in index.json (the last INDEX_KEEP runs). Returns the runs, or the whole index."""
     idx = sink.read_json("index.json") or {}
     runs = [r for r in (idx.get("runs") or []) if isinstance(r, dict) and r.get("run_id") != entry.get("run_id")]
     runs.append(entry)
@@ -1308,7 +1310,7 @@ def update_index(sink, entry: dict) -> list[dict]:
     idx["runs"] = runs
     idx["schema"] = SCHEMA
     sink.write_json("index.json", idx)
-    return runs
+    return idx if whole else runs
 
 
 def read_index(sink) -> list[dict]:
@@ -1373,12 +1375,13 @@ def _pid_alive(pid: Any) -> bool:
         return True
 
 
-def prune_logs(sink, *, now: datetime | None = None, run: RunLog | None = None, force: bool = False) -> dict:
+def prune_logs(sink, *, now: datetime | None = None, run: RunLog | None = None, force: bool = False, index: dict | None = None) -> dict:
     """Delete log files older than the sink's keep_days, then the oldest until the folder fits its budget. Once a day
-    (index.json remembers the day) unless forced. The drop is logged to the run."""
+    (index.json remembers the day) unless forced. The drop is logged to the run. `index`: index.json as the caller
+    just wrote it (saves reading it again from Dropbox)."""
     t = now or utcnow()
     today = t.date().isoformat()
-    idx = sink.read_json("index.json") or {}
+    idx = index if index is not None else (sink.read_json("index.json") or {})
     if not force and idx.get("pruned_on") == today:
         return {"skipped": True}
     files = [m for m in sink.list("") if (m.get("name") or "").startswith(("events-", "runs-", "runs/"))]

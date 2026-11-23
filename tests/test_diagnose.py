@@ -35,11 +35,13 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("REMITWATCH_MODE", "server")
     monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
     saved = set(runlog.SCRUB.names)
+    parts = dict(diagnose.PARTS)                 # parts other units register at import stay registered
     yield
     runlog.SCRUB.names = saved
     runlog.set_clock(None)
     runlog._CURRENT.set(None)
     diagnose.PARTS.clear()
+    diagnose.PARTS.update(parts)
 
 
 @pytest.fixture

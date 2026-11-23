@@ -413,24 +413,35 @@ def test_an_upper_bound_amount_is_counted_and_said_apart(server):
     ev = json.loads(conn.execute("SELECT evidence FROM findings WHERE finding_id=?", (f,)).fetchone()[0])
     ev["written_off_basis"] = "charge_less_paid"
     # as the run leaves such an item: no price, so no shortfall; the write-off capped at the charge less what was paid
-    conn.execute("UPDATE findings SET evidence=?, shortfall_cents=NULL, written_off_cents=12000 WHERE finding_id=?", (json.dumps(ev), f))
+    conn.execute("UPDATE findings SET evidence=?, shortfall_cents=NULL, written_off_cents=15000 WHERE finding_id=?", (json.dumps(ev), f))
     conn.commit()
     conn.close()
     t = c.get("/api/ema/today").json()
     a = t["auto_written_off"]
-    assert (a["n"], a["cents"], a["upper_n"], a["upper_cents"]) == (1, 0, 1, 12000)
+    assert (a["n"], a["cents"], a["upper_n"], a["upper_cents"]) == (1, 0, 1, 15000)
     assert _list_total(c, a["go"]) in (None, (1, 0))           # the list still shows the item, with no dollars
     todo = t["states"]["todo"]
-    assert (todo["upper_n"], todo["upper_cents"]) == (1, 12000)
-    assert (todo["n"], todo["cents"]) == sql_count(db, "status IN ('open','in_progress') AND work_state='work_now' AND appeal_deadline >= ?", TODAY)
+    assert (todo["n"], todo["cents"], todo["upper_n"], todo["upper_cents"]) == (2, 12000, 1, 15000)
+    assert _list_total(c, todo["go"]) in (None, (2, 12000))
     d = c.get("/api/ema/data").json()
-    assert d["upper_bound"] == {"n": 1, "cents": 12000}
+    assert d["upper_bound"] == {"n": 1, "cents": 15000}
     pats = c.get("/api/ema/policy").json()
     pat = next(p for p in pats["patterns"] if p["code"] == "99213" and p["upper_n"])
-    assert (pat["upper_n"], pat["upper_cents"]) == (1, 12000)
+    assert (pat["upper_n"], pat["upper_cents"]) == (1, 15000)
     assert pat["cents"] == sum(r["shortfall_cents"] or 0 for r in _all_items(c, pat["pattern"]))
     item = next(r for r in _all_items(c, pat["pattern"]) if r["finding_id"] == f)
-    assert item["shortfall_cents"] is None and item["written_off_basis"] == "charge_less_paid" and item["written_off_cents"] == 12000
+    assert item["shortfall_cents"] is None and item["written_off_basis"] == "charge_less_paid" and item["written_off_cents"] == 15000
+
+
+def _all_items(c, pattern):
+    """Every item of one write-off pattern, page after page of GET /api/ema/policy/items."""
+    out, page = [], 1
+    while True:
+        r = c.get("/api/ema/policy/items", params={"pattern": pattern, "page": page}).json()
+        out += r["rows"]
+        if page * r["size"] >= r["count"]:
+            return out
+        page += 1
 
 
 def test_a_store_before_the_states_has_no_state_counts_and_no_error(server, monkeypatch):
@@ -884,6 +895,22 @@ const click = async el => { if (!el) throw new Error('nothing to click'); await 
   out.items_html = cell.innerHTML;
   went.length = 0;
   const row = cell.querySelector('.row[data-id]'); if (row) row.onclick(); out.items_open = went.slice();
+  if (answers.__caps) {             // the long lists: the first rows, the rest on request, the filter over all of them
+    const caps = out.caps = {};
+    v = new El('main');
+    await ctx.dataTab(v);
+    caps.asks = v.querySelectorAll('.dtAsk').length;
+    await click(v.querySelector('#dtAllAsk'));
+    caps.asks_after = (v.querySelector('#dtAskList').innerHTML.match(/class="small dtAsk"/g) || []).length;
+    v = new El('main');
+    await ctx.policyTab(v);
+    const shown = () => v.querySelectorAll('[data-find]').filter(e => !e.hidden).length;
+    caps.pol_shown = shown();
+    const f = v.querySelector('#polFind');
+    f.value = 'payer 44'; f.oninput(); caps.pol_found = shown();
+    f.value = ''; f.oninput(); caps.pol_cleared = shown();
+    await click(v.querySelector('#polAll')); caps.pol_all = shown();
+  }
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e && e.stack || e); process.exit(1); });
 """
@@ -998,6 +1025,44 @@ def test_the_policy_page_draws_each_pattern_and_records_a_decision(page_run):
     assert out["accept_went"]                                  # the page redraws with the decision
     assert "1 item</b>, $90" in out["items_html"] and out["items_open"] == [{"open": ans["/api/ema/policy/items?"]["rows"][0]["finding_id"]}]
     assert "—" not in h + out["items_html"]
+
+
+def test_an_unpriced_write_off_is_said_apart_on_each_page(page_run):
+    """An item no rate prices has no dollars of its own; what EMA wrote off on it (the charge less what was paid) is
+    said beside the figure as an upper bound, never inside it (needs_B 1.6)."""
+    out, ans = page_run()
+    copy = lambda k: json.loads(json.dumps(ans[k]))
+    pol, items, today, data = copy("/api/ema/policy"), copy("/api/ema/policy/items?"), copy("/api/ema/today"), copy("/api/ema/data")
+    pol["patterns"][1].update(upper_n=1, upper_cents=15000)
+    items["rows"][0].update(shortfall_cents=None, written_off_basis="charge_less_paid", written_off_cents=15000)
+    today["states"]["todo"].update(upper_n=1, upper_cents=15000)
+    data["upper_bound"] = {"n": 1, "cents": 15000}
+    answers = {"/api/ema/policy": pol, "/api/ema/policy/items?": items, "/api/ema/today": today, "/api/ema/data": data}
+    out, _ = page_run(answers)
+    assert "+ up to $150 not priced" in out["policy_html"] and "up to $150.00" in out["items_html"]
+    assert "Not in this total: up to $150 EMA wrote off on 1 item no rate prices" in out["today_html"]
+    assert "1 open item has no price" in out["data_html"] and "EMA wrote off up to $150 on them" in out["data_html"]
+    narrow, _ = page_run(dict(answers, __narrow=True))
+    assert "(+ up to $150 not priced)" in narrow["policy_html"] and "up to $150.00" in narrow["items_html"]
+
+
+def test_long_lists_show_the_first_rows_and_the_rest_on_request(page_run):
+    """On the real archive the Data tab holds hundreds of re-send requests and the policy page hundreds of patterns: the
+    first ones show (newest month and most dollars; most dollars still inside a window), the rest are one click away,
+    and the filter finds a pattern that is not shown yet."""
+    out, ans = page_run()
+    data = json.loads(json.dumps(ans["/api/ema/data"]))
+    r0 = data["resend"][0]
+    data["resend"] = [dict(r0, month=f"2025-{m:02d}", checks=1, cents=1000 + m) for m in range(12, 0, -1)] + \
+                     [dict(r0, month=f"2024-{m:02d}", checks=1, cents=1000 + m) for m in range(12, 4, -1)]
+    pol = json.loads(json.dumps(ans["/api/ema/policy"]))
+    p0 = pol["patterns"][0]
+    pol["patterns"] = [dict(p0, pattern=f"Payer {i:02d}|99213||CO-197", payer_group=f"Payer {i:02d}") for i in range(45)]
+    out, _ = page_run({"/api/ema/data": data, "/api/ema/policy": pol, "__caps": True})
+    caps = out["caps"]
+    assert (caps["asks"], caps["asks_after"]) == (12, 20) and "Show all 20 requests" in out["data_html"]
+    assert (caps["pol_shown"], caps["pol_found"], caps["pol_cleared"], caps["pol_all"]) == (40, 1, 40, 45)
+    assert "Show all 45 patterns" in out["policy_html"] and "45 patterns" in out["policy_html"]
 
 
 def test_at_phone_width_each_main_action_stays_on_screen(page_run):

@@ -990,3 +990,22 @@ def test_randomized_postings_always_add_up_to_their_charges(tmp_path, seed):
     finally:
         lg.close()
         s.close()
+
+
+def test_the_banner_and_the_data_tab_requests(store):
+    c = store.conn
+    assert sc.banner(c) is None
+    remit(c, "2026-10-09", "ZZ00T0001C001", [("99213", 150, 80)])
+    sc.blindness(c, today=TODAY)
+    b = sc.banner(c)
+    assert b["level"] == "blind" and "No remittance since 2026-10-09" in b["text"]
+    add_item(c, "F-1")
+    out = sc.apply_request(c, {"kind": "selfcheck_request", "what": "audit"}, today=TODAY)
+    assert out["audit"]["why"] == "on demand"
+    assert sc.apply_request(c, {"what": "nonsense"})["skipped"]
+    add_item(c, "F-2")
+    run(c, None, "r1")
+    run(c, bad_closure, "r2")
+    assert sc.banner(c)["level"] == "safe_mode"
+    acc = sc.apply_request(c, {"what": "accept", "checks": ["closure_proof"], "user": "owner@example.test"})
+    assert acc["accepted"] == {"closure_proof": 1}
