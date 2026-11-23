@@ -125,6 +125,8 @@ MINUTE_LABELS = {"investigate": "Items RemitWatch proved settled or closed by it
                  "duplicate": "Repeat listings folded into one item (minutes saved per item)"}
 COST_LABELS = {"hosting_month": "Hosting per month", "other_month": "Other costs per month", "fax_page": "Cost of one fax page",
                "ai_call": "Cost of one AI call"}
+MINUTE_SHORT = {"investigate": "The minutes to investigate one item by hand", "packet": "The minutes saved per appeal packet",
+                "fax": "The minutes saved per fax", "duplicate": "The minutes saved per repeat listing"}
 SETTINGS_HISTORY = 100
 
 FINDING_FIELDS = ("finding_id", "signal", "category", "status", "stale", "line_key", "claim_key", "transaction_key",
@@ -322,13 +324,16 @@ def settings_problem(values: Any) -> str | None:
             continue
         if not isinstance(got, dict):
             return f"The {group} must be a list of named figures."
+        names = MINUTE_SHORT if group == "minutes" else COST_LABELS
         for k, v in got.items():
             if k not in DEFAULT_SETTINGS[group]:
-                return f"There is no figure called {k}."
+                return "There is no such figure on this page: read the page again."
+            what = names.get(k, k)
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
-                return f"{k} must be a number."
+                return f"{what} must be a number."
             if not lo <= float(v) <= hi:
-                return f"{k} must be between {lo} and {hi:,} {unit}."
+                return (f"{what} must be between {lo} and {hi:,} minutes." if unit == "minutes"
+                        else f"{what} must be between $0 and ${hi:,}.")
     return None
 
 
@@ -1515,7 +1520,8 @@ def _closure(r: dict, f: dict | None, money: int) -> str | None:
 
 
 CLOSURE_LABELS = {"paid": "Paid", "patient": "Moved to the patient", "secondary": "Settled by another payer", "policy": "Owner policy or hide rule",
-                  "let_go": "Let go by a person", "expired": "Expired", "other": "Otherwise settled (paid before, a duplicate, a twin)",
+                  "let_go": "Let go by a person", "expired": "Expired",
+                  "other": "Otherwise settled (paid before the flag, or the same service listed twice)",
                   "gone": "No longer listed"}
 
 
@@ -2270,6 +2276,8 @@ def roi(payload: dict, settings: dict, today: Any = None) -> dict:
     costs = (settings or {}).get("values", {}).get("costs") or DEFAULT_SETTINGS["costs"]
     money = payload.get("money") or {}
     lf = payload.get("lift") or {}
+    # the lift-adjusted return rests on the measured lift: with fewer than MIN_RATE_N cases on either side there is none
+    enough = bool(lf.get("enough"))
     w_ret = (lf.get("worked") or {}).get("returned_cents") or 0
     factor = max(0.0, min(1.0, (lf.get("incremental_cents") or 0) / w_ret)) if w_ret > 0 else 0.0
     pages = (payload.get("work") or {}).get("fax_pages_by_month") or {}
@@ -2287,18 +2295,20 @@ def roi(payload: dict, settings: dict, today: Any = None) -> dict:
         r = by_month.get(m) or {}
         cost = fixed + round(pages.get(m, 0) * float(costs.get("fax_page") or 0) * 100) + round(ai.get(m, 0) * float(costs.get("ai_call") or 0) * 100)
         top = int(r.get("cents") or 0)
-        cons = int(round((r.get("a") or 0) * factor + (r.get("b") or 0)))
+        cons = int(round((r.get("a") or 0) * factor + (r.get("b") or 0))) if enough else None
         rows.append({"month": m, "returned_cents": top, "conservative_cents": cons, "cost_cents": cost, "fax_pages": pages.get(m, 0),
                      "ai_calls": ai.get(m, 0), "roi": round(top / cost, 2) if cost > 0 else None,
-                     "roi_conservative": round(cons / cost, 2) if cost > 0 else None})
+                     "roi_conservative": round(cons / cost, 2) if cost > 0 and cons is not None else None})
     tot_cost = sum(r["cost_cents"] for r in rows)
     tot = sum(r["returned_cents"] for r in rows)
-    tot_cons = sum(r["conservative_cents"] for r in rows)
+    tot_cons = sum(r["conservative_cents"] for r in rows) if enough else None
     return {"months": rows, "cost_cents": tot_cost, "returned_cents": tot, "conservative_cents": tot_cons,
-            "roi": round(tot / tot_cost, 2) if tot_cost > 0 else None, "roi_conservative": round(tot_cons / tot_cost, 2) if tot_cost > 0 else None,
-            "factor": round(factor, 3), "costs_set": tot_cost > 0,
-            "basis": ("ROI is the money returned over what RemitWatch cost that month. The lift-adjusted ROI counts only the share of "
-                      "the money after RemitWatch work that similar unworked items do not explain, plus the money found.")}
+            "roi": round(tot / tot_cost, 2) if tot_cost > 0 else None,
+            "roi_conservative": round(tot_cons / tot_cost, 2) if tot_cost > 0 and tot_cons is not None else None,
+            "factor": round(factor, 3) if enough else None, "costs_set": tot_cost > 0, "enough": enough,
+            "basis": ("The return is the money returned over what RemitWatch cost that month. The return counting only what the work "
+                      "added takes the share of the money after RemitWatch work that similar unworked items do not explain, plus the "
+                      "money found" + ("." if enough else f"; it needs {MIN_RATE_N} worked and {MIN_RATE_N} unworked items: not enough cases yet."))}
 
 
 # ------------------------------------------------------------------------------------------------------------- lists
@@ -2769,9 +2779,13 @@ def email_lines(conn: sqlite3.Connection, today: Any = None) -> list[str]:
     lines = [f"Money returned on claims RemitWatch flagged or worked: {usd(m['returned_cents'])} on {m['items']} items "
              f"(after RemitWatch work {usd(m['a_cents'])}, found by RemitWatch {usd(m['b_cents'])}, flagged with no recorded work "
              f"{usd(m['c_cents'])})."]
-    if m.get("anyway", {}).get("cents") is not None:
-        lines.append(f"About {usd(m['anyway']['cents'])} of this may have come back anyway: similar items with no work were paid "
-                     f"at {round((m['anyway']['rate'] or 0) * 100)}% ({m['anyway']['n']} items).")
+    a = m.get("anyway") or {}
+    if a.get("cents") is not None and int(a.get("n") or 0) >= MIN_RATE_N:
+        lines.append(f"About {usd(a['cents'])} of this may have come back anyway: similar items with no work were paid "
+                     f"at {round((a['rate'] or 0) * 100)}% ({a['n']} items).")
+    elif m.get("c_cents"):
+        lines.append(f"Some of this may have come back anyway; there are not enough similar items yet to say how much "
+                     f"({int(a.get('n') or 0)} of the {MIN_RATE_N} needed).")
     lines.append(f"Lost to deadlines: {usd(d['lost']['cents'])} on {d['lost']['n']} items. At risk in the next {AT_RISK_DAYS} days: "
                  f"{usd(live['at_risk']['cents'])} on {live['at_risk']['n']} items.")
     s = spot_summary(spot_rows_all(conn))
