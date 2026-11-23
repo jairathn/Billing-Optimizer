@@ -2297,7 +2297,14 @@ def _cloud_sync_status() -> dict:
     from .pipeline import dropbox_configured
     st = cloud.SERVING_COPY.status()
     lc = st.get("last_cycle") or {}
-    newest = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d") if has_table("transactions") else None
+    newest = None
+    if has_table("transactions"):
+        from .store import feed_through
+        conn = db()
+        try:
+            newest = feed_through(conn)
+        finally:
+            conn.close()
     files = (one("SELECT MAX(ingested_at) last, MAX(CASE WHEN kind='835' THEN ingested_at END) last835 FROM files") or {}) if has_table("files") else {}
     behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(newest).date()).days if newest else None
     return {"mode": "serverless", "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
@@ -3052,7 +3059,12 @@ def _data_behind_days() -> int | None:
     may have been paid since and nobody here can see it."""
     if not has_table("transactions"):
         return None
-    d = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d")
+    from .store import feed_through
+    conn = db()
+    try:
+        d = feed_through(conn)      # a stray remittance file does not make old data current
+    finally:
+        conn.close()
     try:
         return (datetime.now(timezone.utc).date() - datetime.fromisoformat(d[:10]).date()).days if d else None
     except ValueError:

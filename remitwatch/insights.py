@@ -220,10 +220,9 @@ def _meta(conn: sqlite3.Connection, key: str):
 
 
 def newest_payment(conn: sqlite3.Connection) -> str | None:
-    if "transactions" not in _tables(conn):
-        return None
-    r = conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
-    return r[0] if r and r[0] else None
+    """How far the remittances are known to have arrived (store.feed_through): a stray file does not move it."""
+    from .store import feed_through
+    return feed_through(conn)
 
 
 def work(conn: sqlite3.Connection, today: str) -> dict:

@@ -104,8 +104,8 @@ class AlertEngine:
         self.run_id = run_id
         self.now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.today = today or date.today().isoformat()
-        r = conn.execute("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0").fetchone()
-        self.asof = asof or (r["d"] if r else None) or self.today      # asof can be set to replay history
+        from .store import feed_through
+        self.asof = asof or feed_through(conn) or self.today      # asof can be set to replay history
         self.recent_start = _shift(self.asof, -RECENT_DAYS)
         self.base_start = _shift(self.recent_start, -BASELINE_DAYS)
         self.active: dict[str, dict] = {}

@@ -239,6 +239,47 @@ def table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
 
 
+FEED_BACKING_DAYS = 7       # another remittance file paid within this many days before a date backs it
+
+
+def feed_through(conn: sqlite3.Connection) -> str | None:
+    """The newest payment date the remittance feed vouches for: how far the claims' answers are known to have arrived.
+
+    A remittance that answers no claim (provider-level adjustments only, a few dollars) says nothing about the claims, and
+    one file on its own, days after the rest stopped coming, does not make the feed current: treated as current, every
+    claim sent since the feed stopped would look unanswered, and every appeal would stop being held for old data. So a date
+    counts only when a second file, paid on it or within the 7 days before it, backs it. A store with no such pair (one
+    file) has its newest claim-bearing date; one whose remittances carry no claim count, its newest date."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone():
+        return None
+    rows = conn.execute("""SELECT substr(payment_date, 1, 10), COALESCE(file_sha256, transaction_key) FROM transactions
+                           WHERE COALESCE(superseded, 0) = 0 AND payment_date IS NOT NULL AND payment_date <> ''
+                             AND (claim_count IS NULL OR claim_count > 0)
+                           ORDER BY payment_date DESC LIMIT 20000""").fetchall()
+    if not rows:
+        r = conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded, 0) = 0").fetchone()
+        return r[0] if r and r[0] else None
+    from datetime import date, timedelta
+    i, n = 0, len(rows)
+    while i < n:
+        d = rows[i][0]
+        try:
+            start = (date.fromisoformat(d) - timedelta(days=FEED_BACKING_DAYS)).isoformat()
+        except ValueError:
+            i += 1
+            continue
+        files = set()
+        j = i
+        while j < n and rows[j][0] >= start:
+            files.add(rows[j][1])
+            if len(files) >= 2:
+                return d
+            j += 1
+        while i < n and rows[i][0] == d:        # the next older date
+            i += 1
+    return rows[0][0]
+
+
 class Store:
     def __init__(self, db_path: str, compact: bool = False):
         self.db_path = db_path
@@ -379,13 +420,16 @@ class Store:
 
     # ------------------------------------------------------------------ supersession
     def mark_superseded(self) -> int:
-        """When the same payer trace number was delivered with different content, keep the
-        latest file (by ISA date, then mtime) as authoritative and flag the rest."""
+        """When the same payer trace number was delivered with different content, keep one copy as authoritative and flag
+        the rest. A copy whose claims and adjustments add up to its payment (balanced) wins over one that does not: a file
+        cut short partway (a broken download or copy) leaves claims out, so it never balances, and taken as the payment it
+        would drop paid claims from the totals and bring them back as claims to chase. Between two that do not balance,
+        the one with more claims; then the latest file (by ISA date, then mtime), as a payer's own correction balances."""
         c = self.conn
         c.execute("UPDATE transactions SET superseded=0")
         rows = c.execute("""
             SELECT t.transaction_key, COALESCE(t.trace_payer_id, t.payer_id, t.payer_name) AS pid, t.trace_number, t.payment_date,
-                   t.isa_date, t.isa_time, f.mtime
+                   t.isa_date, t.isa_time, f.mtime, COALESCE(t.balanced, 0) AS balanced, COALESCE(t.claim_count, 0) AS claim_count
             FROM transactions t LEFT JOIN files f ON f.sha256 = t.file_sha256
             WHERE t.trace_number IS NOT NULL AND t.trace_number <> ''
         """).fetchall()
@@ -396,8 +440,9 @@ class Store:
         for key, members in groups.items():
             if len(members) < 2:
                 continue
-            # the last key makes the choice the same whatever order the files were read in
-            members.sort(key=lambda r: ((r["isa_date"] or ""), (r["isa_time"] or ""), (r["mtime"] or ""), r["transaction_key"]))
+            # the most complete copy last; the last key makes the choice the same whatever order the files were read in
+            members.sort(key=lambda r: (int(bool(r["balanced"])), 0 if r["balanced"] else int(r["claim_count"] or 0),
+                                        (r["isa_date"] or ""), (r["isa_time"] or ""), (r["mtime"] or ""), r["transaction_key"]))
             for r in members[:-1]:
                 c.execute("UPDATE transactions SET superseded=1 WHERE transaction_key=?", (r["transaction_key"],))
                 flagged += 1

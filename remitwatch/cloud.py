@@ -1081,10 +1081,11 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         out["progress"] = bool(progressed or ran_detect or ran_activity)
         out["changed"] = bool(shown_changed or progressed)
         try:
+            from .store import feed_through
             one = lambda sql: conn.execute(sql).fetchone()[0]       # noqa: E731
             out["totals"] = {"remit_files": one("SELECT COUNT(*) FROM files WHERE kind='835'"),
                              "findings": one("SELECT COUNT(*) FROM findings WHERE COALESCE(stale,0)=0") if has_run or ran_detect else 0,
-                             "newest_payment": one("SELECT MAX(payment_date) FROM transactions WHERE superseded=0")}
+                             "newest_payment": feed_through(conn)}
         except sqlite3.Error:
             pass
         out["finished"] = _now()

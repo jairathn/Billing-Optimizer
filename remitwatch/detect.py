@@ -67,7 +67,7 @@ from datetime import date, datetime, timedelta, timezone
 from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, MPPR_CODES, appeal_rule,
                     carc_text, code_category, corrected_rule, filing_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
 from .fees import FeeTable, family_of, is_downcode
-from .store import Store
+from .store import Store, feed_through
 
 DETECT_RULES = "2.6"
 # whether what EMA has posted as paid closes an item (resolve_elsewhere), or only adds a hint: the billers check EMA, and
@@ -2182,7 +2182,10 @@ class Detector:
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "ema_rows" not in tables:
             return
-        newest, oldest = c.execute("SELECT MAX(payment_date), MIN(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
+        oldest = c.execute("SELECT MIN(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+        # how far the payers' answers are known to have arrived: a stray remittance file days after the feed stopped (one
+        # with only provider-level adjustments, or one file on its own) must not make every claim sent since look unanswered
+        newest = feed_through(c)
         if not newest:
             return
         # as far back as an item can still be open (a claim sent on time runs the longest appeal window, 730 days, past the
@@ -2231,7 +2234,8 @@ class Detector:
             if l.get("claim_status_code") in ("1", "4", "19"):
                 pcn_payer.setdefault(l["patient_control_number"], (l.get("payer_group") or "Unknown", l.get("payer_kind") or "other"))
         name_last: dict[str, str] = {}
-        for name, d in c.execute("SELECT payer_name, MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0 GROUP BY 1"):
+        for name, d in c.execute("""SELECT payer_name, MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0
+                                    AND (claim_count IS NULL OR claim_count > 0) GROUP BY 1"""):
             g = normalize_payer(name)[0]
             name_last[g] = max(name_last.get(g, ""), d or "")
         # when each export was pulled: the newest says what a claim's status and payments are now. A spreadsheet's own creation
