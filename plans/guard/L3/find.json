@@ -1,0 +1,260 @@
+{
+ "lens": "L3 blast radius of one run. One run replaces the whole worklist (Detector.save: DELETE FROM findings, then every item recomputed) and nothing bounds how much it changes before people and payers see it. The snapshot has no swing check at all, and the self-check that should catch a vanishing is not wired into either cycle (no caller in the snapshot or the dev tree f9a326e). Even once wired, on invented data both the snapshot's and the dev tree's self-check let through, with every check green: a 1,600-item flood, 800 items leaving Work now by state, a cut-short copy dropping 30 items (excused as 'superseded'), 500 closures with proof ($50,000 counted as recovered), 300 let-gos by a hide rule, 300 relabels, a $150,000 re-pricing. And a held run still faxes payers, clears alerts and mails the weekly report. Normal real runs are small (per remittance day p99 70 new items and 50 closures; per 100 remittance lines p99 7.31 and 4.73, max 13.76 and 4.85), so a guard can hold every case above with no false holds on the 145 weeks on record. Observed on the real Vercel image: one release run reopened 550 items ($27,017) and took 1,549 off the list with no person in between. Tests: guard/L3/test_l3_blast_radius.py (23 fail, 4 controls pass); measurements: guard/L3/measure/*.json.",
+ "instances": [
+  {
+   "id": "L3-1",
+   "file": "remitwatch/detect.py",
+   "severity": "high",
+   "status": "open",
+   "where": "Detector.run 4312-4363 calls no self-check; pipeline.run_cycle 422-640 and cloud.run_cloud_cycle 1533-1840 neither; selfcheck.begin_detection 1210 and after_detection 1425 have no caller in the snapshot or in the dev tree f9a326e (needs_G section 1 is the unapplied hook)",
+   "what_it_can_do": "Every run-level guard the release counts on is inert: safe mode, the vanished keep, the eleven invariants, the SAFE_MODE and CHECK_FAILED alerts. A run that drops a whole category of items, or closes items with no proof, publishes straight to both sites and nothing records that a check ever ran.",
+   "scenario": "Invented: three denials read from invented 835s; Detector(store).run() on the file store and on the compact store; afterwards selfcheck_runs does not exist or is empty.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_detection_runs_the_self_check_by_itself fails on both store kinds (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid).",
+   "guard": "Wire the self-check and the swing assessment into Detector.save/Detector.run, the one path both hosts use, so no detection path (pipeline, cloud, deferred detection, cli detect) can skip it. Test: Detector.run alone leaves a selfcheck_runs row and a swing record on the file store, the compact store and its serialized image."
+  },
+  {
+   "id": "L3-2",
+   "file": "remitwatch/selfcheck.py",
+   "severity": "high",
+   "status": "open",
+   "where": "CHECKS 719-783 has no check on how many items or dollars a run adds; check_precision_guard 996-1027 leaves out NO_ANSWER, REJECTED_PRE_PAYER, NOT_SENT and the NOT_A_DENIAL signals; the dev tree's NEW_WORK_FLOOD = (20, 10%) (dev selfcheck 1516, 1584) only limits what a run that is already held may list",
+   "what_it_can_do": "One run can add any number of items to Work now and no check fails, so nothing holds. The chaos testers' case: one stray 835 (even a $71.59 adjustment-only file) moves the feed date and about 1,600 claims the payers did answer become 'never answered' (0b-1, 0e-2).",
+   "scenario": "Invented: 40 listed items; the next run adds 1,600 NO_ANSWER items; held=False, failing=[], 1,640 items in Work now.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_a_flood_of_new_work_is_held fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid). Real archive (aggregates, live_state_1122): new items per remittance day p99 70, max 293; per week p99 232, max 439; per 100 remittance lines read p99 7.31, max 13.76. A 1,600-item run is 3.6 times the largest week on record.",
+   "guard": "Count 'appear' and 'enter' moves in the swing assessment: hold when the items explained by new facts on their own claim pass 20 + 15 per 100 new remittance lines read since the last published run, or when unexplained items (no new fact on their own claim) pass 20, $5,000, or 10 in one payer group. Hotfix 2 H8 (feed_date, in its worktree) removes the stray-835 cause on live code and push 2 must port it (INT), but the class stays open for every other shared value (L1)."
+  },
+  {
+   "id": "L3-3",
+   "file": "remitwatch/selfcheck.py",
+   "severity": "high",
+   "status": "open",
+   "where": "check_vanished 1246-1299 skips every item still in the table (`if fid in after or ...: continue`, 1276); the dev version (dev selfcheck 1290-1397) skips any item 'still on record' (1326)",
+   "what_it_can_do": "Items people were shown as work that leave Work now while staying in the table are never counted: a state move to Done, Expired, Can't be checked or Accepted, an automatic closure, a hide rule's Let go. Money leaves the worklist in bulk with every check green.",
+   "scenario": "EMA's Production report turns 15 days old: states._context's prod_fresh flips and every NO_ANSWER item whose payer's 835s stop before its due date moves to Can't be checked in one run; a two-day export with posted scope then flips them all back (states._covered 2551-2556). Invented: 800 items work_now to cant_check: vanished 'ok', held=False.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_items_that_leave_work_now_by_a_state_change_are_counted fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid).",
+   "guard": "Count 'leave' moves (listed before, not listed after, item still on record) with the same causes and budgets as vanishes; a leave with no new fact on the item's own claim, no calendar date crossed and no person's action is unexplained."
+  },
+  {
+   "id": "L3-4",
+   "file": "remitwatch/selfcheck.py",
+   "severity": "high",
+   "status": "partly",
+   "where": "check_vanished's superseded route 1265-1271 and 1294-1295 ('gone from the store, or superseded') excuses every item whose remittance is superseded; supersession is decided in store.Store.mark_superseded 390-414 by payer, trace and date (L2-3)",
+   "what_it_can_do": "A cut-short copy (0e-1) or another remittance that shares payer, trace and date (L2-3) supersedes a complete remittance: every item on it vanishes, its paid claims come back as chase items, and the check files all of it as explained.",
+   "scenario": "Invented: 30 denials on one remittance; a copy with the same payer, trace and date holds 3 of the 30 claims; the run drops the 30 items: vanished routes {'superseded': 30}, kept 0.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_a_cut_short_copy_does_not_excuse_the_items_it_drops fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid). Real: one remittance carries up to 107 items (p99 24); hotfix 2d's brief measured 12 paid claims ($696.84) hidden by this collision on the live image today.",
+   "guard": "'Superseded' excuses an item only when its claim (bill and code) is on the superseding remittance or on another current one of the same payer; anything else is a vanish counted in the swing budget. Hotfix 2d D1 (in progress) keeps live code from letting an unbalanced or non-overlapping copy supersede; push 2 INTAKE owns 0e-1; the check's route is too broad in the snapshot and the dev tree."
+  },
+  {
+   "id": "L3-5",
+   "file": "remitwatch/detect.py",
+   "severity": "high",
+   "status": "open",
+   "where": "_mark_paid 1358-1376 (sets recovered_cents), resolve_elsewhere 1377-, run_ema_outcomes 3266-3302 and _close_from_ema 3304-3316 (closures from EMA Production checks no 835 carries), Detector.save 4198-4210; selfcheck.check_closure_proof 865-875 only asks that a proof row exists",
+   "what_it_can_do": "One run can close any number of items as paid, each with a proof row, and count each one as money recovered: the worklist empties and the Results tab claims the money.",
+   "scenario": "A Production export from another EMA tenant (L2-13), a link-map error or a duplicated posting run closes 500 items. Invented: 500 closures with proof rows: held=False, failing=[], $50,000 counted as recovered.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_a_wave_of_automatic_closures_with_proof_is_held fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid). Real archive: automatic closures per remittance day p99 50, max 111; per week p99 127, max 178; per 100 lines p99 4.73, max 4.85.",
+   "guard": "Count 'close' moves: hold above 20 + 6 per 100 new remittance lines read (plus a per-EMA-file budget measured on the B world before release), or more than 50 closures resting on one file or one check; a held closure is never counted as recovered."
+  },
+  {
+   "id": "L3-6",
+   "file": "remitwatch/detect.py",
+   "severity": "high",
+   "status": "open",
+   "where": "Detector.save 4198-4213: `elif st == \"resolved\" and auto_note: st, auto_note, prev_status = (prev_status or \"open\"), None, None` (4213)",
+   "what_it_can_do": "Every automatic closure whose payment no longer stands reopens in the same run, straight back to the status it had before, Sent ('appealed') included, with no cap and no check; the follow-up engine then treats each as an unanswered appeal.",
+   "scenario": "Real detector, invented 835s: an appealed denial closes on a later remittance; that remittance is superseded (a bad copy); the next run reopens it to 'appealed' and fax.followups lists its second request the same day with no hold (the feed is current, so the 14-day stale hold does not apply).",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_an_item_the_last_run_reopened_gets_no_automatic_follow_up fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid). Observed on the real Vercel image: the 2026-11-15 release run reopened 550 items ($27,017) and closed 82 ($5,586) in one run. Real: up to 96 closures rest on one remittance trace (p99 29).",
+   "guard": "Count 'reopen' moves (budget 20 unless the item's own claim shows a reversal); a reopened item goes to Work now, not back to Sent, until a person looks, and no automatic fax goes for it until then."
+  },
+  {
+   "id": "L3-7",
+   "file": "remitwatch/api.py",
+   "severity": "high",
+   "status": "open",
+   "where": "cli.cmd_cycle 286-292 runs _fax_run 453-466 right after every server cycle; api._send_followups 4692-4714 and _send_followup 4593- hold only for the number (fax.number_hold 440-459) and for _data_behind_days > STALE_APPEAL_DAYS (3418-3431); fax.followups 475-; Vercel: api.cron_faxes 4858-4875 at 15:43 daily",
+   "what_it_can_do": "Faxes to payers go out after a bad run with no regard for safe mode, a swing, or what that run just changed: second requests saying 'unpaid' for claims that were paid, minutes after the run on the server. A fax cannot be taken back.",
+   "scenario": "Invented: safe mode on (a run held); an appealed item with an appeal faxed 2026-09-01: second_request due, hold None.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_no_automatic_follow_up_while_the_worklist_is_held fails on both store kinds and the reopen test above fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid). Hotfix 2d D4 (pending) holds a chase fax when the store shows the claim paid after the appeal; after a supersession the store no longer shows that payment, so D4 does not cover this path.",
+   "guard": "An automatic fax (follow-up, retry, bulk item) goes only when no hold or safe mode is on, the item's status, state and money were set by a published run with no close, reopen or leave in the last run, and the item is not part of the last run's swing; otherwise it waits with a plain reason on the Faxes page."
+  },
+  {
+   "id": "L3-8",
+   "file": "remitwatch/actions.py",
+   "severity": "high",
+   "status": "open",
+   "where": "apply_hide_rules 287-297 and _hide_matching 215-239, called by Detector.run 4355-4361 after the save; _hide_matching sets status only (235), never work_state",
+   "what_it_can_do": "Every hide rule in force lets go every new item it covers, after the save and outside any check, with no count: a relabel (L3-11) or a new signal puts hundreds of items under an old payer rule and they are Let go in one run (0c-3 shows the other direction). Because work_state is left at work_now, a self-check run after this pass would also raise a false open_and_closed hold.",
+   "scenario": "Invented: 300 listed items let go by a hide rule after the run: held=False, failing=[].",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_a_wave_let_go_by_a_hide_rule_after_the_run_is_counted fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid).",
+   "guard": "Apply hide rules to the candidate inside the save, before states and the swing assessment; count let-gos per rule; a rule that lets go more than max(25, what it let go when the owner made it) in one run holds those items for the owner."
+  },
+  {
+   "id": "L3-9",
+   "file": "remitwatch/detect.py",
+   "severity": "high",
+   "status": "open",
+   "where": "progress_snapshots is keyed by run, category and status only (FINDINGS_DDL 277-279; Detector.save 4262-4265; selfcheck._hold 1387-1392)",
+   "what_it_can_do": "The Progress page, the counts check and the interim SWING alarm hotfix 2b is to build (it compares progress_snapshots run to run) cannot see items move between work states, and per-category sums hide offsetting moves (500 closed plus 500 new in one category reads as no change).",
+   "scenario": "Invented: 800 items move from Work now to Can't be checked: the snapshot rows before and after are identical.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_the_progress_counts_a_swing_alarm_reads_can_see_state_moves fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid).",
+   "guard": "Keep per run a transition record: per item (from status and state, to status and state, money before and after, cause) and a rollup by category, signal, payer group, status and work_state; the swing assessment and any alarm read transitions, never sums."
+  },
+  {
+   "id": "L3-10",
+   "file": "remitwatch/detect.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "Detector.build_baselines 789-828 (top_by_year_code), _ratio 2983-, expected_allowed; Detector.save rewrites every item's shortfall_cents and expected_cents each run; no check compares an item's money run to run",
+   "what_it_can_do": "Dollars move on items that stay: one odd line raises a baseline (L1-7) and every E/M downcode's shortfall rises and the worklist re-ranks, with no notice.",
+   "scenario": "Invented: 500 items re-priced by $300 each, open dollars $50,000 to $200,000 in one run: held=False.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_dollars_that_move_on_items_that_stay_are_counted fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid).",
+   "guard": "Count 'money' moves (per item absolute change in shortfall or expected value); unexplained money moves over $5,000 in total or 2% of open dollars hold."
+  },
+  {
+   "id": "L3-11",
+   "file": "remitwatch/detect.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "finding id = sha256 of signal and line or claim (_fid 287-288, _emit 1654); heirs in Detector.save 4112-4182; check_vanished same_line route 1281-1282",
+   "what_it_can_do": "A rules or data change that gives many lines a new signal replaces their items with new ids: unworked items restart as new (first seen today, so the weekly email lists them as new; deadlines worked out again), and the check calls it explained.",
+   "scenario": "Invented: 300 items replaced by new ids on the same lines: vanished routes {'same_line': 300}, not held.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_a_wave_of_relabelled_items_is_counted fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid). Observed on the real image: the 2026-11-15 release run took 850 CLAIM_DENIED_UNPAID and 699 UNDERPAID_VS_OWN_RATE items off the list in one run.",
+   "guard": "Count 'relabel' moves per (old signal, new signal); more than 25 unexplained relabels hold; relabels by a rules change go through the release notice (L3-17)."
+  },
+  {
+   "id": "L3-12",
+   "file": "remitwatch/alerts.py",
+   "severity": "high",
+   "status": "open",
+   "where": "AlertEngine.run 388-411 clears every alert the run does not raise (406-407); notify 434- mails new ones (pipeline 598-599, cloud 1728 and 1786); no SWING or SAFE_MODE alert kind exists because selfcheck.alert_candidates has no caller",
+   "what_it_can_do": "A bad run silences the alarms that would expose it, and the clear is permanent history: one stray remittance clears STALE_FEED even while the worklist is held.",
+   "scenario": "Invented: STALE_FEED raised; safe mode on; one stray 835 dated the day before: run_alerts clears STALE_FEED.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_a_held_run_does_not_clear_the_stale_feed_alert fails (on the snapshot 2f9c6ea: 23 failed, 4 controls passed (python3.13/SQLite 3.53 and python3.12/SQLite 3.45); the same 23 fail with the dev tree's newer selfcheck.py (f9a326e) overlaid). Hotfix 2b (interim alert-only SWING rule on live code) had not started in its worktree at audit time, and its design reads progress_snapshots (L3-9).",
+   "guard": "While a hold or safe mode is on, the alert engine clears nothing (it may add); it raises SWING (high) with the counts, mailed once per hold episode and again only when the held change grows."
+  },
+  {
+   "id": "L3-13",
+   "file": "remitwatch/report.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "build_report's 'New this run' (57-60: first_seen = MAX(first_seen)), sent by pipeline 605-608 and cloud 1797-1799 whatever the run did",
+   "what_it_can_do": "The weekly email presents a flood or a relabel wave as this run's new work, and goes out from a held run too (0c-12).",
+   "scenario": "A run adds 1,600 unexplained items on report day: the email lists them as new work before anyone sees the hold.",
+   "evidence": "Code reading; 0c-12 shows the section already mislabels.",
+   "guard": "The report reads the published list and the swing state; in a held run it says the update was held and lists nothing from the candidate."
+  },
+  {
+   "id": "L3-14",
+   "file": "remitwatch/results.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "results.snapshot 1778-1821 freezes a week (final=1 at 1816) once SETTLE_DAYS=14 have passed; baseline 1829-1841 ('frozen on the first run, never written again'); computed on the server when the Results page opens after an analysis (api_results._ensure 71-79)",
+   "what_it_can_do": "A flood or closure wave on a freeze day is frozen into history (recovered, lost, at risk) for good, and the push-2 release run, itself the largest swing, becomes the permanent 'before' of the ROI figures.",
+   "scenario": "The first push-2 run on the live store moves open items from 11,077 to 12,475 and puts 6,215 items in Done and 6,487 in Expired (unit B's measurement on the real world): that state is frozen as the baseline.",
+   "evidence": "Code reading; report_B.md 'Open items before and after'.",
+   "guard": "Freeze a week only when two published runs agree on its figures and no hold is on; write the baseline only after the release notice is accepted."
+  },
+  {
+   "id": "L3-15",
+   "file": "remitwatch/states.py",
+   "severity": "high",
+   "status": "open",
+   "where": "_context 944-983 (prod_fresh, boxes, group_last_835, newest_835, policy), _cant_check 2521-2547, _covered 2551-2556 (one posted-scope box covers every date), response_table 319-368, Detector._set_states 3765-3796",
+   "what_it_can_do": "Values every item's state shares move whole populations in one run with no count: Production freshness crossing 14 days, one posted-scope box, an answer-time table recomputed after a future-dated file (L1-11), a write-off policy decided.",
+   "scenario": "As L3-3; unit B also saw one run move 154 denials from Work now to Done (code edits) and 416 NO_ANSWER claims wait on EMA coverage.",
+   "evidence": "Code reading; report_B.md; the state-move test of L3-3.",
+   "guard": "Each state move is attributed to its cause; a shared-context cause that moves more than the budget is held, except a move toward Can't be checked because a feed went stale (the safe direction), which is published with the blind banner in dollars and listed in the run's notice."
+  },
+  {
+   "id": "L3-16",
+   "file": "remitwatch/detect.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "fold_payer_policy 3027-3055, default decision 'accept' (3046), the paid share recomputed every run (_paid_share)",
+   "what_it_can_do": "When a payer and code fall to 5% paid or less over 20 answered lines, every open denial of it is folded out of the work in one run, and new ones are folded before anyone sees them; one batch of identical denials can tip a pattern.",
+   "scenario": "One remittance file with 40 identical denials of a code the payer usually pays tips the share under 5%: all its open items leave Work now.",
+   "evidence": "report_B.md: 579 remittance items and 252 EMA-only lines ($111,436) folded on the real world.",
+   "guard": "Folds are 'leave' moves; a newly folded pattern or one that folds more than 25 items waits for the owner's decision (PLAN decision 14: 'decide', not 'accept'; owner INT) and its items stay listed until then."
+  },
+  {
+   "id": "L3-17",
+   "file": "remitwatch/pipeline.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "rules_changed re-detection runs like any run: pipeline 563-575, cloud 1663-1689; the self-check's first run sets the baseline and holds nothing (selfcheck 1444, 1463-1465)",
+   "what_it_can_do": "A release reclassifies the whole store with no notice and no acceptance, and automatic actions on the items it moved start at once.",
+   "scenario": "Observed: the 2026-11-15 release run (550 reopened, 82 closed, 1,549 taken off). Push 2's first run on the live store: open items 11,077 to 12,475; Done 6,215, Expired 6,487 (report_B.md).",
+   "evidence": "Real Vercel image detection_runs and finding_events (aggregates); report_B.md.",
+   "guard": "A release (DETECT_VERSION change), a migration (ema_reports.migrate_misread) and the first EMA report of a kind are let through with a notice, never held for size: the diff by signal, payer and cause on the Data tab and the banner, and one owner acceptance; automatic faxes for items they moved wait until it is accepted or 7 days pass; vanished items stay kept until accepted (needs_G)."
+  },
+  {
+   "id": "L3-18",
+   "file": "remitwatch/cloud.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "MAX_HOPS = 30 runs in a row (cloud.py 66); server cycles every interval and on every Dropbox webhook; the dev tree's NEW_WORK_FLOOD lets 20 items or 10% of the list into each held run (dev selfcheck 1516, 1584)",
+   "what_it_can_do": "Per-run thresholds alone let a flood in by instalments: split across hops or days, each part stays under any per-run bar, and a sustained flood leaks about 10% of the list per held run (five runs: about +61%).",
+   "scenario": "A 1,600-item flood arriving as eight 200-item runs over one day of Vercel hops.",
+   "evidence": "Code reading.",
+   "guard": "Budgets are cumulative from the last published state (held runs' admitted items count against the same budget) and per calendar day."
+  },
+  {
+   "id": "L3-19",
+   "file": "remitwatch/detect.py",
+   "severity": "high",
+   "status": "open",
+   "where": "no publish step on the server: the pages read the live findings table; Detector.save commits the candidate (DELETE FROM findings 4258, commit 4270), then run_ema_summaries and apply_hide_rules commit on their own (4353-4361); on Vercel the run publishes the serving copy right after (cloud 1774), and a run that applies a Production file publishes new EMA tables with the old items for one hop (cloud 1675, 1741)",
+   "what_it_can_do": "Whatever a run produces is what people see within seconds on the server and within 45 seconds on Vercel, before any assessment; a hold applied afterwards (safe mode's _hold) restores a list people may already have acted on.",
+   "scenario": "A biller opens the worklist during the run and works items that the hold then takes back off the list.",
+   "evidence": "Code reading.",
+   "guard": "Assess inside Detector.save before the DELETE: the candidate goes to a side table until it passes or is released; both hosts share the path; the serving copy is built only from the published list."
+  },
+  {
+   "id": "L3-20",
+   "file": "remitwatch/archive.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "archive.run 1133- (retire past every window plus 30 days; tighten 6 months under pressure, TIGHTEN_STEP_MONTHS 87); not wired in the snapshot (needs_E)",
+   "what_it_can_do": "Once wired, one run can move many items and bills to the cold archive (its first run on the live store, or a tightening step) with no swing accounting.",
+   "scenario": "A memory-pressure step tightens the horizon by 6 months and retires a block of items in one run.",
+   "evidence": "Code reading.",
+   "guard": "Retire only from a published, unheld state; count retirements as a named cause in the run's record, capped per run and listed on the Data tab."
+  },
+  {
+   "id": "L3-21",
+   "file": "remitwatch/api.py",
+   "severity": "medium",
+   "status": "partly",
+   "where": "bulk appeal ('Appeal everything appealable') sends the run's appealable list with one click; REMITWATCH_BULK_APPEAL is off by default on live (hotfix on main); 0b-4: one 'Fax them anyway' overrides the stale hold for a whole batch",
+   "what_it_can_do": "When switched on, a flood of wrongly appealable items becomes hundreds of faxes in one click.",
+   "scenario": "0b-4: 728 appeals in one batch with one override.",
+   "evidence": "chaos_r0_b.json 0b-4; the switch on main.",
+   "guard": "Bulk refused while a hold is on; it lists only items in Work now in two consecutive published runs with no unexplained move."
+  },
+  {
+   "id": "L3-22",
+   "file": "remitwatch/static/today.js",
+   "severity": "medium",
+   "status": "open",
+   "where": "selfcheck.banner 3675-3688 has no caller; today.js 143 reads meta.selfcheck_banner, which /api/meta (api.py 399) never sets",
+   "what_it_can_do": "Even once safe mode is wired, nobody sees that the list is held or why.",
+   "scenario": "Safe mode holds a run; every page still looks normal.",
+   "evidence": "grep: no route sets selfcheck_banner.",
+   "guard": "/api/meta returns the hold, notice and blind banner from meta on both hosts; every page shows it above everything; a page test on each host."
+  },
+  {
+   "id": "L3-23",
+   "file": "remitwatch/selfcheck.py",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "where": "Models to build on: check_closure_proof holds a closure with no proof; check_vanished keeps a plainly dropped item; ema_reports' format holds keep a filtered-looking A/R and a Production file that would replace a box with much less for a person (api ema_report_decision); dev posted_money catches ledger money that disappears; hotfix 2 H8 feed_date; hotfix 2d D1",
+   "what_it_can_do": "These hold one input or one invariant; none bounds the total change one run makes.",
+   "scenario": "Controls: a dropped item is kept and a closure without proof holds, on both store kinds.",
+   "evidence": "guard/L3/test_l3_blast_radius.py::test_control_a_plain_dropped_item_is_kept and ::test_control_a_closure_without_proof_holds pass.",
+   "guard": "Keep them; the swing guard sits above them and reuses safe mode's hold store."
+  }
+ ],
+ "class_guard": "SWING GUARD SPEC (one module, remitwatch/swing.py; one call in Detector.save; both hosts).\n1. Where. Detector.save builds the candidate (out_rows, with hide rules, folds, states, expected values and any archive retirement applied to it in memory) and calls swing.assess(conn, published, candidate, ctx) BEFORE `DELETE FROM findings`. Only a passing or released candidate is written; the serving copy (Vercel) and every page read only the published list. The self-check's after_detection runs on what was written.\n2. Transitions. Per item, published vs candidate: appear (new listed id), vanish (listed id gone or stale), enter, leave (listed to not listed, item still on record: Done, Expired, Can't check, Accepted, Let go), close, reopen, relabel (same line or claim, new id), money (shortfall or expected value change of $1 or more), deadline (moved over 7 days). Kept per run as a transition record (item, from, to, money before and after, cause) plus a rollup by category, signal, payer group, status and work_state (replaces progress_snapshots as what alarms read).\n3. Causes (first match wins). person: a person's event on the item since the last published run (status, a hide rule a person made, the owner's policy decision). facts: the item's own-claim fingerprint changed (selfcheck._facts_of extended with supersession of its remittance, its EMA lines, newest postings and newest A/R row). calendar: a date the item carries (appeal or legal deadline, follow-up day, NO_ANSWER due day) falls between the last published run's day and today. release: DETECT_VERSION changed, a migration ran, or this is the first EMA report of its kind. shared: anything else (one store-, payer- or period-wide value moved: L1's class).\n4. Thresholds (constants with the measurement that set them; real archive 2024-01 to 2026-10, aggregates in guard/L3/measure). Cumulative from the last published state and per calendar day, over all runs and hops.\n - facts: appear+enter <= 20 + 15 per 100 new remittance lines read (max week on record 13.76 per 100, 439 items); close <= 20 + 6 per 100 lines (max 4.85, 178); reopen <= 20 unless the item's own claim shows a reversal; EMA-driven moves per EMA file: budget measured on the B world before release (owner INT).\n - shared: 20 items, $5,000, and 10 items in any one payer group (normal value 0 by construction).\n - per payer group, any non-person cause: max(25, 3 x that group's own daily p99 for the move; e.g. Medicare KY new 48, Humana MA closed 28).\n - calendar: 20 + 3 x what the previous run predicted for the days elapsed; a 'today' that moved backwards or by more than 2 days makes calendar moves over 20 a hold.\n - money: unexplained money moves over $5,000 in total or 2% of open dollars.\n - hide rules: a rule that lets go more than max(25, what it let go when made) in one run; folds: a new pattern or more than 25 items.\n - release causes are never held for size: they publish with a notice.\n By construction no week of the 145 on record would be held; acceptance: replay the archive day by day on a copy with the guard in measure-only mode (zero holds on the 988 remittance days) and the chaos perturbations (all held).\n5. What a hold does. Published list kept; candidate stored compressed (selfcheck_held's store) with its run id and transition record. Admitted from the candidate while held: every person's change (already published) and 'facts' appears within the cumulative budget (new work still shows). Held: closures, reopenings, leaves, vanishes, relabels, money moves, unexplained appears, hide and fold let-gos over their budgets, archive retirement, expected-value rewrite. Frozen outward and permanent effects: automatic faxes (follow-ups, retries) and bulk appeal; alert clears (the engine may add, never clear); the weekly report's new-work list (it says the update was held); Results freezes and the baseline.\n6. What people see. Every page, above everything, on both hosts (from meta, so Vercel's copy shows it): 'RemitWatch held today's update. It would have added N items ($X), closed M ($Y) and moved K off the list. Most have nothing new on their own claim (one shared value moved). The list is yesterday's, with your changes. See what changed.' The Data tab lists the transitions by cause, signal and payer group with example finding ids (deep links), and the files read since the last published run (counts by kind, never names). A SWING alert (high) is mailed once per hold and again only if the held change grows. The diagnostic bundle carries the rollup.\n7. Who releases. The owner (require_owner, as the Providers tab, typed count like H7), naming the run id shown (a newer candidate makes the release 409 changed); on Vercel a journal entry 'swing_release' {run_id, counts} applied at the next run start. Automatic release only when a later run, compared with the published list, is within every budget ('the next run agreed with the list you work'). A held vanish, leave or close wave is never auto-published by time. After 2 days held the banner turns red and the alert repeats daily. Discard: the owner names the input to take back (L2/L5) and the next run recomputes without it. Every hold, release and discard goes to the decision log with who, when and the run id.\n8. Release notice (not a hold): rules version change, migration, first A/R or Production report: published with the diff and one owner acceptance; until accepted, automatic faxes for items it moved wait (7 days at most) and vanished items stay kept.\n9. Also: fax.followups/api._send_followup hold any item that a non-person cause closed, reopened or moved in the last run until a person opens it; the vanished check's 'superseded' route only when the item's claim is on a current remittance; apply_hide_rules runs on the candidate and sets work_state; /api/meta serves the banner; progress_snapshots gains work_state and signal or is replaced by the transition rollup.",
+ "property_test": "Generated swing test (release gate 9; both hosts: the file store through pipeline.run_cycle and the compact store image through cloud.run_cloud_cycle with LocalState; invented data from tests/test_features, tests/test_selfcheck and tests/ema_fixtures builders).\nWorld(seed): 3 to 8 payer groups paying weekly or twice a week, 20 to 60 weeks of 835s, optional weekly EMA exports, A/R and Production, people's statuses and faxes on 5% of items. Run the cycle to a published state P0 and record T0 (items, states, money, causes).\nPerturb with exactly one of: (a) shared-value floods: one 835 from one group (adjustment-only or 1 to 3 claims) dated today-3, today+1, today+400 or 2099-12-31; a posted-scope two-day Production export; a payer alias setting change. (b) vanishings: a cut-short copy or a same-trace copy with other claims; a filtered A/R; the clock moved 15 days with no new files; a rule monkeypatched to return nothing; a hide rule matching a relabelled signal. (c) a closure wave: a Production export carrying another tenant's link prefix or duplicated postings. (d) a money swing: one E/M line 10x its allowed amount. (e) normal: the next 1 to 7 days of 835s drawn from the same model, plus people's actions, plus a calendar day passing. (f) a rules-version change and a first A/R report.\nInvariants, each on both hosts:\nI1 for (a) to (d) whose transitions pass a threshold: the published list after the run (server findings, Vercel serving copy) equals P0 plus people's changes plus admitted facts-appears; meta swing:state.held is true; /api/meta carries the banner on both hosts.\nI2 for (e): never held, published = candidate (no false hold on any generated normal day; also 0 holds when replaying the real archive week by week on a copy).\nI3 while held: the fake fax line records zero automatic sends; notify sends exactly one SWING alert and no alert row goes to cleared; results_snapshots gets no final=1 row and no baseline is written; archive retires nothing.\nI4 release is exact: after the owner releases run R, published = candidate(R) plus people's changes since; a release naming an older run id is refused.\nI5 no creep: a flood split into k >= 2 runs, each under the per-run budget, is held once the cumulative change since P0 passes it (also across Vercel hops in one day).\nI6 (f) publishes with swing:state.notice listing counts by signal and cause, never held for size; automatic faxes for items it moved wait until accepted.\nI7 the verdict (held, counts by move and cause) is identical on the file store and the compact image.\nI8 a second cycle with no new input changes nothing: same verdict, no second SWING mail, no item moves.\nI9 attribution is sound: every transition the run records has exactly one cause; removing the perturbation input (L2 take-back) and running again returns the published list to P0 plus admitted changes."
+}

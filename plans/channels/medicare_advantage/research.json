@@ -1,0 +1,1911 @@
+{
+ "family": "medicare_advantage",
+ "payers": [
+  {
+   "payer_group": "Humana Medicare Advantage",
+   "product": "Humana Medicare Advantage (HMO, PPO, PFFS; also the Medicare side of Humana D-SNPs) - participating (contracted) providers",
+   "states": "KY and IN (Humana's Medicare Advantage provider processes are national; no Kentucky or Indiana difference found)",
+   "what_it_is": "Humana Medicare Advantage claims (835 payer ids HUMANA and 61101; payer names HUMANA and HUMANA CARE PLAN). The 835s themselves point to Humana's Grievances and Appeals/Inquiry Directory.",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Availity Essentials (https://www.availity.com): Claims & Payments > Claim Status > find the claim > 'Dispute Claim', then submit from Claims & Payments > Appeals (the Appeals worklist). Supporting documents can be uploaded there.",
+     "applies_to": "First-level claim payment dispute (also called dispute/reopening) on a finalized Humana Medicare Advantage claim",
+     "required_or_preferred": "Preferred (listed first; also mail and phone)",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-inquiries",
+      "quote": "select the Dispute Claim button on the claim details screen. This adds the claim to your Appeals worklist but does not submit it to Humana.",
+      "title": "Humana provider page: claim payment inquiries",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Humana Correspondence, P.O. Box 14601, Lexington, KY 40512-4601",
+     "applies_to": "First-level dispute by mail: include TIN, member ID, date of service, claim number, charged, paid and expected amounts, and the reason. Phone alternative: 800-448-6262",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-inquiries",
+      "quote": "You can submit claim disputes via mail to: Humana Correspondence P.O. Box 14601 Lexington, KY 40512-4601",
+      "title": "Humana provider page: claim payment inquiries",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "email",
+     "value": "HumanaProviderServices@humana.com",
+     "applies_to": "Participating providers only, after Humana answers the first dispute (escalation to the Provider Concierge Unit). Send as secure email.",
+     "form": "Claim Escalation Form",
+     "form_url": "https://apps.humana.com/marketing/documents.asp?file=5018741",
+     "required_or_preferred": "Only escalation route Humana lists for participating providers",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "quote": "you can escalate your concern. Send a secure email to HumanaProviderServices@humana.com. Include the Claim Escalation Form",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Availity Essentials: Claims & Payments > Claim Status > 'Correct this Claim' (shows only for finalized claims eligible for correction); or electronically with 837P CLM05-3 = 7",
+     "applies_to": "Corrected (replacement) claim for Humana Medicare Advantage",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Claim%20Disputes%20and%20Corrected%20Claims%20Tip%20Sheetpdf",
+      "quote": "Correct a claim on Availity Portal: use the “Correct this Claim” button.",
+      "title": "Humana MA Claim Disputes and Corrected Claims Tip Sheet",
+      "doc_date": "2026-08-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Paper CMS-1500 marked 'corrected' or with resubmission code 7 and the original claim number in box 22, mailed to the claims address on the back of the member's Humana ID card (Humana's general claims address: Humana Claims Office, P.O. Box 14601, Lexington, KY 40512-4601)",
+     "applies_to": "Corrected claim on paper (Humana may charge a paper claim fee)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Claim%20Disputes%20and%20Corrected%20Claims%20Tip%20Sheetpdf",
+      "quote": "Mail paper corrected claims to the address on the back of the patient's Humana ID card",
+      "title": "Humana MA Claim Disputes and Corrected Claims Tip Sheet",
+      "doc_date": "2026-08-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity Essentials > Payer Spaces > Humana > Applications > Medical Records Management (MRM): find the open record request and upload",
+     "applies_to": "Medical records, itemized bills or invoices Humana asked for",
+     "required_or_preferred": "Preferred (Humana: 'faster adjudication')",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Upload requested documents to Humana's Medical Records Management (MRM) tool on Availity Essentials Portal, where all open medical record requests can be viewed.",
+      "title": "Humana provider page: medical records management",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "866-305-6655",
+     "applies_to": "Records Humana requested; put Humana's request letter on top. Second check: guide 642103ALL0125 p.4 and the 2026 manual list 866-305-6655.",
+     "required_or_preferred": "Allowed",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Fax requested records to 866-305-6655.",
+      "title": "Humana provider page: medical records management",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "Humana Medical Records Management, P.O. Box 14465, Lexington, KY 40512-4465",
+     "applies_to": "Medical records Humana requested (attach the request letter)",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Mail requested documents to: Humana Medical Records Management P.O. Box 14465 Lexington, KY 40512-4465",
+      "title": "Humana provider page: medical records management",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "other",
+     "channel": "fax",
+     "value": "888-815-8912",
+     "applies_to": "ONLY disputes of Humana Payment Integrity medical record review findings (mail: P.O. Box 14279, Lexington, KY 40512-4279), with the dispute form from the findings letter. Second check: guide 642103ALL0125 p.8 lists 888-815-8912.",
+     "form": "Humana PPI Medical Record Review Dispute Request Form",
+     "form_url": "https://assets.humana.com/is/content/humana/PPI%20Medical%20Record%20Review%20Dispute%20Formpdf",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-record-dispute-policy",
+      "quote": "Please submit all levels of disputes to the following address or fax number: Humana Provider Payment Integrity Disputes P.O. Box 14279 Lexington, KY 40512-4279 Fax: 888-815-8912",
+      "title": "Humana PPI medical record review dispute policy",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "First-level dispute (participating)",
+     "window": "18 months from the date the provider received notice of the original claim determination, unless the agreement or law sets another period",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_773902ALL0725-B_2026_ProviderManual-NonDelegated_formattedpdf",
+      "quote": "Claims disputes must be received by Humana within 18 months from the date the provider received notice of the original claim determination unless state or federal law or the agreement requires another time period or the claim will not be reopened.",
+      "title": "Humana 2026 Provider Manual (773902ALL0725)",
+      "doc_date": "2026-02-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim",
+     "window": "1 year from the original claim determination, unless the contract states otherwise",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Claim%20Disputes%20and%20Corrected%20Claims%20Tip%20Sheetpdf",
+      "quote": "Unless a contract states differently, a corrected claim must be submitted within 1 year from original claim determination.",
+      "title": "Humana MA Claim Disputes and Corrected Claims Tip Sheet",
+      "doc_date": "2026-08-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Medical record review dispute (PPI)",
+     "window": "Level one: in-network 18 months, out-of-network 6 months from the original determination; level two: 60 calendar days from the level one letter",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-record-dispute-policy",
+      "quote": "Level Two disputes must be submitted within 60 calendar days from the date of the Level One dispute determination letter.",
+      "title": "Humana PPI medical record review dispute policy",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Fax 888-556-2128 is printed on Humana's member 'Appeal or Grievance Form' (Y0040_GHHJX8LENa_C: 'may be sent to us by mail or fax ... Fax Number: 888-556-2128') and in some 2026 member Evidences of Coverage, but Humana's provider guide 642103ALL0125 labels 888-556-2128 'Commercial standard fax'. Humana's provider documents for Medicare Advantage list no standard appeal fax. Do not use it for provider claim disputes or appeals.",
+    "Fax 800-949-2961 is Humana's 'Medicare expedited fax' (guide 642103ALL0125). Expedited appeals are for services not yet given; they never apply to payment for care already given. Do not use it for claim appeals.",
+    "Participating providers have no Medicare appeal rights of their own at Humana: the 2026 directory says 'Participating providers do not have grievance and appeal rights on behalf of themselves'. Their route is the dispute process above, then the Provider Concierge escalation, then the arbitration terms of the agreement.",
+    "Dispute filing clock: the 2026 manual counts 18 months from 'the date the provider received notice of the original claim determination'; the 2025 manual (FINAL589003ALL1024) said 'within 18 months of the date the claim was paid'. Use the 2026 wording."
+   ],
+   "no_fax_reason": "Humana publishes no fax for provider claim payment disputes, reconsiderations or appeals on Medicare Advantage claims. Its live claim-payment page, its 2026 provider manual, its claim-payment inquiry guide (642103ALL0125) and its August 2026 tip sheet name only Availity, phone and mail (Humana Correspondence, P.O. Box 14601). Humana's faxes are for records it asked for (866-305-6655) and record-review disputes (888-815-8912) only.",
+   "notes": "Best path in the app: open Availity (Claim Status > Dispute Claim) with the packet ready to upload, or print with the P.O. Box 14601 address page. Records Humana requested can be faxed to 866-305-6655 with the request letter on top."
+  },
+  {
+   "payer_group": "Humana Medicare Advantage",
+   "product": "Humana Medicare Advantage - non-participating (non-contracted) providers: payment reconsideration (appeal) with Waiver of Liability, then the CMS Part C IRE",
+   "states": "KY and IN (national process)",
+   "what_it_is": "CMS gives non-contracted providers the Medicare Part C appeal path for claim denials: plan reconsideration, then automatic IRE review.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials: Claim Status > Dispute Claim > Appeals worklist (upload the signed Waiver of Liability and records)",
+     "applies_to": "Non-participating provider appeal of a denied Medicare Advantage claim",
+     "required_or_preferred": "Either Availity or mail",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/reconsiderations-appeals",
+      "quote": "To request an appeal of a denied claim, you need to submit your request in writing, via Availity Essentials or mail, within 65 calendar days from the date of the denial.",
+      "title": "Humana provider page: reconsiderations and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Humana Inc., P.O. Box 14165, Lexington, KY 40512-4165 (Humana Grievance and Appeal Department)",
+     "applies_to": "Non-participating appeal by mail: original claim, remittance, records, signed Waiver of Liability. The 2026 directory names the same box.",
+     "form": "Humana Waiver of Liability Statement (required when appealing on your own behalf); optional Humana Appeal, Complaint or Grievance Form with Section 4 skipped",
+     "form_url": "https://assets.humana.com/is/content/humana/Waiver%20of%20Liability%20Formpdf",
+     "required_or_preferred": "Required: written request with signed Waiver of Liability",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/reconsiderations-appeals",
+      "quote": "You can submit the request online via Availity Essentials or mail it to: Humana Inc. P.O. Box 14165 Lexington, KY 40512-4165",
+      "title": "Humana provider page: reconsiderations and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Availity Essentials Claim Status > Dispute Claim (same tool as contracted providers) for a disagreement with the amount paid",
+     "applies_to": "Non-contracted payment amount dispute (not a denial); mail alternative: Humana Correspondence, P.O. Box 14601, Lexington, KY 40512-4601",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "quote": "Appeals and disputes for finalized Humana Medicare Advantage, Medicaid or commercial claims can be submitted through Availity's secure provider portal, Availity Essentials",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "904-539-4080",
+     "applies_to": "Only to ask the CMS Part C IRE (C2C) to review a plan DISMISSAL of a non-contracted reconsideration. Upheld cases go to the IRE automatically. Second check: C2C's page lists 904-539-4080.",
+     "required_or_preferred": "Allowed ('in writing, which includes by fax')",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/managed-care/review-part-c-independent-entitiy",
+      "quote": "Attn: QIC Part C - New Plan Dismissal Appeal 301 W. Bay St., Suite 1110 Jacksonville, FL 32202 Fax: (904) 539-4080",
+      "title": "CMS: Reconsideration by Part C IRE",
+      "doc_date": "2026-05-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "external_review",
+     "channel": "mail",
+     "value": "C2C Innovative Solutions, Inc. - QIC Part C, Attn: QIC Part C - New Plan Dismissal Appeal, P.O. Box 1949, Jacksonville, FL 32231-0053",
+     "applies_to": "IRE review of a plan dismissal",
+     "source": {
+      "url": "https://partcappeals.c2cinc.com/Enrollees-and-Representatives/How-to-Request-Review-of-Plan-Dismissal",
+      "quote": "C2C Innovative Solutions, Inc. - QIC Part C Attn: QIC Part C - New Plan Dismissal Appeal P.O. Box 1949 Jacksonville, FL 32231-0053",
+      "title": "C2C (Part C IRE): Request Review of Plan Dismissal",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Non-participating appeal (Humana)",
+     "window": "65 calendar days from the date of the denial",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/reconsiderations-appeals",
+      "quote": "within 65 calendar days from the date of the denial",
+      "title": "Humana provider page: reconsiderations and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-contracted dispute (Humana MA tip sheet)",
+     "window": "180 days from the original claim determination",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Claim%20Disputes%20and%20Corrected%20Claims%20Tip%20Sheetpdf",
+      "quote": "Not contracted: 180 days from original claim determination",
+      "title": "Humana MA Claim Disputes and Corrected Claims Tip Sheet",
+      "doc_date": "2026-08-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Second level, non-contracted (automatic)",
+     "window": "Nothing to file: the plan sends upheld cases to the Part C IRE (C2C since 2026-05-01); IRE decides payment cases in 60 days",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/managed-care/review-part-c-independent-entitiy",
+      "quote": "the plan must automatically submit the case file and its decision for review by the Part C Independent Review Entity (IRE).",
+      "title": "CMS: Reconsideration by Part C IRE",
+      "doc_date": "2026-05-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-contracted reconsideration (federal rule)",
+     "window": "60 calendar days after receipt of the notice; receipt presumed 5 days after its date (65 days from the notice date); plan decides payment cases within 60 days",
+     "source": {
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.582",
+      "quote": "a request for reconsideration must be filed within 60 calendar days after receipt of the written organization determination notice",
+      "title": "42 CFR 422.582 (eCFR)",
+      "doc_date": "eCFR 2026-11-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "IRE review of a plan dismissal",
+     "window": "65 calendar days from the dismissal notice; IRE decides payment cases within 60 calendar days",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/managed-care/review-part-c-independent-entitiy",
+      "quote": "The request must be filed with the IRE within 65 calendar days from the date of the plan dismissal decision notice.",
+      "title": "CMS: Reconsideration by Part C IRE",
+      "doc_date": "2026-05-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Humana's 2026 manual says a non-participating provider 'can appeal claim denials for Medicare members only with a waiver of liability form for the following: Full claim denials, Claims paying zero dollars, Claims denied for medical necessity, Claims denied for noncovered benefits'. CMS guidance gives non-contracted providers appeal rights also for partial payments, bundling and level-of-care changes; for those Humana may treat the request as a payment dispute instead.",
+    "Humana says 65 calendar days from the denial date; the federal rule is 60 days after receipt with receipt presumed 5 days after the notice. Both give 65 days from the notice date."
+   ],
+   "no_fax_reason": "Humana publishes no fax for non-participating provider Medicare Advantage appeals: its live 'Reconsiderations and appeals' page says 'via Availity Essentials or mail', and the directory and guide list the P.O. Box 14165 address. The only Medicare fax in the guide (800-949-2961) is for expedited (pre-service) appeals.",
+   "notes": "The app should attach a pre-filled Humana Waiver of Liability Statement for the practice to sign before sending. Corrected claims and records Humana asked for: same channels as the participating entry (Availity Correct this Claim or paper to the ID-card address; records fax 866-305-6655)."
+  },
+  {
+   "payer_group": "UnitedHealthcare Medicare Advantage",
+   "product": "UnitedHealthcare Medicare Advantage (AARP and UHC MA plans, group MA) - network (contracted) providers",
+   "states": "KY and IN (national process; KY and IN are not in UHC's exclusion list for the digital-only rule)",
+   "what_it_is": "UnitedHealthcare Medicare Advantage claims, payer id 87726.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal (https://secure.uhcprovider.com/#/claims): Claims & Payments > Look Up a Claim > Act on Claim > reconsideration (or UHC's API)",
+     "applies_to": "Step 1 claim reconsideration, network (contracted) providers",
+     "required_or_preferred": "Required: digital only (portal or API) for network providers since 2026-02-01; Kentucky and Indiana are not on the exclusion list",
+     "source": {
+      "url": "https://www.uhcprovider.com/en/claims-payments-billing/appeals.html",
+      "quote": "First, you must submit a claim reconsideration request. If you don't agree with the outcome of the reconsideration, you may submit an appeal.",
+      "title": "UHCprovider.com: appeals and reconsiderations",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Look Up a Claim > Act on Claim > Appeal (attach only new material)",
+     "applies_to": "Step 2 post-service appeal after the reconsideration answer",
+     "required_or_preferred": "Required: digital only for network providers",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/2026-Medicare-Advantage-QRG.pdf",
+      "quote": "Submit appeals online at UHCprovider.com. Click the Sign In button in the top-right corner. Click Claims & Payments > Look Up a Claim > Act on Claim > Appeal.",
+      "title": "UHC 2026 Medicare Advantage, CSNP and DSNP QRG",
+      "doc_date": "2026-03-12",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Notice of Dispute: to the notice address in the practice's UnitedHealthcare participation agreement (no public address)",
+     "applies_to": "After the appeal, to start the agreement's dispute resolution (arbitration). 'Notice of Dispute' in the reference line.",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "Be sent in the manner and method required by your Agreement to the notice address identified in your Agreement",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Act on a Claim > Submit corrected claim; or EDI with CLM05-3 = 7 and the original claim number in REF02",
+     "applies_to": "Corrected claim",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "Select the Claims & Payments > Act on a Claim > Submit corrected claim",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Paper claim with frequency code 7 in box 22 and the original claim number, mailed to the medical claim address on the member's ID card (UHC sample MA card: P.O. Box 31362, Salt Lake City, UT 84131-0362)",
+     "applies_to": "Corrected claim on paper; the address is the one on the member ID card. UHC's group MA quick reference guide: 'Paper claims: Mail claims to the address on the member ID card.'",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "Enter frequency code 7 in box 22 for professional and box 64 for facility claims in the left-justified position",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments (pended claim attachments), or API; for audits, follow the record request letter",
+     "applies_to": "Records or information UHC asked for on a pended or denied claim",
+     "required_or_preferred": "Required (UHC: do not use a claim form)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "Do not use a claim form to resubmit claims that were denied or pended for additional information. Use the claims tool in the UnitedHealthcare Provider Portal.",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Reconsideration and appeal (both steps)",
+     "window": "12 months from the date of the original claim EOB or PRA (or as the agreement or law requires)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "You must submit your reconsideration and appeal to us within 12 months from the date of the original claim EOB or PRA (or as required by law or your Agreement).",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Notice of Dispute",
+     "window": "60 days after the date of the appeal decision, unless the agreement says otherwise",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "Unless your Agreement prescribes a different time frame, a Notice of Dispute must be sent no later than 60 days after the date of our decision on your appeal.",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim",
+     "window": "Within the agreement's timely filing limit counted from the date of service",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "This number of days also applies to submission of corrected claims.",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "UHC's notice says it announced the move away from paper appeals in 2023; since 2026-02-01 network providers' MA post-service appeals are digital-only, so mailed reconsideration forms or old mailing addresses should not be used for them.",
+    "Fax 888-517-7113 (standard) and 866-373-1081 (urgent) with P.O. Box 6111 MS CA 124-0157 Cypress CA are on UHC's contact page under Colorado as 'Appeals and grievances' for Medicare Advantage; the 2026 guide gives 'P.O. Box 6106 Mail Stop CA 124-0157 Cypress, CA 90630 Fax: 1-888-517-7113' for forwarding MEMBER grievances and appeals. Neither is a channel for a provider's own claim appeal."
+   ],
+   "no_fax_reason": "UHC takes network providers' post-service reconsiderations and appeals only through the portal or API since Feb. 1, 2026 (Kentucky and Indiana not excluded), and lists no appeal fax for Kentucky or Indiana. Fax 888-517-7113 on UHC pages is the MA member appeals and grievances line, not a provider claim channel.",
+   "notes": "Best path in the app: deep link to the UHC portal claim page (Claims & Payments > Look Up a Claim), with the packet ready to upload and the claim number copied. 20 or more reconsiderations for one administrative issue without attachments can go as a Claims Research Project in the portal."
+  },
+  {
+   "payer_group": "UnitedHealthcare Medicare Advantage",
+   "product": "UnitedHealthcare Medicare Advantage - non-contracted providers: claim payment dispute or payment reconsideration (appeal), then the CMS Part C IRE",
+   "states": "KY and IN (national process)",
+   "what_it_is": "CMS process for non-contracted providers, as UHC publishes it.",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Look up a Claim > claim number > Act on a Claim > Explore available actions > Create an appeal/dispute",
+     "applies_to": "Non-contracted: dispute of the AMOUNT paid when Original Medicare would have paid differently",
+     "required_or_preferred": "Portal is the only method UHC lists",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/MA-Non-Cont-Provider-Dispute-Appeal-Rights.pdf",
+      "quote": "You must file a dispute within 120 calendar days from the initial payment.",
+      "title": "UHC MA non-contracted dispute and appeal rights",
+      "doc_date": "2025-01-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: same path, 'Create an appeal/dispute', with a signed Waiver of Liability Statement",
+     "applies_to": "Non-contracted: denial, or payment for a different service or level than billed",
+     "form": "Waiver of Liability Statement (CMS model)",
+     "required_or_preferred": "Portal is the only method UHC lists",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/MA-Non-Cont-Provider-Dispute-Appeal-Rights.pdf",
+      "quote": "you have 60 days from the denial date to file a payment reconsideration (appeal) request. This is the first step in the Medicare appeal process.",
+      "title": "UHC MA non-contracted dispute and appeal rights",
+      "doc_date": "2025-01-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "904-539-4080",
+     "applies_to": "Only to ask the CMS Part C IRE (C2C) to review a plan DISMISSAL of a non-contracted reconsideration. Upheld cases go to the IRE automatically. Second check: C2C's page lists 904-539-4080.",
+     "required_or_preferred": "Allowed ('in writing, which includes by fax')",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/managed-care/review-part-c-independent-entitiy",
+      "quote": "Attn: QIC Part C - New Plan Dismissal Appeal 301 W. Bay St., Suite 1110 Jacksonville, FL 32202 Fax: (904) 539-4080",
+      "title": "CMS: Reconsideration by Part C IRE",
+      "doc_date": "2026-05-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Non-contracted claim payment dispute",
+     "window": "120 calendar days from the initial payment; UHC answers in 30 calendar days",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/MA-Non-Cont-Provider-Dispute-Appeal-Rights.pdf",
+      "quote": "UnitedHealthcare Medicare Advantage has 30 calendar days to review and respond after receiving a payment dispute request.",
+      "title": "UHC MA non-contracted dispute and appeal rights",
+      "doc_date": "2025-01-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-contracted payment reconsideration",
+     "window": "60 calendar days of the remittance notification date; UHC answers in 60 calendar days and forwards upheld cases to the IRE",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/MA-Non-Cont-Provider-Dispute-Appeal-Rights.pdf",
+      "quote": "Use the UnitedHealthcare Provider Portal within 60 calendar days of the remittance notification date",
+      "title": "UHC MA non-contracted dispute and appeal rights",
+      "doc_date": "2025-01-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-contracted reconsideration (federal rule)",
+     "window": "60 calendar days after receipt of the notice; receipt presumed 5 days after its date (65 days from the notice date); plan decides payment cases within 60 days",
+     "source": {
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.582",
+      "quote": "a request for reconsideration must be filed within 60 calendar days after receipt of the written organization determination notice",
+      "title": "42 CFR 422.582 (eCFR)",
+      "doc_date": "eCFR 2026-11-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "UHC states 60 days from the remittance date; the federal rule gives 60 days after receipt, with receipt presumed 5 days after the notice. File within UHC's 60 days to avoid a timeliness fight.",
+    "UHC's appeals page only 'recommends' electronic submission for out-of-network providers; but UHC's non-contracted rights document lists no mail or fax address at all."
+   ],
+   "no_fax_reason": "UHC's Medicare Advantage non-contracted dispute and appeal rights document lists only the UnitedHealthcare Provider Portal; no fax or mailing address is published for non-contracted provider disputes or reconsiderations.",
+   "notes": "Corrected claims and requested records: same channels as the network entry (portal Submit corrected claim or paper with code 7 to the ID-card address; records through the portal or as the request letter says)."
+  },
+  {
+   "payer_group": "Anthem / BCBS Medicare Advantage",
+   "product": "Anthem Blue Cross and Blue Shield Medicare Advantage (individual and group MA, D-SNP) - participating providers",
+   "states": "KY and IN (the guidebook gives one address row for GA, IN, KY, MO, OH, WI)",
+   "what_it_is": "Anthem (Elevance) Medicare Advantage claims; 835 payer ids ANTHM, 00660, 00630 via Availity.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials: Claims & Payments > Claim Status > find the claim > Dispute Claim, then open the request in the appeals dashboard, add documents and submit",
+     "applies_to": "Step 1 claim payment reconsideration (payment amount, code edits, administrative denials not about medical necessity)",
+     "required_or_preferred": "Preferred (Anthem expects digital channels)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Online (Reconsideration and Claim Payment Appeal): Use the secure provider Availity Appeal application at Availity.com.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, ATTN: Medicare Payment Dispute Unit, P.O. Box 105187, Atlanta, GA 30348-5187",
+     "applies_to": "Step 1 reconsideration in writing (Kentucky and Indiana row of the table: 'GA, IN, KY, MO,OH, WI ... ATTN: Medicare Payment Dispute Unit P.O. Box 105187 Atlanta, GA 30348-5187')",
+     "form": "Reconsideration Form (Anthem provider forms library)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Written reconsiderations and claim payment appeals should be mailed, along with the Claim Payment Appeal Form or the Reconsideration Form to:",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "Availity Essentials: same Dispute Claim / appeals dashboard path",
+     "applies_to": "Step 2 claim payment appeal after the reconsideration letter",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "We accept claim payment appeals through our provider website or in writing within 30 calendar days of the date on the reconsideration determination letter.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, ATTN: Medicare Payment Dispute Unit, P.O. Box 105187, Atlanta, GA 30348-5187",
+     "applies_to": "Step 2 claim payment appeal in writing",
+     "form": "Claim Payment Appeal Form (Anthem provider forms library)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "ATTN: Medicare Payment Dispute Unit P.O. Box 105187 Atlanta, GA 30348-5187",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Medicare Complaints, Appeals, and Grievances (MCAG), Attention: Medical Necessity Provider Appeals, Mailstop: OH0205-A537, 4361 Irwin Simpson Road, Mason, Ohio 45040",
+     "applies_to": "Participating provider standard appeal when medical necessity was not established and provider liability was assigned (cover letter, copy of Anthem's decision, all records)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Medicare Complaints, Appeals, and Grievances (MCAG) Attention: Medical Necessity Provider Appeals Mailstop: OH0205-A537 4361 Irwin Simpson Road Mason, Ohio 45040",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, ATTN: Claims Correspondence, P.O. Box 105187, Atlanta, GA 30348-5187 (with the Claim Correspondence Form)",
+     "applies_to": "Corrected claim on paper; clearly identify it as corrected; no handwritten changes. Electronic replacement claims go through the Availity EDI gateway.",
+     "form": "Claim Correspondence Form",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Mail the Claim Correspondence Form and your corrected claim to that listed address.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, ATTN: Claims Correspondence, P.O. Box 105187, Atlanta, GA 30348-5187 (Claim Correspondence Form + EOP copy + records)",
+     "applies_to": "Medical records Anthem asked for on the EOP",
+     "form": "Claim Correspondence Form",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Mail the Claim Correspondence Form, EOP copy, and medical records to the listed address.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity Essentials: Claim Status (attach to the claim) or Medical Attachments (Digital Request for Additional Information); or X12 275",
+     "applies_to": "Records and attachments",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "The Claim Status application enables providers and facilities to digitally submit supporting claims documentation, including medical records, directly to the claim.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Step 1 reconsideration",
+     "window": "120 calendar days from the date on the Explanation of Payment (EOP); goal 45 days to decide",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "We accept reconsideration requests in writing, verbally and through our provider website within 120 calendar days from the date on the Explanation of Payment (EOP)",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Step 2 claim payment appeal",
+     "window": "30 calendar days of the date on the reconsideration determination letter; goal 30 days to decide",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "within 30 calendar days of the date on the reconsideration determination letter",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Participating medical necessity appeal",
+     "window": "180 days from the Anthem decision letter date",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Submitted within 180 days from the Anthem decision letter date.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim",
+     "window": "365 days from the date of service (if the original was timely)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Provided the claim was originally received timely, a corrected claim must be received within 365 days of the date of service.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "The guidebook posted today is the edition effective January 1, 2027 (dated November 1, 2026). Its Kentucky/Indiana dispute address and windows match what the earlier 2026 notes recorded from the same URL; re-check after January 1 if Anthem posts changes.",
+    "Anthem's only MA fax in the guidebook is prior authorization (866-959-1537); it is not for disputes or appeals.",
+    "Member-liability denials must go through the member appeal process, not the provider dispute process ('Any time a member liability denial letter is issued, the member appeals process must be followed')."
+   ],
+   "no_fax_reason": "Anthem's Medicare Advantage guidebook lists Availity, phone (reconsideration only) and mail for claim payment disputes and appeals, and mail for medical-necessity and non-participating appeals; it publishes no fax for any of them and says providers are expected to use digital channels instead of paper, mail, fax or phone.",
+   "notes": "Best path in the app: Availity Dispute Claim (reconsideration, then appeal). Print option: the P.O. Box 105187 address page plus the Reconsideration or Claim Payment Appeal Form."
+  },
+  {
+   "payer_group": "Anthem / BCBS Medicare Advantage",
+   "product": "Anthem Medicare Advantage - non-participating providers: payment dispute, or appeal of a denial with member liability, then the CMS Part C IRE",
+   "states": "KY and IN",
+   "what_it_is": "Anthem's non-participating provider routes under CMS rules.",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Availity Essentials Dispute Claim (same section 5 dispute process as participating providers)",
+     "applies_to": "Non-participating: different service paid, or payment differs from Original Medicare. Mail: P.O. Box 105187 (Medicare Payment Dispute Unit)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "the nonparticipating provider payment dispute resolution process can be used.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Medicare Complaints, Appeals and Grievances, Attention: Non-Contracted Provider Appeals, Mailstop: OH0205-A537, 4361 Irwin Simpson Rd, Mason, Ohio 45040",
+     "applies_to": "Non-participating appeal of a full or partial denial with member liability; written, with a signed Waiver of Liability (CMS model), the original claim, the remittance and records",
+     "form": "CMS model Waiver of Liability Statement",
+     "form_url": "https://www.cms.gov/Medicare/Appeals-and-Grievances/MMCAG/Downloads/Model-Waiver-of-Liability_Feb2019v508.zip",
+     "required_or_preferred": "Required: in writing by mail",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "Medicare Complaints, Appeals and Grievances Attention: Non-Contracted Provider Appeals Mailstop: OH0205-A537 4361 Irwin Simpson Rd Mason, Ohio 45040",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "904-539-4080",
+     "applies_to": "Only to ask the CMS Part C IRE (C2C) to review a plan DISMISSAL of a non-contracted reconsideration. Upheld cases go to the IRE automatically. Second check: C2C's page lists 904-539-4080.",
+     "required_or_preferred": "Allowed ('in writing, which includes by fax')",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/managed-care/review-part-c-independent-entitiy",
+      "quote": "Attn: QIC Part C - New Plan Dismissal Appeal 301 W. Bay St., Suite 1110 Jacksonville, FL 32202 Fax: (904) 539-4080",
+      "title": "CMS: Reconsideration by Part C IRE",
+      "doc_date": "2026-05-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Non-participating appeal",
+     "window": "65 calendar days from the remittance notification",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+      "quote": "the nonparticipating provider must request a reconsideration of the denial within 65 calendar days from the remittance notification.",
+      "title": "Anthem Medicare Advantage Provider Guidebook (eff. 2027-01-01)",
+      "doc_date": "2026-11-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-contracted reconsideration (federal rule)",
+     "window": "60 calendar days after receipt of the notice; receipt presumed 5 days after its date (65 days from the notice date); plan decides payment cases within 60 days",
+     "source": {
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.582",
+      "quote": "a request for reconsideration must be filed within 60 calendar days after receipt of the written organization determination notice",
+      "title": "42 CFR 422.582 (eCFR)",
+      "doc_date": "eCFR 2026-11-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Anthem limits section 7.2 appeals to denials 'with member liability'; CMS guidance also gives non-contracted providers appeal rights for other payment denials. Downcodes and level-of-care changes may be handled as section 7.1 payment disputes."
+   ],
+   "no_fax_reason": "Anthem publishes only a mailing address for non-participating Medicare Advantage appeals ('The appeal must be in writing. Mail the appeal to this address'); no fax is listed.",
+   "notes": "Corrected claims and records Anthem asked for: same channels as the participating entry (Claims Correspondence, P.O. Box 105187, Atlanta, GA 30348-5187, or Availity attachments)."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene) Medicare Advantage",
+   "product": "Wellcare (Centene) Medicare Advantage - participating reconsiderations, non-participating appeals and claim payment disputes",
+   "states": "KY (Wellcare, payer id 14163) and IN (Wellcare, payer id 68069); same fax, different mail boxes",
+   "what_it_is": "Group of claims linked to an 835 named AMBETTER with payer id 68069 (state MO, Centene). Wellcare's claims guide lists 68069 as the Wellcare Medicare Advantage payer id for Indiana (Kentucky Wellcare MA uses 14163), so these are most likely Indiana Wellcare Medicare Advantage claims; Ambetter marketplace claims also use 68069.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-866-201-0657",
+     "applies_to": "Appeals (non-participating, with signed WOL) and reconsiderations (participating), Kentucky and Indiana: one fax line under 'MAIL OR FAX ALL MEDICAL APPEALS AND RECONSIDERATIONS'. Second checks: 2026 MA Provider Manual section 9, the 2026 cover sheet ('You may also fax the Appeal/Reconsideration request to 1-866-201-0657') and the 2026 claims guide all list it.",
+     "form": "Wellcare Provider Cover Sheet: Claim Appeals, Reconsiderations & Disputes (one per claim; do not use it for portal submissions)",
+     "form_url": "https://www.wellcare.com/-/media/pdfs/na/provider/forms/other/na_care_prov_appeals_form_2026_r.ashx",
+     "required_or_preferred": "Allowed; Wellcare says the Provider Portal is fastest",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Attn: Appeals Department P.O. Box 3060 Farmington, MO 63640-3060 Fax: 1-866-201-0657",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Wellcare Provider Portal (provider.wellcare.com): submit the appeal or reconsideration and track status",
+     "applies_to": "Reconsiderations and appeals",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_medicare_advantage_provider_manual_2026_r.ashx",
+      "quote": "The provider portal is the preferred method of submitting the participating Provider reconsideration request form.",
+      "title": "Wellcare Medicare Advantage Provider Manual 2026",
+      "doc_date": "2026-04-29",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Kentucky: Wellcare, Attn: Appeals Department, P.O. Box 31368, Tampa, FL 33631-3368",
+     "applies_to": "Kentucky Wellcare Medicare Advantage appeals and reconsiderations (the guide's row lists KY with this box)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Attn: Appeals Department P.O. Box 31368 Tampa, FL 33631-3368",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Indiana: Wellcare, Attn: Appeals Department, P.O. Box 3060, Farmington, MO 63640-3060",
+     "applies_to": "Indiana Wellcare Medicare Advantage appeals and reconsiderations (the guide's row lists IN with this box)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Attn: Appeals Department P.O. Box 3060 Farmington, MO 63640-3060",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Wellcare Provider Portal (provider.wellcare.com)",
+     "applies_to": "Claim payment disputes (untimely filing, bundling, unlisted or non-covered codes)",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_claims-guide_2026_r.ashx",
+      "quote": "Submit all claims payment disputes with supporting documentation at provider.wellcare.com or by mail.",
+      "title": "Wellcare Claims, Disputes & Recovery/CCU Guide",
+      "doc_date": "2026-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "fax",
+     "value": "1-866-201-0657",
+     "applies_to": "Claim payment disputes, per the claims guide heading 'MAIL OR FAX ALL CLAIM PAYMENT DISPUTES, MEDICAL APPEALS AND RECONSIDERATIONS' (Jan and Aug 2026 editions). The cover sheet names fax only for appeals.",
+     "required_or_preferred": "Allowed per the claims guide",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_claims-guide_2026_r.ashx",
+      "quote": "Attn: Appeals Department P.O. Box 3060 Farmington, MO 63640-3060 Fax: 1-866-201-0657",
+      "title": "Wellcare Claims, Disputes & Recovery/CCU Guide",
+      "doc_date": "2026-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Wellcare Health Plans, Inc., Attn: Claims Payment Dispute, P.O. Box 31370, Tampa, FL 33631-3370",
+     "applies_to": "Claim payment dispute by mail with the cover sheet (the claims guide instead routes disputes to the Appeals boxes above)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/forms/other/na_care_prov_appeals_form_2026_r.ashx",
+      "quote": "Attn: Claims Payment Dispute Wellcare Health Plans, Inc. P.O. Box 31370 Tampa, FL 33631-3370",
+      "title": "Wellcare cover sheet: Claim Appeals, Reconsiderations & Disputes",
+      "doc_date": "2026-04-14",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Kentucky: Wellcare, Attn: Claims Department, P.O. Box 31372, Tampa, FL 33631-3372; Indiana: Wellcare, Attn: Claims Department, P.O. Box 3060, Farmington, MO 63640-3060",
+     "applies_to": "Paper corrected claim: code 7 in box 22 plus Wellcare's original claim number (the word 'corrected' alone makes it a new claim)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_claims-guide_2026_r.ashx",
+      "quote": "Attn: Claims Department P.O. Box 31372 Tampa, FL 33631-3372",
+      "title": "Wellcare Claims, Disputes & Recovery/CCU Guide",
+      "doc_date": "2026-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Availity Essentials or the Wellcare Provider Portal (claim corrections)",
+     "applies_to": "Corrected claims",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_claims-guide_2027_r.ashx",
+      "quote": "Availity and the Provider Portal provide self-service for claim submission, claim corrections, and claim status inquiries.",
+      "title": "Wellcare Claims, Disputes & Recovery/CCU Guide 2027",
+      "doc_date": "2026-08",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "904-539-4080",
+     "applies_to": "Only to ask the CMS Part C IRE (C2C) to review a plan DISMISSAL of a non-contracted reconsideration. Upheld cases go to the IRE automatically. Second check: C2C's page lists 904-539-4080.",
+     "required_or_preferred": "Allowed ('in writing, which includes by fax')",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/managed-care/review-part-c-independent-entitiy",
+      "quote": "Attn: QIC Part C - New Plan Dismissal Appeal 301 W. Bay St., Suite 1110 Jacksonville, FL 32202 Fax: (904) 539-4080",
+      "title": "CMS: Reconsideration by Part C IRE",
+      "doc_date": "2026-05-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Participating reconsideration",
+     "window": "90 calendar days from the claim denial (or as the contract says)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Participating providers must seek a reconsideration through the Appeals Department within 90 calendar days",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-participating appeal",
+     "window": "65 calendar days from the date of the notice of the initial determination, with a signed WOL",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "All non-participating Medicare provider appeals must be submitted within 65 calendar days from the date of the notice of the initial determination",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Claim payment dispute",
+     "window": "90 calendar days of the date on the EOP (or as the contract says)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_claims-guide_2026_r.ashx",
+      "quote": "Claim payment disputes must be submitted in writing to Wellcare within 90 calendar days of the date on the EOP",
+      "title": "Wellcare Claims, Disputes & Recovery/CCU Guide",
+      "doc_date": "2026-01",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim",
+     "window": "180 calendar days from the date of service (initial, corrected and voided claims), unless the agreement says otherwise",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_medicare_advantage_provider_manual_2026_r.ashx",
+      "quote": "participating Providers must submit Clean Claims (initial, corrected, and voided) to Wellcare within 180 calendar days",
+      "title": "Wellcare Medicare Advantage Provider Manual 2026",
+      "doc_date": "2026-04-29",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-contracted reconsideration (federal rule)",
+     "window": "60 calendar days after receipt of the notice; receipt presumed 5 days after its date (65 days from the notice date); plan decides payment cases within 60 days",
+     "source": {
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.582",
+      "quote": "a request for reconsideration must be filed within 60 calendar days after receipt of the written organization determination notice",
+      "title": "42 CFR 422.582 (eCFR)",
+      "doc_date": "eCFR 2026-11-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Dispute mailing address: the April 2026 cover sheet sends claim payment disputes to 'Attn: Claims Payment Dispute ... P.O. Box 31370'; the Claims, Disputes & Recovery/CCU Guide (January and August 2026) sends disputes, appeals and reconsiderations to the Appeals boxes (KY P.O. Box 31368, IN P.O. Box 3060) and fax 1-866-201-0657; the MA manual says mail disputes to 'the address listed on the back of the member's ID card'. Use the portal, or the fax, which both guides share.",
+    "Wellcare By Allwell (AR, MO, TX) uses fax 1-844-273-2671; Kentucky and Indiana are listed as 'Wellcare', so 1-866-201-0657 applies.",
+    "If the member ID card says Ambetter (ACA marketplace) rather than Wellcare Medicare, these channels do not apply: see the Ambetter entry for this group."
+   ],
+   "notes": "Fax 1-866-201-0657 is confirmed by four Wellcare publications for Kentucky and Indiana. Expedited appeals are for pre-service requests only and do not apply to claims."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene) Medicare Advantage",
+   "product": "Ambetter (Centene ACA marketplace) - only when the member ID card says Ambetter: Ambetter from WellCare of Kentucky / Ambetter Health of Indiana (Coordinated Care Corporation)",
+   "states": "KY and IN (payer id 68069 in both)",
+   "what_it_is": "Centene's marketplace plans share payer id 68069 with Indiana Wellcare Medicare Advantage, so an 835 named AMBETTER can be either; the member ID card decides.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-833-886-7956",
+     "applies_to": "Ambetter medical appeals and reconsiderations, IN and KY. Second checks: the Kentucky Ambetter QRG (Oct 2026) and the Indiana appeals guide list the same fax.",
+     "required_or_preferred": "Allowed; portal is fastest",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Ambetter-Provider-QRG.pdf",
+      "quote": "Appeals and Grievances Fax: 1-833-886-7956",
+      "title": "Ambetter Indiana Quick Reference Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Appeals and Grievances Department, P.O. Box 10341, Van Nuys, CA 91410",
+     "applies_to": "Ambetter medical appeals and reconsiderations (same box in the Kentucky QRG)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Ambetter-Provider-QRG.pdf",
+      "quote": "Attn: Appeals and Grievances Department P.O. Box 10341 Van Nuys, CA 91410",
+      "title": "Ambetter Indiana Quick Reference Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Ambetter secure provider portal",
+     "applies_to": "Claim payment disputes",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "Submit all claims payment disputes with supporting documentation via the secure provider portal or by mail.",
+      "title": "Ambetter Indiana Claims, Disputes & Recovery Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Claims Disputes/Appeals, P.O. Box 5010, Farmington, MO 63640-5010",
+     "applies_to": "Claim payment disputes by mail (same box in the Kentucky CCU guide)",
+     "form": "Claim Dispute Form (Ambetter provider forms)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "Attn: Claims Disputes/Appeals P.O. Box 5010 Farmington, MO 63640-5010",
+      "title": "Ambetter Indiana Claims, Disputes & Recovery Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Claims Department, P.O. Box 5010, Farmington, MO 63640-5010",
+     "applies_to": "Paper claims and corrected claims; Availity and the provider portal also take corrections",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Ambetter-Provider-QRG.pdf",
+      "quote": "Attn: Claims Department P.O. Box 5010 Farmington, MO 63640-5010",
+      "title": "Ambetter Indiana Quick Reference Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Indiana Ambetter dispute or appeal",
+     "window": "180 calendar days from the date on the EOP (participating and non-participating)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "Par: 180 calendar days Par: 180 calendar days Par: 180 days Non-Par: 180 calendar days",
+      "title": "Ambetter Indiana Claims, Disputes & Recovery Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Kentucky Ambetter dispute or appeal",
+     "window": "Participating 180 calendar days; non-participating 90 calendar days",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/KY-CCU-Guide.pdf",
+      "quote": "Non-Par: 90 calendar days",
+      "title": "Ambetter from WellCare of Kentucky Claims, Disputes Guide",
+      "doc_date": "2026-10-24",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "This is commercial marketplace coverage, not Medicare Advantage; use it only if the member's card says Ambetter. Older Ambetter guides gave P.O. Box 10341 for disputes; the September/October 2026 CCU guides give P.O. Box 5010 Farmington for disputes and keep P.O. Box 10341 for appeals."
+   ],
+   "notes": "Ambetter's appeal fax 1-833-886-7956 appears in both the Kentucky and the Indiana quick reference guides."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene)",
+   "product": "Wellcare (Centene) Medicare Advantage - participating reconsiderations, non-participating appeals and claim payment disputes",
+   "states": "KY (Wellcare, payer id 14163) and IN (Wellcare, payer id 68069); same fax, different mail boxes",
+   "what_it_is": "Practice-labelled Wellcare/Ambetter claims with no 835 yet (kind medicare_advantage): Wellcare Medicare Advantage, Kentucky (payer 14163) or Indiana (payer 68069). The member ID card tells Wellcare Medicare from Ambetter marketplace.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-866-201-0657",
+     "applies_to": "Appeals (non-participating, with signed WOL) and reconsiderations (participating), Kentucky and Indiana: one fax line under 'MAIL OR FAX ALL MEDICAL APPEALS AND RECONSIDERATIONS'. Second checks: 2026 MA Provider Manual section 9, the 2026 cover sheet ('You may also fax the Appeal/Reconsideration request to 1-866-201-0657') and the 2026 claims guide all list it.",
+     "form": "Wellcare Provider Cover Sheet: Claim Appeals, Reconsiderations & Disputes (one per claim; do not use it for portal submissions)",
+     "form_url": "https://www.wellcare.com/-/media/pdfs/na/provider/forms/other/na_care_prov_appeals_form_2026_r.ashx",
+     "required_or_preferred": "Allowed; Wellcare says the Provider Portal is fastest",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Attn: Appeals Department P.O. Box 3060 Farmington, MO 63640-3060 Fax: 1-866-201-0657",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Wellcare Provider Portal (provider.wellcare.com): submit the appeal or reconsideration and track status",
+     "applies_to": "Reconsiderations and appeals",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_medicare_advantage_provider_manual_2026_r.ashx",
+      "quote": "The provider portal is the preferred method of submitting the participating Provider reconsideration request form.",
+      "title": "Wellcare Medicare Advantage Provider Manual 2026",
+      "doc_date": "2026-04-29",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Kentucky: Wellcare, Attn: Appeals Department, P.O. Box 31368, Tampa, FL 33631-3368",
+     "applies_to": "Kentucky Wellcare Medicare Advantage appeals and reconsiderations (the guide's row lists KY with this box)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Attn: Appeals Department P.O. Box 31368 Tampa, FL 33631-3368",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Indiana: Wellcare, Attn: Appeals Department, P.O. Box 3060, Farmington, MO 63640-3060",
+     "applies_to": "Indiana Wellcare Medicare Advantage appeals and reconsiderations (the guide's row lists IN with this box)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Attn: Appeals Department P.O. Box 3060 Farmington, MO 63640-3060",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Participating reconsideration",
+     "window": "90 calendar days from the claim denial (or as the contract says)",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "Participating providers must seek a reconsideration through the Appeals Department within 90 calendar days",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-participating appeal",
+     "window": "65 calendar days from the date of the notice of the initial determination, with a signed WOL",
+     "source": {
+      "url": "https://www.wellcare.com/-/media/pdfs/na/provider/resources/na_care_prov_appeals-guide_2026_r.ashx",
+      "quote": "All non-participating Medicare provider appeals must be submitted within 65 calendar days from the date of the notice of the initial determination",
+      "title": "Wellcare Appeals/Reconsiderations and Grievances Guide",
+      "doc_date": "2026-01 (Jan 2026)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "If the member ID card says Ambetter (ACA marketplace) rather than Wellcare Medicare, these channels do not apply: see the Ambetter entry for this group.",
+    "Same channels as the 'WellCare / Ambetter (Centene) Medicare Advantage' entry, which lists every source and the non-contracted IRE route."
+   ],
+   "notes": "Fax 1-866-201-0657 is confirmed by four Wellcare publications for Kentucky and Indiana. Expedited appeals are for pre-service requests only and do not apply to claims."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene)",
+   "product": "Ambetter (Centene ACA marketplace) - only when the member ID card says Ambetter: Ambetter from WellCare of Kentucky / Ambetter Health of Indiana (Coordinated Care Corporation)",
+   "states": "KY and IN (payer id 68069 in both)",
+   "what_it_is": "Centene's marketplace plans share payer id 68069 with Indiana Wellcare Medicare Advantage, so an 835 named AMBETTER can be either; the member ID card decides.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-833-886-7956",
+     "applies_to": "Ambetter medical appeals and reconsiderations, IN and KY. Second checks: the Kentucky Ambetter QRG (Oct 2026) and the Indiana appeals guide list the same fax.",
+     "required_or_preferred": "Allowed; portal is fastest",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Ambetter-Provider-QRG.pdf",
+      "quote": "Appeals and Grievances Fax: 1-833-886-7956",
+      "title": "Ambetter Indiana Quick Reference Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Claims Disputes/Appeals, P.O. Box 5010, Farmington, MO 63640-5010",
+     "applies_to": "Claim payment disputes by mail (same box in the Kentucky CCU guide)",
+     "form": "Claim Dispute Form (Ambetter provider forms)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "Attn: Claims Disputes/Appeals P.O. Box 5010 Farmington, MO 63640-5010",
+      "title": "Ambetter Indiana Claims, Disputes & Recovery Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Indiana Ambetter dispute or appeal",
+     "window": "180 calendar days from the date on the EOP (participating and non-participating)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "Par: 180 calendar days Par: 180 calendar days Par: 180 days Non-Par: 180 calendar days",
+      "title": "Ambetter Indiana Claims, Disputes & Recovery Guide",
+      "doc_date": "2026-09",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Kentucky Ambetter dispute or appeal",
+     "window": "Participating 180 calendar days; non-participating 90 calendar days",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/KY-CCU-Guide.pdf",
+      "quote": "Non-Par: 90 calendar days",
+      "title": "Ambetter from WellCare of Kentucky Claims, Disputes Guide",
+      "doc_date": "2026-10-24",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Commercial marketplace coverage, not Medicare Advantage; use only if the card says Ambetter. Full Ambetter channels: see the entry under 'WellCare / Ambetter (Centene) Medicare Advantage'."
+   ],
+   "notes": "Ambetter's appeal fax 1-833-886-7956 appears in both the Kentucky and the Indiana quick reference guides."
+  },
+  {
+   "payer_group": "United Healthcare Dual Complete",
+   "product": "UHC Dual Complete (UnitedHealthcare's dual eligible special needs plans, D-SNP), Medicare side",
+   "states": "KY (UHC Dual Complete KY-S001, KY-S002, KY-S3, KY-S4, KY-V001) and IN (UHC Dual Complete IN-S002 and IN-D001; UHC PathWays Dual Care IN-S1/IN-S3 are the aligned FIDE plans)",
+   "what_it_is": "UnitedHealthcare Medicare Advantage D-SNPs for people with Medicare and Medicaid (payer id 87726, 'UnitedHealthcare Community Plan / UnitedHealthcare Dual Complete (formerly Evercare)'). The Medicare claim follows UHC's Medicare Advantage rules; Medicaid cost-sharing is a separate secondary claim unless UHC crosses it over.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal (https://secure.uhcprovider.com/#/claims): Claims & Payments > Look Up a Claim > Act on Claim (reconsideration, then appeal)",
+     "applies_to": "Network providers, D-SNP Medicare claims",
+     "required_or_preferred": "Required: digital only (portal or API)",
+     "source": {
+      "url": "https://www.uhcprovider.com/en/claims-payments-billing/appeals.html",
+      "quote": "Medicare Advantage (including D-SNP), UnitedHealthcare Community Plan (Medicaid) and commercial plan members are required to submit reconsiderations and pre- and post-service appeals digitally.",
+      "title": "UHCprovider.com: appeals and reconsiderations",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Act on Claim > Appeal",
+     "applies_to": "Step 2 appeal (UHC's 2026 MA, CSNP and DSNP quick reference guide)",
+     "required_or_preferred": "Required: digital only",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/2026-Medicare-Advantage-QRG.pdf",
+      "quote": "Submit appeals online at UHCprovider.com. Click the Sign In button in the top-right corner. Click Claims & Payments > Look Up a Claim > Act on Claim > Appeal.",
+      "title": "UHC 2026 Medicare Advantage, CSNP and DSNP QRG",
+      "doc_date": "2026-03-12",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Non-contracted: UnitedHealthcare Provider Portal > Create an appeal/dispute (payment dispute within 120 days, or reconsideration with Waiver of Liability within 60 days)",
+     "applies_to": "Non-contracted providers (UHC links this rights document from its Kentucky D-SNP provider page)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/MA-Non-Cont-Provider-Dispute-Appeal-Rights.pdf",
+      "quote": "In the menu, select Claims & Payments > Look up a Claim and enter your search criteria",
+      "title": "UHC MA non-contracted dispute and appeal rights",
+      "doc_date": "2025-01-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Act on a Claim > Submit corrected claim (or EDI frequency 7)",
+     "applies_to": "Corrected claims",
+     "required_or_preferred": "Preferred",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "Select the Claims & Payments > Act on a Claim > Submit corrected claim",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Reconsideration and appeal (both steps)",
+     "window": "12 months from the date of the original claim EOB or PRA (or as the agreement or law requires)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "You must submit your reconsideration and appeal to us within 12 months from the date of the original claim EOB or PRA (or as required by law or your Agreement).",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Notice of Dispute",
+     "window": "60 days after the date of the appeal decision, unless the agreement says otherwise",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "Unless your Agreement prescribes a different time frame, a Notice of Dispute must be sent no later than 60 days after the date of our decision on your appeal.",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Non-contracted payment reconsideration",
+     "window": "60 calendar days of the remittance notification date",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/MA-Non-Cont-Provider-Dispute-Appeal-Rights.pdf",
+      "quote": "Use the UnitedHealthcare Provider Portal within 60 calendar days of the remittance notification date",
+      "title": "UHC MA non-contracted dispute and appeal rights",
+      "doc_date": "2025-01-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Integrated plans only (UHC PathWays Dual Care in Indiana)",
+     "window": "Integrated reconsideration: 60 calendar days after receipt of the notice; the plan decides within 30 calendar days",
+     "source": {
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.633",
+      "quote": "An enrollee has 60 calendar days after receipt of the adverse organization determination notice to file a request for an integrated reconsideration with the applicable integrated plan.",
+      "title": "42 CFR 422.633 (eCFR)",
+      "doc_date": "eCFR 2026-11-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Kentucky KY-S4 (HMO-POS D-SNP): UHC also processes eligible Kentucky Medicaid cost-sharing ('You will not be required to submit a secondary claim to the Medicaid payer in this situation. At times, you may receive 2 provider remittance advices'). Other Kentucky and Indiana Dual Complete plans need a secondary claim to Medicaid (Kentucky Medicaid or Indiana PathWays/IHCP), and disputes about the Medicaid part go to that Medicaid payer, not to UHC's Medicare process.",
+    "The 'UHC PathWays Dual Care' plans in Indiana are fully integrated (FIDE) D-SNPs with exclusively aligned enrollment from 2026; their appeals follow the unified Medicare-Medicaid rules (42 CFR 422.629-634), with a 30-day plan decision. 'UHC Dual Complete IN-S002' is for full duals not eligible for PathWays and is not that plan."
+   ],
+   "no_fax_reason": "UHC takes network providers' post-service reconsiderations and appeals only through the portal or API since Feb. 1, 2026 (Kentucky and Indiana not excluded), and lists no appeal fax for Kentucky or Indiana. Fax 888-517-7113 on UHC pages is the MA member appeals and grievances line, not a provider claim channel.",
+   "notes": "Second check that the D-SNP follows UHC's MA admin guide: UHC's Indiana Dual Complete FAQ says 'Find out more about doing business with us at UHCprovider.com/guides > Administrative Guide for Commercial, Medicare Advantage and D-SNP'. Identity: UHC's claims payer list (https://www.uhcprovider.com/content/dam/provider/docs/public/resources/edi/Payer-List-UHC-Affiliates-Strategic-Alliances.pdf, dated 2026-05-14) reads 'UnitedHealthcare Community Plan / UnitedHealthcare Dual Complete (formerly Evercare) 87726'"
+  },
+  {
+   "payer_group": "Humana Medicare Advantage Medicaid",
+   "product": "Kentucky dual eligible: Humana Gold Plus SNP-DE H1036-320 (HMO D-SNP, a HIDE SNP contracted with Kentucky's Department for Medicaid Services); Medicaid part often Humana Healthy Horizons in Kentucky",
+   "states": "KY",
+   "what_it_is": "Most likely Humana's dual eligible special needs plan: in Kentucky, Humana Gold Plus SNP-DE H1036-320 (HMO D-SNP), a HIDE SNP with a Medicare contract and a contract with Kentucky's Department for Medicaid Services. Humana Medicare Advantage pays the Medicare part (appeal on the Humana MA routes); Kentucky Medicaid pays cost-sharing through the member's Medicaid plan, and when that is Humana Healthy Horizons in Kentucky its provider appeals use the routes below. 835: HUMANA CARE PLAN, payer id 61101, KY.",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Medicare part of the claim: Availity Essentials Claim Status > Dispute Claim, as in the Humana Medicare Advantage entries (participating: dispute there or mail Humana Correspondence, P.O. Box 14601, Lexington, KY 40512-4601; non-participating: appeal there or mail P.O. Box 14165 with a Waiver of Liability)",
+     "applies_to": "Medicare-covered services on the Kentucky D-SNP (Humana Gold Plus SNP-DE H1036-320)",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-inquiries",
+      "quote": "select the Dispute Claim button on the claim details screen. This adds the claim to your Appeals worklist but does not submit it to Humana.",
+      "title": "Humana provider page: claim payment inquiries",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "800-949-2961",
+     "applies_to": "Provider appeals to Humana Healthy Horizons in Kentucky (Medicaid), e.g. the Medicaid part of a dual's claim. Second check: the 2025 Kentucky provider manual lists the same fax for provider grievances and appeals.",
+     "form": "Kentucky Medicaid MCO Provider Appeal Request Form",
+     "form_url": "https://www.chfs.ky.gov/agencies/dms/MAPForms/ProviderAppealRequestForm.pdf",
+     "required_or_preferred": "Allowed (mail, phone, fax or Availity)",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You may use the Kentucky Medicaid MCO Provider Appeal Request Form. Submit by mail: Humana Healthy Horizons Grievance and Appeal Department P.O. Box 14546 Lexington, KY 40512-4546 Submit by phone: 800-444-9137 Submit by fax: 800-949-2961",
+      "title": "Humana Healthy Horizons in Kentucky: grievances and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons Grievance and Appeal Department, P.O. Box 14546, Lexington, KY 40512-4546",
+     "applies_to": "Kentucky Medicaid provider appeals and grievances",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "Humana Healthy Horizons in Kentucky Grievance and Appeal Department P.O. Box 14546 Lexington, KY 40512-4546 Fax: 800-949-2961",
+      "title": "Humana Healthy Horizons in Kentucky 2025 Provider Manual",
+      "doc_date": "2026-01-26",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials (Humana Kentucky Medicaid appeal or grievance; mark which in the comment box)",
+     "applies_to": "Kentucky Medicaid provider appeals",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "Providers can submit encrypted grievances regarding claim issues or appeals online via Availity Essentials.",
+      "title": "Humana Healthy Horizons in Kentucky 2025 Provider Manual",
+      "doc_date": "2026-01-26",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "fax",
+     "value": "800-949-2961",
+     "applies_to": "Kentucky Medicaid contracted rate disputes (payment errors under the contract), with the Contracted Rate Dispute Form. Second check: the form itself says 'Fax: 800-9492961'.",
+     "form": "Contracted Rate Dispute Form",
+     "form_url": "https://assets.humana.com/is/content/humana/KY_PROV_Contracted_Rate_Dispute_Form_366004KY1223-Bpdf",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You can submit contracted rate disputes by mail, fax or via your secure Availity account. Submit by mail: Humana Healthy Horizons Contracted Rate Disputes P.O. Box 14546 Lexington, KY 40512-4546 Submit by fax: 800-949-2961",
+      "title": "Humana Healthy Horizons in Kentucky: grievances and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "502-508-1796",
+     "applies_to": "Kentucky Medicaid External Independent Review after the internal appeal; EIR form required. Second check: the live Kentucky page lists 502-508-1796.",
+     "form": "External Independent Review (EIR) Request Form",
+     "form_url": "https://assets.humana.com/is/content/humana/KY_External_Independent_Review_Request_Formpdf",
+     "required_or_preferred": "Form required; mail, email or fax",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/KY_External_Independent_Review_Request_Formpdf",
+      "quote": "Submit EIR request to: Humana Healthy Horizons, Inc. P.O. Box 14546 Lexington, KY 40512-4546 Fax: 502-508-1796 Email: HumanaMedicaid_EIR_MFH@humana.com",
+      "title": "Kentucky Medicaid EIR Request Form (Humana)",
+      "doc_date": "2025-03-18",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "external_review",
+     "channel": "email",
+     "value": "HumanaMedicaid_EIR_MFH@humana.com",
+     "applies_to": "Kentucky Medicaid EIR request (with the form)",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "Submit by email: HumanaMedicaid_EIR_MFH@humana.com",
+      "title": "Humana Healthy Horizons in Kentucky: grievances and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "866-305-6655",
+     "applies_to": "Records Humana requested (national Humana medical records management, all lines of business)",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Fax requested records to 866-305-6655.",
+      "title": "Humana provider page: medical records management",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Kentucky Medicaid provider appeal (web page)",
+     "window": "60 calendar days from the notice or action; 120 calendar days for a claim reduction or denial",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You must submit an appeal within 60 calendar days from Humana Healthy Horizons' date of notice or action. For a claim reduction or denial, the appeal must be submitted within 120 calendar days.",
+      "title": "Humana Healthy Horizons in Kentucky: grievances and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Kentucky Medicaid provider appeal (2025 manual)",
+     "window": "60 calendar days from the original claim adjudication",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "If a provider does not agree with the decision on a processed claim, the provider has 60 calendar days from the date of the original claim submission adjudication to file an appeal.",
+      "title": "Humana Healthy Horizons in Kentucky 2025 Provider Manual",
+      "doc_date": "2026-01-26",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Kentucky Medicaid external independent review",
+     "window": "60 calendar days of the final internal appeal decision (3 days added if the notice came by mail)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "An EIR must be submitted within 60 calendar days of the MCO's final adverse determination.",
+      "title": "Humana Healthy Horizons in Kentucky 2025 Provider Manual",
+      "doc_date": "2026-01-26",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Kentucky Medicaid contracted rate dispute",
+     "window": "24 months from the original processing date",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You must submit a Contracted Rate Dispute Form within 24 months of the original processing date of the claim in question.",
+      "title": "Humana Healthy Horizons in Kentucky: grievances and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Appeal window: the live Kentucky Medicaid page allows 120 calendar days for a claim reduction or denial; the 2025 provider manual says 60 calendar days from the original adjudication. Use 60 days to be safe.",
+    "The 835 name HUMANA CARE PLAN and payer id 61101 also appear on the practice's Humana Medicare Advantage 835s, so the 835 alone cannot tell the D-SNP Medicare part from Humana Medicaid. Check the member ID card (Humana Gold Plus SNP-DE card vs a Humana Healthy Horizons Medicaid card) before choosing the route.",
+    "The Kentucky D-SNP is a HIDE SNP but Humana's documents found do not show exclusively aligned enrollment, so the unified (integrated) appeal rules are not shown to apply in Kentucky; the Medicare part follows ordinary Humana MA rules."
+   ],
+   "notes": "Humana's Medicare Advantage directory sends 'Medicaid, Dual Demonstration and Applicable Integrated Plans' reconsiderations to state pages; its Kentucky link is the Humana Healthy Horizons in Kentucky grievances and appeals page used here. HIDE status: the plan's 2026 Summary of Benefits (https://assets.humana.com/is/content/humana/H1036320000SB26pdf, dated 2025-08-13, read 2026-11-23) says 'This is a Highly Integrated Dual Eligible (HIDE) Special Needs Plan.'"
+  },
+  {
+   "payer_group": "Humana Medicare Advantage Medicaid",
+   "product": "Indiana dual eligible: Humana PathWays Dual Care (HMO-POS D-SNP), a fully integrated (FIDE) D-SNP aligned with Humana Healthy Horizons in Indiana (PathWays for Aging)",
+   "states": "IN",
+   "what_it_is": "Indiana requires each PathWays managed care entity to run a statewide FIDE D-SNP and, from January 1, 2026, exclusively aligned enrollment, which makes it an 'applicable integrated plan': one claim to Humana covers Medicare and Medicaid, and member appeals are unified. Provider claim disputes go through Humana Healthy Horizons in Indiana's informal and formal dispute steps, or the Medicaid/dual appeal route in Humana's guide.",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Availity Essentials (Humana Indiana Medicaid payer id 61101): Claim Status > Dispute Claim",
+     "applies_to": "Informal claim dispute (step 1) for Humana Healthy Horizons in Indiana / PathWays claims",
+     "required_or_preferred": "Availity, mail or email",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/IN_claims_dispute_processpdf",
+      "quote": "You can submit an informal dispute within 60 calendar days following the date you receive written notification from Humana.",
+      "title": "Humana Indiana Provider Claim Payment Dispute Process flyer",
+      "doc_date": "2025-03-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons in Indiana, Attn: Informal Claim Dispute, P.O. Box 14169, Lexington, KY 40512-4169",
+     "applies_to": "Informal claim dispute (step 1)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/IN_claims_dispute_processpdf",
+      "quote": "Humana Healthy Horizons in Indiana Informal Claim Dispute P.O. Box 14169 Lexington, KY 40512-4169",
+      "title": "Humana Indiana Provider Claim Payment Dispute Process flyer",
+      "doc_date": "2025-03-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "email",
+     "value": "INMedicaidClaimsResearch@humana.com",
+     "applies_to": "Informal claim dispute (step 1) by email; use secure email for PHI",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "Via email: INMedicaidClaimsResearch@humana.com Informal claim disputes must be received within 60 calendar days of the notice of Humana's determination.",
+      "title": "Humana Healthy Horizons in Indiana: claims and payments",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "email",
+     "value": "IndianaFormalDispute@humana.com",
+     "applies_to": "Formal dispute (step 2) after the 30-day informal step",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "Formal disputes should be mailed to: Humana Healthy Horizons in Indiana Attn: Formal Dispute 201 North Illinois Street Suite 1200 Indianapolis, IN 46204 Or submitted via email: IndianaFormalDispute@Humana.com",
+      "title": "Humana Healthy Horizons in Indiana: claims and payments",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons in Indiana, Attn: Formal Dispute, 201 North Illinois Street, Suite 1200, Indianapolis, IN 46204",
+     "applies_to": "Formal dispute (step 2); reviewed by an independent panel, decision within 45 calendar days",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/IN_claims_dispute_processpdf",
+      "quote": "Humana Healthy Horizons in Indiana 201 North Illinois Street Suite 1200 Indianapolis, IN 46204",
+      "title": "Humana Indiana Provider Claim Payment Dispute Process flyer",
+      "doc_date": "2025-03-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Humana Grievances and Appeals, P.O. Box 14546, Lexington, KY 40512-4546 (or Availity)",
+     "applies_to": "Non-participating provider appeal on a Medicaid or dual (integrated) plan; Waiver of Liability required for dual/AIP appeals on the provider's own behalf",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "quote": "Medicaid/dual Medicare-Medicaid Submit via Availity Essentials as described in the online instructions above, or you may submit by mail to: Humana Grievances and Appeals P.O. Box 14546 Lexington, KY 40512-4546",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "866-305-6655",
+     "applies_to": "Records Humana requested (Humana medical records management; the Indiana Medicaid inquiry guide lists the same fax)",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Fax requested records to 866-305-6655.",
+      "title": "Humana provider page: medical records management",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Informal dispute",
+     "window": "60 calendar days of the notice of Humana's determination; Humana resolves within 30 days",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "Informal claim disputes must be received within 60 calendar days of the notice of Humana's determination.",
+      "title": "Humana Healthy Horizons in Indiana: claims and payments",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Formal dispute",
+     "window": "60 calendar days after the end of the 30-day informal dispute period; decision within 45 calendar days",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/IN_claims_dispute_processpdf",
+      "quote": "The formal dispute can be submitted within 60 calendar days after the 30-day informal dispute time frame.",
+      "title": "Humana Indiana Provider Claim Payment Dispute Process flyer",
+      "doc_date": "2025-03-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Integrated reconsideration (applicable integrated plan, enrollee or assignee provider with waiver)",
+     "window": "60 calendar days after receipt of the notice (receipt presumed 5 days after the notice); plan decides within 30 calendar days",
+     "source": {
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.633",
+      "quote": "no later than 30 calendar days from the date of receipt of the request for the integrated reconsideration",
+      "title": "42 CFR 422.633 (eCFR)",
+      "doc_date": "eCFR 2026-11-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Humana's 2026 Indiana D-SNP provider resource guide is a placeholder PDF ('Coming Soon'), so no D-SNP-specific provider appeal page exists yet; the routes above come from Humana's Indiana Medicaid pages and its national guide.",
+    "Humana's guide lists 'Medicaid/duals expedited fax 855-336-6220' for expedited requests only (pre-service); it is not for claims.",
+    "Indiana FIDE status: the state's waiver says 'MCEs are required to maintain a fully integrated dual eligible special needs plan (FIDE D-SNP)' and 'Effective January 1, 2026, the State will require exclusively aligned enrollment'; Humana's own page calls the plan 'Humana PathWays Dual Care (HMO-POS D-SNP)'."
+   ],
+   "no_fax_reason": "Humana Healthy Horizons in Indiana publishes no fax for provider claim disputes or appeals: informal disputes go by Availity, mail or email, formal disputes by mail or email, and dual/Medicaid appeals by Availity or mail. The only dual fax in Humana's guide (855-336-6220) is for expedited (pre-service) requests.",
+   "notes": "Indiana's PathWays waiver (Indiana PathWays for Aging 1915(b) waiver IN.017.00.03, 2026-01-27, https://secure.in.gov/fssa/files/PathWaysBJan2026.PDF) says 'Effective January 1, 2026, the State will require exclusively aligned enrollment for full-benefit dual eligible PathWays enrollees who choose to enroll in the FIDE-SNP.' A non-contracted provider who signs a waiver of payment from the member is a party to an integrated reconsideration: 42 CFR 422.629 (eCFR) (https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.629, read 2026-11-23) lists 'An assignee of the enrollee (that is, a physician or other provider who has furnished or intends to furnish a service to the enrollee and formally agrees to waive any right to payment from the enrollee for that service).'"
+  },
+  {
+   "payer_group": "Farm Bureau Health Plans Mapd",
+   "product": "Farm Bureau Health Plans (Tennessee) Medicare Advantage with prescription drugs (MAPD) - run-out only",
+   "states": "TN plan; members seen in KY/IN",
+   "what_it_is": "Medicare Advantage-PD plan formerly sold by Farm Bureau Health Plans of Tennessee (Columbia, TN). Its Medicare Advantage and Part D pages on fbhealthplans.com now return 'page not found'; the provider page still says Medicare Advantage claims are processed by Farm Bureau Health Plans. Open items are small (10 items, $12.45).",
+   "channels": [
+    {
+     "purpose": "other",
+     "channel": "phone",
+     "value": "844-874-8301 (Farm Bureau Health Plans provider toll-free number)",
+     "applies_to": "Ask where to send a Medicare Advantage claim dispute or appeal for this run-out claim",
+     "source": {
+      "url": "https://fbhealthplans.com/provider-information/provider/",
+      "quote": "Farm Bureau Health Plans Provider toll-free number: 844-874-8301",
+      "title": "Farm Bureau Health Plans: provider resources",
+      "doc_date": "2025-12-05",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Non-contracted reconsideration (federal rule)",
+     "window": "60 calendar days after receipt of the notice; receipt presumed 5 days after its date (65 days from the notice date); plan decides payment cases within 60 days",
+     "source": {
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-422/subpart-M/section-422.582",
+      "quote": "a request for reconsideration must be filed within 60 calendar days after receipt of the written organization determination notice",
+      "title": "42 CFR 422.582 (eCFR)",
+      "doc_date": "eCFR 2026-11-19",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Farm Bureau Health Plans' Medicare Advantage appeal pages (fbhealthplans.com/medicare-advantage/...) no longer exist; search snippets say the company stopped offering Medicare Advantage for 2025, but that page could not be read today, so the exit date is not confirmed from a live source.",
+    "The only fax on the provider page (931-560-4278) is for the Medicare Supplement provider registration form; it is not an appeal channel."
+   ],
+   "no_fax_reason": "Farm Bureau Health Plans' current site publishes no Medicare Advantage provider appeal or dispute channel at all (its MA pages were removed); no fax can be verified. Call the provider line first.",
+   "notes": "Federal Part C rules still apply to any open run-out claim (non-contracted: written reconsideration within 60 days of receipt with a Waiver of Liability). Who processes the claims: Farm Bureau's provider information page (https://fbhealthplans.com/provider-information/, last modified 2025-12-05, read 2026-11-23) says 'Medicare Supplement or Medicare Advantage Plan claims are processed by Farm Bureau Health Plans.'"
+  },
+  {
+   "payer_group": "Secure Horizons",
+   "product": "SecureHorizons: former UnitedHealthcare (PacifiCare) Medicare Advantage brand, now UnitedHealthcare MedicareComplete / AARP MedicareComplete",
+   "states": "KY and IN (national UHC MA process)",
+   "what_it_is": "UnitedHealthcare's payer list shows 'UnitedHealthcare MedicareComplete (formerly SecureHorizons)' and 'AARP MedicareComplete insured through UnitedHealthcare (formerly AARP MedicareComplete from SecureHorizons)', payer id 87726. Use the UnitedHealthcare Medicare Advantage routes.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal (https://secure.uhcprovider.com/#/claims): Claims & Payments > Look Up a Claim > Act on Claim > reconsideration (or UHC's API)",
+     "applies_to": "Step 1 claim reconsideration, network (contracted) providers",
+     "required_or_preferred": "Required: digital only (portal or API) for network providers since 2026-02-01; Kentucky and Indiana are not on the exclusion list",
+     "source": {
+      "url": "https://www.uhcprovider.com/en/claims-payments-billing/appeals.html",
+      "quote": "First, you must submit a claim reconsideration request. If you don't agree with the outcome of the reconsideration, you may submit an appeal.",
+      "title": "UHCprovider.com: appeals and reconsiderations",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Look Up a Claim > Act on Claim > Appeal (attach only new material)",
+     "applies_to": "Step 2 post-service appeal after the reconsideration answer",
+     "required_or_preferred": "Required: digital only for network providers",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/medicare/2026-Medicare-Advantage-QRG.pdf",
+      "quote": "Submit appeals online at UHCprovider.com. Click the Sign In button in the top-right corner. Click Claims & Payments > Look Up a Claim > Act on Claim > Appeal.",
+      "title": "UHC 2026 Medicare Advantage, CSNP and DSNP QRG",
+      "doc_date": "2026-03-12",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "Reconsideration and appeal (both steps)",
+     "window": "12 months from the date of the original claim EOB or PRA (or as the agreement or law requires)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "quote": "You must submit your reconsideration and appeal to us within 12 months from the date of the original claim EOB or PRA (or as required by law or your Agreement).",
+      "title": "2026 UnitedHealthcare Administrative Guide",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "The open balance is $0.64 (one item). Full UHC routes (Notice of Dispute, corrected claims, records) are in the UnitedHealthcare Medicare Advantage entries. Non-contracted claims follow the UHC non-contracted routes (portal only, 120-day dispute, 60-day reconsideration)."
+   ],
+   "no_fax_reason": "UHC takes network providers' post-service reconsiderations and appeals only through the portal or API since Feb. 1, 2026 (Kentucky and Indiana not excluded), and lists no appeal fax for Kentucky or Indiana. Fax 888-517-7113 on UHC pages is the MA member appeals and grievances line, not a provider claim channel.",
+   "notes": "Identity: UHC's claims payer list (https://www.uhcprovider.com/content/dam/provider/docs/public/resources/edi/Payer-List-UHC-Affiliates-Strategic-Alliances.pdf, dated 2026-05-14, read 2026-11-23) reads 'UnitedHealthcare Medicare / UnitedHealthcare MedicareComplete (formerly SecureHorizons) 87726'"
+  }
+ ]
+}

@@ -1,0 +1,307 @@
+{
+ "area": "payer_manuals",
+ "checks": [
+  {
+   "id": "HUM-1",
+   "verdict": "correct",
+   "citation": "Humana 2026 Provider Manual for Physicians, Hospitals and Healthcare Providers (773902ALL0725-A; PDF 2026-02-19), 'Provider Claims Dispute Process' p. 20 and 'Escalated Review Process' p. 21",
+   "url": "https://assets.humana.com/is/content/humana/FINAL_773902ALL0725-A_2026_ProviderManual-Delegated_formattedpdf",
+   "quote": "Claims disputes must be received by Humana within 18 months from the date the provider received notice of the original claim determination unless state or federal law or the agreement requires another time period or the claim will not be reopened.",
+   "correction": "Confirmed as stated: 'For all products'; the 12 listed written-dispute data elements; no Humana decision deadline; escalation to HumanaProviderServices@humana.com with reference ID 'Within 3-5 business days'; process 'separate and distinct from the arbitration provisions'. The manual 'shall apply equally to Humana, ChoiceCare or HBHN participating providers' (p. 3). Note p. 4: 'State laws and/or regulations do not affect the adjudication of claims for Medicare Advantage members.'"
+  },
+  {
+   "id": "HUM-2",
+   "verdict": "correct",
+   "citation": "Humana Grievances and Appeals/Inquiry Directory (954306ALL0226 (HUMP954306); PDF created 2026-07-21), 'Claim Payment Inquiries/Disputes' pp. 3-4 (escalation steps 3-4 on p. 4)",
+   "url": "https://assets.humana.com/is/content/humana/Information%20for%20Non%20Participating%20Providerspdf",
+   "quote": "Look for an “Acknowledgment of Submission” email with a tracking number within 5 business days of your submission. Please allow 30 to 45 days from the date of the acknowledgment notice for our response.",
+   "correction": "Minor: the phrase 'Most inquiries receive a response in 30 to 45 days' belongs to the call-center route (step 2C), not the escalation; the escalation's own words are 'allow 30 to 45 days from the date of the acknowledgment notice'. Escalation is 'Participating providers only'. Service targets only; no consequence stated."
+  },
+  {
+   "id": "HUM-3",
+   "verdict": "correct",
+   "citation": "Humana Grievances and Appeals/Inquiry Directory (954306ALL0226), 'Medicare Advantage Grievances and Appeals' p. 5; Humana 2026 Provider Manual, 'Medicare Appeals Process' pp. 21-22",
+   "url": "https://assets.humana.com/is/content/humana/Information%20for%20Non%20Participating%20Providerspdf",
+   "quote": "Participating providers do not have grievance and appeal rights on behalf of themselves, but they can appeal on behalf of their Humana-covered patients. Nonparticipating providers may appeal on behalf of themselves or on behalf of their Humana-covered patients. ... Please submit your appeal request in writing within 65 calendar days from the date of the denial notice.",
+   "correction": "Also confirmed in the manual p. 22: 'Post-service – 60 calendar days from the receipt of the request'. Mail address P.O. Box 14165, Lexington, KY 40512-4165 and Waiver of Liability requirement for nonparticipating providers confirmed."
+  },
+  {
+   "id": "HUM-4",
+   "verdict": "correct",
+   "citation": "Humana Physician Participation Agreement template 'HUM Phys 08-2006KY', Article 13 sections 13.1-13.6 (filed as Attachment I.C.18.d-3 to Kentucky MCO RFP #758 2000000202; PDF created 2019-06-26, modified 2020-01-29), pp. 6-7 of 30",
+   "url": "https://finance.ky.gov/eProcurement/HumanaResponse/136_Attachment%20I.C.18.d-3%20HUM%20Physician%20All%20Products%20Template.pdf",
+   "quote": "The parties agree that any dispute arising out of their business relationship which cannot be settled by mutual agreement shall be submitted to final and binding arbitration under the Healthcare Payor Provider Arbitration Rules of the American Arbitration Association (“AAA”) ... Humana agrees that it shall refund any applicable filing fees or arbitrators’ fees paid by such Physician in the event that Physician is the prevailing party",
+   "correction": "All points confirmed (exhaust internal review; Medicare-appeal disputes via the Medicare process; one AAA National Healthcare Panel arbitrator; within 50 miles failing agreement; costs split; fee refund for a physician practicing individually or in a group of 'less than six (6) physicians'; no joinder or class; party resisting arbitration pays costs incl. reasonable attorneys' fees). Add: 13.2 sweeps statutory claims into arbitration too: 'No claim or allegation shall be excepted from this Arbitration Agreement, including alleged breaches of the Agreement, alleged violations of state or federal statutes or regulations'. It is a 2019/2020 template, not the practice's signed contract."
+  },
+  {
+   "id": "HUM-5",
+   "verdict": "correct",
+   "citation": "Humana Physician Participation Agreement template 'HUM Phys 08-2006KY', section 15.3, pp. 7-8 of 30",
+   "url": "https://finance.ky.gov/eProcurement/HumanaResponse/136_Attachment%20I.C.18.d-3%20HUM%20Physician%20All%20Products%20Template.pdf",
+   "quote": "Humana shall provide Physician thirty (30) days advance written notice of Humana’s intent to offset such amounts prior to deduction of any monies due. ... Humana may make retroactive adjustments to payments for a period not to exceed eighteen (18) months from original date of payment or such other period as may be required by applicable law."
+  },
+  {
+   "id": "HHH-KY-1",
+   "verdict": "corrected",
+   "citation": "Humana Healthy Horizons in Kentucky 2025 Provider Manual (572302KY1024; PDF 2026-01-26), Chapter 7 'Internal appeals' p. 53; network notice LC17925KY0722 (7/26/2022); controlling statute KRS 205.534(1)(d) as amended by 2026 Ky. Acts ch. 179, sec. 13, effective April 14, 2026",
+   "url": "https://apps.legislature.ky.gov/law/Statutes/statute.aspx?id=57033",
+   "quote": "Manual: 'If a provider does not agree with the decision on a processed claim, the provider has 60 calendar days from the date of the original claim submission adjudication to file an appeal.' Statute: 'Allowing a provider to file any grievance or appeal related to the reduction or denial of the claim within one hundred twenty (120) days of confirmed receipt of a notification from the managed care organization that payment for a submitted claim has been reduced or denied;'",
+   "correction": "The manual and the 2022 notice are quoted accurately (the notice cited KRS 205.534(1)(d), whose 2019 text said 'sixty (60) days'), but the statute was amended effective April 14, 2026: a Kentucky Medicaid MCO must now allow 120 days from CONFIRMED RECEIPT of the reduction/denial notice. Do not treat a Humana KY Medicaid claim appeal as expired at day 61; the statutory floor is day 120 from confirmed receipt (keep proof of receipt date). The 30-day resolution is now statutory: KRS 205.534(1)(d)2.a ('within thirty (30) days from the date the grievance or appeal is filed'), and 2.b: 'Failure of the managed care organization to comply with subdivision a. of this subparagraph shall result in a fine or penalty as provided in subsection (6)'; (1)(d)3 requires payment in full within 30 days after an appeal resolved in the provider's favor. Manual's 14-day extension is the MCO's own term. Contact details (P.O. Box 14546; fax 800-949-2961; phone 800-444-9137) confirmed in the 2022 notice."
+  },
+  {
+   "id": "HHH-KY-2",
+   "verdict": "correct",
+   "citation": "Humana Healthy Horizons in Kentucky 2025 Provider Manual, 'Contracted rate dispute process' p. 88; Contracted Rate Dispute Form 366004KY1223-B (PDF modified 2025-08-05)",
+   "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+   "quote": "Humana Healthy Horizons determines and then mails the provider a dispute decision letter within 30 calendar days of receipt of a complete contracted rate dispute.",
+   "correction": "Confirmed: 24 months from original adjudication; KRS 304.17A-708 basis; EOP and misapplied contract provision required; 'Incomplete submissions are rejected.' Caveat the researcher missed: the same page says a later appeal of the rate-dispute decision 'must be received within 60 calendar days of the original claim adjudication date' (now at least 120 days under amended KRS 205.534(1)(d)1), and EIR excludes contract-reimbursement disputes, so in practice the rate-dispute letter is the last internal step. Same page: 'Claims determined by Humana Healthy Horizons to have been incorrectly paid or denied and within 24 months of Humana’s claims adjudication date are reprocessed. Providers are not required to resubmit the claim.'"
+  },
+  {
+   "id": "HHH-KY-3",
+   "verdict": "correct",
+   "citation": "Humana Healthy Horizons in Kentucky 2025 Provider Manual, 'External independent reviews' pp. 54-56; 907 KAR 17:035; fee set by 907 KAR 17:040 Section 3 under KRS 205.646(6)",
+   "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+   "quote": "The provider must submit a request for an EIR within 60 calendar days of receiving final decision on the internal appeal. ... The party that receives an adverse final order shall pay a fee not to exceed $1,000.",
+   "correction": "All manual points confirmed. Resolves the open question on the hearing fee: KRS 205.646(6) caps it ('not to exceed one thousand dollars ($1,000)'), and 907 KAR 17:040 Section 3 sets it: 'The party that receives an adverse final order shall pay a fee of $600 to the department within thirty (30) calendar days of the issuance of the final order.' So the operative fee is $600 (Anthem's figure); Humana quotes the statutory cap. Also missed: KRS 205.646(2) lets a provider put multiple claims in ONE EIR when it alleges an MCO policy or practice caused the denials (see missing list)."
+  },
+  {
+   "id": "KY-MCO-MEET",
+   "verdict": "corrected",
+   "citation": "KRS 205.534(1)(b) (effective April 14, 2026); Humana Healthy Horizons in Kentucky 2025 Provider Manual 'Claim status' p. 99 (not p. 98); Aetna Better Health of Kentucky 2026 Provider Manual 'On-site Meeting' p. 102 (not p. 101); Anthem KY Medicaid Provider Manual section 11.8 p. 119",
+   "url": "https://apps.legislature.ky.gov/law/Statutes/statute.aspx?id=57033",
+   "quote": "(b) Afford each participating provider the opportunity for an in-person meeting with a representative of the managed care organization on: 1. Any clean claim that remains unpaid in violation of KRS 304.17A-700 to 304.17A-730; and 2. Any claim that remains unpaid for forty-five (45) days or more after the date the claim is received by the managed care organization and that individually or in the aggregate exceeds two thousand five hundred dollars ($2,500);",
+   "correction": "The meeting right is confirmed in the statute itself, but by statute it belongs to PARTICIPATING providers (the manuals say 'each provider'). Page cites corrected (Humana p. 99, Aetna p. 102). Anthem has not been a Kentucky Medicaid MCO since Jan. 1, 2025 (CHFS), so cite the statute plus the current MCOs: Aetna Better Health, Humana Healthy Horizons, Passport by Molina, UnitedHealthcare Community Plan, WellCare of Kentucky (CHFS MCO page). The aggregate trigger does reward pooling small unpaid claims per MCO."
+  },
+  {
+   "id": "ANT-COM-1",
+   "verdict": "correct",
+   "citation": "2026 Anthem BCBS Kentucky Commercial Provider Manual (v1), effective September 1, 2026 (KY-BCBS-CM-PM-010987-26-S3103, v1b 08012026), 'Claim Payment Disputes' pp. 58-60; same in Indiana manuals PM_IN_00012 (v1, eff. 8/1/2026) and PM_IN_00013 (v2, eff. 1/1/2027)",
+   "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+   "quote": "Providers and Facilities have a minimum of two (2) years from the issue date of the EOP, unless otherwise required by State law (or such time period set forth in the Provider or Facility Agreement. ... Providers and Facilities must submit Claims Payment Appeals within ninety (90) days from the date of the determination of the Claims Payment Reconsideration.",
+   "correction": "Minor: section is on pp. 58-60 (not 57). Indiana text says 'have two (2) years' (no 'minimum of'). No decision deadline for payment disputes confirmed. Not covered by this process: clinical appeals, which have their own limits (see missing list: 180 days to file, decided within 60 days)."
+  },
+  {
+   "id": "ANT-COM-2",
+   "verdict": "correct",
+   "citation": "2026 Anthem BCBS Kentucky Commercial Provider Manual, 'Dispute Resolution, Mediation, and Arbitration' sections A-H, pp. 14-17 (same in Indiana manuals)",
+   "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+   "quote": "pre-judgment interest shall be simple, not compounded, at an annual percentage rate no more than five percent (5%) or the interest applied for “clean claims”, whichever is less.",
+   "correction": "Minor: section starts p. 14 (not 13). All other points confirmed: 'All administrative remedies set forth in the Agreement shall be exhausted prior to filing an arbitration demand'; written notice with 'a detailed description of the amount(s) in dispute and how they have been calculated'; fees shared; no consolidation across separate Agreements; class-waiver disputes go to court; confidential."
+  },
+  {
+   "id": "ANT-COM-3",
+   "verdict": "correct",
+   "citation": "Anthem Provider News - Kentucky, November 1, 2022, 'You can now submit one electronic claim dispute for multiple claims and access correspondence digitally, too' (KYBCBS-CM-10722-22-CPN10713; line of business Commercial)",
+   "url": "https://providernews.anthem.com/kentucky/articles/you-can-now-submit-one-electronic-claim-dispute-for-multiple-claims-and-access-correspondence-digitally-too-2-11956",
+   "quote": "You can submit one dispute and add multiple claims — up to 25 claims — as long as the additional disputed claims are for the same member, provider, and dispute reason.",
+   "correction": "Confirmed, including 'you will receive correspondence related to each individual dispute' (CI-COMM case number). Neither the 2026 KY nor the IN commercial manual mentions the 25-claim bundle, so whether it is still live remains unconfirmed."
+  },
+  {
+   "id": "ANT-MA-1",
+   "verdict": "correct",
+   "citation": "Anthem BCBS Provider Guidebook Medicare Advantage, January 1, 2027 (CR-PM-017345-26-GRP4605, dated November 1, 2026), sections 5.2-5.5.1, pp. 80-84",
+   "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+   "quote": "The plan will make every effort to resolve the claims payment reconsideration within 45 calendar days of receipt.",
+   "correction": "Confirmed: reconsideration within 120 calendar days of the EOP ('untimely and denied unless good cause'); appeal within 30 calendar days of the reconsideration letter ('upheld unless good cause'); 'every effort' 30 days for the appeal; determination letter must give 'Support for the action, including applicable statutes, regulations, policies, claims, codes, or provider manual references'; P.O. Box 105187 Atlanta for GA, IN, KY, MO, OH, WI."
+  },
+  {
+   "id": "ANT-MA-2",
+   "verdict": "correct",
+   "citation": "Anthem Medicare Advantage Provider Guidebook (Jan. 1, 2027), section 2.18 'Prompt Payment by Medicare Advantage (MA) Organization' p. 29 and section 7.2 'Nonparticipating Provider Appeals Rights' p. 88",
+   "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/ABSCRPM-0010-20.pdf",
+   "quote": "Pay interest on clean claims not paid within 30 days ... the nonparticipating provider must request a reconsideration of the denial within 65 calendar days from the remittance notification."
+  },
+  {
+   "id": "ANT-KYCAID-1",
+   "verdict": "corrected",
+   "citation": "Anthem BCBS Medicaid Provider Manual Kentucky Medicaid (KYBCBS-CD-PM-042746-23; PDF 2024-02-09), section 10.2.4 'Payment Appeals' pp. 109-111 and 10.2.5 p. 111; CHFS 'Kentucky Medicaid Anthem MCO Transition' page and Anthem Medicaid MCO Transition FAQ (updated Feb. 5, 2025)",
+   "url": "https://chfs.ky.gov/agencies/dms/Pages/AnthemTransition.aspx",
+   "quote": "Manual: 'Payment appeals, whether verbal or written, must be received by Anthem within 90 calendar days of the remittance date.' CHFS: 'Anthem Kentucky Managed Care Plan, Inc. is no longer a Kentucky Medicaid Managed Care Organization effective Jan. 1, 2025, according to a court order in Anthem Kentucky Managed Care Plan, Inc. v Kentucky Finance and Administration Cabinet, et al., Franklin Circuit Court, Civil Action No. 20-CI-00719.'",
+   "correction": "The manual text is quoted accurately (also the 30-day determination and 10.2.5 negotiation steps), but the rule now governs only run-out claims for dates of service before Jan. 1, 2025: the FAQ says 'Anthem will be required to process claims up to 365 days post termination, as well as receive and respond to any appeals or grievances related to services prior to January 1, 2025.' Anthem members moved to Humana or UnitedHealthcare Community Plan. Also, the 90-day window is below the current statutory floor: KRS 205.534(1)(d)1 (effective April 14, 2026) requires MCOs to allow 120 days from confirmed receipt. Current Kentucky Medicaid MCOs: Aetna, Humana, Passport, UnitedHealthcare Community Plan, WellCare."
+  },
+  {
+   "id": "ANT-KYCAID-2",
+   "verdict": "corrected",
+   "citation": "Anthem Kentucky Medicaid Provider Manual section 10.3.2, pp. 113-114; 907 KAR 17:035; 907 KAR 17:040 Section 3",
+   "url": "https://providers.anthem.com/docs/gpp/KY_CAID_ProviderManual.pdf",
+   "quote": "If the external review decision is to overturn the original Anthem decision, the claim will be adjusted within 30 days of the decision. ... The party who receives an adverse final order shall pay a fee of $600 to DMS for the cost of the Administrative Hearing.",
+   "correction": "Quotes, 60-day EIR window, DOS on or after 12-1-2016, contacts and the $600 fee are confirmed ($600 matches 907 KAR 17:040 Section 3). Corrections: (1) applies only to Anthem run-out claims (DOS before Jan. 1, 2025) since Anthem left Kentucky Medicaid; (2) the manual's '45 business days if an extension has been agreed' differs from 907 KAR 17:035 Section 3(5)(c), which allows 'An extension of up to fourteen (14) calendar days ... upon agreement of both parties'; (3) the regulation's own payment duty is 'Within sixty (60) calendar days from the exhaustion of appeal rights after a final decision against an MCO' (Section 5); Anthem's manual promises 30 days."
+  },
+  {
+   "id": "ANT-INCAID-1",
+   "verdict": "correct",
+   "citation": "Anthem BCBS Indiana Medicaid Provider Manual (HHW, HIP, HCC, PathWays) INBCBS-CD-PM-070775-24 (PDF 2025-04-09), 'Informal Claim Disputes' and 'Formal Appeals' pp. 150-152; 21-day information rule in Chapter 10 claims table p. 107",
+   "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+   "quote": "Anthem will make every effort to resolve the formal appeal within 45 calendar days of receipt. If a determination is not made within 45 days, the decision will be rendered in favor of the provider.",
+   "correction": "Confirmed: informal within 60 calendar days of the EOP, Anthem 'every effort' 30 days plus 30 with a written extension letter; formal within 60 calendar days of the reconsideration letter; binding arbitration per the agreement; good-cause list. The 21-day rule ('If the information is not received within 21 days, Anthem may close the case') is in the Chapter 10 timely-filing table, not the dispute section. The underlying 405 IAC 1-1.6 text was not verified here (indiana area)."
+  },
+  {
+   "id": "ANT-INCAID-2",
+   "verdict": "correct",
+   "citation": "Anthem BCBS Indiana Provider Dispute Resolution Request Form (WEBPAIN-0226-17, June 2017), pp. 1-2; manual Chapter 10 table p. 108",
+   "url": "https://providers.anthem.com/docs/gpp/IN_CAID_DisputeResolutionForm.pdf",
+   "quote": "Use this page only for multiple like claims (disputed for the same reason). ... Submission of this form constitutes agreement not to bill the patient during the dispute process.",
+   "correction": "Also confirmed in the 2025 manual (p. 108): 'Multiple claims for the same situation can be submitted on one form.' The 2017 form names Hoosier Healthwise, HIP and Hoosier Care Connect only (predates PathWays)."
+  },
+  {
+   "id": "UHC-1",
+   "verdict": "correct",
+   "citation": "2026 UnitedHealthcare Care Provider Administrative Guide for Commercial, Individual Exchange and Medicare Advantage (PDF 2026-05-13), Chapter 10 section 5 'Claim reconsideration and appeals process', printed pp. 134-136",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+   "quote": "You must submit your reconsideration and appeal to us within 12 months from the date of the original claim EOB or PRA (or as required by law or your Agreement).",
+   "correction": "Confirmed: 'allows a total of 12 months for timely submission for both steps'; not applicable in CA Commercial HMO, OR HMO, OR and WA commercial; no UHC decision deadline in Chapter 10. Guide 'is effective April 1, 2026' for current network providers and 'effective now' for those joining on or after Jan. 1, 2026. Minor page shift (section on pp. 134-136)."
+  },
+  {
+   "id": "UHC-2",
+   "verdict": "correct",
+   "citation": "2026 UHC Administrative Guide, Chapter 1 'Obligation to do business with UnitedHealthcare electronically' p. 5; Chapter 10 '20 or more claim reconsiderations (research request)' p. 134; Single Paper Claim Reconsideration Request Form (PCA-1-25-00612-POE-FM_03312025)",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+   "quote": "If you have a request to reconsider 20 or more paid or denied claims for the same administrative issue (and attachments are not required), you may submit these in bulk online.",
+   "correction": "Also confirmed: 'where allowed by law, UnitedHealthcare requires you to use digital tools where available ... This includes submissions and inquiries related to claims, reconsiderations and appeals'; paper form: 'If electronic submission isn’t possible, use the following form. This form is for submitting 1 claim at a time, not for bulk or multiple claims.' and 'please mail to UnitedHealthcare using the address listed on the PRA.' No fax route."
+  },
+  {
+   "id": "UHC-3",
+   "verdict": "correct",
+   "citation": "2026 UHC Administrative Guide, Chapter 10 'Resolving potential reimbursement issues' p. 146 and 'Arbitration locations' p. 147",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+   "quote": "Unless your Agreement prescribes a different time frame, a Notice of Dispute must be sent no later than 60 days after the date of our decision on your appeal. ... Failure to timely comply with this process and the requirements in your Agreement will result in the waiver of your right to initiate dispute resolution and waiver of your right to pursue such claim or issue in any forum.",
+   "correction": "Minor: pages are 146-147 (not 145-146). Field list, 'Notice of Dispute' reference line, IN = Marion County and KY = Fayette County all confirmed."
+  },
+  {
+   "id": "UHC-4",
+   "verdict": "correct",
+   "citation": "2026 UHC Administrative Guide, Chapter 10 'Disagreement' p. 134 (overpayment refund section on p. 133)",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+   "quote": "If you disagree with the claim adjustment, or request for an overpayment refund or recoupment, you may submit a notice of disagreement within 30 calendar days (or as required by law or your Agreement) from the date of receipt of notification.",
+   "correction": "Minor page shift (p. 134). Related p. 133: refunds 'within 30 calendar days (or as required by law or your Agreement) from the date of notification' and 'We may apply the overpayment against future claim payments unless your Agreement states otherwise or as required by law.'"
+  },
+  {
+   "id": "UMR-1",
+   "verdict": "correct",
+   "citation": "2026 UHC Administrative Guide, 'UMR and UHSS supplement' pp. 417-423 (Applicability p. 417; claim reconsideration pp. 422-423; FAQ p. 423); Chapter 10 contact table p. 149",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+   "quote": "You are subject to both the UnitedHealthcare Care Provider Administrative Guide and this supplement. This supplement supersedes the main guide if there is conflicting information.",
+   "correction": "Confirmed: UMR 'is a third-party administrator (TPA) and not an insurance company'; mail UMR - Claim Appeals, P.O. Box 30546; 'Timely filing requirements are determined by the self-funded customer, as well as the provider-contracted timely filing provisions'; overpayment refund within 30 days, recoupment attempted 120 days then Payment Resolution Solutions. The UHSS post-service fax 1-866-427-7703 appears only in the Chapter 10 table (p. 149); the supplement itself lists UHSS mail only. 12-month outer limit is an inference from 'For protocols, policies and procedures not referenced in this supplement, refer to the appropriate chapter in the main guide.'"
+  },
+  {
+   "id": "CIG-1",
+   "verdict": "correct",
+   "citation": "Cigna Healthcare 'Appeals and Disputes Policy and Procedures' provider page, 'How to Submit an Appeal' (the /how-to-submit URL redirects to /health-care-providers/coverage-and-claims/appeals-disputes; read 2026-11-23)",
+   "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes",
+   "quote": "The review will be completed in 60 days and the health care provider will receive notification of the dispute resolution within 75 business days of receipt of the original dispute.",
+   "correction": "Confirmed: call 1-800-882-4462 first; 180 calendar days from the initial payment/denial notice or last adjustment; PO Box 188011 (188062 for 'GWH-Cigna' or 'G'); 'Time periods are subject to applicable law and the health care provider agreement'; footnote 4 (last determination final; 'Customers cannot be billed'). Nuance: the page routes 'Maximum reimbursable amount' and 'Benefit denials' to the Customer appeal path, not the provider appeal."
+  },
+  {
+   "id": "CIG-2",
+   "verdict": "correct",
+   "citation": "Cigna 'Appeals and Disputes Policy and Procedures' page, 'Arbitration'",
+   "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes",
+   "quote": "With respect to health care provider payment or termination disputes, you must request arbitration within one year of the date of the letter communicating the final internal level review decision.",
+   "correction": "Confirmed: agreement clause controls if present; otherwise AHLA ADR Service list request; 'Arbitration will be the exclusive remedy'; binding; no consolidation or class basis; agreement stays in force."
+  },
+  {
+   "id": "CIG-3",
+   "verdict": "correct",
+   "citation": "Cigna 'Request for Health Care Professional Payment Review' form (PDF modified 2021-08-16), header notes and Step 2",
+   "url": "https://static.cigna.com/assets/chcp/pdf/resourceLibrary/medical/RequestForHealthCareProfessionalPaymentReview.pdf",
+   "quote": "Fee schedule or reimbursement terms for multiple patients do not require individual appeals.",
+   "correction": "Confirmed with Step 2: 'Your appeal should be submitted within 180 days and allow 60 days for processing your appeal, unless other timelines are required by state law.'"
+  },
+  {
+   "id": "WC-KY-1",
+   "verdict": "corrected",
+   "citation": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (PDF 2026-04-17), 'Claim Payment Appeals' p. 2, 'Recovery/Cost Containment Unit' p. 3, 'Claim Payment Policy Disputes' p. 4, 'Clinical Appeals' and 'KY External Review Process' p. 5; KRS 205.534(1)(d)1 (effective April 14, 2026)",
+   "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+   "quote": "Claim payment appeals must be submitted in writing to WellCare within 24 months of the date on the EOP. ... Providers may seek an appeal through the Appeals Department within 60 calendar days of a claims denial for lack of prior authorization, services exceeding the authorization, insufficient documentation or late notification.",
+   "correction": "All guide text, addresses, faxes, the 30-day overpayment Final Determination and 'will not be considered' confirmed. Correction: the 60-calendar-day clinical appeal window for CLAIM denials (no auth, over-auth, documentation, late notice) is shorter than the statutory floor now in KRS 205.534(1)(d)1 ('within one hundred twenty (120) days of confirmed receipt of a notification ... that payment for a submitted claim has been reduced or denied'); do not expire such appeals before day 120 from confirmed receipt. The 24-month payment-appeal window already exceeds the floor."
+  },
+  {
+   "id": "AET-KY-1",
+   "verdict": "correct",
+   "citation": "Aetna Better Health of Kentucky 2026 Provider Manual (Aetna/2350 10-01-25 (1/26); PDF modified 2026-08-07), 'Appeal Process for Providers' p. 107, 'Resolution of the Appeal' p. 108, 'Provider External Review' pp. 109-110; Aetna KY 'File a Grievance or Appeal (for Providers)' web page",
+   "url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ABHKY%20Provider%20Manual.pdf",
+   "quote": "We must receive your appeal within one (1) year of the incident, remit date or date of notice of action that caused the appeal. We will respond to your appeal in writing within thirty (30) calendar days of when we receive it.",
+   "correction": "All points confirmed, including the web page's 'You can file an appeal within 60 days of receiving a Notice of Action', fax 1-855-454-5585 ('the fastest and best way'), KYAppealandGrievance@aetna.com, EIR fax 1-844-359-6670 and the 60-day Final Order compliance. The conflict is resolved by statute: KRS 205.534(1)(d)1 (effective April 14, 2026) requires at least 120 days from confirmed receipt for claim reduction/denial appeals, so the 60-day web figure cannot cut off a claim appeal; the manual's one year governs. The 30-day decision is statutory, with fines for failure (KRS 205.534(1)(d)2, (6))."
+  },
+  {
+   "id": "AET-KY-2",
+   "verdict": "correct",
+   "citation": "Aetna Better Health of Kentucky 2026 Provider Manual, 'Recoveries' p. 101 and claims timeliness and interest text p. 102 (not pp. 100-101)",
+   "url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ABHKY%20Provider%20Manual.pdf",
+   "quote": "Providers can send a notice of disagreement with the overpayment recovery request within thirty(30) days from the postmark date/electronic delivery date and submit additional relevant information to Aetna Better Health. In such an instance, Aetna Better Health shall not proceed with the recoupment until the dispute is resolved.",
+   "correction": "Page correction only. Also supported by statute: KRS 205.534(1)(e)3 lets an MCO 'Only recoup denied payments or issue a demand for payment from a provider upon the final disposition of the audit, including the appeals process established in KRS 205.646'."
+  },
+  {
+   "id": "PASS-1",
+   "verdict": "could_not_check",
+   "citation": "Passport by Molina Healthcare 2026 Kentucky Medicaid Provider Manual (DMS approved)",
+   "url": "https://www.molinahealthcare.com/-/media/Molina/PublicWebsite/PDF/Providers/ky/medicaid/2026-MKY-ProviderManual-DMSApproved_R.ashx",
+   "quote": "(not read)",
+   "correction": "Molina's site returned 404 or a bot-block page to every automated request (curl and WebFetch, 2026-11-23); the 2025 manual and slide-deck URLs redirected away. Nothing about Passport's own deadlines or fax could be confirmed. Statutory floors that DO apply to Passport as a Kentucky Medicaid MCO (verified): KRS 205.534(1)(d) (120 days to appeal from confirmed receipt; disposition within 30 days; payment within 30 days of a favorable result), KRS 205.534(1)(b) meeting right, KRS 205.646 EIR, and the KDMS MCO Dispute Form route (lists 'Passport by Molina'). Obtain the manual by hand before automating."
+  },
+  {
+   "id": "MHS-1",
+   "verdict": "correct",
+   "citation": "MHS Indiana Provider Manual (0126.PR.P.JB; PDF modified 2026-02-09; header 'MHS Provider Manual 2025'), Chapter 5 'Informal Claim Dispute', 'Formal Claim Dispute - Administrative Claim Appeal', 'Administrative Claim Appeal Review and Determination', pp. 25-27",
+   "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+   "quote": "In the event MHS fails to deliver to the provider a written determination within 45 calendar days of the initial receipt of the administrative claim appeal, the initial decision will be overturned and the appeal ruled in favor of the provider.",
+   "correction": "Confirmed: Level 1 within 60 calendar days of the EOP, MHS responds within 30; Level 2 within 60 days of the informal resolution notice, letterhead, 'appeal' clearly marked, acknowledgment within 5 business days; processing within 30 days after final determination; phone/online reconsideration 'will not stop the 60-calendar-day count'. MHS applies 405 IAC 1-1.6 'for both contracted and non-contracted providers'."
+  },
+  {
+   "id": "MHS-2",
+   "verdict": "correct",
+   "citation": "MHS Indiana Provider Manual, Chapter 5 'Arbitration', p. 27",
+   "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+   "quote": "Claims with similar issues from the same provider may be grouped together for the purpose of requesting arbitration.",
+   "correction": "Confirmed: request 'postmarked no later than 60 calendar days after the date the provider received MHS’ decision on the administrative claim appeal'; mail 429 N. Pennsylvania Street, Suite 109, or fax 1 (833) 364-2498; research within 30 calendar days with information or an offer to settle; AHLA rules under IC 34-57-2-1 et seq."
+  },
+  {
+   "id": "CS-IN-1",
+   "verdict": "corrected",
+   "citation": "CareSource Indiana Medicaid Provider Manual (PDF 2025-04-23), 'Provider Grievances, Claim Disputes & Appeals Process' pp. 112-114; CareSource Indiana Medicaid 'Provider Disputes or Appeals' web page (updated 07/25/2025); Provider Standard Claims Dispute Form IN-MED-P-2391462 (4/10/2024) and Provider Standard Appeal Form IN-MED-P-2303004",
+   "url": "https://www.caresource.com/documents/in-hip-hhw-health-partner-manual.pdf",
+   "quote": "CareSource must issue a written decision within 45 days of receipt of the written request for appeal. If the appeal is not resolved within the 45-day time frame, the appeal will be determined as an approval.",
+   "correction": "Deadlines and the deemed approval are confirmed, and the web page confirms 'Claims appeals filed without first submitting a dispute will not be processed.' Correction on channel: fax (937) 531-2398 appears in the April 2025 manual and the 2021 notice, but the current dispute and appeal forms say 'The preferred method of submission is through the CareSource Provider Portal. However, if you are unable to do so, please complete this form and submit to the mailing address below' (P.O. Box 2008, Dayton, OH 45401) and list no fax; the web page lists portal or form only. Confirm by phone (1-844-607-2831) that faxed disputes are accepted before relying on fax; otherwise use the portal or tracked mail."
+  },
+  {
+   "id": "CS-IN-2",
+   "verdict": "correct",
+   "citation": "CareSource Indiana Medicaid Provider Manual, 'Arbitration', p. 114",
+   "url": "https://www.caresource.com/documents/in-hip-hhw-health-partner-manual.pdf",
+   "quote": "The fees and expenses of arbitration or other binding resolution procedure shall be borne by the non-prevailing party.",
+   "correction": "Confirmed, including 'The arbitration process may include, in a single arbitration proceeding, matters from multiple formal claim resolution procedures involving CareSource and the provider.' No filing deadline stated in the manual."
+  },
+  {
+   "id": "CS-IN-3",
+   "verdict": "correct",
+   "citation": "CareSource network notification 'Dispute and Appeal Clarification' (July 2, 2021; OMPP approved 06/24/2021); document title and URL say IN-MED-P-488869, the printed footer says 'IN-MED-P-488862'",
+   "url": "https://www.caresource.com/documents/in-med-p-488869-dispute-and-appeal-clarification",
+   "quote": "If a systemic issue is identified, multiple claims may be submitted for one dispute. When submitting multiple claims, the claims must be disputed for the same reason and under the same Tax ID and NPI.",
+   "correction": "Confirmed, including 'the provider shall have sixty (60) days after the end of the thirty (30) day period to submit a formal appeal notice' and the warning against generic or copied forms."
+  },
+  {
+   "id": "HHH-IN-1",
+   "verdict": "correct",
+   "citation": "Humana Healthy Horizons in Indiana claim-payment inquiry resolution guide for Indiana PathWays for Aging providers (567406IN0924; PDF 2025-01-08), pp. 1-5",
+   "url": "https://assets.humana.com/is/content/humana/Indiana%20Medicaid%20Claim%20Payment%20Inquiry%20Resolution%20Guidepdf",
+   "quote": "If you are a participating provider and disagree with our determination after we respond to your informal claim dispute, you can email a claim appeal to IndianaFormalDispute@humana.com",
+   "correction": "Confirmed (informal via Availity, INMedicaidClaimsResearch@humana.com or P.O. Box 14169; formal to 201 N. Illinois St., Suite 1200; 'Most inquiries receive a response in 30 to 45 days'; PPI escalations answered 'within 3 to 7 business days'). No filing windows printed."
+  }
+ ],
+ "missing": [
+  "KENTUCKY MEDICAID STATE ESCALATION (KDMS Contract Monitoring Branch MCO Dispute Form, Rev 09/25/2025), https://www.chfs.ky.gov/agencies/dms/MAPForms/MCODisputeForm.pdf : 'Grievances and appeals submitted through the MCO process may be submitted to KDMS Dispute Resolution after 30 calendar days have passed from the date of submission to the MCO's internal process.' Requires the MCO's tracking number ('Disputes that do not include the assigned tracking number cannot be reviewed'); reasons include 'Denied Claim' and 'Underpaid Claim'; 'Providers should use the Dispute/Claims-Issue template when submitting two (2) or more related disputes/claims with the same MCO. The template allows for up to 100 related items per submission.' KDMS acknowledges in 3-5 business days and checks in within 10 business days. Submit by fax 502-564-0223 ('Attention: Contract Monitoring Branch'), email ProviderMCOInquiry@ky.gov or mail. Applies to all KY Medicaid MCOs (form lists Aetna, Anthem, Humana, UnitedHealthcare, Passport, WellCare). Provider use: fax-capable, bulk (100 items), regulator-visible step on day 31 of any unanswered KY Medicaid appeal. The CHFS Anthem transition FAQ (Feb. 5, 2025) adds that ProviderMCOInquiry@ky.gov 'is monitored and response is required same day.'",
+  "KRS 205.534(1)(d), as amended by 2026 Ky. Acts ch. 179, sec. 13, effective April 14, 2026, https://apps.legislature.ky.gov/law/Statutes/statute.aspx?id=57033 : MCO must allow 'any grievance or appeal related to the reduction or denial of the claim within one hundred twenty (120) days of confirmed receipt of a notification' (the 2019 text said sixty days); must ensure 'disposition of any grievance or any appeal within thirty (30) days from the date the grievance or appeal is filed'; 'Failure of the managed care organization to comply with subdivision a. of this subparagraph shall result in a fine or penalty as provided in subsection (6)'; and after a provider win 'payment is made in full to the provider within thirty (30) days from the date on which the appeal was resolved'. Subsection (6): fines, penalties and sanctions 'up to and including termination' under the MCO contract. Applies to every KY Medicaid MCO (statute is per MCO; Medicare and commercial excluded). Overrides the shorter manual windows (Humana 60 days, UHC Community Plan 60 days, WellCare clinical 60 days, Anthem 90 days).",
+  "KRS 205.534(1)(a)3-4 (same URL): for any adverse payment or coverage determination the MCO must provide 'copies of all documents, records, and other information relevant to a determination, including medical necessity criteria and any processes, strategies, or evidentiary standards relied upon, if requested by the provider ... at no cost to the provider', and 'a written reply in sufficient detail to inform the provider of all reasons for the determination.' Provider use: every KY Medicaid appeal letter can demand the full file and all reasons, in writing, free.",
+  "KRS 205.534(1)(c) (same URL): MCO must 'Reprocess claims that are incorrectly paid or denied in error, in compliance with KRS 304.17A-708. The reprocessing shall not require a provider to rebill or resubmit claims to obtain correct payment. A claim shall not be denied for timely filing if the initial claim was timely submitted;'. KRS 205.534(1)(e): audits allow at least 30 days for records, must finish within 180 days, and the MCO may 'Only recoup denied payments or issue a demand for payment from a provider upon the final disposition of the audit, including the appeals process established in KRS 205.646'.",
+  "KRS 205.534(3)(a)4 (same URL): each MCO must report monthly to DMS, 'For each internal appeal or grievance not resolved within sixty (60) calendar days, the name of the provider who filed the unresolved internal appeal or grievance, the dollar amount of the claim that was denied ..., the reason for the delay'. Provider use: an appeal left open past day 60 is reported to the regulator by name, which is real, citable pressure in a follow-up letter.",
+  "KRS 205.646(2), (3), (6) (effective July 1, 2025), https://apps.legislature.ky.gov/law/Statutes/statute.aspx?id=56581 : 'A provider may submit multiple claims to be appealed in a single external independent third-party review if the provider alleges that a Medicaid managed care organization has implemented a policy or practice that results in the denial, in whole or in part, of those claims.' The MCO's final internal letter must state that internal rights are exhausted, that the provider is entitled to EIR, and 'The time period and address'. Hearing appeal within 30 days; a multi-claim review goes to 'a single administrative hearing' and 'only one (1) fee shall be assessed' (fee cap $1,000). Note 907 KAR 17:035 Section 3(3) still says 'Only one (1) claim shall be reviewed per external independent third-party review unless the department determines ...'; the statute ('Notwithstanding any law to the contrary', amended 2019) controls. Provider use: pool same-reason KY Medicaid denials into one EIR.",
+  "907 KAR 17:040 Section 3, https://apps.legislature.ky.gov/law/kar/titles/907/017/040/ : 'Administrative Hearing Fee. The party that receives an adverse final order shall pay a fee of $600 to the department within thirty (30) calendar days of the issuance of the final order.' And 907 KAR 17:035 Section 5, https://apps.legislature.ky.gov/law/kar/titles/907/017/035/ : 'Within sixty (60) calendar days from the exhaustion of appeal rights after a final decision against an MCO, whether rendered in an administrative proceeding or a court of law, the MCO shall submit complete payment as required by the decision.' Resolves the researcher's $1,000 vs $600 question ($1,000 is the KRS 205.646(6) cap; $600 is the fee).",
+  "Anthem left Kentucky Medicaid: CHFS 'Kentucky Medicaid Anthem MCO Transition', https://chfs.ky.gov/agencies/dms/Pages/AnthemTransition.aspx : 'Anthem Kentucky Managed Care Plan, Inc. is no longer a Kentucky Medicaid Managed Care Organization effective Jan. 1, 2025'; FAQ (Feb. 5, 2025), https://www.chfs.ky.gov/agencies/dms/Documents/Anthem%20Medicaid%20MCO%20Transition%20FAQ_2.5.25%20DSNP.pdf : 'Anthem will be required to process claims up to 365 days post termination, as well as receive and respond to any appeals or grievances related to services prior to January 1, 2025.' Current KY Medicaid MCOs per CHFS: Aetna Better Health, Humana Healthy Horizons, Passport by Molina, UnitedHealthcare Community Plan, WellCare of Kentucky.",
+  "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (Doc# PMI 05202026-094800; PDF 2026-05-20/06-15), Chapter 12 grid p. 69, https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf : a current KY Medicaid MCO the researcher did not cover (it received part of Anthem's members). Reconsideration: 'Claim reconsiderations (adjustment requests) are accepted within 24 months from the PRA', response '45 business days'; formal appeal: '60 calendar days from the provider remittance advice', 'Resolve within 30 calendar days. *May be extended by 14 calendar days.'; channel: 'We no longer use fax numbers.' (portal/API or mail); overpayment disputes to Attn: Overpayment Disputes, PO Box 740804, Atlanta, GA 30374-0804; 'In accordance with 907 KAR 1:671 ... providers have the right to an administrative hearing ... within 30 days of the UnitedHealthcare internal appeal determination' (907 KAR 1:671 itself not read). The 60-day appeal window is below the KRS 205.534(1)(d)1 floor of 120 days.",
+  "Anthem commercial (KY; same structure in IN) Notice of Overpayment and Claims Audit Appeal Policy, 2026 KY Commercial Provider Manual pp. 117-119, https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf : refund within 30 calendar days if the provider agrees; 'An Appeal of the Notice of Overpayment must be in writing and received by Anthem or its designee within forty-five (45) calendar days of the date of the Notice of Overpayment unless applicable law expressly indicates otherwise ... If the Provider or Facility does not timely appeal, retraction will begin at the expiration of the forty-five (45) calendar days'; Anthem's response 'shall address each matter contained in the Provider’s or Facility’s Appeal.' Provider use: answer every Anthem overpayment notice by day 45 to stop the retraction (the researcher covered takeback rules for Humana, UHC and Aetna but not Anthem).",
+  "Anthem commercial clinical appeals, 2026 KY Commercial Provider Manual pp. 60-61 (same URL): 'Providers and Facilities have one hundred eighty (180) calendar days to file a clinical appeal from the date they receive notice of Anthem's initial decision.' and 'All standard post-service clinical appeals will be resolved within a reasonable period of time appropriate to the medical circumstances, but not later than sixty (60) calendar days from the receipt of the appeal request by Anthem.' This is the only firm Anthem commercial decision deadline found; medical-necessity denials (e.g., Mohs, radiation) use it, not the 2-year payment dispute.",
+  "UnitedHealthcare retroactive-eligibility refunds, 2026 UHC Administrative Guide p. 146: 'If we implement a claim reconsideration and request a refund, we notify you at least 30 business days prior to any adjustment, or as required by law or your Agreement.' Provider use: a retro-eligibility takeback without that notice is itself a dispute ground.",
+  "Does not apply: the 'Billing Dispute External Review Form' linked on Cigna's appeals page (https://www.cigna.com/static/www-cigna-com/docs/health-care-providers/form-billing-dispute-external-review.pdf) is a 2005 class-settlement form for 'Retained Claims' (services 'on or before May 27, 2005'); it gives no current external review for contract payment disputes.",
+  "Coverage gaps (no rule claimed): Indiana MDwise and UnitedHealthcare Community Plan of Indiana (Hoosier Care Connect, PathWays) manuals were not reviewed by the researcher or by me; Passport's 2026 manual remains unread (bot-blocked); the 405 IAC 1-1.6 text behind the Indiana 45-day deemed-approval rules was not verified here (Indiana area); UMWA Health & Retirement Funds and VA CCN provider dispute rules are outside the documents reviewed in this area."
+ ]
+}

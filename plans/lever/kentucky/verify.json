@@ -1,0 +1,432 @@
+{
+ "area": "kentucky",
+ "checks": [
+  {
+   "id": "KY-01",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-005(22), (29); KRS 304.17A-008(2)(f), (k)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=54530",
+   "quote": "\"Insurer\" means any insurance company; health maintenance organization; self-insurer, including a governmental plan, church plan, or multiple employer welfare arrangement, not exempt from state regulation by ERISA",
+   "correction": "Note: 304.17A-008 has its own page (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=56190), created 2025 Ky. Acts ch. 61, effective 6/27/2025: (2)(f) 'Medicare supplement insurance'; (2)(k) 'KRS Chapter 205 or 342'. 005(22)(a)7 also reaches a 'Health benefit plan that affects the rights of a Kentucky insured and bears a reasonable relation to Kentucky, whether delivered or issued for delivery in Kentucky', so classify by plan situs and patient residence as well as funding."
+  },
+  {
+   "id": "KY-02",
+   "verdict": "correct",
+   "citation": "KRS 18A.225(22)(c)-(h)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=55802",
+   "quote": "Any fully insured health benefit plan or self-insured plan issued or renewed to public employees pursuant to this section shall comply with: ... (c) KRS 304.17A-600 to 304.17A-633; (d) KRS 205.593; (e) KRS 304.17A-700 to 304.17A-730; (f) KRS 304.14-135; (g) KRS 304.17A-580 and 304.17A-641; (h) KRS 304.99-123;",
+   "correction": "Note: current text effective 1/1/2025; the version effective 1/1/2027 (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=58242) keeps this list and adds (s) 304.17A-128 and (t) 304.17A-655 to 304.17A-659. The list does not include KRS 304.12-230 or 304.12-235, so the unfair-claims statute and the 30-day/12%/attorney-fee statute are not shown to bind the self-insured KEHP."
+  },
+  {
+   "id": "KY-03",
+   "verdict": "corrected",
+   "citation": "KRS 304.17A-702(1)-(2); KRS 304.17A-700(2), (9); 806 KAR 17:360 Sec. 3(3), (5)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29329",
+   "quote": "each insurer shall reimburse a provider for a clean claim or send a written or an electronic notice denying or contesting the claim within thirty (30) calendar days from the date that the claim is received by the insurer or any entity that administers or processes claims on behalf of the insurer.",
+   "correction": "The rule, the 30 days (60 for organ transplants), the three options in 702(2) and the 3-business-day check grace in 806 KAR 17:360 Sec. 3(3) are right. Two fixes. (1) Only Kentucky-licensed providers are protected: 304.17A-700(9) \"'Health care provider' or 'provider' means a provider licensed in Kentucky\"; a claim rendered by a clinician licensed only in Indiana cannot use 702/730. (2) Day 0 is receipt by the insurer or its claims processor 'at the address published by the insurer' (700(2)), and 806 KAR 17:360 Sec. 3(5)(b) says the time frame does 'Not include the time a claim is with a health care clearinghouse acting on behalf of a provider'. The practice's own clearinghouse 999 acceptance is proof of transmittal, not the received date; use the payer's acknowledgment/277CA or the claim-status 'date the claim was received' (Sec. 2(2)(b)) to compute the due date and interest."
+  },
+  {
+   "id": "KY-04",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-700(3)(c)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=48419",
+   "quote": "\"Clean claim\" means a properly completed billing instrument, paper or electronic, including the required health claim attachments, submitted in the following applicable form:",
+   "correction": "Note: 700(3)(c) reads 'A clean claim for all other providers shall consist of the HCFA 1500 data set or its successor submitted on the designated paper or electronic format as adopted by the National Uniform Claims Committee.'"
+  },
+  {
+   "id": "KY-05",
+   "verdict": "corrected",
+   "citation": "KRS 304.17A-704(1)-(4); KRS 304.17A-706(3)(a)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29330",
+   "quote": "shall notify the provider, its billing agent, or designee that submitted the claim, in writing or electronically, of all information that is missing from the billing instrument, any errors in the billing instrument, or of any other circumstances which preclude it from being a clean claim.",
+   "correction": "Duties and deadlines are right (48 hours electronic, 20 calendar days paper, every defect named at acknowledgment, corrected clean claim adjudicated within the 702 time frame, claim status on the remittance or electronically). The stated consequence is not in the text: 704 sets no penalty and no 'deemed clean' rule for a defect not flagged at acknowledgment. It is an argument only, and a payer may still contest within 30 days under 706(3)(a) for 'information reasonably necessary', provided it gives 'an itemization of all new, never-before-provided information that is needed'. Letters should present it as an argument."
+  },
+  {
+   "id": "KY-06",
+   "verdict": "correct",
+   "citation": "806 KAR 17:360 Sec. 2(2), 3(1), 3(5)",
+   "url": "https://apps.legislature.ky.gov/law/kar/downloads/docs/7651/document.engrossed.pdf",
+   "quote": "Provide the date the claim was received by an insurer, its agent, or designee, an insurer reference number for the claim, and one (1) of the following dated actions",
+   "correction": "Note: regulation certified effective 10/29/2025. Measure lateness from the payer's received date (Sec. 3(5)(b) excludes time at the provider's clearinghouse) to the payment date in Sec. 3(1) (EFT posting date, check postmark, or documented delivery date)."
+  },
+  {
+   "id": "KY-07",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-706(1), (3); 806 KAR 17:360 Sec. 5(2)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29332",
+   "quote": "An insurer may contest a clean claim only in the following instances: ... with an itemization of all new, never-before-provided information that is needed."
+  },
+  {
+   "id": "KY-08",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-706(2)(a)-(d)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29332",
+   "quote": "the insurer shall identify the specific required health claim attachments in its provider manual or other document that sets forth the procedure for filing claims with the insurer.",
+   "correction": "Note: 706(2)(c)3 accrues the 12% (or 730) interest 'from the appropriate claim payment time frame established in KRS 304.17A-613' (the statute's own cross-reference; 702 is the time-frame section)."
+  },
+  {
+   "id": "KY-09",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-730(1)(a)-(c), (2); 806 KAR 17:360 Sec. 4(1)-(4)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29344",
+   "quote": "When paying a claim after the time required by KRS 304.17A-702, the insurer shall add the interest payable to the amount of the unpaid claim without the necessity for any claim for that interest to be made by the provider filing the original claim."
+  },
+  {
+   "id": "KY-10",
+   "verdict": "corrected",
+   "citation": "KRS 304.99-123(1)(a)-(b), (2), (3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=47798",
+   "quote": "A fine of one thousand dollars ($1,000) per day or ten percent (10%) of the unpaid claim amount, whichever is greater, for each day that a clean claim remains unpaid in violation of ... (b) Except for the late payment of claims under subsection (2) of this section, a fine of up to ten thousand dollars ($10,000) where the commissioner determines that an insurer has willfully and knowingly violated",
+   "correction": "Amounts, 'may assess', the 95%/90% quarterly test and the Medicaid MCO reach of (3) are right. But (1)(b) opens 'Except for the late payment of claims under subsection (2)', so a pattern of late payments does not support the $10,000 willful/pattern fine; late payment is reached only by the (1)(a) per-day fine when the insurer fails the quarterly test. Use the $10,000 pattern fine for other prompt-pay violations (contesting outside the four 706(1) grounds, interest not added, 708/714 breaches, claim-form rules). The statute does not say where fines go. The Medicaid MCO contract restates the fines in its own words (Aetna CY2026 Appendix A row 56)."
+  },
+  {
+   "id": "KY-11",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-708(1)-(2); KRS 304.12-230(17); KRS 304.99-020(1)(a); 806 KAR 17:360 Sec. 4(4)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29333",
+   "quote": "An insurer shall not require a provider to appeal errors in payment where the insurer has not paid the claim according to the contracted rate. Miscalculations in payments made by the insurer shall be corrected and paid within thirty (30) calendar days upon the insurer's receipt of documentation from the provider verifying the error."
+  },
+  {
+   "id": "KY-12",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-708(3)(a)-(d)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29333",
+   "quote": "Except in cases of fraud, an insurer may only retroactively deny reimbursement to a provider during the twenty-four (24) month period after the date that the insurer paid the claim submitted by the provider."
+  },
+  {
+   "id": "KY-13",
+   "verdict": "corrected",
+   "citation": "KRS 304.17A-714(1)-(6); KRS 304.17A-712(1)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29336",
+   "quote": "Except for overpayments which are a result of an error in the payment rate or method, an insurer that determines that a provider was overpaid shall, within twenty-four (24) months from the date that the insurer paid the claim, provide written or electronic notice ... If a provider files a dispute in accordance with subsection (2) of this section, no recoupment shall be made until the dispute is resolved.",
+   "correction": "The 30-day dispute window, the freeze on recoupment during a dispute and the notice contents apply only to overpayments noticed under 714(1), which excludes rate or method errors. Rate/method overpayments are collected under 714(5)-(6), and 'A provider may dispute such recoupment in accordance with the provisions contained in KRS 304.17A-708', so the 714(3) freeze does not by its terms protect them; there rely on 714(6) (written documentation 'within twenty-four (24) months from the date that the insurer paid the claim, and at the actual time of recoupment') and 708. 712 (effective 1/1/2025) requires written notice for eligibility or non-covered refunds and routes recoupment through 714."
+  },
+  {
+   "id": "KY-14",
+   "verdict": "correct",
+   "citation": "KRS 304.14-375",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17158",
+   "quote": "No insurer, assignee of the insurer, or other person, whether acting for himself or another in connection with a health insurance transaction, shall make any claim or seek recovery for reimbursement for any overpayment pursuant to any health insurance contract from any person more than two (2) years after the claim was filed, unless the claim was false or fraudulent.",
+   "correction": "Note: the statute states no penalty of its own; the 304.2-140 route (willful violation) is right."
+  },
+  {
+   "id": "KY-15",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-726; KRS 304.17A-724",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29342",
+   "quote": "An insurer shall not request or require a provider to pursue any other course of action regarding the payment of health care claims outside of the provisions set forth in KRS 304.17A-700 to 304.17A-730 and KRS 205.593, 304.14-135, and 304.99-123."
+  },
+  {
+   "id": "KY-16",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-728(1)-(3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29343",
+   "quote": "An insurer or entity shall not reimburse on a discounted fee basis unless the disclosure is provided in the contract with:"
+  },
+  {
+   "id": "KY-17",
+   "verdict": "correct",
+   "citation": "KRS 304.14-135(1)(c), (2); KRS 304.99-125",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=50952",
+   "quote": "An insurer shall not require a provider to: (a) Use a claim form that is different than the uniform claim form for the provider type as set out in subsection (1) of this section; (b) Modify the uniform claims form or its content; or (c) Submit additional claims forms.",
+   "correction": "Note: 304.99-125 confirmed: 'fined not less than one hundred dollars ($100) for each offense. Each claim that is required by the insurer to be submitted on a form which is found in violation of KRS 304.14-135 shall constitute a separate offense.' Using it against appeal or reconsideration forms is an argument, not settled."
+  },
+  {
+   "id": "KY-18",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-722(3)-(5)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29340",
+   "quote": "The department shall, as part of the market conduct survey of each insurer, audit the insurer to determine compliance with KRS 304.17A-700 to 304.17A-730 and KRS 304.14-135 and 304.99-123. Findings shall be made available to the public upon request."
+  },
+  {
+   "id": "KY-19",
+   "verdict": "corrected",
+   "citation": "KRS 304.12-230(2)-(6), (12), (14), (16), (17); KRS 304.12-220; KRS 304.38-180(3); KRS 304.12-120; KRS 304.99-020(1)(a); KRS 304.2-140; KRS 304.99-010",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17037",
+   "quote": "(6) Not attempting in good faith to effectuate prompt, fair and equitable settlements of claims in which liability has become reasonably clear; ... (12) Delaying the investigation or payment of claims by requiring an insured, claimant, or the physician of either to submit a preliminary claim report and then requiring the subsequent submission of formal proof of loss forms, both of which submissions contain substantially the same information;",
+   "correction": "Subsections and penalties confirmed (desist order after a KRS 13B hearing; civil penalty up to $10,000 per violation for an insurer or HMO under 304.99-020(1)(a), text effective 7/15/2026; 304.2-140; 304.99-010 on conviction). Two changes: (a) remove KEHP from applies_to or mark it unconfirmed: KRS 18A.225(22) lists 304.12-237 but not 304.12-230, and KEHP is self-insured; (b) add subsection (12), which names physicians and fits repeated requests for records already sent."
+  },
+  {
+   "id": "KY-20",
+   "verdict": "correct",
+   "citation": "KRS 304.12-235(1)-(3); 806 KAR 12:092 Sec. 1(15)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17038",
+   "quote": "If an insurer fails to settle a claim within the time prescribed in subsection (1) of this section and the delay was without reasonable foundation, the insured person or health care provider shall be entitled to be reimbursed for his reasonable attorney's fees incurred."
+  },
+  {
+   "id": "KY-21",
+   "verdict": "correct",
+   "citation": "806 KAR 12:092 Sec. 1(3), (9), (15); Sec. 2(2); Sec. 3(4), (7), (8), (9), (10)",
+   "url": "https://apps.legislature.ky.gov/law/kar/downloads/docs/7537/document.engrossed.pdf",
+   "quote": "The insurer shall acknowledge and respond within fifteen (15) calendar days to any written communications relating to a claim.",
+   "correction": "Note: Sec. 3(4) gives attorney's fees to 'the insured' (the statute 304.12-235(3) adds the health care provider); Sec. 3(7) sends the delay notice in 'assigned health insurance claims' also to the 'health care provider'. Certified 2/26/2020."
+  },
+  {
+   "id": "KY-22",
+   "verdict": "correct",
+   "citation": "KRS 304.2-165(1)-(4); KRS 304.2-160(2)-(4)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=16665",
+   "quote": "The commissioner shall send a copy of the complaint to the entity or individual and the entity or individual shall send a written or electronic message response to the commissioner within fifteen (15) calendar days from the date of the commissioner's letter.",
+   "correction": "Note: 304.2-160 was amended effective 7/15/2026 (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57320): 'Each written and signed complaint received by the department shall be recorded ... maintained for a period of not less than five (5) years'; indexed by insurer and by licensee; considered before issuing or renewing any certificate of authority or license."
+  },
+  {
+   "id": "KY-23",
+   "verdict": "correct",
+   "citation": "KDOI Health Care Provider 'Clean Claim' Complaint Form (Rev. 10/19); KDOI Filing a Consumer Complaint instructions (07/18/24)",
+   "url": "https://insurance.ky.gov/ppc/Documents/clean_claim_form_oct_19.pdf",
+   "quote": "The use of this form is suggested but not mandatory ... One form per patient. Form may include multiple dates of service for that patient.",
+   "correction": "Note: instructions (https://insurance.ky.gov/ppc/Documents/KDOI_InstructionsConsumerComplaintForm071824.pdf) say insurers 'have 15 calendar days to provide the Department with a response. This response time is strictly enforced, but on occasion, additional time is needed' and 'the majority of cases are processed and completed within 30 days'. The form also requires 'a patient Health Insurance Card' and lists 800-595-6053. A 999 is useful as 'documented written proof of your transmittal' if the insurer denies receipt; it is not the insurer's received date (see KY-03)."
+  },
+  {
+   "id": "KY-24",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-603(1), (4)(a)-(c), (6); KRS 205.522(1)(m)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=49559",
+   "quote": "An insurer shall not deny a claim for failure to obtain preauthorization if the preauthorization requirement was not in effect on the date of service on the claim."
+  },
+  {
+   "id": "KY-25",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-607(2)(b), (i), (j), (l); (3); (4)(b)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57342",
+   "quote": "The insurer's or private review agent's failure to make a determination and provide written notice within the time frames set forth in this section shall be deemed to be a prior authorization for the health care services or benefits subject to the review.",
+   "correction": "Note: text effective 7/15/2026. The 24-hour/5-day clocks run from 'all necessary information', which 607(2)(i) limits to a face-to-face evaluation, a required second opinion and information the department deems necessary. 607(3)(b) excuses failures 'documented to be beyond the insurer's control'. See also 607(2)(l) and (4)(b) under missing."
+  },
+  {
+   "id": "KY-26",
+   "verdict": "corrected",
+   "citation": "KRS 304.17A-611(1) (version effective until 1/1/2028); KRS 205.536(1)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=55784",
+   "quote": "A utilization review decision shall not retrospectively deny coverage for health care services provided to a covered person when prior approval has been obtained from the insurer or its designee for those services, unless the approval was based upon fraudulent, materially inaccurate, or misrepresented information submitted by the covered person, authorized person, or the provider.",
+   "correction": "Text right. Applies_to should add Medicaid MCO review agents: KRS 205.536(1) (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=55333) says 'If the Medicaid managed care organization utilizes a private review agent, as defined in KRS 304.17A-600, the agent shall comply with all applicable requirements of KRS 304.17A-600 to 304.17A-633', which includes 611(1). For reviews done by the MCO itself, still not confirmed. The version effective 1/1/2028 (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=58328) keeps (1) and adds (3) on gold-card retrospective reviews."
+  },
+  {
+   "id": "KY-27",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-617(1)-(4); 806 KAR 17:280 Sec. 7(1)-(2); KRS 304.17A-600(7)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57343",
+   "quote": "The internal appeals process may be initiated by the covered person, an authorized person, or a provider acting on behalf of the covered person.",
+   "correction": "Note: 806 KAR 17:280 Sec. 7(1) (effective 5/30/2023): 'request an internal appeal at least sixty (60) days following receipt of a denial letter'. Short-term plans are included by 304.17A-600(7). For ERISA group health plans, insured or self-funded, federal law gives 'at least 180 days following receipt of a notification of an adverse benefit determination' (29 C.F.R. 2560.503-1(h)(3)(i)); 60 days is a safe internal deadline, not the outer limit. Text of 617 effective 7/15/2026."
+  },
+  {
+   "id": "KY-28",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-619(1)-(2)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57344",
+   "quote": "The insurer's failure to make a determination or provide a written notice within the time frames set forth in KRS 304.17A-617 shall be deemed to be an adverse benefit determination, other than a coverage denial, by the insurer for the purpose of initiating an external review as set forth in KRS 304.17A-623."
+  },
+  {
+   "id": "KY-29",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-623(2)-(5), (12)-(13)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57346",
+   "quote": "A covered person, an authorized person, or a provider acting on behalf of and with the consent of the covered person, may request an external review of an adverse benefit determination, other than a coverage denial, rendered by an insurer, its designee, or agent.",
+   "correction": "Note: expedited review may be extended up to 24 more hours by agreement (623(12)(b)); the 21 days run from 'the receipt of all information required from the insurer'."
+  },
+  {
+   "id": "KY-30",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-625(5), (8)-(10), (13)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57347",
+   "quote": "Failure to provide coverage as required by the independent review entity shall also: 1. Subject the insurer to the provisions of KRS 304.99-010 and 304.99-020; and 2. Require the insurer to pay the claim that was the subject of the external review, without need for the covered person or authorized person to further establish a right as to the payment amount.",
+   "correction": "Note: the 30-day implementation report to DOI is 625(13), outside the cited range; attorney's fees in 625(10)(b) are for 'the insured' only."
+  },
+  {
+   "id": "KY-31",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-617(5)(a)-(h)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57343",
+   "quote": "On receipt of a written request for review of a coverage denial from a covered person, authorized person, or provider, the department shall:"
+  },
+  {
+   "id": "KY-32",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-613(6), (8), (9); 806 KAR 17:280 Sec. 6",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17456",
+   "quote": "Send a copy of the complaint to the insurer or the private review agent within ten (10) days of receipt of the complaint, and require that any written reply be sent to the commissioner within ten (10) days;"
+  },
+  {
+   "id": "KY-33",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-235(1)(a), (3), (5), (6); KRS 304.17A-577(1)(b), (2)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=45438",
+   "quote": "If an insurer issuing a health benefit plan makes a change to an agreement that changes an existing prior authorization, precertification, notification, or referral program, or changes an edit program or specific edits, the insurer shall provide notice of the change to the participating provider at least fifteen (15) days prior to the change.",
+   "correction": "Note: a 'material change' is only one 'the occurrence and timing of which is not otherwise clearly identified in the contract' (235(1)(a)); 577(2) 'shall not apply to changes in standard codes and guidelines developed by the American Medical Association or a similar organization'. 235(4) (signature needed for new products) is listed under missing."
+  },
+  {
+   "id": "KY-34",
+   "verdict": "correct",
+   "citation": "KRS 205.593(2); 907 KAR 17:015 Sec. 4(2)-(3); 42 C.F.R. 447.46(c)(1), 447.45(d)(2)-(3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=7735",
+   "quote": "KRS 304.17A-700 to 304.17A-730 and KRS 205.593, 304.14-135, and 304.99-123 apply to any provider partnership, health maintenance organization, or other managed care organization under contract with the Department for Medicaid Services to manage care and process health care claims for services delivered to Medicaid recipients covered under Medicaid managed care.",
+   "correction": "Note: 42 C.F.R. 447.45(d)(2)-(3) (eCFR): 'pay 90 percent of all clean claims ... within 30 days of the date of receipt' and '99 percent ... within 90 days'; 447.46(c)(1) puts these in the MCO contract. 907 KAR 17:015 certified 2/5/2025."
+  },
+  {
+   "id": "KY-35",
+   "verdict": "correct",
+   "citation": "KRS 205.534(1)(a)3-4, (6)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+   "quote": "With regard to any adverse payment or coverage determination, copies of all documents, records, and other information relevant to a determination, including medical necessity criteria and any processes, strategies, or evidentiary standards relied upon, if requested by the provider.",
+   "correction": "Note: 205.534 text effective 4/14/2026; 'shall be provided at no cost to the provider'."
+  },
+  {
+   "id": "KY-36",
+   "verdict": "correct",
+   "citation": "KRS 205.534(1)(b)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+   "quote": "Any claim that remains unpaid for forty-five (45) days or more after the date the claim is received by the managed care organization and that individually or in the aggregate exceeds two thousand five hundred dollars ($2,500);"
+  },
+  {
+   "id": "KY-37",
+   "verdict": "correct",
+   "citation": "KRS 205.534(1)(c); KRS 205.5356(2)(c)3",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+   "quote": "The reprocessing shall not require a provider to rebill or resubmit claims to obtain correct payment. A claim shall not be denied for timely filing if the initial claim was timely submitted;"
+  },
+  {
+   "id": "KY-38",
+   "verdict": "correct",
+   "citation": "KRS 205.534(1)(d)1-3, (6)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+   "quote": "Allowing a provider to file any grievance or appeal related to the reduction or denial of the claim within one hundred twenty (120) days of confirmed receipt of a notification from the managed care organization that payment for a submitted claim has been reduced or denied;",
+   "correction": "Note: the contract penalty for systemic appeal failure is verified in the Aetna CY2026 contract, Appendix A row 42: '$500.00 per day Contractor is in default until an approved CAP is fully implemented', triggered by failures 'in over twenty percent (20%) of Appealed cases during a sixty (60)-Day period'."
+  },
+  {
+   "id": "KY-39",
+   "verdict": "correct",
+   "citation": "KRS 205.534(1)(e)1-4",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+   "quote": "Only recoup denied payments or issue a demand for payment from a provider upon the final disposition of the audit, including the appeals process established in KRS 205.646; and"
+  },
+  {
+   "id": "KY-40",
+   "verdict": "correct",
+   "citation": "KRS 205.646(1)-(4), (6)-(7); 907 KAR 17:035 Sec. 1-5",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=56581",
+   "quote": "A provider may submit multiple claims to be appealed in a single external independent third-party review if the provider alleges that a Medicaid managed care organization has implemented a policy or practice that results in the denial, in whole or in part, of those claims.",
+   "correction": "Note: 205.646 text effective 7/1/2025. The review decision is not final if either side appeals to the Office of Administrative Hearings within 30 days (205.646(4)); payment is due within 60 days after appeal rights are exhausted (907 KAR 17:035 Sec. 5). 907 KAR 17:035 Sec. 3(3) still says 'Only one (1) claim shall be reviewed per external independent third-party review unless the department determines that reviewing multiple claims related to one (1) member is expedient'. Contract row 45 ($5,000.00 per occurrence) verified in Aetna CY2026 Appendix A."
+  },
+  {
+   "id": "KY-41",
+   "verdict": "correct",
+   "citation": "907 KAR 17:040 Sec. 1-4; KRS 205.646(4), (6)",
+   "url": "https://apps.legislature.ky.gov/law/kar/downloads/docs/9951/document.engrossed.pdf",
+   "quote": "The party that receives an adverse final order shall pay a fee of $600 to the department within thirty (30) calendar days of the issuance of the final order."
+  },
+  {
+   "id": "KY-42",
+   "verdict": "correct",
+   "citation": "KRS 205.532(1)(g), (7), (9)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=54016",
+   "quote": "A Medicaid managed care organization shall not require a provider to appeal or resubmit any clean claim submitted during the time period between the provider's credentialing application date and the completion of the credentialing process."
+  },
+  {
+   "id": "KY-43",
+   "verdict": "correct",
+   "citation": "KRS 205.533(1)-(3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57032",
+   "quote": "A managed care organization shall maintain an interactive website, operated by the managed care organization, that allows providers to file grievances, appeals, and supporting documentation electronically in an encrypted format that complies with federal law and that allows a provider to review the current status of a matter relating to an appeal or a grievance filed concerning a submitted claim."
+  },
+  {
+   "id": "KY-44",
+   "verdict": "correct",
+   "citation": "KRS 205.5356(2)(c), (4), (5)(b); KRS 205.5357",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57030",
+   "quote": "The Department for Medicaid Services shall, in all instances, exercise its rights under a contract with a Medicaid managed care organization to impose all remedies available to the department under the terms of the contract, at law, or equity if the department determines that the managed care organization or a subcontractor acting on behalf of the managed care organization has:"
+  },
+  {
+   "id": "KY-45",
+   "verdict": "correct",
+   "citation": "KRS 205.534(4)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+   "quote": "The Department of Insurance shall then make a determination of whether the contract violation was also a violation of KRS 304.17A-700 to 304.17A-730."
+  },
+  {
+   "id": "KY-46",
+   "verdict": "correct",
+   "citation": "Kentucky Medicaid MCO contract CY2026, Attachment C Sec. 27.1-27.2 (verified in the Aetna contract)",
+   "url": "https://www.chfs.ky.gov/agencies/dms/dhpo/Documents/CY2026Aetna.pdf",
+   "quote": "The Contractor shall consider timely claims filing to be within three-hundred-sixty-five (365) Days of the date of service.",
+   "correction": "Verified in the Aetna CY2026 contract (316 pages, fetched 11/23/2026): 27.2 has the 365 days, 90% in 30 days and 99% in 90 days, the duty to comply with KRS 304.17A-700-730, 205.593, 304.14-135 and 304.99-123, the in-person meeting, reprocessing without rebilling, 'no Claim shall be denied for timely filing if the Claim was timely submitted', receipt = MCO date stamp, and denial notices with the reason; the retroactive MCO change clause (recoupment letter) is on p. 115. The Humana PDF could not be fetched (CHFS returned 403 to a scripted download; the file exceeds the 10 MB fetch limit), so 'same text in Humana' is unverified. Row 56 and row 45 verified in Aetna Appendix A. Note the contract defines the date of payment as 'the date of the check or other form of payment', not the 806 KAR 17:360 posting/postmark date."
+  },
+  {
+   "id": "KY-47",
+   "verdict": "correct",
+   "citation": "Kentucky Medicaid MCO contract CY2026, Attachment C Sec. 25.10; Appendix A rows 41, 42, 45 (verified in the Aetna contract)",
+   "url": "https://www.chfs.ky.gov/agencies/dms/dhpo/Documents/CY2026Aetna.pdf",
+   "quote": "If the Provider prevails, in whole or in part, the Contractor shall comply with any Final Order within sixty (60) Days unless the Final Order designates a different timeframe.",
+   "correction": "Verified in Aetna CY2026: committee of 'at least three (3) qualified individuals who were not involved in the original decision'; written resolution 'received by the Provider within thirty (30) Days', with a 14-day extension requested from the provider; no discrimination for appealing; row 41 'Up to $250.00 per reporting period', row 42 '$500.00 per day', row 45 '$5,000.00 per occurrence'. Provider appeals 'on the Enrollee's behalf for denied services with requisite consent' are enrollee appeals, not 25.10 appeals. Humana copy not fetched (see KY-46)."
+  },
+  {
+   "id": "KY-48",
+   "verdict": "correct",
+   "citation": "907 KAR 17:010 Sec. 4(3), (5), (6), (10); Sec. 5(3); 907 KAR 17:035 Sec. 2(4)",
+   "url": "https://apps.legislature.ky.gov/law/kar/downloads/docs/11020/document.engrossed.pdf",
+   "quote": "A provider shall not be an authorized representative of an enrollee without the enrollee's written consent for the specific action that is being appealed or that is the subject of a state fair hearing.",
+   "correction": "Note: regulation effective 3/10/2022. A single written consent cannot cover more than one visit, admission or treatment plan (Sec. 4(3)(b)2). See Sec. 5(5) automatic ruling under missing."
+  },
+  {
+   "id": "KY-49",
+   "verdict": "correct",
+   "citation": "806 KAR 17:570 Sec. 15(1)-(2)",
+   "url": "https://apps.legislature.ky.gov/law/kar/downloads/docs/15836/document.engrossed.pdf",
+   "quote": "Accepting a notice from a Medicare carrier on dually assigned claims submitted by participating physicians and suppliers as a claim for benefits in place of any other claim form required and making a payment determination on the basis of the information contained in that notice;",
+   "correction": "Note: effective 2/4/2025; the section implements 42 U.S.C. 1395ss (Social Security Act 1882(c)(3)), so the same duty is federal."
+  },
+  {
+   "id": "KY-50",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-576(1)-(4)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=48418",
+   "quote": "Following credentialing, the applicant and, upon the applicant's signing of a contract with the managed care plan, the insurer shall make payments to the applicant for services rendered during the credentialing process in accordance with procedures for reimbursement for participating providers."
+  },
+  {
+   "id": "KY-51",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-150(4), (5), (7)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=40554",
+   "quote": "It is an unfair trade practice for an insurer that offers multiple health benefit plans to require a health care provider, as a condition of participation in a health benefit plan of the insurer, to participate in any of the insurer's other health benefit plans."
+  },
+  {
+   "id": "KY-52",
+   "verdict": "correct",
+   "citation": "KRS 446.070",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=19395",
+   "quote": "A person injured by the violation of any statute may recover from the offender such damages as he sustained by reason of the violation, although a penalty or forfeiture is imposed for such violation.",
+   "correction": "Text confirmed. Provider standing against a health insurer remains unconfirmed (no case law reviewed here); 806 KAR 12:092 Sec. 2(2) implies Kentucky allows one: it limits that regulation to guidance because the NAIC model 'is not appropriate for a state which allows a private cause of action'."
+  },
+  {
+   "id": "KY-53",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-606(2)-(5) (effective 1/1/2028)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=58325",
+   "quote": "Every insurer shall offer a program under which a participating provider may qualify for an exemption from the requirement to obtain prior authorization for any covered health care service that requires prior authorization.",
+   "correction": "Note: applies to contracts delivered, entered, renewed, extended or amended on or after 1/1/2028; a utilization requirement may not 'Require a minimum utilization of more than twenty-four (24)'. Medicaid MCOs are excluded: KRS 205.536(4) (effective 1/1/2028, https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=58329) says the chapter shall not be construed to require Medicaid MCOs 'to comply with KRS 304.17A-606'."
+  },
+  {
+   "id": "KY-54",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-540(1)-(2)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=56516",
+   "quote": "Twenty (20) working days of the receipt of requested medical information where the plan has initiated a retrospective review;",
+   "correction": "Note: text effective 6/27/2025; applies to 'Any insurer'; the denial letter is owed to 'the enrollee', not the provider."
+  }
+ ],
+ "missing": [
+  "KRS 304.17A-700(9) with 304.17A-005(23)(h); KRS 205.532(1)(g); KRS 205.646(1)(e): Kentucky prompt pay (304.17A-700 to 730), the Medicaid MCO duties in 205.532 to 205.536 and the Medicaid external review protect only a provider 'licensed in Kentucky' (700(9): \"'Health care provider' or 'provider' means a provider licensed in Kentucky\"). Claims of clinicians licensed only in Indiana cannot rely on them; the app should store each rendering clinician's Kentucky license and check it before citing Kentucky law. https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=48419",
+  "KRS 304.17A-005(22)(a)7 and KRS 304.17A-603(1): Kentucky law reaches a 'Health benefit plan that affects the rights of a Kentucky insured and bears a reasonable relation to Kentucky, whether delivered or issued for delivery in Kentucky', and the UR, appeal and external review statutes 'apply to any insurer that covers citizens of the Commonwealth under a health benefit plan'. An Indiana resident on an Indiana-issued policy treated in Kentucky may fall outside Kentucky law; classify by plan situs and patient residence, not only by the clinic's state. https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=54530",
+  "KRS 304.17A-700(2), 806 KAR 17:360 Sec. 2(2)(b) and Sec. 3(5), KRS 304.17A-710(1)-(2): the 30-day clock runs from receipt 'at the address published by the insurer, whether it is the address of the insurer or a delegated claims processor'; time with the insurer's clearinghouse counts, time with the provider's clearinghouse does not; insurers must disclose the claims address, phone and delegated processors and give contracted providers 'thirty (30) calendar days' prior written notice' of changes (710(2)). Use the payer's received date (277CA or claim status), not the practice's clearinghouse 999 date, for due dates and interest. https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29334",
+  "KRS 304.17A-607(2)(l) and (4)(b) (text effective 7/15/2026) with 304.17A-613(6): a registered insurer or review agent must 'Comply with its own policies and procedures on file with the department', and 'No change to utilization review policies and procedures shall be effective or used until after it has been filed with and approved by the commissioner.' DOI must give a provider copies of the filed UR policies on request (613(6)); a denial resting on an unfiled new edit or criterion is a UR complaint under 613(8). https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57342",
+  "KRS 304.17A-600(16)(b): 'Retrospective review' 'Does not include the review of a claim that is limited to an evaluation of reimbursement levels, or adjudication of payment'. Pure payment-amount disputes are not utilization review and cannot go to Kentucky external review; route them through 304.17A-708(1) (no appeal may be required; 30 days) and 304.12-230(17). https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57341",
+  "KRS 304.17A-235(4): a material change that puts the practice into 'any new or modified insurance products, or proposes changes to the participating provider's membership networks' 'shall only take effect upon the acceptance of the participating provider, evidenced by a written signature' and must be 'sent by certified mail, return receipt requested'. A claim priced at a product or network rate the practice never signed for is an underpayment to dispute. https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=45438",
+  "KRS 205.534(2) (effective 4/14/2026) with KRS 205.522(1)(m): Kentucky Medicaid MCO authorization requests must be approved within 24 hours (expedited) or 'within five (5) calendar days' (standard), extendable up to 14 days only at the enrollee's or provider's request or on justification to DMS; 205.522(1)(m) makes 304.17A-600, 603 and 607 apply to MCOs, including the deemed authorization in 607(3). Contract remedies (Aetna CY2026 Appendix A): row 59 '$500.00 per standard service authorization request for each day the Contractor is in default'; row 36 '$500.00 per day' for a late or non-compliant Notice of Adverse Benefit Determination. https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+  "KRS 205.536(1)-(2) with KRS 304.38-240: Medicaid MCO utilization review must use the medical necessity criteria designated by the Department of Insurance (one nationally recognized, objective, evidence-based set per category, not the MCO's proprietary criteria), and an MCO's private review agent 'shall comply with all applicable requirements of KRS 304.17A-600 to 304.17A-633'. Demand the criteria under 205.534(1)(a)3 and show where a denial departs from the designated set. Which set DOI designated was not checked. https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=55333 and https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=47795",
+  "907 KAR 17:035 Sec. 6 (certified 2/5/2025): an appeal of a Medicaid MCO medical-necessity denial 'in a case involving a medical or surgical specialty or subspecialty, shall, upon request of the recipient, authorized person, or provider, include a review by a board-eligible or board-certified physician in the appropriate specialty or subspecialty area', and the reviewer 'shall not have participated in the initial review and denial'. Ask for a dermatologist, Mohs surgeon, dermatopathologist or radiation oncologist in every Kentucky Medicaid appeal. https://apps.legislature.ky.gov/law/kar/downloads/docs/9950/document.engrossed.pdf",
+  "907 KAR 17:010 Sec. 5(5): at the enrollee's state fair hearing (requested within 120 days of the MCO's final letter, Sec. 5(3)), 'An automatic ruling shall be made by the department in favor of an enrollee if an MCO fails to' comply with the Sec. 4 appeal rules (for example the 30-day resolution), deliver its supporting documents within 5 days (Sec. 5(4)), or participate and present evidence. Usable only with the enrollee's specific written consent (Sec. 4(3)), and it bars a provider external review on the same claim (907 KAR 17:035 Sec. 2(4)). https://apps.legislature.ky.gov/law/kar/downloads/docs/11020/document.engrossed.pdf",
+  "Kentucky Medicaid MCO contract (verified in Aetna CY2026: Attachment C Sec. 34.0 item 1.G, Appendix I (e)(2), Appendix A row 73): the MCO must 'request and receive the Department's written permission to administratively collect overpayments in excess of $500'; failure to request it costs 'A forfeiture of the amount collected from the provider by the Contractor and a $10,000.00 penalty per occurrence.' On any program-integrity recoupment over $500, ask for DMS's written permission and copy DMS. Also Appendix A row 35: '$5,000.00 per occurrence per Enrollee' for 'Imposing arbitrary utilization guidelines, Prior Authorization restrictions ... not in accordance with an approved policy'. KRS 205.5356(4) obliges DMS to impose contract remedies once it finds a violation (contracts on or after 4/14/2026). https://www.chfs.ky.gov/agencies/dms/dhpo/Documents/CY2026Aetna.pdf",
+  "KRS 304.12-230(12): it is an unfair claims settlement practice to delay 'by requiring an insured, claimant, or the physician of either to submit a preliminary claim report and then requiring the subsequent submission of formal proof of loss forms, both of which submissions contain substantially the same information'. It names physicians; cite it against repeat requests for records already sent (fully insured and Medigap). https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17037",
+  "806 KAR 17:370 Sec. 2-3 (effective 1/4/2022) with 806 KAR 17:360 Sec. 2(1): when another payer is identified, a clean claim must include 'An explanation of benefits statement or noncoverage notice from another payer' or 'An electronic or paper-based Medicare remittance notice'; routinely requested attachments are limited to the listed standardized items. Attach the primary EOB or Medicare remittance to every secondary claim so the 30-day clock starts. https://apps.legislature.ky.gov/law/kar/downloads/docs/10592/document.engrossed.pdf",
+  "KRS 304.9-051(1)(a), 304.9-052(1), 304.99-020(1)(c), 304.2-160(3)-(4): a business that 'adjusts or settles claims on, residents of this state in connection with ... other life, health, or annuity benefit plans' is an 'administrator' that must hold a Kentucky license; administrators face civil penalties up to $2,000 per violation, and DOI indexes complaints by licensee and weighs them at renewal. A DOI complaint naming a TPA (for example UMR) is possible, but whether DOI will act on a self-funded ERISA plan's claim decision is not confirmed (29 U.S.C. 1144; DOI refers matters outside its jurisdiction). https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57325",
+  "DMS MCO contracts page (https://www.chfs.ky.gov/agencies/dms/dhpo/Pages/MCO-Contracts.aspx, read 11/23/2026): 'The Department for Medicaid Services contracts Aetna, Humana, Passport by Molina, UnitedHealthcare, and WellCare' and 'Anthem no longer participates in Kentucky Medicaid managed care.' The 2026-2027 contract renewals listed are for those five. Kentucky Medicaid citations (205.534, 205.646) apply to those five for current dates of service; Anthem appears only in the 2025-2026 and earlier contract lists, so an Anthem Medicaid claim is either an earlier Kentucky contract period or Indiana Medicaid (exit date not checked)."
+ ]
+}

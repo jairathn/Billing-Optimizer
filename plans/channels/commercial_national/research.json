@@ -1,0 +1,2463 @@
+{
+ "family": "commercial_national",
+ "payers": [
+  {
+   "payer_group": "Anthem / BCBS",
+   "product": "Anthem Blue Cross and Blue Shield Kentucky commercial and individual plans (local products Blue Access, Blue Preferred, Blue Traditional; exchange Anthem Essential Network), participating providers",
+   "states": "KY (835 payer id 00660, payer name ANTHEM; payer ids ANTHM and ANTHEM are shared with Indiana, so tell the states apart by the remittance trace payer id, which differs between the Kentucky and Indiana plans)",
+   "what_it_is": "Anthem's own Kentucky plan. Two-step Claim Payment Dispute: a reconsideration, then an appeal, then the Agreement's dispute resolution and arbitration. Medical-necessity (clinical) appeals are a separate track.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials: Claims & Payments > Claim Status > find the claim > dispute the claim (Claim Payment Reconsideration); attach documents there. Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Claim Payment Reconsiderations can be submitted via phone, Availity Essentials, or in writing."
+     },
+     "applies_to": "Claim Payment Reconsideration (step 1) of a finalized claim: underpaid, zero-paid, code edits, duplicates, timely filing, authorization-matched denials",
+     "required_or_preferred": "Preferred: 'It is the expectation of Anthem that electronic Claim payment disputes are adopted when and where they are integrated.'"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Payment Dispute Unit, P.O. Box 105557, Atlanta, GA 30348-5557",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail all required documentation, including the Claim Payment Appeal Form or the Reconsideration Form, to: Anthem Blue Cross and Blue Shield Payment Dispute Unit P O. Box 105557 Atlanta, GA 30348-5557"
+     },
+     "applies_to": "Written reconsideration. Include position statement, provider name, address, phone, email and NPI or TIN, member name and Anthem ID, a listing of disputed claims (Anthem claim number and dates of service), and all supporting documents",
+     "form": "Reconsideration Form (Anthem provider forms library; JS-rendered, no direct link found)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "800-345-4344 (Kentucky local products Provider Services; or the number on the member ID card, Claims prompt)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Local products Blue Access Blue Preferred Blue Traditional 800-345-4344"
+     },
+     "applies_to": "Reconsideration by phone (step 1 only). Appeals (step 2) cannot be made by phone."
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "Availity Essentials: Claims & Payments > Claim Status > the claim > dispute (Claim Payment Appeal). Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities may submit a Claim Payment Appeal through Availity Essentials or in writing."
+     },
+     "applies_to": "Claim Payment Appeal (step 2), only after a reconsideration decision",
+     "required_or_preferred": "Preferred (same expectation of electronic disputes)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Payment Dispute Unit, P.O. Box 105557, Atlanta, GA 30348-5557",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail all required documentation, including the Claim Payment Appeal Form or the Reconsideration Form, to: Anthem Blue Cross and Blue Shield Payment Dispute Unit P O. Box 105557 Atlanta, GA 30348-5557"
+     },
+     "applies_to": "Written Claim Payment Appeal with the same required documentation",
+     "form": "Claim Payment Appeal Form (Anthem provider forms library; no direct link found)"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Attention: Grievances and Appeals, P.O. Box 105568, Atlanta, GA 30348-5568",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Send the appeal request to: Anthem Blue Cross and Blue Shield Attention: Grievances and Appeals P.O. Box 105568 Atlanta, GA 30348-5568"
+     },
+     "applies_to": "Clinical appeals only (claim denied as not medically necessary or experimental/investigational). Not for payment disputes."
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Availity Essentials: Claims & Payments > Professional Claim > Billing Frequency \"Replacement of Prior Claim\" with the payer claim number; or EDI 837 CLM05-3 = 7 with REF*F8 original claim number. Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Submit replacement, void/canceled claims through Availity.com following the instructions below for digital submission. Do not use the paper submission process unless there is a specific reason for filing a paper claim correction."
+     },
+     "required_or_preferred": "Digital required unless there is a specific reason for paper"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Anthem, P.O. Box 105187, Atlanta, GA 30348-5187 (paper CMS-1500, code 7 in item 22 with the original claim number)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Medical claims Anthem P.O. Box 105187 Atlanta, GA 30348-5187"
+     },
+     "applies_to": "Paper corrected claim only when there is a specific reason not to file digitally"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity Essentials: Claim Status > the claim > Send Attachment (or EDI 275); include a copy of the request letter",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "When submitting documentation in response to Anthem's request, the recommended method is to submit them electronically via the 275 transaction or digitally through the Attachments Dashboard."
+     },
+     "required_or_preferred": "Recommended"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "The department and address printed on the Anthem request letter (no fixed records fax or address is published)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If Availity Essentials set-up has not been completed and medical records must be sent via mail or fax, send them to the appropriate department as directed in the notification from Anthem."
+     },
+     "applies_to": "Only when Availity attachments are not set up; use the fax or address on the letter itself"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "At least 2 years from the issue date of the EOP (or as state law or the Agreement says)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities have a minimum of two (2) years from the issue date of the EOP, unless otherwise required by State law"
+     }
+    },
+    {
+     "level": "second_level",
+     "window": "90 days from the date of the reconsideration determination",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities must submit Claims Payment Appeals within ninety (90) days from the date of the determination of the Claims Payment Reconsideration."
+     }
+    },
+    {
+     "level": "other",
+     "window": "Clinical appeal: 180 calendar days from notice of the initial decision",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities have one hundred eighty (180) calendar days to file a clinical appeal from the date they receive notice of Anthem's initial decision."
+     }
+    },
+    {
+     "level": "records",
+     "window": "Within 10 calendar days of the request",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "within ten (10) calendar days of Anthem's request, or sooner, depending upon the urgency of the matter"
+     }
+    }
+   ],
+   "no_fax_reason": "Anthem does not publish a fax for Kentucky commercial claim payment disputes (reconsiderations or appeals). Its 2026 Kentucky manual lists only Availity Essentials, mail to the Payment Dispute Unit (P.O. Box 105557) and the phone number on the member ID card, and says Anthem expects digital channels 'in lieu of manual channels (paper, mail, fax, call, chat, etc.)'. The 2026 Kentucky quick contact guide lists no appeals fax for local commercial products.",
+   "conflicts": [
+    "Fax 800-376-0247: the 2026 Kentucky quick contact guide prints 'Fax: 800-376-0247' with no label inside the 'Paper claims address' cell for local products. Anthem's Indiana Quick Reference Guide 'UPDATED 11-19-2019' (still hosted at IN_CONTACT_0002.pdf) labels the same number 'Request for Claim Review, Adjustment or Submitting Records ... Anthem BCBS PO Box 105557 ... Fax: 1-800-376-0247'. No 2026 Anthem publication labels it for claim payment disputes, so it is NOT offered as an appeal fax. A person may call Provider Services (Kentucky local products 800-345-4344) to ask whether it still takes written reconsiderations before anyone uses it.",
+    "Fax 888-859-3046: Anthem's Central-region Grievances and Appeals fax for P.O. Box 105568. The 2026 Ohio quick contact guide lists it for Ohio local products and FEP; the 2026 Kentucky guide lists it only on the Medicare Supplement row; the old 2019 Indiana guide listed it for National accounts and Medicare Supplement appeals. It is not published for Kentucky or Indiana local commercial products, and that unit handles clinical (medical necessity) appeals, not claim payment disputes, which go to P.O. Box 105557. Do not use it for Kentucky or Indiana commercial payment disputes.",
+    "Two Anthem post office boxes: the quick contact guide's 'Appeals address' for local products is 'Attn: Grievance and Appeals, P.O. Box 105568' (clinical appeals); the manuals send Claim Payment Disputes (reconsideration and appeal) to the Payment Dispute Unit, P.O. Box 105557. Use 105557 for payment disputes and 105568 only for medical-necessity appeals.",
+    "Fax 877-876-4992 in the quick contact guides is for the 'Anthem associates HRA' plan (Anthem's own employees) only."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Kentucky commercial payment disputes go by Availity (preferred), mail to P.O. Box 105557, or phone. Late requests are 'deemed ineligible' and the provider may not bill the member. Both steps must be finished before the Agreement's arbitration."
+  },
+  {
+   "payer_group": "Anthem / BCBS",
+   "product": "Anthem Blue Cross and Blue Shield Indiana commercial and individual plans, participating providers",
+   "states": "IN (835 payer id 00630, payer name ANTHEM; payer ids ANTHM and ANTHEM are shared with Kentucky, so tell the states apart by the remittance trace payer id, which differs between the Kentucky and Indiana plans)",
+   "what_it_is": "Anthem's own Indiana plan (Anthem Insurance Companies, Inc.). Same two-step Claim Payment Dispute as Kentucky; the mail addressee is 'Anthem Claim Payment Dispute' and the paper form is the Provider Adjustment Form.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials Claim Status application > dispute the claim. Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00012.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual (v1), effective August 1, 2026",
+      "doc_date": "2026-05-27",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Online through Availity Essentials Claims Status Application (preferred method where available)"
+     },
+     "required_or_preferred": "Preferred where available"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem Claim Payment Dispute, P.O. Box 105557, Atlanta, GA 30348-5557",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00012.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual (v1), effective August 1, 2026",
+      "doc_date": "2026-05-27",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail all required documentation, including the Provider Adjustment Form, to: Anthem Claim Payment Dispute P.O. Box 105557 Atlanta, GA 30348-5557"
+     },
+     "applies_to": "Written reconsideration or appeal with position statement, provider identifiers, member name and ID, listing of disputed claims (claim number and dates of service) and supporting documents",
+     "form": "Provider Adjustment Form (Anthem provider forms library; no direct link found)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "The Provider Services number on the back of the member ID card (Claims prompt)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00012.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual (v1), effective August 1, 2026",
+      "doc_date": "2026-05-27",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Claim Payment Reconsiderations can be submitted via phone, Availity Essentials, or in writing."
+     },
+     "applies_to": "Reconsideration only"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "Availity Essentials Claim Status > dispute (Claim Payment Appeal). Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00013.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual v2, effective January 1, 2027",
+      "doc_date": "2026-11-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities may submit a Claim Payment Appeal through Availity Essentials or in writing."
+     },
+     "applies_to": "Claim Payment Appeal after the reconsideration decision (same text in v1 and v2)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Anthem Claim Payment Dispute, P.O. Box 105557, Atlanta, GA 30348-5557",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00013.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual v2, effective January 1, 2027",
+      "doc_date": "2026-11-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail all required documentation, including the Provider Adjustment Form, to: Anthem Claim Payment Dispute P.O. Box 105557 Atlanta, GA 30348-5557"
+     },
+     "form": "Provider Adjustment Form"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Attention: Grievances and Appeals, P.O. Box 105568, Atlanta, GA 30348-5568",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00013.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual v2, effective January 1, 2027",
+      "doc_date": "2026-11-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Send the appeal request to: Anthem Blue Cross and Blue Shield Attention: Grievances and Appeals P.O. Box 105568 Atlanta, GA 30348-5568"
+     },
+     "applies_to": "Clinical (medical necessity) appeals only"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Availity Essentials replacement claim (frequency 7 with the payer claim number) or EDI 837 CLM05-3 = 7 with REF*F8. Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00012.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual (v1), effective August 1, 2026",
+      "doc_date": "2026-05-27",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Submit replacement, void/canceled claims through Availity.com"
+     },
+     "required_or_preferred": "Digital; paper only for a specific reason"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity Essentials Claim Status > Send Attachment (or EDI 275) with a copy of the request letter",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00013.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual v2, effective January 1, 2027",
+      "doc_date": "2026-11-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If Availity Essentials setup has not been completed and medical records must be sent via mail or fax, send them to the appropriate department as directed in the notification from Anthem."
+     },
+     "applies_to": "Records Anthem asked for; mail or fax only to the department on the request letter"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "2 years from the issue date of the EOP (or as state law or the Agreement says)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00012.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual (v1), effective August 1, 2026",
+      "doc_date": "2026-05-27",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities have two (2) years from the issue date of the EOP, unless otherwise required by State law"
+     }
+    },
+    {
+     "level": "second_level",
+     "window": "90 days from the date of the reconsideration determination",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00013.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual v2, effective January 1, 2027",
+      "doc_date": "2026-11-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities must submit Claims Payment Appeals within ninety (90) days from the date of the determination of the Claims Payment Reconsideration."
+     }
+    },
+    {
+     "level": "other",
+     "window": "Clinical appeal: 180 calendar days from notice of the initial decision",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_IN_00013.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Indiana Provider Manual v2, effective January 1, 2027",
+      "doc_date": "2026-11-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers and Facilities have one-hundred eighty (180) calendar days to file a clinical appeal from the date they receive notice of Anthem's initial decision."
+     }
+    }
+   ],
+   "no_fax_reason": "Anthem does not publish a fax for Indiana commercial claim payment disputes. Both Indiana manuals in force (v1 effective 8/1/2026 and v2 effective 1/1/2027) list only Availity Essentials ('preferred method where available'), mail to Anthem Claim Payment Dispute, P.O. Box 105557, and the phone number on the member ID card.",
+   "conflicts": [
+    "Fax 800-376-0247: the 2026 Kentucky quick contact guide prints 'Fax: 800-376-0247' with no label inside the 'Paper claims address' cell for local products. Anthem's Indiana Quick Reference Guide 'UPDATED 11-19-2019' (still hosted at IN_CONTACT_0002.pdf) labels the same number 'Request for Claim Review, Adjustment or Submitting Records ... Anthem BCBS PO Box 105557 ... Fax: 1-800-376-0247'. No 2026 Anthem publication labels it for claim payment disputes, so it is NOT offered as an appeal fax. A person may call Provider Services (Kentucky local products 800-345-4344) to ask whether it still takes written reconsiderations before anyone uses it.",
+    "Fax 888-859-3046: Anthem's Central-region Grievances and Appeals fax for P.O. Box 105568. The 2026 Ohio quick contact guide lists it for Ohio local products and FEP; the 2026 Kentucky guide lists it only on the Medicare Supplement row; the old 2019 Indiana guide listed it for National accounts and Medicare Supplement appeals. It is not published for Kentucky or Indiana local commercial products, and that unit handles clinical (medical necessity) appeals, not claim payment disputes, which go to P.O. Box 105557. Do not use it for Kentucky or Indiana commercial payment disputes.",
+    "Two Anthem post office boxes: the quick contact guide's 'Appeals address' for local products is 'Attn: Grievance and Appeals, P.O. Box 105568' (clinical appeals); the manuals send Claim Payment Disputes (reconsideration and appeal) to the Payment Dispute Unit, P.O. Box 105557. Use 105557 for payment disputes and 105568 only for medical-necessity appeals.",
+    "Anthem publishes no current Indiana quick contact guide (IN-BCBS-Quick-Contact-Guide.pdf returns 404); the only Indiana guide hosted is dated 11-19-2019. The Kentucky 2026 guide's paper claims box (P.O. Box 105187) is the same box the 2019 Indiana guide gives, but use the address on the member ID card for paper claims."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Indiana commercial payment disputes go by Availity (preferred), mail to P.O. Box 105557, or phone."
+  },
+  {
+   "payer_group": "Anthem / BCBS",
+   "product": "BlueCard: members of other Blue plans (for example Excellus BCBS) seen in Kentucky or Indiana; claims filed with and paid by the local Anthem plan",
+   "states": "KY and IN (local plan Anthem; the member's home plan is out of state)",
+   "what_it_is": "Under BlueCard the provider deals only with the local Anthem plan. Appeals and adjustments go to Anthem, which coordinates with the member's home plan. Pre-service (authorization) appeals follow the home plan's instructions.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials Claim Status > dispute (same Claim Payment Dispute process as Anthem members). Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00006.pdf",
+      "title": "The BlueCard Program Provider Manual (Anthem Kentucky), January 1, 2022 (linked from the 2026 Kentucky manual)",
+      "doc_date": "2022-01-01 (PDF modified 2024-09-03)",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Appeals for all claims are handled through your local Anthem Plan."
+     },
+     "required_or_preferred": "Through the local Anthem plan only"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem, ITS/Blue Card Dept., P.O. Box 105557, Atlanta, GA 30348-5557",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Anthem ITS/Blue Card Dept. P.O. Box 105557"
+     },
+     "applies_to": "Appeals address the 2026 Kentucky guide gives for BlueCard (non-Kentucky Anthem members' plans)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "866-594-0521 (BlueCard Provider Service and claim status)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "BlueCard Provider Service: 866-594-0521"
+     },
+     "applies_to": "BlueCard claim questions; eligibility and preapproval route to the home plan at 800-676-2583"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "The member's home plan, per the instructions the home plan sent",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If the appeal relates to Pre-certification/Pre-authorization, the Provider or Facility may have received information directly from the Member's Home Plan regarding appeal rights and processes."
+     },
+     "applies_to": "Pre-certification / pre-authorization appeals only"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "The address, email or fax printed on the Anthem request letter (records for claim review go to the local Anthem plan)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00006.pdf",
+      "title": "The BlueCard Program Provider Manual (Anthem Kentucky), January 1, 2022 (linked from the 2026 Kentucky manual)",
+      "doc_date": "2022-01-01 (PDF modified 2024-09-03)",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "The address or fax number for medical records may be"
+     },
+     "applies_to": "Records requested for BlueCard claim review"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "Same as the local Anthem plan: reconsideration at least 2 years from the EOP (KY) / 2 years (IN); appeal 90 days",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "a Claim Payment Dispute should be submitted, along with attached supporting documentation, to the local Anthem Plan."
+     }
+    }
+   ],
+   "no_fax_reason": "Anthem publishes no BlueCard appeal fax for Kentucky or Indiana; the 2026 Kentucky guide gives only the ITS/Blue Card Dept. mailing address, and the manuals route BlueCard claim appeals through the local plan's Availity and mail dispute process.",
+   "conflicts": [
+    "The BlueCard Provider Manual linked from the 2026 Kentucky manual is dated January 1, 2022; its rule (appeals through the local plan) matches the 2026 manual's BlueCard section."
+   ],
+   "notes": "Fax for provider claim appeals: NO. BlueCard appeals go through the local Anthem plan (Availity or the ITS/Blue Card Dept. box)."
+  },
+  {
+   "payer_group": "Anthem / BCBS",
+   "product": "Anthem Medicare Supplement (Medigap) products, usually claims crossed over from Medicare",
+   "states": "KY (2026 guide); IN listed in the 2019 Indiana guide only",
+   "what_it_is": "Anthem's own Medicare Supplement plans. Their remittances come from Anthem (payer name ANTHEM), so they land in this group; the claim was usually paid by Medicare first. The 835 alone may not show the product: check the member ID card.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "888-859-3046",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Attn: Appeals Department P.O. Box 105568 Atlanta, GA 30348- 5568 Fax: 888-859-3046"
+     },
+     "applies_to": "Appeals on Anthem Medicare Supplement claims only. Second check: Anthem's 2026 Ohio quick contact guide prints the same number on its Medicare Supplement row, and the 2019 Indiana guide prints it too.",
+     "required_or_preferred": "Listed with the mailing address as an alternative"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem, Attn: Appeals Department, P.O. Box 105568, Atlanta, GA 30348-5568",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Attn: Appeals Department P.O. Box 105568"
+     },
+     "applies_to": "Appeals on Anthem Medicare Supplement claims"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "866-649-2033 (Medicare Supplement Provider Services, Kentucky)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Supplement products 866-649-2033"
+     },
+     "applies_to": "Claim questions before an appeal"
+    }
+   ],
+   "windows": [],
+   "no_fax_reason": "",
+   "conflicts": [
+    "The Ohio 2026 guide's same row also lists 'Medicare Advantage EMPLOYER GROUP' plans; for Kentucky the guide lists Medicare Advantage separately (Mason, OH address). Use this fax only when the card shows an Anthem Medicare Supplement plan.",
+    "No filing window is printed in the quick contact guides; none was found in the commercial manuals for Medicare Supplement."
+   ],
+   "notes": "Fax for provider claim appeals: YES, 888-859-3046, Anthem Appeals Department, for Anthem Medicare Supplement claims only (2026 Kentucky and Ohio guides agree)."
+  },
+  {
+   "payer_group": "Anthem / BCBS",
+   "product": "Blue Cross and Blue Shield Federal Employee Program (FEP) members (ID starts with R), processed by Anthem in Kentucky",
+   "states": "KY (Indiana FEP is also processed by Anthem; no current Indiana guide)",
+   "what_it_is": "FEP claims are processed by the local Blue plan. The FEP disputed-claims process belongs to the member: the member (or a provider with the member's written consent) asks the local plan to reconsider within 6 months, then may go to OPM.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem Federal Employee Program, P.O. Box 105557, Atlanta, GA 30348-5557",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Federal Employee Program (FEP) Federal Employee Program (FEP) (R88888888) 800-382-5520"
+     },
+     "applies_to": "FEP appeals address in the 2026 Kentucky guide (same box as FEP paper claims); provider acting for the member needs written consent"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "800-382-5520 (FEP Provider Services, Kentucky)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Federal Employee Program (FEP) Federal Employee Program (FEP) (R88888888) 800-382-5520"
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "The address shown on the EOB of the local plan that processed the claim",
+     "source": {
+      "url": "https://www.fepblue.org/manage-your-health/manage-claims-records/dispute-claim",
+      "title": "Blue Cross and Blue Shield Federal Employee Program: Dispute a claim",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Send your request to us at the address shown on your explanation of benefits (EOB) form for the Local Plan that processed the claim"
+     },
+     "applies_to": "FEP reconsideration request (Step 1 of the disputed claims process)"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "6 months from the initial decision (member reconsideration request)",
+     "source": {
+      "url": "https://www.fepblue.org/manage-your-health/manage-claims-records/dispute-claim",
+      "title": "Blue Cross and Blue Shield Federal Employee Program: Dispute a claim",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Within 6 months of our initial decision, you may ask us in writing to reconsider our initial decision."
+     }
+    }
+   ],
+   "no_fax_reason": "No FEP appeal fax is published for Kentucky: the 2026 Kentucky guide gives only P.O. Box 105557 for FEP appeals (the Ohio guide's FEP fax 888-859-3046 is for Ohio).",
+   "conflicts": [
+    "Only the member may take a disputed claim to OPM; a provider must include the member's specific written consent (fepblue.org)."
+   ],
+   "notes": "Fax for provider claim appeals: NO for Kentucky FEP (mail P.O. Box 105557; reconsideration is the member's, with written consent)."
+  },
+  {
+   "payer_group": "UnitedHealthcare",
+   "product": "UnitedHealthcare commercial plans (fully insured and employer self-funded administered by UHC), network providers",
+   "states": "KY and IN (national process; 835 payer id 87726, payer names UNITED HEALTHCARE OF ALL STATES, UHC, UNITEDHEALTHCARE)",
+   "what_it_is": "Two steps within 12 months in total: reconsideration, then appeal, both in the UnitedHealthcare Provider Portal or by API. Since Feb. 1, 2026 network providers must file post-service appeals electronically. Beyond the appeal, the Agreement's Notice of Dispute.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Look up a Claim > Act on Claim > Explore available actions > Create a reconsideration. https://secure.uhcprovider.com/#/claims",
+     "source": {
+      "url": "https://www.uhcprovider.com/en/claims-payments-billing/appeals.html",
+      "title": "UnitedHealthcare: Pre- and post-service appeals and reconsiderations",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Most network health care professionals (primary and ancillary) and facilities that provide services to UnitedHealthcare® Medicare Advantage (including D-SNP), UnitedHealthcare Community Plan (Medicaid) and commercial plan members are required to submit reconsiderations and pre- and post-service appeals digitally."
+     },
+     "required_or_preferred": "Required for network providers (portal or API)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Claims Research Project (bulk): UHCprovider.com > Sign In > Claims & Payments > Claims Research Project",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If you have a request to reconsider 20 or more paid or denied claims for the same administrative issue (and attachments are not required), you may submit these in bulk online."
+     },
+     "applies_to": "20 or more paid or denied claims with the same administrative issue, no attachments; contract set-up or bulk payment issues"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "The address on the provider remittance advice (PRA), with the Single Paper Claim Reconsideration form, one claim per form",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/claims/UHC-Single-Paper-Claim-Reconsideration-Form.pdf",
+      "title": "UnitedHealthcare Single Paper Claim Reconsideration Request Form (PCA-1-25-00612-POE-FM_03312025)",
+      "doc_date": "2025-04-08",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If electronic submission isn't possible, use the following form. This form is for submitting 1 claim at a time, not for bulk or multiple claims."
+     },
+     "applies_to": "Reconsideration only when electronic submission isn't possible; attach a copy of the PRA or EOB. 'Do not use this form for formal appeals or disputes.'",
+     "required_or_preferred": "Fallback only",
+     "form": "Single Paper Claim Reconsideration Request Form (PCA-1-25-00612-POE-FM_03312025)",
+     "form_url": "https://www.uhcprovider.com/content/dam/provider/docs/public/claims/UHC-Single-Paper-Claim-Reconsideration-Form.pdf"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Look up a Claim > Act on Claim (post-service appeal); or the API",
+     "source": {
+      "url": "https://www.uhcprovider.com/en/resource-library/news/2026/paperless-submissions-february.html",
+      "title": "UnitedHealthcare news: Feb. 1: Submit post-service appeals electronically (PCA-1-25-02664-POE-NN_01072026)",
+      "doc_date": "2026-02-01",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "beginning Feb. 1, 2026, you'll be required to submit all post-service appeals electronically."
+     },
+     "applies_to": "Post-service appeal after the reconsideration decision; attach new materials only",
+     "required_or_preferred": "Required (electronic only) for most network providers since Feb. 1, 2026"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Act on a Claim > Submit corrected claim; or EDI 837 CLM05-3 = 7 with the original claim number in REF02",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "A claim submitted through the UnitedHealthcare Provider Portal's functionality found at Claims & Payments > Act on a Claim > Submit corrected claim"
+     },
+     "required_or_preferred": "Electronic preferred"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Paper CMS-1500 with frequency code 7 in box 22 and the original claim number, to the claims address on the member ID card",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "A paper claim with frequency code 7 in box 22 in the left-justified position"
+     },
+     "applies_to": "Paper corrected claim (within the timely filing limit)"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal claims tool (pended claim attachments) or the API; audit records per the request letter",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Do not use a claim form to resubmit claims that were denied or pended for additional information. Use the claims tool in the UnitedHealthcare Provider Portal."
+     },
+     "required_or_preferred": "Portal or API"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "12 months from the original EOB or PRA date for both steps together (or as law or the Agreement says)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "You must submit your reconsideration and appeal to us within 12 months from the date of the original claim EOB or PRA (or as required by law or your Agreement)."
+     }
+    },
+    {
+     "level": "second_level",
+     "window": "Inside the same 12 months; then a Notice of Dispute within 60 days of the appeal decision (unless the Agreement differs)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Unless your Agreement prescribes a different time frame, a Notice of Dispute must be sent no later than 60 days after the date of our decision on your appeal."
+     }
+    }
+   ],
+   "no_fax_reason": "UnitedHealthcare publishes no fax for commercial provider reconsiderations or post-service appeals. Its appeals page and 2026 Administrative Guide require the Provider Portal or API for network providers, the Feb. 1, 2026 notice made post-service appeals electronic-only, and the only paper path is a reconsideration form mailed to the PRA address.",
+   "conflicts": [
+    "The Feb. 2026 electronic-only rule excludes some UHC lines (Colorado plans, All Savers, UMR, UHOne/Golden Rule, Student Resources, FlexWork and others); those keep their own mail or fax routes (see UMR, American Medical Security and other UHC entries).",
+    "The Administrative Guide's 'Commercial plans: UnitedHealthcare P.O. Box 30573, Salt Lake City, UT 84130-0573' is where providers forward MEMBER appeals and grievances, not provider claim disputes.",
+    "Out-of-network providers are only 'recommended' to file electronically; no separate commercial mail address for them was found."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Provider Portal or API only (electronic-only for post-service appeals since Feb. 1, 2026)."
+  },
+  {
+   "payer_group": "Optum (UHC)",
+   "product": "VA Community Care Network claims administered by Optum (Regions 1-3; Kentucky and Indiana are in Region 2), when the claim was for a Veteran with a VA referral (EMA payer id VACCN, or EMA payer name 'Optum Unitedhealth Care' on a VA-referred visit)",
+   "states": "KY and IN (VA CCN Region 2, Optum)",
+   "what_it_is": "RemitWatch's 'Optum (UHC)' group has no 835s; EMA names VA CCN claims after Optum, so these are most likely VA network claims. Optum takes written reconsiderations of denied claims by secure fax, mail or secure email, and claim inquiries about how much was paid (allowable reviews) by mail.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-877-666-6597",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+      "title": "Optum VA Community Care Network (CCN) Provider Manual (2026 1102)",
+      "doc_date": "2026-11-10",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Secure Fax: 1-877 -666 -6597"
+     },
+     "applies_to": "Claim reconsideration of a VA CCN claim denied in part or in whole. Use the fax on the remittance advice if one is printed. Second check: Optum's November 2026 Medical Service Model and Claims Guide lists the same secure fax under 'Claim Reconsiderations may be submitted by fax or U.S. Mail, email'.",
+     "required_or_preferred": "Allowed (mail, secure fax or secure email)",
+     "form": "Claim Reconsideration Form (vacommunitycare.com/provider > Forms & Resources) or a letter with claim number, date of service, Veteran name and justification"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "VA Community Care Network, Appeals and Grievance Team MS-21, 3237 Airport Road, La Crosse, WI 54603",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+      "title": "Optum VA Community Care Network (CCN) Provider Manual (2026 1102)",
+      "doc_date": "2026-11-10",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Send reconsideration requests to the address or fax number listed on the remittance advice."
+     },
+     "applies_to": "Mail reconsideration (manual ZIP 54603; the claims guide prints 56403, a typo: La Crosse ZIP codes start 546)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "email",
+     "value": "faxAG2@optumserve.com (Region 2: Kentucky and Indiana)",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/ccnMedServClaimGuide",
+      "title": "Optum VA CCN Medical Service Model and Claims Guide (2026 1104)",
+      "doc_date": "2026-11-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Region 2: faxAG2@optumserve.com"
+     },
+     "applies_to": "Secure email reconsideration for Region 2 providers"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "VA Community Care Network, Attn: Claims, P.O. Box 202118, Florence, SC 29502",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/ccnMedServClaimGuide",
+      "title": "Optum VA CCN Medical Service Model and Claims Guide (2026 1104)",
+      "doc_date": "2026-11-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "A medical C laim Inquiry or Replacement claim may be submitted by U.S. Mail using the contact information below."
+     },
+     "applies_to": "Medical claim inquiry (allowable review: paid amount below the fee schedule). The manual also mentions fax but prints no inquiry fax number."
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Replacement claim through the practice's clearinghouse or Optum's XPressClaim, with the original claim number",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+      "title": "Optum VA Community Care Network (CCN) Provider Manual (2026 1102)",
+      "doc_date": "2026-11-10",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "A corrected claim may be submitted through the provider’s clearing house, XPressClaim, or U.S. mail."
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "VA Community Care Network, Claims, P.O. Box 202118, Florence, SC 29502 (replacement claim with the original claim number)",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/ccnMedServClaimGuide",
+      "title": "Optum VA CCN Medical Service Model and Claims Guide (2026 1104)",
+      "doc_date": "2026-11-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "A replacement claim may be submitted through the provider’s clearinghouse, XPressClaim, or U.S. Mail"
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "90 calendar days from the date of denial (manual) / from the PRA date (claims guide)",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+      "title": "Optum VA Community Care Network (CCN) Provider Manual (2026 1102)",
+      "doc_date": "2026-11-10",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "When a claim is denied partially or in whole, a reconsideration request must be filed within ninety (90 ) calendar days from the date of denial"
+     }
+    },
+    {
+     "level": "payment_dispute",
+     "window": "Claim inquiries within 12 months after the claim was first processed",
+     "source": {
+      "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+      "title": "Optum VA Community Care Network (CCN) Provider Manual (2026 1102)",
+      "doc_date": "2026-11-10",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "All medical claim inquiries, including allowable reviews must be submitted by mail or fax within twelve (12) months after the claim was initially processed."
+     }
+    }
+   ],
+   "no_fax_reason": "",
+   "conflicts": [
+    "Reconsideration clock: the manual says 90 days from the date of denial; the claims guide says 90 days from the date on the PRA. Use the earlier date.",
+    "Which claims: RemitWatch routes EMA payer ids VACCN and TWVACCN to 'VA Community Care'. Items left in 'Optum (UHC)' may be VA claims without a payer id or a true Optum commercial product; confirm with the remittance or the referral before faxing."
+   ],
+   "notes": "Fax for provider claim appeals: YES, secure fax 1-877-666-6597 for VA CCN reconsiderations (Optum manual and claims guide, Nov 2026, agree)."
+  },
+  {
+   "payer_group": "Optum (UHC)",
+   "product": "Optum-named claims that are not VA Community Care (UnitedHealth Group plans that use the UnitedHealthcare provider portal)",
+   "states": "KY and IN",
+   "what_it_is": "If the remittance or ID card shows a UnitedHealthcare commercial plan, the UnitedHealthcare commercial route applies (Provider Portal or API, no fax).",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claims & Payments > Look up a Claim > Act on Claim. https://secure.uhcprovider.com/#/claims",
+     "source": {
+      "url": "https://www.uhcprovider.com/en/claims-payments-billing/appeals.html",
+      "title": "UnitedHealthcare: Pre- and post-service appeals and reconsiderations",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Most network health care professionals (primary and ancillary) and facilities that provide services to UnitedHealthcare® Medicare Advantage (including D-SNP), UnitedHealthcare Community Plan (Medicaid) and commercial plan members are required to submit reconsiderations and pre- and post-service appeals digitally."
+     },
+     "applies_to": "Only when the claim is a UnitedHealthcare plan; otherwise follow the appeal instructions on that payer's remittance",
+     "required_or_preferred": "Required for network providers"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "12 months from the original EOB or PRA for both steps (UnitedHealthcare)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "You must submit your reconsideration and appeal to us within 12 months from the date of the original claim EOB or PRA (or as required by law or your Agreement)."
+     }
+    }
+   ],
+   "no_fax_reason": "UnitedHealthcare publishes no fax for commercial provider reconsiderations or appeals (Provider Portal or API only).",
+   "conflicts": [
+    "No public Optum-branded commercial provider appeal channel was found apart from VA CCN; the 835 or ID card decides which route applies."
+   ],
+   "notes": "Fax for provider claim appeals: NO (UnitedHealthcare Provider Portal or API)."
+  },
+  {
+   "payer_group": "Aetna",
+   "product": "Aetna commercial (non-Medicare) plans, participating providers",
+   "states": "KY and IN (835 payer id 60054, payer name AETNA; Kentucky and Indiana use the El Paso mailing address)",
+   "what_it_is": "Two steps: reconsideration (180 days), then appeal (60 days after the reconsideration decision). Availity is fastest; mail and fax are accepted with Aetna's mandatory Practitioner and Provider Complaint and Appeal Request form.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials: Claim Status > the claim > Dispute Claim, then finish in the Appeals dashboard. Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+      "title": "Aetna: Disputes and appeals overview for providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "File online through the Availity® provider website."
+     },
+     "required_or_preferred": "Preferred: 'the fastest method is to use our provider portal on Availity'"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Aetna Provider Resolution Team, PO Box 981106, El Paso, TX 79998-1106 (or the address on the denial letter or EOB)",
+     "source": {
+      "url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+      "title": "Aetna: Disputes and appeals overview for providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail your reconsideration to: Aetna Provider Resolution Team PO Box 981106 El Paso, TX 79998-1106"
+     },
+     "applies_to": "Reconsideration by mail from Kentucky or Indiana (the page lists IN and KY under this address)",
+     "form": "Practitioner and Provider Complaint and Appeal Request (or a letter with the listed details)",
+     "form_url": "https://www.aetna.com/document-library/healthcare-professionals/documents-forms/provider-complaint-appeal-request.pdf"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "Availity Essentials Dispute Claim / Appeals dashboard. Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+      "title": "Aetna: Disputes and appeals overview for providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "File your appeal within 60 calendar days of the reconsideration decision."
+     },
+     "required_or_preferred": "Fastest"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "1-859-455-8650",
+     "source": {
+      "url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+      "title": "Aetna: Disputes and appeals overview for providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Aetna Provider Resolution Team PO Box 14020 Lexington, KY 40512 Fax: 1-859-455-8650"
+     },
+     "applies_to": "Non-Medicare (commercial) provider appeals, with the completed Practitioner and Provider Complaint and Appeal Request. Second check: the form itself says 'Or use our National Fax Number: 859-455-8650'.",
+     "required_or_preferred": "Allowed: 'You can also file by mail or fax using the appropriate form.'",
+     "form": "Practitioner and Provider Complaint and Appeal Request (GR-69140)",
+     "form_url": "https://www.aetna.com/document-library/healthcare-professionals/documents-forms/provider-complaint-appeal-request.pdf"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Aetna Provider Resolution Team, PO Box 14020, Lexington, KY 40512",
+     "source": {
+      "url": "https://www.aetna.com/document-library/healthcare-professionals/documents-forms/provider-complaint-appeal-request.pdf",
+      "title": "Aetna Practitioner and Provider Complaint and Appeal Request, GR-69140 (3-17)",
+      "doc_date": "2017-03-07",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Aetna-Provider Resolution Team PO Box 14020 Lexington, KY 40512"
+     },
+     "form": "Practitioner and Provider Complaint and Appeal Request (mandatory for mail or fax)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-888-632-3862 (non-Medicare provider line, also to check a mailed or faxed request)",
+     "source": {
+      "url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+      "title": "Aetna: Disputes and appeals overview for providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Non-Medicare plans: 1-888-632-3862"
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Availity: submit a corrected or voided claim; paper corrected claims go to Aetna, PO Box 981106, El Paso, TX 79998-1106",
+     "source": {
+      "url": "https://www.aetna.com/content/dam/aetna/pdfs/aetnacom/health-care-professionals/office_manual_hcp.pdf",
+      "title": "Aetna Provider manual (Resources, policies and procedures)",
+      "doc_date": "2026-06-22",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "On our provider portal Availity, you can submit professional and institutional claims at no charge, including COB claims and corrected and voided claims."
+     }
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity: Claim Status Inquiry > Send Attachments (include the EOB so the documents route correctly)",
+     "source": {
+      "url": "https://www.aetna.com/content/dam/aetna/pdfs/aetnacom/health-care-professionals/office_manual_hcp.pdf",
+      "title": "Aetna Provider manual (Resources, policies and procedures)",
+      "doc_date": "2026-06-22",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If we pend your claim for additional information from you, you can upload your supporting documents electronically through our provider portal or through another EDI Claim Attachment vendor."
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "180 calendar days from the initial claim decision",
+     "source": {
+      "url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+      "title": "Aetna: Disputes and appeals overview for providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "File your reconsideration within 180 calendar days of the initial claim decision."
+     }
+    },
+    {
+     "level": "second_level",
+     "window": "60 calendar days from the reconsideration decision (180 days if the issue skips reconsideration, such as medical necessity)",
+     "source": {
+      "url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+      "title": "Aetna: Disputes and appeals overview for providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "File your appeal within 60 calendar days of the reconsideration decision."
+     }
+    }
+   ],
+   "no_fax_reason": "",
+   "conflicts": [
+    "The reconsideration section of Aetna's page names Availity and mail only; the fax 1-859-455-8650 is printed in the appeals section and on the form ('National Fax Number'). Aetna's 2026 manual says disputes sent 'by fax or mail' must include the form, so faxing a reconsideration with the form is allowed, but the page itself lists the fax for appeals.",
+    "The appeal form (GR-69140, 3-17) is from 2017 but is the form the June 2026 manual calls mandatory and the live page links."
+   ],
+   "notes": "Fax for provider claim appeals: YES, 1-859-455-8650 for Aetna commercial provider appeals with the mandatory form (Aetna page and form agree). Aetna decides appeals within 60 calendar days; reconsiderations usually within 30 business days."
+  },
+  {
+   "payer_group": "Cigna",
+   "product": "Cigna Healthcare commercial plans (health care provider payment appeals)",
+   "states": "KY and IN (835 payer ids 62308 and 80705, payer name CIGNA; payer states CO and TN on the 835s)",
+   "what_it_is": "Call Customer Service first; claim-coding-edit denials can be reconsidered online in CignaforHCP. One written provider appeal level (mail only), then arbitration.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1 (800) 882-4462 (Cigna Healthcare Customer Service) before any appeal",
+     "source": {
+      "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes/how-to-submit",
+      "title": "Cigna Healthcare: Appeals and Disputes Policy and Procedures",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Before beginning the appeals process, please call Cigna Healthcare Customer Service at 1 (800) 882-4462"
+     },
+     "required_or_preferred": "Asked for first"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "CignaforHCP.com claim reconsideration (users with claims/reconsideration access). https://cignaforhcp.cigna.com/app/login",
+     "source": {
+      "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes/how-to-submit",
+      "title": "Cigna Healthcare: Appeals and Disputes Policy and Procedures",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "user with claims/reconsideration access can submit a reconsideration request on the claim."
+     },
+     "applies_to": "Only claims denied or not processed as expected because of claim coding edits"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Cigna Healthcare Inc. National Appeals Unit (NAO), PO Box 188011, Chattanooga, TN 37422 (if the ID card shows GWH-Cigna or \"G\": PO Box 188062, Chattanooga, TN 37422)",
+     "source": {
+      "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes/how-to-submit",
+      "title": "Cigna Healthcare: Appeals and Disputes Policy and Procedures",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "For all other appeals: Cigna Healthcare Inc. National Appeals Unit (NAO) PO Box 188011 Chattanooga, TN 37422"
+     },
+     "applies_to": "Health care provider appeal: completed form or letter, original claim, EOB/EOP, supporting documents",
+     "required_or_preferred": "Only written channel published",
+     "form": "Request for Health Care Professional Payment Review",
+     "form_url": "https://static.cigna.com/assets/chcp/pdf/resourceLibrary/medical/RequestForHealthCareProfessionalPaymentReview.pdf"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "The claim address on the back of the patient's Cigna ID card",
+     "source": {
+      "url": "https://static.cigna.com/assets/chcp/pdf/resourceLibrary/medical/RequestForHealthCareProfessionalPaymentReview.pdf",
+      "title": "Cigna Request for Health Care Professional Payment Review",
+      "doc_date": "2021-08-16",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Corrected claims should be submitted to the claim address on the back of the patient's Cigna identification card (ID card)."
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "180 calendar days from the initial payment or denial notice (or from the last payment adjustment)",
+     "source": {
+      "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes/how-to-submit",
+      "title": "Cigna Healthcare: Appeals and Disputes Policy and Procedures",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Submit the appeal within 180 calendar days of the date of the initial payment or denial notice or, if the appeal relates to a payment that was adjusted by Cigna Healthcare, within 180 calendar days from the date of the last payment adjustment"
+     }
+    },
+    {
+     "level": "second_level",
+     "window": "Arbitration request within one year of the final internal decision letter",
+     "source": {
+      "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes/how-to-submit",
+      "title": "Cigna Healthcare: Appeals and Disputes Policy and Procedures",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "you must request arbitration within one year of the date of the letter communicating the final internal level review decision."
+     }
+    }
+   ],
+   "no_fax_reason": "Cigna publishes no fax for provider payment appeals: its appeals page and the Request for Health Care Professional Payment Review form give only the National Appeals Unit mailing addresses (the only fax on the page is Express Scripts' pharmacy appeals fax).",
+   "conflicts": [
+    "Some denials are customer (member) appeals, not provider appeals (benefit denials, maximum reimbursable amount, pre-service denials); those need the patient's authorization and follow the member process."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Mail to the National Appeals Unit only (CignaforHCP for coding-edit reconsiderations). Cigna completes the review in 60 days and notifies within 75 business days of receipt."
+  },
+  {
+   "payer_group": "Humana",
+   "product": "Humana commercial (employer group) plans",
+   "states": "KY and IN (835 payer ids HUMANA and 61101, payer name HUMANA; Kentucky remittances)",
+   "what_it_is": "Claim payment disputes (all products): Availity, mail or phone, within 18 months; participating providers can escalate by secure email. Commercial appeals are filed on behalf of the covered person with their authorization (Availity or mail).",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Availity Essentials: Claim Status > the claim > Dispute Claim > submit from Claims & Payments > Appeals. Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125 (linked as \"Claim payment inquiry guide\" from the live payment inquiries page)",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Appeals and disputes for finalized Humana Medicare Advantage, Medicaid or commercial claims can be submitted through Availity's secure provider portal, Availity Essentials"
+     },
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Humana Correspondence, P.O. Box 14601, Lexington, KY 40512-4601",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-inquiries",
+      "title": "Humana provider page: Claims payment inquiry resources",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "You can submit claim disputes via mail to: Humana Correspondence P.O. Box 14601 Lexington, KY 40512-4601"
+     },
+     "applies_to": "Written dispute with TIN, member ID, date of service, claim number, charged, paid and expected amounts, and the reason"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "phone",
+     "value": "800-448-6262",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125 (linked as \"Claim payment inquiry guide\" from the live payment inquiries page)",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Call Humana's provider call center at 800-448-6262."
+     }
+    },
+    {
+     "purpose": "second_level",
+     "channel": "email",
+     "value": "HumanaProviderServices@humana.com (secure email) with the Claim Escalation Form",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125 (linked as \"Claim payment inquiry guide\" from the live payment inquiries page)",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If you are a participating provider and disagree with our determination after we respond to your initial online, mail or phone submission, you can escalate your concern. Send a secure email to HumanaProviderServices@humana.com."
+     },
+     "applies_to": "Participating providers only, after the first dispute response",
+     "form": "Claim Escalation Form",
+     "form_url": "https://assets.humana.com/is/content/humana/Provider%20Concierge%20Unit%20Provider%20Submissions%20Form"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials Dispute Claim (appeal on behalf of the covered person). Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/reconsiderations-appeals",
+      "title": "Humana provider page: Reconsiderations and appeals (Commercial plans tab)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Please submit the appeal online via Availity Essentials or send the appeal to the following address: Humana Grievances and Appeals P.O. Box 14546 Lexington, KY 40512-4546"
+     },
+     "applies_to": "Commercial appeal of a claim determination, filed for the covered person with an Appointment of Representative form; same process for participating and nonparticipating providers"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Humana Grievances and Appeals, P.O. Box 14546, Lexington, KY 40512-4546",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Information%20for%20Non%20Participating%20Providerspdf",
+      "title": "Humana Grievances and Appeals/Inquiry Directory 954306ALL0226",
+      "doc_date": "2026-07-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Please note the commercial plan appeal process is the same for nonparticipating and participating providers."
+     },
+     "form": "Appointment of Representative form (or other legal authorization) when filing for the covered person"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "888-556-2128",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125 (linked as \"Claim payment inquiry guide\" from the live payment inquiries page)",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Commercial standard fax 888-556-2128"
+     },
+     "applies_to": "SINGLE SOURCE for commercial appeals: the July 2025 guide (still linked from Humana's live payment inquiries page) lists it under 'Nonparticipating healthcare providers submitting appeals: Commercial'. Humana's July 2026 directory, the newest, and the live commercial appeals page give only Availity and mail. Second check of the digits only: Humana's February 2026 Appeal or Grievance Form (a Medicare member form) prints 'Humana Grievance and Appeals Department Fax Number: 888-556-2128'. See conflicts.",
+     "required_or_preferred": "Listed in one current Humana guide only"
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "866-305-6655",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_773902ALL0725-A_2026_ProviderManual-Delegated_formattedpdf",
+      "title": "Humana 2026 Provider Manual for Physicians, Hospitals and Healthcare Providers (773902ALL0725-A)",
+      "doc_date": "2026-02-19",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Fax to 866-305-6655"
+     },
+     "applies_to": "Medical records Humana requested (Humana Medical Records Management; put the request letter on top). Second check: Humana's claim-payment inquiry guide lists 'Humana Medical Records Management P.O. Box 14465 ... Fax: 866-305-6655'.",
+     "required_or_preferred": "Allowed (Availity MRM, EMR vendor, fax or mail)"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity Essentials > Payer Spaces > Humana > Medical Records Management",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_412905ALL0224-A_HUMP0412905_Claim_Payment_Inquiry_Resolution_Guide_4.19.24pdf",
+      "title": "Humana claim-payment inquiry resolution guide 642103ALL0125 (linked as \"Claim payment inquiry guide\" from the live payment inquiries page)",
+      "doc_date": "2025-07-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Select “Medical Records Management” under the Applications tab to launch the tool."
+     }
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Humana Claims Office, P.O. Box 14601, Lexington, KY 40512-4601 (paper only where the law allows paper)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_773902ALL0725-A_2026_ProviderManual-Delegated_formattedpdf",
+      "title": "Humana 2026 Provider Manual for Physicians, Hospitals and Healthcare Providers (773902ALL0725-A)",
+      "doc_date": "2026-02-19",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Humana Claims Office P.O. Box 14601 Lexington, KY 40512-4601"
+     },
+     "applies_to": "Humana requires electronic claims unless law allows paper; corrected claims go electronically (837 frequency 7)"
+    }
+   ],
+   "windows": [
+    {
+     "level": "payment_dispute",
+     "window": "18 months from the date the provider received notice of the original claim determination (unless law or the agreement says otherwise)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/FINAL_773902ALL0725-A_2026_ProviderManual-Delegated_formattedpdf",
+      "title": "Humana 2026 Provider Manual for Physicians, Hospitals and Healthcare Providers (773902ALL0725-A)",
+      "doc_date": "2026-02-19",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Claims disputes must be received by Humana within 18 months from the date the provider received notice of the original claim determination"
+     }
+    },
+    {
+     "level": "first_level",
+     "window": "Commercial appeal on behalf of the covered person: within the time limit in the member's policy",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/reconsiderations-appeals",
+      "title": "Humana provider page: Reconsiderations and appeals (Commercial plans tab)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "To request an appeal, you need to submit your request in writing within the time limits set forth in the medical insurance policy if filing on behalf of the covered person."
+     }
+    }
+   ],
+   "no_fax_reason": "Humana publishes no fax for commercial claim payment disputes (Availity, mail to P.O. Box 14601, or phone). For commercial appeals the July 2026 directory and the live appeals page list only Availity and mail; one 2025 guide adds 'Commercial standard fax 888-556-2128' for nonparticipating providers.",
+   "conflicts": [
+    "888-556-2128 is also printed on Humana's member Appeal or Grievance Form for Medicare (Y0040, P.O. Box 14165) as the Grievance and Appeals Department fax. Confirm with Humana before faxing a commercial appeal; the safer routes are Availity or P.O. Box 14546.",
+    "Disputes (payment disagreements) and appeals (adverse determinations for the covered person) use different boxes: P.O. Box 14601 (Humana Correspondence) vs P.O. Box 14546 (Grievances and Appeals).",
+    "Humana's manual: 'Multiple provider dispute requests per provider encounter are generally unacceptable.'"
+   ],
+   "notes": "Fax for provider claim appeals: NO for payment disputes. Commercial appeals: Availity or mail; one 2025 Humana guide adds 888-556-2128 (the same digits are Humana's Grievance and Appeals fax on a 2026 Medicare member form) but the July 2026 directory does not, so confirm first. Records: fax 866-305-6655 (two sources)."
+  },
+  {
+   "payer_group": "Asuris Northwest Health",
+   "product": "Asuris Northwest Health (Cambia; Washington, Oregon, Idaho) commercial plans, member seen out of area in KY/IN",
+   "states": "Out of area (WA/OR/ID plan); no 835 identities in RemitWatch",
+   "what_it_is": "Not a BlueCard plan for this purpose: Asuris members use the Multiplan network outside the Asuris service area, so the claim and any appeal go to Asuris itself, not to Anthem. Asuris's provider appeal process is for contracted providers; a non-contracted provider's appeal goes through the member appeal process.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials Appeals application (Claims & Payments > Appeals). Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://beonbrand.getbynder.com/m/6c9c8f85f5b6d0ec/original/Administrative-Manual-Appeals-for-providers.pdf",
+      "title": "Asuris Administrative Manual: Provider Appeals (revised April 1 and June 1, 2026; linked from asuris.com)",
+      "doc_date": "2026-05-28",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Use the Appeals application on Availity Essentials to submit appeals"
+     },
+     "applies_to": "Contracted providers: adverse determination appeals and disputes (all levels); large files by SFTP",
+     "required_or_preferred": "Required (fax lines deactivated March 1, 2026 except exceptions)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "(888) 487-0939",
+     "source": {
+      "url": "https://www.asuris.com/provider/forms-documents/fax-exception-critia",
+      "title": "Asuris Northwest Health: Fax exception criteria",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Provider appeal exceptions: Fax to (888) 487‑0939."
+     },
+     "applies_to": "EXCEPTION ONLY: Availity outage, file over 143 MB, natural disaster, no internet, or extenuating circumstance; send the Provider Appeal Form plus the Provider Fax Submission Exception Form. Second check: the appeals page says 'Fax both forms to (888) 487-0939'. Faxes that do not meet the criteria are not processed.",
+     "required_or_preferred": "Exception only; never the normal route",
+     "form": "Provider Appeal Form (FORM 5255AS) and Provider Fax Submission Exception Form",
+     "form_url": "https://beonbrand.getbynder.com/m/3a835251c2000cba/original/Provider-Appeal-Form.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Asuris, Attention: Appeals, P.O. Box 1248, Lewiston, ID 83501-1248 (certified mail)",
+     "source": {
+      "url": "https://www.asuris.com/provider/contact-us",
+      "title": "Asuris Northwest Health provider Contact us",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Attention: Appeals > P.O. Box 1248 > Lewiston, ID 83501-1248"
+     },
+     "applies_to": "Certified mail for contracted provider appeals"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Pricing Dispute Form (contracted providers) for disagreement with the contracted allowed amount: https://www.asuris.com/provider/library/forms/pricing-dispute-form",
+     "source": {
+      "url": "https://www.asuris.com/provider/claims-payment/payment/appeals",
+      "title": "Asuris Northwest Health provider page: Pricing disputes and appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Use the Pricing Dispute Form (below) to disagree with the contractual pricing of a claim or claim line."
+     },
+     "applies_to": "Contracted providers only; pricing disputes are not appeals and follow timely filing rules for adjustments"
+    },
+    {
+     "purpose": "other",
+     "channel": "fax",
+     "value": "1 (888) 496-1542",
+     "source": {
+      "url": "https://beonbrand.getbynder.com/m/75a1ed7977ae910f/original/Appeal-form-Asuris.pdf",
+      "title": "Asuris member Appeal Form, FORM 4581AS (Eff. 11/2023) v2 (linked from the live member appeals page)",
+      "doc_date": "2023-12-08",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "or via fax at 1 (888) 496-1542"
+     },
+     "applies_to": "Member appeal route (Commercial and Individual plans: Attn: Asuris Level 1 Member Appeals, PO Box 1106, Lewiston, ID 83501-1106; self-funded ASO groups use fax 1 (877) 663-7526). For a NON-contracted provider appealing for the patient, with the patient's signature or HIPAA authorization. SINGLE SOURCE: the 2023 member form linked from the live member appeals page.",
+     "required_or_preferred": "Member route; email MemberAppeals@asuris.com and mail also accepted",
+     "form": "Asuris Appeal Form (FORM 4581AS)",
+     "form_url": "https://beonbrand.getbynder.com/m/75a1ed7977ae910f/original/Appeal-form-Asuris.pdf"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "24 months after payment or denial notice (30 months with coordination of benefits)",
+     "source": {
+      "url": "https://beonbrand.getbynder.com/m/6c9c8f85f5b6d0ec/original/Administrative-Manual-Appeals-for-providers.pdf",
+      "title": "Asuris Administrative Manual: Provider Appeals (revised April 1 and June 1, 2026; linked from asuris.com)",
+      "doc_date": "2026-05-28",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Within 24 months after payment of the claim or notice that the claim was denied or 30 months for claims subject to coordination of benefits."
+     }
+    },
+    {
+     "level": "second_level",
+     "window": "Level two (external review) notice within 90 calendar days of the written internal review decision",
+     "source": {
+      "url": "https://beonbrand.getbynder.com/m/6c9c8f85f5b6d0ec/original/Administrative-Manual-Appeals-for-providers.pdf",
+      "title": "Asuris Administrative Manual: Provider Appeals (revised April 1 and June 1, 2026; linked from asuris.com)",
+      "doc_date": "2026-05-28",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "ninety (90) calendar days after the written Internal Review determination"
+     }
+    },
+    {
+     "level": "other",
+     "window": "Member appeal: 180 days from the written decision",
+     "source": {
+      "url": "https://www.asuris.com/member/members/member-appeals",
+      "title": "Asuris member page: Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "You must appeal within 180 days of getting our written decision."
+     }
+    }
+   ],
+   "no_fax_reason": "Asuris deactivated its provider appeals fax on March 1, 2026. Provider appeals go through the Availity Essentials Appeals application; the (888) 487-0939 fax is only for listed exceptions with the exception cover sheet.",
+   "conflicts": [
+    "The computed task called Asuris a BlueCard plan. Asuris's own member page says: 'If you're an Asuris Northwest Health member, you have access to Multiplan for health care when you travel outside your local Asuris service area.' So the claim is Asuris's, not Anthem's.",
+    "Asuris's appeals page also says 'Out of area- non-contracted providers should submit rate negotiation requests according to their local Blue Plan billing dispute process' (No Surprises Act rate negotiation only). This conflicts with the travel page; check the member ID card and the remittance to see who processed the claim.",
+    "Appeals by non-contracted providers are not eligible for the provider appeal process ('Appeals by non-contracted providers may be eligible for the member appeal process.')."
+   ],
+   "notes": "Fax for provider claim appeals: EXCEPTION ONLY. Asuris turned off its provider appeals fax on March 1, 2026; (888) 487-0939 only for listed exceptions. Normal route: Availity Appeals."
+  },
+  {
+   "payer_group": "Excellus Bluecross Blueshield",
+   "product": "Excellus BlueCross BlueShield (New York) members seen in Kentucky or Indiana, claims filed through BlueCard",
+   "states": "Out of area (NY home plan); local plan Anthem KY or IN; no 835 identities in RemitWatch",
+   "what_it_is": "A Blue plan. Under BlueCard the claim is filed with and paid by the local Anthem plan, and appeals for all claims go to the local Anthem plan, which coordinates with Excellus.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Anthem Availity Essentials Claim Status > dispute (Anthem Claim Payment Dispute). Login: https://apps.availity.com/availity/web/public.elegant.login",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00006.pdf",
+      "title": "The BlueCard Program Provider Manual (Anthem Kentucky), January 1, 2022 (linked from the 2026 Kentucky manual)",
+      "doc_date": "2022-01-01 (PDF modified 2024-09-03)",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Appeals for all claims are handled through your local Anthem Plan."
+     },
+     "required_or_preferred": "Through the local Anthem plan only"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem, ITS/Blue Card Dept., P.O. Box 105557, Atlanta, GA 30348-5557",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Anthem ITS/Blue Card Dept. P.O. Box 105557"
+     },
+     "applies_to": "BlueCard appeals address in the 2026 Kentucky guide"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "866-594-0521 (Anthem BlueCard Provider Service)",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/general/KY-BCBS-Quick-Contact-Guide.pdf",
+      "title": "Anthem Kentucky Quick contact guide (QCG), Medicare Advantage and Commercial (KY-BCBS-CRCM-020250-26-GRP5163)",
+      "doc_date": "2026-10-21",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "BlueCard Provider Service: 866-594-0521"
+     }
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Excellus (home plan), per the home plan's letter",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If the appeal relates to Pre-certification/Pre-authorization, the Provider or Facility may have received information directly from the Member's Home Plan regarding appeal rights and processes."
+     },
+     "applies_to": "Pre-authorization appeals only"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "Local Anthem plan's windows: reconsideration at least 2 years from the EOP (KY) or 2 years (IN); appeal 90 days after the reconsideration decision",
+     "source": {
+      "url": "https://www.anthem.com/content/dam/digital/docs/provider/commercial/manuals/PM_KY_00011.pdf",
+      "title": "2026 Anthem Blue Cross and Blue Shield Kentucky Provider Manual (v1), effective September 1, 2026",
+      "doc_date": "2026-07-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "a Claim Payment Dispute should be submitted, along with attached supporting documentation, to the local Anthem Plan."
+     }
+    }
+   ],
+   "no_fax_reason": "No fax: BlueCard appeals go through the local Anthem plan, which publishes only Availity and the ITS/Blue Card Dept. mailing address for them.",
+   "conflicts": [
+    "Excellus's own provider BlueCard FAQ is behind a login (not read). The local-plan rule comes from Anthem's BlueCard Provider Manual."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Through the local Anthem plan (BlueCard)."
+  },
+  {
+   "payer_group": "Healthlink",
+   "product": "HealthLink (Anthem-owned provider network and pricing organization; Missouri, Illinois, Arkansas)",
+   "states": "Network in MO/IL/AR; claims priced by HealthLink and paid by the plan's claims administrator",
+   "what_it_is": "HealthLink prices claims for payors that rent its network. Pricing disputes go to HealthLink; disagreements with the payment itself go to the claims administrator named on the EOP.",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "HealthLink Appeals, PO Box 659987, San Antonio, TX 78265",
+     "source": {
+      "url": "https://wcs.anthem.com/documents/HL_Provider_Manual_2026.pdf",
+      "title": "HealthLink 2026 Provider Manual",
+      "doc_date": "2026-08-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Requests for investigation or reconsideration can be sent to HealthLink Appeals PO Box 659987 San Antonio, TX 78265"
+     },
+     "applies_to": "Claim Pricing Dispute (re-price request): provider identifiers, member name and birth date, list of claims (HealthLink claim number, dates of service), expected allowed amount"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "HealthLink Grievance & Appeal Department, P.O. Box 659987, San Antonio, TX 78265",
+     "source": {
+      "url": "https://wcs.anthem.com/documents/HL_Provider_Manual_2026.pdf",
+      "title": "HealthLink 2026 Provider Manual",
+      "doc_date": "2026-08-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail all required documentation to: HealthLink Grievance & Appeal Department P.O. Box 659987 San Antonio, TX 78265"
+     },
+     "applies_to": "Claim Pricing Appeal after the pricing dispute decision"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "The claims administrator (payor) named on the EOP or remittance, at the address and by the method it gives",
+     "source": {
+      "url": "https://wcs.anthem.com/documents/HL_Provider_Manual_2026.pdf",
+      "title": "HealthLink 2026 Provider Manual",
+      "doc_date": "2026-08-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If a Provider or Facility disagrees with the Payment received by a Claims Administrator the Provider or Facility must appeal the payment directly with the Claims Administrator per the instructions on the explanation of payment (EOP) or remittance advice."
+     },
+     "applies_to": "Payment (benefit) appeals, as opposed to pricing"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-800-624-2356 (HealthLink Customer Service, contracted amounts)",
+     "source": {
+      "url": "https://wcs.anthem.com/documents/HL_Provider_Manual_2026.pdf",
+      "title": "HealthLink 2026 Provider Manual",
+      "doc_date": "2026-08-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "HealthLink Customer Service at 1-800-624-2356"
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "second_level",
+     "window": "Claim Pricing Appeal: 30 calendar days from the pricing dispute determination (or per the Agreement)",
+     "source": {
+      "url": "https://wcs.anthem.com/documents/HL_Provider_Manual_2026.pdf",
+      "title": "HealthLink 2026 Provider Manual",
+      "doc_date": "2026-08-14",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "HealthLink accepts Claim Pricing Appeals in writing within 30 calendar days of the Claim Pricing Dispute determination or according to the Agreement."
+     }
+    }
+   ],
+   "no_fax_reason": "HealthLink's 2026 provider manual lists only mail (P.O. Box 659987, San Antonio) for pricing disputes and appeals; no fax.",
+   "conflicts": [
+    "No window is stated for the first pricing dispute. HealthLink's network is in MO/IL/AR, so a KY/IN practice usually meets HealthLink pricing through a network lease; the payor on the EOP may be someone else."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Mail only."
+  },
+  {
+   "payer_group": "Medica",
+   "product": "Medica plans billed to payer ID 94265 (Medica claims processed in Salt Lake City; not available in Availity)",
+   "states": "Out of area (MN-based plan); 835 payer id 94265, payer state UT",
+   "what_it_is": "Medica's 2026 adjustment and appeal form lists a separate mail address and fax for each payer ID; payer ID 94265 is the one column marked 'Not an option in Availity'. The same form is used for the initial request and, after Medica's answer, for the appeal.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1 (801) 994-1076",
+     "source": {
+      "url": "https://partner.medica.com/-/media/documents/provider/forms/claim-appeal-and-adjustment-form.pdf",
+      "title": "Medica Provider Claim Adjustment or Appeal Request Form (MHP-OPS11013023-3-0226A)",
+      "doc_date": "2026-03-17",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "94265 Not an option in Availity Medica PO Box 30990 Salt Lake City, UT 84130 Fax 1 (801) 994 1076"
+     },
+     "applies_to": "Claim adjustment or appeal request for claims sent to payer ID 94265, with the Provider Claim Adjustment or Appeal Request Form and the remittance. SINGLE SOURCE (the 2026 form; Medica's web pages return 403 to automated readers and no other Medica publication with this number was found). The form's column layout was checked on a rendered image.",
+     "required_or_preferred": "Allowed (mail or fax); Availity not available for 94265",
+     "form": "Provider Claim Adjustment or Appeal Request Form (MHP-OPS11013023-3-0226A)",
+     "form_url": "https://partner.medica.com/-/media/documents/provider/forms/claim-appeal-and-adjustment-form.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Medica, PO Box 30990, Salt Lake City, UT 84130",
+     "source": {
+      "url": "https://partner.medica.com/-/media/documents/provider/forms/claim-appeal-and-adjustment-form.pdf",
+      "title": "Medica Provider Claim Adjustment or Appeal Request Form (MHP-OPS11013023-3-0226A)",
+      "doc_date": "2026-03-17",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "94265 Not an option in Availity Medica PO Box 30990 Salt Lake City, UT 84130"
+     },
+     "form": "Provider Claim Adjustment or Appeal Request Form"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "1 (801) 994-1076",
+     "source": {
+      "url": "https://partner.medica.com/-/media/documents/provider/forms/claim-appeal-and-adjustment-form.pdf",
+      "title": "Medica Provider Claim Adjustment or Appeal Request Form (MHP-OPS11013023-3-0226A)",
+      "doc_date": "2026-03-17",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "94265 Not an option in Availity Medica PO Box 30990 Salt Lake City, UT 84130 Fax 1 (801) 994 1076"
+     },
+     "applies_to": "Appeal after Medica's first answer: fill in the 'For Use After Initial Response: Appeal' section on page 2 of the same form ('Please submit to the appropriate address on the previous page'), so the same 94265 fax and mail address apply. SINGLE SOURCE (the same 2026 form)."
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "phone",
+     "value": "1-800-458-5512 (Medica Provider Service Center, contracted rate disputes)",
+     "source": {
+      "url": "https://partner.medica.com/-/media/documents/provider/forms/claim-appeal-and-adjustment-form.pdf",
+      "title": "Medica Provider Claim Adjustment or Appeal Request Form (MHP-OPS11013023-3-0226A)",
+      "doc_date": "2026-03-17",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Note: For disputes related to the contracted rate, call the Provider Service Center at 1-800-458-5512."
+     }
+    }
+   ],
+   "windows": [],
+   "no_fax_reason": "",
+   "conflicts": [
+    "Medica's administrative manual pages (claim adjustment and appeal guidelines) return HTTP 403 to automated readers, so the filing window could not be read from Medica directly; a search excerpt of that page says 12 months from the processed date. Confirm before relying on it.",
+    "The form's other columns carry other faxes (952-992-1427, 469-417-1960, 952-992-3024, 952-992-3899) for other payer IDs; only 801-994-1076 belongs to 94265."
+   ],
+   "notes": "Fax for provider claim appeals: YES for payer ID 94265, 1 (801) 994-1076 (Medica 2026 form; SINGLE SOURCE, no second Medica publication found)."
+  },
+  {
+   "payer_group": "Government Employees Health Association",
+   "product": "G.E.H.A (Government Employees Health Association) FEHB/PSHB medical plans; UnitedHealthcare Choice Plus network; claims payer ID 39026",
+   "states": "National (federal employees); no 835 identities",
+   "what_it_is": "An independent FEHB plan that uses the UnitedHealthcare network and payer ID 39026. Post-service appeals and reconsiderations go to G.E.H.A Post-Service Appeals in Eagan, MN. The appeal is the member's (FEHB disputed-claims rules); a provider files for the member with a Designation of Authorized Representative form.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "G.E.H.A Post-Service Appeals, P.O. Box 21324, Eagan, MN 55121",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/faq/geha-changes-faq.pdf",
+      "title": "Government Employees Health Association (GEHA) Frequently Asked Questions, UnitedHealthcare Plans (PCA-1-26-00264-E&I-FAQ_03032026)",
+      "doc_date": "2026-03-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Submit post-service appeals reconsiderations to: G.E.H.A Post-Service Appeals P.O. Box 21324 Eagan, MN 55121"
+     },
+     "applies_to": "Post-service appeals and reconsiderations. Second check: G.E.H.A's own October 2026 appeal FAQ gives the same box, and the 2026 FEHB brochure (OPM) lists 'Post-Service Appeals: G.E.H.A, PO Box 21324, Eagan, MN 55121'.",
+     "form": "Designation of Authorized Representative form when filing for the member (geha.com/Appeals)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-866-963-0156",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Post-appeal fax: 1-866-963-0156"
+     },
+     "applies_to": "Post-service appeals by fax (G.E.H.A appeal FAQ, October 2026, member-facing). SINGLE SOURCE: the UnitedHealthcare-hosted provider FAQ gives only the mail box and 'digital submissions at geha.com', and G.E.H.A's 2026 FEHB brochure gives only the online form at geha.com/My-Member-Portal and the mail box.",
+     "required_or_preferred": "Allowed per the G.E.H.A FAQ"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "G.E.H.A provider portal: https://provider.mygeha.com/login (claims, remittances); members can appeal by secure message in MyG.E.H.A",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/faq/geha-changes-faq.pdf",
+      "title": "Government Employees Health Association (GEHA) Frequently Asked Questions, UnitedHealthcare Plans (PCA-1-26-00264-E&I-FAQ_03032026)",
+      "doc_date": "2026-03-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Find information on digital submissions at geha.com."
+     },
+     "applies_to": "Check claims and remittances; no provider appeal upload was found on the public pages"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "G.E.H.A Medical Claims, P.O. Box 21172, Eagan, MN 55121 (electronic: payer ID 39026)",
+     "source": {
+      "url": "https://www.geha.com/resource-center/provider-resources/where-to-submit-claims",
+      "title": "G.E.H.A provider resources: Where to submit claims",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "All medical and dental claims should be submitted to EDI 39026."
+     },
+     "applies_to": "Paper claims when electronic submission is not possible"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "Within 6 months of the decision (member appeal); OPM review within 90 days of G.E.H.A's appeal decision",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "The member may appeal to G.E.H.A within six months of the decision."
+     }
+    },
+    {
+     "level": "external_review",
+     "window": "OPM review within 90 days of the date of the G.E.H.A appeal decision letter",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Within 90 days of the date of G.E.H.A's appeal decision letter"
+     }
+    }
+   ],
+   "no_fax_reason": "",
+   "conflicts": [
+    "G.E.H.A's member FAQ (Oct 2026) and UnitedHealthcare's GEHA provider FAQ (Mar 2026) agree on the mail box; only the member FAQ prints a post-service fax. Pre-service appeals use a different fax (1-888-615-6584) and box (P.O. Box 64, Huntingdon Valley, PA).",
+    "G.E.H.A's 2026 FEHB brochure (OPM, Section 8) says to log in at geha.com/My-Member-Portal and complete the online appeal form, or mail post-service appeals to PO Box 21324, Eagan, MN 55121; it prints no appeal fax.",
+    "RemitWatch has three groups for the same plan ('Government Employees Health Association', 'Government Employees Hospital Association (Geha)', 'Geha'); all three use these channels."
+   ],
+   "notes": "Fax for provider claim appeals: YES, post-service appeal fax 1-866-963-0156 (G.E.H.A appeal FAQ, October 2026; SINGLE SOURCE: the 2026 FEHB brochure lists only the online form and mail). Mailing box confirmed by three sources."
+  },
+  {
+   "payer_group": "Government Employees Hospital Association (Geha)",
+   "product": "G.E.H.A (Government Employees Health Association) FEHB/PSHB medical plans; UnitedHealthcare Choice Plus network; claims payer ID 39026",
+   "states": "National (federal employees); 835 payer name GOVERNMENT EMPLOYEES HOSPITAL ASSOCIATION (GEHA), payer state MN",
+   "what_it_is": "An independent FEHB plan that uses the UnitedHealthcare network and payer ID 39026. Post-service appeals and reconsiderations go to G.E.H.A Post-Service Appeals in Eagan, MN. The appeal is the member's (FEHB disputed-claims rules); a provider files for the member with a Designation of Authorized Representative form.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "G.E.H.A Post-Service Appeals, P.O. Box 21324, Eagan, MN 55121",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/faq/geha-changes-faq.pdf",
+      "title": "Government Employees Health Association (GEHA) Frequently Asked Questions, UnitedHealthcare Plans (PCA-1-26-00264-E&I-FAQ_03032026)",
+      "doc_date": "2026-03-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Submit post-service appeals reconsiderations to: G.E.H.A Post-Service Appeals P.O. Box 21324 Eagan, MN 55121"
+     },
+     "applies_to": "Post-service appeals and reconsiderations. Second check: G.E.H.A's own October 2026 appeal FAQ gives the same box, and the 2026 FEHB brochure (OPM) lists 'Post-Service Appeals: G.E.H.A, PO Box 21324, Eagan, MN 55121'.",
+     "form": "Designation of Authorized Representative form when filing for the member (geha.com/Appeals)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-866-963-0156",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Post-appeal fax: 1-866-963-0156"
+     },
+     "applies_to": "Post-service appeals by fax (G.E.H.A appeal FAQ, October 2026, member-facing). SINGLE SOURCE: the UnitedHealthcare-hosted provider FAQ gives only the mail box and 'digital submissions at geha.com', and G.E.H.A's 2026 FEHB brochure gives only the online form at geha.com/My-Member-Portal and the mail box.",
+     "required_or_preferred": "Allowed per the G.E.H.A FAQ"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "G.E.H.A provider portal: https://provider.mygeha.com/login (claims, remittances); members can appeal by secure message in MyG.E.H.A",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/faq/geha-changes-faq.pdf",
+      "title": "Government Employees Health Association (GEHA) Frequently Asked Questions, UnitedHealthcare Plans (PCA-1-26-00264-E&I-FAQ_03032026)",
+      "doc_date": "2026-03-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Find information on digital submissions at geha.com."
+     },
+     "applies_to": "Check claims and remittances; no provider appeal upload was found on the public pages"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "G.E.H.A Medical Claims, P.O. Box 21172, Eagan, MN 55121 (electronic: payer ID 39026)",
+     "source": {
+      "url": "https://www.geha.com/resource-center/provider-resources/where-to-submit-claims",
+      "title": "G.E.H.A provider resources: Where to submit claims",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "All medical and dental claims should be submitted to EDI 39026."
+     },
+     "applies_to": "Paper claims when electronic submission is not possible"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "Within 6 months of the decision (member appeal); OPM review within 90 days of G.E.H.A's appeal decision",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "The member may appeal to G.E.H.A within six months of the decision."
+     }
+    },
+    {
+     "level": "external_review",
+     "window": "OPM review within 90 days of the date of the G.E.H.A appeal decision letter",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Within 90 days of the date of G.E.H.A's appeal decision letter"
+     }
+    }
+   ],
+   "no_fax_reason": "",
+   "conflicts": [
+    "G.E.H.A's member FAQ (Oct 2026) and UnitedHealthcare's GEHA provider FAQ (Mar 2026) agree on the mail box; only the member FAQ prints a post-service fax. Pre-service appeals use a different fax (1-888-615-6584) and box (P.O. Box 64, Huntingdon Valley, PA).",
+    "G.E.H.A's 2026 FEHB brochure (OPM, Section 8) says to log in at geha.com/My-Member-Portal and complete the online appeal form, or mail post-service appeals to PO Box 21324, Eagan, MN 55121; it prints no appeal fax.",
+    "RemitWatch has three groups for the same plan ('Government Employees Health Association', 'Government Employees Hospital Association (Geha)', 'Geha'); all three use these channels."
+   ],
+   "notes": "Fax for provider claim appeals: YES, post-service appeal fax 1-866-963-0156 (G.E.H.A appeal FAQ, October 2026; SINGLE SOURCE: the 2026 FEHB brochure lists only the online form and mail). Mailing box confirmed by three sources."
+  },
+  {
+   "payer_group": "Geha",
+   "product": "G.E.H.A (Government Employees Health Association) FEHB/PSHB medical plans; UnitedHealthcare Choice Plus network; claims payer ID 39026",
+   "states": "National (federal employees); 835 payer id 39026, payer state MN",
+   "what_it_is": "An independent FEHB plan that uses the UnitedHealthcare network and payer ID 39026. Post-service appeals and reconsiderations go to G.E.H.A Post-Service Appeals in Eagan, MN. The appeal is the member's (FEHB disputed-claims rules); a provider files for the member with a Designation of Authorized Representative form.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "G.E.H.A Post-Service Appeals, P.O. Box 21324, Eagan, MN 55121",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/faq/geha-changes-faq.pdf",
+      "title": "Government Employees Health Association (GEHA) Frequently Asked Questions, UnitedHealthcare Plans (PCA-1-26-00264-E&I-FAQ_03032026)",
+      "doc_date": "2026-03-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Submit post-service appeals reconsiderations to: G.E.H.A Post-Service Appeals P.O. Box 21324 Eagan, MN 55121"
+     },
+     "applies_to": "Post-service appeals and reconsiderations. Second check: G.E.H.A's own October 2026 appeal FAQ gives the same box, and the 2026 FEHB brochure (OPM) lists 'Post-Service Appeals: G.E.H.A, PO Box 21324, Eagan, MN 55121'.",
+     "form": "Designation of Authorized Representative form when filing for the member (geha.com/Appeals)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-866-963-0156",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Post-appeal fax: 1-866-963-0156"
+     },
+     "applies_to": "Post-service appeals by fax (G.E.H.A appeal FAQ, October 2026, member-facing). SINGLE SOURCE: the UnitedHealthcare-hosted provider FAQ gives only the mail box and 'digital submissions at geha.com', and G.E.H.A's 2026 FEHB brochure gives only the online form at geha.com/My-Member-Portal and the mail box.",
+     "required_or_preferred": "Allowed per the G.E.H.A FAQ"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "G.E.H.A provider portal: https://provider.mygeha.com/login (claims, remittances); members can appeal by secure message in MyG.E.H.A",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/health-plans/faq/geha-changes-faq.pdf",
+      "title": "Government Employees Health Association (GEHA) Frequently Asked Questions, UnitedHealthcare Plans (PCA-1-26-00264-E&I-FAQ_03032026)",
+      "doc_date": "2026-03-04",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Find information on digital submissions at geha.com."
+     },
+     "applies_to": "Check claims and remittances; no provider appeal upload was found on the public pages"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "G.E.H.A Medical Claims, P.O. Box 21172, Eagan, MN 55121 (electronic: payer ID 39026)",
+     "source": {
+      "url": "https://www.geha.com/resource-center/provider-resources/where-to-submit-claims",
+      "title": "G.E.H.A provider resources: Where to submit claims",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "All medical and dental claims should be submitted to EDI 39026."
+     },
+     "applies_to": "Paper claims when electronic submission is not possible"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "Within 6 months of the decision (member appeal); OPM review within 90 days of G.E.H.A's appeal decision",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "The member may appeal to G.E.H.A within six months of the decision."
+     }
+    },
+    {
+     "level": "external_review",
+     "window": "OPM review within 90 days of the date of the G.E.H.A appeal decision letter",
+     "source": {
+      "url": "https://geha.com/~/media93/Project/GEHA/GEHA/documents-files/appeals/geha-appeal-process-faq.pdf",
+      "title": "G.E.H.A appeal process FAQs (CO-WEB-0826-003)",
+      "doc_date": "2026-10-30",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Within 90 days of the date of G.E.H.A's appeal decision letter"
+     }
+    }
+   ],
+   "no_fax_reason": "",
+   "conflicts": [
+    "G.E.H.A's member FAQ (Oct 2026) and UnitedHealthcare's GEHA provider FAQ (Mar 2026) agree on the mail box; only the member FAQ prints a post-service fax. Pre-service appeals use a different fax (1-888-615-6584) and box (P.O. Box 64, Huntingdon Valley, PA).",
+    "G.E.H.A's 2026 FEHB brochure (OPM, Section 8) says to log in at geha.com/My-Member-Portal and complete the online appeal form, or mail post-service appeals to PO Box 21324, Eagan, MN 55121; it prints no appeal fax.",
+    "RemitWatch has three groups for the same plan ('Government Employees Health Association', 'Government Employees Hospital Association (Geha)', 'Geha'); all three use these channels."
+   ],
+   "notes": "Fax for provider claim appeals: YES, post-service appeal fax 1-866-963-0156 (G.E.H.A appeal FAQ, October 2026; SINGLE SOURCE: the 2026 FEHB brochure lists only the online form and mail). Mailing box confirmed by three sources."
+  },
+  {
+   "payer_group": "Caresource",
+   "product": "CareSource Marketplace (ACA individual plans), Kentucky",
+   "states": "KY",
+   "what_it_is": "Claim payment disputes (underpayment) and claim appeals (denials) through the CareSource Provider Portal, or the Provider Standard Appeal Form by mail.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "CareSource Provider Portal (Kentucky): https://providerportal.caresource.com/KY",
+     "source": {
+      "url": "https://www.caresource.com/ky/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Kentucky Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "The Provider Portal is the most efficient method of submitting appeals."
+     },
+     "applies_to": "Claim payment disputes and claim appeals",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "CareSource Grievance & Appeals Department, P.O. Box 2008, Dayton, OH 45401",
+     "source": {
+      "url": "https://www.caresource.com/documents/multi-multi-p-2303005-provider-standard-appeal-form-mpdsnp.pdf",
+      "title": "CareSource Provider Standard Appeal Form (Multi-Multi-P-2303005)",
+      "doc_date": "2026-04-09",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail - CareSource Grievance & Appeals Department, P.O. Box 2008, Dayton, OH 45401"
+     },
+     "applies_to": "When the portal cannot be used",
+     "form": "Provider Standard Appeal Form",
+     "form_url": "https://www.caresource.com/documents/multi-multi-p-2303005-provider-standard-appeal-form-mpdsnp.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-833-230-2101 (Provider Services)",
+     "source": {
+      "url": "https://www.caresource.com/documents/multi-multi-p-2303005-provider-standard-appeal-form-mpdsnp.pdf",
+      "title": "CareSource Provider Standard Appeal Form (Multi-Multi-P-2303005)",
+      "doc_date": "2026-04-09",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "For questions, please call Provider Services at 1-833-230-2101"
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "payment_dispute",
+     "window": "24 months from the date of denial or payment",
+     "source": {
+      "url": "https://www.caresource.com/ky/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Kentucky Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "The dispute must be submitted within twenty-four (24) months of the date of denial or date of payment."
+     }
+    },
+    {
+     "level": "first_level",
+     "window": "Claim appeal: 365 calendar days from the date of service or discharge (unless the contract says otherwise)",
+     "source": {
+      "url": "https://www.caresource.com/ky/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Kentucky Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "If you do not agree with a denial on a processed claim, you have 365 calendar days from the date of service or discharge, unless otherwise specified in your contract, to file a claim appeal."
+     }
+    },
+    {
+     "level": "corrected_claim",
+     "window": "365 days from the date of service or discharge",
+     "source": {
+      "url": "https://www.caresource.com/ky/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Kentucky Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers have 365 days from the date of service or discharge to submit a corrected claim."
+     }
+    }
+   ],
+   "no_fax_reason": "CareSource's current Kentucky Marketplace page and its April 2026 Provider Standard Appeal Form list only the Provider Portal and mail; no fax for claim disputes or appeals.",
+   "conflicts": [
+    "CareSource's March 2024 multi-state Marketplace manual lists fax 937-531-2398 for medical-necessity (clinical) appeals; the current page and form do not, so it is not offered.",
+    "If the member's card is CareSource Indiana Medicaid (Hoosier Healthwise, HIP), Medicaid rules apply instead (Medicaid family)."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Provider Portal or mail."
+  },
+  {
+   "payer_group": "Caresource",
+   "product": "CareSource Marketplace (ACA individual plans), Indiana",
+   "states": "IN",
+   "what_it_is": "Indiana Marketplace disputes have a much shorter window than Kentucky (90 days from payment) and a different mail box.",
+   "channels": [
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "CareSource Provider Portal (Indiana): https://providerportal.caresource.com/IN",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Indiana Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Claim disputes can be submitted to CareSource through the following methods:"
+     },
+     "required_or_preferred": "Portal or mail"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "CareSource, Attn: Quality Improvement, P.O. Box 8738, Dayton, OH 45401-8738",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Indiana Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Claim Payment Dispute Address CareSource Attn: Quality Improvement P.O. Box 8738 Dayton, OH 45401-8738"
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "CareSource Provider Portal (Indiana) claim appeal: https://providerportal.caresource.com/IN",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Indiana Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "you will have 365 calendar days from the date of service or discharge to file a claim appeal."
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "payment_dispute",
+     "window": "90 calendar days from the date of payment",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Indiana Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "The dispute must be submitted within 90 calendar days of the date of payment."
+     }
+    },
+    {
+     "level": "first_level",
+     "window": "Claim appeal: 365 calendar days from the date of service or discharge",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Indiana Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "you will have 365 calendar days from the date of service or discharge to file a claim appeal."
+     }
+    },
+    {
+     "level": "corrected_claim",
+     "window": "90 days from the date of service or discharge",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/marketplace/",
+      "title": "CareSource Indiana Marketplace: Provider Disputes or Appeals",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers have 90 days from the date of service or discharge to submit a corrected claim."
+     }
+    }
+   ],
+   "no_fax_reason": "CareSource's Indiana Marketplace page lists only the Provider Portal and mail for claim disputes and appeals.",
+   "conflicts": [
+    "Kentucky and Indiana Marketplace windows differ (KY dispute 24 months; IN dispute 90 days from payment)."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Provider Portal or mail."
+  },
+  {
+   "payer_group": "Health Alliance",
+   "product": "Health Alliance Medical Plans (Carle, Illinois); plans ended at the start of 2026, claims run-out only",
+   "states": "Illinois plan; no 835 identities",
+   "what_it_is": "Provider appeals are entered on Health Alliance's online Provider Inquiry Portal; there is no published mail or fax route for provider claim appeals.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Provider Inquiry Portal: https://provider.healthalliance.org (informal inquiry first, then formal appeal with the Provider Appeal form)",
+     "source": {
+      "url": "https://www.healthalliance.org/documents/2316",
+      "title": "Health Alliance provider manual, Section 5 Appeals",
+      "doc_date": "2021-08-11",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Both informal and formal appeals will need to be entered on our online Provider Inquiry Portal located at Provider.HealthAlliance.org."
+     },
+     "required_or_preferred": "Required (portal only)"
+    },
+    {
+     "purpose": "other",
+     "channel": "phone",
+     "value": "(800) 500-3373 (appeal on behalf of a member)",
+     "source": {
+      "url": "https://www.healthalliance.org/documents/2316",
+      "title": "Health Alliance provider manual, Section 5 Appeals",
+      "doc_date": "2021-08-11",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "To make an appeal on behalf of a member, call (800) 500-3373."
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "Informal inquiry within 90 days of the original denial; formal appeal within 90 days of the original denial",
+     "source": {
+      "url": "https://www.healthalliance.org/documents/2316",
+      "title": "Health Alliance provider manual, Section 5 Appeals",
+      "doc_date": "2021-08-11",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Providers must initiate informal inquiries within 90 days of the original denial."
+     }
+    }
+   ],
+   "no_fax_reason": "Health Alliance's provider manual sends both informal and formal provider appeals through its online Provider Inquiry Portal; no fax or mail route is published.",
+   "conflicts": [
+    "The manual section is from 2021 and the plans stopped at the start of 2026; the run-out notice page was unavailable (HTTP 503). A phone check before working an old item is reasonable."
+   ],
+   "notes": "Fax for provider claim appeals: NO. Provider Inquiry Portal only."
+  },
+  {
+   "payer_group": "American Medical Security",
+   "product": "UnitedHealthcare plans billed to payer ID 81400: UnitedHealthcare FlexWork (2026 UHC Administrative Guide) and the All Savers Health Plan (an older UHC contact page gives payer ID 81400 for All Savers; UHC's live contact page lists All Savers support for Kentucky and Indiana). The 835 still names American Medical Security, a former UnitedHealth company based in Wisconsin.",
+   "states": "835 payer id 81400, payer state WI",
+   "what_it_is": "Two-step process within 12 months. Reconsiderations go to the claims unit at P.O. Box 31375; appeals go to the Grievance Administrator at P.O. Box 31371 (the same unit that handles UnitedHealthOne/Golden Rule appeals). These plans are excluded from UHC's electronic-only rule.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-801-478-7582",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail: FlexWork Attn: Claims P.O. Box 31375 Salt Lake City, UT 84131-0375 Fax: 1-801-478-7582 Phone: 1-855-892-2401"
+     },
+     "applies_to": "Claim reconsideration (pricing or other) for payer ID 81400. Second check: FlexWork's live contact page lists 'Claims Submission Mailing Address FlexWork P.O. Box 31375 Salt Lake City, UT 84131-0375 Fax: 1-801-478-7582', and an older UHC page (October 2022) lists the same box and fax for All Savers paper claims. Check that the member ID card names FlexWork or All Savers before faxing.",
+     "required_or_preferred": "Allowed (mail, fax or phone)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "FlexWork, Attn: Claims, P.O. Box 31375, Salt Lake City, UT 84131-0375",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail: FlexWork Attn: Claims P.O. Box 31375 Salt Lake City, UT 84131-0375"
+     }
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-855-892-2401",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Fax: 1-801-478-7582 Phone: 1-855-892-2401"
+     },
+     "applies_to": "FlexWork members"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "800-291-2634",
+     "source": {
+      "url": "https://www.uhcprovider.com/en/contact-us.html",
+      "title": "UnitedHealthcare provider page: Contact us (state sections)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "All Savers® Health Plan 800-291-2634"
+     },
+     "applies_to": "All Savers members: UHC health plan support listed for Kentucky and Indiana; ask where a reconsideration or appeal goes"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "1-801-478-5463",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail: Grievance Administrator P.O. Box 31371 Salt Lake City, UT 84131-0371 Fax: 1-801-478-5463 Phone: 1-855-892-2401"
+     },
+     "applies_to": "Claim appeal (step 2). Second check: Golden Rule's filing posted by the Maryland Insurance Administration (January 2023) lists 'Grievance Administrator PO Box 31371 Salt Lake City, UT 84131-0371 Standard fax: (801) 478-5463', and the 2026 guide's UnitedHealthOne supplement and member-appeal table list the same fax. For an All Savers card, see conflicts.",
+     "required_or_preferred": "Allowed (mail, fax or phone)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Grievance Administrator, P.O. Box 31371, Salt Lake City, UT 84131-0371",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail: Grievance Administrator P.O. Box 31371 Salt Lake City, UT 84131-0371"
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "12 months from the original EOB or denial, for both steps together",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+      "title": "2026 UnitedHealthcare Care Provider Administrative Guide (Commercial, Individual Exchange, Medicare Advantage)",
+      "doc_date": "2026-05-13",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "You must submit your claim reconsideration and/or appeal to us within 12 months (or as required by law or your Agreement), from the date of the original EOB or denial."
+     }
+    }
+   ],
+   "no_fax_reason": "",
+   "conflicts": [
+    "Payer ID 81400 is listed in the 2026 guide only for FlexWork ('For UnitedHealthcare FlexWork members, submit electronic claims using payer ID number 81400'); an older UHC page gives the same payer ID for All Savers. The 835 still names American Medical Security. Confirm the product on the member card. For UnitedHealthOne/Golden Rule (payer ID 37602) the appeal fax is the same 1-801-478-5463, plus email uhoappealsandgrievances@uhc.com.",
+    "An older UHC page ('Master Contact Us RTE', last modified October 2022, not linked from the current Contact us page) lists All Savers formal appeals at 'Appeals Review P.O. Box 31371 Salt Lake City, UT, 84131-0371 Fax: 317-715-7648'. The 2026 guide and the 2023 Golden Rule filing give 1-801-478-5463 for the same box. If the card says All Savers, confirm the appeal fax at 800-291-2634 before the first send."
+   ],
+   "notes": "Fax for provider claim appeals: YES. Reconsideration 1-801-478-7582 (2026 UHC guide; FlexWork's contact page agrees) and appeal 1-801-478-5463 (2026 UHC guide; Golden Rule's 2023 filing agrees), for FlexWork and All Savers cards. A 2022 UHC page gives All Savers appeals 317-715-7648, so confirm first for All Savers."
+  },
+  {
+   "payer_group": "Health Plans Inc",
+   "product": "Health Plans, Inc. (HPI, Westborough MA; third-party administrator for self-funded plans, part of Point32Health), non-Harvard Pilgrim network claims",
+   "states": "MA-based TPA; no 835 identities",
+   "what_it_is": "One Provider Appeal Form per claim, mailed with the EOP and supporting documents. Harvard Pilgrim network claims use a different HPHC form.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Health Plans, Inc., PO Box 5199, Westborough, MA 01581",
+     "source": {
+      "url": "https://hpitpa.com/media/bmrbzir1/providerappealform_hpi_-non-hphc.pdf",
+      "title": "Health Plans, Inc. Provider Appeal Form (non-HPHC), ProviderAppealForm_HPI_(Non-HPHC)_072722 (linked from the live Access Forms page)",
+      "doc_date": "2022-08-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "PO Box 5199 • Westborough, MA 01581 • 800-532-7575"
+     },
+     "applies_to": "All appeal types on the form (underpayment by contract rate, timely filing, corrected claim, COB, duplicates); one form per claim",
+     "form": "Health Plans General Provider Appeal form (non HPHC)",
+     "form_url": "https://hpitpa.com/media/bmrbzir1/providerappealform_hpi_-non-hphc.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "800-532-7575",
+     "source": {
+      "url": "https://hpitpa.com/media/bmrbzir1/providerappealform_hpi_-non-hphc.pdf",
+      "title": "Health Plans, Inc. Provider Appeal Form (non-HPHC), ProviderAppealForm_HPI_(Non-HPHC)_072722 (linked from the live Access Forms page)",
+      "doc_date": "2022-08-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "PO Box 5199 • Westborough, MA 01581 • 800-532-7575"
+     }
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level",
+     "window": "The filing limit of the prevailing network (no fixed number published)",
+     "source": {
+      "url": "https://hpitpa.com/media/bmrbzir1/providerappealform_hpi_-non-hphc.pdf",
+      "title": "Health Plans, Inc. Provider Appeal Form (non-HPHC), ProviderAppealForm_HPI_(Non-HPHC)_072722 (linked from the live Access Forms page)",
+      "doc_date": "2022-08-03",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Filing limit of the prevailing network applies."
+     }
+    }
+   ],
+   "no_fax_reason": "HPI's current provider appeal form (linked from its Access Forms page) says to mail it to P.O. Box 5199; no appeal fax is published. The 508-754-9664 fax on the website footer is the corporate office line, not an appeals line.",
+   "conflicts": [
+    "'Incomplete appeal submissions will be returned unprocessed.'"
+   ],
+   "notes": "Fax for provider claim appeals: NO. Mail only."
+  },
+  {
+   "payer_group": "Principal Financial Group",
+   "product": "Principal Life Insurance Company (group dental and specialty benefits; Principal no longer sells group medical)",
+   "states": "National; no 835 identities",
+   "what_it_is": "Principal publishes a provider appeal route only for dental claims (provider portal) and a claims mailbox; no medical provider appeal channel exists on its public pages.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Principal provider portal: Claims > find the claim > \"Provide info\" (Submit information column)",
+     "source": {
+      "url": "https://www.principal.com/dental-providers/help-for-dental-providers",
+      "title": "Principal: Help for dental providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "After locating the claim, click “Provide info” in the “Submit information” column."
+     },
+     "applies_to": "Appeals or additional information on dental claims"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Principal Life Insurance Company, P.O. Box 9010, Brentwood, NY 11717-9010 (email CSDClaims@exchange.principal.com)",
+     "source": {
+      "url": "https://www.principal.com/dental-providers/help-for-dental-providers",
+      "title": "Principal: Help for dental providers",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true,
+      "quote": "Mail your claim or pre-determination to Principal Life Insurance Company, P.O. Box 9010, Brentwood, NY 11717-9010"
+     },
+     "applies_to": "Claims mailbox for Principal specialty benefits"
+    }
+   ],
+   "windows": [],
+   "no_fax_reason": "Principal publishes no provider claim appeal fax: its provider help pages give the dental provider portal, a claims mailbox and a claims email only.",
+   "conflicts": [
+    "A medical claim to Principal is unusual; call the number on the member card to learn which product paid."
+   ],
+   "notes": "Fax for provider claim appeals: NO."
+  }
+ ]
+}

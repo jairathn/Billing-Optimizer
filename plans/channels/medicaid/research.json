@@ -1,0 +1,2834 @@
+{
+ "family": "medicaid",
+ "payers": [
+  {
+   "payer_group": "Humana Medicaid",
+   "product": "Humana Healthy Horizons in Kentucky (Kentucky Medicaid managed care, Humana Health Plan, Inc.)",
+   "states": "KY",
+   "what_it_is": "Kentucky Medicaid managed care plan. 835s: payer ids 61101 and HUMANA, payer state KY. Internal appeal, then the Kentucky external independent review (EIR, 907 KAR 17:035) filed with Humana on its EIR form, then an administrative hearing with DMS (907 KAR 17:040).",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "800-949-2961",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You can submit appeals by mail, phone or fax, or via your secure Availity account. You may use the Kentucky Medicaid MCO Provider Appeal Request Form. Submit by mail: Humana Healthy Horizons Grievance and Appeal Department P.O. Box 14546 Lexington, KY 40512-4546 Submit by phone: 800-444-9137 Submit by fax: 800-949-2961",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider appeal of a claim denial, reduction or payment decision (post-service). Attach the denial or EOP and the supporting records. Second source: the 2025 Kentucky provider manual contact table, row 'Provider Grievance and Appeals': Grievance and Appeal Department, P.O. Box 14546, Fax: 800-949-2961.",
+     "required_or_preferred": "Accepted (mail, phone, fax or Availity are all listed)",
+     "form": "Kentucky Medicaid MCO Provider Appeal Request Form (optional: \"You may use\"); the chfs.ky.gov link on Humana's page returned 404 on 2026-11-23"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons Grievance and Appeal Department, P.O. Box 14546, Lexington, KY 40512-4546",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You can submit appeals by mail, phone or fax, or via your secure Availity account. ... Submit by mail: Humana Healthy Horizons Grievance and Appeal Department P.O. Box 14546 Lexington, KY 40512-4546",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider claim appeal",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials (https://www.availity.com); say in the comment box that it is an appeal",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "Providers can submit encrypted grievances regarding claim issues or appeals online via Availity Essentials. To ensure proper handling, please indicate in the comment box whether you are filing an inquiry, grievance or appeal.",
+      "title": "Humana Healthy Horizons in Kentucky Provider Manual 2025 (current edition on the documents page)",
+      "doc_date": "2026-01-26 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider claim appeal; documents can be uploaded",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "800-444-9137",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "Submit by phone: 800-444-9137",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider appeal by phone (Provider Services); a written appeal leaves better proof",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "fax",
+     "value": "800-949-2961",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/KY_PROV_Contracted_Rate_Dispute_Process_366004KY1223-Apdf",
+      "quote": "please submit contracted rate disputes to Humana Healthy Horizons by mail, fax or through your secure Availity Essentials™ account: Mail: Humana Healthy Horizons Contracted Rate Disputes P.O. Box 14546 Lexington, KY 40512-4546 Fax: 800-949-2961",
+      "title": "Humana Healthy Horizons in Kentucky Contracted Rate Dispute Process (366004KY1223-A)",
+      "doc_date": "2025-08-05 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Contracted rate dispute (paid, but not at the contracted rate). The form must attach the EOP and the contract provision Humana misapplied; incomplete submissions are rejected. All other issues go through the appeal process. Second sources: the live grievances-and-appeals page (Submit by fax: 800-949-2961) and the 2025 manual contact table (Contracted rate disputes, Fax: 800-949-2961).",
+     "required_or_preferred": "Accepted",
+     "form": "Contracted Rate Dispute Form (366004KY1223-B), required",
+     "form_url": "https://assets.humana.com/is/content/humana/KY_PROV_Contracted_Rate_Dispute_Form_366004KY1223-Bpdf"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons, Contracted Rate Disputes, P.O. Box 14546, Lexington, KY 40512-4546",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/KY_PROV_Contracted_Rate_Dispute_Process_366004KY1223-Apdf",
+      "quote": "Mail: Humana Healthy Horizons Contracted Rate Disputes P.O. Box 14546 Lexington, KY 40512-4546",
+      "title": "Humana Healthy Horizons in Kentucky Contracted Rate Dispute Process (366004KY1223-A)",
+      "doc_date": "2025-08-05 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Contracted rate dispute with the required form",
+     "required_or_preferred": "Accepted",
+     "form": "Contracted Rate Dispute Form (366004KY1223-B), required",
+     "form_url": "https://assets.humana.com/is/content/humana/KY_PROV_Contracted_Rate_Dispute_Form_366004KY1223-Bpdf"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Availity Essentials (https://www.availity.com)",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You can submit contracted rate disputes by mail, fax or via your secure Availity account.",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Contracted rate dispute",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "502-508-1796",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/KY_External_Independent_Review_Request_Formpdf",
+      "quote": "Submit EIR request to: Humana Healthy Horizons, Inc. P.O. Box 14546 Lexington, KY 40512-4546 Fax: 502-508-1796 Email: HumanaMedicaid_EIR_MFH@humana.com",
+      "title": "Humana Healthy Horizons in Kentucky External Independent Review (EIR) Request Form",
+      "doc_date": "2025-03-18 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review after Humana's final appeal decision. Only on the EIR Request Form; every field with an asterisk; attachments limited to a copy of Humana's final adverse decision. Not for reimbursement disputes under the provider agreement, Medicare claims or Special Investigations Unit cases. Second source: live grievances-and-appeals page, Submit by fax: 502-508-1796.",
+     "required_or_preferred": "Required form; mail, email or fax",
+     "form": "External Independent Review (EIR) Request Form (required since Oct 1, 2024)",
+     "form_url": "https://assets.humana.com/is/content/humana/KY_External_Independent_Review_Request_Formpdf"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "email",
+     "value": "HumanaMedicaid_EIR_MFH@humana.com",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "Submit by email: HumanaMedicaid_EIR_MFH@humana.com",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review request on the EIR Request Form",
+     "required_or_preferred": "Accepted",
+     "form": "External Independent Review (EIR) Request Form",
+     "form_url": "https://assets.humana.com/is/content/humana/KY_External_Independent_Review_Request_Formpdf"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons Grievance and Appeal Department, P.O. Box 14546, Lexington, KY 40512-4546",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You must submit a request for an external independent review in writing via mail, email or fax to Humana. Submit by mail: Humana Healthy Horizons Grievance and Appeal Department P.O. Box 14546 Lexington, KY 40512-4546 Submit by fax: 502-508-1796",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review request on the EIR Request Form",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Humana Claims, P.O. Box 14601, Lexington, KY 40512-4601 (paper claim marked \"corrected\")",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "Humana medical claims submit via mail to: Humana Claims P.O. Box 14601 Lexington, KY 40512-4601",
+      "title": "Humana Healthy Horizons in Kentucky Provider Manual 2025 (current edition on the documents page)",
+      "doc_date": "2026-01-26 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper corrected claim. The manual: 'Paper submission of corrected claim(s) should be marked \"corrected\" when resubmitted. Please mail corrected claims to claim and encounter submissions.' Electronic corrected claims are also accepted.",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "866-305-6655",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Mail requested documents to: Humana Medical Records Management P.O. Box 14465 Lexington, KY 40512-4465 Fax requested records to 866-305-6655. To ensure the medical records are indexed correctly, please attach the medical record request letter from Humana for each claim.",
+      "title": "Humana Provider Payment Integrity: Medical Records Management policy (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Records Humana asked for in a medical record request letter (Humana Provider Payment Integrity; the page covers all Humana lines). Attach Humana's request letter. Second sources: the national claim-payment inquiry resolution guide 642103ALL0125 and the Indiana Medicaid guide 567406IN0924 (both: Fax: 866-305-6655).",
+     "required_or_preferred": "Accepted (Availity MRM upload is faster)"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "Humana Medical Records Management, P.O. Box 14465, Lexington, KY 40512-4465",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Mail requested documents to: Humana Medical Records Management P.O. Box 14465 Lexington, KY 40512-4465",
+      "title": "Humana Provider Payment Integrity: Medical Records Management policy (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Records Humana asked for; attach the request letter",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity Essentials > Payer Spaces > Humana > Applications > Medical Records Management",
+     "source": {
+      "url": "https://provider.humana.com/coverage-claims/payment-integrity/medical-records-management",
+      "quote": "Upload requested documents to Humana's Medical Records Management (MRM) tool on Availity Essentials Portal, where all open medical record requests can be viewed. Uploading records online allows for faster adjudication of claims.",
+      "title": "Humana Provider Payment Integrity: Medical Records Management policy (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Records Humana asked for",
+     "required_or_preferred": "Preferred (faster adjudication)"
+    },
+    {
+     "purpose": "other",
+     "channel": "email",
+     "value": "humanaproviderservices@humana.com",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Claim%20Escalation%20Formpdf",
+      "quote": "The Humana Provider Concierge Unit resolves provider service issues previously reviewed and closed by Customer Service or Provider Disputes not completed to the provider's satisfaction. Use this form to email escalated service issues to the Humana Provider Concierge Unit at humanaproviderservices@humana.com.",
+      "title": "Humana Claim Escalation Form",
+      "doc_date": "2025-05-22 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Optional escalation of an issue already reviewed and closed by Customer Service or Provider Disputes (the form lists Medicaid as a plan type). Not a regulated appeal level and does not stop any clock. Use secure email or leave out patient details.",
+     "form": "Claim Escalation Form",
+     "form_url": "https://assets.humana.com/is/content/humana/Claim%20Escalation%20Formpdf"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Cabinet for Health and Family Services, Department for Medicaid Services, Division of Program Quality and Outcomes, 275 East Main St., 6C-C, Frankfort, KY 40621-0001",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "Requests for Administrative Hearings should be sent to: Cabinet for Health and Family Services Department for Medicaid Services Division of Program Quality and Outcomes 275 East Main St., 6C-C Frankfort, KY 40621-0001",
+      "title": "Humana Healthy Horizons in Kentucky Provider Manual 2025 (current edition on the documents page)",
+      "doc_date": "2026-01-26 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Administrative hearing (907 KAR 17:040) after an adverse EIR decision: within 30 calendar days of DMS's written notice. The KAR allows electronic, fax or mail delivery to the department but prints no number or address; use the address in DMS's notice if it differs from this one."
+    }
+   ],
+   "windows": [
+    {
+     "level": "First level (provider appeal), live page",
+     "window": "60 calendar days from the date of notice or action; 120 calendar days for a claim reduction or denial",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "You must submit an appeal within 60 calendar days from Humana Healthy Horizons' date of notice or action. For a claim reduction or denial, the appeal must be submitted within 120 calendar days.",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "First level (provider appeal), 2025 manual",
+     "window": "60 calendar days from the date of the original claim submission adjudication (shorter; conflicts with the live page)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "If a provider does not agree with the decision on a processed claim, the provider has 60 calendar days from the date of the original claim submission adjudication to file an appeal.",
+      "title": "Humana Healthy Horizons in Kentucky Provider Manual 2025 (current edition on the documents page)",
+      "doc_date": "2026-01-26 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Contracted rate dispute",
+     "window": "24 months from the original claim adjudication date; decision letter within 30 calendar days of a complete dispute",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/KY_PROV_Contracted_Rate_Dispute_Process_366004KY1223-Apdf",
+      "quote": "Humana Healthy Horizons must receive the contracted rate dispute documentation within 24 months of the original claim adjudication date.",
+      "title": "Humana Healthy Horizons in Kentucky Contracted Rate Dispute Process (366004KY1223-A)",
+      "doc_date": "2025-08-05 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "External independent review",
+     "window": "60 calendar days from receipt of the appeal resolution (fax: transmission date; mail: postmark plus 3 days)",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/kentucky-medicaid/grievances-and-appeals",
+      "quote": "Providers have 60 calendar days from receipt of the appeal resolution to request a review by the external independent third party.",
+      "title": "Humana Healthy Horizons in Kentucky Provider Grievances and Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Administrative hearing (DMS)",
+     "window": "30 calendar days from receipt of DMS's written notice of the EIR decision",
+     "source": {
+      "url": "https://apps.legislature.ky.gov/law/kar/titles/907/017/040/",
+      "quote": "A written request for an administrative hearing referenced in subsection (1) of this section shall be sent to the department within thirty (30) calendar days of receipt of the department's written notice",
+      "title": "907 KAR 17:040 Appeal and administrative hearing post external review (official KAR text)",
+      "doc_date": "Cert eff. 4-17-2024",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim",
+     "window": "365 calendar days from the date of service",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/2025_KY_Provider_Manualpdf",
+      "quote": "Providers have 365 calendar days from the date of service to submit a corrected claim.",
+      "title": "Humana Healthy Horizons in Kentucky Provider Manual 2025 (current edition on the documents page)",
+      "doc_date": "2026-01-26 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "State fair hearing (member; provider only as authorized representative with written consent)",
+     "window": "120 calendar days from the MCO appeal decision letter",
+     "source": {
+      "url": "https://apps.legislature.ky.gov/law/kar/titles/907/017/010/",
+      "quote": "Be postmarked or filed within 120 calendar days from the date of the MCO adverse action letter issued at the conclusion of the MCO internal appeal process.",
+      "title": "907 KAR 17:010 Managed care enrollee appeals and state fair hearings (official KAR text)",
+      "doc_date": "eff. 3-10-2022",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Appeal window: the live page says 60 days from notice, 120 days for a claim reduction or denial; the 2025 manual says 60 days from the original adjudication. Use the shorter (60 days from adjudication) when the decision date is known.",
+    "800-949-2961 is also printed in Humana's national claim-payment inquiry resolution guide (642103ALL0125) as the 'Medicare expedited fax' for nonparticipating Medicare appeals; the same guide gives Medicaid/dual appeals the mail box P.O. Box 14546 and an expedited-only fax 855-336-6220, and says 'For Medicaid specific claims, refer to this chart for the appropriate state'. Every Kentucky Medicaid publication (live page, 2025 manual contact table, rate dispute form and process) prints 800-949-2961 for Kentucky Medicaid provider appeals, grievances and rate disputes, so it applies here.",
+    "The state 'Kentucky Medicaid MCO Provider Appeal Request' form copies still posted by other plans (2016 and 2018 versions) list Humana's appeal fax as 1-855-262-9793 and a 30-day window: outdated; do not use. Humana's own link to the current state form (chfs.ky.gov/agencies/dms/MAPForms/ProviderAppealRequestForm.pdf) returned 404 on 2026-11-23; the form is optional.",
+    "Administrative hearing fee: Humana's manual says a fee 'not to exceed $1,000'; 907 KAR 17:040 says $600. The regulation controls.",
+    "Hearing addresses differ between plan publications (Humana 2025 manual and WellCare: DMS Division of Program Quality and Outcomes, 275 E. Main St. 6C-C; UHC 2026 manual: Office of the Commissioner, 6th Floor; member fair hearings: Humana prints fax 502-564-0223 and DMS.Hearings@ky.gov, Anthem and UHC print the Office of the Ombudsman and Administrative Review, 2E-O, fax 502-564-9523). DMS's own page at the 'dpqo' web address now shows a Division of Quality and Population Health. No DMS page confirming any of these was found, so no hearing fax is recorded."
+   ],
+   "notes": "Fax numbers checked in two Humana publications each: appeals 800-949-2961 (live G&A page; 2025 manual contact table), contracted rate disputes 800-949-2961 (rate dispute process and form, live page, manual), EIR 502-508-1796 (EIR Request Form; live page), records 866-305-6655 (MRM page; national and Indiana guides). Humana's EIR network notice (Oct 1, 2024): Humana and DMS created the EIR intake form; verbal EIR requests and written requests not on the form are not considered. Grievances use the same box and fax."
+  },
+  {
+   "payer_group": "Humana Medicaid",
+   "product": "Humana Healthy Horizons in Indiana (Indiana PathWays for Aging; a Medicaid product of Arcadian Health Plan, Inc.)",
+   "states": "IN",
+   "what_it_is": "Indiana Medicaid managed care (PathWays). Payer id 61101. Two internal steps (informal claim dispute, then formal claim dispute, also called the claim appeal), then binding arbitration (405 IAC 1-1.6).",
+   "no_fax_reason": "Humana publishes no fax for Indiana Medicaid provider claim disputes. The 2026 manual says 'Provider claim appeals can be submitted via mail or email using the formal claim dispute contact information'; informal disputes go by Availity, mail or email. The Grievance and Appeals fax 800-949-2961 in the Indiana manual is for standard (member and utilization) appeals, not provider claim disputes.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials: Claim Status tool > Dispute Claim > Appeals worklist (under Claims & Payments)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Provider%20Manualpdf",
+      "quote": "To submit an informal dispute about a finalized claim, sign in to Availity Essentials. Then, use the Claim Status tool to locate the claim and select the Dispute Claim button. You should then navigate to the Appeals worklist located under Claims & Payments to supply needed information and documentation and submit the request to Humana Healthy Horizons.",
+      "title": "2026 Humana Healthy Horizons in Indiana Provider Policy and Procedures Manual (880004IN1125)",
+      "doc_date": "2026-07-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal claim dispute (step 1)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons in Indiana, Attn: Informal Dispute, PO Box 14169, Lexington, KY 40512-4169",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "By mail: Humana Healthy Horizons in Indiana Attn: Informal Dispute PO Box 14169 Lexington, KY 40512-4169",
+      "title": "Humana Healthy Horizons in Indiana: Claims and payments (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal claim dispute (step 1); include member name and Medicaid ID, date of service, relationship to the member, claim number, rendering provider, charge, paid and expected amounts and the difference, and the basis",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "email",
+     "value": "INMedicaidClaimsResearch@humana.com",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "Via email: INMedicaidClaimsResearch@humana.com Informal claim disputes must be received within 60 calendar days of the notice of Humana's determination.",
+      "title": "Humana Healthy Horizons in Indiana: Claims and payments (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal claim dispute (step 1); use secure email for patient details",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "email",
+     "value": "IndianaFormalDispute@Humana.com",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "Or submitted via email: IndianaFormalDispute@Humana.com.",
+      "title": "Humana Healthy Horizons in Indiana: Claims and payments (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Formal claim dispute / claim appeal (step 2) after the informal step; send all documents from the informal dispute",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons in Indiana, Attn: Formal Dispute, 201 North Illinois Street, Suite 1200, Indianapolis, IN 46204",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "Formal disputes should be mailed to: Humana Healthy Horizons in Indiana Attn: Formal Dispute 201 North Illinois Street Suite 1200 Indianapolis, IN 46204",
+      "title": "Humana Healthy Horizons in Indiana: Claims and payments (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Formal claim dispute / claim appeal (step 2)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Humana Healthy Horizons in Indiana, Attn: Arbitration Notice, 201 N. Illinois St., Suite 1200, Indianapolis, IN 46204",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Provider%20Manualpdf",
+      "quote": "Address (arbitration notice): Humana Healthy Horizons in Indiana Attn: Arbitration Notice 201 N. Illinois St., Suite 1200 Indianapolis, IN 46204",
+      "title": "2026 Humana Healthy Horizons in Indiana Provider Policy and Procedures Manual (880004IN1125)",
+      "doc_date": "2026-07-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Binding arbitration notice after the formal claim appeal (American Health Law Association rules, Uniform Arbitration Act as adopted in Indiana; all costs other than attorneys' fees shared equally)"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Humana Claims, P.O. Box 14169, Lexington, KY 40512-4169",
+     "source": {
+      "url": "https://provider.humana.com/medicaid/indiana-medicaid/claims-payments",
+      "quote": "Paper claims should be mailed to Humana Claims, P.O. Box 14169, Lexington, KY 40512 4169",
+      "title": "Humana Healthy Horizons in Indiana: Claims and payments (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper claims and corrected claims (electronic through Availity, payer id 61101)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "866-305-6655",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Medicaid%20Claim%20Payment%20Inquiry%20Resolution%20Guidepdf",
+      "quote": "You also can submit records through the mail or by fax to: Humana Medical Records Management P.O. Box 14465 Lexington, KY 40512-4465 Fax: 866-305-6655",
+      "title": "Humana Healthy Horizons in Indiana claim-payment inquiry resolution guide (567406IN0924)",
+      "doc_date": "2025-01-08 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medical records requested by Humana Healthy Horizons' Provider Payment Integrity team; attach Humana's request letter. Second source: Humana Medical Records Management page (Fax requested records to 866-305-6655).",
+     "required_or_preferred": "Accepted (Availity MRM preferred)"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "Availity Essentials > Payer Spaces > Humana > Applications > Medical Records Management",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Medicaid%20Claim%20Payment%20Inquiry%20Resolution%20Guidepdf",
+      "quote": "To submit medical records requested by Humana Healthy Horizons PPI team, submit through Availity Essentials.",
+      "title": "Humana Healthy Horizons in Indiana claim-payment inquiry resolution guide (567406IN0924)",
+      "doc_date": "2025-01-08 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Records Humana asked for",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "other",
+     "channel": "fax",
+     "value": "317-232-4412",
+     "source": {
+      "url": "https://www.in.gov/oalp/resources-for-fssa-appeals/",
+      "quote": "For FSSA appeals, you may contact OALP by mail, fax, or e-mail: Mail: Office of Administrative Law Proceedings – FSSA Hearings 100 N. Senate Avenue, Suite N802 Indianapolis, IN 46204 Fax: 317-232-4412",
+      "title": "Indiana Office of Administrative Law Proceedings: Resources for FSSA Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "State fair hearing on Humana's appeal decision: a member right. Humana's manual: 'With the member's permission and a signed consent form, providers may act on the member's behalf and ask for a State Fair Hearing'. Within 120 days of Humana's resolution notice. Second source: OALP contact page (FSSA Matters, Fax: 317-232-4412). Not for fee-for-service claim appeals (see Medicaid IN)."
+    },
+    {
+     "purpose": "other",
+     "channel": "email",
+     "value": "fssa.appeals@oalp.in.gov",
+     "source": {
+      "url": "https://www.in.gov/oalp/resources-for-fssa-appeals/",
+      "quote": "Email: fssa.appeals@oalp.in.gov",
+      "title": "Indiana Office of Administrative Law Proceedings: Resources for FSSA Appeals (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "State fair hearing request (member, or provider with the member's signed consent)"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Informal claim dispute",
+     "window": "60 calendar days from written notice of the determination (or 90 calendar days from claim submission if Humana does not decide within 30); resolved within 30 calendar days",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Provider%20Manualpdf",
+      "quote": "Within 60 calendar days following the date you receive written notification from Humana Healthy Horizons",
+      "title": "2026 Humana Healthy Horizons in Indiana Provider Policy and Procedures Manual (880004IN1125)",
+      "doc_date": "2026-07-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Formal claim dispute / claim appeal",
+     "window": "60 calendar days after the 30 calendar days allowed for the informal review; decision within 45 calendar days",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Provider%20Manualpdf",
+      "quote": "You may submit a written appeal within 60 calendar days after the 30 calendar days allowed for the informal claim dispute review.",
+      "title": "2026 Humana Healthy Horizons in Indiana Provider Policy and Procedures Manual (880004IN1125)",
+      "doc_date": "2026-07-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim (originally paid or partly paid)",
+     "window": "Printed as 60 calendar days of the date of service or discharge (denied claims are resubmitted as new claims)",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Provider%20Manualpdf",
+      "quote": "Corrected claims that were originally paid or partially paid must be submitted within 60 calendar days of the date of service or discharge",
+      "title": "2026 Humana Healthy Horizons in Indiana Provider Policy and Procedures Manual (880004IN1125)",
+      "doc_date": "2026-07-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "State fair hearing (member)",
+     "window": "120 calendar days from the date on Humana's notice of resolution",
+     "source": {
+      "url": "https://assets.humana.com/is/content/humana/Indiana%20Provider%20Manualpdf",
+      "quote": "A member who exhausts Humana Healthy Horizons' appeal process may file a request for a State Fair Hearing within 120 calendar days from the date on Humana Healthy Horizons' notice of resolution.",
+      "title": "2026 Humana Healthy Horizons in Indiana Provider Policy and Procedures Manual (880004IN1125)",
+      "doc_date": "2026-07-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "OALP number 317-232-4412: Humana's 2026 Indiana manual prints it as a phone in one contact table; OALP's own pages list it as the FSSA Hearings fax (phones 317-234-3488 and 866-259-3573).",
+    "The corrected-claim window for paid claims reads '60 calendar days of the date of service or discharge', which would often end before the claim is paid. Treat it as unclear, file corrections as early as possible, and confirm with Humana Provider Services (866-274-5888).",
+    "Formal dispute mailing label differs: the claims page says 'Attn: Formal Dispute'; the manual contact table says 'Attn: Formal Claim Appeals' (same street address)."
+   ],
+   "notes": "The live claims page, the dispute flyer (287002IN0823), the guide (567406IN0924) and the 2026 manual (880004IN1125) agree: informal by Availity, mail or email; formal by email or mail. Arbitration is the third step under 405 IAC 1-1.6."
+  },
+  {
+   "payer_group": "Medicaid KY",
+   "product": "Kentucky Medicaid fee-for-service (Department for Medicaid Services; fiscal agent Gainwell Technologies)",
+   "states": "KY",
+   "what_it_is": "835 'KY MEDICAID', payer id 00661, phone 800-807-1232 (Gainwell). Denied FFS claims are appealed to Gainwell in writing with the Provider Inquiry Form, the reason and a hard-copy claim; paid claims (zero-paid included) are adjusted in KYHealth-Net or with the Adjustment and Void Request Form.",
+   "no_fax_reason": "DMS and Gainwell publish no fax for fee-for-service claim appeals or adjustments. The DMS physicians page sends appeals to Gainwell with the Provider Inquiry Form, the reason and a hard-copy claim; Gainwell's forms and billing instructions give only mailing addresses (and KYHealth-Net for adjustments).",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Gainwell Technologies, Provider Services, P.O. Box 2100, Frankfort, KY 40602-2100",
+     "source": {
+      "url": "http://www.kymmis.com/kymmis/pdf/billingInstr/PT64-65withMedicare_v9.9_(08-13-2026).pdf",
+      "quote": "The mailing address for the Provider Inquiry Form is: Gainwell Technologies Provider Services P.O. Box 2100 Frankfort, KY 40602-2100",
+      "title": "Kentucky Medicaid Provider Billing Instructions for Physician Services, PT 64/65, v9.9",
+      "doc_date": "2026-08-13",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Appeal of a denied FFS claim: the DMS physicians page requires 'the Provider Inquiry Form, reason for the appeal, and a hard copy claim'. Gainwell returns a copy of the form with its answer. Do not attach an inquiry form to a corrected claim.",
+     "required_or_preferred": "Required route (mail)",
+     "form": "Provider Inquiry Form",
+     "form_url": "http://www.kymmis.com/kymmis/pdf/ProviderInquiryForm.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-800-807-1232",
+     "source": {
+      "url": "http://www.kymmis.com/kymmis/pdf/billingInstr/PT64-65withMedicare_v9.9_(08-13-2026).pdf",
+      "quote": "A toll free Gainwell number 1-800-807-1232 is available in lieu of using this form",
+      "title": "Kentucky Medicaid Provider Billing Instructions for Physician Services, PT 64/65, v9.9",
+      "doc_date": "2026-08-13",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Questions on denied claims instead of an inquiry form (the 835 lists the same number)"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "KYHealth-Net (https://home.kymmis.com)",
+     "source": {
+      "url": "http://www.kymmis.com/kymmis/pdf/Adjust_VoidRequestForm.pdf",
+      "quote": "YOU MAY PERFORM ADJUSTMENTS OR VOIDS ELECTRONICALLY USING KYHEALTHNET IN MOST CASES.",
+      "title": "Kentucky Medicaid (Gainwell) Adjustment and Void Request Form",
+      "doc_date": "DMS Approved: December 7, 2020",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Adjust or void a paid FFS claim (a denied claim is corrected and resubmitted as a new claim)",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Gainwell Technologies, P.O. Box 2108, Frankfort, KY 40602-2108, Attn: Financial Services",
+     "source": {
+      "url": "http://www.kymmis.com/kymmis/pdf/billingInstr/PT64-65withMedicare_v9.9_(08-13-2026).pdf",
+      "quote": "The mailing address for the Adjustment and Void Request Form is: Gainwell Technologies P.O. Box 2108 Frankfort, KY 40602-2108 Attn: Financial Services",
+      "title": "Kentucky Medicaid Provider Billing Instructions for Physician Services, PT 64/65, v9.9",
+      "doc_date": "2026-08-13",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Adjustment of a paid claim: attach a copy of the corrected claim and the paid remittance advice page. 'Claims showing paid zero-dollar amounts are considered paid claims by Medicaid; if the paid amount of zero is incorrect, the claim requires an adjustment.'",
+     "required_or_preferred": "Accepted",
+     "form": "Adjustment and Void Request Form",
+     "form_url": "http://www.kymmis.com/kymmis/pdf/Adjust_VoidRequestForm.pdf"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Gainwell Technologies, Claims Submission, P.O. Box 2101, Frankfort, KY 40602-2101",
+     "source": {
+      "url": "http://www.kymmis.com/kymmis/Provider%20Relations/contact.aspx",
+      "quote": "Claims Submission P.O. Box 2101 Frankfort, KY 40602-2101",
+      "title": "KYHealth-Net (kymmis.com) Provider Relations: Contact Information (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper claims, including claims more than 12 months old, which must carry proof of timely receipt (a remittance page) as an attachment"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Office of the Commissioner, Department for Medicaid Services, Cabinet for Health and Family Services, 275 East Main Street, 6th Floor, Frankfort, Kentucky 40621-0002",
+     "source": {
+      "url": "https://apps.legislature.ky.gov/law/kar/titles/907/001/671/",
+      "quote": "This request shall be sent to the Office of the Commissioner, Department for Medicaid Services, Cabinet for Health and Family Services, 275 East Main Street, 6th Floor, Frankfort, Kentucky 40621-0002.",
+      "title": "907 KAR 1:671 Conditions of provider participation; administrative appeal process (official KAR text)",
+      "doc_date": "Crt eff. 9-24-2026",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Administrative hearing on a DMS determination under 907 KAR 1:671 (sanctions, repayment of an overpayment, discrimination, certain terminations and the other listed situations), within 30 days, after an optional dispute resolution meeting requested from the branch manager who issued the determination. Not a route for routine claim denials."
+    }
+   ],
+   "windows": [
+    {
+     "level": "Claim filing (FFS appeals travel with a hard-copy claim)",
+     "window": "12 months from the date of service (or 12 months from retroactive eligibility, or 6 months from the Medicare adjudication); older claims need proof of timely receipt. No separate appeal deadline is published.",
+     "source": {
+      "url": "https://www.chfs.ky.gov/agencies/dms/dpo/bpb/Pages/physicians.aspx",
+      "quote": "Claims must be received within twelve (12) months from the date the service was provided",
+      "title": "Kentucky DMS: Physicians (PT 64) program page (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "FFS claim appeal requirements",
+     "window": "Provider Inquiry Form, the reason for the appeal and a hard-copy claim, to Gainwell",
+     "source": {
+      "url": "https://www.chfs.ky.gov/agencies/dms/dpo/bpb/Pages/physicians.aspx",
+      "quote": "Appeal requests for denied FFS claims must be submitted to Gainwell Technologies. The request must include the Provider Inquiry Form ... , reason for the appeal, and a hard copy claim.",
+      "title": "Kentucky DMS: Physicians (PT 64) program page (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Dispute resolution meeting on a DMS determination (907 KAR 1:671)",
+     "window": "30 calendar days from receipt of the notice",
+     "source": {
+      "url": "https://apps.legislature.ky.gov/law/kar/titles/907/001/671/",
+      "quote": "The request shall be in writing and mailed to and received by the branch manager that initiated the department-written determination within thirty (30) calendar days of the date the notice was received by the provider.",
+      "title": "907 KAR 1:671 Conditions of provider participation; administrative appeal process (official KAR text)",
+      "doc_date": "Crt eff. 9-24-2026",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Administrative hearing on a DMS determination (907 KAR 1:671)",
+     "window": "30 calendar days from receipt of the notice or dispute resolution decision",
+     "source": {
+      "url": "https://apps.legislature.ky.gov/law/kar/titles/907/001/671/",
+      "quote": "A written request for an administrative hearing shall be received by the department within thirty (30) calendar days of the date of receipt of the department's notice of a determination or a dispute resolution decision.",
+      "title": "907 KAR 1:671 Conditions of provider participation; administrative appeal process (official KAR text)",
+      "doc_date": "Crt eff. 9-24-2026",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Gainwell's Provider Inquiry Form (PDF 2025-10-30) prints only 'P.O. Box 2100 Frankfort, KY 40602'; the PT 64/65 billing instructions v9.9 (Aug 13, 2026) give the full 40602-2100. Same box."
+   ],
+   "notes": "No Kentucky FFS records-request channel is published; documents go with the paper claim or the inquiry form. Claim status: Gainwell Voice Response 1-800-807-1301 or KYHealth-Net."
+  },
+  {
+   "payer_group": "Medicaid IN",
+   "product": "Indiana Health Coverage Programs fee-for-service (Traditional Medicaid and other FFS; fiscal agent Gainwell Technologies)",
+   "states": "IN",
+   "what_it_is": "835 'IN MEDICAID', payer id 00711, phone 800-457-4584 (IHCP Customer Assistance). Administrative review by Gainwell, then appeal to FSSA's Office of Medicaid Policy and Planning (OMPP), heard by an OALP administrative law judge.",
+   "no_fax_reason": "The IHCP publishes no fax for fee-for-service administrative reviews or appeals: reviews go by IHCP Portal secure correspondence or mail to Gainwell; appeals by IHCP Portal secure correspondence or mail to OMPP. BT202642 (March 24, 2026): 'Please do not fax, email or mail the OALP directly.'",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "IHCP Provider Healthcare Portal (https://portal.indianamedicaid.com): Secure Correspondence, message category Claim Administrative Review Request",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/business-transactions/billing-and-remittance/claim-administrative-review-and-appeal/",
+      "quote": "Secure correspondence on the IHCP Provider Healthcare Portal ... (message category: Claim Administrative Review Request)",
+      "title": "IHCP: Claim Administrative Review and Appeal (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Administrative review of an FFS claim payment or denial. First check whether correcting and resubmitting the claim would fix it. Note the Claim ID and every earlier Claim ID tried, and the reason you disagree; attach records and the RA.",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Gainwell Written Correspondence, PO Box 50442, Indianapolis, IN 46250-0418",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-administrative-review-and-appeals.pdf",
+      "quote": "Submit the request and any supporting documentation via the IHCP Portal or by mail to the following address: Gainwell Written Correspondence PO Box 50442 Indianapolis, IN 46250-0418",
+      "title": "IHCP provider reference module: Claim Administrative Review and Appeals (PROMOD00013) v7.1",
+      "doc_date": "2026-03-24",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Administrative review by mail: the IHCP Claim Administrative Review Request form, or a letterhead letter with 'Claim Administrative Review' printed on its face; list the Claim ID and earlier Claim IDs",
+     "required_or_preferred": "Accepted",
+     "form": "IHCP Claim Administrative Review Request (fee-for-service nonpharmacy)",
+     "form_url": "https://www.in.gov/dA/24e12b82e0/administrative-review-request-form.pdf?language_id=1"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "IHCP Provider Healthcare Portal: Secure Correspondence, Appeal category",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/bulletins/BT202642.pdf",
+      "quote": "The appeal may be submitted via the IHCP Provider Healthcare Portal (IHCP Portal) through secure correspondence (using the Appeal category).",
+      "title": "IHCP Bulletin BT202642: IHCP updates fee-for-service nonpharmacy claim appeal process",
+      "doc_date": "2026-03-24",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Appeal of an adverse administrative review decision (405 IAC 1-1.4); include the action appealed, all pertinent facts, proof of actions taken to resolve it and the documents. The provider must attend the hearing: a missed hearing typically dismisses the appeal.",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "MS07, Claim Appeals, Indiana Family and Social Services Administration, Office of Medicaid Policy and Planning, 402 W. Washington St., Room W374, Indianapolis, IN 46204-2739",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/bulletins/BT202642.pdf",
+      "quote": "If submitting by mail, send to the following address: MS07 Claim Appeals Indiana Family and Social Services Administration Office of Medicaid Policy and Planning 402 W. Washington St., Room W374 Indianapolis, IN 46204-2739 Please do not fax, email or mail the OALP directly.",
+      "title": "IHCP Bulletin BT202642: IHCP updates fee-for-service nonpharmacy claim appeal process",
+      "doc_date": "2026-03-24",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Appeal of an adverse administrative review decision; the statement of issues (within 45 days) goes to the same address",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "IHCP Provider Healthcare Portal: open the most recent paid claim, then Edit (replacement) or Void; or an 837 replacement",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-adjustments.pdf",
+      "quote": "An electronic void or replacement of an FFS claim may be performed using the IHCP Provider Healthcare Portal (IHCP Portal), accessible from the homepage at in.gov/medicaid/providers, or submitted via the appropriate 837 claim transaction.",
+      "title": "IHCP provider reference module: Claim Adjustments (PROMOD00003) v8.0",
+      "doc_date": "2026-01-29",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Adjustment (void or replacement) of a paid FFS claim; a denied claim is corrected and resubmitted as a new claim",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Gainwell - Adjustments, PO Box 50444, Indianapolis, IN 46250-0420",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-adjustments.pdf",
+      "quote": "Submit non-check-related adjustment requests and underpayment adjustment requests to the following address: Gainwell – Adjustments PO Box 50444 Indianapolis, IN 46250-0420",
+      "title": "IHCP provider reference module: Claim Adjustments (PROMOD00003) v8.0",
+      "doc_date": "2026-01-29",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper adjustment of a paid claim on the adjustment request form, with the supporting documents",
+     "required_or_preferred": "Accepted",
+     "form": "IHCP Professional, Dental, or Medicare Part B Crossover Claim Adjustment Request"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "IHCP Provider Healthcare Portal: upload attachments with the claim",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-submission-and-processing.pdf",
+      "quote": "When submitting claims via the IHCP Portal, providers are strongly encouraged to upload attachments electronically",
+      "title": "IHCP provider reference module: Claim Submission and Processing (PROMOD00004) v8.5",
+      "doc_date": "2026-02-24",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim attachments (medical records and other documents)",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "Gainwell - Claim Attachments, PO Box 50440, Indianapolis, IN 46250-0440",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-submission-and-processing.pdf",
+      "quote": "The new address for submitting claim attachments will be: Gainwell – Claim Attachments PO Box 50440 Indianapolis, IN 46250-0440",
+      "title": "IHCP provider reference module: Claim Submission and Processing (PROMOD00004) v8.5",
+      "doc_date": "2026-02-24",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper attachments to an electronic claim, with the IHCP Claims Attachment Cover Sheet and the attachment control number (PWK, transmission code BM); the module: 'The IHCP accepts paper attachments only by mail.'",
+     "required_or_preferred": "Accepted",
+     "form": "IHCP Claims Attachment Cover Sheet"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Administrative review",
+     "window": "60 days from the adverse action on the remittance advice; later reviews are denied and the original decision stands",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/bulletins/BT2026175.pdf",
+      "quote": "Administrative reviews: Must be submitted within 60 days of the adverse claim action shown on the remittance advice (RA).",
+      "title": "IHCP Bulletin BT2026175: IHCP reminds providers about FFS nonpharmacy claim appeals",
+      "doc_date": "2026-10-22",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Appeal (second level)",
+     "window": "15 calendar days from the adverse administrative review decision (later appeals need a substantiated reason for the delay)",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/bulletins/BT2026175.pdf",
+      "quote": "Appeals: Must be filed within 15 calendar days of the adverse administrative review decision.",
+      "title": "IHCP Bulletin BT2026175: IHCP reminds providers about FFS nonpharmacy claim appeals",
+      "doc_date": "2026-10-22",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Statement of issues (with the appeal)",
+     "window": "45 calendar days from the adverse administrative review determination",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-administrative-review-and-appeals.pdf",
+      "quote": "If a provider elects to appeal, the provider must also file a statement of issues within 45 calendar days from the date of the adverse administrative review determination.",
+      "title": "IHCP provider reference module: Claim Administrative Review and Appeals (PROMOD00013) v7.1",
+      "doc_date": "2026-03-24",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Claim adjustment or void/replacement",
+     "window": "60 days from notification of the claim's disposition (the RA)",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-administrative-review-and-appeals.pdf",
+      "quote": "The claim adjustment or void/replacement must be filed within 60 days of notification of the claim's disposition.",
+      "title": "IHCP provider reference module: Claim Administrative Review and Appeals (PROMOD00013) v7.1",
+      "doc_date": "2026-03-24",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Mailed attachments",
+     "window": "45 calendar days from receipt of the electronic claim",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-submission-and-processing.pdf",
+      "quote": "Attachments must be received within 45 calendar days of the date the electronic claim is received, or the claim will be denied.",
+      "title": "IHCP provider reference module: Claim Submission and Processing (PROMOD00004) v8.5",
+      "doc_date": "2026-02-24",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Original claim (FFS timely filing)",
+     "window": "180 days from the date of service or discharge",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/modules/claim-administrative-review-and-appeals.pdf",
+      "quote": "must be originally filed within 180 days of the date of service or date of discharge.",
+      "title": "IHCP provider reference module: Claim Administrative Review and Appeals (PROMOD00013) v7.1",
+      "doc_date": "2026-03-24",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "The Claim Administrative Review and Appeals module v7.1 (March 24, 2026) still prints 'Fax: 317-232-4412' and 'Email: fssa.appeals@oalp.in.gov' under the OMPP appeal address. Those are OALP's FSSA Hearings fax and email (OALP pages), and the same module says providers are not to email or fax the OALP directly (BT202642). Do not fax FFS claim appeals.",
+    "An earlier lever note said FFS appeals go to OMPP by fax 317-232-4412: wrong after BT202642.",
+    "Managed care claims (HIP, Hoosier Healthwise, Hoosier Care Connect, PathWays) follow each managed care entity's own process, not this one."
+   ],
+   "notes": "The IHCP Quick Reference Guide v14.1 (May 2026) lists the same Gainwell boxes (Written Correspondence PO Box 50442, Adjustments PO Box 50444, Claim Attachments PO Box 50440) and CMS-1500 claims at PO Box 50447. BT2026175 (Oct 22, 2026): billers must tell the provider when an appeal is filed, because a missed hearing typically dismisses the appeal."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene) Medicaid",
+   "product": "WellCare of Kentucky (Kentucky Medicaid managed care, Centene)",
+   "states": "KY",
+   "what_it_is": "835 'WELLCARE OF KENTUCKY, INC.', payer id 14163. The route depends on the denial: claim payment appeals (timely filing, incidental, unlisted, non-covered codes) go by portal or mail only; clinical appeals (no authorization, exceeding the authorization, insufficient documentation, late notification) go to the Appeals Department by mail or fax.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "WellCare provider portal (https://provider.wellcare.com)",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Submit all claims payment appeals with supporting documentation at provider.wellcare.com.",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim payment appeal (timely filing, incidental procedures, unlisted or non-covered codes and similar)",
+     "required_or_preferred": "Accepted (portal or mail; no fax)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "WellCare of Kentucky, Attn: Claim Payment Appeals, P.O. Box 31370, Tampa, FL 33631-3370",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Attn: Claim Payment Appeals ... P.O. Box 31370 ... Tampa, FL 33631-3370",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim payment appeal with all supporting documentation",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-866-201-0657",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Attn: Appeals Department ... 13551 Triton Park Blvd., Suite 1200 ... Louisville, KY 40223 ... Fax: 1-866-201-0657",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Clinical appeal only: claim denials for no prior authorization, services exceeding the authorization, insufficient supporting documentation or late notification (EOP codes such as DN001, DN004, DN0038 as printed, DN039, VSTEX, DMNNE, HRM16, KYREC), or anything else about authorization or medical necessity; send a summary of the appeal, the relevant medical records and member details. Not for claim payment appeals. Second source: the Kentucky Medicaid MCO Provider Appeal Request form posted on WellCare's Kentucky forms page lists WellCare of Kentucky fax 1-866-201-0657.",
+     "required_or_preferred": "Accepted for clinical appeals (mail or fax)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "WellCare of Kentucky, Attn: Appeals Department, 13551 Triton Park Blvd., Suite 1200, Louisville, KY 40223",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Attn: Appeals Department ... 13551 Triton Park Blvd., Suite 1200 ... Louisville, KY 40223",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Clinical appeal (authorization or medical necessity denials)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "WellCare of Kentucky, Attn: Payment Policy Disputes Department, P.O. Box 31426, Tampa, FL 33631-3426",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Attn: Payment Policy Disputes Department ... P.O. Box 31426 ... Tampa, FL 33631-3426",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Payment policy disputes for EOP codes beginning IH, CE, MK, CV, PD, DN250 or ERLOC (medical records required for CV codes). Codes LT/RVLT: Attn: CCR, P.O. Box 31394; codes RVPI and DN173: P.O. Box 31416 (both Tampa).",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "1-800-509-8203",
+     "source": {
+      "url": "https://www.wellcare.com/kentucky/providers/bulletins/medicaid-external-review-resource",
+      "quote": "You may submit your request to WellCare of Kentucky via one of the following methods: ... Fax: 1-800-509-8203",
+      "title": "WellCare of Kentucky bulletin: Provider External Independent Third-Party Review",
+      "doc_date": "Last Updated On: 10/1/2026",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent third-party review after WellCare's internal appeal (dates of service on or after Dec 1, 2016). WellCare forwards to DMS everything you sent during the appeal within 15 business days; no additional documents are allowed. The bulletin names no request form. Second source: 2026 Quick Reference Guide (Fax: 1-800-509-8203).",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "email",
+     "value": "kyexternalreview@wellcare.com",
+     "source": {
+      "url": "https://www.wellcare.com/kentucky/providers/bulletins/medicaid-external-review-resource",
+      "quote": "Email: kyexternalreview@wellcare.com",
+      "title": "WellCare of Kentucky bulletin: Provider External Independent Third-Party Review",
+      "doc_date": "Last Updated On: 10/1/2026",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent third-party review request",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "mail",
+     "value": "WellCare Health Plans, Attention: External Independent Third-Party Review, 13551 Triton Park Blvd. Suite 1800, Louisville, KY 40223",
+     "source": {
+      "url": "https://www.wellcare.com/kentucky/providers/bulletins/medicaid-external-review-resource",
+      "quote": "Mail: WellCare Health Plans Attention: External Independent Third-Party Review 13551 Triton Park Blvd. Suite 1800 Louisville, KY 40223",
+      "title": "WellCare of Kentucky bulletin: Provider External Independent Third-Party Review",
+      "doc_date": "Last Updated On: 10/1/2026",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent third-party review request (the suite number conflicts with the Quick Reference Guide; fax or email avoids the question)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Cabinet for Health and Family Services, Department for Medicaid Services, Division of Program Quality and Outcomes, 275 East Main Street, 6C-C, Frankfort, KY 40621",
+     "source": {
+      "url": "https://www.wellcare.com/kentucky/providers/bulletins/medicaid-external-review-resource",
+      "quote": "You must submit your request for administrative hearing to: Cabinet for Health and Family Services Department for Medicaid Services Division of Program Quality and Outcomes 275 East Main Street, 6C-C Frankfort, KY 40621",
+      "title": "WellCare of Kentucky bulletin: Provider External Independent Third-Party Review",
+      "doc_date": "Last Updated On: 10/1/2026",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Administrative hearing (907 KAR 17:040) if the EIR upholds WellCare, within 30 calendar days of DMS's written notice; use the address in DMS's notice if it differs"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "WellCare of Kentucky, Attn: Claims Department, P.O. Box 31224, Tampa, FL 33631-3224",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Attn: Claims Department ... MAIL PAPER CLAIM SUBMISSIONS TO: ... P.O. Box 31224 ... Tampa, FL 33631-3224",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper corrected or voided claim on an original red claim form with the frequency code and the original WellCare claim number (electronic: CLM05-3 = 7 or 8 with the original claim number in REF*F8). WellCare does not accept handwritten, faxed or replicated claim forms.",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "Optum, P.O. Box 52846, Philadelphia, PA 19115 (FedEx/UPS: Optum, 458 Pike Road, Huntingdon Valley, PA 19006)",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Optum ... P.O. Box 52846 ... Philadelphia, PA 19115",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medical records, initial reviews and appeals for EOP codes beginning CPI## (Optum review for WellCare); follow Optum's Medical Record Request letter, which also offers secure upload"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Claim payment appeal",
+     "window": "24 months from the date on the EOP",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Claim payment appeals must be submitted in writing to WellCare within 24 months of the date on the EOP.",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Clinical appeal",
+     "window": "60 calendar days from the claim denial",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Providers may seek an appeal through the Appeals Department within 60 calendar days of a claims denial for lack of prior authorization, services exceeding the authorization, insufficient documentation or late notification.",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Payment policy dispute",
+     "window": "24 months from the denial date on the EOP",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "Appeals for payment policy-related issues must be submitted in writing within 24 months of the date of denial on the EOP.",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Overpayment administrative review",
+     "window": "60 days from the overpayment letter; documents sent later are not considered",
+     "source": {
+      "url": "https://www.wellcareky.com/content/dam/centene/wellcare/ky/pdfs/provider/KY_Medicaid_Provider_Quick_Reference_Guide_2026_R.pdf",
+      "quote": "you may request an Administrative Review by submitting your request in writing within 60 days of the date of this letter.",
+      "title": "WellCare of Kentucky Medicaid Provider Quick Reference Guide 2026 (State Approved 04062026)",
+      "doc_date": "2026-04-17 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "External independent review",
+     "window": "60 days from the date of receipt of the notice",
+     "source": {
+      "url": "https://www.wellcare.com/kentucky/providers/bulletins/medicaid-external-review-resource",
+      "quote": "You must submit your request for external independent third-party review within 60 days from the date of receipt of the notice.",
+      "title": "WellCare of Kentucky bulletin: Provider External Independent Third-Party Review",
+      "doc_date": "Last Updated On: 10/1/2026",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Administrative hearing",
+     "window": "30 calendar days of DMS's written notice",
+     "source": {
+      "url": "https://www.wellcare.com/kentucky/providers/bulletins/medicaid-external-review-resource",
+      "quote": "you have the right to request an administrative hearing in accordance with 907 KAR 17:040 within 30 calendar days of the Department's written notice.",
+      "title": "WellCare of Kentucky bulletin: Provider External Independent Third-Party Review",
+      "doc_date": "Last Updated On: 10/1/2026",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "EIR mailing suite: the bulletin (last updated 10/1/2026) says 13551 Triton Park Blvd. Suite 1800; the 2026 Quick Reference Guide says Suite 1200 for both the EIR and the Appeals Department. Fax and email are the same in both, so prefer fax or email.",
+    "The state appeal form copy on WellCare's forms page (Provider Appeal-MCO 012016) lists fax 1-866-201-0657 for all WellCare appeals and a 30-day window; WellCare's 2026 guide limits that fax to clinical appeals and sends claim payment appeals to the portal or P.O. Box 31370. Follow the 2026 guide.",
+    "The medicare_advantage family records 1-866-201-0657 as Wellcare's Medicare Advantage appeals and payment dispute fax. For Kentucky Medicaid, WellCare's 2026 Kentucky Medicaid guide limits it to clinical appeals."
+   ],
+   "notes": "Single-source faxes in the 2026 guide, not recorded as channels until a second WellCare publication confirms them: overpayment administrative review 1-877-277-1805 (mail: WellCare Health Plans, Attn: CCU Recovery, P.O. Box 31658, Tampa, FL 33631-3658); Cotiviti clinical chart validation disputes 1-203-202-6607; Optum CPI reviews 1-267-687-0994. A full 2025 or 2026 WellCare Kentucky Medicaid provider manual was not found; the 2026 Quick Reference Guide (state approved 04/06/2026) is the main source."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene) Medicaid",
+   "product": "Ambetter from WellCare of Kentucky (Centene ACA marketplace plan, not Medicaid) for the 835 identity AMBETTER, payer id 68069",
+   "states": "KY",
+   "what_it_is": "Marketplace (Qualified Health Plan) claims that land in this Medicaid group because the 835 payer is AMBETTER 68069 (Indiana's Ambetter uses the same payer id: see the next entry; the member ID card tells which). Request for reconsideration first, then a claim dispute/appeal on Ambetter's form. Authorization and medical necessity denials go through the appeals and grievances department instead.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Ambetter Secure Provider Portal",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "Providers may submit a request for reconsideration via the Secure Provider Portal (preferred method).",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Request for reconsideration (disagreement with the original claim outcome). Medical records are required when the denial is a code audit, code edit or authorization denial, or the denial is upheld.",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Request for Reconsideration, P.O. Box 5010, Farmington, MO 63640-5010",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "Written requests for reconsideration and any applicable attachments must be mailed to: Ambetter Attn: Request for Reconsideration P.O. Box 5010 Farmington, MO 63640-5010",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Request for reconsideration by letter or on the Claim Dispute form; include member name and ID, date of service, total charges, provider name, the original EOP or claim number",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-833-705-2175",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/KY-Ambetter-Provider-QRG.pdf",
+      "quote": "Provider Services Phone (IVR): ... 1-833-705-2175 (TTY: 711)",
+      "title": "Ambetter Quick Reference Guide, Kentucky, January 2027 (7249072KY_7PMKTGUDE_AB, Internal Approved 08182026)",
+      "doc_date": "2026-10-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Reconsideration by phone only when no supporting documents are needed (for example, paid at the wrong rate), per the 2026 manual",
+     "required_or_preferred": "Accepted for simple reconsiderations"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-833-886-7956",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "(For Physical Health related authorization appeals) Ambetter from WellCare of Kentucky Attn: Appeals and Grievances Department PO Box 10341 Van Nuys, CA 91410-0341 Fax: 1-833-886-7956",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Only for authorization and medical necessity denials, which Ambetter handles through its member appeal process: the participant, or a provider with the participant's consent (written consent may be required). Not for claim reconsiderations or claim payment disputes. Second source: Ambetter Quick Reference Guide, Kentucky, January 2027 ('Appeals and Grievances', Ambetter Attn: Appeals and Grievances Department, P.O. Box 10341, Van Nuys, CA 91410, Fax: 1-833-886-7956).",
+     "required_or_preferred": "Only for authorization or medical necessity denials"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "Ambetter Secure Provider Portal",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/KY-CCU-Guide.pdf",
+      "quote": "The Provider Portal supports claim disputes ... Submit all claims payment disputes with supporting documentation via the secure provider portal or by mail.",
+      "title": "Ambetter from WellCare of Kentucky Claims, Disputes & Recovery/CCU Guide (7249068KY_7PMKTGUDE_AB, Internal Approved 08182026)",
+      "doc_date": "2026-10-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim dispute/appeal after an unsatisfactory reconsideration (a dispute with no reconsideration on file is treated as a reconsideration)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Claims Disputes/Appeals, P.O. Box 5010, Farmington, MO 63640-5010",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/KY-CCU-Guide.pdf",
+      "quote": "Claim payment disputes: Ambetter Attn: Claims Disputes/Appeals P.O. Box 5010 Farmington, MO 63640-5010",
+      "title": "Ambetter from WellCare of Kentucky Claims, Disputes & Recovery/CCU Guide (7249068KY_7PMKTGUDE_AB, Internal Approved 08182026)",
+      "doc_date": "2026-10-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim dispute/appeal on Ambetter's claim dispute/appeal form, completed in full, with supporting documents. The 2026 manual prints 'Attn: Claim Dispute' at the same box; see conflicts.",
+     "required_or_preferred": "Accepted",
+     "form": "Ambetter claim dispute/appeal form (on the Ambetter provider website; must be completed in its entirety)"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Ambetter Secure Provider Portal or Availity Essentials (electronic: CLM05-3 = 7 with the original claim number)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "Submit a corrected claim via the Secure Provider Portal.",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Corrected claim; the January 2027 quick reference guide marks both Availity and the Ambetter portal as fastest for corrected claims",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Corrected Claims, P.O. Box 5010, Farmington, MO 63640-5010",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "Submit a corrected paper claim to: Ambetter Attn: Corrected Claims P.O. Box 5010 Farmington, MO 63640-5010",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper corrected claim on a standard red and white form, the original claim number typed in field 22 with the frequency code; handwritten corrected claims are rejected",
+     "required_or_preferred": "Accepted"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Corrected claim, reconsideration or claim dispute (2026 manual)",
+     "window": "180 days from the date of the original EOP or denial",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "All requests for corrected claims, reconsiderations, or claim disputes must be received within 180 days from the date of the original explanation of payment or denial.",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Reconsiderations and claim disputes/appeals (claims guide)",
+     "window": "Participating 180 calendar days, non-participating 90 calendar days, from the date on the EOP",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/KY-CCU-Guide.pdf",
+      "quote": "Claim payment disputes must be submitted in writing to Ambetter within the specified number of calendar days from the date on the EOP. Reconsiderations/ Claim Initial Claims Coordination of Benefits Disputes/ Appeals Par: 180 calendar days Par: 180 calendar days Par: 180 days Non-Par: 90 calendar days",
+      "title": "Ambetter from WellCare of Kentucky Claims, Disputes & Recovery/CCU Guide (7249068KY_7PMKTGUDE_AB, Internal Approved 08182026)",
+      "doc_date": "2026-10-24 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Claim dispute/appeal decision",
+     "window": "30 calendar days",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "A claim dispute/appeal will be resolved within 30 calendar days.",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Authorization / medical necessity appeal (member appeal process)",
+     "window": "180 calendar days from Ambetter's notice of action",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/kentucky/ambetter/pdf/2026-ky-provider-manual.pdf",
+      "quote": "A member has 180 calendar days from Ambetter's notice of action to file the appeal.",
+      "title": "Ambetter from WellCare of Kentucky Provider and Billing Manual 2026",
+      "doc_date": "2026-07-21 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Claim dispute mailing address: the Claims, Disputes & Recovery guide (internal approved 08/18/2026) and the 2026 manual's claim dispute section say P.O. Box 5010, Farmington, MO 63640-5010; the same manual's appeal-process table says 'Attn: Level II - Claim Disputes, PO Box 5000, Farmington, MO 63640-5000' and its paper-claim section says 'Attn: Claim Dispute, PO Box 5010, Farmington, MO 63640-5000'. Use the newest guide (P.O. Box 5010, 63640-5010) or the portal.",
+    "The medicare_advantage family records 1-833-886-7956 as a general first-level Ambetter appeal fax. Ambetter's 2026 Kentucky manual limits it to authorization and medical necessity appeals and sends claim reconsiderations and claim disputes to the portal or P.O. Box 5010."
+   ],
+   "notes": "Commercial marketplace coverage: Kentucky Medicaid EIR and state fair hearing rules do not apply. Manual: 'The Ambetter Payer ID is 68069.' Ambetter does not accept handwritten, faxed or replicated claim forms."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene) Medicaid",
+   "product": "Ambetter Health of Indiana (Coordinated Care Corporation; Centene ACA marketplace plan, not Medicaid) for the 835 identity AMBETTER, payer id 68069",
+   "states": "IN",
+   "what_it_is": "Indiana marketplace claims with the same payer id 68069 as Kentucky's Ambetter (the member ID card tells which). Claim payment disputes go by portal or mail; denials for authorization, exceeded authorization, insufficient documentation or late notification are reconsidered by the appeals and grievances department.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Ambetter secure Provider Portal (claim reconsiderations)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Ambetter-Provider-QRG.pdf",
+      "quote": "Availity Portal (IVR) Interactive Voice Response ... Submit Claim Reconsiderations N/A Fastest Result N/A",
+      "title": "Ambetter Quick Reference Guide, Indiana, January 2027 (7149701IN_7PMKTGUDE_AH, last updated September 2026)",
+      "doc_date": "2026-10-19 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim reconsideration: the January 2027 guide marks only the Ambetter portal (not Availity, not the phone line) for submitting reconsiderations",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "Ambetter secure Provider Portal",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "The Provider Portal supports claim disputes ... Submit all claims payment disputes with supporting documentation via the secure provider portal or by mail.",
+      "title": "Ambetter Health (Indiana) Claims, Disputes & Recovery/CCU Guide (7116541IN_7PMKTGUDE_AH, last updated September 2026)",
+      "doc_date": "2026-10-18 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim payment dispute (untimely filing, unlisted or non-covered codes and other claim denials)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Claims Disputes/Appeals, P.O. Box 5010, Farmington, MO 63640-5010",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "Claim payment disputes: Ambetter Attn: Claims Disputes/Appeals P.O. Box 5010 Farmington, MO 63640-5010",
+      "title": "Ambetter Health (Indiana) Claims, Disputes & Recovery/CCU Guide (7116541IN_7PMKTGUDE_AH, last updated September 2026)",
+      "doc_date": "2026-10-18 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim payment dispute with supporting documentation",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-833-886-7956",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Provider-Appeals-Grievances-Guide.pdf",
+      "quote": "Mail, email or fax all medical ... appeals and reconsiderations with ... supporting documentation to: ... Fax: 1-833-886-7956 PO Box 10341 Van Nuys, CA 91410",
+      "title": "Ambetter (Indiana) Appeals/Reconsiderations (Medical) and Grievances Guide (3696559_IN5PMKTRGDE, last updated October 2024)",
+      "doc_date": "Internal Approved 01162025 (PDF 2025-01-24)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medical reconsiderations and appeals: claim denials for lack of prior authorization, services exceeding the authorization, insufficient supporting documentation or late notification, and other authorization or medical necessity questions; list the code or service on the appeal form and include a summary, records and member details (no image of the claim). Not for claim payment disputes. Second source: Ambetter Quick Reference Guide, Indiana, January 2027 ('Appeals and Grievances', P.O. Box 10341, Fax: 1-833-886-7956).",
+     "required_or_preferred": "Only for authorization, documentation or medical necessity denials"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Ambetter, Appeals and Grievances Department, PO Box 10341, Van Nuys, CA 91410",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Provider-Appeals-Grievances-Guide.pdf",
+      "quote": "Mail, email or fax all medical ... appeals and reconsiderations with ... supporting documentation to: ... Grievances Department Fax: 1-833-886-7956 PO Box 10341 Van Nuys, CA 91410",
+      "title": "Ambetter (Indiana) Appeals/Reconsiderations (Medical) and Grievances Guide (3696559_IN5PMKTRGDE, last updated October 2024)",
+      "doc_date": "Internal Approved 01162025 (PDF 2025-01-24)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medical reconsiderations and appeals (authorization, documentation or medical necessity denials)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "Availity Essentials (claim corrections) or the Ambetter secure Provider Portal",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "The Provider Portal supports claim disputes, while Availity Essentials provides self-service for claim submission, claim corrections, and claim status inquiries.",
+      "title": "Ambetter Health (Indiana) Claims, Disputes & Recovery/CCU Guide (7116541IN_7PMKTGUDE_AH, last updated September 2026)",
+      "doc_date": "2026-10-18 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Corrected claim",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Ambetter, Attn: Claims Department, P.O. Box 5010, Farmington, MO 63640-5010",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Ambetter-Provider-QRG.pdf",
+      "quote": "Mail paper claims to: Ambetter ... Attn: Claims Department ... P.O. Box 5010 ... Farmington, MO 63640-5010",
+      "title": "Ambetter Quick Reference Guide, Indiana, January 2027 (7149701IN_7PMKTGUDE_AH, last updated September 2026)",
+      "doc_date": "2026-10-19 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper claims address; the Indiana guides give no separate corrected-claim address. No handwritten, faxed or replicated claim forms.",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "phone",
+     "value": "1-877-687-1182",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Ambetter-Provider-QRG.pdf",
+      "quote": "Provider Services Phone (IVR): ... 1-877-687-1182",
+      "title": "Ambetter Quick Reference Guide, Indiana, January 2027 (7149701IN_7PMKTGUDE_AH, last updated September 2026)",
+      "doc_date": "2026-10-19 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider Services: status of reconsiderations and appeals"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Reconsiderations and claim disputes/appeals",
+     "window": "180 calendar days from the date on the EOP (participating and non-participating)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-CCU-Guide.pdf",
+      "quote": "Claim payment disputes must be submitted in writing to Ambetter within the specified number of calendar days from the date on the EOP. Reconsiderations/ Claim Initial Claims Coordination of Benefits Disputes/ Appeals Par: 180 calendar days Par: 180 calendar days Par: 180 days Non-Par: 180 calendar days",
+      "title": "Ambetter Health (Indiana) Claims, Disputes & Recovery/CCU Guide (7116541IN_7PMKTGUDE_AH, last updated September 2026)",
+      "doc_date": "2026-10-18 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Medical reconsideration (participating providers)",
+     "window": "90 calendar days from the claim denial (the guide says the contract sets the required timing)",
+     "source": {
+      "url": "https://www.ambetterhealth.com/content/dam/centene/mhsindiana/Ambetter/PDFs/IN-Provider-Appeals-Grievances-Guide.pdf",
+      "quote": "Participating providers must seek a reconsideration through ... the Appeals Department within 90 calendar days (required ... timing is listed in your contract) of a claim denial for lack of ... prior authorization, services exceeding the authorization, ... insufficient supporting documentation or late notification.",
+      "title": "Ambetter (Indiana) Appeals/Reconsiderations (Medical) and Grievances Guide (3696559_IN5PMKTRGDE, last updated October 2024)",
+      "doc_date": "Internal Approved 01162025 (PDF 2025-01-24)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "The Indiana appeals and grievances guide (last updated October 2024) is written partly in Medicare terms (Part C or D, waiver of liability for non-participating providers); the January 2027 quick reference guide still lists the same Appeals and Grievances box and fax.",
+    "The medicare_advantage family records 1-833-886-7956 as a general first-level Ambetter appeal fax. The Indiana guides limit it to medical (authorization, documentation, medical necessity) reconsiderations and appeals; claim payment disputes go to the portal or P.O. Box 5010."
+   ],
+   "notes": "Commercial marketplace coverage: Indiana Medicaid dispute rules (405 IAC 1-1.6) do not apply. The guide also lists an Appeals and Grievances email (printed across two columns as ambetter_centralized_Grievances_ / Appeals@CENTENE.Com); not recorded as a channel."
+  },
+  {
+   "payer_group": "WellCare / Ambetter (Centene) Medicaid",
+   "product": "MHS (Managed Health Services), Centene's Indiana Medicaid plan (Hoosier Healthwise, HIP, Hoosier Care Connect)",
+   "states": "IN",
+   "what_it_is": "Indiana Medicaid managed care entity owned by Centene. Informal claim dispute, then administrative claim appeal, then pre-arbitration review and binding arbitration (405 IAC 1-1.6).",
+   "no_fax_reason": "MHS publishes no fax for informal claim disputes or administrative claim appeals (Secure Provider Portal or mail to P.O. Box 3002). The only dispute fax is for pre-arbitration review requests.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "MHS Secure Provider Portal (request for informal dispute)",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "Submitting a request for informal dispute via the Secure Provider Portal",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal claim dispute. A phone call or an online reconsideration is not official notice of a dispute and does not stop the 60-day count.",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Managed Health Services, P.O. Box 3002, Farmington, MO 63640",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "Medical Claims: Managed Health Services, P.O. Box 3002, Farmington, MO 63640.",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal claim dispute: a copy of the MHS EOP with the completed informal dispute form, or a letterhead request (behavioral health claims: P.O. Box 6800, Farmington, MO 63640-3809)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Managed Health Services, P.O. Box 3002, Farmington, MO 63640",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "Administrative claim appeals should be submitted to: ... Medical Claims - Managed Health Services, P.O. Box 3002, Farmington, MO 63640",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Administrative claim appeal: company letterhead with the word 'appeal' clearly marked; available only after an informal dispute",
+     "required_or_preferred": "Required (mail)"
+    },
+    {
+     "purpose": "other",
+     "channel": "fax",
+     "value": "1-833-364-2498",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "Providers can choose to mail or fax their pre-arbitration review requests to the following address: Mailing Address: MHS Pre-Arbitration Review 429 N. Pennsylvania Street, Suite 109 Indianapolis, IN 46204 Or New Fax Number: MHS Pre-Arbitration Review Fax Number: 1 (833) 364- 2498",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Pre-arbitration review request on letterhead after the administrative claim appeal; claims with similar issues may be grouped. Second source: MHS newsroom, 09/04/24, Fax Number: 1 (833) 364-2498."
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "MHS Pre-Arbitration Review, 429 N. Pennsylvania Street, Suite 109, Indianapolis, IN 46204",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "Mailing Address: MHS Pre-Arbitration Review 429 N. Pennsylvania Street, Suite 109 Indianapolis, IN 46204",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Pre-arbitration review request (postmarked within 60 days of receiving the appeal decision)"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Managed Health Services, P.O. Box 3002, Farmington, MO 63640-3802",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "Do use the correct P.O. Box number. Physical Health: P.O. Box 3002, Farmington, MO 63640-3802.",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper corrected claim: resubmit the entire claim with resubmission code 7 and the original claim number in box 22 (EDI: CLM05-3 = 7 with the original claim number); no handwriting",
+     "required_or_preferred": "Accepted (EDI encouraged)"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Informal claim dispute",
+     "window": "60 calendar days from the date on the EOP; MHS answers in 30 calendar days",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "Informal claim disputes/reconsiderations must be submitted either via the Secure Provider Portal or in writing within 60 calendar days from the date on the EOP.",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Administrative claim appeal",
+     "window": "60 calendar days from receipt of the informal dispute resolution notice",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "The appeal must be filed within 60 calendar days from receipt of the informal dispute resolution notice.",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Administrative claim appeal decision",
+     "window": "45 calendar days, or the denial is overturned in favor of the provider",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "In the event MHS fails to deliver to the provider a written determination within 45 calendar days of the initial receipt of the administrative claim appeal, the initial decision will be overturned and the appeal ruled in favor of the provider.",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Pre-arbitration / arbitration request",
+     "window": "Postmarked within 60 calendar days after receipt of the appeal decision",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "The request must be postmarked no later than 60 calendar days after the date the provider received MHS' decision on the administrative claim appeal.",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim",
+     "window": "60 days from the original EOP date",
+     "source": {
+      "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+      "quote": "resubmit the \"entire claim\" within 60 days of original date on the EOP",
+      "title": "MHS (Managed Health Services) Indiana Provider Manual 2025 (0126.PR.P.JB)",
+      "doc_date": "2026-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [],
+   "notes": "Manual titled 'MHS Provider Manual 2025' (code 0126.PR.P.JB; PDF modified 2026-02-09), linked from MHS's guides-and-manuals page. Medical necessity appeals follow a separate chapter (not claim appeals)."
+  },
+  {
+   "payer_group": "Aetna Medicaid",
+   "product": "Aetna Better Health of Kentucky (Kentucky Medicaid managed care, CVS Health)",
+   "states": "KY",
+   "what_it_is": "835 'AETNA BETTER HEALTH OF KENTUCKY', payer id 128KY. One internal provider appeal level (the manual cites 907 KAR 17:015), then the Kentucky external independent review filed with Aetna, then the DMS administrative hearing.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "1-855-454-5585",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "Our secure fax is here for you 24 hours a day, 7 days a week. This is the fastest and best way to file a grievance or appeal. ... Just fax your grievance or appeal to 1-855-454-5585",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider appeal of a denied claim, a claim not acted on in a reasonable time, or a contract dispute. The manual: include a letter about the details of the appeal and the documents that support it. Second source: 2026 provider manual contact table, 'Complaints Appeals Address ... Attn: KY Appeals & Grievances ... Fax: 1-855-454-5585'.",
+     "required_or_preferred": "Preferred ('the fastest and best way')",
+     "form": "Aetna Better Health of Kentucky appeal form (optional)",
+     "form_url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ky-providers-library-appeal.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Aetna Better Health of Kentucky, Attn: Complaint and Appeal Department, PO Box 81040, 5801 Postal Rd, Cleveland, OH 44181",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "Aetna Better Health of Kentucky Attn: Complaint and Appeal Department PO Box 81040 5801 Postal Rd Cleveland, OH 44181",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider appeal (the manual prints Attn: KY Appeals & Grievances at the same box)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "email",
+     "value": "KYAppealandGrievance@aetna.com",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "Email your grievance or appeal <mailto:KYAppealandGrievance@aetna.com>",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider appeal (use secure email for patient details)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Aetna Better Health Provider Portal",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "You can file a grievance or appeal online. Just log in to your Provider Portal.",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider appeal",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-855-300-5528",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "You can file a grievance or appeal by phone. Just call 1-855-300-5528",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Provider appeal by phone; a written appeal leaves better proof",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "1-844-359-6670",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "You can fax your request and the required documentation to 1-844-359-6670.",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review after Aetna's appeal decision, with the EIR Request Form stating each specific issue, why Aetna's decision is wrong, and a designated contact (name, mailing address, email, fax and phone). Second source: 2026 manual, 'If you wish to fax your request, our fax number is 1-844-359-6670.'",
+     "required_or_preferred": "Accepted",
+     "form": "External Independent Review (EIR) Request Form",
+     "form_url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/External%20Independent%20Review%20Request%20Form.pdf"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "email",
+     "value": "AetnaExternalReview@aetna.com",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "You can email us <mailto:AetnaExternalReview@aetna.com> your request and the required documentation.",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review request",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "mail",
+     "value": "Aetna Better Health of Kentucky, Attn: KY Appeals & Grievances, PO Box 81040, 5801 Postal Road, Cleveland, OH 44181",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ABHKY%20Provider%20Manual.pdf",
+      "quote": "If you wish to send your request by mail, send your request and the required documentation (listed below) to the address below. Aetna Better Health of Kentucky Attn: KY Appeals & Grievances PO Box 81040 5801 Postal Road Cleveland, OH 44181",
+      "title": "Aetna Better Health of Kentucky 2026 Provider Manual (Aetna/2350 10-01-25 (1/26))",
+      "doc_date": "2026-08-07 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review request",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Aetna Better Health of Kentucky, P.O. Box 982969, El Paso, TX 79998-2969",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ABHKY%20Provider%20Manual.pdf",
+      "quote": "All paper claims for initial and corrected submissions must be submitted directly to Aetna Better Health at the following address: Aetna Better Health of Kentucky P.O. Box 982969 El Paso, TX 79998-2969",
+      "title": "Aetna Better Health of Kentucky 2026 Provider Manual (Aetna/2350 10-01-25 (1/26))",
+      "doc_date": "2026-08-07 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Paper corrected claim marked 'corrected' or 'resubmittal' (electronic: payer id 128KY)",
+     "required_or_preferred": "Accepted"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Provider appeal (web page)",
+     "window": "60 days from receiving a Notice of Action",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "You can file an appeal within 60 days of receiving a Notice of Action.",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Provider appeal (2026 manual)",
+     "window": "One year from the incident, remit date or notice of action (longer; conflicts with the page)",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ABHKY%20Provider%20Manual.pdf",
+      "quote": "We must receive your appeal within one (1) year of the incident, remit date or date of notice of action that caused the appeal.",
+      "title": "Aetna Better Health of Kentucky 2026 Provider Manual (Aetna/2350 10-01-25 (1/26))",
+      "doc_date": "2026-08-07 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Appeal decision",
+     "window": "30 calendar days, in writing by mail",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ABHKY%20Provider%20Manual.pdf",
+      "quote": "We will respond to your appeal in writing within thirty (30) calendar days of when we receive it.",
+      "title": "Aetna Better Health of Kentucky 2026 Provider Manual (Aetna/2350 10-01-25 (1/26))",
+      "doc_date": "2026-08-07 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "External independent review",
+     "window": "60 calendar days from the postmark or electronic receipt of the decision",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/kentucky/providers/grievance-appeal.html",
+      "quote": "We must receive your request for an external review within 60 calendar days of the postmark date on the envelope containing our decision or of the electronic receipt date, if we sent your decision by fax or email.",
+      "title": "Aetna Better Health of Kentucky: File a Grievance or Appeal (for Providers) (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Adjustment or corrected claim",
+     "window": "24 months from the first remittance advice",
+     "source": {
+      "url": "https://ch.aetnabetterhealth.com/content/dam/aetna/medicaid/kentucky/providers/pdfs/ABHKY%20Provider%20Manual.pdf",
+      "quote": "Adjusted/corrected claims Providers have 24 months from the date of the first remittance advice to contact Aetna Better Health to request an adjustment or for Aetna Better Health of Kentucky to receive a corrected claim",
+      "title": "Aetna Better Health of Kentucky 2026 Provider Manual (Aetna/2350 10-01-25 (1/26))",
+      "doc_date": "2026-08-07 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Appeal window: page 60 days from the Notice of Action; manual one year. Use 60 days.",
+    "Mail attention line: page 'Attn: Complaint and Appeal Department'; manual 'Attn: KY Appeals & Grievances'. Same PO Box 81040."
+   ],
+   "notes": "www.aetnabetterhealth.com returned 403 to scripted requests; the same Aetna pages and PDFs were read from ch.aetnabetterhealth.com (Aetna's own host). Records requests: the manual says submission details come in each request letter and records are due within 30 days. Grievances use the same fax."
+  },
+  {
+   "payer_group": "Anthem / BCBS Medicaid",
+   "product": "Anthem Blue Cross and Blue Shield Medicaid, Kentucky (Anthem Kentucky Managed Care Plan) - run-out only: no longer a Kentucky Medicaid MCO since Jan 1, 2025",
+   "states": "KY",
+   "what_it_is": "835 'ANTHEM', payer id 00660 (Anthem's Kentucky Medicaid professional payer id). Covers dates of service through Dec 31, 2024 only; Anthem kept its appeal process for those claims.",
+   "no_fax_reason": "Anthem publishes no fax for Kentucky Medicaid payment appeals: verbal (Provider Services), Availity, or mail to Claim Appeals, P.O. Box 62429. Its only provider fax in this process is for external independent review requests.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials (Payment Appeal tool; upload the denial and supporting documents)",
+     "source": {
+      "url": "https://providernews.anthem.com/kentucky/articles/medicaid-contract-expiring-after-december-31-2024-23191",
+      "quote": "Submit a copy of the denial document and copies of all supporting documents through Availity Essentials or to: Anthem Claim Appeals P.O. Box 62429 Virginia Beach, VA 23466-1599",
+      "title": "Anthem provider news: Medicaid contract expiring after December 31, 2024",
+      "doc_date": "2024-11-21",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Payment appeal on a run-out claim (dates of service on or before Dec 31, 2024)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem, Claim Appeals, P.O. Box 62429, Virginia Beach, VA 23466-1599",
+     "source": {
+      "url": "https://providernews.anthem.com/kentucky/articles/medicaid-contract-expiring-after-december-31-2024-23191",
+      "quote": "Submit a copy of the denial document and copies of all supporting documents through Availity Essentials or to: Anthem Claim Appeals P.O. Box 62429 Virginia Beach, VA 23466-1599",
+      "title": "Anthem provider news: Medicaid contract expiring after December 31, 2024",
+      "doc_date": "2024-11-21",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Payment appeal: a copy of the denial document and copies of all supporting documents",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "855-661-2028",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/KY_CAID_ProviderManual.pdf",
+      "quote": "As appropriate, verbal appeals can be submitted by calling Provider Services at 855-661-2028.",
+      "title": "Anthem Kentucky Medicaid Provider Manual (KYBCBS-CD-PM-042746-23)",
+      "doc_date": "2024-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Verbal payment appeal where no paper proof is needed (the manual names, for example, payment below the contract rate, or a no-authorization denial when Anthem made the error)",
+     "required_or_preferred": "Accepted for some issues"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "502-212-7336",
+     "source": {
+      "url": "https://providernews.anthem.com/kentucky/files/5216",
+      "quote": "SUBMIT EIR REQUEST VIA: Email: KYExternalReview@anthem.com Fax: 1-502-212-7336",
+      "title": "Anthem Blue Cross and Blue Shield Medicaid (Kentucky) External Independent Review intake form",
+      "doc_date": "2024-10-16 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review after Anthem's final appeal decision, on the EIR intake form (KYBCBS-CD-067274-24, September 2024). Requests are not accepted verbally and the reviewer considers no new information. Second source: Kentucky Medicaid provider manual, external review section (Fax: 502-212-7336).",
+     "required_or_preferred": "Required form",
+     "form": "Anthem Kentucky Medicaid External Independent Review (EIR) Request Form",
+     "form_url": "https://providernews.anthem.com/kentucky/files/5216"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "email",
+     "value": "KYExternalReview@anthem.com",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/KY_CAID_ProviderManual.pdf",
+      "quote": "Please send your request to one of the following: • Email: KYExternalReview@anthem.com • Fax: 502-212-7336",
+      "title": "Anthem Kentucky Medicaid Provider Manual (KYBCBS-CD-PM-042746-23)",
+      "doc_date": "2024-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review request",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "mail",
+     "value": "Anthem, Central Appeals Processing, P.O. Box 62429, Virginia Beach, VA 23466-2429",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/KY_CAID_ProviderManual.pdf",
+      "quote": "Mail: Anthem Central Appeals Processing P.O. Box 62429 Virginia Beach, VA 23466-2429",
+      "title": "Anthem Kentucky Medicaid Provider Manual (KYBCBS-CD-PM-042746-23)",
+      "doc_date": "2024-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review request",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "portal",
+     "value": "Availity Essentials (Availity.com)",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/KY_CAID_ProviderManual.pdf",
+      "quote": "Electronic: Availity Essentials (Availity.com)",
+      "title": "Anthem Kentucky Medicaid Provider Manual (KYBCBS-CD-PM-042746-23)",
+      "doc_date": "2024-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent review request",
+     "required_or_preferred": "Accepted"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Payment appeal (run-out notice)",
+     "window": "90 days from the date of check or denial date; answer within 30 days",
+     "source": {
+      "url": "https://providernews.anthem.com/kentucky/articles/medicaid-contract-expiring-after-december-31-2024-23191",
+      "quote": "Anthem will accept appeals received no later than 90 days from date of check or denial date.",
+      "title": "Anthem provider news: Medicaid contract expiring after December 31, 2024",
+      "doc_date": "2024-11-21",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Payment appeal (manual)",
+     "window": "90 calendar days of the remittance date",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/KY_CAID_ProviderManual.pdf",
+      "quote": "Payment appeals, whether verbal or written, must be received by Anthem within 90 calendar days of the remittance date.",
+      "title": "Anthem Kentucky Medicaid Provider Manual (KYBCBS-CD-PM-042746-23)",
+      "doc_date": "2024-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "External independent review",
+     "window": "60 calendar days of receiving Anthem's final internal decision",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/KY_CAID_ProviderManual.pdf",
+      "quote": "Providers may submit a request for an external independent third party review within 60 calendar days of receiving an MCO's final decision from the MCO's internal appeal process.",
+      "title": "Anthem Kentucky Medicaid Provider Manual (KYBCBS-CD-PM-042746-23)",
+      "doc_date": "2024-02-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Run-out claims",
+     "window": "365 days from the date of service (dates of service through Dec 31, 2024)",
+     "source": {
+      "url": "https://www.chfs.ky.gov/agencies/dms/ProviderLetters/Anthem%20Transition_Written%20Notice%20to%20Providers_11.12.24%20FINAL%20(002).pdf",
+      "quote": "Anthem is required to process claims up to 365 days from date of service.",
+      "title": "DMS letter to all Medicaid providers: Termination of Anthem as a Medicaid MCO",
+      "doc_date": "2024-11-12",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "The state appeal form copies (2016, 2018) list 502-212-7336 as Anthem's appeal fax; Anthem's own manual and EIR form use 502-212-7336 for external review only and list no fax for payment appeals.",
+    "Anthem's Kentucky Medicaid provider grievance fax is 855-384-4872 (grievances only, not appeals)."
+   ],
+   "notes": "DMS contacts page (live): 'Note: As of Jan.1, 2025, Anthem is no longer a Medicaid Managed Care Organization, or MCO, in Kentucky.' DMS letter of Nov 12, 2024: Anthem must keep its appeal and grievance resources until pending appeals are completed. Anthem's notice: run-out claims to Anthem Kentucky Claims, P.O. Box 61010, Virginia Beach, VA 23466-1010. The Kentucky Medicaid manual read is KYBCBS-CD-PM-042746-23 (PDF February 2024), the last edition."
+  },
+  {
+   "payer_group": "Anthem / BCBS Medicaid",
+   "product": "Anthem Blue Cross and Blue Shield Indiana Medicaid (Hoosier Healthwise, Healthy Indiana Plan, Hoosier Care Connect, Indiana PathWays for Aging)",
+   "states": "IN",
+   "what_it_is": "Indiana Medicaid managed care. Informal claim dispute (reconsideration), then formal claim payment appeal, then binding arbitration under the provider agreement.",
+   "no_fax_reason": "Anthem publishes no fax for Indiana Medicaid claim payment disputes or appeals: verbal (informal only), Availity, or mail to P.O. Box 61599. Fax 855-535-7445 is the grievances (and member appeals) fax.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "Provider Services: Hoosier Healthwise 866-408-6132; HIP 844-533-1995; Hoosier Care Connect 844-284-1798; PathWays 833-569-4739",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "• Hoosier Healthwise: 866-408-6132 • Healthy Indiana Plan: 844-533-1995 • Hoosier Care Connect: 844-284-1798 • Indiana PathWays for Aging: 833-569-4739",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal dispute only (verbal)",
+     "required_or_preferred": "Accepted for informal disputes"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Availity Essentials Payment Appeal Tool (https://Availity.com)",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "Online (for informal dispute and formal appeals): Use the secure Provider Availity Payment Appeal Tool at https://Availity.com.",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal claim dispute (reconsideration); supporting documents can be uploaded",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Provider Disputes and Appeals, P.O. Box 61599, Virginia Beach, VA 23466-1599",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "Written (for informal dispute and formal appeal) – Mail all required documentation (see below for more details), including the Provider Dispute Resolution Request form, to: Anthem Blue Cross and Blue Shield Provider Disputes and Appeals P.O. Box 61599 Virginia Beach, VA 23466-1599",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Informal dispute with the Provider Dispute Resolution Request form; include your name, address, phone, email and NPI or TIN, the member name and ID, a listing of disputed claims with Anthem claim numbers and dates of service, and all supporting documents",
+     "required_or_preferred": "Accepted",
+     "form": "Provider Dispute Resolution Request form"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "Availity Essentials Payment Appeal Tool (https://Availity.com)",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "Online (for informal dispute and formal appeals): Use the secure Provider Availity Payment Appeal Tool at https://Availity.com.",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Formal claim payment appeal after the reconsideration determination letter",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Provider Disputes and Appeals, P.O. Box 61599, Virginia Beach, VA 23466-1599",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "Written (for informal dispute and formal appeal) – Mail all required documentation (see below for more details), including the Provider Dispute Resolution Request form, to: Anthem Blue Cross and Blue Shield Provider Disputes and Appeals P.O. Box 61599 Virginia Beach, VA 23466-1599",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Formal claim payment appeal",
+     "required_or_preferred": "Accepted",
+     "form": "Provider Dispute Resolution Request form"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Corrected Claims and Correspondence, P.O. Box 61599, Virginia Beach, VA 23466-1599",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "Submissions should be mailed to: Anthem Blue Cross and Blue Shield Corrected Claims and Correspondence ... P.O. Box 61599 Virginia Beach, VA 23466-1599",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Corrected claim with a Claim Follow-up Form, clearly identified as corrected; handwritten alterations are not accepted",
+     "required_or_preferred": "Accepted",
+     "form": "Claim Follow-up Form"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "Anthem Blue Cross and Blue Shield, Corrected Claims and Correspondence, P.O. Box 61599, Virginia Beach, VA 23466-1599",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "EOP requests for ... Submit a Claim Follow-up Form, a copy of your EOP, and the ... medical records.",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medical records or documents Anthem asked for on the EOP",
+     "required_or_preferred": "Accepted",
+     "form": "Claim Follow-up Form"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Informal dispute",
+     "window": "60 calendar days from the date on the EOP; Anthem aims to resolve within 30 calendar days (may extend 30 more)",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "We accept informal requests in writing, verbally, and through our secure provider website within 60 calendar days from the date on the EOP",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Formal claim payment appeal",
+     "window": "60 calendar days of the reconsideration determination letter",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "We accept formal appeals through our provider website or in writing within 60 calendar days of the date on the reconsideration determination letter.",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Formal appeal decision",
+     "window": "45 calendar days, or decided in favor of the provider",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "If a determination is not made within 45 days, the decision will be rendered in favor of the provider.",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim (claims chapter)",
+     "window": "Printed as 60 days of the date of service (if the original was timely)",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "Provided the claim was originally received timely, a corrected claim must be received within 60 days of the date of service.",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Corrected claim (claim issues table)",
+     "window": "60 days from the date on the EOB or letter",
+     "source": {
+      "url": "https://providers.anthem.com/docs/gpp/IN_CAID_ProviderManual.pdf",
+      "quote": "Submit a Claim Follow-Up Form/Corrected Claim. ... It must be received by Anthem within 60 days from the date on the ... EOB or letter.",
+      "title": "Anthem Indiana Medicaid Provider Manual (INBCBS-CD-PM-070775-24)",
+      "doc_date": "2025-04-09 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Corrected claim window: one section says 60 days of the date of service, the claim issues table says 60 days from the date on the EOB or letter. Use the earlier date.",
+    "The manual's contact table labels 855-535-7445 'Grievances and Appeals' fax (expedited 855-516-1083), and the grievance section sends provider grievances to it; the claim payment dispute section lists only verbal, Availity and mail. Not recorded for claim payment disputes.",
+    "Manual read is INBCBS-CD-PM-070775-24 (PDF April 2025); no newer Indiana Medicaid manual was found."
+   ],
+   "notes": "After the formal appeal, unresolved matters go to binding arbitration under the provider agreement."
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "product": "Passport by Molina Healthcare (Kentucky Medicaid managed care)",
+   "states": "KY",
+   "what_it_is": "Kentucky Medicaid MCO. Same Kentucky ladder: internal appeal, external independent review filed with Passport (907 KAR 17:035), DMS administrative hearing.",
+   "no_fax_reason": "Not verified. Passport's 2026 provider manual and forms on molinahealthcare.com could not be read (the site returned a not-found page or a redirect to its individual-plans page for scripted requests on 2026-11-23). No fax is recorded until a person confirms it in Passport's own current manual.",
+   "channels": [
+    {
+     "purpose": "other",
+     "channel": "phone",
+     "value": "800-578-0775",
+     "source": {
+      "url": "https://www.chfs.ky.gov/agencies/dms/Pages/MedicaidContacts.aspx",
+      "quote": "Passport by Molina ... 800-578-0775",
+      "title": "Kentucky DMS: Medicaid Contacts (live page)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Passport provider line as listed by Kentucky DMS: ask for the current appeal and EIR fax and address before sending anything"
+    }
+   ],
+   "windows": [
+    {
+     "level": "External independent review (state rule)",
+     "window": "60 calendar days from receiving the final internal appeal decision",
+     "source": {
+      "url": "https://apps.legislature.ky.gov/law/kar/titles/907/017/035/",
+      "quote": "a provider shall submit a written request for external independent third-party review to the MCO within sixty (60) calendar days of receiving the MCO's final decision resulting from the MCO's internal appeal process.",
+      "title": "907 KAR 17:035 External independent third-party review (official KAR text)",
+      "doc_date": "Cert eff. 2-5-2025",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Unverified search-engine excerpts of the 2026 Passport manual: provider appeals and grievances 'Online: Availity.com (preferred submission) Fax: (866) 315-2572'; EIR ReviewRequests@passporthealthplan.com, fax (502) 585-8334. The 2020 state grievance form lists Passport grievance fax 1-866-315-2572; the 2016/2018 state appeal forms list 502-585-8461. None of these are recorded as channels."
+   ],
+   "notes": "No 835 identity in this group. A person should open https://www.molinahealthcare.com/providers/ky/medicaid/ and the 2026 Passport provider manual, then add the fax with its quote."
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "product": "UnitedHealthcare Community Plan of Kentucky (Kentucky Medicaid managed care)",
+   "states": "KY",
+   "what_it_is": "Kentucky Medicaid MCO (payer id 87726). Claim reconsideration and formal claim appeal through the UnitedHealthcare Provider Portal, then the external independent third-party review (EITPR), then the DMS administrative hearing.",
+   "no_fax_reason": "UHC's 2026 Kentucky Community Plan manual says 'We no longer use fax numbers.' Reconsiderations and appeals go through the UnitedHealthcare Provider Portal; the EITPR goes by email or mail.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal (UHCprovider.com/claims): Pre- and post-service appeals and reconsiderations",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "Medical claim, ... UHCprovider.com/claims ... Most care providers in your state must ... submit reconsideration/appeal requests ... electronically.",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim reconsideration (step 1: overpayment, underpayment, payment denial, or an original or corrected claim determination)",
+     "required_or_preferred": "Required for most providers (electronic)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal (UHCprovider.com/claims): Pre- and post-service appeals and reconsiderations",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "Medical claim, ... UHCprovider.com/claims ... Most care providers in your state must ... submit reconsideration/appeal requests ... electronically.",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Formal claim appeal (step 2) after the reconsideration",
+     "required_or_preferred": "Required for most providers (electronic)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-866-633-4449",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "Call Provider Services at 1-866-633-4449.",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Status of reconsiderations and appeals; questions"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "email",
+     "value": "eir_ky@uhc.com",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "Email the request form to: eir_ky@uhc.com",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent third-party review after UHC's appeal decision, only on the EITPR form (Provider Portal, Provider Forms and References tab, KY Department of Medicaid Services forms section)",
+     "required_or_preferred": "Accepted",
+     "form": "EITPR request form"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "mail",
+     "value": "UnitedHealthcare Community Plan, Attn: Appeals and Grievances Unit, External Reviews, P.O. Box 31364, Salt Lake City, UT 84131-0364",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "Mail: UnitedHealthcare Community Plan ... Attn: Appeals and Grievances Unit ... External Reviews ... P.O. Box 31364 ... Salt Lake City, UT 84131-0364",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "External independent third-party review request on the EITPR form",
+     "required_or_preferred": "Accepted",
+     "form": "EITPR request form"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "UnitedHealthcare Community Plan, P.O. Box 5270, Kingston, NY 12402-5270",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "UnitedHealthcare Community ... P.O. Box 5270 ... Kingston, NY 12402-5270",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim correction (resubmission) by mail; online through the Provider Portal",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "Office of the Commissioner, Department for Medicaid Services, Cabinet for Health and Family Services, 275 East Main Street, 6th Floor, Frankfort, KY 40621-0002",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "To file a request for an administrative hearing, providers may submit a written request within 30 days of the UnitedHealthcare internal appeal determination to: Office of the Commissioner Department for Medicaid Services Cabinet for Health and Family Services 275 East Main Street, 6th Floor Frankfort, KY 40621-0002",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Administrative hearing request as printed by UHC (UHC cites 907 KAR 1:671); see conflicts for the timing"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Reconsideration (step 1)",
+     "window": "24 months from the provider remittance advice (PRA); response in 45 business days",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "Claim ... reconsiderations ... (adjustment ... requests) are ... accepted within ... 24 months from ... the PRA.",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Formal claim appeal (step 2)",
+     "window": "60 calendar days from the provider remittance advice; resolved within 30 calendar days (may be extended 14)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "A second review ... 60 calendar ... formal ... days from ... appeal (step 2 of ... the provider ... remittance ... advice.",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "External independent third-party review",
+     "window": "60 calendar days from the notice of appeal resolution",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/KY-Care-Provider-Manual.pdf",
+      "quote": "We must receive EITPR requests within 60 calendar ... days from the date of the notice of appeal resolution.",
+      "title": "UnitedHealthcare Community Plan of Kentucky 2026 Care Provider Manual (PMI 05202026)",
+      "doc_date": "2026-06-15 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "UHC's EIR Request Form (PCA-1-25-01082, May 2025) says 'Submit EIR request via email to EIR_KY@uhc.com or fax to 844-800-8833'; the newer 2026 manual lists email and mail only and says UHC no longer uses fax numbers. The fax is not recorded.",
+    "Administrative hearing: UHC's manual says within 30 days of the UnitedHealthcare internal appeal determination (citing 907 KAR 1:671); 907 KAR 17:040 says within 30 calendar days of DMS's written notice of the EIR decision. Use the earlier date if unsure.",
+    "Member fair hearing: UHC's 2026 manual prints the Office of the Ombudsman and Administrative Review, fax 1-502-564-9523, email providermcoinquiry@ky.gov; Humana's manual prints a different DMS office and fax. Not recorded."
+   ],
+   "notes": "The formal appeal grid row reads as interleaved columns in the PDF text; the quote above keeps its pieces in order."
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "product": "UnitedHealthcare Community Plan of Indiana (Hoosier Care Connect)",
+   "states": "IN",
+   "what_it_is": "Indiana Medicaid managed care (payer id 87726). Claim reconsideration (step one), then claim appeal (step two).",
+   "no_fax_reason": "UHC's Indiana Community Plan manual lists no fax for reconsiderations or appeals: Provider Portal, phone (reconsiderations) or mail.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "UnitedHealthcare Provider Portal: Claim Reconsideration application (UHCprovider.com/claims)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/Indiana_Provider_Manual.pdf",
+      "quote": "Electronically: Use the Claim Reconsideration application on the Provider Portal.",
+      "title": "UnitedHealthcare Community Plan of Indiana Hoosier Care Connect Provider Manual (PMG-20231012)",
+      "doc_date": "2025-06-30 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim reconsideration (step one); attach documents electronically",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "UnitedHealthcare Community Plan, P.O. Box 5240, Kingston, NY 12402-5240",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/Indiana_Provider_Manual.pdf",
+      "quote": "Reconsiderations mailing address: ... UnitedHealthcare Community Plan ... P.O. Box 5240 ... Kingston, NY 12402-5240",
+      "title": "UnitedHealthcare Community Plan of Indiana Hoosier Care Connect Provider Manual (PMG-20231012)",
+      "doc_date": "2025-06-30 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim reconsideration by mail with the Claim Reconsideration Request Form",
+     "required_or_preferred": "Accepted",
+     "form": "Claim Reconsideration Request Form"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "877-610-9785",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/Indiana_Provider_Manual.pdf",
+      "quote": "Phone: Call Provider Services at 877-610-9785",
+      "title": "UnitedHealthcare Community Plan of Indiana Hoosier Care Connect Provider Manual (PMG-20231012)",
+      "doc_date": "2025-06-30 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim reconsideration by phone (tracking number starts with SF)",
+     "required_or_preferred": "Accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "UnitedHealthcare Community Plan, Grievances and Appeals, P.O. Box 31364, Salt Lake City, UT 84131-0364",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/Indiana_Provider_Manual.pdf",
+      "quote": "Appeals mailing address: ... UnitedHealthcare Community Plan ... Grievances and Appeals ... P.O. Box 31364 ... Salt Lake City, UT 84131-0364",
+      "title": "UnitedHealthcare Community Plan of Indiana Hoosier Care Connect Provider Manual (PMG-20231012)",
+      "doc_date": "2025-06-30 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim appeal (step two) after the reconsideration; include information not sent with the reconsideration",
+     "required_or_preferred": "Accepted"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Reconsideration and dispute",
+     "window": "Within the time limits in the provider contract (the manual gives no fixed number of days)",
+     "source": {
+      "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/comm-plan/Indiana_Provider_Manual.pdf",
+      "quote": "File adjustment requests and claims disputes within ... contractual time requirements.",
+      "title": "UnitedHealthcare Community Plan of Indiana Hoosier Care Connect Provider Manual (PMG-20231012)",
+      "doc_date": "2025-06-30 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "The manual on UHCprovider.com is the Hoosier Care Connect edition (Doc PMG-20231012, footer v 65.11.2022, PDF updated 2025-06-30); no separate PathWays dispute chapter was read."
+   ],
+   "notes": "IHCP Quick Reference Guide v14.1 (May 2026) also lists UnitedHealthcare Community Plan of Indiana Provider Services 877-610-9785 and electronic payer id 87726."
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "product": "CareSource Indiana (Hoosier Healthwise, Healthy Indiana Plan)",
+   "states": "IN",
+   "what_it_is": "Indiana Medicaid managed care. Claim dispute first, then claim appeal, then binding arbitration. Medical necessity denials follow the clinical appeal process instead.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "CareSource Provider Portal (https://providerportal.caresource.com/IN): Claims > Dispute",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/medicaid/",
+      "quote": "Must be submitted through the Provider Portal ... (the most efficient method)",
+      "title": "CareSource Indiana Medicaid: Provider Disputes or Appeals (live page; Updated 07/25/2025)",
+      "doc_date": "2025-07-25",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim dispute (first formal review of claim processing; excludes medical necessity denials)",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "CareSource Grievance & Appeals Department, P.O. Box 2008, Dayton, OH 45401",
+     "source": {
+      "url": "https://www.caresource.com/documents/in-med-p-2391462-provider-standard-claim-dispute-form.pdf",
+      "quote": "TO SUBMIT CLAIMS DISPUTES Mail - CareSource Grievance & Appeals Department, P.O. Box 2008, Dayton, OH 45401",
+      "title": "CareSource Indiana Medicaid Provider Standard Claim Dispute Form (IN-MED-P-2391462)",
+      "doc_date": "Issued 4/10/2024",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim dispute on the Provider Standard Claim Dispute Form (the manual prints Claim Disputes Department at the same box)",
+     "required_or_preferred": "Accepted",
+     "form": "Provider Standard Claim Dispute Form (IN-MED-P-2391462)",
+     "form_url": "https://www.caresource.com/documents/in-med-p-2391462-provider-standard-claim-dispute-form.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "937-531-2398",
+     "source": {
+      "url": "https://www.caresource.com/documents/in-hip-hhw-health-partner-manual.pdf",
+      "quote": "In writing, by submitting the claim dispute form using one of the following methods: - Fax: (937) 531-2398",
+      "title": "CareSource Indiana Medicaid (HIP, HHW) Provider Manual",
+      "doc_date": "2025-04-23 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim dispute in writing on the claim dispute form. Second source: CareSource's IHCP Works 2026 dental deck ('Provider Claims Disputes Fax Number: 937-531-2398', CareSource Claims Disputes - Indiana, same P.O. Box 2008). The live page and CareSource's 2026 medical claims deck list only portal and mail.",
+     "required_or_preferred": "Accepted per the provider manual (portal preferred)",
+     "form": "Provider Standard Claim Dispute Form",
+     "form_url": "https://www.caresource.com/documents/in-med-p-2391462-provider-standard-claim-dispute-form.pdf"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "phone",
+     "value": "1-844-607-2831",
+     "source": {
+      "url": "https://www.caresource.com/documents/in-hip-hhw-health-partner-manual.pdf",
+      "quote": "Verbal: call Provider Services at 1-844-607-2831 to submit an appeal verbally.",
+      "title": "CareSource Indiana Medicaid (HIP, HHW) Provider Manual",
+      "doc_date": "2025-04-23 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Verbal dispute as listed in the manual (which also says 'member written consent is still required' and that claim disputes must be submitted in writing); use writing for proof"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "CareSource Provider Portal: Appeals",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/medicaid/",
+      "quote": "Through the Provider Portal ... (most efficient method) or the Provider Clinical/Claim Appeal Form",
+      "title": "CareSource Indiana Medicaid: Provider Disputes or Appeals (live page; Updated 07/25/2025)",
+      "doc_date": "2025-07-25",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim appeal after the dispute; appeals filed without a dispute are not processed",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "CareSource, Attn: Provider Appeals, P.O. Box 2008, Dayton, OH 45401",
+     "source": {
+      "url": "https://www.caresource.com/documents/in-hip-hhw-health-partner-manual.pdf",
+      "quote": "• Mail: CareSource Attn: Provider Appeals P.O. Box 2008 Dayton, OH 45401 Fax: 937-531-2398",
+      "title": "CareSource Indiana Medicaid (HIP, HHW) Provider Manual",
+      "doc_date": "2025-04-23 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim appeal on the appeal form with the original remittance advice and supporting records",
+     "required_or_preferred": "Accepted",
+     "form": "Provider Clinical/Claim Appeal Form (IN-MED-P-2303004)",
+     "form_url": "https://www.caresource.com/documents/in-med-p-2303004-provider-standard-appeal-form-in-mcd.pdf"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "937-531-2398",
+     "source": {
+      "url": "https://www.caresource.com/documents/in-hip-hhw-health-partner-manual.pdf",
+      "quote": "• Mail: CareSource Attn: Provider Appeals P.O. Box 2008 Dayton, OH 45401 Fax: 937-531-2398",
+      "title": "CareSource Indiana Medicaid (HIP, HHW) Provider Manual",
+      "doc_date": "2025-04-23 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claim appeal in writing. Second source: CareSource's IHCP Works 2026 dental deck (claim appeals: 'Mail: CareSource Attn: Provider Appeals P.O. Box 2008 Dayton, OH 45401 Fax: 1-937-531-2398').",
+     "required_or_preferred": "Accepted per the provider manual (portal preferred)",
+     "form": "Provider Clinical/Claim Appeal Form (IN-MED-P-2303004)",
+     "form_url": "https://www.caresource.com/documents/in-med-p-2303004-provider-standard-appeal-form-in-mcd.pdf"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "CareSource Claims Department, P.O. Box 3607, Dayton, OH 45401-3607",
+     "source": {
+      "url": "https://www.caresource.com/documents/in-med-p-2391462-provider-standard-claim-dispute-form.pdf",
+      "quote": "Corrected claims should be sent through Electronic Data Interchange (EDI) or mailing a red and white claim form and the primary insurance Explanation of Payment (EOP) to: CareSource Claims Department, P.O. Box 3607, Dayton, OH 45401-3607.",
+      "title": "CareSource Indiana Medicaid Provider Standard Claim Dispute Form (IN-MED-P-2391462)",
+      "doc_date": "Issued 4/10/2024",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Corrected claim (not with the dispute form); CMS-1500 code 7 in box 22 with the original claim number",
+     "required_or_preferred": "Accepted (EDI preferred)"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "CareSource Provider Portal",
+     "source": {
+      "url": "https://www.in.gov/medicaid/providers/files/IHCP-Works-2026-CareSource-Medicaid-Provider-Claims-Billing-Guide.pdf",
+      "quote": "*NOTE: If your claim was denied requesting medical records, those should be submitted via the CareSource Provider Portal.",
+      "title": "CareSource Medicaid Provider Claims Billing Guide (IHCP Works 2026)",
+      "doc_date": "2026-09-29 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medical records for a claim denied for records",
+     "required_or_preferred": "Preferred"
+    },
+    {
+     "purpose": "external_review",
+     "channel": "fax",
+     "value": "844-417-6262",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/medicaid/",
+      "quote": "Providers may send external review requests to: CareSource P.O. Box 8738 Dayton, OH 45401-8738 Attn: Independent Review - Appeals Dept. Fax: 844-417-6262",
+      "title": "CareSource Indiana Medicaid: Provider Disputes or Appeals (live page; Updated 07/25/2025)",
+      "doc_date": "2025-07-25",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Member's independent external review (IRO) of a medical necessity appeal decision, within 120 days; a provider sends it with the member's consent. Not a claim payment step. Second source: the manual's fax table lists 844-417-6262 under Provider Appeals."
+    }
+   ],
+   "windows": [
+    {
+     "level": "Claim dispute",
+     "window": "60 days from the written determination of the claim (if CareSource does not decide a claim within 30 days, an appeal may be submitted)",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/medicaid/",
+      "quote": "Must be submitted within 60 days of the written determination of the claim",
+      "title": "CareSource Indiana Medicaid: Provider Disputes or Appeals (live page; Updated 07/25/2025)",
+      "doc_date": "2025-07-25",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Claim appeal",
+     "window": "60 days from the resolution of the dispute",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/medicaid/",
+      "quote": "Within 60 days of the resolution of the dispute process",
+      "title": "CareSource Indiana Medicaid: Provider Disputes or Appeals (live page; Updated 07/25/2025)",
+      "doc_date": "2025-07-25",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Claim appeal decision",
+     "window": "45 days, or the appeal is approved",
+     "source": {
+      "url": "https://www.caresource.com/documents/in-hip-hhw-health-partner-manual.pdf",
+      "quote": "If the appeal is not resolved within the 45-day time frame, the appeal will be determined as an approval.",
+      "title": "CareSource Indiana Medicaid (HIP, HHW) Provider Manual",
+      "doc_date": "2025-04-23 (PDF)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "Member external review (IRO)",
+     "window": "120 calendar days from the appeal determination",
+     "source": {
+      "url": "https://www.caresource.com/in/providers/provider-portal/appeals/medicaid/",
+      "quote": "The member or their authorized representative has the right to request an independent external review within 120 calendar days from the date of the appeal determination.",
+      "title": "CareSource Indiana Medicaid: Provider Disputes or Appeals (live page; Updated 07/25/2025)",
+      "doc_date": "2025-07-25",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Fax for disputes and appeals: the provider manual (PDF April 2025) lists fax 937-531-2398 for claim disputes and claim appeals, and CareSource's 2026 dental deck repeats it for dental disputes and appeals; the live dispute page (updated 07/25/2025), the OMPP-approved forms and CareSource's IHCP Works 2026 medical claims deck list only portal and mail. Portal is preferred everywhere.",
+    "The manual's fax table lists both 844-417-6262 and 937-531-2398 under 'Provider Appeals'; its dispute and appeal sections name 937-531-2398, and the live page names 844-417-6262 only for external (IRO) review requests. Use 937-531-2398 for claim disputes and appeals."
+   ],
+   "notes": "Arbitration after the claim appeal: binding, per the manual and the live page. The 2026 medical claims deck: include the reason the claim or line should be paid and supporting documents (IHCP bulletin, provider reference module, policy)."
+  },
+  {
+   "payer_group": "Medicaid (other)",
+   "product": "MDwise (Hoosier Healthwise and Healthy Indiana Plan) - run-out only: left Indiana Medicaid managed care on Jan 1, 2026",
+   "states": "IN",
+   "what_it_is": "Claims for dates of service before Jan 1, 2026. MDwise remains responsible for administrative reviews and appeals of claims it adjudicated.",
+   "no_fax_reason": "MDwise publishes no current claim dispute fax or dispute address; its site lists only the claims mailing address and the provider mailbox (open through March 31, 2027).",
+   "channels": [
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "MDwise, PO Box 1575, Flint, MI 48501",
+     "source": {
+      "url": "https://www.mdwise.org/mdwise/mdwise-home",
+      "quote": "All MDwise claims should be mailed to: MDwise PO Box 1575 Flint, MI 48501",
+      "title": "MDwise home page (live)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Claims (and resubmissions) for dates of service before Jan 1, 2026"
+    },
+    {
+     "purpose": "other",
+     "channel": "email",
+     "value": "ProviderServices@MDwise.org",
+     "source": {
+      "url": "https://www.mdwise.org/mdwise/mdwise-home",
+      "quote": "Important Notice: Provider Mailbox Retirement ProviderServices@MDwise.org ... Please be advised that the Provider Mailbox will remain available through March 31, 2027.",
+      "title": "MDwise home page (live)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Ask MDwise where to send a claim administrative review or appeal for run-out claims (mailbox available through March 31, 2027); no patient details by plain email"
+    }
+   ],
+   "windows": [
+    {
+     "level": "Run-out claims",
+     "window": "Network providers 90 days from the date of service; out of network 365 days",
+     "source": {
+      "url": "https://www.mdwise.org/mdwise/mdwise-home",
+      "quote": "Claims for network providers should have been submitted within 90 days of the date of service. Out of network providers have 365 days to submit from the date of service.",
+      "title": "MDwise home page (live)",
+      "doc_date": "live page",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [],
+   "notes": "MDwise closure notice (notification date 12/4/2025): 'Requests for administrative review and appeals related to claims adjudicated by MDwise will be the responsibility of MDwise.' IHCP BT2025183: after April 1, 2026, prior authorization and utilization management questions go securely to padept@mdwise.org."
+  }
+ ]
+}

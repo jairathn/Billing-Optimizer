@@ -1,0 +1,322 @@
+{
+ "area": "medicare_ffs",
+ "checks": [
+  {
+   "id": "MFFS-01-redet-filing-deadline",
+   "verdict": "correct",
+   "citation": "42 CFR 405.942(a), (a)(1), (a)(2), (b)(1)-(3); SSA 1869(a)(3)(C)(i) [42 USC 1395ff(a)(3)(C)(i)]; MCPM Pub. 100-04 Ch. 29 secs. 240.A, 240.3 NOTE, 310.2",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.law.cornell.edu/uscode/text/42/1395ff ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.942(a): \"any request for redetermination must be filed within 120 calendar days from the date a party receives the notice of the initial determination. (1) ... the date of receipt of the initial determination will be presumed to be 5 calendar days after the date of the notice of initial determination, unless there is evidence to the contrary. (2) The request is considered as filed on the date it is received by the contractor.\" MCPM 29 sec. 310.2: \"When the filing deadline for a redetermination ends on a Saturday, Sunday, legal holiday, or any other nonwork day, the contractor shall apply a rollover period that extends the filing deadline to the first working day after\". Sec. 240.3 NOTE: \"Failure of a billing company or other consultant (that the provider, physician, or other supplier has retained) to timely submit appeals or other information is NOT grounds for finding good cause for late filing.\"",
+   "correction": "Confirmed as stated. Detail: MCPM 29 sec. 310.2 counts fax and portal receipt dates as filing dates, and sec. 240.B says provider requests to extend the deadline 'should not be routinely granted'. The regulation's own good-cause list (405.942(b)(3)) is broader, but CMS tells MACs to apply the narrow provider list in sec. 240.3."
+  },
+  {
+   "id": "MFFS-02-redet-content-form-vs-letter",
+   "verdict": "correct",
+   "citation": "42 CFR 405.944(a)-(b); 405.952(b)(2); MCPM Ch. 29 sec. 310.1.B.2(a)-(c), 310.1.B.3; Form CMS-20027 (01/20)",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf ; https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20027.pdf ; https://www.cgsmedicare.com/partb/appeals/level1.html ; https://www.cgsmedicare.com/partb/forms/pdf/reopen_vs_redet_jobaid.pdf ; https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf",
+   "quote": "405.944(b): \"A written request that is not made on a standard CMS form is accepted if it contains the same required elements as follows: (1) The beneficiary's name; (2) The Medicare number; (3) Specific service(s) and/or item(s) for which the redetermination is being requested and the specific date(s) of the service; (4) The name of the party or the representative of the party.\" MCPM 29 sec. 310.1.B.2: \"Where the required information is not listed on the request form but is provided within the documents or attachments submitted with the appeal, the request substantially complies with the requirements established in 42 CFR 405.944. MACs shall not dismiss requests under 42 CFR 405.952(b)(2) when redeterminations substantially comply with requirements.\"",
+   "correction": "Confirmed, including the CGS quotes (job aid rev. 12/16/2025: 'Written request should be typed and submitted on the Medicare Part B Jurisdiction 15 Redetermination Request Form'; level-1 page: 'Always submit the Appeal form as the top document' and 'As of July 8, 2019, CMS no longer requires a signature on an appeal form') and the WPS form ('All fields are REQUIRED'; 'requests with incomplete information will be dismissed'). Lever: dismissal is allowed only when the request fails to substantially comply with the 405.944(b) elements (405.952(b)(2)). Fields a MAC form adds (PTAN, NPI, tax ID) are not regulatory elements, so a dismissal for those alone can be challenged by asking the MAC to vacate it (405.952(d)). Fill them anyway to avoid friction."
+  },
+  {
+   "id": "MFFS-03-redet-evidence-and-clock-extension",
+   "verdict": "correct",
+   "citation": "42 CFR 405.946(a)-(b); 405.950(b)(3); MCPM Ch. 29 sec. 310.4.D.2 and D.4",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.946: \"(a) ... a party must explain why it disagrees with the contractor's determination and should include any evidence that the party believes should be considered by the contractor in making its redetermination. (b) ... When a party submits additional evidence after filing the request for redetermination, the contractor's 60 calendar day decision-making time frame is automatically extended for up to 14 calendar days for each submission.\" MCPM 29 sec. 310.4.D.2: \"If the additional documentation that was requested is not received within 14 calendar days from the date of request, the reviewer conducts the redetermination based on the information in the file.\"",
+   "correction": "Confirmed. Add: when the MAC asks for documents during a provider redetermination, the practice has 14 calendar days to send them (sec. 310.4.D.2), and the 14-day clock extension applies even to documents the MAC asked for (sec. 310.4.D.4). The WPS portal quote is confirmed (SNAP manual, Nov 2026: 'you cannot submit it after you submit the request')."
+  },
+  {
+   "id": "MFFS-04-redet-60-day-decision-no-escalation",
+   "verdict": "correct",
+   "citation": "42 CFR 405.950(a), (b)(1)-(3); SSA 1869(a)(3)(C)(ii) [42 USC 1395ff(a)(3)(C)(ii)]; 42 CFR 405.972(b)(6); MCPM Ch. 29 sec. 310.4.A",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.law.cornell.edu/uscode/text/42/1395ff ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.950(a): \"The contractor mails, or otherwise transmits, written notice of the redetermination or dismissal to the parties to the redetermination at their last known addresses within 60 calendar days of the date the contractor receives a timely filed request for redetermination.\" SSA 1869(a)(3)(C)(ii): \"Redeterminations shall be concluded by not later than the 60-day period beginning on the date the fiscal intermediary or the carrier, as the case may be, receives a request for a redetermination.\" 405.972(b)(6): \"When the contractor has not issued a redetermination on the initial determination for which a reconsideration is sought.\"",
+   "correction": "Confirmed: neither 1869(a) nor Subpart I attaches a consequence to a late redetermination; escalation exists only from the QIC level up (1869(c)(3)(C)(ii), 1869(d)(3), 405.970, 405.1016, 405.1132). Add: MCPM 29 sec. 310.4.A says a favorable redetermination is complete only when the letter is mailed AND the claim adjustment has been started, so the 60 days covers starting the payment, not just the letter."
+  },
+  {
+   "id": "MFFS-05-redet-notice-content",
+   "verdict": "corrected",
+   "citation": "42 CFR 405.956(a)(1), (b)(1)-(10), (c); 405.921(b)(2); SSA 1869(a)(4)(C), (a)(5)(A)-(C)",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.law.cornell.edu/uscode/text/42/1395ff",
+   "quote": "405.956(b)(9): \"The procedures for obtaining additional information concerning the redetermination, such as specific provisions of the policy, manual, or regulation used in making the redetermination.\" SSA 1869(a)(5): \"(B) such written notice shall be provided in printed form and written in a manner calculated to be understood by the individual entitled to benefits under part A or enrolled under part B, or both; and (C) the individual provided such written notice may obtain, upon request, information on the specific provision of the policy, manual, or regulation used in making the redetermination.\"",
+   "correction": "The quoted elements are verbatim and correct. Correction on the right to the specific provision: the statute grants it to 'the individual' (the beneficiary). The provider's hook is the regulation: 405.956(b)(9) requires every unfavorable MRN to state the procedure for getting the specific policy, manual or regulation provision. For the RA, 405.921(b)(2) only requires the basis of the denial, the CARC/RARC codes and who to contact (b)(2)(iv); the 'specific provision' wording is in the beneficiary notice rule (405.921(a)(2)(ii)), not the provider RA rule. In letters, cite 405.956(b)(9) and 405.921(b)(2)(i), (iv) rather than 1869(a)(4)(C) alone. Also, the (b) content list applies to affirmations in whole or part; a full reversal needs only the (c) statement."
+  },
+  {
+   "id": "MFFS-06-redet-dismissal-vacate-or-qic-review",
+   "verdict": "correct",
+   "citation": "42 CFR 405.952(b)-(e); 405.974(b)(1)-(3); MCPM Ch. 29 sec. 240.5",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.952(d): \"If good and sufficient cause is established, a contractor may vacate its dismissal of a request for redetermination within 180 calendar days from the date of the notice of dismissal.\" 405.974(b)(1): \"A party to a contractor's dismissal of a request for redetermination has a right to have the dismissal reviewed by a QIC, if the party files a written request for review of the dismissal with the QIC within 60 calendar days after receipt of the contractor's notice of dismissal.\" (b)(3): \"A QIC's review of a contractor's dismissal of a redetermination request is binding and not subject to further review.\"",
+   "correction": "Confirmed. MCPM 29 sec. 240.5 words the vacate window as '6 months of the dismissal'; use the regulation's 180 calendar days from the date of the notice. MCPM 29 sec. 310.1.B.4 NOTE: refiling a corrected appeal after a dismissal is handled as a request to vacate, and the MAC does not issue a second dismissal."
+  },
+  {
+   "id": "MFFS-07-effectuation-30-days",
+   "verdict": "corrected",
+   "citation": "MCPM Pub. 100-04 Ch. 29 secs. 310.11, 320.9, 330.4, 340.2; Medicare Financial Management Manual Pub. 100-06 Ch. 3 secs. 200.6, 200.6.1; 42 CFR 405.378; 405.1046(a)(3)",
+   "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/fin106c03.pdf ; https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I",
+   "quote": "MCPM 29 sec. 310.11: \"If the redetermination decision is fully or partially favorable to the appellant and gives a specific amount to be paid, the MAC effectuates within 30 calendar days of the date of the redetermination decision.\" FMM Ch. 3 sec. 200.6: \"Medicare has the obligation to pay providers interest if the reversed overpayment at any level of the administrative appeal process is not effectuated timely. Medicare will pay interest on the underpayment for each full 30-day period a payment remains delayed.\" 405.1046(a)(3): \"The amount of payment determined by the contractor in effectuating the ALJ's or attorney adjudicator's decision is a new initial determination under § 405.924.\"",
+   "correction": "The 30-day effectuation times are correct (QIC and OMHA: 30 days from receipt of the effectuation notice; Council: start within 30, finish within 60 days). Wrong as stated: 'no interest or penalty' for late effectuation. When an overpayment (takeback) is reversed at any appeal level and the MAC does not repay on time, FMM Ch. 3 sec. 200.6 requires 405.378 interest for each full 30-day period, and sec. 200.6.1 gives the MAC 30 days from the ALJ decision or final determination date to compute and refund. No interest rule was found for late effectuation of an ordinary denied claim. Also: 405.976(a)(1)(iii) and 405.1046(a)(3) do not set 30 days. The useful point in 405.1046(a)(3) is that the amount the MAC pays on an ALJ win is a new initial determination, with its own 120-day appeal right if it is wrong."
+  },
+  {
+   "id": "MFFS-08-reconsideration-filing",
+   "verdict": "corrected",
+   "citation": "42 CFR 405.960, 405.962(a)-(b), 405.964(a)-(b); SSA 1869(b)(1)(D)(i); MCPM Ch. 29 secs. 320.1, 320.1.B, 320.7(B); CMS Second Level of Appeal page (modified 09/30/2026)",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf ; https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal ; https://www.c2cinc.com/QIC-Part-B-North",
+   "quote": "405.962(a): \"any request for a reconsideration must be filed within 180 calendar days from the date the party receives the notice of the redetermination.\" (a)(2): \"the request is considered as filed on the date it is received by the QIC.\" MCPM 29 sec. 320.1.B: \"The jurisdiction for all DME and Part B QIC appeals is dependent upon the State where the beneficiary resides.\" CMS page: \"Part B South C2C Innovative Solutions, Inc. Requests can be submitted in writing, via fax to 904-539-4090, or via the Part B South QIC Appeals Portal at https://www.c2cinc.com/QIC-Part-B-South.\"",
+   "correction": "The deadline, the five elements, filing on QIC receipt and no amount-in-controversy minimum (405.960) are correct. Correction: the Part B QIC is chosen by the beneficiary's state of residence, not by the MAC. The sec. 320.7 table puts Kentucky and Indiana in Part B North (C2C, fax 904-539-4081, PO Box 45208, Jacksonville FL 32232-5208). A patient seen in Kentucky or Indiana who lives in a Part B South state (for example Tennessee) goes to QIC Part B South: also C2C, but fax 904-539-4090. Route by the QIC named on the MRN, and fall back to the beneficiary's state."
+  },
+  {
+   "id": "MFFS-09-full-and-early-presentation",
+   "verdict": "correct",
+   "citation": "42 CFR 405.966(a)(1)-(2), (c); 405.956(b)(6)-(8); 405.976(b)(5)(ii); 405.1018(c)-(d); 405.1028(a)(2)-(3); SSA 1869(b)(3) [42 USC 1395ff(b)(3)]",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.law.cornell.edu/uscode/text/42/1395ff",
+   "quote": "405.966(a)(2): \"Absent good cause, failure to submit all evidence, including documentation requested in the notice of redetermination prior to the issuance of the notice of reconsideration precludes subsequent consideration of that evidence.\" 405.1028(a)(3): \"the ALJ or attorney adjudicator must exclude the evidence from the proceeding and may not consider it in reaching a decision.\" SSA 1869(b)(3): \"A provider of services or supplier may not introduce evidence in any appeal under this section that was not presented at the reconsideration conducted by the qualified independent contractor under subsection (c), unless there is good cause which precluded the introduction of such evidence at or before that reconsideration.\"",
+   "correction": "Confirmed. Add the statutory basis, SSA 1869(b)(3), which the researcher did not cite."
+  },
+  {
+   "id": "MFFS-10-qic-60-days-and-escalation",
+   "verdict": "correct",
+   "citation": "42 CFR 405.970(a)-(e); 405.966(b); 405.1002(b); 405.1016(c); SSA 1869(c)(3)(C)(i)-(ii)",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.law.cornell.edu/uscode/text/42/1395ff",
+   "quote": "405.970(c)(2): \"Notify the parties that it cannot complete the reconsideration by the deadline specified in paragraph (b) of this section and offer the appellant the opportunity to escalate the appeal to OMHA.\" (e)(2): \"the QIC must take one of the following actions within 5 calendar days of receipt of the notice or 5 calendar days from the end of the applicable adjudication period\". SSA 1869(c)(3)(C)(ii): \"the party requesting the reconsideration or appeal may request a hearing before the Secretary, notwithstanding any requirements for a reconsidered determination for purposes of the party's right to such hearing.\"",
+   "correction": "Confirmed. Note 405.966(b): the 14-day extension does not apply to timely submission of documents the QIC itself requested, unless those documents were first requested in the MRN."
+  },
+  {
+   "id": "MFFS-11-alj-hearing-aic-aggregation",
+   "verdict": "corrected",
+   "citation": "42 CFR 405.1002(a), 405.1006(a)(2), (b), (d), (e)(1)(ii), (f), 405.1014(a)-(d), 405.1014(a)(3)(ii), 405.1016(a), (c), (e), (f), 405.1044, 405.1060, 405.1062(a)-(c), 405.1063; 82 FR 4974 at 5010-5011 (Jan. 17, 2017); 90 FR 55869; 91 FR 58681",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.govinfo.gov/content/pkg/FR-2017-01-17/html/2016-32058.htm ; https://www.govinfo.gov/content/pkg/FR-2025-12-04/html/2025-21879.htm ; https://www.govinfo.gov/content/pkg/FR-2026-09-16/html/2026-19016.htm ; https://www.cms.gov/medicare/appeals-grievances/fee-for-service/third-level-appeal",
+   "quote": "405.1006(e)(1)(ii): \"the request is filed within 60 calendar days after receipt of all of the reconsiderations being appealed\". 82 FR 5010-5011 (parallel Part D change made 'for the same reasons' as the 405.1006(e)(1)(ii) revision): \"Our proposal would help ensure there is no confusion that the timely filing requirement applies to each of the requests for hearing filed with the request for aggregation.\" 405.1062(c): \"An ALJ or attorney adjudicator or the Council may not set aside or review the validity of an LMRP or LCD for purposes of a claim appeal.\" Notices: \"The calendar year 2026 AIC threshold amounts are $200 for ALJ hearings and $1,960 for judicial review.\" \"The calendar year 2027 AIC threshold amounts are $200 for ALJ hearings and $2,000 for judicial review.\"",
+   "correction": "Thresholds, deadlines, the copy requirement and the e-Appeal portal are correct. Corrections: (1) Aggregation does not run 'within 60 days of the last reconsideration'. Each aggregated claim's hearing request must still be filed on time: within 60 days of receipt of its own reconsideration, receipt presumed 5 days after the notice date. So a bundle closes on its earliest deadline. Only sample claims in an extrapolated overpayment get the 'last reconsideration' rule (405.1014(a)(3)(ii)). (2) The ALJ is not bound by LCDs or manuals, but may not review an LCD's validity (405.1062(c)). The ALJ is bound by NCDs, statutes, regulations and CMS Rulings (405.1060, 405.1063). Useful: 'similar or related services' covers 'like or coordinated services or items provided to one or more beneficiaries' (405.1006(a)(2)), so the practice alone can aggregate the same issue across patients."
+  },
+  {
+   "id": "MFFS-12-council-and-court",
+   "verdict": "correct",
+   "citation": "42 CFR 405.1100(c)-(d), 405.1102(a), 405.1108(d), 405.1130, 405.1132(a)-(b), 405.1136(a)-(c); SSA 1869(d)(2)-(3)",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.law.cornell.edu/uscode/text/42/1395ff",
+   "quote": "405.1100(c): \"The Council issues a final decision or dismissal order or remands a case to the ALJ or attorney adjudicator within 90 calendar days of receipt of the appellant's request for review\". 405.1132(b): \"A party may file an action in a Federal district court within 60 calendar days after the date it receives the Council's notice that the Council is not able to issue a final decision, dismissal order, or remand order unless the party is appealing an ALJ or attorney adjudicator dismissal.\" 405.1130: \"A party may file an action in a Federal district court within 60 calendar days after the date it receives notice of the Council's decision.\"",
+   "correction": "Confirmed."
+  },
+  {
+   "id": "MFFS-13-reopening-party-request-clerical",
+   "verdict": "correct",
+   "citation": "42 CFR 405.980(a)(3), (a)(5), (c)(1)-(3); 405.927; 405.926(l); 405.984(f); MCPM Pub. 100-04 Ch. 34 secs. 10, 10.1, 10.4, 10.6.2, 10.7; MCPM Ch. 29 sec. 200.D",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c34.pdf ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.980(a)(3): \"a contractor must process clerical errors (which includes minor errors and omissions) as reopenings, instead of as redeterminations ... (i) Mathematical or computational mistakes; (ii) Inaccurate data entry; or (iii) Denials of claims as duplicates.\" MCPM 34 sec. 10.4 list includes \"Misapplication of a fee schedule\" and \"Incorrect data items, such as provider number, use of a modifier or date of service.\" Sec. 10.7: \"the contractor shall complete the reopening action 60 days from the date of receipt of the party's reopening request ... This does not apply to 'big box cases' defined as aggregated requests filed by a provider, physician, or other supplier that involve 40 or more beneficiaries/claims and $40,000 or more in controversy.\"",
+   "correction": "Confirmed. Two refinements: (a) the 60 days in sec. 10.7 is a 'shall complete' requirement once the MAC accepts the reopening, not just a target. (b) A safe fallback the researcher missed: if a timely redetermination request is routed to reopening and the MAC then finds it cannot reopen, 'the contractor shall not issue a refusal to reopen notice. Rather, the contractor shall process the request as a valid/timely redetermination' (MCPM 34 sec. 10.1; also MCPM 29 sec. 200.D). Within 120 days, one redetermination request therefore covers both tracks."
+  },
+  {
+   "id": "MFFS-14-reopening-good-cause-4-years",
+   "verdict": "correct",
+   "citation": "42 CFR 405.980(c)(2), 405.986(a)-(c); MCPM Ch. 34 secs. 10.11, 10.11.1-10.11.3",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c34.pdf",
+   "quote": "405.986(a): \"Good cause may be established when— (1) There is new and material evidence that— (i) Was not available or known at the time of the determination or decision; and (ii) May result in a different conclusion; or (2) The evidence that was considered in making the determination or decision clearly shows on its face that an obvious error was made at the time of the determination or decision.\" MCPM 34 sec. 10.11.3: \"Error on the face of the evidence exists if it is clear that the determination or decision was incorrect based on all evidence in file on which the determination or decision was based, or any evidence of record anywhere in the contractor's Medicare file or in CMS files at the time such determination or decision was made.\"",
+   "correction": "Confirmed. Also MCPM 34 sec. 10.11 NOTE: third-party (other payer) error can be reopened only under the 1-year 'any reason' rule, never for good cause."
+  },
+  {
+   "id": "MFFS-15-no-reopening-while-appeal-pending",
+   "verdict": "correct",
+   "citation": "42 CFR 405.980(a)(4); MCPM Ch. 34 sec. 10.1",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c34.pdf",
+   "quote": "405.980(a)(4): \"When a party has filed a valid request for an appeal of an initial determination, redetermination, reconsideration, ALJ or attorney adjudicator decision, or Council review, no adjudicator has jurisdiction to reopen an issue on a claim that is under appeal until all appeal rights for that issue are exhausted.\"",
+   "correction": "Confirmed."
+  },
+  {
+   "id": "MFFS-16-adr-no-response-denials",
+   "verdict": "correct",
+   "citation": "42 CFR 405.980(a)(2), 405.903(b)-(c), 405.929(b)-(c), 405.930; MCPM Ch. 34 sec. 10.3; PIM Pub. 100-08 Ch. 3 secs. 3.2.3.2, 3.2.3.8, 3.2.3.9",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c34.pdf ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/pim83c03.pdf",
+   "quote": "405.980(a)(2): \"If a contractor issues a denial of a claim because it did not receive requested documentation during medical review and the party subsequently requests a redetermination, the contractor must process the request as a reopening.\" MCPM 34 sec. 10.3: \"If the ADR reopening results in an affirmation of the original denial or an adverse decision, the provider will retain their right to a redetermination. The date of the MR decision will be the date used to calculate the 120 days to request a redetermination.\" PIM 3.2.3.9: \"If the MACs receive the requested information from a provider or supplier after a denial has been issued but within a reasonable number of days (generally 15 calendar days after the denial date), they have the discretion to reopen the claim.\"",
+   "correction": "Confirmed, including CO-50/M127 (PIM 3.2.3.8). Add the PIM 3.2.3.9 shortcut: records sent within about 15 calendar days of the denial may be reopened by medical review at the MAC's discretion, with a decision within 60 days of receipt. After that, file the redetermination within 120 days."
+  },
+  {
+   "id": "MFFS-17-clean-claim-30-day-interest",
+   "verdict": "correct",
+   "citation": "SSA 1842(c)(2)(A)-(C) [42 USC 1395u(c)(2)]; 42 CFR 405.922; 31 USC 3902(a); MCPM Ch. 1 secs. 80.2, 80.2.1.1, 80.2.2, 80.2.2.1; Treasury Prompt Payment rates (91 FR 5035; 91 FR 42594)",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1395u ; https://www.ecfr.gov/current/title-42/section-405.922 ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c01.pdf ; https://fiscal.treasury.gov/prompt-payment/rates.html",
+   "quote": "SSA 1842(c)(2)(C): \"If payment is not issued, mailed, or otherwise transmitted within the applicable number of calendar days (as defined in clause (ii) of subparagraph (B)) after a clean claim (as defined in clause (i) of such subparagraph) is received, interest shall be paid at the rate used for purposes of section 3902(a) of title 31 (relating to interest penalties for failure to make prompt payments) for the period beginning on the day after the required payment date and ending on the date on which payment is made.\" Treasury: \"The Prompt Payment interest rate for July 1– December 31, 2026 is 4.75%.\" Table: Jan-26 through Jun-26 4.125% (Vol. 91, No. 22, p. 5035); Jul-26 through Dec-26 4.75% (Vol. 91, No. 130, p. 42594).",
+   "correction": "Confirmed, including the formula, the payment-date rate and the MCPM example ($100 x 5.625% x 3/365 = $0.05)."
+  },
+  {
+   "id": "MFFS-18-interest-exclusions",
+   "verdict": "correct",
+   "citation": "MCPM Pub. 100-04 Ch. 1 secs. 80.2, 80.2.2, 80.2.2.1(C)-(D)",
+   "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c01.pdf",
+   "quote": "Sec. 80.2.2: \"Interest is not paid on: • Claims requiring external investigation or development by the provider's FI or carrier; • Claims on which no payment is due; • Full denials; • Claims for which the provider is receiving PIP; or • HH PPS RAPs\". Sec. 80.2.2.1(C): \"Interest payments are not payable on clean claims initially processed to denial and on which payment is made subsequent to the initial decision as a result of an appeal request.\"",
+   "correction": "Confirmed. Detail: sec. 80.2.2.1(C) sends 'an appeal of a previously paid claim [that] results in increased payment' to (D), where interest is recomputed as the new amount over the original amount, times the original interest. A higher payment after appeal earns extra clean-claim interest only if the original payment was itself late."
+  },
+  {
+   "id": "MFFS-19-payment-floor",
+   "verdict": "correct",
+   "citation": "SSA 1842(c)(3)(A)-(B) [42 USC 1395u(c)(3)]; MCPM Ch. 1 sec. 80.2.1.2",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1395u ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c01.pdf",
+   "quote": "SSA 1842(c)(3): \"no payment shall be issued, mailed, or otherwise transmitted with respect to any claim submitted under this subchapter within the applicable number of calendar days after the date on which the claim is received ... (i) with respect to claims submitted electronically as prescribed by the Secretary, 13 days, and (ii) with respect to claims submitted otherwise, 28 days.\" MCPM 1 sec. 80.2.1.2: \"Effective January 1, 2006, paper claims will not be eligible for payment earlier than the 29th day after the date of receipt.\" Table: \"07-01-04 and later 14th day for HIPAA-compliant EMC\".",
+   "correction": "Confirmed."
+  },
+  {
+   "id": "MFFS-20-underpayment-interest-405-378",
+   "verdict": "correct",
+   "citation": "42 CFR 405.378(b)(1)-(2), (c)(1)(ii)(B), (d)(1), (e)(4), (f)(1)(i); FMM Pub. 100-06 Ch. 3 secs. 200.6, 200.6.1",
+   "url": "https://www.ecfr.gov/current/title-42/section-405.378 ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/fin106c03.pdf",
+   "quote": "405.378(b)(1): \"CMS will charge interest on overpayments, and pay interest on underpayments, to providers and suppliers of services (including physicians and other practitioners)\". (e)(4): \"If an intermediary or a carrier makes a final determination that an underpayment exists, interest to the provider or the supplier will accrue from the date of notification of the underpayment.\" (f)(1)(i): \"Interest charges will be waived if the overpayment or underpayment is completely liquidated within 30 days from the date of the final determination.\" (b)(2): interest is \"paid on the underpayment balance for each full 30-day period that payment is delayed.\"",
+   "correction": "Confirmed as quoted. Partial answer to the researcher's open question: FMM Ch. 3 sec. 200.6 applies 405.378 'late (Penalty) interest' when a reversed overpayment is not effectuated on time, and sec. 200.6.1 says the MAC must issue a revised written determination. No CMS text was found saying that an ordinary favorable redetermination of a denied claim is a 'written determination of an underpayment'."
+  },
+  {
+   "id": "MFFS-21-recoupment-stop-and-interest-on-reversal",
+   "verdict": "correct",
+   "citation": "42 CFR 405.379(b), (d)(1)-(9), (e)(1)-(2), (g); 405.378(j); SSA 1893(f)(2)(A)-(B) [42 USC 1395ddd(f)(2)]",
+   "url": "https://www.ecfr.gov/current/title-42/section-405.379 ; https://www.ecfr.gov/current/title-42/section-405.378 ; https://www.law.cornell.edu/uscode/text/42/1395ddd",
+   "quote": "405.379(d)(1): \"Medicare contractors can begin recoupment no earlier than 41 days from the date of the initial overpayment demand but shall cease recoupment of the overpayment in question, upon receipt of a timely and valid request for a redetermination of an overpayment. If the recoupment has not yet gone into effect, the contractor shall not initiate recoupment.\" (e)(1)(ii): recoupment may resume \"On the 60th calendar day after the date of the notice of redetermination issued under § 405.956 if the redetermination decision is an affirmation in whole\". (d)(5): at the ALJ and above \"recoupment remains in effect\".",
+   "correction": "Confirmed, including the CGS Kentucky offset/OPR fax 615.664.5916 (CGS phone/fax page, updated 10.27.2026) and the WPS portal overpayment flag ('Clicking Yes notifies Medicare to pause pending collection activities until the redetermination is complete'). The 60 days in (e)(1)(ii) run from the DATE of the redetermination notice, not from receipt. See the missing items for the separate 15-day rebuttal under 405.374."
+  },
+  {
+   "id": "MFFS-22-what-is-not-appealable",
+   "verdict": "correct",
+   "citation": "42 CFR 405.924(b)(11); 405.926(c), (l), (n), (s); MCPM Ch. 29 sec. 200.B(11), 200.C(3) NOTE, NOTE after 200.C(19), sec. 310",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "MCPM 29 sec. 200.C(3) NOTE: \"section 1848(i)(1) of the Act prohibits administrative and judicial review of the individual components used to compute Medicare physician fee schedule payment amounts. However, a payment amount determination with respect to a particular item or service on a claim is an initial determination that is appealable.\" NOTE after 200.C(19): \"Duplicate items and services are not afforded appeal rights, unless the supplier is appealing whether or not the service was, in fact, a duplicate.\" Sec. 310: \"The reviewer may not change the amount required to be paid under the Physician Fee Schedule.\"",
+   "correction": "Confirmed."
+  },
+  {
+   "id": "MFFS-23-timely-filing-of-claims",
+   "verdict": "correct",
+   "citation": "42 CFR 424.44(a)(1), (b)(1)-(5), (c); 405.926(n); MCPM Ch. 1 secs. 70.1, 70.4, 70.6, 70.7, 80.2.1",
+   "url": "https://www.ecfr.gov/current/title-42/section-424.44 ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c01.pdf",
+   "quote": "424.44(a)(1): \"the claim must be filed no later than the close of the period ending 1 calendar year after the date of service.\" MCPM 1 sec. 70.6: \"Where the provider or supplier is protesting the denial of payment or the assignment of responsibility, no formal channels of appeal are available. However, the contractor may, at the request of the provider or supplier, informally review its initial determination.\" Sec. 70.1: \"Claims having a date of service on February 29 must be filed by February 28 of the following year to be considered timely filed.\"",
+   "correction": "Confirmed. Add the leap-day rule in MCPM 1 sec. 70.1 (Feb 29 service date: file by Feb 28 the next year). Also from sec. 70.1: for professional claims with a date span, the line 'From' date controls, and a line that is only partly timely is split."
+  },
+  {
+   "id": "MFFS-24-written-and-congressional-inquiry-clocks",
+   "verdict": "corrected",
+   "citation": "Pub. 100-09 Ch. 6 secs. 30.7.4.1, 70.2.2, 70.2.2.1, 70.2.2.4 (Rev. 13683, 04-08-26); MCPM Ch. 29 secs. 310.1.A.1, 310.1.B.2, 310.1.B.5",
+   "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/com109c06.pdf ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf ; https://www.cgsmedicare.com/partb/cs/phone.html",
+   "quote": "Pub. 100-09 Ch. 6 sec. 70.2.2.1: \"All general written provider inquiries (including those received electronically) shall be responded to in writing or by telephone within 45 business days of receipt.\" Sec. 70.2.2.4: \"All Congressional written inquiries shall be responded to in writing within 10 business days of receipt.\" MCPM 29 sec. 310.1.B.5: \"if the physician questions the amount paid for an item or service on a claim that was processed to payment, and asserts additional payment is warranted, the contractor handles this as an appeal of the payment amount, even if the item/service was paid under a fee schedule.\"",
+   "correction": "The clocks, the 5-business-day final answer after information arrives, and the CGS Congressional fax (KY 615.664.5913, for Congressional offices only) are confirmed. Correction to provider_use: an 'inquiry' about an unexplained payment amount is treated as an appeal if it disputes the amount and asserts more is owed (sec. 310.1.B.5). A letter that has the request elements and asks for action or shows dissatisfaction is a redetermination request (sec. 310.1.B.2). That starts the 60-day redetermination clock and its scope review (405.948). Only a letter limited to 'explain how you calculated this' stays an inquiry. At CGS, a faxed letter that counts as a redetermination will not be processed, because CGS does not accept faxed appeals."
+  },
+  {
+   "id": "MFFS-25-mac-performance-accountability",
+   "verdict": "correct",
+   "citation": "SSA 1874A(b)(3)(A)-(C) [42 USC 1395kk-1(b)(3)]; Pub. 100-09 Ch. 6 sec. 70.3",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1395kk-1 ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/com109c06.pdf ; https://www.cgsmedicare.com/partb/cs/addresses.html",
+   "quote": "SSA 1874A(b)(3)(B): \"The Secretary shall include, as one of the standards developed under subparagraph (A), provider and beneficiary satisfaction levels.\" (C): \"All contractor performance requirements shall be set forth in the contract ... (ii) shall be used for evaluating contractor performance under the contract\". Pub. 100-09 Ch. 6 sec. 70.3: \"Each MAC jurisdiction shall achieve an average score of 3.6 out of 5.0 for each evaluated business function during their contract year.\" CGS: \"Send feedback about your experience with CGS. Send comments to CMS: OPOLE_IFM_CHIKCGP@cms.hhs.gov\"",
+   "correction": "Confirmed. Add: the provider-satisfaction standard is a measured target. Each MAC must average 3.6 of 5.0 per business function on the MAC satisfaction (MCE) survey, from at least 50 responses (Pub. 100-09 Ch. 6 sec. 70.3)."
+  },
+  {
+   "id": "MFFS-26-no-fee-for-appeals",
+   "verdict": "correct",
+   "citation": "SSA 1842(c)(4)(A)-(E) [42 USC 1395u(c)(4)]",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1395u",
+   "quote": "SSA 1842(c)(4): \"Neither a medicare administrative contractor nor the Secretary may impose a fee under this subchapter— (A) for the filing of claims related to physicians' services, (B) for an error in filing a claim relating to physicians' services or for such a claim which is denied, (C) for any appeal under this subchapter with respect to physicians' services, (D) for applying for (or obtaining) a unique identifier under subsection (r), or (E) for responding to inquiries respecting physicians' services or for providing information with respect to medical review of such services.\"",
+   "correction": "Confirmed."
+  },
+  {
+   "id": "MFFS-27-party-standing-assigned-claims",
+   "verdict": "corrected",
+   "citation": "42 CFR 405.906(a)(2)-(3), (b)(3)-(4), 405.910, 405.912; MCPM Ch. 29 secs. 210, 270.1.1 NOTE, 270.1.6.B.2, 310.1.B.5",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.906(a)(2): \"A supplier who has accepted assignment for items or services furnished to a beneficiary that are at issue in the claim.\" MCPM 29 sec. 270.1.1 NOTE: \"Billing clerks or billing services employed by the provider or supplier to prepare and/or bill the initial claim, process the payments, and/or pursue appeals act as the agent of the provider or supplier and do not need to be appointed as representative of the provider/supplier.\"",
+   "correction": "The party-status rules are correct. Wrong in provider_use: an outside billing company does NOT need an appointment of representative (405.910) to file the practice's appeals when the practice employs it to bill and pursue appeals. It acts as the practice's agent (MCPM 29 sec. 270.1.1 NOTE), and the MAC records evidence of the arrangement in the case file. The sec. 310.1.B.5 / 270.1.6.B.2 'inquiry' rule covers someone trying to act as a representative without an appointment, such as an outside consultant or attorney. File in the practice's own name, and keep a short billing-agent statement ready in case the MAC asks."
+  },
+  {
+   "id": "MFFS-28-redetermination-scope-risk",
+   "verdict": "correct",
+   "citation": "42 CFR 405.948; 405.968(b)(5); 405.1032(b); MCPM Ch. 29 sec. 310.4.C.1",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.948: \"The contractor may raise and develop new issues that are relevant to the claims in the particular case.\" MCPM 29 sec. 310.4.C.1: \"if the appellant questions the amount paid, the contractor must also review medical necessity, coverage, deductible, and limitation on liability, if applicable.\" 405.968(b)(5): \"A QIC may raise and develop new issues that are relevant to the claims in a particular case provided that the contractor rendered a redetermination with respect to the claims.\"",
+   "correction": "Confirmed, including the limit to the original denial reasons after complex pre- or post-payment review or automated post-payment review. Add: the risk continues past the MAC. The QIC can raise new issues (405.968(b)(5)), and the ALJ can too, including reopening a favorable part, if the issue is material and there is new and material evidence or an obvious error (405.1032(b))."
+  },
+  {
+   "id": "MFFS-29-resubmission-does-not-restart-clock",
+   "verdict": "correct",
+   "citation": "MCPM Ch. 29 sec. 310.4.C.3",
+   "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "\"For appeals of a specific line item or service, the date of the first MSN or RA that states the coverage and payment decision is the date of the initial determination. Adjustments to the initial claim or claim resubmissions for the same item/service on the same date of service that are included on subsequent MSNs or RAs, but do not revise the initial determination, do not extend/change the appeal rights on the initial determination.\"",
+   "correction": "Confirmed. Contrast: a reopening that actually revises the determination gives a new 120 days from the revised determination, for the revised part only (405.984(f); MCPM 34 sec. 10.10)."
+  },
+  {
+   "id": "MFFS-30-initial-determination-45-days-nonclean",
+   "verdict": "corrected",
+   "citation": "SSA 1869(a)(2)(A)-(B) [42 USC 1395ff(a)(2)]; MCPM Ch. 1 sec. 80.3.3",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1395ff ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c01.pdf",
+   "quote": "SSA 1869(a)(2)(A): \"initial determinations shall be concluded by not later than the 45-day period beginning on the date the fiscal intermediary or the carrier, as the case may be, receives a claim for benefits\". MCPM 1 sec. 80.3.3: \"The contractor shall process all 'other-than-clean' claims and notify the provider and provider of the determination within 45 calendar days of receipt. ... However, when the contractor develops to the provider/supplier or beneficiary for additional information, the contractor shall cease counting the 45 calendar days on the day that the contractor sends the development letter.\"",
+   "correction": "The statute is quoted correctly and gives no consequence. Correction for automation: the 45 days are not a flat count from receipt. CMS stops the clock while a development letter is out and restarts it when the answer arrives. Section 80.3.3 also excludes claims held on CMS instructions, CWF or beneficiary-ID problems, and claims 'in development due to processing requirements (e.g. medical review)'. An unanswered-claim alarm at day 45 must allow for those pauses."
+  },
+  {
+   "id": "CH-CGS-J15B-redetermination-channels",
+   "verdict": "correct",
+   "citation": "CGS Reopening vs. Redetermination Job Aid (Revised December 16, 2025); CGS J15 Part B 1st Level of Appeal page (updated 04.15.2026); myCGS user manual (appeals); MCPM Ch. 29 sec. 310.1 NOTE",
+   "url": "https://www.cgsmedicare.com/partb/forms/pdf/reopen_vs_redet_jobaid.pdf ; https://www.cgsmedicare.com/partb/appeals/level1.html ; https://www.cgsmedicare.com/mycgs/mycgs_user_manual_appeals.html ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "Job aid: \"Utilizing the myCGS Web portal is the preferred method for submitting your Redetermination.\" \"Redeterminations should be mailed to the address at the bottom of the form.\" \"Redeterminations do not accept faxed request.\" \"Submit only one claim per request form.\" \"Written Reopenings may take up to 60 days to process.\" myCGS: \"This field will hold up to 1200 characters.\" \"You can attach up to 10 documents. Attachments can be up to 40MBs in size, not to exceed to total of 150MBs for all attachments. The documents must be in a PDF format.\" MCPM 29 sec. 310.1 NOTE: \"Contractors are not required to utilize a facsimile and/or a secure Internet portal/application for performing appeals activities.\"",
+   "correction": "Confirmed, including the mail address (CGS, Attn: J15 Part B Appeals Department, PO Box 20018, Nashville, TN 37202, on the form revised July 27, 2020) and 'Reopenings, PO Box 20018'. CGS refusing fax is lawful: MCPM 29 sec. 310.1 NOTE says the MAC must accept mail and may choose whether to offer fax."
+  },
+  {
+   "id": "CH-CGS-contacts-and-CMS-feedback",
+   "verdict": "correct",
+   "citation": "CGS J15 Part B Phone/Fax page (Updated 10.27.2026); CGS Addresses page",
+   "url": "https://www.cgsmedicare.com/partb/cs/phone.html ; https://www.cgsmedicare.com/partb/cs/addresses.html",
+   "quote": "\"615.664.5913 – KY Congressman or Senator office inquiries\"; \"General Correspondence Fax: 615.782.4490\"; Overpayment Recovery: \"Fax offset requests and OPR forms to: Kentucky – 615.664.5916\"; Addresses page: \"CMS guidelines allow up to 45 business days to respond.\" and \"Send feedback about your experience with CGS. Send comments to CMS: OPOLE_IFM_CHIKCGP@cms.hhs.gov\"",
+   "correction": "Confirmed."
+  },
+  {
+   "id": "CH-WPS-J8-fax-and-portal",
+   "verdict": "correct",
+   "citation": "WPS J8 Part B Redetermination Request Form (02/19/26); WPS J8 Part B Redetermination of an Overpayment Request Form (02/18/2026); WPS SNAP Portal User Manual (November 2026), CER and Appeals sections",
+   "url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf ; https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf ; https://www.wpsgha.com/uploads/Portal_User_Manual_3a2185c43e.pdf",
+   "quote": "Redetermination form: \"Indiana: (608) 224-3502\" / \"Michigan: (608) 224-3504\"; overpayment form: \"Indiana: (608) 224-3504\" / \"Michigan: (608) 224-3502\"; both: mail \"WPS Government Services ... PO Box 8580 Madison, WI 53708-8580\" for Indiana. Portal: \"providers can only reopen a claim once via the portal\"; \"A provider, physician, or supplier may request a reopening up to one year from the receipt of the initial Remittance Notice.\"; Part B appeal: \"The file size cannot exceed 100 MB (102,400 KB) for Part B redeterminations\"; \"(up to 20 files)\"; \"Clicking Yes notifies Medicare to pause pending collection activities until the redetermination is complete.\"",
+   "correction": "Confirmed. The two Indiana fax numbers really do conflict, and the two forms swap the Indiana and Michigan numbers. Confirm with WPS before automating. The '4:30 PM CT' portal cut-off is stated in the Part A guidance only."
+  },
+  {
+   "id": "CH-QIC-PartB-and-OMHA",
+   "verdict": "correct",
+   "citation": "CMS Second Level of Appeal page (modified 09/30/2026); C2C QIC Part B North page; CMS Third Level of Appeal page",
+   "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal ; https://www.c2cinc.com/QIC-Part-B-North ; https://www.cms.gov/medicare/appeals-grievances/fee-for-service/third-level-appeal",
+   "quote": "CMS: \"Part B North C2C Innovative Solutions, Inc. Requests can be submitted in writing, via fax to 904-539-4081, or via the Part B North QIC Appeals Portal\". C2C: \"C2C Innovative Solutions - QIC Part B North PO Box 45208 Jacksonville, Florida 32232-5208\"; \"As of July 8, 2019, the signature of the party ... is no longer a requirement for a request for reconsideration.\" CMS third level: \"An appeal may be filed by mail or electronically via the OMHA e-Appeal Portal at https://hhs-ecape-portal.entellitrak.com\"; \"For calendar year 2027 the amount in controversy will remain at $200.\"",
+   "correction": "Confirmed. See MFFS-08: patients who live in Part B South states go to QIC Part B South (fax 904-539-4090)."
+  },
+  {
+   "id": "SUMMARY-policy-validity-belongs-at-QIC-ALJ",
+   "verdict": "corrected",
+   "citation": "42 CFR 405.968(b)(1)-(4); 405.1060(a)(4), (b); 405.1062(a)-(c); 405.1063(a)-(b); 405.990; MCPM Ch. 29 sec. 310",
+   "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I ; https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+   "quote": "405.968(b)(2): \"QICs are not bound by LCDs, LMRPs, or CMS program guidance, such as program memoranda and manual instructions, but give substantial deference to these policies if they are applicable to a particular case. A QIC may decline to follow a policy, if the QIC determines, either at a party's request or at its own discretion, that the policy does not apply to the facts of the particular case.\" 405.1062(c): \"An ALJ or attorney adjudicator or the Council may not set aside or review the validity of an LMRP or LCD for purposes of a claim appeal.\"",
+   "correction": "The summary says policy-validity arguments belong at the QIC and ALJ. Not quite: at those levels you can argue that an LCD or manual provision does not apply to this claim's facts, or should not be followed for this one claim. You cannot get an LCD declared invalid, and NCDs, statutes, regulations and CMS Rulings are binding there (405.968(b)(1), 405.1060, 405.1063). A challenge to the validity of a regulation, NCD or CMS Ruling uses expedited access to judicial review (405.990): no material facts in dispute, AIC met. LCD validity goes through 42 CFR part 426 (not checked in detail). Letter tone: argue fit and application, not invalidity."
+  },
+  {
+   "id": "DNA-sequestration-years",
+   "verdict": "corrected",
+   "citation": "2 USC 901a(6)(A), (B), (D), (F); X12 CARC 253",
+   "url": "https://www.law.cornell.edu/uscode/text/2/901a ; https://x12.org/codes/claim-adjustment-reason-codes",
+   "quote": "2 USC 901a(6)(D): \"On the date on which the President submits the budget under section 1105 of title 31 for fiscal year 2032, the President shall order a sequestration of payments for the Medicare programs specified in section 906(d) of this title, effective upon issuance, such that the payment reduction shall be 2.0 percent for such fiscal year.\" (F): for fiscal year 2033, \"with respect to the first 5 months in which such order is effective for such fiscal year, the payment reduction shall be 2.0 percent\". X12: \"253 Sequestration - reduction in federal payment\".",
+   "correction": "The does_not_apply entry says 'ordered for FY2022-2031'. The statute now runs the 2% Medicare sequestration through FY2032 and the first 5 months of FY2033. CARC 253 is confirmed as the sequestration code. The advice not to chase it stands."
+  },
+  {
+   "id": "DNA-state-prompt-pay-not-applicable-to-MAC",
+   "verdict": "could_not_check",
+   "citation": "SSA 1842(c)(2) [42 USC 1395u(c)(2)]; SSA 1874A [42 USC 1395kk-1]",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1395u ; https://www.law.cornell.edu/uscode/text/42/1395kk-1",
+   "quote": "SSA 1842(c)(2)(A): \"Each contract under section 1395kk–1 of this title that provides for making payments under this part shall provide that payment shall be issued, mailed, or otherwise transmitted with respect to not less than 95 percent of all claims submitted under this part— (i) which are clean claims\"",
+   "correction": "No primary text found that says in so many words that Kentucky or Indiana prompt-pay law does not reach a MAC. The conclusion fits the federal structure: payment timing and interest for MAC contracts are set by SSA 1842(c)(2) and the MAC contract under 1874A. It is a legal inference, not a quoted rule."
+  }
+ ],
+ "missing": [
+  "42 CFR 405.373(a), 405.374(a)-(b), 405.375(a)-(c) (https://www.ecfr.gov/current/title-42/section-405.374): a notice of intended offset or recoupment must give 'an opportunity for rebuttal'. 405.374(a): 'the provider or supplier has at least 15 days following the date of notification to submit the statement.' 405.375(a): the MAC 'must within 15 days, from the date the statement is received, consider the statement', with a written rationale (b). The rebuttal does not delay recoupment and is not appealable (405.375(a), (c)). Use: a cheap, fast written answer to a takeback, made alongside a redetermination filed before day 41.",
+  "MCPM Pub. 100-04 Ch. 29 sec. 270.1.1 NOTE (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf): 'Billing clerks or billing services employed by the provider or supplier to prepare and/or bill the initial claim, process the payments, and/or pursue appeals act as the agent of the provider or supplier and do not need to be appointed as representative of the provider/supplier.' Applies to the practice's own staff and its billing service. No CMS-1696 is needed for the practice's own appeals.",
+  "MCPM Ch. 29 sec. 320.1.B and sec. 320.7(B) table (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf); CMS Second Level of Appeal page (https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal): 'The jurisdiction for all DME and Part B QIC appeals is dependent upon the State where the beneficiary resides.' Kentucky and Indiana are in Part B North (C2C, fax 904-539-4081). Part B South states such as Tennessee go to C2C Part B South, fax 904-539-4090, portal https://www.c2cinc.com/QIC-Part-B-South.",
+  "42 CFR 405.1006(e)(1)(ii) plus the 2017 preamble, 82 FR 4974 at 5010-5011 (https://www.govinfo.gov/content/pkg/FR-2017-01-17/html/2016-32058.htm): aggregation does not revive a lapsed 60-day hearing deadline. The preamble: 'the timely filing requirement applies to each of the requests for hearing filed with the request for aggregation.' Only sample claims in an extrapolation use 'within 60 calendar days of the date the party receives the last reconsideration' (405.1014(a)(3)(ii)). Build ALJ bundles around the earliest reconsideration in the bundle.",
+  "Medicare Financial Management Manual Pub. 100-06 Ch. 3 secs. 200.6 and 200.6.1 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/fin106c03.pdf): 'Medicare has the obligation to pay providers interest if the reversed overpayment at any level of the administrative appeal process is not effectuated timely. Medicare will pay interest on the underpayment for each full 30-day period a payment remains delayed.' Sec. 200.6.1: the MAC 'will have 30 days to calculate and refund the provider from the ALJ Decision date or the final determination Date.' This is in addition to 405.378(j) interest on funds recouped and kept until an ALJ-or-higher reversal.",
+  "MCPM Ch. 34 sec. 10.1 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c34.pdf) and MCPM Ch. 29 sec. 200.D: when a timely redetermination request raises a clerical issue it is processed as a reopening, and 'If a contractor receives a valid and timely request for redetermination and begins processing the request as a reopening ... and later determines that a reopening cannot be performed ... the contractor shall not issue a refusal to reopen notice. Rather, the contractor shall process the request as a valid/timely redetermination'. Within 120 days, one request protects both tracks.",
+  "MCPM Ch. 29 sec. 310.1.B.2 and B.5 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf): how a letter is classified. A letter with the request elements that 'explicitly asks the contractor to take further action, or ... indicates dissatisfaction' is a redetermination request. A letter questioning 'the amount paid ... on a claim that was processed to payment' that 'asserts additional payment is warranted' is 'an appeal of the payment amount, even if the item/service was paid under a fee schedule'. Only a pure request to explain the calculation is an inquiry (45 business days). Templates must choose the outcome on purpose.",
+  "MCPM Ch. 29 sec. 310.1.B.4 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf): duplicate requests made while an appeal is pending are combined, and 'Adjudication time frames are still based on the first request'. After a decision, a further request for the same service is treated as an inquiry, and the party is told to go to the QIC. CGS: 'Do not submit a duplicate appeal, if a request has been submitted.' Software must never send a second redetermination for the same line.",
+  "MCPM Ch. 29 sec. 310.1 NOTE (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf): 'Contractors may not require an appellant to file an appeal electronically ... Submission of appeal requests via facsimile or a portal/application shall be at the discretion of the appellant. Contractors shall continue to accept appeal requests in hardcopy via mail.' This is why CGS may refuse fax. Mail is always a lawful channel.",
+  "esMD as a no-fax electronic channel. CMS esMD overview (https://www.cms.gov/data-research/computer-data-systems/esmd) lists 'First and Second Level Appeal Requests' among provider lines of business. The CMS esMD provider page (https://www.cms.gov/data-research/computer-data-systems/esmd/esmd-medicare-providers-and-suppliers) lists 'MAC J15 (CGS)', 'MAC J5 & J8 (WPS)' and 'QICs Part A East, Part B North & South (C2C)' as participating review contractors. MACs use the esMD system receipt date. CGS notice of 07/16/2024 (https://www.cgsmedicare.com/hhh/pubs/news/2024/07/cope159552.html): 'J15 Appeals will accept redetermination requests submitted via the following methods: myCGS portal, Electronic Submission of Medical Documentation (esMD), Mail'. That notice is on CGS's HHH site with Part A and HHH forms, so confirm Part B esMD intake with CGS. Sending needs a Health Information Handler.",
+  "SSA 1882(c)(3)(A)-(B) [42 USC 1395ss(c)(3)] (https://www.law.cornell.edu/uscode/text/42/1395ss): to be certified, a Medigap policy's issuer must accept 'a notice under section 1395u(h)(3)(B) of this title as a claim form for benefits under such policy in lieu of any claim form otherwise required' and must provide 'any payment covered by such policy directly to the participating physician or supplier involved'. For participating physicians, a crossed-over Medicare claim is the Medigap claim, so an unpaid Medigap balance is a claim to chase, not a claim to rebill. State enforcement routes were not checked.",
+  "42 CFR 405.1046(a)(3) (https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I): an ALJ decision on payment amount 'is not binding on the contractor for purposes of determining the amount of payment due', and 'The amount of payment determined by the contractor in effectuating the ALJ's or attorney adjudicator's decision is a new initial determination under § 405.924.' If the MAC pays the wrong amount after an ALJ win, a new 120-day redetermination right starts.",
+  "MCPM Ch. 29 sec. 310.4.D.2 and D.4 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf): when the MAC asks for documents during a provider redetermination, 'If the additional documentation that was requested is not received within 14 calendar days from the date of request, the reviewer conducts the redetermination based on the information in the file.' MAC document requests that arrive by fax or mail need a 14-day response task.",
+  "PIM Pub. 100-08 Ch. 3 sec. 3.2.3.9 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/pim83c03.pdf): after a CO-50/M127 no-records denial, 'If the MACs receive the requested information from a provider or supplier after a denial has been issued but within a reasonable number of days (generally 15 calendar days after the denial date), they have the discretion to reopen the claim'. Medical review then decides within 60 calendar days. This is a faster path than a redetermination for missed ADRs.",
+  "Pub. 100-09 Ch. 6 sec. 70.3 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/com109c06.pdf): 'Each MAC jurisdiction shall achieve an average score of 3.6 out of 5.0 for each evaluated business function during their contract year. MACs shall collect a minimum of 50 survey responses for each business function.' This is the measured provider-satisfaction standard behind SSA 1874A(b)(3)(B). Practice feedback through the MAC satisfaction survey and the CMS feedback address is lawful, factual pressure.",
+  "SSA 1869(b)(3) [42 USC 1395ff(b)(3)] (https://www.law.cornell.edu/uscode/text/42/1395ff): statutory full-and-early-presentation rule: 'A provider of services or supplier may not introduce evidence in any appeal under this section that was not presented at the reconsideration conducted by the qualified independent contractor under subsection (c), unless there is good cause'.",
+  "42 CFR 405.968(b)(5) and 405.1032(b) (https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-B/part-405/subpart-I): the QIC 'may raise and develop new issues', and the ALJ may consider a new issue, 'including a favorable portion of a determination', when it is material and there is new and material evidence or an obvious error. Scope risk on small-dollar appeals continues above the MAC.",
+  "MCPM Ch. 1 sec. 70.1 (https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c01.pdf): 'Claims having a date of service on February 29 must be filed by February 28 of the following year to be considered timely filed.' For professional claims with spans, 'the line item From date is used', and untimely parts of a span are split and denied. Leap-day and span edge cases for the timely-filing calculator.",
+  "2 USC 901a(6)(D) and (F) (https://www.law.cornell.edu/uscode/text/2/901a): the 2% Medicare sequestration continues through FY2032 and the first 5 months of FY2033 (the researcher's note said FY2022-2031). X12 CARC 253 = 'Sequestration - reduction in federal payment' (https://x12.org/codes/claim-adjustment-reason-codes). Not chaseable."
+ ]
+}

@@ -1,0 +1,1647 @@
+{
+ "family": "medicare_ffs",
+ "payers": [
+  {
+   "payer_group": "Medicare",
+   "product": "Original Medicare Part B (pattern items spanning MACs)",
+   "states": "KY, IN (and Railroad Medicare nationwide)",
+   "what_it_is": "A RemitWatch pattern group with no 835 identity of its own. Route each underlying claim by its 835 payer id: 15102 (KY MEDICARE) -> CGS J15 Kentucky Part B; 08102 (MEDICARE OF INDIANA / IN MEDICARE) -> WPS J8 Indiana Part B; 00882 or 00320 (RAILROAD MEDICARE) -> Palmetto GBA Railroad Medicare. Second level for 15102 and 08102 is C2C QIC Part B North; for Railroad it is C2C QIC Part B South.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "myCGS: Claims tab > claim detail > Request Redetermination. Log in at https://www.onlineproviderservices.com/cgs_ops/ (linked from https://www.cgsmedicare.com/partb/mycgs/index.html)",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/forms/pdf/reopen_vs_redet_jobaid.pdf",
+      "title": "CGS Reopening vs. Redetermination Job Aid (A/B MAC Jurisdiction 15)",
+      "doc_date": "Revised December 16, 2025",
+      "quote": "HOW TO FILE A REDETERMINATION Utilizing the myCGS Web portal is the preferred method for submitting your Redetermination.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). One claim per request; up to 10 PDF attachments, 40 MB each, 150 MB total; reason field 1,200 characters; e-signature; Submission ID returned (myCGS User Manual - Appeals).",
+     "form": "myCGS Redetermination form (built into myCGS)",
+     "required_or_preferred": "preferred"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "CGS, Attn: J15 Part B Appeals Department, PO Box 20018, Nashville, TN 37202",
+     "source": {
+      "url": "https://www.cgsmedicare.com/pdf/partb_redeterminationform.pdf",
+      "title": "Medicare Part B Jurisdiction 15 Redetermination Request Form",
+      "doc_date": "Revised July 27, 2020",
+      "quote": "CGS Attn: J15 Part B Appeals Department PO Box 20018 Nashville, TN 37202",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Form on top; attach the Medicare RA, ABN if any, order and signed medical documentation (form's suggested checklist). Courier/certified mail: J15 - Part A/B Correspondence, CGS Administrators, LLC, 26 Century Blvd Suite NT600, Nashville, TN 37214 (CGS addresses page).",
+     "form": "Medicare Part B Jurisdiction 15 Redetermination Request Form (form on top; signature not required since July 8, 2019)",
+     "form_url": "https://www.cgsmedicare.com/pdf/partb_redeterminationform.pdf",
+     "required_or_preferred": "accepted (written requests must be mailed)"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "myCGS redetermination with 'overpayment' marked (same route as first_level)",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/forms/pdf/reopen_vs_redet_jobaid.pdf",
+      "title": "CGS Reopening vs. Redetermination Job Aid (A/B MAC Jurisdiction 15)",
+      "doc_date": "Revised December 16, 2025",
+      "quote": "If appealing a recoupment claim (which is not a recoupment clerical reopening, see above) send to the Redetermination department with supporting documentation.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Overpayment/recoupment appeals are redeterminations; mark the overpayment box (MR PROBE, UPIC, CERT, RAC or Other) on the form.",
+     "form": "Medicare Part B Jurisdiction 15 Redetermination Request Form, 'Overpayment Appeal' section",
+     "form_url": "https://www.cgsmedicare.com/pdf/partb_redeterminationform.pdf",
+     "required_or_preferred": "preferred (mail also accepted)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "WPS SNAP (Secure Net Access Portal): Claim Inquiry > claim > Claim Actions > Request Redetermination. Log in at https://www.wpsgha.com",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/661",
+      "title": "WPS: How to Appeal a Claim Determination (J8B section; text from https://www.wpsgha.com/api/content/resources/661)",
+      "doc_date": "content updated 2025-01-07",
+      "quote": "How to Submit Your Redetermination Request via WPS SNAP To submit a redetermination request, you must use a specific claim. Once logged in, use the claim inquiry link to find the claim.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Documents must go with the request (cannot be added later); Part B upload up to 100 MB, up to 20 files in one .zip; tracking number returned (WPS SNAP User Manual, November 2026).",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "(608) 224-3504",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/Indiana_Appeals_Clerical_Error_Reopening_Fax_Cover_Sheet_94af235c3b.pdf",
+      "title": "WPS Indiana Appeals/Clerical Error Reopening Fax Cover Sheet (form A08; listed at https://www.wpsgha.com/forms/view/7)",
+      "doc_date": "PDF dated 03/29/2016; form page updated 2025-03-07",
+      "quote": "INDIANA FAX (Please indicate which type of request you are submitting.) REDETERMINATION REQUEST Appeal of Overpayment (please include overpayment letter) REOPENING REQUEST To: Medicare Appeals Department Fax Number: 608-224-3504",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Settled conflict: WPS's 'How to Appeal a Claim Determination' J8B table, the Indiana cover sheet, the 02/18/2026 overpayment redetermination form and the 10/2026 CER guide all give Indiana (608) 224-3504; only the 02/19/26 redetermination request form prints 3502 for Indiana (it swaps Indiana and Michigan). Fax the Indiana cover sheet plus the form, one ICN per fax.",
+     "form": "WPS J8 Part B Redetermination Request Form + Indiana Appeals/Clerical Error Reopening Fax Cover Sheet (cover sheet alone is not a valid request)",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "WPS Government Services, ATTN: Redeterminations, PO Box 8580, Madison, WI 53708-8580",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf",
+      "title": "WPS Government Services J8 Part B Redetermination Request Form",
+      "doc_date": "02/19/26 (file replaced 2026-03-27)",
+      "quote": "Or mail the form to: Indiana: WPS Government Services ATTN: Redeterminations PO Box 8580 Madison, WI 53708-8580",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). WPS Contact Us lists the same box as 'Appeals Department, P.O. Box 8580' for redeterminations not related to an overpayment.",
+     "form": "WPS Government Services J8 Part B Redetermination Request Form (all fields required; incomplete requests are dismissed)",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "fax",
+     "value": "(608) 224-3504",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+      "title": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+      "doc_date": "02/18/2026 (file replaced 2026-03-27)",
+      "quote": "Fax Numbers: Indiana: (608) 224-3504 Michigan: (608) 224-3502",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Appeal of an overpayment decision (redetermination of an overpayment). Include the overpayment letter and the Indiana cover sheet. Portal also accepted (answer 'Yes' to 'Request involves Overpayment').",
+     "form": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "WPS Government Services, ATTN: Overpayment Appeals, PO Box 8580, Madison, WI 53708-8580",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+      "title": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+      "doc_date": "02/18/2026 (file replaced 2026-03-27)",
+      "quote": "Or Mail to: Indiana: WPS Government Services ATTN: Overpayment Appeals PO Box 8580 Madison, WI 53708-8580",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102).",
+     "form": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "904-539-4081",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal",
+      "title": "CMS: Second Level of Appeal: Reconsideration by a Qualified Independent Contractor",
+      "doc_date": "Page Last Modified 09/30/2026",
+      "quote": "Part B North C2C Innovative Solutions, Inc. Requests can be submitted in writing, via fax to 904-539-4081, or via the Part B North QIC Appeals Portal at https://www.c2cinc.com/QIC-Part-B-North",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B claims with 835 payer id 15102 (CGS J15 Kentucky) or 08102 (WPS J8 Indiana). Second check: C2C's own QIC Part B North page lists 'FAX 904-539-4081'. Use the QIC named on the redetermination notice if it differs. Attach a copy of the redetermination notice (MRN) or RA and any new documentation; evidence not given to the QIC may be excluded later.",
+     "form": "CMS-20033 Medicare Reconsideration Request (or a written request with the same items); signature not required since July 8, 2019",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted (fax, portal or mail)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "C2C QIC Appeals Portal: https://www.c2cinc.com/Appellant-Signup (link from https://www.c2cinc.com/QIC-Part-B-North)",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "Ways to submit your appeal: FAX 904-539-4081 ONLINE Appeals Portal Access the Appeals Portal",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B claims with 835 payer id 15102 (CGS J15 Kentucky) or 08102 (WPS J8 Indiana). Free account for the appellant; the portal only receives the request and documents (no status check).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "C2C Innovative Solutions - QIC Part B North, PO Box 45208, Jacksonville, Florida 32232-5208",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "US MAIL C2C Innovative Solutions - QIC Part B North PO Box 45208 Jacksonville, Florida 32232-5208",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B claims with 835 payer id 15102 (CGS J15 Kentucky) or 08102 (WPS J8 Indiana).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Palmetto GBA eServices portal, log in via https://palmettogba.com/eservices",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+      "doc_date": "Revised 7/20/2026",
+      "quote": "Instructions: If you are unable to submit your Redetermination (first level appeals) request via our eServices portal, please use this form to submit your request for a Redetermination.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Overpayment appeals use the same form or the eServices Overpayment Appeal eForm.",
+     "required_or_preferred": "preferred (form is for when eServices cannot be used)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "(803) 462-2218",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+      "doc_date": "Revised 7/20/2026",
+      "quote": "Please send this form and all additional documentation to: Mail Fax Submit Appeals Electronically Palmetto GBA Railroad Medicare (803) 462-2218 Palmetto GBA eServices Portal",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Second check: Palmetto reopening forms AP-RRB-B-1020 and AP-RRB-B-1021 print 'Fax: (803) 462-2218'. Include the RA; one form may cover several claims with the same issue.",
+     "form": "Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+     "form_url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Palmetto GBA Railroad Medicare, Attention: Appeals, P.O. Box 10066, Augusta, GA 30999-0001",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+      "doc_date": "Revised 7/20/2026",
+      "quote": "Palmetto GBA Railroad Medicare (803) 462-2218 Palmetto GBA eServices Portal Attention:Appeals Login via palmettogba.com/eservices P.O. Box 10066 Augusta, GA 30999-0001",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320).",
+     "form": "Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+     "form_url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "904-539-4090",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal",
+      "title": "CMS: Second Level of Appeal: Reconsideration by a Qualified Independent Contractor",
+      "doc_date": "Page Last Modified 09/30/2026",
+      "quote": "Part B South C2C Innovative Solutions, Inc. Requests can be submitted in writing, via fax to 904-539-4090, or via the Part B South QIC Appeals Portal at https://www.c2cinc.com/QIC-Part-B-South",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Railroad reconsiderations go to QIC Part B South (MCPM Ch. 29 sec. 320.7). Second check: C2C's QIC Part B South page lists 'FAX 904-539-4090'. Use the QIC named on the redetermination notice.",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted (fax, portal or mail)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "C2C QIC Appeals Portal: https://www.c2cinc.com/Appellant-Signup (link from https://www.c2cinc.com/QIC-Part-B-South)",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-South",
+      "title": "C2C Innovative Solutions: QIC Part B South",
+      "doc_date": "no date on page",
+      "quote": "Ways to submit your appeal: FAX 904-539-4090 ONLINE Appeals Portal Access the Appeals Portal",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "C2C Innovative Solutions - QIC Part B South, PO Box 45300, Jacksonville, Florida 32232-5300",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-South",
+      "title": "C2C Innovative Solutions: QIC Part B South",
+      "doc_date": "no date on page",
+      "quote": "US MAIL C2C Innovative Solutions - QIC Part B South PO Box 45300 Jacksonville, Florida 32232-5300",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level (redetermination)",
+     "window": "120 days from receipt of the initial determination (RA date + 5 days presumed receipt).",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/first-level-appeal-redetermination-medicare-contractor",
+      "title": "CMS: First Level of Appeal: Redetermination by a Medicare Contractor",
+      "doc_date": "Page Last Modified 03/10/2026",
+      "quote": "The appellant (the individual filing the appeal) has 120 days from the date of receipt of the initial claim determination to file a redetermination request. The notice of initial determination is presumed to be received 5 calendar days after the date of the notice, unless there is evidence to the contrary.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "second_level (QIC reconsideration)",
+     "window": "180 days from receipt of the redetermination decision (presumed received 5 days after the notice date); 60 days from receipt of a MAC dismissal to ask the QIC to review the dismissal.",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal",
+      "title": "CMS: Second Level of Appeal: Reconsideration by a Qualified Independent Contractor",
+      "doc_date": "Page Last Modified 09/30/2026",
+      "quote": "The appellant (the individual filing the appeal) has 180 days from the date of receipt of the redetermination decision to file a reconsideration request.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "reopening (clerical error correction)",
+     "window": "1 year from the date of the initial determination for any reason; up to 4 years with good cause.",
+     "source": {
+      "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c34.pdf",
+      "title": "Medicare Claims Processing Manual Pub. 100-04 Ch. 34, sec. 10.6.2",
+      "doc_date": "Rev. 4219, 01-25-19 (sec. 10.6.2 Rev. 3568)",
+      "quote": "A party may request a contractor reopen and revise its initial determination or redetermination under the following conditions: ... Within 1 year from the date of the initial determination or redetermination for any reason; or ... Within 4 years from the date of the initial determination or redetermination for good cause as defined in §10.11",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "QIC jurisdiction",
+     "window": "Kentucky and Indiana are in the Part B North QIC jurisdiction (C2C Innovative Solutions).",
+     "source": {
+      "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+      "title": "Medicare Claims Processing Manual Pub. 100-04 Ch. 29, sec. 320.7 QIC Jurisdictions",
+      "doc_date": "Rev. 12423, 12-20-23 (sec. 320.7 Rev. 4380)",
+      "quote": "Part B North Jurisdiction Alaska, American Samoa, Arizona, California, Connecticut, Delaware, Guam, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "payer id map",
+     "window": "Indiana Part B workload identifier 08102 (WPS J8).",
+     "source": {
+      "url": "https://www.cms.gov/regulations-and-guidance/guidance/transmittals/2019downloads/r2263otn.pdf",
+      "title": "CMS Transmittal 2263, CR 11153: J8 A/B MAC award (workload identifiers)",
+      "doc_date": "February 22, 2019",
+      "quote": "A/B MAC Part B Workload Identifier: 08102 -Indiana (IN) and 08202-Michigan (MI)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "payer id map",
+     "window": "Kentucky Part B contractor number 15102 (CGS J15).",
+     "source": {
+      "url": "https://www.cgsmedicare.com/pdf/partb_redeterminationform.pdf",
+      "title": "Medicare Part B Jurisdiction 15 Redetermination Request Form",
+      "doc_date": "Revised July 27, 2020",
+      "quote": "KENTUCKY - (15102)",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Channels differ by MAC: CGS (15102) takes no fax for redeterminations or reopenings; WPS (08102) and Palmetto (Railroad) do. Never send a Kentucky appeal to a WPS or Palmetto fax line.",
+    "WPS Indiana fax: 3504 is current (4 WPS documents); the 02/19/26 WPS redetermination request form swaps Indiana and Michigan (prints 3502 for Indiana)."
+   ],
+   "notes": "Appeal routes only (first level, overpayment appeal, second level), each with applies_to naming the 835 payer id it serves. Reopening (clerical correction) and medical-records channels are in the groups 'Medicare KY (CGS J15)', 'Medicare IN (WPS J8)' and 'Railroad Medicare'. Medicare Part B never takes a 'corrected claim': clerical fixes are reopenings (1 year), disputes are redeterminations (120 days), unprocessable MA130 claims get a new claim."
+  },
+  {
+   "payer_group": "Medicare KY (CGS J15)",
+   "product": "Original Medicare Part B",
+   "states": "KY",
+   "what_it_is": "CGS Administrators, LLC, A/B MAC Jurisdiction 15 (Kentucky and Ohio); 835 payer KY MEDICARE, payer id 15102, payer phone 866-290-4036 (CGS IVR).",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "myCGS: Claims tab > claim detail > Request Redetermination. Log in at https://www.onlineproviderservices.com/cgs_ops/ (linked from https://www.cgsmedicare.com/partb/mycgs/index.html)",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/forms/pdf/reopen_vs_redet_jobaid.pdf",
+      "title": "CGS Reopening vs. Redetermination Job Aid (A/B MAC Jurisdiction 15)",
+      "doc_date": "Revised December 16, 2025",
+      "quote": "HOW TO FILE A REDETERMINATION Utilizing the myCGS Web portal is the preferred method for submitting your Redetermination.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). One claim per request; up to 10 PDF attachments, 40 MB each, 150 MB total; reason field 1,200 characters; e-signature; Submission ID returned (myCGS User Manual - Appeals).",
+     "form": "myCGS Redetermination form (built into myCGS)",
+     "required_or_preferred": "preferred"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "CGS, Attn: J15 Part B Appeals Department, PO Box 20018, Nashville, TN 37202",
+     "source": {
+      "url": "https://www.cgsmedicare.com/pdf/partb_redeterminationform.pdf",
+      "title": "Medicare Part B Jurisdiction 15 Redetermination Request Form",
+      "doc_date": "Revised July 27, 2020",
+      "quote": "CGS Attn: J15 Part B Appeals Department PO Box 20018 Nashville, TN 37202",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Form on top; attach the Medicare RA, ABN if any, order and signed medical documentation (form's suggested checklist). Courier/certified mail: J15 - Part A/B Correspondence, CGS Administrators, LLC, 26 Century Blvd Suite NT600, Nashville, TN 37214 (CGS addresses page).",
+     "form": "Medicare Part B Jurisdiction 15 Redetermination Request Form (form on top; signature not required since July 8, 2019)",
+     "form_url": "https://www.cgsmedicare.com/pdf/partb_redeterminationform.pdf",
+     "required_or_preferred": "accepted (written requests must be mailed)"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "portal",
+     "value": "myCGS redetermination with 'overpayment' marked (same route as first_level)",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/forms/pdf/reopen_vs_redet_jobaid.pdf",
+      "title": "CGS Reopening vs. Redetermination Job Aid (A/B MAC Jurisdiction 15)",
+      "doc_date": "Revised December 16, 2025",
+      "quote": "If appealing a recoupment claim (which is not a recoupment clerical reopening, see above) send to the Redetermination department with supporting documentation.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Overpayment/recoupment appeals are redeterminations; mark the overpayment box (MR PROBE, UPIC, CERT, RAC or Other) on the form.",
+     "form": "Medicare Part B Jurisdiction 15 Redetermination Request Form, 'Overpayment Appeal' section",
+     "form_url": "https://www.cgsmedicare.com/pdf/partb_redeterminationform.pdf",
+     "required_or_preferred": "preferred (mail also accepted)"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "myCGS Reopenings (clerical error reopening; self-service adjustments for billed amount, cancel claim/line, date of service, diagnosis, modifier, place of service, procedure code, rendering NPI, units)",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/forms/gateways/when_to.html",
+      "title": "CGS J15 Part B: How to File a Clerical Reopening",
+      "doc_date": "no date on page",
+      "quote": "The BEST vehicle for providers to submit their clerical reopening request is through myCGS web portal!",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Medicare Part B takes no 'corrected claim' (frequency 7): a clerical fix is a reopening. Telephone reopenings ended August 1, 2026 (J15 Part B Customer Service Guide).",
+     "required_or_preferred": "preferred"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "J15 - Part B Correspondence, CGS Administrators, LLC, Attn: Reopenings, PO Box 20018, Nashville, TN 37202",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/cs/addresses.html",
+      "title": "CGS J15 Part B Mailing Addresses",
+      "doc_date": "no date on page",
+      "quote": "Reopenings J15 – Part B Correspondence CGS Administrators, LLC Attn: Reopenings PO Box 20018 Nashville, TN 37202",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). One claim per hardcopy form; written reopenings may take up to 60 days (job aid).",
+     "form": "CGS hardcopy reopening forms (e.g., BPC 346 Billed Amount/Procedure Code Adjustment Request Form)",
+     "form_url": "https://www.cgsmedicare.com/partb/forms/pdf/bpc_346.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "New claim only if the original was rejected as unprocessable (MA130): J15 - Part B/HHH Claims, CGS Administrators, LLC, PO Box 20019, Nashville, TN 37202 (paper only for ASCA small providers; everyone else resubmits electronically)",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/cs/addresses.html",
+      "title": "CGS J15 Part B Mailing Addresses",
+      "doc_date": "no date on page",
+      "quote": "Claims J15 – Part B/HHH Claims CGS Administrators, LLC PO Box 20019 Nashville, TN 37202",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). ASCA: initial claims, including resubmitted rejected claims, must be electronic unless the practice is a small provider (fewer than 10 FTEs) (MCPM Ch. 24 sec. 90).",
+     "form": "CMS-1500 (paper) or 837P (electronic)",
+     "required_or_preferred": "only when paper claims are allowed"
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "615-664-5964",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/pubs/news/2018/01/cope6009.html",
+      "title": "CGS: Additional Documentation Requests (ADRs): How and What to Send",
+      "doc_date": "January 29, 2018, Updated 01.17.2025",
+      "quote": "Medical records may be sent to CGS via three routes: Fax: Kentucky: 615-664-5964 Ohio: 615-664-5966",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Responses to a CGS Medical Review ADR letter only (ADR letter on top of each claim's records). SINGLE SOURCE: no second CGS publication lists this number; confirm it against the fax number printed on the ADR letter before the first send.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "myCGS (Forms tab, ADR form with the ADR Letter Number)",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/pubs/news/2018/01/cope6009.html",
+      "title": "CGS: Additional Documentation Requests (ADRs): How and What to Send",
+      "doc_date": "January 29, 2018, Updated 01.17.2025",
+      "quote": "myCGS Provider Portal: MyCGS Provider Portal Whichever route you use to submit your records, you need to always include your ADR letter on top of the documentation that goes with each requested claim.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102).",
+     "required_or_preferred": "accepted (CGS encourages portal upload)"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "CGS Administrators, LLC, Medicare Part B, 26 Century Blvd, Suite NT600, Nashville, TN 37214",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/pubs/news/2018/01/cope6009.html",
+      "title": "CGS: Additional Documentation Requests (ADRs): How and What to Send",
+      "doc_date": "January 29, 2018, Updated 01.17.2025",
+      "quote": "Mail: CGS Administrators, LLC, Medicare Part B 26 Century Blvd, Suite NT600 Nashville, TN 37214",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Second check: CGS addresses page lists Medical Review ADRs at J15 - Part A/B Correspondence, 26 Century Blvd Suite NT600, Nashville, TN 37214.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "fax",
+     "value": "615-664-5916",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/cs/phone.html",
+      "title": "CGS J15 Part B Phone / Fax",
+      "doc_date": "Updated 10.27.2026",
+      "quote": "Overpayment Recovery Fax offset requests and OPR forms to: Kentucky – 615.664.5916",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Overpayment Recovery only (immediate offset requests, OPR forms for money the practice owes back). Not for appeals. Second check: CGS Immediate Offset Request Form and OPR Non-MSP form both print 1.615.664.5916 (KY).",
+     "form": "Immediate Offset Request Form / Overpayment Recovery Request (Non-MSP OPR 677)",
+     "form_url": "https://www.cgsmedicare.com/partb/forms/pdf/opr_non_msp.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "904-539-4081",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal",
+      "title": "CMS: Second Level of Appeal: Reconsideration by a Qualified Independent Contractor",
+      "doc_date": "Page Last Modified 09/30/2026",
+      "quote": "Part B North C2C Innovative Solutions, Inc. Requests can be submitted in writing, via fax to 904-539-4081, or via the Part B North QIC Appeals Portal at https://www.c2cinc.com/QIC-Part-B-North",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Second check: C2C's own QIC Part B North page lists 'FAX 904-539-4081'. Use the QIC named on the redetermination notice if it differs. Attach a copy of the redetermination notice (MRN) or RA and any new documentation; evidence not given to the QIC may be excluded later.",
+     "form": "CMS-20033 Medicare Reconsideration Request (or a written request with the same items); signature not required since July 8, 2019",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted (fax, portal or mail)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "C2C QIC Appeals Portal: https://www.c2cinc.com/Appellant-Signup (link from https://www.c2cinc.com/QIC-Part-B-North)",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "Ways to submit your appeal: FAX 904-539-4081 ONLINE Appeals Portal Access the Appeals Portal",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102). Free account for the appellant; the portal only receives the request and documents (no status check).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "C2C Innovative Solutions - QIC Part B North, PO Box 45208, Jacksonville, Florida 32232-5208",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "US MAIL C2C Innovative Solutions - QIC Part B North PO Box 45208 Jacksonville, Florida 32232-5208",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "phone",
+     "value": "1-904-224-7426 (QIC Part B North questions)",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "If you have questions about the QIC Part B North appeals process: FAQ FAQ Get answers to Frequently Asked Questions . Access Frequently-Asked-Questions on electronic submission options. CALL 1-904-224-7426",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Kentucky (CGS J15; 835 payer id 15102)."
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level (redetermination)",
+     "window": "120 days from the date of receipt of the notice of initial determination; no dollar minimum.",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/appeals/level1.html",
+      "title": "CGS J15 Part B: 1st Level of Appeal - Redetermination",
+      "doc_date": "Updated 04.15.2026",
+      "quote": "Time Limit for Filing Request 120 days from the date of receipt of the notice of initial determination",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "first_level (redetermination)",
+     "window": "120 days from receipt of the initial determination (RA date + 5 days presumed receipt).",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/first-level-appeal-redetermination-medicare-contractor",
+      "title": "CMS: First Level of Appeal: Redetermination by a Medicare Contractor",
+      "doc_date": "Page Last Modified 03/10/2026",
+      "quote": "The appellant (the individual filing the appeal) has 120 days from the date of receipt of the initial claim determination to file a redetermination request. The notice of initial determination is presumed to be received 5 calendar days after the date of the notice, unless there is evidence to the contrary.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "second_level (QIC reconsideration)",
+     "window": "180 days from receipt of the redetermination; 60 days from receipt of a dismissal.",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/appeals/level2.html",
+      "title": "CGS J15 Part B: 2nd Level of Appeal - Reconsideration",
+      "doc_date": "Reviewed 12.17.2025",
+      "quote": "180 days from the date of receipt of the redetermination. NOTE: If a party requests QIC review of a contractor's dismissal of a request for redetermination, the time limit for filing a request for reconsideration is 60 days from the date of receipt of the contractor's dismissal notice.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "reopening (clerical error correction)",
+     "window": "Within one year from the date of the initial determination (4 years with good cause, MCPM Ch. 34).",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/forms/pdf/reopen_vs_redet_jobaid.pdf",
+      "title": "CGS Reopening vs. Redetermination Job Aid (A/B MAC Jurisdiction 15)",
+      "doc_date": "Revised December 16, 2025",
+      "quote": "A reopening must be requested within one year from the date of the initial determination.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "records (ADR response)",
+     "window": "Received within 45 days of the date of the ADR letter.",
+     "source": {
+      "url": "https://www.cgsmedicare.com/partb/pubs/news/2018/01/cope6009.html",
+      "title": "CGS: Additional Documentation Requests (ADRs): How and What to Send",
+      "doc_date": "January 29, 2018, Updated 01.17.2025",
+      "quote": "when records are requested, they must be received within 45 days of the date of the letter.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "QIC jurisdiction",
+     "window": "Kentucky and Indiana are in the Part B North QIC jurisdiction (C2C Innovative Solutions).",
+     "source": {
+      "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+      "title": "Medicare Claims Processing Manual Pub. 100-04 Ch. 29, sec. 320.7 QIC Jurisdictions",
+      "doc_date": "Rev. 12423, 12-20-23 (sec. 320.7 Rev. 4380)",
+      "quote": "Part B North Jurisdiction Alaska, American Samoa, Arizona, California, Connecticut, Delaware, Guam, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "no_fax_reason": "CGS does not accept redeterminations or reopenings by fax. Job aid (rev. 12/16/2025): 'Utilizing the myCGS Web portal is the preferred method for submitting your Redetermination ... Redeterminations should be mailed to the address at the bottom of the form. Redeterminations do not accept faxed request.' Telephone reopenings ended 08/01/2026. The only faxes CGS publishes are for congressional offices, general correspondence (615.782.4490), overpayment recovery (KY 615.664.5916) and Medical Review ADR records (KY 615-664-5964). Second level (QIC Part B North) does take fax: 904-539-4081.",
+   "conflicts": [
+    "Redetermination mail: form says 'CGS, Attn: J15 Part B Appeals Department, PO Box 20018'; addresses page says 'J15 - Part A/B Correspondence ... PO Box 20018' for appeals. Same box; use the form's attention line.",
+    "Job aid says a redetermination is due '120 days from the initial claim determination'; the CGS appeals page and CMS say 120 days from receipt (date of notice + 5 days). Use receipt.",
+    "CGS reconsideration form (2017) and CGS level-2 page point to C2C QIC Part B North; the myCGS manual says 'The QICs for our jurisdiction are C2C Innovative Solutions, Inc. (C2C) and Maximus' because Part A goes to other QICs. For Part B use QIC Part B North (MCPM 29 sec. 320.7) unless the decision letter names another.",
+    "CGS PWK fax (KY 1.615.664.5952, 2018 cover sheet) is for unsolicited documentation with an electronic claim and must not be used for ADR responses."
+   ],
+   "notes": "myCGS log-in: https://www.onlineproviderservices.com/cgs_ops/ (needs an EDI enrollment agreement per NPI/PTAN). Part B reconsiderations cannot be filed in myCGS (2nd level there is Part A/HHH only). ASCA: paper claims only for small providers (MCPM 24 sec. 90). Overpayment appeals are redeterminations; reopenings of recoupment claims go to Overpayment Recovery (job aid)."
+  },
+  {
+   "payer_group": "Medicare IN (WPS J8)",
+   "product": "Original Medicare Part B",
+   "states": "IN",
+   "what_it_is": "WPS Government Health Administrators, A/B MAC Jurisdiction 8 (Indiana and Michigan); 835 payer MEDICARE OF INDIANA / IN MEDICARE, payer id 08102, payer phone 866-234-7331.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "WPS SNAP (Secure Net Access Portal): Claim Inquiry > claim > Claim Actions > Request Redetermination. Log in at https://www.wpsgha.com",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/661",
+      "title": "WPS: How to Appeal a Claim Determination (J8B section; text from https://www.wpsgha.com/api/content/resources/661)",
+      "doc_date": "content updated 2025-01-07",
+      "quote": "How to Submit Your Redetermination Request via WPS SNAP To submit a redetermination request, you must use a specific claim. Once logged in, use the claim inquiry link to find the claim.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Documents must go with the request (cannot be added later); Part B upload up to 100 MB, up to 20 files in one .zip; tracking number returned (WPS SNAP User Manual, November 2026).",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "(608) 224-3504",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/Indiana_Appeals_Clerical_Error_Reopening_Fax_Cover_Sheet_94af235c3b.pdf",
+      "title": "WPS Indiana Appeals/Clerical Error Reopening Fax Cover Sheet (form A08; listed at https://www.wpsgha.com/forms/view/7)",
+      "doc_date": "PDF dated 03/29/2016; form page updated 2025-03-07",
+      "quote": "INDIANA FAX (Please indicate which type of request you are submitting.) REDETERMINATION REQUEST Appeal of Overpayment (please include overpayment letter) REOPENING REQUEST To: Medicare Appeals Department Fax Number: 608-224-3504",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Settled conflict: WPS's 'How to Appeal a Claim Determination' J8B table, the Indiana cover sheet, the 02/18/2026 overpayment redetermination form and the 10/2026 CER guide all give Indiana (608) 224-3504; only the 02/19/26 redetermination request form prints 3502 for Indiana (it swaps Indiana and Michigan). Fax the Indiana cover sheet plus the form, one ICN per fax.",
+     "form": "WPS J8 Part B Redetermination Request Form + Indiana Appeals/Clerical Error Reopening Fax Cover Sheet (cover sheet alone is not a valid request)",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "WPS Government Services, ATTN: Redeterminations, PO Box 8580, Madison, WI 53708-8580",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf",
+      "title": "WPS Government Services J8 Part B Redetermination Request Form",
+      "doc_date": "02/19/26 (file replaced 2026-03-27)",
+      "quote": "Or mail the form to: Indiana: WPS Government Services ATTN: Redeterminations PO Box 8580 Madison, WI 53708-8580",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). WPS Contact Us lists the same box as 'Appeals Department, P.O. Box 8580' for redeterminations not related to an overpayment.",
+     "form": "WPS Government Services J8 Part B Redetermination Request Form (all fields required; incomplete requests are dismissed)",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_Request_Form_c69dfa1183.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "fax",
+     "value": "(608) 224-3504",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+      "title": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+      "doc_date": "02/18/2026 (file replaced 2026-03-27)",
+      "quote": "Fax Numbers: Indiana: (608) 224-3504 Michigan: (608) 224-3502",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Appeal of an overpayment decision (redetermination of an overpayment). Include the overpayment letter and the Indiana cover sheet. Portal also accepted (answer 'Yes' to 'Request involves Overpayment').",
+     "form": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "WPS Government Services, ATTN: Overpayment Appeals, PO Box 8580, Madison, WI 53708-8580",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+      "title": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+      "doc_date": "02/18/2026 (file replaced 2026-03-27)",
+      "quote": "Or Mail to: Indiana: WPS Government Services ATTN: Overpayment Appeals PO Box 8580 Madison, WI 53708-8580",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102).",
+     "form": "WPS Government Services J8 Part B Redetermination of an Overpayment Request Form",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Redetermination_of_an_Overpayment_Request_Form_1f05298b15.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "portal",
+     "value": "WPS SNAP Clerical Error Reopening (CER) on the claim (once per claim; update every field in one go)",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/2658",
+      "title": "WPS: How to Request a Clerical Error Reopening (CER) (text from WPS content API)",
+      "doc_date": "updated 2026-10-20",
+      "quote": "Providers can submit most CERs using our portal. The CER function allows providers to enter revised claim information, which the portal transmits directly to the claims processing system.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Medicare Part B takes no 'corrected claim': clerical fixes are reopenings. 'NOTE: You can only adjust claims once via the portal.'",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "phone",
+     "value": "(866) 234-7331",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/2658",
+      "title": "WPS: How to Request a Clerical Error Reopening (CER) (text from WPS content API)",
+      "doc_date": "updated 2026-10-20",
+      "quote": "Call us at (866) 234-7331. You will need to provide the following information:",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Telephone clerical error reopening; have PTAN, NPI, TIN and claim details ready.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "fax",
+     "value": "(608) 224-3504",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/2658",
+      "title": "WPS: How to Request a Clerical Error Reopening (CER) (text from WPS content API)",
+      "doc_date": "updated 2026-10-20",
+      "quote": "To submit CER requests by fax, you must complete the ... Reopening Request Form and use the appropriate fax cover sheet and fax number for your state. Each fax cover sheet lists the fax number for that state.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). The Indiana cover sheet lists 608-224-3504 (see first_level fax). Settled conflict: WPS's 'How to Appeal a Claim Determination' J8B table, the Indiana cover sheet, the 02/18/2026 overpayment redetermination form and the 10/2026 CER guide all give Indiana (608) 224-3504; only the 02/19/26 redetermination request form prints 3502 for Indiana (it swaps Indiana and Michigan). Fax the Indiana cover sheet plus the form, one ICN per fax.",
+     "form": "WPS Medicare Reopening Request Form - J8B + Indiana Appeals/Clerical Error Reopening Fax Cover Sheet",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Reopening_Request_Form_5161891700.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "WPS Government Services, Reopening Department, PO Box 8580, Madison, WI 53708-8580",
+     "source": {
+      "url": "https://www.wpsgha.com/contact",
+      "title": "WPS Contact Us, J8 MAC Part B (text from https://www.wpsgha.com/api/content/departments)",
+      "doc_date": "entries updated 2025-03-14 to 2025-03-17",
+      "quote": "Mail written request for a reopening of a claim: Indiana WPS Government Services Reopening Department PO Box 8580 Madison, WI 53708-8580",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102).",
+     "form": "WPS Medicare Reopening Request Form - J8B",
+     "form_url": "https://www.wpsgha.com/uploads/J8_B_Reopening_Request_Form_5161891700.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "New claim only if the original was rejected as unprocessable (MA130): WPS Government Services, Claims Department, P.O. Box 8940, Madison, WI 53708-8940 (paper only for ASCA small providers)",
+     "source": {
+      "url": "https://www.wpsgha.com/contact",
+      "title": "WPS Contact Us, J8 MAC Part B (text from https://www.wpsgha.com/api/content/departments)",
+      "doc_date": "entries updated 2025-03-14 to 2025-03-17",
+      "quote": "Indiana WPS Government Services Claims Department P.O. Box 8940 Madison, WI 53708-8940",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). 'You can only correct a rejected or unprocessable claim by submitting a new claim with the correct information.' (WPS How to Correct a Rejected Claim).",
+     "form": "CMS-1500 (paper) or 837P (electronic)",
+     "required_or_preferred": "only when paper claims are allowed"
+    },
+    {
+     "purpose": "records",
+     "channel": "portal",
+     "value": "WPS SNAP: Add Documentation (ADR or MR) on the claim",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/365",
+      "title": "WPS: Responding to a Medical Review Additional Documentation Request (ADR) (text from WPS content API)",
+      "doc_date": "updated 2024-12-26",
+      "quote": "The best way to submit medical records is via the portal.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). One file per claim, 15 MB max; several files go in one .zip of no more than 60 files; ADR letter as first page.",
+     "required_or_preferred": "preferred"
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "(608) 224-3512",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/365",
+      "title": "WPS: Responding to a Medical Review Additional Documentation Request (ADR) (text from WPS content API)",
+      "doc_date": "updated 2024-12-26",
+      "quote": "To avoid delays and possible claim denials, fax documentation to the Medical Review fax number for your jurisdiction. ... Medical Review Fax Number: (608) 224-3512",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). J8 Part B Medical Review ADR responses only; one ADR per fax, ADR letter on top. SINGLE SOURCE: no second WPS publication lists this number; confirm against the ADR letter before the first send.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "WPS Medical Review Department, P.O. Box 7954, Madison, WI 53707-7954 (overnight/certified: 1717 W Broadway, Madison, WI 53713-1834)",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/365",
+      "title": "WPS: Responding to a Medical Review Additional Documentation Request (ADR) (text from WPS content API)",
+      "doc_date": "updated 2024-12-26",
+      "quote": "WPS Medical Review Department P.O. Box 7954 Madison, WI 53707-7954 | WPS Medical Review Department 1717 W Broadway Madison, WI 53713-1834",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Also esMD (through a Health Information Handler) and password-protected CD/DVD.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "fax",
+     "value": "(608) 223-7550",
+     "source": {
+      "url": "https://www.wpsgha.com/uploads/overpayment_notification_refund_form_15d6cd22a8.pdf",
+      "title": "WPS Overpayment Notification-Refund Form",
+      "doc_date": "PDF modified 2018-07-27",
+      "quote": "If no payment included, fax to: (608) 223-7550.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Overpayment Notification/Refund Form without a check (practice telling WPS it was overpaid). Not for appeals. Second check: WPS Contact Us (J8B, MSP Overpayments) says 'If overpayment notification only, please fax to: 608-223-7550'. WPS recommends the portal for refunds.",
+     "form": "Overpayment Notification/Refund Form",
+     "form_url": "https://www.wpsgha.com/uploads/overpayment_notification_refund_form_15d6cd22a8.pdf",
+     "required_or_preferred": "accepted (portal recommended)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "904-539-4081",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal",
+      "title": "CMS: Second Level of Appeal: Reconsideration by a Qualified Independent Contractor",
+      "doc_date": "Page Last Modified 09/30/2026",
+      "quote": "Part B North C2C Innovative Solutions, Inc. Requests can be submitted in writing, via fax to 904-539-4081, or via the Part B North QIC Appeals Portal at https://www.c2cinc.com/QIC-Part-B-North",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Second check: C2C's own QIC Part B North page lists 'FAX 904-539-4081'. Use the QIC named on the redetermination notice if it differs. Attach a copy of the redetermination notice (MRN) or RA and any new documentation; evidence not given to the QIC may be excluded later.",
+     "form": "CMS-20033 Medicare Reconsideration Request (or a written request with the same items); signature not required since July 8, 2019",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted (fax, portal or mail)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "C2C QIC Appeals Portal: https://www.c2cinc.com/Appellant-Signup (link from https://www.c2cinc.com/QIC-Part-B-North)",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "Ways to submit your appeal: FAX 904-539-4081 ONLINE Appeals Portal Access the Appeals Portal",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102). Free account for the appellant; the portal only receives the request and documents (no status check).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "C2C Innovative Solutions - QIC Part B North, PO Box 45208, Jacksonville, Florida 32232-5208",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "US MAIL C2C Innovative Solutions - QIC Part B North PO Box 45208 Jacksonville, Florida 32232-5208",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "other",
+     "channel": "phone",
+     "value": "1-904-224-7426 (QIC Part B North questions)",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-North",
+      "title": "C2C Innovative Solutions: QIC Part B North",
+      "doc_date": "no date on page",
+      "quote": "If you have questions about the QIC Part B North appeals process: FAQ FAQ Get answers to Frequently Asked Questions . Access Frequently-Asked-Questions on electronic submission options. CALL 1-904-224-7426",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Medicare Part B, Indiana (WPS J8; 835 payer id 08102)."
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level (redetermination)",
+     "window": "120 days from the date of receipt of the notice of initial determination; no dollar minimum.",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/661",
+      "title": "WPS: How to Appeal a Claim Determination (J8B section; text from https://www.wpsgha.com/api/content/resources/661)",
+      "doc_date": "content updated 2025-01-07",
+      "quote": "Redetermination | 120 days from the date of receipt of the notice of initial determination | None",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "payment_dispute (overpayment appeal)",
+     "window": "Any time within 120 days, but within 30 days of the demand letter to stop recoupment (Section 935); reconsideration within 60 days of the redetermination to keep it stopped.",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/239",
+      "title": "WPS: How to Appeal an Overpayment Decision (text from WPS content API)",
+      "doc_date": "updated 2023-10-28",
+      "quote": "if a provider wants to delay recoupment of the overpayment, it must submit a redetermination request within 30 days of the demand letter date.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "second_level (QIC reconsideration)",
+     "window": "180 days from the date of receipt of the redetermination.",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/661",
+      "title": "WPS: How to Appeal a Claim Determination (J8B section; text from https://www.wpsgha.com/api/content/resources/661)",
+      "doc_date": "content updated 2025-01-07",
+      "quote": "Reconsideration | 180 days from the date of receipt of the redetermination.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "reopening (clerical error correction)",
+     "window": "Up to one year from receipt of the initial Remittance Notice; later only in writing with good cause.",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/2658",
+      "title": "WPS: How to Request a Clerical Error Reopening (CER) (text from WPS content API)",
+      "doc_date": "updated 2026-10-20",
+      "quote": "A provider, physician, or supplier may request a reopening up to one year from the receipt of the initial Remittance Notice.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "records (ADR response)",
+     "window": "Within 45 days of the ADR letter date.",
+     "source": {
+      "url": "https://www.wpsgha.com/guides-resources/view/365",
+      "title": "WPS: Responding to a Medical Review Additional Documentation Request (ADR) (text from WPS content API)",
+      "doc_date": "updated 2024-12-26",
+      "quote": "The billing provider is responsible for returning the documentation to the MAC within 45 days of the ADR letter date.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "QIC jurisdiction",
+     "window": "Kentucky and Indiana are in the Part B North QIC jurisdiction (C2C Innovative Solutions).",
+     "source": {
+      "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+      "title": "Medicare Claims Processing Manual Pub. 100-04 Ch. 29, sec. 320.7 QIC Jurisdictions",
+      "doc_date": "Rev. 12423, 12-20-23 (sec. 320.7 Rev. 4380)",
+      "quote": "Part B North Jurisdiction Alaska, American Samoa, Arizona, California, Connecticut, Delaware, Guam, Hawaii, Idaho, Illinois, Indiana, Iowa, Kansas, Kentucky",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Indiana fax: (608) 224-3504 per WPS How to Appeal a Claim Determination (J8B table), the Indiana Appeals/Clerical Error Reopening Fax Cover Sheet ('INDIANA FAX ... Fax Number: 608-224-3504'), the J8B Redetermination of an Overpayment Request Form (02/18/2026) and the CER guide (10/20/2026: 'Each fax cover sheet lists the fax number for that state'). The J8B Redetermination Request Form (02/19/26) prints 'Indiana: (608) 224-3502 ... Michigan: (608) 224-3504', the reverse. Current = 3504 for Indiana. Both lines are WPS appeals lines (Michigan = 3502), so the form's error would misroute inside WPS, not outside it; report the form error to WPS 866-234-7331.",
+    "Mail attention line: redetermination form 'ATTN: Redeterminations, PO Box 8580'; Contact Us 'Appeals Department, P.O. Box 8580'. Same box.",
+    "WPS PWK cover sheet (2019) Indiana fax (608) 224-3505 is for unsolicited documentation with an electronic claim, not appeals or ADR responses."
+   ],
+   "notes": "WPS SNAP log-in at https://www.wpsgha.com (WPS says not to bookmark the portal URL). One appeal per claim; portal documentation must go with the request. Portal reopenings: once per claim. Part B reconsiderations go straight to C2C QIC Part B North (SNAP files 2nd level for Part A only). WPS pages render client-side; their text was read from WPS's public content API on wpsgha.com."
+  },
+  {
+   "payer_group": "Railroad Medicare",
+   "product": "Railroad Medicare Part B (RRB Specialty MAC)",
+   "states": "national (practice in KY, IN)",
+   "what_it_is": "Palmetto GBA, Railroad Retirement Board Specialty Medicare Administrative Contractor; 835 payer RAILROAD MEDICARE, payer ids 00882 and 00320, payer state GA, payer phone 877-288-7600.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "Palmetto GBA eServices portal, log in via https://palmettogba.com/eservices",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+      "doc_date": "Revised 7/20/2026",
+      "quote": "Instructions: If you are unable to submit your Redetermination (first level appeals) request via our eServices portal, please use this form to submit your request for a Redetermination.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Overpayment appeals use the same form or the eServices Overpayment Appeal eForm.",
+     "required_or_preferred": "preferred (form is for when eServices cannot be used)"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "fax",
+     "value": "(803) 462-2218",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+      "doc_date": "Revised 7/20/2026",
+      "quote": "Please send this form and all additional documentation to: Mail Fax Submit Appeals Electronically Palmetto GBA Railroad Medicare (803) 462-2218 Palmetto GBA eServices Portal",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Second check: Palmetto reopening forms AP-RRB-B-1020 and AP-RRB-B-1021 print 'Fax: (803) 462-2218'. Include the RA; one form may cover several claims with the same issue.",
+     "form": "Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+     "form_url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "Palmetto GBA Railroad Medicare, Attention: Appeals, P.O. Box 10066, Augusta, GA 30999-0001",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+      "doc_date": "Revised 7/20/2026",
+      "quote": "Palmetto GBA Railroad Medicare (803) 462-2218 Palmetto GBA eServices Portal Attention:Appeals Login via palmettogba.com/eservices P.O. Box 10066 Augusta, GA 30999-0001",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320).",
+     "form": "Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+     "form_url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "904-539-4090",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal",
+      "title": "CMS: Second Level of Appeal: Reconsideration by a Qualified Independent Contractor",
+      "doc_date": "Page Last Modified 09/30/2026",
+      "quote": "Part B South C2C Innovative Solutions, Inc. Requests can be submitted in writing, via fax to 904-539-4090, or via the Part B South QIC Appeals Portal at https://www.c2cinc.com/QIC-Part-B-South",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Railroad reconsiderations go to QIC Part B South (MCPM Ch. 29 sec. 320.7). Second check: C2C's QIC Part B South page lists 'FAX 904-539-4090'. Use the QIC named on the redetermination notice.",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted (fax, portal or mail)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "C2C QIC Appeals Portal: https://www.c2cinc.com/Appellant-Signup (link from https://www.c2cinc.com/QIC-Part-B-South)",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-South",
+      "title": "C2C Innovative Solutions: QIC Part B South",
+      "doc_date": "no date on page",
+      "quote": "Ways to submit your appeal: FAX 904-539-4090 ONLINE Appeals Portal Access the Appeals Portal",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "C2C Innovative Solutions - QIC Part B South, PO Box 45300, Jacksonville, Florida 32232-5300",
+     "source": {
+      "url": "https://www.c2cinc.com/QIC-Part-B-South",
+      "title": "C2C Innovative Solutions: QIC Part B South",
+      "doc_date": "no date on page",
+      "quote": "US MAIL C2C Innovative Solutions - QIC Part B South PO Box 45300 Jacksonville, Florida 32232-5300",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320).",
+     "form": "CMS-20033",
+     "form_url": "https://www.cms.gov/medicare/cms-forms/cms-forms/downloads/cms20033.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "fax",
+     "value": "(803) 462-2218",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1020.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Reopening: Simple Claim Correction (AP-RRB-B-1020)",
+      "doc_date": "Revised 3/2018",
+      "quote": "Please mail this form and all additional documentation to: AP-RRB-B-1020 Palmetto GBA - Railroad Medicare AP-RRB-B-1020 P.O. Box 10066 Revised 3/2018 Augusta, GA 30999 Fax: (803) 462-2218",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Clerical error reopening (no corrected claims in Medicare Part B). Use AP-RRB-B-1021 when more than one year has passed.",
+     "form": "Reopening: Simple Claim Correction (AP-RRB-B-1020)",
+     "form_url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1020.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "Palmetto GBA - Railroad Medicare, P.O. Box 10066, Augusta, GA 30999",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1020.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Reopening: Simple Claim Correction (AP-RRB-B-1020)",
+      "doc_date": "Revised 3/2018",
+      "quote": "Palmetto GBA - Railroad Medicare AP-RRB-B-1020 P.O. Box 10066 Revised 3/2018 Augusta, GA 30999",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320).",
+     "form": "Reopening: Simple Claim Correction (AP-RRB-B-1020)",
+     "form_url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1020.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "New claim only if rejected as unprocessable (MA130): paper CMS-1500 only if eligible to file paper claims, otherwise electronic",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/PC-RRB-B-5510.pdf",
+      "title": "Railroad Medicare Provider Contact Center - Written Inquiry Request Form (PC-RRB-B-5510)",
+      "doc_date": "Revised 10/2022",
+      "quote": "Claims with remittance advice message MA130 or returned with a letter are considered unprocessable. If you are eligible to file paper claims, resubmit your corrected claim on a new CMS-1500 claim form.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "Railroad Medicare Part B (Palmetto GBA RRB SMAC; 835 payer name RAILROAD MEDICARE, payer ids 00882 and 00320). Mail address for Railroad Medicare Part B claims/correspondence: Palmetto GBA, Railroad Medicare - Part B, P.O. Box 10066, Augusta, GA 30999 (as listed by WPS Contact Us; Palmetto's own forms use the same box).",
+     "form": "CMS-1500 or 837P",
+     "required_or_preferred": "only when paper claims are allowed"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level (redetermination)",
+     "window": "120 days from receipt of the initial determination; give the reason if later.",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1000.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Redetermination: 1st Level Appeal (AP-RRB-B-1000)",
+      "doc_date": "Revised 7/20/2026",
+      "quote": "Reason for Appeal: Include the reason for filing late if the request exceeds the 120-day timely filing limit.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "second_level (QIC reconsideration)",
+     "window": "180 days from receipt of the redetermination decision (presumed received 5 days after the notice date); 60 days from receipt of a MAC dismissal to ask the QIC to review the dismissal.",
+     "source": {
+      "url": "https://www.cms.gov/medicare/appeals-grievances/fee-for-service/second-level-appeal",
+      "title": "CMS: Second Level of Appeal: Reconsideration by a Qualified Independent Contractor",
+      "doc_date": "Page Last Modified 09/30/2026",
+      "quote": "The appellant (the individual filing the appeal) has 180 days from the date of receipt of the redetermination decision to file a reconsideration request.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "QIC jurisdiction",
+     "window": "Railroad Retirement Board reconsiderations belong to the Part B South QIC (C2C).",
+     "source": {
+      "url": "https://www.cms.gov/regulations-and-guidance/guidance/manuals/downloads/clm104c29.pdf",
+      "title": "Medicare Claims Processing Manual Pub. 100-04 Ch. 29, sec. 320.7 QIC Jurisdictions",
+      "doc_date": "Rev. 12423, 12-20-23 (sec. 320.7 Rev. 4380)",
+      "quote": "Note: Railroad Retirement Board ... reconsiderations are also included in ... this workload jurisdiction.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "reopening (clerical error correction)",
+     "window": "Within 365 days of the initial determination; after that use the late-submission form with good cause.",
+     "source": {
+      "url": "https://palmettogba.com/api/files/forms/AP-RRB-B-1021.pdf",
+      "title": "Palmetto GBA Railroad Medicare: Reopening: Simple Claim Correction - Late Submission (AP-RRB-B-1021)",
+      "doc_date": "Revised 3/2018",
+      "quote": "Reason Request Submission is Late (365 Days After Initial Determination):",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "conflicts": [
+    "Mail ZIP: redetermination form 'Augusta, GA 30999-0001' with 'Attention:Appeals'; reopening forms 'Augusta, GA 30999'. Same PO Box 10066; use the form's version.",
+    "Railroad reconsiderations go to QIC Part B South (PO Box 45300, fax 904-539-4090), not Part B North like the practice's KY/IN Medicare claims (MCPM 29 sec. 320.7).",
+    "Written inquiry fax (803) 264-9844 (PC-RRB-B-5510) is for Provider Contact Center inquiries, not appeals or reopenings."
+   ],
+   "notes": "Medical records (ADR) channel not recorded: Palmetto's current site renders in the browser and the legacy ADR pages are gone, so no current Palmetto publication with an ADR fax could be read. Use the fax or address printed on the ADR letter, or eServices. eServices log-in: https://palmettogba.com/eservices."
+  },
+  {
+   "payer_group": "Tricare",
+   "product": "TRICARE For Life (Medicare-wraparound; TRICARE secondary to Medicare)",
+   "states": "U.S. and territories",
+   "what_it_is": "TRICARE For Life administered by WPS (Wisconsin Physicians Service) for the Defense Health Agency; 835 payer TRICARE FOR LIFE, payer state WI, web WWW.TRICARE4U.COM.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "WPS TRICARE For Life, ATTN: APPEALS, P.O. BOX 7490, Madison, WI 53707-7490",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us/faqs",
+      "title": "TRICARE For Life (WPS): FAQs",
+      "doc_date": "no date on page",
+      "quote": "Your SIGNED, written request must state the specific matter with which you disagree and MUST be mailed to the following address no later than ninety (90) days from the date of the denial. ... WPS TRICARE For Life ATTN: APPEALS P.O. BOX 7490 Madison, WI 53707-7490",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE). TRICARE-only denials. If Medicare and TRICARE both cover the service, appeal to Medicare first (tricare.mil). Second check: tricare.mil appeals page and the TFL Contact Us page list the same box. Allowable-charge amounts are not appealable; network providers are not proper appealing parties (TFL Handbook Fig. 7.1).",
+     "form": "Signed written request with the denial notice and supporting documents (no specific form)",
+     "required_or_preferred": "required in writing"
+    },
+    {
+     "purpose": "first_level",
+     "channel": "portal",
+     "value": "TRICARE4u.com provider portal (secure log-in): https://tricare4u.com/en/portal/provider",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us/faqs",
+      "title": "TRICARE For Life (WPS): FAQs",
+      "doc_date": "no date on page",
+      "quote": "Appeals can also be sent by your provider to TFL through the secure portion of the TRICARE4u.com website.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE).",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Defense Health Agency, Appeals, Hearings and Claims Collection Division, 16401 E. Centretech Parkway, Aurora, CO 80011-9066",
+     "source": {
+      "url": "https://tricare.mil/PatientResources/Claims/Appeals",
+      "title": "TRICARE: File an Appeal (read through WebFetch; tricare.mil blocks scripted downloads)",
+      "doc_date": "Last Updated 10/21/2026",
+      "quote": "Defense Health Agency Appeals, Hearings and Claims Collection Division 16401 E. Centretech Parkway Aurora, CO 80011-9066 ... If the amount is $50 or more and the letter says the Defense Health Agency is the next level of appeal, you can request a formal review. Send a letter to the Defense Health Agency.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE). Formal review after WPS's reconsideration decision, only when the decision letter names DHA as the next level.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "303-676-3616",
+     "source": {
+      "url": "https://tricare.mil/PatientResources/Claims/Appeals",
+      "title": "TRICARE: File an Appeal (read through WebFetch; tricare.mil blocks scripted downloads)",
+      "doc_date": "Last Updated 10/21/2026",
+      "quote": "Defense Health Agency Appeals, Hearings and Claims Collection Division 16401 E. Centretech Parkway Aurora, CO 80011-9066 Fax: 303-676-3616",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE). SINGLE SOURCE (tricare.mil appeals page, read through WebFetch): confirm against the reconsideration decision letter before the first send.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "WPS/TRICARE For Life, P.O. Box 7890, Madison, WI 53707-7890 (claims)",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us",
+      "title": "TRICARE For Life (WPS): Contact Us",
+      "doc_date": "no date on page",
+      "quote": "Send all claims to: WPS/TRICARE For Life P.O. Box 7890 Madison, WI 53707-7890",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE). A corrected claim that changes diagnosis or procedure code becomes a formal appeal ('Can I use a corrected claim as an appeal? A: Yes', TFL FAQ). Second check: tricare.mil claims addresses page (9/23/2026) lists WPS TRICARE For Life P.O. Box 7890 Madison WI 53707-7890.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "fax",
+     "value": "608-301-2114",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us",
+      "title": "TRICARE For Life (WPS): Contact Us",
+      "doc_date": "no date on page",
+      "quote": "Send all written correspondence to: WPS/TRICARE For Life P.O. Box 7889 Madison, WI 53707-7889 Fax correspondence to: 608-301-2114",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE). General written correspondence (including documents TFL asks for). Not listed for appeals. Second check: the TFL FAQ (Authorizations) also gives fax 608-301-2114 for claims sent with supporting documents.",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "WPS/TRICARE For Life, P.O. Box 7889, Madison, WI 53707-7889",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us",
+      "title": "TRICARE For Life (WPS): Contact Us",
+      "doc_date": "no date on page",
+      "quote": "Send all written correspondence to: WPS/TRICARE For Life P.O. Box 7889 Madison, WI 53707-7889",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE).",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "payment_dispute",
+     "channel": "mail",
+     "value": "WPS/TRICARE For Life, P.O. Box 7928, Madison, WI 53707-7928 (recoupment department)",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us/faqs",
+      "title": "TRICARE For Life (WPS): FAQs",
+      "doc_date": "no date on page",
+      "quote": "You may request a review in writing to our recoupment department. Be sure to include any pertinent documentation/information and your reason(s) for disagreeing. Submit your request to: WPS/TRICARE For Life P.O. Box 7928 Madison, WI 53707-7928",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "TRICARE For Life (WPS Military and Veterans Health, U.S. and territories; 835 payer name TRICARE FOR LIFE). Disagreeing with a TFL recoupment (refund request).",
+     "required_or_preferred": "required in writing"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level (TFL reconsideration)",
+     "window": "90 days from the date of the denial / date on the EOB.",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us/faqs",
+      "title": "TRICARE For Life (WPS): FAQs",
+      "doc_date": "no date on page",
+      "quote": "MUST be mailed to the following address no later than ninety (90) days from the date of the denial.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "first_level (TFL reconsideration)",
+     "window": "Within 90 days from the date on the explanation of benefits or denial notification letter.",
+     "source": {
+      "url": "https://tricare.mil/-/media/Files/TRICARE/Publications/Handbooks/TFL_HB.pdf",
+      "title": "TRICARE For Life Handbook",
+      "doc_date": "Updated August 2026",
+      "quote": "TFL appeals must be filed with WPS ... within 90 days from the date that appears ... on the explanation of benefits or denial ... notification letter.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "second_level (DHA formal review)",
+     "window": "Postmark within 60 days of the appeal decision; amount in dispute $50 or more; hearing if $300 or more.",
+     "source": {
+      "url": "https://tricare.mil/PatientResources/Claims/Appeals",
+      "title": "TRICARE: File an Appeal (read through WebFetch; tricare.mil blocks scripted downloads)",
+      "doc_date": "Last Updated 10/21/2026",
+      "quote": "Make sure the postmark is within 60 days of the date on the appeal decision.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "payment_dispute (recoupment)",
+     "window": "Providers have 60 days from the recoupment letter to repay before offsets start.",
+     "source": {
+      "url": "https://tricare4u.com/en/portal/beneficiary/contact-us/faqs",
+      "title": "TRICARE For Life (WPS): FAQs",
+      "doc_date": "no date on page",
+      "quote": "If you are a provider, you have 60 days from the date of the recoupment letter.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "no_fax_reason": "TFL publishes no fax for appeals: the TFL FAQ says a signed written request 'MUST be mailed' to WPS TRICARE For Life ATTN: APPEALS P.O. BOX 7490 Madison WI 53707-7490, or sent by the provider through the secure TRICARE4u.com portal; tricare.mil lists the same box. The TFL fax 608-301-2114 is for general written correspondence.",
+   "conflicts": [
+    "Which program decides: if Medicare and TRICARE both cover the service, the appeal goes to Medicare first (tricare.mil 'Both Medicare and TRICARE -> Medicare first'); TFL Handbook: 'You should only submit appeals to WPS if TRICARE is the primary payer.' The TFL FAQ invites provider appeals of TFL denials. So: TRICARE-only denials or TFL-specific denials -> WPS TFL; Medicare-covered service denials -> the Medicare MAC.",
+    "Timely filing: TFL FAQ and tricare.mil say one year from service; the TFL Handbook (Updated August 2026) says claims 'must be filed within three years'. Not a channel fact; flagged for the deadline owner.",
+    "Allowable charges are not appealable (TFL Handbook Fig. 7.1); network providers need an appointment of representative to appeal."
+   ],
+   "notes": "tricare.mil blocks scripted downloads; its pages were read with WebFetch on 2026-11-23 and the quotes are as returned (no local copy). The TFL Handbook PDF and all tricare4u.com pages are saved in sources/."
+  },
+  {
+   "payer_group": "Champva - Hac",
+   "product": "CHAMPVA",
+   "states": "national",
+   "what_it_is": "Civilian Health and Medical Program of the VA, run by the VHA Office of Integrated Veteran Care (the former Health Administration Center); CHAMPVA is secondary to Medicare and other insurance; medical payer ID 84146.",
+   "channels": [
+    {
+     "purpose": "first_level",
+     "channel": "mail",
+     "value": "VFMP Appeals, PO Box 600, Spring City PA 19475",
+     "source": {
+      "url": "https://department.va.gov/vha/community-care/family-member-care/reviews-and-appeals-fm-care/",
+      "title": "VA: Decision reviews and appeals for family member care",
+      "doc_date": "Date last updated June 3, 2026",
+      "quote": "Requests for Higher-Level Review must be submitted within 1 year of the decision. VA Form 20-0996, Decision Review Request: Higher-Level Review VFMP Appeals PO Box 600 Spring City PA 19475",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "CHAMPVA (VHA Office of Integrated Veteran Care, formerly the Health Administration Center; claims payer ID 84146). Higher-Level Review (no new evidence) or Supplemental Claim (VA Form 20-0995, new and relevant evidence, any time) go to the same box; one review option at a time. Missing documents, OHI EOBs and proof of payment are not decision reviews.",
+     "form": "VA Form 20-0996 (Higher-Level Review) or VA Form 20-0995 (Supplemental Claim)",
+     "form_url": "https://www.va.gov/find-forms/about-form-20-0996/",
+     "required_or_preferred": "required (mail; no fax or portal published)"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "portal",
+     "value": "Board Appeal online at https://www.va.gov/decision-reviews/board-appeal/",
+     "source": {
+      "url": "https://www.va.gov/decision-reviews/board-appeal/",
+      "title": "VA: Board Appeals",
+      "doc_date": "Last updated October 22, 2026",
+      "quote": "Option 1: Online You can request a Board Appeal online right now.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "CHAMPVA (VHA Office of Integrated Veteran Care, formerly the Health Administration Center; claims payer ID 84146). Board of Veterans' Appeals (listed by VA as the third review option for family member care providers); within 1 year of the decision.",
+     "form": "VA Form 10182 (Notice of Disagreement)",
+     "form_url": "https://www.va.gov/vaforms/va/pdf/VA10182.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "mail",
+     "value": "Board of Veterans' Appeals, PO Box 27063, Washington, D.C. 20038",
+     "source": {
+      "url": "https://www.va.gov/decision-reviews/board-appeal/",
+      "title": "VA: Board Appeals",
+      "doc_date": "Last updated October 22, 2026",
+      "quote": "Send your form and any supporting documents to this address: Board of Veterans' Appeals PO Box 27063 Washington, D.C. 20038",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "CHAMPVA (VHA Office of Integrated Veteran Care, formerly the Health Administration Center; claims payer ID 84146). Second check: VA Form 10182 (JUN 2026) gives the same box.",
+     "form": "VA Form 10182",
+     "form_url": "https://www.va.gov/vaforms/va/pdf/VA10182.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "second_level",
+     "channel": "fax",
+     "value": "844-678-8979",
+     "source": {
+      "url": "https://www.va.gov/decision-reviews/board-appeal/",
+      "title": "VA: Board Appeals",
+      "doc_date": "Last updated October 22, 2026",
+      "quote": "Option 4: By fax Fill out a Decision Review Request: Board Appeal (Notice of Disagreement) (VA Form 10182). Get VA Form 10182 to download Fax your form and any supporting documents to 844-678-8979",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "CHAMPVA (VHA Office of Integrated Veteran Care, formerly the Health Administration Center; claims payer ID 84146). SINGLE SOURCE (va.gov Board Appeals page, 10/22/2026); VA Form 10182 itself lists mail only. Confirm before the first send.",
+     "form": "VA Form 10182",
+     "form_url": "https://www.va.gov/vaforms/va/pdf/VA10182.pdf",
+     "required_or_preferred": "accepted"
+    },
+    {
+     "purpose": "corrected_claim",
+     "channel": "mail",
+     "value": "VCC - Payment Operations, CHAMPVA Claims, PO Box 30750, Tampa, FL 33630-3750 (paper); electronic 837 to payer ID 84146 preferred",
+     "source": {
+      "url": "https://department.va.gov/vha/community-care/family-member-care/champva/",
+      "title": "VA: CHAMPVA (provider information)",
+      "doc_date": "Date last updated October 22, 2026",
+      "quote": "Paper claims VCC – Payment Operations CHAMPVA Claims PO Box 30750 Tampa, FL 33630-3750",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "CHAMPVA (VHA Office of Integrated Veteran Care, formerly the Health Administration Center; claims payer ID 84146). Corrected claim = frequency code 7 with the original 18-digit claim number (837: CLM05-3 = 7, REF F8; CMS-1500 box 22) (VA Claims corrections and voids, 6/3/2026). Not for originally rejected or denied claims.",
+     "form": "CMS-1500 with box 22 resubmission code 7 and original claim ID",
+     "required_or_preferred": "accepted (electronic preferred)"
+    },
+    {
+     "purpose": "records",
+     "channel": "mail",
+     "value": "Resubmit the claim with the records and a copy of the CHAMPVA EOB to VCC - Payment Operations, CHAMPVA Claims, PO Box 30750, Tampa, FL 33630-3750 (or electronically)",
+     "source": {
+      "url": "https://department.va.gov/vha/community-care/family-member-care/fm-claim-denial-codes/",
+      "title": "VA: Family member claim denial codes",
+      "doc_date": "Date last updated June 3, 2026",
+      "quote": "Additional medical documentation is needed to support the services billed. Resubmit the claim with supporting documentation and a copy of the CHAMPVA EOB.",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "CHAMPVA (VHA Office of Integrated Veteran Care, formerly the Health Administration Center; claims payer ID 84146). Denial code 224. No CHAMPVA records fax is published.",
+     "required_or_preferred": "required (resubmission)"
+    },
+    {
+     "purpose": "other",
+     "channel": "mail",
+     "value": "VHA Office of Integrated Veteran Care, ATTN: Appeals, PO Box 600, Spring City, PA 19475",
+     "source": {
+      "url": "https://department.va.gov/vha/community-care/family-member-care/fm-claim-denial-codes/",
+      "title": "VA: Family member claim denial codes",
+      "doc_date": "Date last updated June 3, 2026",
+      "quote": "You may submit a written appeal if there were exceptional circumstances. VHA Office of Integrated Veteran Care ATTN: Appeals PO Box 600, Spring City, PA 19475",
+      "read_on": "2026-11-23",
+      "public": true
+     },
+     "applies_to": "CHAMPVA (VHA Office of Integrated Veteran Care, formerly the Health Administration Center; claims payer ID 84146). Timely-filing denials (code 124, claims must be filed within 365 days of service).",
+     "required_or_preferred": "required in writing"
+    }
+   ],
+   "windows": [
+    {
+     "level": "first_level (Higher-Level Review)",
+     "window": "Within 1 year of the decision.",
+     "source": {
+      "url": "https://department.va.gov/vha/community-care/family-member-care/reviews-and-appeals-fm-care/",
+      "title": "VA: Decision reviews and appeals for family member care",
+      "doc_date": "Date last updated June 3, 2026",
+      "quote": "Requests for Higher-Level Review must be submitted within 1 year of the decision.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "first_level (Supplemental Claim)",
+     "window": "Any time, with new and relevant evidence.",
+     "source": {
+      "url": "https://department.va.gov/vha/community-care/family-member-care/reviews-and-appeals-fm-care/",
+      "title": "VA: Decision reviews and appeals for family member care",
+      "doc_date": "Date last updated June 3, 2026",
+      "quote": "Supplemental claims may be submitted anytime.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "second_level (Board Appeal)",
+     "window": "Within 1 year of the date on the decision letter.",
+     "source": {
+      "url": "https://www.va.gov/decision-reviews/board-appeal/",
+      "title": "VA: Board Appeals",
+      "doc_date": "Last updated October 22, 2026",
+      "quote": "A Board Appeal may be an option for you if you submit your request within 1 year of the decision on your initial claim, Supplemental Claim, or Higher-Level Review",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    },
+    {
+     "level": "timely filing",
+     "window": "Claims within 365 days of the date of service.",
+     "source": {
+      "url": "https://department.va.gov/vha/community-care/family-member-care/fm-claim-denial-codes/",
+      "title": "VA: Family member claim denial codes",
+      "doc_date": "Date last updated June 3, 2026",
+      "quote": "Claims must be submitted within 365 days of the date of service.",
+      "read_on": "2026-11-23",
+      "public": true
+     }
+    }
+   ],
+   "no_fax_reason": "VA publishes no fax for CHAMPVA provider decision reviews: 'Decision reviews and appeals for family member care' (6/3/2026) lists only VFMP Appeals, PO Box 600, Spring City PA 19475 for Supplemental Claims and Higher-Level Reviews. Only the Board of Veterans' Appeals (third option) lists a fax (844-678-8979, single source).",
+   "conflicts": [
+    "Paper claims address moved: VA CHAMPVA page (10/22/2026) 'VCC - Payment Operations, CHAMPVA Claims, PO Box 30750 Tampa, FL 33630-3750'; older Denver and Spring City claim boxes are out of date.",
+    "Appeal box naming: 'VFMP Appeals, PO Box 600, Spring City PA 19475' (decision reviews page) vs 'VHA Office of Integrated Veteran Care, ATTN: Appeals, PO Box 600, Spring City, PA 19475' (denial codes page). Same box."
+   ],
+   "notes": "CHAMPVA reviews follow the VA decision-review model (Supplemental Claim, Higher-Level Review, Board Appeal), one at a time. Missing documents, OHI EOBs and proof of payment are sent without a decision review."
+  }
+ ]
+}

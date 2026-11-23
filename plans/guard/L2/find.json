@@ -1,0 +1,282 @@
+{
+ "lens": "L2 trust at the door",
+ "instances": [
+  {
+   "id": "L2-1",
+   "file": "remitwatch/store.py",
+   "where": "Store.ingest_parsed (store.py:289); dropbox_sync.ingest_new_files (dropbox_sync.py:775); uploads.preview_x12 (uploads.py:308); x12_837.ingest_837_file (x12_837.py:166); detect.py builds items from every live transaction",
+   "what_it_can_do": "A remittance paid to another practice (another tax ID and NPI) is read as this practice's: its patients become this practice's items, appeal letters go out on this practice's letterhead and tax ID, and once read it cannot be taken back (no route or command removes a file's rows; deleting it from Dropbox changes nothing). A claim file (837) from another practice is read the same way.",
+   "scenario": "A biller who also bills for a second clinic drops that clinic's ERA (invented payee TIN [number], NPI [number], three CO-197 denials) in the Dropbox folder. The next run makes three 'Appeal' items whose letters say 'From: this practice, TIN ...' (chaos 0e-5).",
+   "evidence": "chaos/r0_e/tests_chaos/test_chaos_r0e.py::test_a_remittance_for_another_payee_is_held_not_read_as_ours fails on the snapshot; no code on the door reads payee_tin or payee_npi (grep: schema, activity.py and two read-only api queries only). Real store copy (2026-11-22, aggregates): every one of 32,696 transactions names the practice's single tax ID (REF*TJ on 31,608; N1*PE with qualifier FI on 636) or, with no tax ID, a payee NPI that also appears with it (452). 13 payee NPIs; a new one first appears every few months (2025-05, -09, -10, -12). The rule in 'guard' holds 0 of 32,696 real files.",
+   "severity": "high",
+   "status": "open",
+   "guard": "Payee identity learned at the door (remitwatch/door.py): practice TINs are the TINs on at least 95% of transactions (REF*TJ, or N1*PE N104 when N103 is FI), checked against PRACTICE_TIN when set; practice NPIs are payee NPIs seen with a practice TIN. A transaction with a practice TIN is admitted (a new NPI under it is admitted and noted on the Data tab); another TIN, or no TIN and an NPI never seen with a practice TIN, is held with a plain reason ('This ERA is paid to another payee, tax ID ending 8888, not to this practice: not read'). The 837 reader checks the billing TIN/NPI the same way. Held files write no rows; the owner applies (a new location) or discards. Owner: INTAKE (0e-5)."
+  },
+  {
+   "id": "L2-2",
+   "file": "remitwatch/x12_835.py",
+   "where": "_parse_envelope.finish_txn (x12_835.py:308-323, called at 708 for a transaction with no SE: kept with segment_count and content_fingerprint None, no problem); SE01 (697), SE02, GE01, IEA01/IEA13 never compared; txn['balanced'] (321) and the claim and line 'balanced' flags read by nothing on the door (grep: only api.py:1162's claim view); store.py Store.mark_superseded (390-414) keeps the newest copy by ISA date, ISA time, then file mtime whatever its completeness; trizetto.Session.read (trizetto.py:419) and DropboxClient.download (dropbox_sync.py:192) never compare the bytes read with the listed size or content hash",
+   "what_it_can_do": "A cut-short or damaged remittance is read as complete and can replace the complete copy: paid claims vanish from every count and return as 'Chase the payer' (0e-1). A remittance that does not add up is read as 'ok' with no visible gap, so dollars go missing with no number on any page (owner rule 1). Once read, it cannot be taken back.",
+   "scenario": "The complete 5-claim ERA was read; a copy cut in the middle of claim 3 (no SE, GE, IEA) arrives as 'era (1).RMT' with a later file time and supersedes it: 3 of 5 paid claims leave the counts. A copy that lost one segment in transfer but still ends 'SE*28' is read as whole.",
+   "evidence": "guard/L2/test_l2_door.py::test_a_remittance_that_does_not_balance_is_held fails (balanced=0, file status 'ok'); ::test_a_segment_count_that_disagrees_is_held fails (SE01 says 28, 27 segments, read); chaos 0e-1's test fails. Real store copy: in 2 supersession groups the kept copy holds no claim and does not balance while the superseded copy is complete and balanced, so 6 paid claims ($570.16) are hidden today; 23 live transactions do not balance (total difference $2,051.33, largest $501.79) and no page shows them; 0 transactions lack an SE. Builder note: tests/test_remitwatch.remit writes 'SE*20' for a 28-segment transaction, so every invented 835 in the suite has a wrong SE01; the fixture must count segments before an SE check is switched on.",
+   "severity": "high",
+   "status": "open",
+   "guard": "The 835 checks run before any row is written: each ST has an SE whose SE01 equals the segments counted and SE02 equals ST02; GE01 equals the ST count, IEA01 the GS count, control numbers match; a failing transaction is held ('cut short or damaged: RemitWatch keeps the copy it has'). BPR02 against claims paid less PLB: an unbalanced transaction is read but carries a visible gap (dollars on the Data tab and in the money reconciliation) and never supersedes a balanced copy. Supersession ranks copies by complete, balanced, claims held, then ISA date (never file mtime, never an ISA date after the day read). Feeds compare bytes read with the listed size or Dropbox content hash and fetch again on a mismatch. Owner: INTAKE (0e-1)."
+  },
+  {
+   "id": "L2-3",
+   "file": "remitwatch/store.py",
+   "where": "Store.mark_superseded (store.py:390-414): groups by (COALESCE(trace_payer_id, payer_id, payer_name), trace_number, payment_date) and flags all but one, without asking whether the copies hold the same claims",
+   "what_it_can_do": "Two different remittances that share a payer, a trace number and a payment date (a reused trace, a split remittance) are taken for two copies of one: one is hidden whole, with every claim it paid. Nothing records why.",
+   "scenario": "A payer pays claim A ($77.60) and claim B ($67.60) in two ERAs that carry the same TRN02 and payment date. After both are read only claim A is counted; claim B looks unanswered.",
+   "evidence": "guard/L2/test_l2_door.py::test_two_different_remittances_that_share_a_trace_number_are_both_counted fails: live claims and paid cents (1, 7760) instead of (2, 14520). Real store copy: 76 supersession groups (156 transactions); in 6 of them two balanced transactions with different amounts and no claim in common share one key, and one is hidden (6 paid claims, $126.68, today). With L2-2's 2 groups, supersession hides 12 paid claims, $696.84, on the live store now.",
+   "severity": "high",
+   "status": "open",
+   "guard": "Supersede only versions of one remittance: copies whose claim sets overlap (CLP01 or CLP07 with the same charge) or whose content fingerprints match. Two balanced transactions with no claim in common under one key are both kept; two overlapping but different balanced versions are held for a person ('two versions of one remittance differ'). Every supersession is written to the decision log with both copies' claim counts and dollars. Owner: INTAKE."
+  },
+  {
+   "id": "L2-4",
+   "file": "remitwatch/dropbox_sync.py",
+   "where": "ingest_new_files (dropbox_sync.py:775): files ending .csv/.tsv/.txt/.zip/.gz/.xlsx go to the report and export readers by name first (811-853); an X12 file is recognised only if its first bytes are 'ISA' (x12_835.looks_like_x12, x12_835.py:715); then b'*837*' or b'GS*HC*' anywhere in the first 400 bytes makes it a claim file (dropbox_sync.py:915; store.ingest_835_paths store.py:357 and uploads.preview_x12 uploads.py:312 use 600 bytes); x12_837.parse_837_bytes never checks ST01, and record_file then marks the bytes seen",
+   "what_it_can_do": "A remittance is lost for good without a word: read as a claim file with no claim (its bytes then count as already read, so dropping it again changes nothing), skipped because a byte-order mark or a blank line comes before ISA, or set aside as 'none of the EMA exports' because its name ends .csv. The Upload page strips leading blanks and reads by bytes, so the same bytes give a different result by door (and a wrong refusal there: 'This claim file (837) holds no claim').",
+   "scenario": "An ERA paying exactly $837.00 (BPR*I*837*C...) or with GS06 = 837 is filed as an 837 with 0 claims; an ERA opened and saved in a text editor gains a BOM and is skipped; an ERA saved from a portal as 'remit.csv' is filed as an unknown export.",
+   "evidence": "guard/L2/test_l2_door.py: test_a_remittance_whose_group_control_number_is_837_is_read_as_a_remittance (filed as '837'), test_a_payment_of_exactly_837_dollars_is_read_as_a_remittance, test_a_remittance_saved_with_a_byte_order_mark_is_read_or_named (out: skipped 1, no row), test_a_remittance_named_csv_is_read_by_what_its_bytes_are (filed as 'ema:unknown') all fail. Real store copy: all 43 claim files hold claims and TriZetto's GS06 is always 1, so it has not happened yet; 438 of 32,696 payments are whole-dollar amounts.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "One identify(bytes, name) for every door: strip a BOM and leading whitespace, then decide by content (ISA, then ST01 of each transaction set: 835, 837, 999, 277; PK with xl/workbook.xml; %PDF-; delimited text with known headers); the name only breaks a tie. A file whose bytes and name disagree is read by its bytes with the disagreement noted, or refused when the bytes are a PDF or a document. A transaction set of another type gets its own verdict ('an acknowledgement, not a remittance'), never an empty 837. Owner: INTAKE."
+  },
+  {
+   "id": "L2-5",
+   "file": "remitwatch/x12_835.py",
+   "where": "_parse_envelope keeps ISA15 as isa_usage (x12_835.py:343); nothing reads it (grep: store.py schema only); the 837 reader does not keep it at all",
+   "what_it_can_do": "A clearinghouse's or vendor's test interchange becomes real payments and denials: items, appeals, the newest payment date and the feed's currency.",
+   "scenario": "A TriZetto test file or a vendor's sample ERA (ISA15 = T) dropped in the folder or pulled from SFTP (0e-3 names a vendor test file).",
+   "evidence": "guard/L2/test_l2_door.py::test_a_clearinghouse_test_file_is_held_not_read_as_payments fails. Real store copy: all 32,696 transactions are 'P', so holding anything else holds no real file.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "ISA15 must be P; T or anything else is held ('a test file, marked T by its sender: not read'). The same for 837s. Owner: INTAKE."
+  },
+  {
+   "id": "L2-6",
+   "file": "remitwatch/x12_835.py",
+   "where": "iso_date (x12_835.py:101) accepts any eight digits ('20261340' gives '2026-13-40') and maps six digits to 20YY; cents (70) returns None for an amount it cannot read and records no problem; BPR16 and ISA09 are never bounded; store.mark_superseded ranks by ISA date first, so an interchange dated in the future wins every tie; parse_835_bytes decodes with errors='replace' and counts nothing (221)",
+   "what_it_can_do": "A payment dated 2099 wipes out every 'never answered' and 'never reached the payer' item and wins every supersession tie (0e-3); an impossible service date sorts after every real one; an amount that cannot be read makes a paid claim look unpaid with no problem row.",
+   "scenario": "A vendor test file with BPR16 20991231; a damaged CLP04 '77.6O'; DTM*472*20261340.",
+   "evidence": "guard/L2/test_l2_door.py: test_an_amount_that_cannot_be_read_is_a_problem_not_zero and test_an_impossible_date_is_refused fail; chaos 0e-3's test fails. Real store copy: payment dates run 2024-01-01 to 2026-10-09, 0 impossible dates, 0 unreadable amounts, 0 names with a replacement character, and a payment date is never more than 6 days after its own ISA date (162 are 4 to 6 days after). 'At most 7 days after the ISA date and after the day read' holds 0 real files.",
+   "severity": "high",
+   "status": "partly",
+   "guard": "Every date must be a calendar date, else a problem that holds the transaction; BPR16 on or after 2000-01-01 and at most 7 days after both its ISA date and the day read, else held ('dated after the day it was sent'); service dates on or before the payment date; an amount that cannot be read is a problem that holds the transaction; decoding replacements are counted as problems. Hotfix 2 (H8) only clamps the feed date (detect.feed_date) on live code: the file is still read, and the snapshot has neither. Owner: INTAKE, with INT porting feed_date."
+  },
+  {
+   "id": "L2-7",
+   "file": "remitwatch/store.py",
+   "where": "Store.ingest_parsed writes parse problems to the problems table (store.py:325) and files.status 'error' or 'empty' (329); nothing reads them (grep: no 'FROM problems' in api.py, api_ema.py, insights.py, selfcheck.py, diagnose.py, runlog.py); api_ema's Data tab lists only files of kind ema:unknown or ema:too_large (api_ema.py:495); uploads.describe tells the person 'the Data tab lists them' (uploads.py:734)",
+   "what_it_can_do": "A segment left out, a transaction set skipped because it is not an 835, or a file with no payment in it is recorded where no person, alert, self-check or diagnostic bundle looks; the Upload card promises a list that does not exist.",
+   "scenario": "A 999 acknowledgement or a 277 claim status file is dropped in the folder: it starts with ISA, 'skipped ST type 999' goes to the problems table, and nothing says so anywhere.",
+   "evidence": "Code reading (grep above). Real store copy: the problems table is empty and 0 files have status 'error' or 'empty', so listing them adds no noise.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "The door's verdict row (one per file and per transaction set) is what the Data tab lists, with its problems in plain words and the dollars it carries; the run manifest and the bundle count problems by kind; a self-check fails when an input has problems and no verdict a person can see. Owner: INTAKE with H (runlog, diagnose)."
+  },
+  {
+   "id": "L2-8",
+   "file": "remitwatch/dropbox_sync.py",
+   "where": "sync.mirror (dropbox_sync.py:455) and cloud.sync_and_ingest (cloud.py:954) pass over entries whose ending is not in WANTED_EXT without counting them; ingest_new_files ends with out['skipped'] += 1 and no files row (dropbox_sync.py:928) for a file that is no report, no export and does not start with ISA; _read_zip_members skips members with other endings (700); cloud.ingest_zip filters the first-load archive the same way (cloud.py:359); the server's pending list drops a file once offered",
+   "what_it_can_do": "A file in the data folder is never read and never named: an empty or cut .RMT, a PDF or workbook saved as .RMT, an ERA with no ending or ending .xls or .bak, a zip member with another ending. On Vercel the cursor moves past it; on the server it leaves the pending list after one offer.",
+   "scenario": "A biller drops 'ERA 11-20' with no ending and a scanned EOB saved as 'ERA 11-20.rmt'; the run log says 'skipped 1' and no page shows either.",
+   "evidence": "guard/L2/test_l2_door.py::test_a_remittance_saved_with_a_byte_order_mark_is_read_or_named shows the router's 'skipped' with no row. 0e-6 is partly fixed in the snapshot: .csv, .tsv, .zip and .gz are wanted and read, and an unknown spreadsheet is recorded as ema:unknown and listed on the Data tab.",
+   "severity": "medium",
+   "status": "partly",
+   "guard": "Every entry a feed lists ends with exactly one verdict row: read, duplicate, held, refused, or not ours (an ending RemitWatch never reads, named with its ending), listed on the Data tab until the file changes; the 'skipped' counter goes. Owner: INTAKE (0e-6)."
+  },
+  {
+   "id": "L2-9",
+   "file": "remitwatch/x12_835.py",
+   "where": "finish_line (x12_835.py:271) and finish_claim (284) sum over every adjustment and line of the whole file for each line and each claim (quadratic); dropbox_sync.MAX_X12_BYTES = 64 MB (dropbox_sync.py:41); repair.read_file (repair.py:533), the 'unreadable_file' remedy that holds a file after 2 failed runs, is called by no reader; only intake pairs (PAIR_TRIES) and Production files (MAX_ATTEMPTS) count attempts",
+   "what_it_can_do": "One large but legal remittance (a year of one payer's ERAs in one portal download) takes longer than a serverless run: the run dies, the cursor does not move, the next run fetches the same file and dies again, and every newer file waits behind it; on the server the cycle runs for hours under the lock.",
+   "scenario": "A 5 MB ERA file of about 16,000 claims lands in the Dropbox folder.",
+   "evidence": "guard/L2/big835_timing.py on the snapshot: 1,000 claims 1.24 s, 2,000 claims 5.55 s, 4,000 claims (1.2 MB) 20.67 s; guard/L2/test_l2_door.py::test_reading_a_large_remittance_takes_time_in_proportion_to_its_size fails (3x the claims took 9.9x to 11.7x the time). Real store copy: the largest 835 is 148 KB and no transaction has more than 726 lines.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Parse in linear time (running totals per line, claim and transaction instead of re-scanning lists); cap each kind at a size matched to its measured cost (an 835 at 8 MB, about 50 times the largest seen) with a plain reason; wire repair.read_file into the router on both hosts, keyed by content hash, so a file that stops two runs is held and named and the cursor moves on. Owner: INTAKE with H (repair)."
+  },
+  {
+   "id": "L2-10",
+   "file": "remitwatch/ema_exports.py",
+   "where": "_decode (ema_exports.py:253) keeps a UTF-8 byte-order mark as 'ï»¿' when the text falls back to cp1252 (0e-7); _date (112) reads M/D/Y with no calendar check, no day-first test and '20'+YY for two-digit years (while _csv_cell uses Excel's pivot); no date bounds; _cents (102) returns None for an amount it cannot read and counts nothing. The A/R and Production readers do all of these (ema_reports._date, date_order, date_bounds, money with its _BAD sentinel)",
+   "what_it_can_do": "An Excel CSV loses its first column; a day-first export stores '2026-25-09' and moves 3 October to 10 March; a cell that cannot be read as money becomes no money; nothing holds the file or says so.",
+   "scenario": "An export re-saved in a non-US locale (day first), or Excel's 'CSV UTF-8' with Windows-1252 accents.",
+   "evidence": "guard/L2/test_l2_door.py::test_an_export_with_an_impossible_or_day_first_date_is_not_read_month_first fails (read as ['2026-03-10', '2026-25-09']); chaos 0e-7's test fails. Real store copy: 0 export rows with an impossible, future or pre-2000 date today.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "The weekly exports use the report readers' value parsers and format hold: BOM stripped from the bytes before decoding; one date order per file (mixed orders refused); calendar dates within date_bounds; money parsed with a sentinel; more than 1% (and 20) rows left out for an unreadable date or amount, or misaligned cells, holds the file with the counts. Owner: INTAKE (0e-7)."
+  },
+  {
+   "id": "L2-11",
+   "file": "remitwatch/ema_exports.py",
+   "where": "detect_family (ema_exports.py:61): any layout with Activity Type is charge_lines before the ERA test, and the ERA Payment Line export's 'Adjustment Reason Code' is not 'Reason Code' (0b-10); a layout missing Activity Type is 'unknown' and the router's message says it has no Claim ID (0e-8); a header-only CSV is accepted with 0 rows (0b-11)",
+   "what_it_can_do": "The weekly ERA Payment Line export is filed as charge lines, so its payments and adjustments are read as charges; a file missing one column is refused for the wrong reason; an empty export counts as read.",
+   "scenario": "The practice's weekly 'ERA Payment Line' export, as dropped every week.",
+   "evidence": "chaos 0b-10 (8 of 10 weekly ERA exports in the live store filed as charge lines), 0e-8 and 0b-11; the snapshot's code is unchanged except that 0e-8's file is now recorded as ema:unknown and listed.",
+   "severity": "medium",
+   "status": "partly",
+   "guard": "Recognition by a signature per report (required columns, columns that must be absent, the activity values seen); when one column is missing, name the closest report and the column ('looks like Encounter & Charge Lines without Activity Type'); a file with no data row is held. Owner: INTAKE (0b-10, 0e-8, 0b-11)."
+  },
+  {
+   "id": "L2-12",
+   "file": "remitwatch/ema_exports.py",
+   "where": "iter_rows builds row_fingerprint over every column (ema_exports.py:450-451) (0e-10); dropbox_sync.ingest_new_files records export_created (the workbook's own creation stamp) as the pull date (dropbox_sync.py:886) (0e-9)",
+   "what_it_can_do": "A cosmetic column change re-imports every row (sums over EMA rows double, Find a claim lists a charge up to four times); an old export re-saved today becomes EMA's newest word and turns newer statuses back.",
+   "scenario": "The same week's charges exported again with one extra column; a September export re-saved in October.",
+   "evidence": "chaos 0e-9 (99 claims' statuses turned back) and 0e-10 (2,351 rows re-added). Real store copy: 1,098 charge lines (same claim, code, date, amount, activity and bill item) already appear in more than one export file.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Row identity by canonical fields (claim, bill item, code, date, activity, amounts); 'newest' by the dates the rows hold, never by the workbook's stamp. Owner: INTAKE (0e-9, 0e-10)."
+  },
+  {
+   "id": "L2-13",
+   "file": "remitwatch/ema_reports.py",
+   "where": "learn_claim_prefix (ema_reports.py:1356) refuses only two EMA hosts inside one file, and replaces the kept prefix with whatever single host the newest file shows (INSERT OR REPLACE, 1371); apply_ar_snapshot (3143-3146) and _learn_prefix_from (2741-2758) swallow its refusal; the weekly exports carry no ownership check at all",
+   "what_it_can_do": "An A/R or Production report from another practice's EMA is applied as this practice's (its patients listed to the billers, its postings in the ledger), and every 'Open in EMA' link then points at the other practice's system. A weekly export from another practice is read the same way.",
+   "scenario": "The biller who handles two clinics exports the other clinic's A/R and drops it in the folder.",
+   "evidence": "guard/L2/test_l2_door.py::test_an_ar_report_from_another_ema_system_is_held_and_keeps_the_practice_s_address fails (the practice's EMA address was replaced and the file applied). The live store holds no report yet (the readers ship in push 2).",
+   "severity": "medium",
+   "status": "open",
+   "guard": "The learned EMA host is the practice's identity for EMA files: a report whose host differs is held ('from another EMA system') and never replaces it (only REMITWATCH_EMA_CLAIM_URL or the owner can); weekly exports compare Location, Business Unit and billing provider with the values on file and a file whose values are all new is held. Owner: INTAKE with the ema_reports owner."
+  },
+  {
+   "id": "L2-14",
+   "file": "remitwatch/uploads.py",
+   "where": "sniff (uploads.py:188) takes any %PDF- file as a visit note whatever its name; match_finding (983) gives the claim's own identifiers as the note's when a person attaches it (0b-2); match_text (923) matches any name and date in a report listing several patients (0b-3)",
+   "what_it_can_do": "Another patient's note, or a report listing several patients, is faxed to the payer inside this patient's appeal (a disclosure and a wrong appeal).",
+   "scenario": "Chaos 0b-2 (a note for another patient and date attached by a person) and 0b-3 (a PDF of a charge report saved as '.csv').",
+   "evidence": "chaos 0b-2 and 0b-3 tests fail on the snapshot; hotfix 2's worktree adds the misnamed-PDF refusal, several_patients and note_identity in uploads.py, and a person's note check before any fax.",
+   "severity": "high",
+   "status": "guarded_by_hotfix2",
+   "guard": "Port H6 into push 2 unchanged (PORT): a note is this visit's only if its own text shows the patient by two identifiers and the date of service; attaching does not change that; several patients refuses; a misnamed PDF refuses; a scan or a mismatch waits for note_checked. Keep tests/test_hotfix2*.py green on the dev tree."
+  },
+  {
+   "id": "L2-15",
+   "file": "remitwatch/api.py",
+   "where": "fax_payer_save (api.py:4354) checks fax.digits (fax.py:73), shared payer groups and the owner gate; fax.digits keeps any Unicode digit (0d-11); nothing compares a number with the practice's own fax (PRACTICE_FAX, SRFAX_CALLER_ID) or with numbers saved for other payer groups",
+   "what_it_can_do": "A full-width number is accepted (fixed by H9 on live code); one payer's number saved under another payer, or the practice's own number, is saved and confirmed without a word, so appeal packets with patient records go to the wrong recipient.",
+   "scenario": "The owner pastes one payer's appeal fax number into another payer's row by mistake.",
+   "evidence": "Code reading; the hotfix 2 worktree changes fax.digits to ASCII digits only. A changed number already needs a person's confirmation before retries and follow-ups use it.",
+   "severity": "medium",
+   "status": "partly",
+   "guard": "Port H9; refuse a number equal to the practice's own fax or caller ID; a number already saved for another payer group needs a typed confirmation naming both payers; the first fax to a new number is a cover sheet only (the existing /api/faxes/test) before any packet. Owner: the fax unit and PORT."
+  },
+  {
+   "id": "L2-16",
+   "file": "remitwatch/fax.py",
+   "where": "match_inbound (fax.py:679) ties an incoming fax without a person when it names a claim and came from a number known for that payer (known_senders, 653); the caller ID comes from the fax service and any sender can set it",
+   "what_it_can_do": "A misdirected or spoofed fax that shows a payer's number and names a claim is tied to the item without a person: it writes a history line and moves the follow-up calendar (records request, next level).",
+   "scenario": "A fax with a real claim number arrives from a number that only looks like the payer's.",
+   "evidence": "Code reading. The tie needs a strong identifier and a known number, the AI only reads, and a person sends every follow-up.",
+   "severity": "low",
+   "status": "partly",
+   "guard": "Treat caller ID as a hint: a tie made without a person is marked 'tied by the fax's number', shown with the fax in the drawer, and any follow-up it causes waits for a person to confirm the tie. Owner: the fax unit."
+  },
+  {
+   "id": "L2-17",
+   "file": "remitwatch/api.py",
+   "where": "_practice_missing (api.py:3477) and cloud.setup_status (cloud.py:2113) check PRACTICE_NAME, PRACTICE_TIN and PRACTICE_NPI only for being set; appeals.PRACTICE (appeals.py:31-34) puts them on every letter",
+   "what_it_can_do": "A mistyped tax ID or NPI goes on every faxed appeal letter, and nothing compares them with the payee tax ID and NPIs every remittance on file names.",
+   "scenario": "PRACTICE_TIN set to eight digits, or an NPI with a wrong check digit.",
+   "evidence": "guard/L2/test_l2_door.py::test_a_practice_tax_id_or_npi_that_cannot_be_right_is_named_before_any_letter fails (missing == []). Real store copy: one payee tax ID on every remittance that names one.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Typed checks on /setup and before any fax: TIN nine digits, NPI ten digits with a valid check digit, both equal to the archive's payee identity (L2-1); a mismatch holds letters with a plain reason on /setup and Today. Owner: INTAKE or the fax unit."
+  },
+  {
+   "id": "L2-18",
+   "file": "remitwatch/alerts.py",
+   "where": "module-level int(os.environ.get(...)) with no bounds: alerts.STALE_DAYS, RECENT_DAYS, BASELINE_DAYS (alerts.py:42-44), api.STALE_APPEAL_DAYS (api.py:3418), detect.NO_ANSWER_DAYS (detect.py:156), ema_checks.STALE_DAYS (ema_checks.py:80), cloud.DEFER_DETECT_AFTER_FILES (cloud.py:69); detect.EMA_CLOSES (detect.py:90) and REMITWATCH_EMA_STRICT switch behaviour off silently; ema_reports._env_aliases (ema_reports.py:1239) drops a JSON it cannot read without a word; selfcheck.today_of reads REMITWATCH_TODAY on a live host",
+   "what_it_can_do": "One mistyped setting silences the stale-feed alarm (owner rule 3), lifts the fax hold, floods or empties 'never answered', or drops the owner's payer aliases, and no page says that a safety setting differs from its default.",
+   "scenario": "REMITWATCH_STALE_DAYS=100 typed for 10; REMITWATCH_NO_ANSWER_DAYS=0.",
+   "evidence": "Code reading: retain_days (at least 366) and REMITWATCH_MAX_SECONDS (at least 30) are the only bounded settings.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "One settings module: name, type, default, bounds and a safety flag for each setting; an out-of-bounds value is refused (the default is used) and named on /setup; a safety setting away from its default is named on Today and in the run manifest; a JSON setting that cannot be read is named. Owner: H (runtime, runlog) or INTAKE."
+  },
+  {
+   "id": "L2-19",
+   "file": "remitwatch/cloud.py",
+   "where": "load_raw (cloud.py:190): a missing store.sqlite.gz gives a blank store as on a first load (existed=False changes only what is shown) while cursor.json still holds the Dropbox position; nothing ties the image to the last save (status.json and cursor.json keep no hash, size or revision), so an older image loads silently; gunzip_chunks (122) never checks the gzip end; ema_ledger.LedgerHandle.behind (ema_ledger.py:2302) reads any revision difference as 'the store is behind' and refreshes the store from whatever ledger is there. A server whose store file is missing (a volume not mounted) creates an empty one the same way",
+   "what_it_can_do": "Moving or renaming one file in the state folder (it sits in the practice's Dropbox) makes the next run start from an empty store and save it as the practice's: every item, status and recovery disappears from the site. An older image or ledger silently rolls back people's work and EMA postings.",
+   "scenario": "store.sqlite.gz is dragged to another folder by mistake; the daily run at 10:17 UTC saves a near-empty store and the dashboard's copy shows no work.",
+   "evidence": "guard/L2/test_l2_door.py::test_a_missing_store_image_is_not_taken_for_a_first_load fails; ::test_a_cut_short_store_image_is_not_loaded_as_the_store passes (SQLite refuses a cut image: 'database disk image is malformed' at every cut tried from 50% to 99.9%, so a cut image fails every run loudly, with no named cause and no fallback).",
+   "severity": "high",
+   "status": "partly",
+   "guard": "Each save records the image's sha256, size and revision in status.json and keeps the previous image as store.prev.sqlite.gz; load_raw checks the gzip end, size and hash and refuses to run when the image is missing or is not the one last saved while status.json or cursor.json show earlier runs ('the store image is not the one the last run saved: nothing was changed'); a first load needs both absent or an owner's command; the ledger carries a sequence number, the newer side wins and an older ledger is held. Server: a marker beside the store refuses to create a new one where a store existed. Owner: SWEEP/A1 (cloud) with H."
+  },
+  {
+   "id": "L2-20",
+   "file": "remitwatch/cloud.py",
+   "where": "apply_actions (cloud.py:242-263) treats an entry that raises as malformed and returns it as done, so it is deleted with no log line and no record; actions.apply (actions.py:341) checks only the status word of a status entry; 'at' and 'actor' are taken as written (actions.apply_payer_fax actions.py:89 and the ema_policy branch 377-396 keep the newest by comparing 'at' as text)",
+   "what_it_can_do": "A person's change that this build cannot apply is lost without a trace (CLAUDE.md: never catch an exception without logging it); an entry dated in the future (one instance's clock wrong, a file made by hand in the state folder) pins a fax number or a policy decision against every later save.",
+   "scenario": "During a deploy a newer page writes a status value an older instance does not know; the older run deletes the entry.",
+   "evidence": "guard/L2/test_l2_door.py: test_a_journal_entry_that_cannot_be_applied_is_named_not_dropped and test_a_journal_entry_dated_in_the_future_cannot_pin_a_fax_number fail. Hotfix 2 (H3, H5) gives entries unique ids and checks API bodies before journaling; the replay door itself is unchanged.",
+   "severity": "medium",
+   "status": "partly",
+   "guard": "A schema per entry kind checked at replay (types, required fields, known values, 'at' an ISO time no later than the entry file's own time plus a minute, actor a known user); an entry that fails moves to actions/refused/ with its reason through runlog.caught, is counted on the Data tab and is never deleted. Owner: PORT (0a-6) with H."
+  },
+  {
+   "id": "L2-21",
+   "file": "remitwatch/api_ema.py",
+   "where": "policy_set (api_ema.py:1014): 'Any signed-in person may' accept a write-off pattern, with a typed name kept beside the sign-in; api.hide_add (api.py:4994) needs only require_auth in the snapshot; the journal replays the actor as written",
+   "what_it_can_do": "Money is given up as 'written off by the owner's policy' on a biller's click with the owner's name typed in; it then counts as owner-approved and leaves the open totals (owner rule 2, PLAN decision 14).",
+   "scenario": "A biller types the owner's name and accepts a write-off pattern worth $12,000 of open denials.",
+   "evidence": "tests/test_ema_pages2.py::test_accepting_a_pattern_takes_its_items_off_the_queue_at_the_next_run_and_pursue_brings_them_back records 'Owner Test (anonymous)' with no owner password; hotfix 2 (H7) requires the owner's password and a typed count for hides on live code only.",
+   "severity": "high",
+   "status": "partly",
+   "guard": "Owner decisions (accepting a policy, hide rules, applying an ownership hold, taking a file back) go through require_owner with the owner password; with no owner password set they are recorded as 'not owner-approved' and counted every week in the money given up without a decision. Owner: C2 fixer (decision 14) and PORT (H7)."
+  },
+  {
+   "id": "L2-22",
+   "file": "remitwatch/api.py",
+   "where": "dropbox_webhook (api.py:2831-2839: HMAC of the body with the app secret, compare_digest); _cron_auth (api.py:2740-2745: CRON_SECRET bearer)",
+   "what_it_can_do": "Nothing found: an unsigned notification or cron call is refused before any work starts.",
+   "scenario": "A forged webhook call.",
+   "evidence": "Code reading.",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "guard": "Keep as is; the generated door test should include forged calls."
+  },
+  {
+   "id": "L2-23",
+   "file": "remitwatch/uploads.py",
+   "where": "check_start, check_piece, verify (uploads.py:1489, 1515, 1620): every piece's SHA-256, the whole file's SHA-256 and size, compressed and unpacked caps, zip and gzip bomb and line caps; the sidecar is written last; intake.PAIR_TRIES sets aside a pair that stopped two runs",
+   "what_it_can_do": "Nothing found in transport: a file is checked whole before any reader sees it. What the reader then does with it is L2-1 to L2-13.",
+   "scenario": "An upload cut off or corrupted in transit.",
+   "evidence": "Code reading; A2 and SWEEP reviews.",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "guard": "Keep; route the checked file through the same identify and admit as every other door."
+  },
+  {
+   "id": "L2-24",
+   "file": "remitwatch/ema_reports.py",
+   "where": "date_bounds, date_order, _date, money (ema_reports.py:866-949); format_holds and production_format_holds (2843, 2865); _ar_holds shrink and missing-value holds (2910); ema_ledger holds H2 to H8 (ema_ledger.py:707); held files with Apply or Discard (decide)",
+   "what_it_can_do": "This door already checks what the others do not: impossible and out-of-range dates, mixed date orders, money it cannot read, misaligned rows, a cut-short last line, a filtered or shrunken re-export, and holds the file with a reason a person sees and decides. Its one gap is ownership across files (L2-13).",
+   "scenario": "An A/R re-export filtered by payer.",
+   "evidence": "Code reading; tests/test_ema_reports.py.",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "guard": "Use it as the model: the 835 and weekly-export doors adopt the same check, hold and decide pattern (class guard)."
+  },
+  {
+   "id": "L2-25",
+   "file": "remitwatch/modmed.py",
+   "where": "modmed.find_note (two identifiers before a note is used), trizetto Session host key (pinned by TRIZETTO_SFTP_HOSTKEY or trusted on first use), fax.classify and the note review (output checked against a schema), cli.cmd_import_cloud (refuses to replace a store with data without --force)",
+   "what_it_can_do": "Nothing found: notes from EMA's API, the TriZetto server's identity, the AI's answers and an imported store are checked before use.",
+   "scenario": "A note from EMA's API for another patient of the same name.",
+   "evidence": "Code reading; notes, feed and fax unit reports.",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "guard": "Keep; uploaded notes must reach the same two-identifier rule (L2-14)."
+  }
+ ],
+ "class_guard": "One door per input, one verdict per input, and nothing written before the verdict. (1) remitwatch/door.py: identify(bytes, name) and admit(kind, parsed, context) -> Verdict {decision: read | duplicate | held | refused | not_ours, checks: [{rule, ok, plain reason, dollars}], identity by bytes, content fingerprint, size}. Every path calls it: the server mirror and pending list, the serverless delta and first-load archive, TriZetto, the one-piece upload and the intake pairs, the CLI, zip and gzip members, reports fetched again. Non-file inputs get the same shape: journal entries (a schema per kind), settings (one typed reader with bounds and a safety flag), the state folder (image and ledger hash, size and revision recorded at save and checked at load), owner decisions (require_owner), payer fax numbers. (2) Every reader becomes parse, then check, then apply: only a read verdict reaches the store; a held or refused input writes one verdict row (kind, origin, reasons, dollars it carries, first seen, who decided) and nothing else; supersession and detection never see it. (3) The check list per kind, each rule's false-hold rate measured on a copy of the live store before it holds (0 of 32,696 today for payee, ISA15, dates and trailers): what it is (bytes after a BOM, ST01, workbook or PDF magic; the name breaks ties only); whose (payee TIN and NPI learned from the archive and PRACTICE_TIN, the EMA host, the billing NPI); complete (SE, GE, IEA counts and control numbers, cut-short text, bytes read equal to the listed size); balanced (BPR against claims less PLB: a visible gap in dollars, never superseding a balanced copy); plausible (calendar dates, payment date at most 7 days after its ISA date and the day read, ISA15 = P, amounts that parse, one date order per export); new (content identity for X12 and canonical fields for EMA rows; supersession only between versions with overlapping claims, ranked complete, balanced, claims held, ISA date); size and cost (caps matched to linear parsing; attempts counted per content hash on both hosts, held after two so the cursor moves on). (4) Nothing silent: the Data tab, Today ('3 files held: $4,210 not counted'), the run manifest and the diagnostic bundle list every verdict that is not read, with its reason and dollars; the router's 'skipped' counter, unread problems tables and bare excepts go. (5) Take back: forget(file id) for the owner removes every row an input added, re-runs supersession and detection, and writes before and after counts and dollars to the decision log; a held input can be applied (the owner for ownership and foreign-payee holds) or discarded. (6) The A/R and Production readers (ema_reports, ema_ledger) are the model: their date, money, format, cut-short and shrink holds with Apply and Discard are what the 835 and weekly-export doors adopt.",
+ "property_test": "Generated door test (release gate 8), both hosts and both store kinds. A generator takes clean invented inputs (835s from tests/test_remitwatch.remit with a correct SE count, exports and reports from tests/ema_fixtures, journal entries, settings) and applies random mutations: a cut at a random byte; a BOM or blank line in front; a renamed ending; another payee's TIN and NPI; ISA15 = T; an amount that cannot be read; an impossible or future date; SE01 off by one; BPR off by one cent to $1,000; the same remittance in a new envelope; a second remittance under the same trace with other claims; a cosmetic column added or removed; a day-first export; another EMA host; a zip or gzip around it; a size past the cap; a journal entry with a bad field or a future time; a setting out of bounds; a missing, older or cut store image. Each input goes through every door (server mirror, serverless delta, TriZetto with tests/fake_sftp, one-piece upload, chunked upload with intake, CLI) in random order. Properties: (a) every input ends with exactly one verdict row a person can see, and none is only 'skipped'; (b) a held or refused input changes nothing else: money totals, transactions, claims, EMA rows, report snapshots, supersession flags and items equal the store without it; (c) the verdict and the resulting store do not depend on the door or the arrival order; (d) reading a clean input again, or its copy under a new name or envelope, changes nothing; (e) forget(file id) after a read returns the store to its earlier state (same items, same dollars) and reading it again restores it; (f) no clean fixture is held, and on a copy of the live store's 835s the ownership, test-flag, date and trailer rules hold nothing (measured today: 0 of 32,696)."
+}

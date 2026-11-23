@@ -1,0 +1,319 @@
+{
+ "area": "indiana",
+ "checks": [
+  {
+   "id": "IN-PP-1-deemed-clean",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-2; IC 27-8-5.7-3; IC 27-8-5.7-5(b),(c)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "Failure of an insurer to notify a provider as required under subsection (b) establishes the submitted claim as a clean claim.",
+   "correction": "Confirmed. Precision notes: (1) 5(b) says the insurer shall notify 'not more than: (1) thirty (30) days for a claim that is filed electronically; or (2) forty-five (45) days for a claim that is filed on paper' and does not name the start event; receipt is the natural reading but it is not in the text. (2) An administrator is an 'insurer' only if it both '(A) collects charges or premiums; and (B) adjusts or settles claims' (sec. 3(2)). (3) The clean-claim definition reaches only a claim 'under an accident and sickness insurance policy issued in Indiana' (sec. 2), so a policy sold in Kentucky is outside it even when the service was given in Indiana."
+  },
+  {
+   "id": "IN-PP-2-pay-or-deny-interest",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-6(a)-(d)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "(1) If the claim is filed electronically, within thirty (30) days after the date the claim is received by the insurer. ... (d) In paying interest under subsection (b), an insurer shall use the same interest rate as provided in IC 12-15-21-3(7)(A).",
+   "correction": "Confirmed. The pay-or-deny clock runs from receipt; interest is on 'the accident and sickness insurance policy allowable amount of the claim paid', 'accrues beginning thirty-one (31) days after the date the claim is filed' (forty-six for paper) and 'stops accruing on the date the claim is paid'. The statement that a timely denial later reversed earns no interest is a reading of 6(b) (interest only where the insurer 'fails to pay or deny' in time and 'subsequently pays'), not express text."
+  },
+  {
+   "id": "IN-PP-3-interest-rate",
+   "verdict": "correct",
+   "citation": "IC 12-15-21-3(7)(A); IDOI Bulletin 248 (Apr. 10, 2019); State of Indiana ACFR FY2025 and FY2024 (investment note); Indiana Worker's Compensation Board provider page",
+   "url": "https://iga.in.gov/ic/2026/Title_12.html",
+   "quote": "at a rate that is the percentage rounded to the nearest whole number that equals the average investment yield on state general fund money for the state's previous fiscal year, excluding pension fund investments, as published in the state comptroller's comprehensive annual financial report",
+   "correction": "All figures confirmed in the sources: FY2025 ACFR 'The average yield on the General Fund investments was 4.90% ... The average yield on the total investment of all funds, except for pension trust funds, was 4.65%'; FY2024 ACFR 4.55% and 4.22%; WCB page 'The rate of interest for 2026 shall be 4% annually'; IDOI's bulletin index (through Bulletin 280) has no clean-claim rate bulletin after Bulletin 248. Added context: Bulletin 248 used the 'all funds, except for pension trust funds' yield for the fiscal year ending June 30, 2018 (1.16%) as the rate 'for calendar year 2019' and quoted the statute as 'state money', although the 2019 Code already said 'state general fund money' (checked in the 2019 Title 12 file). For calendar 2026 both IDOI's 2019 method (FY2025 all funds 4.65%) and the statute's General Fund wording (FY2025 4.90%) round to 5%; the WCB's 4% matches only the FY2024 all-funds figure (4.22%). So 4% is the conservative figure and 5% is the better-supported 2026 figure; cite the formula and show the source year. Sources: https://secure.in.gov/comptroller/files/Fiscal-2025-Annual-Comprehensive-Financial-Report.pdf ; https://www.in.gov/dA/94c52aa712/2024-ACFR.pdf ; https://secure.in.gov/idoi/files/Bulletin-248-Indiana-Rate-for-Failure-to-Pay-a-Clean-Claim.pdf ; https://www.in.gov/wcb/providers/"
+  },
+  {
+   "id": "IN-PP-4-aggregate-penalty",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-8(a)-(e); IC 27-13-36.2-6(a)-(e)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "If the insurer has paid at least eighty-five percent (85%) but less than ninety-five percent (95%) of all clean claims received from all providers during the calendar year in compliance with this chapter, a civil penalty of up to ten thousand dollars ($10,000).",
+   "correction": "Confirmed, including (c) the 30-day IC 4-21.5 hearing request and (d) no IC 27-4-1 penalty 'for the same activity'. Also (b): the commissioner 'shall consider whether the insurer's failure ... is due to circumstances beyond the insurer's control', and (e): penalties go to the state general fund. Nothing here is paid to the practice."
+  },
+  {
+   "id": "IN-PP-5-hmo-prompt-pay",
+   "verdict": "correct",
+   "citation": "IC 27-13-36.2-1, -2, -3, -4(a)-(d)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "the health maintenance organization shall pay the provider that submitted the claim interest on the lesser of the usual, customary, and reasonable charge for the health care services provided to the enrollee or an amount agreed to between the health maintenance organization and the provider paid under this section.",
+   "correction": "Confirmed. The HMO definition (sec. 2) includes an insurance administrator only if it both collects charges or premiums and adjusts or settles claims for an HMO contract, and includes limited service HMOs. The HMO clean-claim definition has no 'issued in Indiana' words; coverage turns on the HMO being licensed under IC 27-13."
+  },
+  {
+   "id": "IN-CODE-1-cpt-alteration",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-6.5(a)-(c) (P.L.190-2023); IC 27-13-36.2-4.5(a)-(c)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer may not alter the CPT code submitted for a clean claim or pay for a CPT code of lesser monetary value unless:",
+   "correction": "Confirmed verbatim, including both exceptions ((a)(1) coding guidelines, clinical care guidelines or the participating provider's agreement; (a)(2) record 'reviewed by an employee or contractor of the insurer'), (b) final-diagnosis rule and (c) appeal preserved."
+  },
+  {
+   "id": "IN-CODE-2-downcoding-chapter",
+   "verdict": "correct",
+   "citation": "IC 27-1-52-0.3, -2, -5, -6, -8, -10, -11, -12, -13, -14 (HEA 1271 SECTION 6, P.L.88-2026, effective July 1, 2026)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer shall allow a provider to appeal in batches of similar claims involving substantially similar downcoding issues without restriction.",
+   "correction": "Confirmed; the enrolled act shows 'SECTION 6. IC 27-1-52 IS ADDED ... [EFFECTIVE JULY 1, 2026]' (https://iga.in.gov/pdf-documents/124/2026/house/bills/HB1271/HB1271.07.ENRS.pdf). Unlike the IC 27-8-5.7 amendments, the chapter has no plan-year applicability clause. Two additions: (1) the chapter has no penalty clause of its own and IC 27-4-1-4 does not list IC 27-1-52, so enforcement rests on IDOI's general power to order compliance and sue for an injunction (IC 27-1-3-19) and on rules not yet adopted (IC 27-1-52-14). (2) 'Downcode' (sec. 2) means 'the unilateral alteration by an insurer of the: (1) payment for an evaluation and management service code or other service code; or (2) level of ... code ... that results in a lower payment', so clause (1) arguably reaches unilateral payment cuts with no code change; that is an interpretation, not settled."
+  },
+  {
+   "id": "IN-CODE-3-ai-downcoding",
+   "verdict": "correct",
+   "citation": "IC 27-1-52-9(a)-(c) (effective July 1, 2026)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "as the sole basis to downcode a claim based on medical necessity without the review of the covered individual's medical record by an employee or contractor of the insurer.",
+   "correction": "Confirmed verbatim, including (b) on providers ('to submit a health benefits claim without the review of a provider or other person involved in the development of the claim for submission') and (c) disclosure when AI is used 'to: (1) make an adverse determination on a prior authorization request; or (2) downcode a claim.' Same applicability limits as IC 27-1-52 (not Medicaid, 0.3)."
+  },
+  {
+   "id": "IN-RECOUP-1-current-two-years",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-10(a)-(c) and IC 27-13-36.2-8(a)-(c) (2025 edition text, P.L.55-2006); applicability of the 2026 text in IC 27-8-5.7-0.5 and IC 27-13-36.2-0.5",
+   "url": "https://iga.in.gov/ic/2025/Title_27.html",
+   "quote": "An insurer may not be required to correct a payment error to a provider more than two (2) years after the date on which a payment on a provider claim was made to the provider by the insurer.",
+   "correction": "Confirmed in the 2025 title file; the HMO section is the same; the old fraud exception (c) needs no court finding."
+  },
+  {
+   "id": "IN-RECOUP-2-new-180-days",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-10(a)-(f) and -0.5; IC 27-13-36.2-8(a)-(f) and -0.5 (HEA 1271 SECTIONS 7, 10, 12, 15; P.L.88-2026)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer may not be required to correct a payment error to a provider if notice of the payment error is not provided within one hundred eighty (180) days after payment for a fully adjudicated claim is received.",
+   "correction": "Confirmed. Small precision for the app: the provider's 180 days run from when 'payment for a fully adjudicated claim is received', not from the payer's payment date, so calendar from the receipt date (EFT or check receipt) or, to be safe, from the earlier payment date. The 3-year retroactive audit limit in (c) is not covered by the fraud exception in (e)."
+  },
+  {
+   "id": "IN-RECOUP-3-offset-explanation",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-11; IC 27-13-36.2-9",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "Every subsequent claim that is adjusted by an insurer for reimbursement on an overpayment of a previous provider claim made to the provider must be accompanied by an explanation of the reason for the adjustment, including:",
+   "correction": "Confirmed. The statute requires the explanation (claim identified, responsible party if ascertainable, amount); demanding 'reversal until provided' is an advocacy position, not a stated remedy."
+  },
+  {
+   "id": "IN-RECOUP-4-cob-90-days",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-11.5(a)-(d); IC 27-13-36.2-9.5(a)-(d); applicability IC 27-8-5.7-0.5, IC 27-13-36.2-0.5",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "a provider may submit a claim to the appropriate insurer not later than ninety (90) days after the date the recoupment is made.",
+   "correction": "Confirmed, including 'notwithstanding any other provision of law' and the documentation required by (c)."
+  },
+  {
+   "id": "IN-RATE-1-no-retro-rate-cut",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-6.7(a),(b); IC 27-13-36.2-4.7(a),(b); applicability -0.5 sections",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer may not retroactively reduce the reimbursement rate for any CPT code.",
+   "correction": "Confirmed. Minor: the insurer section requires 'at least sixty (60) days written notice'; the HMO section says 'at least sixty (60) days notice' by mail or email and website posting."
+  },
+  {
+   "id": "IN-REF-1-oon-referral",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-12; IC 27-13-36.2-10 (SEA 480 SECTIONS 37-38, effective July 1, 2025)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer may not deny a claim for reimbursement for a covered service or item provided to an insured on the sole basis that the referring provider is an out of network provider.",
+   "correction": "Confirmed; applies to policies issued, delivered, amended or renewed after June 30, 2025 (HMO: contracts entered into, delivered, amended or renewed after June 30, 2025)."
+  },
+  {
+   "id": "IN-UCSP-1-practices",
+   "verdict": "correct",
+   "citation": "IC 27-4-1-4.5(2),(3),(4),(5),(6),(14); IC 27-4-1-4(a)(16); IC 27-13-29-1(b)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "(2) Failing to acknowledge and act reasonably promptly upon communications with respect to claims arising under insurance policies.",
+   "correction": "Confirmed. 4.5(14) ends 'for denial of a claim or for the offer of a compromise settlement.' A 4.5 practice is an unfair act under sec. 4 when committed 'with such frequency as to indicate a general practice' (4(a)(16)); HMOs are covered 'to the extent that IC 27-4-1 does not conflict' with IC 27-13."
+  },
+  {
+   "id": "IN-UCSP-2-complaint-report",
+   "verdict": "correct",
+   "citation": "IC 27-4-1-5.6(a),(c),(d),(e)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "Within twenty (20) business days from the date of receipt of the complaint, the insurer shall provide to the commissioner and the complaining party a written report containing the following information:",
+   "correction": "Confirmed, with one emphasis: the duty is conditional. IDOI must forward the complaint within 10 business days only '[i]f the commissioner believes an unfair claim settlement practice has occurred' (5.6(c)), and the insurer's 20-business-day report runs from its receipt of that complaint. The summary's 'triggers a required written response' is right only once IDOI forwards it (IDOI's guidelines say it does notify the company and that insurers have 20 business days to respond)."
+  },
+  {
+   "id": "IN-UCSP-3-penalties",
+   "verdict": "correct",
+   "citation": "IC 27-4-1-6(a)-(c); IC 27-4-1-12; IC 27-4-1-18",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "Payment of a civil penalty of not more than twenty-five thousand dollars ($25,000) for each act or violation. If the person knew or reasonably should have known that he was in violation of this chapter, the penalty may be not more than fifty thousand dollars ($50,000) for each act or violation.",
+   "correction": "Confirmed. IC 27-4-1-18 reads 'This article does not create a cause of action other than an action by: (1) the commissioner to enforce his order; or (2) a person ... to appeal an order of the commissioner' (the whole article, not only the chapter)."
+  },
+  {
+   "id": "IN-IDOI-1-provider-complaint-rules",
+   "verdict": "correct",
+   "citation": "IDOI 'Guidelines for Providers Filing a Complaint with the Indiana Department of Insurance' and Provider Complaint Form (rev. 12.20.21); IDOI 'File a Provider Complaint' page",
+   "url": "https://www.in.gov/dA/9ca8388c74/Provider_Complaint_form-12.20.21.pdf",
+   "quote": "The monetary amount on the claim must be $250 or more for healthcare providers claims, $5000 or more for hospital claims. Anything less will be sent back to the complainant.",
+   "correction": "Confirmed (PDF and https://www.in.gov/idoi/consumer-services/file-a-provider-complaint/ : Suite 300, fax 317-234-2103, online form, 'more than 90 days late', one patient per complaint, 'Insurers have 20 business days from receiving the complaint to respond'). Important venue rule the result left out: 'Contracts of insurance are governed by the state in which the contract is sold and complaints should be directed to the Department of Insurance in the state where the company is licensed and the policy sold' (the PDF's own example for Kentucky Blue Cross says 'contact Kentucky'). So Kentucky-sold policies go to Kentucky even for Indiana services. The form also lets a complaint be made against a 'Third Party Administrator'."
+  },
+  {
+   "id": "IN-GRV-1-insurer-grievance",
+   "verdict": "correct",
+   "citation": "IC 27-8-28-1(b), -6(4), -9, -14, -15(b), -16(a),(c),(d), -17(a),(b),(c),(d),(f), -18; IC 27-4-1-4(a)(25)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "not later than forty-five (45) days after the appeal is filed. An insurer that violates this subsection commits an unfair and deceptive act or practice in the business of insurance under IC 27-4-1-4.",
+   "correction": "Confirmed. Precision: the extra 10 business days in 16(c) are allowed only when the insurer cannot decide 'due to circumstances beyond the insurer's control' and gives written notice before the twentieth business day. 4(a)(25) reads 'Violating IC 27-8-28-17(c) or IC 27-13-10-8(c) concerning the resolution of an appealed grievance decision.'"
+  },
+  {
+   "id": "IN-GRV-2-hmo-grievance",
+   "verdict": "correct",
+   "citation": "IC 27-13-1-15; IC 27-13-10-1, -5, -6(b), -7(a),(c),(d), -8(a),(c),(d), -11",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "However, an appeal must be resolved not later than forty-five (45) days after the appeal is filed. A health maintenance organization that violates this subsection commits an unfair and deceptive act or practice in the business of insurance under IC 27-4-1-4.",
+   "correction": "Confirmed. Citation fix for applies_to: the grievance duty falls on HMOs and limited service HMOs under IC 27-13-10-1; IC 27-13-36.2-2 is the prompt-pay chapter's definition. The 20 business days run from filing (7(c)), and the extra 10 business days need circumstances beyond the HMO's control."
+  },
+  {
+   "id": "IN-EXT-1-external-review",
+   "verdict": "corrected",
+   "citation": "IC 27-8-29-12(1),(2), -13(a),(b),(c),(e), -14(b), -15(a), -16, -23; HMO: IC 27-13-10.1-1(1),(2), -2(a),(b),(c),(e), -4(a), -5, -11",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer shall establish and maintain an external grievance procedure for the resolution of external grievances regarding the following: (1) The following determinations made by the insurer or an agent of the insurer regarding a service proposed by the treating health care provider:",
+   "correction": "The mechanics are confirmed (binding: 'A determination made under section 15 of this chapter is binding on the insurer'; request within 120 days; rotation; board-certified reviewer; 15 business days or 72 hours; one review per appeal resolution; insurer pays all IRO costs; no state review where a Medicare external review right exists). The scope is narrower than the result says: IC 27-8-29-12(1) covers adverse determinations of appropriateness or medical necessity and experimental/investigational determinations only 'regarding a service proposed by the treating health care provider' (HMO, IC 27-13-10.1-1(1): 'regarding a service proposed by the treating physician'), plus rescissions. The grievance definition (IC 27-8-28-6(1)) by contrast covers 'a service or proposed service'. So the Indiana statute does not expressly give external review of denials of services already rendered (the Mohs, superficial radiation and pathology claims in provider_use). Whether federal ACA external review reaches those post-service denials was not checked in this area; do not promise IC 27-8-29 review for them."
+  },
+  {
+   "id": "IN-PA-1-authorized-claims",
+   "verdict": "correct",
+   "citation": "IC 27-1-37.5-12(a)-(c) (SEA 480 SECTION 21, P.L.144-2025); IC 27-1-37.5-1, -5, -14, -15; IC 5-10-8-19",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "The utilization review entity shall not deny the claim described in subsection (a) unless:",
+   "correction": "Confirmed: six exceptions, resubmission for unintentional inconsistencies, PA requested after June 30, 2025, contrary contract terms void (contracts entered into, amended or renewed after June 30, 2025), violation is an unfair or deceptive act (sec. 15). IC 5-10-8-19 confirms the state self-insurance program must follow the chapter. The ERISA point is also definitional: 'covered individual' means one covered under a 'health plan' as defined in sec. 5 (insured policies, HMO contracts, Medicaid risk-based managed care, and the state program's administrator)."
+  },
+  {
+   "id": "IN-PA-2-unanticipated-services",
+   "verdict": "correct",
+   "citation": "IC 27-1-37.5-13(a)-(c) (SEA 480 SECTION 22)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "A utilization review entity may not: (1) require retrospective review of; or (2) deny a claim based solely on lack of prior authorization for; an unanticipated health care service described in subsection (a).",
+   "correction": "Confirmed; applies to claims filed after June 30, 2025; (c) the provider must submit documentation explaining why the unanticipated service was medically necessary."
+  },
+  {
+   "id": "IN-PA-3-deadlines-deemed-authorized",
+   "verdict": "correct",
+   "citation": "IC 27-1-37.5-23(a)-(c); IC 27-1-37.5-28; IC 27-1-37.5-15 (SEA 480 SECTIONS 31, 36, 25; effective July 1, 2025)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "If a utilization review entity fails to comply with the deadlines or other requirements under this chapter, the health care service subject to prior authorization shall be automatically deemed authorized by the utilization review entity.",
+   "correction": "Confirmed (24 hours urgent, 48 hours other, weekends and state and federal legal holidays excluded). Citation detail: the duty to state 'Specific reasons for the adverse determination' and 'Suggested alternatives' is 23(c), not 23(a)-(b). 23(d)-(g) add 48-hour provider responses and appeals and a 48-hour UR answer."
+  },
+  {
+   "id": "IN-TF-1-policy-proof-of-loss",
+   "verdict": "correct",
+   "citation": "IC 27-8-5-19(b), (c)(9)-(12), (c)(15) (group, Indiana legal situs); IC 27-8-5-3(a)(6)-(8), (a)(11) (individual)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "(C) the failure to furnish proof within the time required under clause (A) or (B) does not invalidate or reduce any claim if it was not reasonably possible to furnish proof within that time, and if proof is furnished as soon as reasonably possible but (except in case of the absence of legal capacity of the claimant) no later than one (1) year from the time proof is otherwise required under the policy.",
+   "correction": "Confirmed. Group (c)(12): benefits paid 'not more than forty-five (45) days after the insurer's ... receipt of written proof of loss if the claim is filed by the policyholder; or (ii) in accordance with IC 27-8-5.7 if the claim is filed by the provider'. Individual (a)(8) pays 'immediately upon receipt of due written proof of such loss; or (2) in accordance with IC 27-8-5.7; whichever is more favorable to the policyholder'. Also useful: (c)(10)/(a)(6) if claim forms are not furnished within 15 days of notice, written proof is deemed compliant. The statement about provider contracts setting their own limits is not in the statute."
+  },
+  {
+   "id": "IN-CRED-1-provisional-credentialing",
+   "verdict": "correct",
+   "citation": "IC 27-8-11-7(a),(f),(i),(j),(k)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "Once an insurer fully credentials a provider that holds provisional credentialing and a network provider agreement has been executed, then reimbursement payments under the contract shall be paid retroactive to the date the provider was provisionally credentialed.",
+   "correction": "Confirmed. Note (k): if the insurer does not fully credential the provider, provisional credentialing ends on the notice date and 'The insurer is not required to reimburse for services rendered while the provider was provisionally credentialed.'"
+  },
+  {
+   "id": "IN-SEHP-1-state-employee-prompt-pay",
+   "verdict": "correct",
+   "citation": "IC 5-10-8.1-1, -2, -4, -6, -7",
+   "url": "https://iga.in.gov/ic/2026/Title_5.html",
+   "quote": "The administrator shall pay or deny each clean claim as follows:",
+   "correction": "Confirmed: deficiency notice 30/45 days or the claim is clean (sec. 6(c)); pay or deny in 30/45 days after receipt; interest on 'the health benefit plan allowable amount' from day 31/46 after filing at the IC 12-15-21-3(7)(A) rate. Applies to the state self-insurance program (IC 5-10-8-7(b)), its contracted administrator and prepaid plans (IC 5-10-8-7(c)); not to local-unit plans."
+  },
+  {
+   "id": "IN-CRA-1-claim-review-agents",
+   "verdict": "correct",
+   "citation": "IC 27-8-16-0.5, -1, -1.5, -4, -7, -8, -11, -12",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "The compensation of a claim review agent for the performance of medical claims review may not be based on the amount by which claims are reduced for payment.",
+   "correction": "Confirmed, including the 30-day appeal decision 'after: (A) the appeal is filed; and (B) all information necessary to complete the appeal is received' and notice of appeal rights to the rendering provider (8(c)). 7(7)(C) also requires a statement whether database information came from charges outside Indiana. The penalty is in the statute itself: IDOI notifies, the agent must respond in 30 days, IDOI 'shall order' it to 'cease all claims review activities in Indiana' if not satisfied, and may impose a civil penalty of not more than $5,000 only where violations occur 'with a frequency that indicates a general business practice', or suspend or revoke registration (12(c),(d)). The chapter reaches agents working for 'another benefit program', which on its face includes self-funded plans; ERISA preemption of that use is unresolved."
+  },
+  {
+   "id": "IN-MCD-1-prompt-pay",
+   "verdict": "correct",
+   "citation": "IC 12-15-13-0.4, -0.5, -1.6(a)-(f), -1.7(a)-(e)",
+   "url": "https://iga.in.gov/ic/2026/Title_12.html",
+   "quote": "(1) If the claim is filed electronically, within twenty-one (21) days after the date the claim is received by: (A) the office; or (B) a contractor of the office under IC 12-15-30, if IC 12-15-30 applies.",
+   "correction": "Confirmed: 'office' includes MCOs contracted with OMPP and their subcontractors (0.4); non-clean claims denied or suspended within 30 days with each reason (1.6(d)-(f)); interest on 'the Medicaid allowable amount' from day 22/31 after filing; nursing facility claims excluded."
+  },
+  {
+   "id": "IN-MCD-2-contract-claims-terms",
+   "verdict": "correct",
+   "citation": "MHS HIP contract #69655, Exhibit 1 sec. 5.4 and 8.5.1, 8.5.3; Exhibit 2 'Claims Payment' and 'Provider Claim Disputes'; Humana PathWays contract #82035, Exhibit 1 sec. 6.11.3, 9.7.3, 9.9.5; Exhibit 2 items 11-12",
+   "url": "https://www.in.gov/dA/7a56f2dde1/STIND_MHS_HIP_69655_0.PDF",
+   "quote": "The Contractor shall pay interest on all clean claims paid late (i.e., in- or out-of- network claims) for which the Contractor is responsible, unless the Contractor and provider have made alternate written payment arrangements.",
+   "correction": "Confirmed in both contracts (PathWays: https://www.in.gov/dA/a9b8031f68/503Humana25Pathways-82035.PDF), including 'payments made inaccurately (paid upon the claim once adjudicated appropriately)', unclean claims denied in 30 days (PathWays), 'Reference to general legal authorities alone is not acceptable', reprocess overturned disputes 'along with any applicable interest, within 30 business days', $5,700 per deficient claim type below 98%, and $2,310 per quarter below 99% dispute timeliness. Left out: both contracts also say 'The Contractor shall not violate the claims payment provisions and timeframes that apply to accident and sickness insurers and HMOs under IC 27-8-5.7', and the HIP contract says 'Unclean claims must be rejected or denied within one year of receipt', looser than the statute, which requires non-clean claims to be denied or suspended within 30 days (IC 12-15-13-1.6(d)); cite the statute. Alternate written payment arrangements in a provider agreement can displace the interest term."
+  },
+  {
+   "id": "IN-MCD-3-dispute-process",
+   "verdict": "correct",
+   "citation": "405 IAC 1-1.6-1(a)-(c), -2(a),(b), -3(a)-(h), -5(a),(b) (readopted filed 5/30/2023, 20230628-IR-405230292RFA); HIP contract Exhibit 1 sec. 5.4, 8.5.1; PathWays contract sec. 6.11.3",
+   "url": "https://www.law.cornell.edu/regulations/indiana/405-IAC-1-1.6-3",
+   "quote": "In the event the panel fails to issue the panel's written determination within forty-five (45) days after the commencement of the formal claim appeal process, the failure on the part of the panel shall have the effect of an approval by the panel of the provider's claim.",
+   "correction": "Text confirmed on the Cornell LII republication (the official IAR viewer's data service could not be used here; LII shows readoptions filed 11/13/2019 and 5/30/2023, so the rule is in force). The HIP contract confirms 'The Contractor's in-network provider claim dispute process must adhere to the same rules laid out for out-of-network providers in 405 IAC 1-1.6-1', and PathWays 6.11.3 says the same for 'both in-network and out-of-network providers'. Also 1-1.6-1(c): the process may be used if the MCO fails to notify a determination within 30 days of submission; 1-1.6-3(g) requires 'a detailed explanation of the factual, legal, policy, and clinical basis' and notice of the right to binding arbitration."
+  },
+  {
+   "id": "IN-MCD-4-arbitration",
+   "verdict": "correct",
+   "citation": "405 IAC 1-1.6-4(a)-(c); PathWays contract sec. 6.11.3",
+   "url": "https://www.law.cornell.edu/regulations/indiana/405-IAC-1-1.6-4",
+   "quote": "The fees and expenses of arbitration or other binding resolution procedure shall be borne by the nonprevailing party.",
+   "correction": "Confirmed on LII (same caveat as IN-MCD-3): AHLA rules under the Indiana Uniform Arbitration Act (IC 34-57-2) unless the parties agree otherwise or a statute imposes another procedure; 4(b) 'may include, in a single arbitration proceeding, matters from multiple formal claim resolution procedures involving the MCO and the provider'. No filing deadline in the rule."
+  },
+  {
+   "id": "IN-MCD-5-void-bulletins",
+   "verdict": "correct",
+   "citation": "IC 12-15-13-6(a)-(c); IC 12-15-13-0.4",
+   "url": "https://iga.in.gov/ic/2026/Title_12.html",
+   "quote": "(2) a claim may not be denied because the claim does not comply with the void notice or bulletin;",
+   "correction": "Confirmed. Precision: (b) says 'The office must provide a written notice or bulletin ... within five (5) business days after the date on the notice or bulletin', and 'office' is defined in 0.4 to include contracted MCOs and their subcontractors, not only FSSA. (a) opens 'Except as provided by IC 12-15-35-50'."
+  },
+  {
+   "id": "IN-MCD-6-timely-filing",
+   "verdict": "correct",
+   "citation": "HIP contract #69655 Exhibit 1 sec. 5.4, 8.5.1; PathWays contract #82035 sec. 9.7.3, 9.9.5; IHCP Claim Submission and Processing module v8.5 (published Feb. 24, 2026), Section 11; 405 IAC 1-1-3(b),(e),(f)",
+   "url": "https://www.in.gov/dA/a9b8031f68/503Humana25Pathways-82035.PDF",
+   "quote": "if a claim for payment under Medicare has been filed in a timely manner, the Contractor may pay a claim relating to the same services within six (6) months after the provider receives notice of the disposition of the Medicare claim.",
+   "correction": "Confirmed. Note the PathWays crossover clause is permissive ('may pay'). IHCP Section 11 (https://www.in.gov/medicaid/providers/files/modules/claim-submission-and-processing.pdf) confirms FFS: 180 days; 'Medicare or Medicare Advantage Plan primary claims containing paid services ... are not subject to the 180-day timely filing limit' (but the limit applies if Medicare or MA denied); retroactive eligibility one year from the date eligibility was entered; retroactive PA 180 days from approval; delayed third-party notice 180 days from the primary EOB date."
+  },
+  {
+   "id": "IN-MCD-7-ffs-review-appeal",
+   "verdict": "correct",
+   "citation": "IHCP Claim Administrative Review and Appeals module v7.1 (published Mar. 24, 2026); 405 IAC 1-1-3(c)-(e); 405 IAC 1-1.4-1; IC 4-21.5-3-7(a)(3)(A)",
+   "url": "https://www.in.gov/medicaid/providers/files/modules/claim-administrative-review-and-appeals.pdf",
+   "quote": "Requests for administrative review must be filed within 60 calendar days of notification of claim payment or denial. Requests to appeal an adverse administrative review decision must be filed within 15 calendar days of notification of the decision.",
+   "correction": "Confirmed: receipt confirmed within 10 business days; Gainwell responds within 45 calendar days; appeal to FSSA OMPP (fax 317-232-4412) per BT202642; statement of issues within 45 calendar days; OALP ALJ; objections to the ultimate authority within 15 calendar days; judicial review under IC 4-21.5-5. IC 4-21.5-3-7(a)(3)(A) (checked in Title 4) sets the 15 days. The module says MCE claims go through each MCE's own process."
+  },
+  {
+   "id": "IN-MCD-8-medicaid-law-controls",
+   "verdict": "corrected",
+   "citation": "IC 12-15-12-0.9(a),(b); IC 27-1-52-0.3; HIP contract Exhibit 1 sec. 8.5.3; PathWays contract Exhibit 1 sec. 9.7.3",
+   "url": "https://iga.in.gov/ic/2026/Title_12.html",
+   "quote": "Except as provided in IC 27-1-37.5 after December 31, 2020, if a provision of, or rule adopted under, IC 27 conflicts with the administration of the programs under a law described in subsection (a), the law described in subsection (a) is controlling.",
+   "correction": "The statute quote and the IC 27-1-52 exclusion are right, but the consequence 'Do not cite IC 27-8-5.7, IC 27-1-52, or IC 27-4-1 against Medicaid MCEs' is too broad. IC 12-15-12-0.9(b) is a conflict rule, not a blanket exclusion, and the FSSA contracts themselves bind the MCEs to Indiana insurance prompt-pay law: HIP 8.5.3 and PathWays 9.7.3 both say 'The Contractor shall meet the requirements set forth in IC 27-13-36.2-3 and notify providers of deficiencies in claims within the set timelines in State statute' and 'The Contractor shall not violate the claims payment provisions and timeframes that apply to accident and sickness insurers and HMOs under IC 27-8-5.7.' So letters to MCEs can cite IC 12-15-13 first and the contract's incorporation of IC 27-8-5.7 and IC 27-13-36.2-3 as contract duties (enforced by FSSA; provider enforcement as a third-party beneficiary not confirmed). IC 27-1-52 (downcoding) stays out (0.3), and IDOI will not take Medicaid complaints."
+  },
+  {
+   "id": "IN-GUARD-1-intimidation",
+   "verdict": "correct",
+   "citation": "IC 35-45-2-1(a)(1), (b)(1)(C), (c)(1)(F),(G)",
+   "url": "https://iga.in.gov/ic/2026/Title_35.html",
+   "quote": "(F) expose the person threatened to hatred, contempt, disgrace, or ridicule; (G) falsely harm the credit or business reputation of a person;",
+   "correction": "Confirmed; the base offense is 'intimidation, a Class A misdemeanor'. Add: it becomes a Level 6 felony if 'the threat relates to or is made in connection with the occupation, profession, employment status, or ownership status of a person' ((b)(1)(C)), which a threat aimed at a claims employee could meet. (F) needs no falsity, so a threat of public shaming to force payment is the risk; truthful notice of lawful filings (IDOI complaint, grievance, arbitration) is the safe form."
+  }
+ ],
+ "missing": [
+  "IC 27-1-37.5-25 (SEA 480, eff. July 1, 2025): 'A utilization review entity may not revoke, limit, condition, or restrict an authorization if the health care provider begins providing the health care service not later than forty-five (45) days (excluding weekends and state and federal legal holidays) after the date the health care provider received the authorization.' Use against post-service denials of authorized Mohs or radiation courses. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-1-37.5-26(b) and -27(a),(c),(d): an authorization 'shall be valid for at least one (1) year'; a new UR entity must honor a prior plan's authorization for at least the first 90 days of new coverage; a change in coverage or criteria 'may not affect a covered individual who received authorization before the effective date of the change for the remainder of the plan year'; authorizations survive a product change within the same company. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-1-37.5-19(a),(b): PA requirements and written clinical criteria must be on the UR entity's website, and no new or amended PA requirement may be implemented unless the website is updated and written notice goes to providers 'at least sixty (60) days before the requirement or restriction is implemented'. A denial under an unposted or un-noticed rule is challengeable, and sec. 28 makes noncompliance a deemed authorization. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-1-37.5-20 with -1.7 and -21: all adverse medical-necessity determinations and appeals must be made by a 'clinical peer' (for a physician, one certified in the same specialty and, if the review concerns subspecialty care, the same subspecialty) under an Indiana-licensed medical director; the appeal reviewer cannot have a financial interest or have made the first decision; the clinical peer 'owes a duty to the covered individual to exercise the applicable standard of care'. Ask who decided and their board certification. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-1-37.5-17 and -23(c)-(g): the UR entity must offer peer-to-peer review by a clinical peer (every effort within 48 hours, weekends and holidays excluded); an adverse PA decision must give 'Specific reasons' and 'Suggested alternatives'; provider appeal within 48 hours and UR answer within 48 hours. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-4-1-19(a)(2): IDOI's annual published report must separately list any company found to have committed an unfair claim settlement practice 'flagrantly and in conscious disregard' or 'with a frequency that indicates a general business practice', plus the enforcement taken. This is the lawful public-exposure consequence a letter can name. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-1-3-19: the commissioner may order an insurer to stop any practice 'contrary to law' and comply, then sue in Marion County circuit court for an injunction if not obeyed in 30 days. This is the enforcement route for IC 27-1-52 and IC 27-8-5.7 duties that carry no penalty of their own. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-8-11-11: when an insurer pays the insured for a noncontracted provider's service it must send a notice that, in at least 24-point bold type, tells the insured to pay the provider and that failure 'violates the law and may result in collection proceedings or criminal penalties'. Useful for out-of-network checks sent to patients. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-8-11-13.5 (P.L.215-2025): a physician fully credentialed by an insurer who changes employers in Indiana or opens or relocates a practice in Indiana must be provisionally credentialed for 60 days (or until fully credentialed), and paid for that period at the new employer's or the physician's prior contract rates, notwithstanding sec. 7(k). https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-1-25-12.4(b)(4) with IC 27-1-25-1(a),(l): IDOI may deny, suspend or revoke a third party administrator's license if it, without just cause, 'refuses to pay proper claims', causes a covered individual to accept less than the amount due, or causes a covered individual to employ an attorney or bring suit to get a proper claim paid. Reaches administrators acting for insurers, HMOs, and employers with governmental or church plans (for example a county or school district plan run by a licensed TPA), not private self-funded ERISA plans. https://iga.in.gov/ic/2026/Title_27.html",
+  "FSSA contracts (HIP #69655 Exhibit 1 sec. 8.5.3; PathWays #82035 sec. 9.7.3): 'The Contractor shall not violate the claims payment provisions and timeframes that apply to accident and sickness insurers and HMOs under IC 27-8-5.7' and must meet IC 27-13-36.2-3 deficiency notices; the HIP contract's 'within one year of receipt' for unclean claims is looser than the 30 days in IC 12-15-13-1.6(d), so cite the statute. https://www.in.gov/dA/7a56f2dde1/STIND_MHS_HIP_69655_0.PDF",
+  "IC 12-15-13-7.2: the Medicaid 'office' (which includes MCOs, IC 12-15-13-0.4) must start using the current CPT, HCPCS and ICD versions within 90 days of their effective date and must pay under the code version in effect on the date of service when services fall in the gap. Use against denials of new or revised codes. https://iga.in.gov/ic/2026/Title_12.html",
+  "IC 12-15-13-3.5 (Medicaid noninstitutional provider overpayments): draft audit findings, administrative reconsideration within 45 days, appeal within 60 days of the final calculation, repayment within 300 days, refund with interest if the provider wins, and no interest owed where the overpayment came from an office or contractor error. https://iga.in.gov/ic/2026/Title_12.html",
+  "IC 27-1-45.2-10 and -13 (P.L.119-2026; chapter limited to disputes in the federal No Surprises Act IDR process, sec. 1): an out-of-network provider that starts IDR must give the facility written notice within 3 business days or face licensing-board action; a health carrier may not charge a provider an administrative fee or penalty for care involving an out-of-network provider (an unfair practice under IC 27-4-1-4(a)(42)). A compliance duty if the practice ever uses IDR. https://iga.in.gov/ic/2026/Title_27.html",
+  "Medigap and supplemental policies: IC 27-8-5.7-1 adopts the IC 27-8-5-1 definition ('any policy or contract covering one (1) or more of the kinds of insurance described in Class 1(b) or 2(a)'), which has no Medicare supplement exclusion (unlike IC 27-8-28-1(b) and IC 27-8-5-2.5(a)). On the text, Indiana-issued Medigap policies are within prompt pay and interest for provider-submitted claims; not confirmed by IDOI. https://iga.in.gov/ic/2026/Title_27.html",
+  "IC 27-8-28-13 and IC 27-13-10-4: insurers and HMOs must give notice of the grievance and external review procedures (and a toll-free number) 'with any notice of denial of a claim'. A denial without it is itself a defect to cite. https://iga.in.gov/ic/2026/Title_27.html"
+ ]
+}

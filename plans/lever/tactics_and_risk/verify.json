@@ -1,0 +1,537 @@
+{
+ "area": "tactics_and_risk",
+ "summary": "All 65 rules opened in my own downloads of the primary sources (eCFR API current to 2026-11-19, apps.legislature.ky.gov statutes and KAR, the official 2026 Indiana Code title files that iga.in.gov loads, LII U.S. Code, CMS, OIG, GovInfo court opinions, and the payers' own documents). Every researcher quote was found verbatim. 58 correct (many with notes that add limits or stronger text), 7 corrected (TR-21 transparency files move to quarterly per-network files from March 6, 2027; TR-24 'fraud or similar fault' and the unappealable, dismissible clerical reopening; TR-46 Barrows dismissed North Carolina statutes, mostly by concession; TR-47 the PxDx sentence quoted was the complaint, not the holding; TR-48 missing Class A misdemeanor tier and 90-day aggregation; TR-49 now read in the official code, clause is (c)(1)(F) and threats tied to a person's occupation are a Level 6 felony; TR-55 the 180-day period suspends the 60-day clock, it is not the deadline). None wrong; none could not be checked, though TR-50's current court text was confirmed only through the bar's reproduction (kycourts.gov returned 403).",
+ "checks": [
+  {
+   "id": "TR-01",
+   "verdict": "correct",
+   "citation": "42 CFR 422.568(c), (d)(1), (e)(2), (f); 42 CFR 422.566(a) for the applicable integrated plan carve-out",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.568",
+   "quote": "(2) State the specific reasons for the denial; ... If the MA organization fails to provide the enrollee and the physician or provider involved, as appropriate, with timely notice of an organization determination as specified in this section, this failure itself constitutes an adverse organization determination and may be appealed.",
+   "correction": "Note: the payment clock comes from 422.568(c): 'The MA organization must process requests for payment according to the \"prompt payment\" provisions set forth in § 422.520.' The integrated-plan exclusion is in 422.566(a), not 422.568. Read in the eCFR (API, data current to 2026-11-19)."
+  },
+  {
+   "id": "TR-02",
+   "verdict": "correct",
+   "citation": "42 CFR 422.566(d); 42 CFR 422.566(b)(3); CMS FAQ of Feb. 6, 2024, Question 9",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.566",
+   "quote": "the organization determination must be reviewed by a physician or other appropriate health care professional with expertise in the field of medicine or health care that is appropriate for the services at issue, including knowledge of Medicare coverage criteria, before the MA organization issues the organization determination decision. The physician or health care professional reviewing the request need not, in all cases, be of the same specialty or subspecialty as the treating physician",
+   "correction": "Note: FAQ Q9 confirmed ('the refusal to provide or pay for services, in whole or in part ... is an organization determination by the MA plan under § 422.566(b)(3)'). The reviewer must also hold a current and unrestricted license. At reconsideration the bar is higher: 42 CFR 422.590(h)(2) requires the reconsidered medical-necessity decision to be made 'by a physician with expertise in the field of medicine that is appropriate for the services at issue', and 422.590(h)(1) by someone 'not involved in making the organization determination'."
+  },
+  {
+   "id": "TR-03",
+   "verdict": "correct",
+   "citation": "42 CFR 422.101(b)(6), (b)(6)(i), (b)(6)(ii)(A)-(C); 42 CFR 422.101(c)(1)(i)(A)",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.101",
+   "quote": "MA organizations may create publicly accessible internal coverage criteria that are based on current evidence in widely used treatment guidelines or clinical literature when coverage criteria are not fully established in applicable Medicare statutes, regulations, NCDs or LCDs. ... (A) The internal coverage criteria in use and a summary of evidence that was considered during the development of the internal coverage criteria used to make medical necessity determinations;",
+   "correction": "Note: the operative bar is (c)(1)(i)(A): MA organizations 'may not deny coverage for basic benefits based on coverage criteria not specified in paragraph (b) or (c) of this section.' (b)(6)(ii)(B)-(C) also require the list of evidence sources and the rationale to be public."
+  },
+  {
+   "id": "TR-04",
+   "verdict": "correct",
+   "citation": "CMS HPMS memo to all MA organizations and Medicare-Medicaid Plans, 'Frequently Asked Questions related to Coverage Criteria and Utilization Management Requirements in CMS Final Rule (CMS-4201-F)', Feb. 6, 2024, Question 2 (interpreting 42 CFR 422.101(c))",
+   "url": "https://www.cms.gov/files/document/hpms-memo-faq-coverage-criteria-and-utilization-management-020604pdf.pdf",
+   "quote": "an algorithm that determines coverage based on a larger data set instead of the individual patient's medical history, the physician's recommendations, or clinical notes would not be compliant with § 422.101(c). ... Because publicly posted coverage criteria are static and unchanging, artificial intelligence cannot be used to shift the coverage criteria over time.",
+   "correction": "Note: guidance, not regulation. Pair it with the binding text, 42 CFR 422.101(c)(1)(i)(C): decisions must be based on 'The enrollee's medical history (for example, diagnoses, conditions, functional status), physician recommendations, and clinical notes.' No AI-specific regulatory text was found in 42 CFR 422.101, 422.112 or 422.137 in the eCFR current to 2026-11-19."
+  },
+  {
+   "id": "TR-05",
+   "verdict": "correct",
+   "citation": "42 CFR 422.590(b)(2), (d); 42 CFR 422.562(c)(2); 42 CFR 422.574(b); 42 CFR 422.582(b)",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.590",
+   "quote": "If the MA organization affirms, in whole or in part, its adverse organization determination, it must prepare a written explanation and send the case file to the independent entity contracted by CMS no later than 60 calendar days from the date it receives the request for a standard reconsideration. ... this failure constitutes an affirmation of its adverse organization determination, and the MA organization must submit the file to the independent entity",
+   "correction": "Note: a non-contract provider is a party only as 'an assignee of the enrollee (that is, a physician or other provider who has furnished a service to the enrollee and formally agrees to waive any right to payment from the enrollee for that service)' (422.574(b)). The practice's own filing clock is 422.582(b): 'within 60 calendar days after receipt of the written organization determination notice.' The IRE status lookup named in CMS's 2027 Star Ratings technical notes is https://partcappeals.c2cinc.com/Search-Appeal-Status."
+  },
+  {
+   "id": "TR-06",
+   "verdict": "correct",
+   "citation": "CMS 2027 Star Ratings Technical Notes (last updated 11/04/2026), Part C Measure C31 Reviewing Appeals Decisions (p. 85)",
+   "url": "https://www.cms.gov/files/document/2027-star-ratings-technical-notes.pdf",
+   "quote": "This rating shows how often an independent reviewer found the health plan's decision to deny coverage to be reasonable. ... This includes appeals requested by a beneficiary, appeals requested by a party on behalf of a beneficiary, and appeals requested by non-contract providers.",
+   "correction": "Note: Weighting Value 2 confirmed. Cut points: 5 stars only at 100% upheld, 4 stars at 98% to under 100%, 1 star under 88%. Only IRE (level 2) decisions count; dismissed and withdrawn appeals are excluded; 10 or fewer appeals means not enough data. The 2027 ratings use CY2025 appeals."
+  },
+  {
+   "id": "TR-07",
+   "verdict": "correct",
+   "citation": "42 CFR 422.125(a), (b)(3), (c); CMS 2027 Star Ratings Technical Notes, Measure C27 Complaints about the Health Plan",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.125",
+   "quote": "The MA organization must resolve all other complaints within 30 calendar days of the assignment date. ... the MA organization must attempt to contact the individual who filed a complaint within 7 calendar days of the assignment date.",
+   "correction": "Note: the Complaints Tracking Module records complaints 'from beneficiaries and others' (422.125(a)). Measure C27 counts all CTM complaints per 1,000 members (some subcategories excluded by CMS's CTM procedures). I did not verify a CMS online provider complaint form; that point rests on the medicare_advantage area."
+  },
+  {
+   "id": "TR-08",
+   "verdict": "correct",
+   "citation": "29 CFR 2560.503-1(b)(4), (h)(2)(iii), (m)(8)(i)-(iv), (i)(2)(iii)(A), (l)(1)",
+   "url": "https://www.ecfr.gov/current/title-29/section-2560.503-1",
+   "quote": "Provide that a claimant shall be provided, upon request and free of charge, reasonable access to, and copies of, all documents, records, and other information relevant to the claimant's claim for benefits. ... constitutes a statement of policy or guidance with respect to the plan concerning the denied treatment option or benefit for the claimant's diagnosis, without regard to whether such advice or statement was relied upon in making the benefit determination.",
+   "correction": "Note: post-service appeal decisions are due within 60 days for a one-appeal plan, or 30 days per level for a two-appeal plan ((i)(2)(iii)(A)). Deemed exhaustion for group health plans is applied strictly through 29 CFR 2590.715-2719(b)(2)(ii)(F) (TR-11)."
+  },
+  {
+   "id": "TR-09",
+   "verdict": "correct",
+   "citation": "29 CFR 2560.503-1(b)(5), (m)(8)(iii)",
+   "url": "https://www.ecfr.gov/current/title-29/section-2560.503-1",
+   "quote": "where appropriate, the plan provisions have been applied consistently with respect to similarly situated claimants. ... Demonstrates compliance with the administrative processes and safeguards required pursuant to paragraph (b)(5) of this section in making the benefit determination"
+  },
+  {
+   "id": "TR-10",
+   "verdict": "correct",
+   "citation": "29 CFR 2560.503-1(h)(3)(ii)-(v)",
+   "url": "https://www.ecfr.gov/current/title-29/section-2560.503-1",
+   "quote": "the appropriate named fiduciary shall consult with a health care professional who has appropriate training and experience in the field of medicine involved in the medical judgment; ... Provide for the identification of medical or vocational experts whose advice was obtained on behalf of the plan in connection with a claimant's adverse benefit determination, without regard to whether the advice was relied upon in making the benefit determination",
+   "correction": "Note: (h)(3)(ii) adds that the appeal must 'not afford deference to the initial adverse benefit determination' and be decided by someone who is neither the original decision-maker nor that person's subordinate; (h)(3)(v) bars reusing the professional consulted on the initial denial."
+  },
+  {
+   "id": "TR-11",
+   "verdict": "correct",
+   "citation": "29 CFR 2590.715-2719(b)(2)(ii)(F)(1)-(2) (same text at 45 CFR 147.136(b)(2)(ii)(F)); 29 CFR 2560.503-1(l)(1); 29 CFR 2590.715-2719(d)(1)(i)(A)",
+   "url": "https://www.ecfr.gov/current/title-29/section-2590.715-2719",
+   "quote": "In the case of a plan or issuer that fails to strictly adhere to all the requirements of this paragraph (b)(2) with respect to a claim, the claimant is deemed to have exhausted the internal claims and appeals process of this paragraph (b) ... This exception is not available if the violation is part of a pattern or practice of violations by the plan or issuer. The claimant may request a written explanation of the violation from the plan or issuer, and the plan or issuer must provide such explanation within 10 days",
+   "correction": "Note: (F)(2) also gives a 10-day right to a written explanation of any violation, a cheap second lever. Federal external review under (d)(1)(i)(A) covers determinations that involve medical judgment (and a few listed categories), so deemed exhaustion on a pure pricing dispute leads to court, not external review. Non-grandfathered plans only."
+  },
+  {
+   "id": "TR-12",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-607(2)(b), (2)(i), (2)(j)3.a-b, (3)(a)-(b) (effective July 15, 2026); KRS 304.17A-005(29); KRS 205.522(1)(m)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57342",
+   "quote": "only licensed physicians, who are of the same or similar specialty and subspecialty, when possible, as the ordering provider, shall: ... The title of the reviewer making the decision, except that a written notice provided to a provider shall also include, if applicable, the medical license number of the reviewer making the decision; ... failure to make a determination and provide written notice within the time frames set forth in this section shall be deemed to be a prior authorization for the health care services or benefits subject to the review.",
+   "correction": "Note: Medicaid MCO coverage confirmed (KRS 205.522(1)(m) lists 'KRS 304.17A-600, 304.17A-603, and 304.17A-607'). Deemed authorization does not apply where the delay 'results from circumstances which are documented to be beyond the insurer's control' ((3)(b)). Related and stronger for appeals: KRS 304.17A-617(4)(b) and (4)(d)2 (see missing)."
+  },
+  {
+   "id": "TR-13",
+   "verdict": "correct",
+   "citation": "IC 27-1-37.5-20(a)-(b), 27-1-37.5-1.7(1), 27-1-37.5-1.5, 27-1-37.5-5, 27-1-37.5-8.3, 27-1-37.5-21, 27-1-37.5-28",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "adverse determinations based on medical necessity are made; and (B) appeals are reviewed and decided; by a clinical peer ... is certified in the same specialty as the physician under review ... owes a duty to the covered individual to exercise the applicable standard of care. ... the health care service subject to prior authorization shall be automatically deemed authorized by the utilization review entity.",
+   "correction": "Note: 'adverse determination' (27-1-37.5-1.5) covers a service 'furnished or proposed to be furnished', so the clinical-peer rule in -20 reaches retrospective medical-necessity denials made by an entity that performs prior authorization (-8.3); the automatic authorization in -28 is limited to services subject to prior authorization. A clinical peer may not decide an appeal if involved in the denial or financially interested (-20(b)). Read from the official 2026 Title 27 file that the iga.in.gov viewer loads."
+  },
+  {
+   "id": "TR-14",
+   "verdict": "correct",
+   "citation": "IC 27-1-52-9(a), (c); 27-1-52-10; 27-1-52-11; scope 27-1-52-0.3, -5, -6 (added by P.L.88-2026, HEA 1271 SECTION 6, effective July 1, 2026)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "as the sole basis to downcode a claim based on medical necessity without the review of the covered individual's medical record by an employee or contractor of the insurer. ... An insurer must disclose in an easily accessible and readable manner when artificial intelligence is used to: ... An insurer may not downcode a claim based solely on the reported diagnosis code. ... the specific reason for the downcoding, including reference to the clinical criteria used to justify the downcoding;",
+   "correction": "Note: effective date confirmed in the enrolled act (HEA 1271, SECTION 6 '[EFFECTIVE JULY 1, 2026]', https://iga.in.gov/pdf-documents/124/2026/house/bills/HB1271/HB1271.07.ENRS.pdf). 'Insurer' includes a 'third party contractor' (27-1-52-6(4)). The chapter has no penalty section; 27-1-52-14 directs the Department to adopt rules. Also see 27-1-52-8 and -13 (missing)."
+  },
+  {
+   "id": "TR-15",
+   "verdict": "correct",
+   "citation": "IC 27-1-52-12(a)(1)-(3), (b) (effective July 1, 2026)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "a timeline for submission of an appeal that is not less than one hundred eighty (180) days. (b) An insurer shall allow a provider to appeal in batches of similar claims involving substantially similar downcoding issues without restriction."
+  },
+  {
+   "id": "TR-16",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-6.5(a)-(c); IC 27-13-36.2-4.5(a)-(c); insurer definition IC 27-8-5.7-3",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer may not alter the CPT code submitted for a clean claim or pay for a CPT code of lesser monetary value unless: (1) the CPT code submitted is not in accordance with correct coding guidelines and rules, clinical care guidelines, or the terms and conditions of the participating provider's agreement or contract with the insurer; or (2) the medical record of the clean claim has been reviewed by an employee or contractor of the insurer.",
+   "correction": "Note: subsection (b) is also useful for biopsy and pathology lines: an insurer 'may not alter a clean claim to only pay for the CPT codes necessary for an individual's final diagnosis, if the CPT codes billed were deemed medically necessary according to generally accepted clinical care guidelines to reach the final diagnosis.'"
+  },
+  {
+   "id": "TR-17",
+   "verdict": "correct",
+   "citation": "42 CFR 438.402(c)(1)(i)(A), (c)(1)(ii), (c)(2)(ii); 438.404(b)(2); 438.406(b)(2), (b)(5); 438.408(b)(2), (c)(1), (c)(3)",
+   "url": "https://www.ecfr.gov/current/title-42/part-438/subpart-F",
+   "quote": "Such information includes medical necessity criteria, and any processes, strategies, or evidentiary standards used in setting coverage limits. ... If State law permits and with the written consent of the enrollee, a provider or an authorized representative may request an appeal or file a grievance, or request a State fair hearing, on behalf of an enrollee. ... the enrollee is deemed to have exhausted the MCO's, PIHP's, or PAHP's appeals process.",
+   "correction": "Note: 438.406(b)(5) also requires the plan to give the enrollee and representative the case file 'free of charge and sufficiently in advance of the resolution timeframe', and (b)(2)(i) bars deciders who were involved in an earlier level. The 30-day appeal clock may be extended up to 14 days (438.408(c)(1))."
+  },
+  {
+   "id": "TR-18",
+   "verdict": "correct",
+   "citation": "KRS 205.534(1)(a)3-4, (2)(b), (6) (effective April 14, 2026)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033",
+   "quote": "copies of all documents, records, and other information relevant to a determination, including medical necessity criteria and any processes, strategies, or evidentiary standards relied upon, if requested by the provider. ... a written reply in sufficient detail to inform the provider of all reasons for the determination. ... Medicaid members with comparable medical needs receive a comparable, consistent level, amount, and duration of services as supported by the member's medical condition, records, and previous affirmative coverage decisions.",
+   "correction": "Note: the same section has stronger provider tools the area did not list: (1)(c) reprocessing without rebilling, (1)(d) appeal and payment clocks, (1)(e) audit and recoupment limits (see missing)."
+  },
+  {
+   "id": "TR-19",
+   "verdict": "correct",
+   "citation": "KRS 205.646(2)-(4), (6); KRS 205.534(1)(b); 907 KAR 17:035 Section 2(1)(a)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=56581",
+   "quote": "A provider may submit multiple claims to be appealed in a single external independent third-party review if the provider alleges that a Medicaid managed care organization has implemented a policy or practice that results in the denial, in whole or in part, of those claims. ... Any claim that remains unpaid for forty-five (45) days or more after the date the claim is received by the managed care organization and that individually or in the aggregate exceeds two thousand five hundred dollars ($2,500);",
+   "correction": "Caution: 907 KAR 17:035 (last amended effective 5-4-2018, before the statute's current text) still says in Section 3(3) 'Only one (1) claim shall be reviewed per external independent third-party review unless the department determines that reviewing multiple claims related to one (1) member is expedient and appropriate.' The statute applies 'Notwithstanding any law to the contrary', so cite KRS 205.646(2) when an MCO or the Department invokes the regulation. 60-day filing deadline confirmed (907 KAR 17:035 Section 2(1)(a)). The hearing fee is up to $1,000, one fee for a bundled hearing, paid by the losing party (KRS 205.646(6)); either side may appeal the reviewer's decision within 30 days (205.646(4))."
+  },
+  {
+   "id": "TR-20",
+   "verdict": "correct",
+   "citation": "Kisting-Leung v. Cigna Corp., No. 2:23-cv-01477-DAD-CSK (E.D. Cal.), Order of Mar. 30, 2025 (Doc. 55, filed Mar. 31, 2025), quoting Cigna's declarant (Doc. 46-14 at para. 13)",
+   "url": "https://www.govinfo.gov/content/pkg/USCOURTS-caed-2_23-cv-01477/pdf/USCOURTS-caed-2_23-cv-01477-8.pdf",
+   "quote": "if a claim was denied based on PxDx review, both the patient and healthcare provider will receive a separate letter detailing the services billed, the diagnosis codes billed, and the applicable Cigna clinical coverage policy used in adjudicating that PxDx denial."
+  },
+  {
+   "id": "TR-21",
+   "verdict": "corrected",
+   "citation": "29 CFR 2590.715-2715A3(b)(1)(i)(C)(1)-(2), (b)(2), (b)(3), (c)(2) as in force today; amended by Transparency in Coverage final rule, 91 FR 63748 (Oct. 6, 2026), revised (b) and (c)(1) applying from March 6, 2027 (same changes to 45 CFR 147.212 and 26 CFR 54.9815-2715A3)",
+   "url": "https://www.ecfr.gov/current/title-29/section-2590.715-2715A3",
+   "quote": "(i) The in-network rate and out-of-network allowed amount machine-readable files required by paragraphs (b)(1)(i) and (ii) of this section must be updated and posted quarterly on the first day of each calendar-year quarter beginning with the first calendar-year quarter following the applicability date under paragraph (c)(1) of this section; ... The provisions of this section apply beginning March 6, 2027, except that paragraphs (b)(2), (b)(3)(iii), and (b)(4)(iii) through (v) of this section apply beginning September 6, 2027.",
+   "correction": "The researcher's quotes match the text in force on 2026-11-23, but 'monthly' files are ending. The Oct. 6, 2026 final rule (https://www.govinfo.gov/content/pkg/FR-2026-10-06/pdf/2026-20447.pdf, effective Dec. 7, 2026) restructures the in-network rate file per provider network and moves it to quarterly posting from March 6, 2027; until then plans must keep complying with the July 1, 2025 text. Rates stay associated with NPI, TIN and place of service. RemitWatch should plan for quarterly files in 2027 and cite the file date it priced against."
+  },
+  {
+   "id": "TR-22",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-708(2), (3)(a)-(b); applies to Kentucky Medicaid MCOs through KRS 205.593(2)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29333",
+   "quote": "An insurer shall not be required to correct a payment error to a provider if the provider's request for a payment correction is filed more than twenty-four (24) months after the date that the provider received payment for the claim from the insurer. ... Except in cases of fraud, an insurer may only retroactively deny reimbursement to a provider during the twenty-four (24) month period after the date that the insurer paid the claim submitted by the provider.",
+   "correction": "Note: a retroactive denial must come with 'a written or electronic statement specifying the basis for the retroactive denial' ((3)(b)). Overpayment recoupment has its own 24-month notice and dispute rules in KRS 304.17A-714 (see missing)."
+  },
+  {
+   "id": "TR-23",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-10(a)-(f) as amended by P.L.88-2026 SECTION 10 (effective July 1, 2026); IC 27-8-5.7-0.5; HMO counterpart IC 27-13-36.2-8 and 27-13-36.2-0.5",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer may not recoup a paid claim more than one hundred eighty (180) days after the date on which the claim was initially paid. ... An insurer may not retroactively audit a paid claim more than three (3) years after the date on which the claim was initially paid. ... An insurer may not be required to correct a payment error to a provider if notice of the payment error is not provided within one hundred eighty (180) days after payment for a fully adjudicated claim is received.",
+   "correction": "Note: the 2025 text did allow two years each way (checked in https://iga.in.gov/ic/2025/Title_27.html). HMOs have the same 180-day, 3-year and 180-day limits in IC 27-13-36.2-8, for contracts 'entered into, delivered, amended, or renewed after June 30, 2026' covering plan years after Dec. 31, 2026 (27-13-36.2-0.5)."
+  },
+  {
+   "id": "TR-24",
+   "verdict": "corrected",
+   "citation": "42 CFR 405.980(a)(3)-(5), (b)(1)-(5), (c)(1)-(3); 42 CFR 405.986; 42 CFR 422.616(a)-(b)",
+   "url": "https://www.ecfr.gov/current/title-42/section-405.980",
+   "quote": "At any time if there exists reliable evidence as defined in § 405.902 that the initial determination was procured by fraud or similar fault as defined in § 405.902. ... A party may request that a contractor reopen its initial determination at any time if the initial determination is unfavorable, in whole or in part, to the party thereto, but only for the purpose of correcting a clerical error on which that determination was based. Third party payer error does not constitute clerical error. ... The contractor's, QIC's, ALJ's or attorney adjudicator's, or Council's decision on whether to reopen is binding and not subject to appeal.",
+   "correction": "The any-time exception is 'fraud or similar fault', not fraud alone, so old payments are not safe whenever 'similar fault' could be shown. Clerical-error reopenings have real limits the area left out: if the contractor 'disagrees that the issue is a clerical error, the contractor must dismiss the reopening request' and gives appeal rights only if the original appeal window is still open ((a)(3)); the decision whether to reopen is not appealable ((a)(5)); no reopening while the claim is under appeal ((a)(4)). File clerical reopenings while the redetermination window is still open when possible ('within 120 calendar days from the date a party receives the notice of the initial determination', 42 CFR 405.942(a))."
+  },
+  {
+   "id": "TR-25",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-708(1); 806 KAR 17:360 Section 4(4); KRS 304.12-230(17); KRS 304.99-123",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29333",
+   "quote": "An insurer shall not require a provider to appeal errors in payment where the insurer has not paid the claim according to the contracted rate. Miscalculations in payments made by the insurer shall be corrected and paid within thirty (30) calendar days upon the insurer's receipt of documentation from the provider verifying the error. ... An insurer shall not be required to pay interest on corrected payments made in accordance with KRS 304.17A-708(1).",
+   "correction": "Note: KRS 304.12-230(17) confirmed: 'Knowingly and willfully failing to comply with the provisions of KRS 304.17A-708 on resolution of payment errors and retroactive denial of claims.' 806 KAR 17:360 read at https://apps.legislature.ky.gov/law/kar/titles/806/017/360/."
+  },
+  {
+   "id": "TR-26",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-730(1)-(2); KRS 304.17A-702(1); 806 KAR 17:360 Section 4(1)-(3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29344",
+   "quote": "the insurer shall add the interest payable to the amount of the unpaid claim without the necessity for any claim for that interest to be made by the provider filing the original claim. ... shall pay the interest required by KRS 304.17A-730 within thirty (30) days after the date a claim is paid.",
+   "correction": "Note: rates confirmed (12% for 1-30 days late, 18% for 31-60, 21% over 60, per annum, from the date payment was due under 304.17A-702, which is 30 calendar days from receipt). Interest does not apply where the delay results from 'acts or events beyond the control of the insurer' (730(2)). 806 KAR 17:360 Section 4(2) requires each interest payment to identify the claim, so missing interest is detectable on the 835."
+  },
+  {
+   "id": "TR-27",
+   "verdict": "correct",
+   "citation": "KRS 304.12-235(1)-(3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17038",
+   "quote": "If an insurer fails to settle a claim within the time prescribed in subsection (1) of this section and the delay was without reasonable foundation, the insured person or health care provider shall be entitled to be reimbursed for his reasonable attorney's fees incurred."
+  },
+  {
+   "id": "TR-28",
+   "verdict": "correct",
+   "citation": "KRS 304.99-123(1)(a)-(b), (2), (3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=47798",
+   "quote": "A fine of one thousand dollars ($1,000) per day or ten percent (10%) of the unpaid claim amount, whichever is greater, for each day that a clean claim remains unpaid ... has a pattern of repeated violations of KRS 304.17A-700 to 304.17A-730",
+   "correction": "Note: the compliance safe harbor in (2) is measured per calendar quarter (95% of clean claims adjudicated on time and 90% of clean-claim dollars paid on time); (3) extends the fines to Medicaid MCOs."
+  },
+  {
+   "id": "TR-29",
+   "verdict": "correct",
+   "citation": "KRS 304.2-165(1)-(3); KRS 304.2-160(2)-(4) (effective July 15, 2026)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=16665",
+   "quote": "the entity or individual shall send a written or electronic message response to the commissioner within fifteen (15) calendar days from the date of the commissioner's letter. ... Upon review of a complaint, the commissioner shall make a finding to the entity or individual and the complainant. ... The commissioner shall consider complaints received by the department before issuing or renewing any certificate of authority or license."
+  },
+  {
+   "id": "TR-30",
+   "verdict": "correct",
+   "citation": "KRS 304.12-230(2), (14); 806 KAR 12:092 Sections 1(9), 1(16), 2(2), 3(8)-(9)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17037",
+   "quote": "Failing to acknowledge and act reasonably promptly upon communications with respect to claims arising under insurance policies; ... Failing to promptly provide a reasonable explanation of the basis in the insurance policy in relation to the facts or applicable law for denial of a claim or for the offer of a compromise settlement; ... The insurer shall acknowledge and respond within fifteen (15) calendar days to any written communications relating to a claim.",
+   "correction": "Note: 'Written communications' include 'all correspondence, regardless of source or type' (Section 1(16)), so a provider's letter counts. Section 3(9) adds: written notice of denial 'within fifteen (15) calendar days of the determination' that refers to the policy provision relied on. Regulation read at https://apps.legislature.ky.gov/law/kar/titles/806/012/092/."
+  },
+  {
+   "id": "TR-31",
+   "verdict": "correct",
+   "citation": "IC 27-4-1-4.5(2), (14); IC 27-4-1-4(a)(16); IC 27-4-1-5.6(a), (c)-(e); IC 27-4-1-6(a)(1)-(2)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "believes that an unfair claim settlement practice described in section 4.5 of this chapter has been committed in connection with the claim; ... Within twenty (20) business days from the date of receipt of the complaint, the insurer shall provide to the commissioner and the complaining party a written report ... Committing or performing, with such frequency as to indicate a general practice, unfair claim settlement practices ... Payment of a civil penalty of not more than twenty-five thousand dollars ($25,000) for each act or violation.",
+   "correction": "Note: the insurer's 20-business-day report is triggered only after the commissioner, believing a practice occurred, delivers the complaint within 10 business days (5.6(c)-(d)). The $50,000 tier applies if the person 'knew or reasonably should have known' (6(a)(1)). Penalties under 27-4-1-6 follow a hearing."
+  },
+  {
+   "id": "TR-32",
+   "verdict": "correct",
+   "citation": "IC 27-8-5.7-6(a)-(d); IC 27-8-5.7-8(a)-(d); HMOs IC 27-13-36.2-4",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "the insurer shall pay the provider that submitted the claim interest on the accident and sickness insurance policy allowable amount of the claim paid under this section. ... In paying interest under subsection (b), an insurer shall use the same interest rate as provided in IC 12-15-21-3(7)(A). ... the commissioner may assess an aggregate civil penalty against the insurer according to the following schedule:",
+   "correction": "Note: HMOs have the same 30/45-day clock (IC 27-13-36.2-4), but HMO interest runs on 'the lesser of the usual, customary, and reasonable charge ... or an amount agreed to'. A penalty under 27-8-5.7-8 bars a second penalty under IC 27-4-1 for the same activity (8(d))."
+  },
+  {
+   "id": "TR-33",
+   "verdict": "correct",
+   "citation": "42 CFR 422.520(a)(1)-(3), (b)(1)-(2), (c); 42 CFR 422.510(a)(4)(v)",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.520",
+   "quote": "The MA organization must pay interest on clean claims that are not paid within 30 days in accordance with sections 1816(c)(2)(B) and 1842(c)(2)(B). ... All other claims from non-contracted providers must be paid or denied within 60 calendar days from the date of the request. ... The MA organization is obligated to pay contracted providers under the terms of the contract between the MA organization and the provider.",
+   "correction": "Note: 422.510(a)(4)(v) confirmed ('Substantially failed to comply with the prompt payment requirements in § 422.520'). 422.520(c) also lets CMS, after notice and hearing, provide 'For direct payment of the sums owed to providers'."
+  },
+  {
+   "id": "TR-34",
+   "verdict": "correct",
+   "citation": "HHS OIG, OEI-09-18-00260 (April 2022); HHS OIG, OEI-09-16-00410 (September 2018)",
+   "url": "https://oig.hhs.gov/oei/reports/OEI-09-18-00260.pdf",
+   "quote": "among the payment requests that MAOs denied, 18 percent met Medicare coverage rules and MAO billing rules. ... This represents a 75 percent success rate ... Most of these overturned denials (82 percent) were for payment to providers for services that the beneficiary already received. ... appealing only 1 percent of denials during",
+   "correction": "Note: the 2022 figure is an estimate from a sample of denials issued by 15 MAOs in the first week of June 2019; the 2018 report covers 2014-2016 (https://oig.hhs.gov/oei/reports/oei-09-16-00410.pdf). Context only."
+  },
+  {
+   "id": "TR-35",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-617(2); KRS 304.17A-623(2), (3)(d), (4)(a)-(b), (5)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57346",
+   "quote": "The internal appeals process may be initiated by the covered person, an authorized person, or a provider acting on behalf of the covered person. ... A covered person, an authorized person, or a provider acting on behalf of and with the consent of the covered person, may request an external review of an adverse benefit determination, other than a coverage denial, rendered by an insurer, its designee, or agent.",
+   "correction": "Note: external review also requires that 'The entire course of treatment or service will cost the covered person at least one hundred dollars ($100) if the covered person had no insurance' ((3)(d)); the request is due within 60 days of the internal appeal decision with written consent for records ((4)); the covered person pays a $25 fee, refundable and waivable ((5)). Coverage denials go instead to the Department under KRS 304.17A-617(5). Confirmed in KRS 304.17A-625 (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57347): 'The insurer shall be responsible for the cost of the external review' ((5)); the decision 'shall be binding on the insurer with respect to that covered person' ((9)(a)); refusal to comply requires the insurer 'to pay the claim that was the subject of the external review, without need for the covered person or authorized person to further establish a right as to the payment amount' and makes it bear reasonable attorney's fees ((10)). KRS 304.17A-617 read at https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57343."
+  },
+  {
+   "id": "TR-36",
+   "verdict": "correct",
+   "citation": "KRS 24A.230(1); KRS 24A.240(2)-(3); KRS 24A.250(1)-(3)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=39856",
+   "quote": "does not exceed two thousand five hundred dollars ($2,500) exclusive of interest and costs. ... No party may file an assigned claim or a class action in the division. ... No party shall file more than twenty-five (25) claims in any one (1) calendar year in the small claims division of any District Court in the Commonwealth.",
+   "correction": "Note: excess claims are 'dismissed without prejudice at the cost of the plaintiff' (24A.250(3)). KRS 24A.240 read at https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=20712, KRS 24A.250 at https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=20713."
+  },
+  {
+   "id": "TR-37",
+   "verdict": "correct",
+   "citation": "Indiana Small Claims Rule 8(C) (effective Jan. 1, 2025); small claims limit IC 33-29-2-4(b)(1) and IC 33-28-3-4(b)(1)",
+   "url": "https://rules.incourts.gov/Content/small-claims/rule8/current.htm",
+   "quote": "Any assigned or purchased claim, or any debt acquired from the real party in interest by a third party cannot be presented or defended by said third party unless this third party is represented by counsel. ... waives any present or future claim in this or any other forum in excess of the small claims jurisdictional limit as defined by relevant Indiana statutes.",
+   "correction": "Now confirmed from the rule itself (the researcher had it only through a summary). The open question on the dollar limit is answered: small claims dockets take civil actions where 'the amount sought ... is not more than ten thousand dollars ($10,000)' (IC 33-29-2-4(b)(1); IC 33-28-3-4(b)(1), applying after June 30, 2021; read in https://iga.in.gov/ic/2026/Title_33.html)."
+  },
+  {
+   "id": "TR-38",
+   "verdict": "correct",
+   "citation": "29 U.S.C. 1132(e)(1) (ERISA 502(e)(1)); 28 U.S.C. 1441(a)",
+   "url": "https://www.law.cornell.edu/uscode/text/29/1132",
+   "quote": "State courts of competent jurisdiction and district courts of the United States shall have concurrent jurisdiction of actions under paragraphs (1)(B) and (7) of subsection (a) of this section.",
+   "correction": "Note: because federal district courts also have jurisdiction, the plan can generally remove a state-court benefit suit: 'any civil action brought in a State court of which the district courts of the United States have original jurisdiction, may be removed by the defendant' (28 U.S.C. 1441(a), https://www.law.cornell.edu/uscode/text/28/1441)."
+  },
+  {
+   "id": "TR-39",
+   "verdict": "correct",
+   "citation": "29 CFR 2560.503-1(c)(2), (c)(4)(i)-(ii) (group health plans)",
+   "url": "https://www.ecfr.gov/current/title-29/section-2560.503-1",
+   "quote": "The claims procedures do not contain any provision for the mandatory arbitration of adverse benefit determinations, except to the extent that the plan or procedures provide that: ... The claimant is not precluded from challenging the decision under section 502(a) of the Act or other applicable law.",
+   "correction": "Note: paragraph (c) governs group health plans. (c)(2) also bars requiring 'more than two appeals of an adverse benefit determination prior to bringing a civil action'."
+  },
+  {
+   "id": "TR-40",
+   "verdict": "correct",
+   "citation": "2026 UnitedHealthcare Care Provider Administrative Guide, Chapter 10 'Our claims process' (printed pp. 126-150; quotes at pp. 134, 146-147; PDF dated May 13, 2026)",
+   "url": "https://www.uhcprovider.com/content/dam/provider/docs/public/admin-guides/2026-UHC-Administrative-Guide.pdf",
+   "quote": "Unless your Agreement prescribes a different time frame, a Notice of Dispute must be sent no later than 60 days after the date of our decision on your appeal. ... Failure to timely comply with this process and the requirements in your Agreement will result in the waiver of your right to initiate dispute resolution and waiver of your right to pursue such claim or issue in any forum. ... If you have a request to reconsider 20 or more paid or denied claims for the same administrative issue (and attachments are not required), you may submit these in bulk online.",
+   "correction": "Note: page range is slightly off (the waiver sentence is on printed p. 147, not within pp. 133-146)."
+  },
+  {
+   "id": "TR-41",
+   "verdict": "correct",
+   "citation": "Cigna Healthcare provider site, Appeals and Disputes, How to Submit (Arbitration); Cigna Request for Health Care Professional Payment Review form",
+   "url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes/how-to-submit",
+   "quote": "With respect to health care provider payment or termination disputes, you must request arbitration within one year of the date of the letter communicating the final internal level review decision. ... Fee schedule or reimbursement terms for multiple patients do not require individual appeals.",
+   "correction": "Note: the form continues 'Contact Cigna Customer Service at the toll-free number listed on the back on the patient's ID card for further assistance', and the page says an arbitration clause in the provider agreement controls. Form at https://static.cigna.com/assets/chcp/pdf/resourceLibrary/medical/RequestForHealthCareProfessionalPaymentReview.pdf."
+  },
+  {
+   "id": "TR-42",
+   "verdict": "correct",
+   "citation": "MHS (Managed Health Services) Indiana Provider Manual (PDF dated Feb. 2026), Arbitration, referring to 405 IAC 1-1.6",
+   "url": "https://www.mhsindiana.com/content/dam/centene/mhsindiana/medicaid/pdfs/transportation-doc/0126.PR.P.JB_RR.9.13.a.V2.Provider_Manual_101325_Clean_508R.pdf",
+   "quote": "Claims with similar issues from the same provider may be grouped together for the purpose of requesting arbitration. ... The request must be postmarked no later than 60 calendar days after the date the provider received MHS' decision on the administrative claim appeal."
+  },
+  {
+   "id": "TR-43",
+   "verdict": "correct",
+   "citation": "KRS 417.050(2)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=49287",
+   "quote": "This chapter does not apply to: ... (2) Insurance contracts.",
+   "correction": "Note: text confirmed; whether a provider participation agreement is an 'insurance contract' remains unconfirmed, as the researcher said."
+  },
+  {
+   "id": "TR-44",
+   "verdict": "correct",
+   "citation": "45 CFR 149.510(c)(4)(i)(A)-(D); 149.510(c)(5) fee allocation",
+   "url": "https://www.ecfr.gov/current/title-45/section-149.510",
+   "quote": "a certified IDR entity may consider up to 50 qualified IDR items and services jointly as part of a single payment determination"
+  },
+  {
+   "id": "TR-45",
+   "verdict": "correct",
+   "citation": "Estate of Lokken v. UnitedHealth Group, Inc., No. 0:23-cv-03514-JRT (D. Minn.), Memorandum Opinion and Order of Feb. 13, 2025 (Doc. 91); Order of Mar. 9, 2026 on motion to compel (Doc. 162), quoting the clarification order (Dkt. 104 at 2)",
+   "url": "https://www.govinfo.gov/content/pkg/USCOURTS-mnd-0_23-cv-03514/pdf/USCOURTS-mnd-0_23-cv-03514-1.pdf",
+   "quote": "Plaintiffs' claims for breach of contract and breach of the implied covenant of good faith and fair dealing, however, survive preemption because those claims do not aim to regulate the same subject matter as the federal standards. ... UnitedHealthcare's Clinical Services Staff and Physicians make decisions on the health care services you receive based on the appropriateness of care and service and existence of coverage. ... Accordingly, the contract claims are limited to breaches of EOC terms.",
+   "correction": "Note: the last sentence is Judge Tunheim's clarification (Dkt. 104 at 2) as quoted in the magistrate judge's Doc. 162 (https://www.govinfo.gov/content/pkg/USCOURTS-mnd-0_23-cv-03514/pdf/USCOURTS-mnd-0_23-cv-03514-3.pdf). Doc. 162 ordered production on how nH Predict works but not 'the data, rules, source code, and medical guidelines nH Predict is based on'. Pleading-stage ruling; members' case."
+  },
+  {
+   "id": "TR-46",
+   "verdict": "corrected",
+   "citation": "Barrows v. Humana, Inc., No. 3:23-cv-00654-RGJ (W.D. Ky.), Memorandum Opinion and Order signed Aug. 14, 2025, filed Aug. 15, 2025 (DE 82)",
+   "url": "https://www.govinfo.gov/content/pkg/USCOURTS-kywd-3_23-cv-00654/pdf/USCOURTS-kywd-3_23-cv-00654-0.pdf",
+   "quote": "This Evidence of Coverage is part of our contract with you ... During the hearing, Plaintiffs conceded that Violation of North Carolina's Unfair Claims Settlement Practice (Count IV), Insurance Bad Faith (Count VI), and Unfair and Deceptive Insurance Practices (Count VII) are preempted. ... Count 4 (Violation of North Carolina's Unfair Claims Settlement Practice), Count 5 (Unfair Competition Law - North Carolina), Count 6 (Insurance Bad Faith), and Count 7 (Unfair and Deceptive Insurance Practices) are DISMISSED with prejudice.",
+   "correction": "The dismissed statutory claims were North Carolina-law claims, and three of the four were dismissed on the plaintiffs' concession; the court itself held only the North Carolina unfair-competition claim (Count V) expressly preempted. The case did not rule on any Kentucky statute. The practical conclusion still holds, but its basis is 42 CFR 422.402 (MA standards 'supersede any State law or regulation (other than State licensing laws or State laws relating to plan solvency)'), with Barrows as supporting authority. The order is dated Aug. 14, 2025 and was filed Aug. 15, 2025; the body/conclusion conflict on unjust enrichment is real."
+  },
+  {
+   "id": "TR-47",
+   "verdict": "corrected",
+   "citation": "Kisting-Leung v. Cigna Corp., No. 2:23-cv-01477-DAD-CSK (E.D. Cal.), Order Granting in Part and Denying in Part Motion to Dismiss, dated Mar. 30, 2025 (Doc. 55, filed Mar. 31, 2025), Part D.1",
+   "url": "https://www.govinfo.gov/content/pkg/USCOURTS-caed-2_23-cv-01477/pdf/USCOURTS-caed-2_23-cv-01477-8.pdf",
+   "quote": "the court finds defendants' interpretation of the plan provision requiring determinations of medical necessity be made by a medical director-as allowing an algorithm to make the decision so long as a medical director pushes the button-conflicts with the plain language of the plan and constitutes an abuse of discretion. ... Because plaintiffs have adequately alleged that defendants violated the plan terms when they entrusted medical necessity determinations to the PxDx algorithm, they have adequately plead a breach of fiduciary duty.",
+   "correction": "The researcher's fragment 'PxDx algorithm contradicts plan terms promising medical necessity review by a medical director' is the court's summary of the plaintiffs' complaint (TAC para. 132), not a holding. The holding to quote is the one above (pleading stage, allegations taken as true). The 1132(a)(1)(B) benefits claim was dismissed with leave to amend; the 1132(a)(3) claim was dismissed with leave to amend for three plaintiffs and survived for the rest."
+  },
+  {
+   "id": "TR-48",
+   "verdict": "corrected",
+   "citation": "KRS 514.080(1)(b), (c), (e), (f), (2), (3)(a)-(d), (4) (effective June 29, 2021)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=51042",
+   "quote": "Theft by extortion is a Class B misdemeanor unless: (a) The value of the property obtained is five hundred dollars ($500) or more but less than one thousand dollars ($1,000), in which case it is a Class A misdemeanor; (b) The value of the property is one thousand dollars ($1,000) or more but less than ten thousand dollars ($10,000), in which case it is a Class D felony; ... (d) The value of the property is ten thousand dollars ($10,000) or more, in which case it is a Class C felony. (4) If any person commits two (2) or more separate offenses of theft by extortion within ninety (90) days, the offenses may be combined",
+   "correction": "The threat list and the defense are quoted correctly, and the defense does cover only (1)(b), (c) and (d). The penalty summary skipped a tier: $500 to under $1,000 is a Class A misdemeanor; three or more prior convictions under (3)(a) within five years make it a Class D felony; and offenses within 90 days may be aggregated (4), which matters for a batch program sending many letters to one payer."
+  },
+  {
+   "id": "TR-49",
+   "verdict": "corrected",
+   "citation": "IC 35-45-2-1(a)(1), (b)(1)(C), (c)(1)(C)-(G) (as amended through P.L.146-2026)",
+   "url": "https://iga.in.gov/ic/2026/Title_35.html",
+   "quote": "A person who communicates a threat with the intent: (1) that another person engage in conduct against the other person's will; ... commits intimidation, a Class A misdemeanor. ... the threat is communicated because of the occupation, profession, employment status, or ownership status of a person or the threat relates to or is made in connection with the occupation, profession, employment status, or ownership status of a person; ... expose the person threatened to hatred, contempt, disgrace, or ridicule; (G) falsely harm the credit or business reputation of a person;",
+   "correction": "Now read in the official 2026 Indiana Code (the researcher had only a case clip). The 'expose ... to hatred, contempt, disgrace, or ridicule' clause is (c)(1)(F), not (c)(6). Penalty: Class A misdemeanor, raised to a Level 6 felony when the threat relates to a person's occupation or profession ((b)(1)(C)), which fits a threat aimed at a payer's reviewer or claims staff. 'Threat' also covers expressions of intent to 'commit a crime' ((c)(1)(C)) and to 'unlawfully withhold testimony or information with respect to another person's legal claim or defense' ((c)(1)(E)). The provider-use advice stands, and should add: never threaten a named reviewer's job or license."
+  },
+  {
+   "id": "TR-50",
+   "verdict": "correct",
+   "citation": "Ky. SCR 3.130(3.4)(f), as reproduced by the Kentucky Bar Association (Ethics 2000 Committee report, 'Current Kentucky Rule' and proposal retaining paragraph (f))",
+   "url": "https://kybar.org/Portals/0/Admin/KBA%20Ethics%202000%20Committee%20Report/Rule_3.4.pdf",
+   "quote": "Present, participate in presenting, or threaten to present criminal or disciplinary charges solely to obtain an advantage in any civil or criminal matter.",
+   "correction": "Caveat: the document's committee note says the proposal 'retains current KRPC paragraph (f) on threatening criminal or disciplinary charges'. I could not open the Kentucky Court of Justice's current rules (kycourts.gov returned HTTP 403), so the current text is confirmed only through the bar's document."
+  },
+  {
+   "id": "TR-51",
+   "verdict": "correct",
+   "citation": "18 U.S.C. 1035(a); 18 U.S.C. 24(b); 18 U.S.C. 1347(a)-(b)",
+   "url": "https://www.law.cornell.edu/uscode/text/18/1035",
+   "quote": "makes any materially false, fictitious, or fraudulent statements or representations, or makes or uses any materially false writing or document knowing the same to contain any materially false, fictitious, or fraudulent statement or entry, ... any public or private plan or contract, affecting commerce, under which any medical benefit, item, or service is provided to any individual",
+   "correction": "Note: 5 years (1035) and 10 years (1347) confirmed; under 1347(b) 'a person need not have actual knowledge of this section or specific intent to commit a violation of this section.'"
+  },
+  {
+   "id": "TR-52",
+   "verdict": "correct",
+   "citation": "KRS 304.47-020(1)(a)1, (2)(a)-(c); KRS 304.47-050(2)(a)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57396",
+   "quote": "knowing that the statement contains any false, incomplete, or misleading information concerning any fact or thing material to a claim;",
+   "correction": "Note: tiers confirmed: Class A misdemeanor; $500 to under $10,000 aggregate Class D felony; $10,000 to under $1,000,000 Class C; $1,000,000 or more Class B."
+  },
+  {
+   "id": "TR-53",
+   "verdict": "correct",
+   "citation": "CMS Medicare Program Integrity Manual (Pub. 100-08), Chapter 3, Section 3.3.2.5 (Rev. 12633, issued 05-09-24, effective 06-10-24; chapter current as Rev. 13971, issued 09-30-26)",
+   "url": "https://www.cms.gov/Regulations-and-Guidance/Guidance/Manuals/downloads/pim83c03.pdf",
+   "quote": "The date and author of any amendment, correction or delayed entry should be identifiable, and the change/addenda should be clearly and permanently denoted. ... If the MACs, CERT, SMRC or RACs identify medical documentation with potentially fraudulent entries, the reviewers shall refer the cases to the UPIC",
+   "correction": "Note: the manual refers 'potentially fraudulent entries' to the UPIC; it does not say every undisclosed late change is treated as fraud. The policy advice (signed, dated late entries only) is right."
+  },
+  {
+   "id": "TR-54",
+   "verdict": "correct",
+   "citation": "IC 27-1-52-9(b) (P.L.88-2026, effective July 1, 2026)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "A provider may not use an automated: (1) process; (2) system; or (3) tool, including artificial intelligence; to submit a health benefits claim without the review of a provider or other person involved in the development of the claim for submission."
+  },
+  {
+   "id": "TR-55",
+   "verdict": "corrected",
+   "citation": "42 U.S.C. 1320a-7k(d)(1)-(4); 42 CFR 401.305(a)(2), (b)(1)-(3), (e), (f) (as amended 89 FR 98553, Dec. 9, 2024)",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1320a-7k",
+   "quote": "the date which is 60 days after the date on which the overpayment was identified; or ... the deadline for reporting and returning the initially identified overpayment and related overpayments that arise from the same or similar cause or reason as the initially identified overpayment will remain suspended until the earlier of: ... The date that is 180 days after the date on which the initial identified overpayment was identified. ... Once the suspension of the 60-day deadline ends, the person has the remainder of the 60-day period to report and return the overpayment.",
+   "correction": "The rule is not 'within 180 days while an investigation runs'. A timely, good-faith investigation suspends the 60-day deadline until the earlier of its completion or day 180; after that the remainder of the 60 days runs (CMS's example: investigation started on day 10 leaves 50 days after the suspension ends), so the outside date is about 240 days. The last quoted sentence is CMS's preamble, 89 FR 98337-98338 (https://www.govinfo.gov/content/pkg/FR-2024-12-09/html/2024-25382.htm). 'Identified' means the person 'knowingly receives or retains an overpayment' under the False Claims Act's knowledge standard (401.305(a)(2)). Lookback 6 years and False Claims Act 'obligation' confirmed. 401.305 is the Medicare Parts A and B rule; the statute names MA organizations and Medicaid MCOs as 'persons', but whether provider payments from an MA plan are 'funds ... under subchapter XVIII' stays unconfirmed."
+  },
+  {
+   "id": "TR-56",
+   "verdict": "correct",
+   "citation": "45 CFR 164.506(c)(1); 45 CFR 164.502(b)(1); 45 CFR 164.402 (definition of breach, paragraph (2))",
+   "url": "https://www.ecfr.gov/current/title-45/section-164.502",
+   "quote": "A covered entity may use or disclose protected health information for its own treatment, payment, or health care operations. ... a covered entity or business associate must make reasonable efforts to limit protected health information to the minimum necessary to accomplish the intended purpose of the use, disclosure, or request. ... is presumed to be a breach unless the covered entity or business associate, as applicable, demonstrates that there is a low probability that the protected health information has been compromised",
+   "correction": "Note: the HIPAA final rule of Nov. 19, 2026 (91 FR 74848, effective Jan. 19, 2027) amends 164.502(a) and adds 164.506(c)(6) but does not change 164.502(b) or 164.506(c)(1). The breach presumption is subject to the exceptions in paragraph (1) of the definition."
+  },
+  {
+   "id": "TR-57",
+   "verdict": "correct",
+   "citation": "47 U.S.C. 227(a)(5), (b)(1)(C)",
+   "url": "https://www.law.cornell.edu/uscode/text/47/227",
+   "quote": "The term \"unsolicited advertisement\" means any material advertising the commercial availability or quality of any property, goods, or services which is transmitted to any person without that person's prior express invitation or permission, in writing or otherwise."
+  },
+  {
+   "id": "TR-58",
+   "verdict": "correct",
+   "citation": "KRS 525.080(1)(a), (2)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=45228",
+   "quote": "with intent to intimidate, harass, annoy, or alarm another person ... in a manner which causes annoyance or alarm and serves no purpose of legitimate communication;"
+  },
+  {
+   "id": "TR-59",
+   "verdict": "correct",
+   "citation": "KRS 304.47-080(1); KRS 304.47-050(2)(a), (c)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=30190",
+   "quote": "Every insurer admitted to do business in the Commonwealth shall maintain effective procedures and resources to deter and investigate fraudulent insurance acts prohibited by this subtitle, including a unit that will investigate suspected fraudulent insurance acts. ... Any insurer, agent, or other person licensed under this chapter;",
+   "correction": "Note: KRS 304.47-050 read at https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=49052."
+  },
+  {
+   "id": "TR-60",
+   "verdict": "correct",
+   "citation": "42 CFR 422.202(a)(4), (d)(1)-(4)",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.202",
+   "quote": "The reasons for the action, including, if relevant, the standards and profiling data used to evaluate the physician and the numbers and mix of physicians needed by the MA organization. ... The MA organization must ensure that the majority of the hearing panel members are peers of the affected physician. ... An MA organization and a contracting provider must provide at least 60 days written notice to each other before terminating the contract without cause."
+  },
+  {
+   "id": "TR-61",
+   "verdict": "correct",
+   "citation": "42 CFR 422.570(f); 42 CFR 422.584(f); 42 CFR 422.206(a)(1), (d)",
+   "url": "https://www.ecfr.gov/current/title-42/section-422.570",
+   "quote": "An MA organization may not take or threaten to take any punitive action against a physician acting on behalf or in support of an enrollee in requesting an expedited determination. ... An MA organization may not take or threaten to take any punitive action against a physician acting on behalf or in support of an enrollee in requesting an expedited reconsideration. ... An MA organization may not prohibit or otherwise restrict a health care professional, acting within the lawful scope of practice, from advising, or advocating on behalf of, an individual who is a patient and enrolled under an MA plan about"
+  },
+  {
+   "id": "TR-62",
+   "verdict": "correct",
+   "citation": "42 CFR 438.410(b)",
+   "url": "https://www.ecfr.gov/current/title-42/section-438.410",
+   "quote": "The MCO, PIHP, or PAHP must ensure that punitive action is not taken against a provider who requests an expedited resolution or supports an enrollee's appeal."
+  },
+  {
+   "id": "TR-63",
+   "verdict": "correct",
+   "citation": "KRS 304.17A-530(2), (3)(a)",
+   "url": "https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=17433",
+   "quote": "A health care provider shall not be penalized, or a health care provider's contract with a managed care plan terminated, because the provider discusses medically necessary or appropriate care with an enrollee or another person on behalf of an enrollee."
+  },
+  {
+   "id": "TR-64",
+   "verdict": "correct",
+   "citation": "IC 27-8-11-4.5(a)-(b); IC 27-13-15-1(a)(2)-(3); IC 27-8-29-14(a)(1)",
+   "url": "https://iga.in.gov/ic/2026/Title_27.html",
+   "quote": "An insurer may not penalize a provider financially or in any other manner for making a disclosure permitted under subsection (a). ... shall not be subject to retaliation for exercising the covered individual's right to an external grievance under this chapter;"
+  },
+  {
+   "id": "TR-65",
+   "verdict": "correct",
+   "citation": "42 U.S.C. 1395ddd(f)(2)(A)-(B); 42 U.S.C. 1395kk-1 (former subsection (h) struck by Pub. L. 111-152)",
+   "url": "https://www.law.cornell.edu/uscode/text/42/1395ddd",
+   "quote": "the Secretary may not take any action (or authorize any other person, including any medicare contractor, as defined in subparagraph (C)) to recoup the overpayment until the date the decision on the reconsideration has been rendered. ... struck out subsec. (h) which related to conduct of prepayment review.",
+   "correction": "Note: the current 42 U.S.C. 1395kk-1(h) is a different provision (MAC 'Improper payment outreach and education program', added by Pub. L. 114-10); the old prepayment-review limits are not in the statute."
+  }
+ ],
+ "missing": [
+  "42 CFR 422.138(c) (eCFR, https://www.ecfr.gov/current/title-42/section-422.138): an MA prior authorization locks the medical-necessity question. 'If the MA organization approved the furnishing of a covered item or service through a prior authorization or pre-service determination of coverage or payment ... it may not deny coverage later on the basis of lack of medical necessity and may not reopen such a decision for any reason except for good cause ... or if there is reliable evidence of fraud or similar fault'. Directly useful for authorized Mohs and radiation; CMS FAQ Q9 (Feb. 6, 2024) says post-claim audits must respect it.",
+  "42 CFR 422.590(h)(1)-(2) (https://www.ecfr.gov/current/title-42/section-422.590): an MA reconsideration must be done by 'A person or persons who were not involved in making the organization determination', and a medical-necessity reconsideration 'must be made by a physician with expertise in the field of medicine that is appropriate for the services at issue' (same specialty not required in all cases). Stronger than 422.566(d) at the appeal stage.",
+  "42 CFR 422.562(a)(4) (https://www.ecfr.gov/current/title-42/section-422.562): every MA organization 'must employ a medical director who is responsible for ensuring the clinical accuracy of all organization determinations and reconsiderations involving medical necessity'. A named target when asking who answers for an automated denial.",
+  "42 CFR 422.101(c)(1)(i)(A), (C) (https://www.ecfr.gov/current/title-42/section-422.101): the binding rule behind the CMS AI FAQ. MA plans 'may not deny coverage for basic benefits based on coverage criteria not specified in paragraph (b) or (c)' and must base medical-necessity decisions on 'The enrollee's medical history (for example, diagnoses, conditions, functional status), physician recommendations, and clinical notes.'",
+  "42 CFR 422.582(b) and 422.574(b) (https://www.ecfr.gov/current/title-42/section-422.582): the practice's own MA clock and standing. A reconsideration 'must be filed within 60 calendar days after receipt of the written organization determination notice'; a non-contract provider is a party as 'an assignee of the enrollee (that is, a physician or other provider who has furnished a service to the enrollee and formally agrees to waive any right to payment from the enrollee for that service)'.",
+  "42 CFR 422.510(a)(4)(ii) (https://www.ecfr.gov/current/title-42/section-422.510): CMS may terminate an MA contract where the organization 'Substantially failed to comply with the requirements in subpart M of this part relating to grievances and appeals' (alongside (a)(4)(v), prompt payment). Gives a pattern complaint about ignored appeals regulatory weight.",
+  "29 CFR 2560.503-1(c)(2) and (h)(3)(ii) (https://www.ecfr.gov/current/title-29/section-2560.503-1): a group health plan may not require 'more than two appeals of an adverse benefit determination prior to bringing a civil action', and the appeal must 'not afford deference to the initial adverse benefit determination' and be decided by someone who is neither the original decision-maker nor that person's subordinate.",
+  "KRS 304.17A-617(4)(a)-(b), (4)(d)2, (5) (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57343, effective July 15, 2026): Kentucky internal appeals must be decided 'Within thirty (30) days of receipt of the request'; an appeal of an adverse determination other than a coverage denial 'shall only be conducted by a licensed physician who did not participate in the initial review and denial', and on request by the provider the insurer 'shall ... utilize a board-eligible or certified physician in the appropriate specialty or subspecialty area'; the appeal decision letter to a provider must include 'the medical license number of the person making the decision'. Coverage denials can go to the Department, which calls for the insurer's response 'within ten (10) business days' ((5)(c)). Applies to Medicaid MCOs only where KRS 205.522 lists it (it lists 304.17A-600, -603 and -607, not -617).",
+  "KRS 205.534(1)(c)-(e), (6) (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=57033): Kentucky Medicaid MCOs must 'Reprocess claims that are incorrectly paid or denied in error, in compliance with KRS 304.17A-708. The reprocessing shall not require a provider to rebill or resubmit claims to obtain correct payment. A claim shall not be denied for timely filing if the initial claim was timely submitted'; must accept provider appeals filed 'within one hundred twenty (120) days of confirmed receipt' of the reduction or denial and decide them 'within thirty (30) days' (failure subject to contract fines under (6)); must pay within 30 days after a favorable appeal; and in audits must allow 30 days for records, finish within 180 days, and 'Only recoup denied payments or issue a demand for payment from a provider upon the final disposition of the audit, including the appeals process established in KRS 205.646'.",
+  "KRS 304.17A-714(1)-(4) (https://apps.legislature.ky.gov/law/statutes/statute.aspx?id=29336): the defense against Kentucky takebacks. Except for rate or method errors, an insurer must give overpayment notice 'within twenty-four (24) months from the date that the insurer paid the claim' with 'the basis for determining that an overpayment exists'; a provider dispute filed within 30 days means 'no recoupment shall be made until the dispute is resolved', and disputes must be 'completed within thirty (30) days'. Knowing and willful violation is an unfair claims settlement practice (KRS 304.12-230(16)).",
+  "907 KAR 17:035 Sections 2(1)(a), 3(3), 5 (https://apps.legislature.ky.gov/law/kar/titles/907/017/035/): request Kentucky Medicaid external review 'within sixty (60) calendar days of receiving the MCO's final decision'; the 2018 regulation still says 'Only one (1) claim shall be reviewed per external independent third-party review' unless the Department finds multiple claims for one member expedient, which conflicts with the bundling right in KRS 205.646(2) and should be met by citing the statute; and 'Within sixty (60) calendar days from the exhaustion of appeal rights after a final decision against an MCO ... the MCO shall submit complete payment as required by the decision.'",
+  "806 KAR 12:092 Section 3(9) (https://apps.legislature.ky.gov/law/kar/titles/806/012/092/): 'When a claim is denied, written notice of denial shall be sent to the claimant within fifteen (15) calendar days of the determination. The notice shall refer to the policy provision, condition, or exclusion upon which the denial is based.' A bare remark code is not that notice (guidance for the commissioner, Section 2(2)).",
+  "IC 27-1-52-8 and 27-1-52-13 (https://iga.in.gov/ic/2026/Title_27.html, effective July 1, 2026): an Indiana insurer 'may not use downcoding in a manner that prevents a provider from: (1) submitting a health benefits claim for the actual health care service performed; and (2) collecting reimbursement from the insurer for the actual health care service performed', and 'may not downcode in a targeted or discriminatory manner against providers that routinely treat patients with complex or chronic conditions.' Not Medicaid (27-1-52-0.3).",
+  "IC 27-8-5.7-6.7 and IC 27-13-36.2-4.7 (https://iga.in.gov/ic/2026/Title_27.html, P.L.88-2026): Indiana insurers and HMOs 'may not retroactively reduce the reimbursement rate for any CPT code' and must give 'at least sixty (60) days' notice by mail or email and website posting before a prospective rate cut; applies to policies and HMO contracts issued, delivered, amended or renewed after June 30, 2026 that cover plan years beginning after Dec. 31, 2026 (27-8-5.7-0.5; 27-13-36.2-0.5). A ready check for unannounced fee-schedule drops.",
+  "IC 27-13-15-1(d) (https://iga.in.gov/ic/2026/Title_27.html): an Indiana HMO 'must provide the participating provider with a current reimbursement rate schedule: (1) every two (2) years; and (2) when three (3) or more CPT code ... rates under the contract change in a twelve (12) month period.' A lawful demand that supplies the rate evidence for underpayment proof.",
+  "IC 27-8-5.7-11.5 (https://iga.in.gov/ic/2026/Title_27.html, P.L.88-2026): after an Indiana insurer or HMO 'recoups payment from a provider due to an error in coordination of benefits', the provider may bill the right insurer 'not later than ninety (90) days after the date the recoupment is made', with proof of the original submission and the recoupment. A clock RemitWatch should run on every COB takeback.",
+  "IC 33-29-2-4(b)(1); IC 33-28-3-4(b)(1) (https://iga.in.gov/ic/2026/Title_33.html): Indiana small claims dockets hear civil actions where 'the amount sought or value of the property sought to be recovered is not more than ten thousand dollars ($10,000)' (after June 30, 2021); answers the area's open question and is four times Kentucky's $2,500 limit.",
+  "42 CFR 438.406(b)(2)(i), (b)(5) (https://www.ecfr.gov/current/title-42/section-438.406): Medicaid managed care appeals must be decided by individuals 'neither involved in any previous level of review or decision-making nor a subordinate of any such individual', and the plan must give the enrollee and representative the case file, 'including medical records, other documents and records, and any new or additional evidence considered, relied upon, or generated', 'free of charge and sufficiently in advance of the resolution timeframe'."
+ ],
+ "sources_dir": "/tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad/lever/tactics_and_risk/verify/src",
+ "quote_check": "/tmp/claude-0/-home-user-Billing-Optimizer/96e81489-2ad2-5c70-991d-e00db2e22749/scratchpad/lever/tactics_and_risk/verify/quotecheck.json",
+ "counts": {
+  "correct": 58,
+  "corrected": 7
+ }
+}

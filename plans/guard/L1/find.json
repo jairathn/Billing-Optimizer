@@ -1,0 +1,260 @@
+{
+ "lens": "L1, one input moves a shared value: every place the snapshot derives a value for the whole store, a payer or a period from an extreme (MAX, MIN, newest, latest, first, most common) of one row, file or record, and what it gates. The scan found 30 places that compute the store-wide newest payment date themselves (MAX(payment_date) over transactions, no GROUP BY; listed by guard/L1/test_l1_shared_values.py::test_every_module_takes_store_wide_data_dates_from_one_owner with the other data dates: 60 sites in all), plus Production and A/R freshness, export ranking, provider tiers, fee and ratio windows and payer votes. 15 invented tests fail on the snapshot for the stated reason; the reference guard's test passes. Real-store figures are aggregates from read-only queries and in-memory copies.",
+ "instances": [
+  {
+   "id": "L1-1",
+   "file": "remitwatch/detect.py",
+   "severity": "high",
+   "status": "partly",
+   "where": "Detector.run_ema_open_claims 2514-2520 (newest, oldest = MAX/MIN(payment_date) over every payer; since = newest-1830d; recent = newest-400d), 2774-2777 (through = _answers_through(grp, newest); a claim is dropped while due > through), 2880 (severity: first <= newest+30), 2844-2845 (days_waiting); _ema_check_open_claims 3114-3121 (claims due only by EMA postings wait while due > newest; meta ema:unanswered_unseen); _save_ema_wiring 3806-3807",
+   "what_it_can_do": "One remittance file of any payer and any size (even adjustment-only), or one payment-date typo, decides for EVERY payer which EMA claims are 'never answered' (NO_ANSWER, Chase the payer) and 'never reached the payer' (REJECTED_PRE_PAYER), their severity and their days waiting. A newer file floods the worklist, a future-dated file empties both signals, an old file (MIN) widens the pass back before the archive.",
+   "scenario": "(a) Anthem, UHC and Aetna stop on Sept 1; one Humana adjustment-only 835 dated Nov 20 arrives: a claim sent to Anthem on Sept 21 becomes 'no answer from Anthem'. (b) A vendor test 835 paid 2099-12-31: since = 2094, every claim served earlier leaves the pass. (c) After a six-week outage one clearinghouse file holds one day (Nov 20) of all three payers: every claim waiting inside the hole becomes 'never answered'. Shape (c) also passes hotfix 2's rule (volume-weighted median of each group's LATEST date).",
+   "evidence": "Invented tests in guard/L1/test_l1_shared_values.py fail on the snapshot: test_one_newer_file_from_one_payer_does_not_make_three_stopped_payers_current (chased CB0000700C017 and CB0000701C017), test_a_remittance_dated_in_the_future_does_not_wipe_out_unanswered_claims ([] after the 2099 file), test_a_one_day_bundle_after_a_gap_does_not_bridge_the_gap; test_hotfix2_rule_still_bridges_a_gap_with_one_day_of_files shows H8's rule returns 2026-11-20 for (c). Live image (aggregates): 170 open NO_ANSWER + REJECTED_PRE_PAYER items, $47,361, all removed by (b); chaos 0b-1/0e-2 measured (a) on live copies: NO_ANSWER 100 -> 1,726 (+1,626 items, about $373k; 1,524 for payers other than the file's), REJECTED_PRE_PAYER 70 -> 89. The volume-weighted and coverage-based feed dates on the live image both equal the global newest (2026-10-09; 41 groups, 47,816 lines in 120 days), so the robust rule changes nothing today.",
+   "guard": "Every consumer takes the date from one owner module (feeds.py): payment dates clamped to the day their file arrived (later ones held at the door); per payer group, coverage intervals from the group's own cadence (consecutive payment days at most max(14, 2 x median gap) apart; an interval counts once it holds 3 payment days or spans 14 days); a claim is judged unanswered only when one counted interval of its payer group covers sent..due, else it is listed as 'cannot check' with its dollars (never dropped); since/recent from the clamped feed date. Reference: guard/L1/reference_feed.py (coverage, judgeable, feed_date), whose test passes all three shapes. Port H8's tests too (backlog INT)."
+  },
+  {
+   "id": "L1-2",
+   "file": "remitwatch/ema_reports.py",
+   "severity": "high",
+   "status": "open",
+   "where": "coverage 2291-2307 (production_as_of = MAX(as_of) over the current Production boxes) -> ema_checks.freshness 402-416 (production_fresh <= 14 days); consumers: ema_checks.unanswered_claims 1655-1690 (G8 NO_ANSWER from Production: due <= production_as_of), unposted 891-897 (C4), answers_through 1539-1554, alert_candidates EMA_STALE 3740-3748, data_health 3644-3651; states._context 944-962, states._cant_check 2521-2549 with states._covered 2551-2557 (ANY posted-scope box covers EVERY service date); detect.run_ema_summaries 3729-3737 (data_through); selfcheck.blindness/check_feed_ema; story.py 865-872",
+   "what_it_can_do": "One small Production file (a two-day posted-date export) makes Production 'fresh' for the whole store and every service date 'covered': G8 lists every ledger claim due by that day as never answered though the postings between the big export and the small one were never loaded, NO_ANSWER items move from 'cannot check' to 'work now', and EMA_STALE and the Production line of the blindness banner go quiet.",
+   "scenario": "Current boxes: a service-date export through Sept 20 and a posted-date export of Nov 21-22. freshness() reports Production as of Nov 22 and fresh; states._covered reports a service of Oct 15 as covered; G8 judges every claim charged before about Oct 8 whose answer was posted Sept 21-Nov 20.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_one_small_production_file_does_not_make_two_months_of_postings_fresh fails ('Production reads fresh as of 2026-11-22; a service of Oct 15 reads as covered'). Not measurable on the live image (no Production read there yet; push-2 feature).",
+   "guard": "feeds.production_through(conn, today): the end of the CONTINUOUS posted coverage of the current boxes, walking from the oldest (a service box covers postings up to its as_of for its service dates; a gap of more than 3 days ends the run); production_fresh = today - production_through <= 14; _covered tests the item's answer window against each box (never 'any posted box'); G8, answers_through, C4, EMA_STALE and blindness use production_through; a box beyond the run is named on the Data tab ('Production postings Sept 21 to Nov 20 are missing')."
+  },
+  {
+   "id": "L1-3",
+   "file": "remitwatch/alerts.py",
+   "severity": "high",
+   "status": "partly",
+   "where": "AlertEngine.__init__ 108-113 (asof = MAX(payment_date); recent_start, base_start), ramp_rules 134-180, rising_rule 184-215, provider_rule 217-246, rate_cut_rule 248-280, new_code_rule 283-316, stale_rule 347-356 (behind = today - asof; since_ingest = MAX(ingested_at) of any 835 file); also selfcheck.py 3180-3212 (_asof, pattern_watch from the same MAX)",
+   "what_it_can_do": "One file moves every alert window: the rules then compare windows in which most payers have no data, so RAMP, RISING, PROVIDER_TARGETED, NEW_BEHAVIOR and STALE_FEED clear and the email stops naming them; a future date clears every data alert; when the file is taken away they all return as 'new' and are mailed again.",
+   "scenario": "One adjustment-only 835 from a small payer dated three days ago; or one dated 2099-12-31.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_stale_feed_alert_survives_one_file_from_a_fourth_payer and ::test_stale_feed_alert_is_not_cleared_by_a_future_dated_file fail (asof 2099-12-31). On an in-memory copy of the live image: 10 alerts today (RAMP 1, RISING 4, PROVIDER_TARGETED 3, DEADLINE 1, STALE_FEED 1; $58,648 named); asof 2026-11-20 -> 3 alerts ($28,418), 7 cleared; asof 2099-12-31 -> DEADLINE only. Chaos 0e-2 saw 10 -> 3.",
+   "guard": "AlertEngine and pattern_watch take asof = feeds.feed_date(conn, today); per-payer rules use the payer's coverage end (a payer whose coverage ended before the window is skipped and named, never compared on an empty window); STALE_FEED per payer group holding >= 1% of volume whose coverage ended > 14 days before today, with dollars; since_ingest counts only files that added a new transaction; an alert cleared only because a shared value moved stays 'cleared pending' for one run with the reason. H8 covers STALE_FEED in live code only."
+  },
+  {
+   "id": "L1-4",
+   "file": "remitwatch/selfcheck.py",
+   "severity": "high",
+   "status": "open",
+   "where": "blindness 2170-2205 (days = today - MAX(payment_date); _charges_since(newest)), check_feed_835 1144-1153; api_ema.blind_spot 288-330 (fallback MAX(payment_date)); insights.data_health 566-580 ('Payments are current') and brief 763-771; api._cloud_sync_status 2650-2670 (days_behind); pipeline.status 643-660; cloud.py 1807-1812 (status.json newest_payment); report.build_report 29 (weekly email 'latest payment date')",
+   "what_it_can_do": "Owner rule 3 ('blindness is loud') rests on one date: after one small file the banner goes off on every page, the self-check turns green, Today says 'Payments are current', the weekly email shows a current date, and the dollars of claims billed since the newest remittance shrink to those after the stray date; a future date never reads as stale.",
+   "scenario": "Three payers silent since Sept 1; one 835 from a fourth payer dated three days ago.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_blindness_banner_stays_on_after_one_small_file and ::test_home_screen_feed_health_stays_red_after_one_small_file fail. Live image: the 835 feed and the EMA exports both stop on 2026-10-09 (no EMA charge after it), so today's banner rests on this single value.",
+   "guard": "blindness, check_feed_835, blind_spot, data_health, the header, status.json and the email read feeds.feed_date and feeds.coverage: blind per payer group (coverage ended > 14 days ago) with that group's billed dollars since its coverage end; 'current' only when groups holding >= 90% of the last 120 days' lines are current; one input can never switch the banner off (property below). Not in H8's required list; selfcheck and api_ema are push-2 code."
+  },
+  {
+   "id": "L1-5",
+   "file": "remitwatch/api.py",
+   "severity": "high",
+   "status": "guarded_by_hotfix2",
+   "where": "_data_behind_days 3421-3431 (today - MAX(payment_date)); appeals_send 4044-4066 (held 'stale' unless a person vouches); follow-up send 4626-4631 (second request and payment request held, no override)",
+   "what_it_can_do": "One stray file lifts the 14-day hold on every appeal of every payer, so claims paid since the feed stopped can be faxed as unpaid; a future date makes 'behind' negative. While the feed is stale the same single number blocks every second request with no way for a person to send it (chaos 0f-2).",
+   "scenario": "Chaos 0b-1: after one Anthem 835 the Humana appeal is no longer held 'stale' and would fax once a number is saved.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_fax_stale_hold_counts_the_feed_not_one_file fails ('3 days old; Anthem, UHC and Aetna stopped on Sept 1'). Live image: 7,619 open denial, bundling and downcoding items ($879,340) sit behind this one hold.",
+   "guard": "Hold per item on its own payer group's coverage end (feeds.payer_through(group) older than 14 days), dates clamped; the person's 'still unpaid in EMA' override also on second requests. H8 fixes the live code; the snapshot's api.py is unchanged and must be ported (backlog A), and the follow-up override is in neither."
+  },
+  {
+   "id": "L1-6",
+   "file": "remitwatch/insights.py",
+   "severity": "high",
+   "status": "open",
+   "where": "to_decide 702-710 (since = newest - 120 days), follow_ups 752-760 (cut = newest - 30 days), contract_levers 323-330, fee_months 360-368, denial_causes 416-421 (all fed by newest_payment 251-256 = MAX(payment_date)); api.py 776-779 (paid_days), 851-863 (deadline followup / older / decide filters), 1795-1806 (_fee_payers)",
+   "what_it_can_do": "The data date is used as the clock: Today's 'To decide' and 'Follow up on what you sent' and the matching Worklist filters move with one file (a newer file empties part of 'To decide', a future file empties it), and while the feed is stale the follow-up clock stops, so nothing sent after the cut ever comes due.",
+   "scenario": "One stray file dated Nov 20; or a feed stale since Oct 9 for months (chaos 0f-2: 0 follow-ups on every date to 2027-11-23).",
+   "evidence": "Live image (read-only SQL): 'To decide' = 268 items ($45,275) today; with newest = 2026-11-20: 178 ($26,394), 90 items ($18,881) drop off; with 2099-12-31: 0. No item is in status 'appealed' on the live image yet, so the follow-up freeze shows only as items are sent (0f-2 reproduced it).",
+   "guard": "Due dates and 'recent' windows count from today (the practice's date), never from a data date; where the answer could have come and cannot be seen (feeds.judgeable false), the item stays listed with 'remittances for <payer> stop on <date>: check the portal or EMA first'; counts and lists share one function."
+  },
+  {
+   "id": "L1-7",
+   "file": "remitwatch/detect.py",
+   "severity": "high",
+   "status": "open",
+   "where": "Detector.build_baselines 789-828: top_by_year_code = MAX over NPIs of each NPI's usual Medicare amount (99213/99214/99203), no minimum lines per NPI; tier = 'nonphysician' when the NPI's median ratio to that top is under 0.92; tiers key payer_rates and the Medicare reference (_rate_lookup 930-952)",
+   "what_it_can_do": "One Medicare E/M line from a new or odd NPI (another locality, a mis-keyed amount, a Medicare plan misread as Medicare) raises the reference for every provider and relabels every physician 'nonphysician', moving the rate key and Medicare reference of every rate-based item.",
+   "scenario": "Physician paid $100 and nurse practitioner $85 on 30 lines each; one line from a third NPI at $110.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_one_line_from_a_new_npi_does_not_relabel_every_physician fails (the physician becomes nonphysician). Live image, same rules in read-only SQL: 10 providers (4 physician, 6 nonphysician); one invented line per year and code at +10% flips all 4 physicians. Open rate-based items: physician 887 ($467,762), nonphysician 902 ($552,082).",
+   "guard": "The reference comes from the Medicare fee schedule tables (pfs.py, mpfs.py) for the year and locality, not from the data; if data is used, only NPIs with >= 20 lines take part and the reference is their median; an NPI under the floor is 'unknown' (already handled by the rate lookup); a tier change writes a decision-log row and holds the rate items it would move (L3)."
+  },
+  {
+   "id": "L1-8",
+   "file": "remitwatch/detect.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "run_ema_open_claims 2566-2578 (src_at = the workbook's own created_at, else newest row date, then recorded_at) deciding each claim's status 2614-2616 and EMA insurance figures 2650-2654; __init__ 762-775 ema_paid ranked by ema_sources.created_at then source_name (a CSV has no stamp and ranks by FILE NAME), feeding EMA_CLOSES in resolve_elsewhere 1386-1390/1567; ema_exports.export_created 161-172",
+   "what_it_can_do": "One old export opened and saved again (Google Sheets, LibreOffice, openpyxl) becomes EMA's newest word for every claim it lists: paid claims go back to Payment Pending and reappear as 'never answered', rejected ones move to 'chase'; for charge lines, which export closes an item as paid in EMA is decided by a stamp or a file name.",
+   "scenario": "Chaos 0e-9: the Sept 17 status export re-saved on Nov 20 outranks the Oct 12 one.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_an_old_export_saved_again_today_does_not_turn_newer_statuses_back fails. Live image: 146 claims appear in more than one status export and 131 of them carry different statuses across exports, each decided by the stamp; chaos measured 99 claims turned back by one re-saved export (NO_ANSWER +2, REJECTED_PRE_PAYER -1).",
+   "guard": "Rank each row by its own content dates (submission, denial, transaction, posted) and a file by the 99th percentile of them, ties by received_at; never the workbook stamp or the file name; a status row older by content than the claim's current status never overrides it; a re-read export older by content than what is on file is named on the Data tab (backlog INTAKE 0e-9)."
+  },
+  {
+   "id": "L1-9",
+   "file": "remitwatch/ema_checks.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "answers_through 1539-1554 (returns max(newest_835 global, production_as_of - 8)); _group_last_posting 1527-1536 (MAX(last_posted) per payer group from any single EMA check row); used by detect.py 2776 and unanswered_claims 1680-1689",
+   "what_it_can_do": "The global newest always wins (the per-payer refinement can only extend it), and one EMA check row keyed under a payer group (a single small check, a mis-keyed posting) makes that group count as 'posting in EMA', so all its unanswered claims are judged through Production's date.",
+   "scenario": "A group's postings stop Sept 20; one EMA check under its name is posted Nov 21; Production reads fresh Nov 22: every claim of that group due by Nov 14 is judged unanswered.",
+   "evidence": "Code path (push-2 feature, no Production on the live image); the freshness half is shown by L1-2's failing test.",
+   "guard": "answers_through(group) = the earlier of feeds.payer_through(group) and feeds.production_through when the group's own EMA postings are continuous; a group counts as posting only with >= 3 checks (or >= 5% of its usual monthly checks) inside the continuous Production coverage."
+  },
+  {
+   "id": "L1-10",
+   "file": "remitwatch/ema_reports.py",
+   "severity": "medium",
+   "status": "partly",
+   "where": "iter_ar flush 2048-2050 (as_of = MAX(service date, aging date), capped at today); apply_ar_snapshot 3074-3086 (current snapshot per service year chosen by (as_of, created, received, id)); coverage 2300-2306 and ema_checks.freshness 408 (ar_as_of = max over years; ar_fresh within 8 days)",
+   "what_it_can_do": "One row with a service date typed ahead (the reader accepts up to a month ahead) or an aging date of tomorrow dates the whole A/R 'today': an old A/R outranks a newer one for its service years and replaces their rows unless the shrink hold catches it, and the A/R reads fresh (EMA_STALE, blindness and data health quiet).",
+   "scenario": "An A/R pulled Oct 20 with one service date typed 2026-12-15, read on Nov 23.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_one_row_dated_ahead_does_not_make_an_old_ar_export_current fails ('dated 2026-11-23 because of one row'). Guards present: date bounds, cap at today, _ar_holds 2910-2946 (held when fewer than 40% of the lines a re-export must list are listed, if a current snapshot exists and the gap is small); nothing for the first A/R of a year or a large gap.",
+   "guard": "A/R as_of = the 99th percentile of aging dates (never service dates), capped at the day the file arrived; a file whose as_of is older than the current snapshot's never replaces it; rows dated after the file's as_of are counted and named, not used."
+  },
+  {
+   "id": "L1-11",
+   "file": "remitwatch/states.py",
+   "severity": "medium",
+   "status": "partly",
+   "where": "response_table 319-368 (each payer group's answer time over the 2 years before MAX(payment_date); cache keyed on it), response_days 384-414, _wait_of 2500-2518; ema_checks.turnaround 436-460 (svc_p95 window since = newest - 2 years); detect.py 2766-2770 (NO_ANSWER due day)",
+   "what_it_can_do": "A future-dated file empties the windows, so every payer's answer time falls back to the 45-day default: the follow-up date of every waiting item and the due day of every unanswered claim move at once.",
+   "scenario": "One vendor test 835 paid 2099-12-31.",
+   "evidence": "In-memory copy of the live image: 55 payer groups measured today (31 with >= 20 answers); with one 2099 file: 0 measured, all at the default. Floors (MIN_ANSWERS, MIN_GROUP = 20) already guard small samples.",
+   "guard": "Windows anchored on feeds.feed_date (clamped); each group measured only over its own coverage intervals."
+  },
+  {
+   "id": "L1-12",
+   "file": "remitwatch/selfcheck.py",
+   "severity": "medium",
+   "status": "partly",
+   "where": "_denial_cases 2281-2287 (mature = MAX(payment_date) - 90 days), recovery_rates 2334-2346, expected_value 2389-2430, apply_expected_values 2432-2451; the worklist sorts by expected_value_cents (api.py 562-565)",
+   "what_it_can_do": "One newer or future file during an outage counts recent denials as matured though their later payments could not have arrived, lowering recovery rates and re-ranking the worklist (owner rule 4).",
+   "scenario": "Feed stopped Oct 9; one stray file dated Nov 20; or one dated 2099.",
+   "evidence": "In-memory copy of the live image: the stray Nov 20 file adds 1,234 denial cases (24,617 -> 25,851) and moves the expected value of 516 open items by more than 10%; a 2099 file adds 2,432 cases and moves 1,056 items. RATE_MIN_CASES = 10 and the level fallbacks guard small samples.",
+   "guard": "mature per payer group = its coverage end minus 90 days; denials whose 90 days fall in a coverage hole are left out and counted in the basis."
+  },
+  {
+   "id": "L1-13",
+   "file": "remitwatch/ema_checks.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "classify_checks 626-640 (judged window [MIN(payment_date), MAX(payment_date)+3]; later checks 'after_feed', earlier 'before_feed'); _remits_missing 3696-3720 (month from newest_835); alert_candidates REMITS_MISSING 3723-3739; reconcile_summary 3612-3618 since_feed_stopped -> api_ema.blind_spot 321-327",
+   "what_it_can_do": "One old 835 (an archive file from years back) opens the window to that year, so years of EMA checks with no remittance become feed_gap/no_era and raise REMITS_MISSING alerts per payer and month; one stray new file ends 'since the remittances stopped', and the blindness dollars that rest on it collapse.",
+   "scenario": "A 2019 835 found on a shared drive is dropped in the folder; or one stray Nov 20 file during the outage.",
+   "evidence": "Code path; not measurable on the live image (no Production checks there yet).",
+   "guard": "The judged window is the union of payer coverage intervals (feeds.coverage); checks judged per payer group against that group's coverage; MIN(payment_date) never used alone (an old lone file is its own uncounted interval)."
+  },
+  {
+   "id": "L1-14",
+   "file": "remitwatch/ema_ledger.py",
+   "severity": "medium",
+   "status": "partly",
+   "where": "scope_of 282-287 (posted_lo - svc_lo > 45 days -> 'posted'), Box 290-331 (bounds = the file's MIN/MAX service and posted dates); commit replaces older files' postings inside the box; holds 707-766 (H2-H5)",
+   "what_it_can_do": "One row with an old service date turns a service-date export into a 'posted' box covering every service date in its posted window; applying it replaces older files' postings for services this file does not hold (ledger money lost).",
+   "scenario": "A service-date Production export of Jan-Mar 2026 carrying one 2016 service row.",
+   "evidence": "Code path. H3 (claims and payers kept vs older overlapping files), H4, H2 and H5 hold most such files; a file that overlaps no older file is not compared.",
+   "guard": "Scope from the share of rows (>= 95% inside the declared service range -> service scope), never from one MIN; bounds from the 1st/99th percentiles with outliers counted and named; a box that would remove postings the file does not itself hold is held."
+  },
+  {
+   "id": "L1-15",
+   "file": "remitwatch/uploads.py",
+   "severity": "medium",
+   "status": "open",
+   "where": "arrivals 2586-2620 (a weekly export is 'read' and fresh by MAX(ingested_at) of its family); alerts.py 348 (since_ingest = MAX(ingested_at) of any 835 file); insights.py 571-576 ('Files did arrive on X'); pipeline.py 651-652; api.py 2659",
+   "what_it_can_do": "An old export saved again (new bytes) makes its Upload checklist row 'up to date', so nobody pulls the real one; any new 835 file, even one adding nothing, resets 'last new file arrived'.",
+   "scenario": "The Sept export re-saved and dropped in Nov.",
+   "evidence": "Code path.",
+   "guard": "Freshness of a feed is the content date of what was read (feeds.feed_date, the export's content rank, a report's as_of), never the arrival time; a file that added no new rows is not an arrival."
+  },
+  {
+   "id": "L1-16",
+   "file": "remitwatch/detect.py",
+   "severity": "low",
+   "status": "open",
+   "where": "_newest_fees 3925-3940 (since = MAX(service_date of every line) - 90 days) used by emit_charge_caps 3970-4001",
+   "what_it_can_do": "One line with a service date typed a year ahead (no 835 reader checks service dates) leaves no line 'recent', so every CHARGE_BELOW_RATE item is dropped as 'nothing charged below the rate lately'.",
+   "scenario": "One UHC line dated 2027-10-15 in an Oct 2026 remittance.",
+   "evidence": "guard/L1/test_l1_shared_values.py::test_one_future_service_date_does_not_hide_every_fee_below_rate_item fails (1 -> 0). Live image: 1 open item ($296); 0 lines with a service date after their own payment date and 0 transactions dated after the day their file was read, so a door clamp would hold nothing real.",
+   "guard": "Service dates after their own payment date are held at the door (L2); the window end is min(today, the 99th percentile of service dates)."
+  },
+  {
+   "id": "L1-17",
+   "file": "remitwatch/detect.py",
+   "severity": "low",
+   "status": "open",
+   "where": "_ratio 2983-2990 (newest = max payment date over self.lines; 12-month window); ema_checks.StoreRules.ratio 366-380 (MAX(month) FROM exposure)",
+   "what_it_can_do": "A future-dated line moves the 12-month window past the data, so payer paid-to-charge ratios disappear and EMA-only items lose their expected value (dollars and ranking).",
+   "scenario": "One 835 paid 2099-12-31.",
+   "evidence": "Code path.",
+   "guard": "Window anchored on feeds.feed_date (clamped)."
+  },
+  {
+   "id": "L1-18",
+   "file": "remitwatch/detect.py",
+   "severity": "low",
+   "status": "open",
+   "where": "run_ema_open_claims votes 2590-2597 and _open_claim_group 3094-3101 (most_common, no minimum count)",
+   "what_it_can_do": "One answered claim decides the payer group (first-filing limit, appeal window, answer time, lists) of every unanswered claim billed under that EMA payer name.",
+   "scenario": "An EMA payer name with one answered claim, whose 835 came from a crossover payer.",
+   "evidence": "Live image: 17 of 54 voting EMA payer names rest on <= 2 claims; none of the 170 open NO_ANSWER/REJECTED_PRE_PAYER items depends on a weak vote today.",
+   "guard": "A vote needs >= 5 claims and >= 80% share, else the name's own normalize_payer group (and the longest common filing limit when the limit is unknown), with the basis in the evidence."
+  },
+  {
+   "id": "L1-19",
+   "file": "remitwatch/actions.py",
+   "severity": "high",
+   "status": "partly",
+   "where": "payer fax number save 91-120 (a first number is auto_ok = 1; only a replacement needs confirming); fax.number_for / number_hold 421-460",
+   "what_it_can_do": "One person's first save of a payer group's fax number (a typo) is trusted by every send nobody presses a button for: retries, follow-ups and bulk appeals of that payer go to it with their patients' records.",
+   "scenario": "A biller types one wrong digit the first time a payer's appeal number is saved.",
+   "evidence": "Code path (owned by L4: number save and confirm). Replaced numbers need a person's confirmation; shared groups get no number; H9 restricts digits.",
+   "guard": "A first number also needs a second person's confirmation, or one send a person pressed and that SRFax reported delivered, before any automatic send uses it."
+  },
+  {
+   "id": "L1-20",
+   "file": "remitwatch/detect.py",
+   "severity": "low",
+   "status": "partly",
+   "where": "__init__ 755-760 (wo_sign: the store-wide direction of EMA write-offs = majority sign of line_handling rows), used at 1651",
+   "what_it_can_do": "One large ERA-lines export with the opposite sign convention can flip the direction for every line, so EMA write-offs read as reversals and the reverse.",
+   "scenario": "A re-export of a year of ERA lines from another layout.",
+   "evidence": "Code path; a majority vote by rows (guarded against a single row, not against a single large file).",
+   "guard": "Sign per source file (each export's own majority), with a minimum of 20 rows and 90% agreement, else the file is held as 'sign unclear'."
+  },
+  {
+   "id": "L1-21",
+   "file": "remitwatch/ema_reports.py",
+   "severity": "low",
+   "status": "partly",
+   "where": "learn_claim_prefix 1356-1374 (the newest report's claim-link prefix replaces the store's, INSERT OR REPLACE)",
+   "what_it_can_do": "Another practice's EMA report (same vendor domain, another tenant) re-points every 'Open in EMA' link at that tenant.",
+   "scenario": "A report from another clinic dropped in the folder (L2's 'whose file').",
+   "evidence": "Code path; guarded by the domain pattern and by refusing two prefixes in one file.",
+   "guard": "Keep the first learned prefix; a different one is held for the owner ('a report from another EMA system'), never replaces it."
+  },
+  {
+   "id": "L1-22",
+   "file": "remitwatch/activity.py",
+   "severity": "low",
+   "status": "open",
+   "where": "build_activity 451-459 (reference window from MAX/MIN(payment_date)); coverage 1563-1575; calculator.py 340-356 (run-rate window); results.py 1469-1478 (_denials window), 532-541 (_newest_data); states._context 944-971 (first_prod/first_ar = MIN(as_of), MIN(first_seen)) dating work evidence 1058-1095",
+   "what_it_can_do": "The owner's provider figures, calculator run-rate and Results denial rates are windowed on one extreme date (a future file empties them, a stray file marks the newest month incomplete); one old report moves 'the first report' and relabels when work was first seen.",
+   "scenario": "One 835 paid 2099-12-31; one A/R from 2025 uploaded late.",
+   "evidence": "Code path; owner-only figures.",
+   "guard": "Windows anchored on feeds.feed_date; first report dates from the first report of the continuous run, not MIN over all files."
+  },
+  {
+   "id": "L1-23",
+   "file": "remitwatch/ema_ledger.py",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "where": "Models to copy: ema_ledger._retention_cut 889-901 (top = min(max(newest posted, newest), today) and a hold when retention would delete too much); archive.py horizon from today (166-260); link.ema_coverage 61-110 (first week = at least a fifth of the busiest week); learn_payer_aliases 1314-1349 (>= 20 rows, >= 90%); npi_location 736-744 (>= 20 lines, 85%); va_names 2536-2544; learn_payer_equivalence 2370-2393 (>= 3 checks and 5%); turnaround/posting_lag per-group floors (MIN_GROUP = 20); EMA report readers' date_bounds 924-929; trizetto seen set 648-649 (no watermark)",
+   "what_it_can_do": "These already resist one odd input: a clamp to today, a quorum or a floor, or per-item memory instead of a watermark.",
+   "scenario": "n/a",
+   "evidence": "Read in the snapshot.",
+   "guard": "Use them as the pattern for feeds.py: clamp, floor, quorum, hold."
+  }
+ ],
+ "class_guard": "SPEC (one module owns every shared value; every consumer asks it; nothing else may compute one).\n1. feeds.py owns every store-, payer- or period-wide value derived from data. Each function takes (conn, today), clamps to today, and returns the value with its basis (inputs used, their volume share, inputs set aside and why), cached per run and stored in meta feeds:values:\n   a. coverage(): per payer group, intervals over which its remittances are believed complete: payment days (each clamped to the day its file arrived) no more than max(14, 2 x the group's median gap) apart; an interval counts once it holds 3 payment days or spans 14 days (a lone file after a gap opens an interval that does not count yet). payer_through(g) = end of g's last counted interval. judgeable(g, sent, due) = one counted interval covers both. feed_date() = volume-weighted median of payer_through over groups holding >= 1% of the last 120 days' remittance lines (>= 3 groups; else the clamped newest, as H8). Reference: guard/L1/reference_feed.py.\n   b. production_through(): end of the continuous posted coverage of the current Production boxes; production_fresh = today - production_through <= 14; covered(svc, answer window) per box.\n   c. group_posting(g): an EMA payer group counts as posting only with >= 3 checks (or >= 5% of its usual checks) inside that coverage.\n   d. ar_as_of(file): 99th percentile of aging dates, capped at the day the file arrived; rank A/R snapshots by it.\n   e. export_rank(rows/file): by content dates (99th percentile of submission, denial, transaction, posted dates), then received_at; never a workbook stamp or a file name; a row older by content never overrides a newer status.\n   f. provider_tier(npi): reference from the Medicare fee schedule tables (pfs/mpfs), or the median of NPIs with >= 20 lines; under the floor -> 'unknown'.\n   g. any 'most common' or majority value (EMA payer -> group votes, write-off sign, claim prefix): minimum count (>= 5 claims or >= 20 rows) and >= 80% share, else 'unknown' with the documented safe default (longest common filing limit, hold).\n   h. every window (alerts, pattern watch, answer times, turnaround, recovery maturity, fee 'now', ratios, owner figures, C1 check causes) is anchored on feed_date or payer_through, never on a raw MAX/MIN.\n2. The clock is not a data date. Due dates, follow-ups, 'To decide', deadline counts and scoreboard windows count from today (the practice's date). Data dates answer only 'can the answer be seen' (judgeable); when it cannot, the item stays listed as 'cannot check' with its dollars and the reason, never frozen, dropped or flooded.\n3. Door clamps (with L2): an 835 whose payment date is after the day it was read (+1 day) or before 2000, a line whose service date is after its payment date, and an EMA row dated after its file's arrival are held with a plain reason on the Data tab and never reach the store until a person releases them (the live image has 0 such rows, so nothing real is held). The EMA report readers' date_bounds already do this for Production and A/R.\n4. Movement record and hold (with L3's swing guard): each run compares feeds:values with the last run's. A move beyond a threshold (feed date or any payer_through by > 7 days, Production or A/R freshness flipping, any provider tier, export rank changing the status of > 20 claims, any alert set clearing by > 3) writes one decision-log row with the old and new value and their basis; the automatic effects it causes (items appearing or closing for payers with no new data, holds lifting, alerts clearing) are held for one person on the Data tab ('Remittances: 38 payers current through Oct 9; Humana alone through Nov 20, one file'), and the old value stays in force until released. Each item's 'Why did this change?' cites the shared value and basis that moved it.\n5. Lint (CI, all four environments): test_every_module_takes_store_wide_data_dates_from_one_owner fails when any module except feeds.py runs MAX/MIN over payment_date, posted, last_posted, as_of or ingested_at without GROUP BY or a per-row key, or Python max()/min() over those fields of all lines, unless the site is in an allowlist with a one-line reason (display only, per-claim). Today it lists 60 sites (30 for the newest payment date).\nPorts: hotfix 2's H8 tests move into push 2 unchanged (backlog INT), then the stronger coverage rule replaces its 'latest date per group' (H8 still bridges a gap with one day of files).",
+ "property_test": "Non-interference of one input (a generated, metamorphic test, run on both store kinds: the server's file store and the compact in-memory image cloud.py builds).\nGenerate a world from a seed: k in [3, 8] payer groups paying weekly or biweekly with random volumes (a few irregular gaps), 20-60 weeks of 835s ending on a random day, the weekly EMA exports for the same claims, optionally Production boxes and an A/R, 2-10 NPIs (Medicare E/M lines). Run the daily cycle with today fixed; record S0 = {item id: signal, state, hold, deadline, severity, work_now membership, expected-value rank} and V0 = feeds.values() with bases.\nAdd exactly ONE perturbation x drawn from: an 835 from one group (adjustment-only, or <= 3 claims) paid today-3, today+1, today+400, 2099-12-31 or 2000-01-01; a one-day multi-payer bundle after a hole of >= 3 weeks; one service line dated a year ahead; a weekly export re-saved with a newer workbook stamp and older content (and a CSV with a different file name); a Production file covering <= 3 posted days; an A/R with one row dated ahead; one Medicare line from a new NPI at +/-10-30%; one EMA check row for one group; one 835 for a group from years before the archive. Run the cycle again: S1, V1.\nAssert: (1) every date in V1 is <= today, and x is held at the door when its own dates are after the day it was read; (2) every shared value whose basis does not include a quorum of inputs touched by x (>= 50% of the relevant volume, or the stated minimum count) is unchanged; (3) for every item whose claim and payer group x does not touch, signal, state, hold, deadline, severity and work_now membership are identical in S0 and S1; (4) every difference allowed by (2) or (3) carries a decision-log row naming the shared value, its old and new value and basis, and is held for a person, never applied silently; (5) the blindness banner, STALE_FEED and the fax hold are not switched off by x alone. Shrink a failure to the minimal x and world. Seed the run with today's 16 hand-written cases in guard/L1/test_l1_shared_values.py (15 fail on the snapshot; the reference guard passes)."
+}

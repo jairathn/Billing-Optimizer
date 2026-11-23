@@ -1,0 +1,276 @@
+{
+ "area": "va_tricare",
+ "checks": [
+  {
+   "id": "VA-01",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(a)(1), (a)(4), (d)(1), (g)(1)(A), (i)(2)-(3) (uscode.house.gov text current through Pub. L. 119-142, Nov. 10, 2026; last amended 2018); VA fact sheet IB-10-1379 (updated Jan. 24, 2022)",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/ ; https://www.va.gov/COMMUNITYCARE/docs/pubfiles/factsheets/FactSheet_26-08.pdf",
+   "quote": "the Secretary shall pay for hospital care, medical services, or extended care services furnished by health care entities or providers under this chapter within 45 calendar days upon receipt of a clean paper claim or 30 calendar days upon receipt of a clean electronic claim.",
+   "correction": "Correct as stated. Two additions. (1) The overdue test in (d)(1) reads: 'Any claim that has not been denied with notice, made pending with notice, or paid to the health care entity or provider by the Secretary shall be overdue if the notice or payment is not received by the entity provider within the time periods specified in subsection (a).' A pend notice also stops the clock, so a letter must say that no payment, no denial notice and no pend notice was received. (2) For a medical practice, a better VA cite than the dental sheet is fact sheet IB-10-1186 'Community Care Network (CCN)' (updated Jan. 27, 2022), Q8: 'Community providers under CCN will be paid within 30 days of submitting a clean claim to their region's respective third-party administrator. Optum will pay claims submitted by community providers in Regions 1-3' (https://www.va.gov/COMMUNITYCARE/docs/pubfiles/factsheets/FactSheet_26-03.pdf). VA's CCN page (https://department.va.gov/vha/community-care/partnerships/community-care-network/) lists Indiana and Kentucky in Region 2 and says 'Optum serves as TPA for regions 1-3'."
+  },
+  {
+   "id": "VA-02",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(a)(2)-(3), (d)(1)",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/",
+   "quote": "If a claim is denied, the Secretary shall, within 45 calendar days of denial for a paper claim and 30 calendar days of denial for an electronic claim, notify the health care entity or provider of the reason for denying the claim and what, if any, additional information is required to process the claim.",
+   "correction": "Correct. (a)(3) verified: 'Upon the receipt of the additional information, the Secretary shall ensure that the claim is paid, denied, or otherwise adjudicated within 30 calendar days from the receipt of the requested information.' No penalty attaches beyond the overdue status in (d)(1)."
+  },
+  {
+   "id": "VA-03",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(d)(2)(A)-(B); 31 U.S.C. 3902(a)-(b); Treasury Prompt Payment interest rate table (page last updated Sept. 29, 2026); 84 FR 26301 (June 5, 2019, VCCP final rule, FR Doc. 2019-11575)",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/ ; https://uscode.house.gov/us/usc/t31/s3902/ ; https://fiscal.treasury.gov/payments-from-government/prompt-payment/rates ; https://www.govinfo.gov/content/pkg/FR-2019-06-05/html/2019-11575.htm",
+   "quote": "If a claim is overdue under this subsection, the Secretary may, under the requirements established by subsection (a) and consistent with the provisions of chapter 39 of title 31 (commonly referred to as the “Prompt Payment Act”), require that interest be paid on clean claims.",
+   "correction": "Correct. Rates verified on the Treasury table: Jul-Dec 2026 4.75% (Vol. 91, No. 130, July 9, 2026, p. 42594); Jan-Jun 2026 4.125% (Vol. 91, No. 22, Feb. 3, 2026, p. 5035); Jan-Jun and Jul-Dec 2025 4.625%. The 2019 promise is at 84 FR 26301: 'VA will be undertaking future rulemaking to implement the prompt pay provisions of section 1703D, which will include provisions ... addressing interest on overdue claims'. A Federal Register API search of VA documents since 2019 for '1703D', 'prompt payment', 'overdue claims' and 'clean claim(s)' found no final rule. For exact figures in letters (the False Claims Act constraint in VA-22): 31 U.S.C. 3902(a) uses the rate 'in effect at the time the agency accrues the obligation to pay a late payment interest penalty', and 5 CFR 1315.10(a)(1) and (a)(9) compute it 'from the day after the payment due date through the payment date at the interest rate in effect on the day after the payment due date' on 'a 360 day year'; interest under $1.00 is not required (1315.10(c)(5))."
+  },
+  {
+   "id": "VA-04",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(e)(1)-(3)",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/",
+   "quote": "Deductions may not be made under this subsection unless the Secretary has made reasonable efforts to notify a health care entity or provider of the right to dispute the existence or amount of such indebtedness and the right to request a compromise of such indebtedness.",
+   "correction": "Correct. Note (e)(1) was amended in 2018 (Pub. L. 115-251 sec. 204) from 'shall deduct' to 'may deduct' and adds 'may use any other means authorized by another provision of law to correct or recover overpayments'. Whether Optum's own CCN recoupments are 'deductions under this subsection' remains unconfirmed, as the researcher said."
+  },
+  {
+   "id": "VA-05",
+   "verdict": "correct",
+   "citation": "89 FR 67863-67865 (Aug. 22, 2024), FR Doc. 2024-18651, 'Notification of guidance', at 67864",
+   "url": "https://www.govinfo.gov/content/pkg/FR-2024-08-22/html/2024-18651.htm",
+   "quote": "In general, if VA fails to pay a valid, submitted claim, it owes interest for late payment.",
+   "correction": "Correct, including the payer IDs (12115, 12116, 84146, 84147), the Oct. 31, 2024 cutoff, the force majeure and impossibility reasoning, and the H. Rpt. 115-671 quote. It addresses providers who 'submit medical (including transportation) or dental claims directly to VA', not CCN claims paid by Optum."
+  },
+  {
+   "id": "VA-06",
+   "verdict": "corrected",
+   "citation": "VA Financial Policy Vol. VIII, Ch. 02 'Invoice Review and Certification' (Date Approved: June 14, 2024), secs. 0201, 0203 (definition of clean claim), 020507 and 020509",
+   "url": "https://department.va.gov/financial-policy-documents/financial-document/chapter-02-invoice-review-and-certification/",
+   "quote": "In accordance with 38 U.S.C. § 1703D, VA may pay an interest penalty to any Veteran Community Care Program entity or provider for payments not made by the required due date.",
+   "correction": "Quotes verified; one location fix: 'A clean claim functions as an invoice for the Veterans Community Care Program' is in sec. 0203 (Definitions), not sec. 020509. The inconsistency runs both ways and should be quoted exactly: sec. 020507 says 'VA shall pay an interest penalty to the vendor/service provider for payments not made by the required due date' for payments subject to the PPA, whose list includes 'Community Care Network (CCN); and Veterans Care Agreements', while the same section's exempt list ends with 'Payments for community care falling under 38 U.S.C. § 1703D', and sec. 0201 says 'VA will adhere to the requirements of 5 C.F.R. § 1315 for acquisition-based payments or 38 U.S.C. § 1703D for community care related payments'. Interest on CCN claims therefore stays a documented request, not an entitlement."
+  },
+  {
+   "id": "VA-07",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(d)(3)(A)-(B)",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/",
+   "quote": "Not less frequently than annually, the Secretary shall submit to Congress a report on payment of overdue claims under this subsection, disaggregated by paper and electronic claims",
+   "correction": "Correct, including (B): 'The number of such overdue claims and the average number of days late each claim was paid, disaggregated by facility of the Department and Veterans Integrated Service Network region.'"
+  },
+  {
+   "id": "VA-08",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(f)(1)-(3); 84 FR 32670-32671 (July 9, 2019), FR Doc. 2019-14527, request for information",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/ ; https://www.govinfo.gov/content/pkg/FR-2019-07-09/html/2019-14527.htm",
+   "quote": "If the Secretary modifies the information and documentation included in the list under paragraph (1), the Secretary shall notify all health care entities and providers described in paragraph (1) not later than 30 days before such modifications take effect.",
+   "correction": "Correct. A Federal Register API search (VA, 2019 onward) for 'clean claim' and 'clean claims' returns only the 2019 request for information; no final 1703D(f) list was published there. VA's provider claims page (updated Oct. 20, 2026) has a 'Before filing your claim' checklist but does not call it the 1703D(f) list."
+  },
+  {
+   "id": "VA-09",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(b); Optum VA CCN Provider Manual (version 2026 1102), 'Timely Filing', pp. 44-45; Optum Medical Service Model and Claims Guide (version 2026 1104), pp. 2-3",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/ ; https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual ; https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/ccnMedServClaimGuide",
+   "quote": "Claims must be submitted within one hundred-eighty (180) calendar days from the date of service for outpatient care or the date of discharge for inpatient care.",
+   "correction": "Correct. Two limits on the same pages that the rule should carry: manual p. 45, 'If the claim was submitted to any other payer, the claim must be submitted to Optum within one hundred-eighty (180) calendar days of the date of service or discharge', and claims guide p. 2, 'Optum is contractually prohibited from accepting proof of timely filing issued by a payor other than VA or another VA TPA.' A CCN claim billed by mistake to Medicare, Humana or another plan gets no extra time."
+  },
+  {
+   "id": "VA-10",
+   "verdict": "correct",
+   "citation": "Optum VA CCN Provider Manual (version 2026 1102), 'Claims Processing Timelines', p. 45",
+   "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+   "quote": "Optum is committed to processing 98% of all clean claims within thirty (30) calendar days of receipt of the clean claim.",
+   "correction": "Correct, including the 30-day return of non-clean claims and 'All claims submitted will be acknowledged either with a payment, a provider remittance advice or returned with a specific request for additional information.' The manual is silent on interest (the only 'interest' hits in 69 pages are unrelated)."
+  },
+  {
+   "id": "VA-11",
+   "verdict": "correct",
+   "citation": "Optum VA CCN Provider Manual (version 2026 1102), 'Claim Reconsiderations', pp. 48-49; Optum Medical Service Model and Claims Guide (version 2026 1104), pp. 2-3",
+   "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual ; https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/ccnMedServClaimGuide",
+   "quote": "When a claim is denied partially or in whole, a reconsideration request must be filed within ninety (90) calendar days from the date of denial",
+   "correction": "Correct, including 'Providers can request reconsiderations of multiple claims in a single letter', fax 1-877-666-6597, Region 2 email faxAG2@optumserve.com, and the manual address La Crosse, WI 54603 (the guide prints 56403). The 45-day escalation sentence is in the claims guide, p. 3. No written decision deadline was found."
+  },
+  {
+   "id": "VA-12",
+   "verdict": "correct",
+   "citation": "Optum Medical Service Model and Claims Guide (version 2026 1104), 'Claim Inquiry / Replacement Claim', p. 2; Optum VA CCN Provider Manual (version 2026 1102), 'Claim Inquiries / Replacement Claims', p. 48, and 'Reimbursement', p. 43",
+   "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/ccnMedServClaimGuide ; https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+   "quote": "All medical claim inquiries must be submitted within twelve (12) months from the date on the Provider Remittance Advice (PRA) and should include the claim number, date of service, Veteran’s name and justification for the request.",
+   "correction": "Correct. Manual p. 48: 'All medical claim inquiries, including allowable reviews must be submitted by mail or fax within twelve (12) months after the claim was initially processed.' Manual p. 43: 'VA may classify rate revisions as retroactive. When that occurs, Optum will use the date of service to determine applicable rate and reprocess affected claims at the new published rate.'"
+  },
+  {
+   "id": "VA-13",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703(i)(1); 38 CFR 17.4035 (intro and (a)); VA 'VA fee schedules' page; Optum VA CCN Provider Manual (version 2026 1102), 'Reimbursement', pp. 41-43",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703/ ; https://www.ecfr.gov/api/versioner/v1/full/2026-08-27/title-38.xml?part=17 ; https://department.va.gov/vha/community-care/provider-payments/va-fee-schedules/ ; https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+   "quote": "The rates paid by VA for hospital care, medical services, or extended care services (hereafter referred to as “services”) furnished pursuant to a procurement contract or an agreement authorized by §§ 17.4100 through 17.4135 will be the rates set forth in the terms of such contract or agreement.",
+   "correction": "Correct. 1703(i)(1) applies 'Except as provided in paragraph (2), and to the extent practicable'; 17.4035(d) lets VA deviate when not practicable. Manual p. 43 helps the underpayment check: 'Medicare rates are applied to all Medicare priced services regardless of provider type ... Medicare participating providers should bill VA CCN as they would bill Medicare.' Caution, p. 42: 'When a directly applicable CMS rate is unavailable, an approximation pricing methodology may be used' and the result 'may not be available or reproducible through publicly accessible CMS fee schedules'."
+  },
+  {
+   "id": "VA-14",
+   "verdict": "correct",
+   "citation": "Optum VA CCN Provider Manual (version 2026 1102), 'Other Health Insurance and Veteran Billing' and 'Claim Denials', pp. 46-47; 38 U.S.C. 1703(j)",
+   "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual ; https://uscode.house.gov/us/usc/t38/s1703/",
+   "quote": "Veterans are to be held harmless and may not be billed for any reason, including failure to submit claims for reimbursement, failure to submit claims timely, or for claim denials.",
+   "correction": "Correct (the section starts on p. 46, not p. 45). Statutory support for the hold-harmless rule: 38 U.S.C. 1703(k), 'A covered veteran shall not pay a greater amount for receiving care or services under this section than the amount the veteran would pay for receiving the same or comparable care or services at a medical facility of the Department or from a health care provider of the Department.'"
+  },
+  {
+   "id": "VA-15",
+   "verdict": "corrected",
+   "citation": "Optum VA CCN Provider Manual (version 2026 1102), 'Request for Services', p. 10; 'Reimbursement', p. 43; 'Claim Denials', p. 46",
+   "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+   "quote": "Providers must ensure that all billed services align with the Procedural Overview - Standardized Episode of Care (SEOC) outlined in the Veteran’s approved referral. Services outside the authorized SEOC must be authorized through the Request for Services (RFS) process.",
+   "correction": "The sentence quoted in 'requires' ('Any billed CPT codes on a claim which are not listed in the applicable SEOC will result in denial of payment.') appears only in the manual's 'Abortion' paragraph on p. 10; it is not the general SEOC rule. The general rule is the p. 43 text quoted here, and p. 46 lists 'Claims for care that are not within the scope of the approved referral' among denial reasons. The RFS duty (Form 10-10172, sent 'the same day the provider determines care is needed') and the 90-day referral reconsideration quote on p. 10 are verified as written."
+  },
+  {
+   "id": "VA-16",
+   "verdict": "corrected",
+   "citation": "Optum 'Standard Recoupment Process' VA CCN (version 2026 0603); Optum VA CCN Provider Manual (version 2026 1102), 'Claims Audits', p. 49",
+   "url": "https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/CCNSTANDRECOUPR ; https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual",
+   "quote": "If the overpayment is not received within sixty-one (61) days from the date of the recoupment letter, the process of offsetting the amount due against future payments to you will begin.",
+   "correction": "Facts verified (30-day repayment, follow-up letter at day 31, offset from day 61, written dispute to VA CCN Correspondence, P.O. Box 202118, Florence, SC 29501, 'Medical records are neither required nor accepted', 'Determination timeframe expectation is within thirty (30) business days', and p. 49's promise to reimburse amounts recouped if a reconsideration is overturned). Fix the deadline field: the 30 calendar days is the repayment window ('All overpayments shall be returned to VA CCN within thirty (30) calendar days'); the sheet sets no deadline to dispute and does not say the offset is held while a dispute is pending. Filing the dispute well before day 61 is a recommendation, not a stated rule. The manual (p. 49) says the refund is due 'within the time frame specified in the provider's agreement'."
+  },
+  {
+   "id": "VA-17",
+   "verdict": "correct",
+   "citation": "VA Community Care 'Provider claims' page, 'Decision reviews and appeals for Veteran care' (date last updated Oct. 20, 2026)",
+   "url": "https://department.va.gov/vha/community-care/provider-claims/",
+   "quote": "If you provided care under a VA contract, disputes must be submitted in accordance with the terms of your contract.",
+   "correction": "Correct, including Region 2 (844-839-6108), VA Customer Support (877-881-7618) and the unauthorized-emergency options (Supplemental Claim and Higher-Level Review 'within 1 year of the decision', Board appeal)."
+  },
+  {
+   "id": "VA-18",
+   "verdict": "correct",
+   "citation": "38 CFR 17.4135(a)(3)-(5), (c)(1)(iii)(A)-(B), (c)(3)(iii)(A)-(B), (c)(5)",
+   "url": "https://www.ecfr.gov/api/versioner/v1/full/2026-08-27/title-38.xml?part=17",
+   "quote": "The notice of dispute must be received by the designated VA official to which such notice must be submitted, in accordance with the terms of the Veterans Care Agreement, within 90 calendar days after the accrual of the dispute.",
+   "correction": "Correct. The final-agency-decision effect is in (c)(5) ('A written decision issued by the responsible VA official constitutes the agency's final decision on the dispute'), and (a)(4) says these disputes 'are not considered claims' for 41 U.S.C. 7101-7109 (Contract Disputes Act)."
+  },
+  {
+   "id": "VA-19",
+   "verdict": "correct",
+   "citation": "38 CFR 17.276(a)-(b), (d) ('Claim filing deadline'); 17.270(b) ('Payer'); VA 'Decision reviews and appeals - Family member care' page (updated June 3, 2026); VA 'CHAMPVA' page (updated Oct. 22, 2026); VA Financial Policy Vol. VIII Ch. 02 sec. 020507",
+   "url": "https://www.ecfr.gov/api/versioner/v1/full/2026-08-27/title-38.xml?part=17 ; https://department.va.gov/vha/community-care/family-member-care/reviews-and-appeals-fm-care/ ; https://department.va.gov/vha/community-care/family-member-care/champva/ ; https://department.va.gov/financial-policy-documents/financial-document/chapter-02-invoice-review-and-certification/",
+   "quote": "CHAMPVA is the last payer to OHI, as that term is defined in § 17.270(b). CHAMPVA benefits will generally not be paid until the claim has been filed with the OHI and the OHI has issued a final payment determination or explanation of benefits. CHAMPVA is secondary payer to Medicare per the terms of § 17.271(b).",
+   "correction": "Correct. Add the last sentence of 17.276(b): 'Delays due to provider billing procedures do not constitute a valid basis for an exception.' The family-member page also says no decision review is needed to 'Submit missing documentation', 'Provide Other Health Insurance (OHI) Explanation of Benefits (EOB)' or 'Submit proof of payment'."
+  },
+  {
+   "id": "VA-20",
+   "verdict": "correct",
+   "citation": "31 U.S.C. 3902(a)-(c), (e); 31 U.S.C. 3907(b)-(c); 5 CFR 1315.10(a), (c); 1315.11(a)-(d)",
+   "url": "https://uscode.house.gov/us/usc/t31/s3902/ ; https://uscode.house.gov/us/usc/t31/s3907/ ; https://www.ecfr.gov/api/versioner/v1/full/2026-11-18/title-5.xml?part=1315",
+   "quote": "The additional penalty shall be equal to one hundred (100) percent of the original late payment interest penalty but must not exceed $5,000.",
+   "correction": "Correct. Add for exact computation: 1315.10(a)(9) 'Interest calculations are to be based on a 360 day year'; 1315.10(c)(5) no interest penalty 'When the interest penalty is less than $1.00'; 1315.11(c) 'No additional penalty is owed, however, if the amount of the interest penalty is less than $1.00.'"
+  },
+  {
+   "id": "VA-21",
+   "verdict": "correct",
+   "citation": "VA Community Care 'Debt collection' page (date last updated Sept. 28, 2026)",
+   "url": "https://department.va.gov/vha/community-care/provider-payments/debt-collection/",
+   "quote": "From the date of the BOC/NOI, you have 30 days to: submit payment, or request review, or submit documentation showing proof of prior repayment.",
+   "correction": "Correct (the three options are a bulleted list on the page). The page also says 'Do not attempt to refund VA before a BOC is issued' and that payment goes through Pay.gov; VA does not accept paper checks."
+  },
+  {
+   "id": "VA-22",
+   "verdict": "correct",
+   "citation": "38 U.S.C. 1703D(c)(1)-(2), (i)(4)",
+   "url": "https://uscode.house.gov/us/usc/t38/s1703D/",
+   "quote": "Sections 3729 through 3733 of title 31 shall apply to fraudulent claims for payment submitted to the Secretary by a health care entity or provider under this chapter.",
+   "correction": "Correct."
+  },
+  {
+   "id": "TR-01",
+   "verdict": "correct",
+   "citation": "10 U.S.C. 1095c(a)(1)(A)-(B), (a)(3)",
+   "url": "https://uscode.house.gov/us/usc/t10/s1095c/",
+   "quote": "95 percent of all clean claims must be processed not later than 30 days after the date that such claims are submitted to the claims processor; and (B) 100 percent of all clean claims must be processed not later than 100 days after the date that such claims are submitted to the claims processor.",
+   "correction": "Correct. Kentucky and Indiana are listed in the East Region on p. 8 of the Humana Military handbook, which also says 'PGBA, LLC (PGBA) is the Humana Military partner for claims processing in the TRICARE East Region.'"
+  },
+  {
+   "id": "TR-02",
+   "verdict": "could_not_check",
+   "citation": "10 U.S.C. 1095c(a)(2) (verified); TRICARE Operations Manual, Chapter 3, Section 2 (interest on clean claims) (not read)",
+   "url": "https://uscode.house.gov/us/usc/t10/s1095c/ ; https://manuals.health.mil/pages/DisplayManualHtmlFile/2024-08-07/AsOf/tot5/c3s2.html",
+   "quote": "The Secretary may, under the system required by paragraph (1) and consistent with the provisions in chapter 39 of title 31 (commonly referred to as the “Prompt Payment Act”), require that interest be paid on clean claims that are not processed within 30 days.",
+   "correction": "The statute quote is exact. The operative question, whether TRICARE contractors must pay interest, could not be checked at the source: manuals.health.mil omits its intermediate certificate, and once the chain is completed with DigiCert's own intermediate it redirects to manuals.dha.mil, which answers with a JavaScript bot check; WebFetch gets HTTP 503; tricare.mil serves the same check to curl; the web.archive.org copy could not be reached. Search-engine extracts of TOM Ch. 3 Sec. 2 (T-5 'TOT5' series, Change 11 of July 24, 2024, and the TO15 series through Change 150 of June 13, 2025) point the other way from 'discretionary': clean claims are to be processed to completion within 30 days of receipt, interest runs from the 31st day at the Prompt Payment Act rate, totals under $1.00 are not paid, the interest period is capped at one year, and the contractor is fiscally responsible for interest under 10 U.S.C. 1095c(a)(2) except when a government failure caused the delay. These are unverified extracts. Before any letter asserts a TRICARE interest duty, a person must open https://manuals.health.mil/pages/DisplayManualHtmlFile/2024-08-07/AsOf/tot5/c3s2.html in a browser and confirm the current change and its wording; until then, letters may only request interest under 1095c(a)(2)."
+  },
+  {
+   "id": "TR-03",
+   "verdict": "correct",
+   "citation": "10 U.S.C. 1095c(d); see also statutory note, Pub. L. 109-364, div. A, title VII, sec. 731(a)-(b) (Oct. 17, 2006)",
+   "url": "https://uscode.house.gov/us/usc/t10/s1095c/",
+   "quote": "shall limit the information required in support of claims for payment for health care items and services provided under the TRICARE program to that information that is identical to the information that would be required for claims for reimbursement for those items and services under title XVIII of the Social Security Act (42 U.S.C. 1395 et seq.) except for that information, if any, that is uniquely required by the TRICARE program.",
+   "correction": "Correct. Stronger companion text in the note to 1095c: 'the claims processing requirements under the TRICARE program on the matters described in subsection (b) shall be identical to the claims processing requirements under the Medicare program on such matters', and (b)(2) covers 'The documentation required to substantiate medical necessity for items and services that are covered under both the TRICARE program and the Medicare program.'"
+  },
+  {
+   "id": "TR-04",
+   "verdict": "correct",
+   "citation": "32 CFR 199.7(d), (d)(1), (d)(2)(i)(B), (d)(2)(i)(D), (d)(2)(ii)",
+   "url": "https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199",
+   "quote": "all claims submitted for benefits must, except as provided in paragraph (d)(2) of this section, be filed with the appropriate CHAMPUS contractor no later than one year after the services are provided. Unless the requirement is waived, failure to file a claim within this deadline waives all rights to benefits for such services or supplies.",
+   "correction": "Correct. Note that (d)(2)(ii) is written for beneficiaries ('Beneficiaries who wish to request an exception to the claims filing deadline may submit such a request to the CHAMPUS fiscal intermediary'), so a provider's request should follow (d)(2)(ii)(A): 'a complete explanation of the circumstances of the late filing, together with all available documentation supporting the request, and the specific claim denied for late filing.' Humana's 90-day electronic filing request for network providers is on handbook p. 54."
+  },
+  {
+   "id": "TR-05",
+   "verdict": "correct",
+   "citation": "32 CFR 199.10(a)(7)(iv) and Note, (b)(1)(iii)-(iv), (b)(3), (b)(4), (b)(5), (c)(1)(iii), (c)(3), (c)(5), (d)(1)(iii)",
+   "url": "https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199",
+   "quote": "OCHAMPUSEUR, the CHAMPUS contractor, or CHAMPUS peer review organization normally shall issue its reconsideration determination no later than 60 days from the date of receipt of the request for reconsideration",
+   "correction": "Correct. The regulation still names 'OCHAMPUS' and the 'TRICARE Management Activity' for formal review and hearings; 'DHA' is the current name, not the regulation's. A reconsideration request 'shall be deemed filed on the date it is mailed and postmarked' ((b)(1)(iv))."
+  },
+  {
+   "id": "TR-06",
+   "verdict": "correct",
+   "citation": "32 CFR 199.10(a)(2)(i)(E), (a)(6)(ii), (a)(1)(ii)(B)(1)-(3)",
+   "url": "https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199",
+   "quote": "A nonparticipating provider is not a party to the initial determination and may not appeal.",
+   "correction": "Correct, including (a)(6)(ii): 'The amount of the CHAMPUS-determined allowable cost or charge, since the methodology for determining allowable costs or charges is established by this part.'"
+  },
+  {
+   "id": "TR-07",
+   "verdict": "correct",
+   "citation": "Humana Military, TRICARE Provider Handbook, East Region 2026, 'Claims adjustments and allowable charge reviews' and 'Administrative reviews', pp. 67-68",
+   "url": "https://www.humanamilitary.com/content/dam/sites/humana-military-com/provider/tricare-provider-handbook.pdf",
+   "quote": "Administrative reviews must be postmarked or received within 90 calendar days of the date of beneficiary’s EOB or the provider remittance.",
+   "correction": "Correct. The administrative review mailing address (TRICARE East Region claims department, PO Box 202147, Florence, SC 29502-2147) is on p. 68; the allowable charge review address and fax (877) 489-0011 are on p. 67. No response deadline is stated."
+  },
+  {
+   "id": "TR-08",
+   "verdict": "correct",
+   "citation": "Humana Military, TRICARE Provider Handbook, East Region 2026, 'Appealing a decision', p. 53; 'Claim appeals', pp. 68-69",
+   "url": "https://www.humanamilitary.com/content/dam/sites/humana-military-com/provider/tricare-provider-handbook.pdf",
+   "quote": "Network providers are not a proper appealing party, but can appeal on behalf of the beneficiary with a signed Appointment of representation form from the beneficiary.",
+   "correction": "Correct. The fax (877) 850-1046 and Humana Military Appeals, PO Box 740044, Louisville, KY 40201-7444 appear on p. 53 (prior authorization appeals) and p. 69 (claim appeals)."
+  },
+  {
+   "id": "TR-09",
+   "verdict": "correct",
+   "citation": "Humana Military, TRICARE Provider Handbook, East Region 2026, 'TRICARE For Life (TFL)', pp. 25-26 and p. 60; tricare.mil 'Regions' and 'Filing Claims' pages",
+   "url": "https://www.humanamilitary.com/content/dam/sites/humana-military-com/provider/tricare-provider-handbook.pdf ; https://tricare.mil/About/Regions ; https://tricare.mil/PatientResources/Claims",
+   "quote": "File TFL claims first with Medicare. Medicare pays its portion and electronically forwards the claim to TRICARE Medicare Eligible Program (TMEP), (unless the beneficiary has OHI). TMEP sends its payment for TRICARE-covered services directly to the provider.",
+   "correction": "Correct. tricare.mil pages were read with WebFetch (curl gets a JavaScript check): 'In the U.S. and U.S. territories, you must file your claims within one year of service', and 'WPS Government Services' is listed for TRICARE For Life. Handbook p. 60: 'Providers who currently submit claims to Medicare on a beneficiary's behalf do not need to submit a claim to TMEP.'"
+  },
+  {
+   "id": "TR-10",
+   "verdict": "corrected",
+   "citation": "Humana Military, TRICARE Provider Handbook, East Region 2026, pp. 8, 10, 54, 55, 65, 68-70",
+   "url": "https://www.humanamilitary.com/content/dam/sites/humana-military-com/provider/tricare-provider-handbook.pdf",
+   "quote": "Please wait at least 45 days after submitting a claim before contacting Humana Military.",
+   "correction": "Quotes verified, page fix: the stated consequence and the network-rate duty are on p. 55, which the citation omits: 'Noncompliance with balance-billing requirements may affect a provider's TRICARE and/or Medicare status' and 'A TRICARE network provider agrees to accept the rates and terms of payment specified in its Humana Military agreement as payment for a covered service.' The same page adds: 'Providers may not bill beneficiaries for administrative expenses, including collection fees, to collect TRICARE payment.' The 45-day sentence is on p. 65 under 'Avoiding collection activities'; the claims-auditing sentence on p. 69; the 115 percent limit and payer ID 99727 on p. 70."
+  }
+ ],
+ "missing": [
+  "32 CFR 199.7(h)(4) (https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199): 'Benefit under $1. If the CHAMPUS benefit is determined to be under $1, payment is waived.' TRICARE pays nothing on a benefit under $1, so a TRICARE line worth less than $1 cannot be recovered by any letter. The owner's 'even $0.60' rule must exclude TRICARE benefit amounts under $1.",
+  "32 CFR 199.8(d)(1)(vii) (https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199): 'In the case of a beneficiary enrolled in a MA-PD plan who receives items or services for which payment may be made under both the MA-PD plan and CHAMPUS/TRICARE, a claim for the beneficiary's normal out-of-pocket costs under the MA-PD plan may be submitted for CHAMPUS/TRICARE payment.' A TRICARE-eligible patient in Humana or another Medicare Advantage plan can have the MA copay or coinsurance billed to TRICARE For Life (within 1 year, 199.7(d)). The cap is in (d)(1)(ii) and the same paragraph. (d)(1)(viii): 'CHAMPUS is second payer to other third-party payers of health insurance, including Medicare supplemental plans', so with a Medigap plan TRICARE pays after the Medigap plan. This is a 'secondary never billed' source the researcher did not list.",
+  "32 CFR 199.11(f)(6)(ii)(B)-(E), (f)(6)(v), (f)(4), (d) (https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199): TRICARE recoupments. The demand letter must give 'The right to inspect and copy TRICARE records pertaining to the debt' and 'The opportunity to request an administrative review by the TRICARE contractor; and that such a request must be received by the TRICARE contractor within 90 days from the date of the initial demand letter'; payment is due in 30 days; interest at the Treasury Current Value of Funds rate runs from the demand letter and is waived if paid within 30 days. 'No collection by offset may be undertaken unless the debtor has been sent a written demand for payment, including the procedural safeguards described in paragraph (f)(6)(ii)' (narrow exception). (f)(4): for denials caused by 'a change, clarification or interpretation', 'no recoupment action need be taken to recover funds expended prior to the effective date'. (d): a pending appeal 'may provide a basis for the suspension of collection'. The researcher covered VA and Optum recoupments but not TRICARE's.",
+  "32 CFR 199.17(a)(7)(ii) (https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199): 'any State or local law relating to health insurance, prepaid health plans, or other health care delivery or financing methods is preempted and does not apply in connection with TRICARE regional contracts.' This is the exact citation for the researcher's 'does not apply' point: Kentucky and Indiana prompt-pay laws cannot be used against Humana Military on TRICARE claims. No comparable VA preemption rule for CCN was found in 38 CFR part 17.",
+  "32 CFR 199.10(b)(4)(i)-(v), (a)(1)(i)(F), (a)(9) (https://www.ecfr.gov/api/versioner/v1/full/2026-08-17/title-32.xml?part=199): a TRICARE reconsideration notice 'must contain' the issues, 'The provisions of law, regulation, policies, and guidelines that apply to the issue or issues under appeal', a discussion of the information, the rationale, and appeal rights when the amount in dispute is $50 or more; every adverse initial notice 'shall include a statement of the beneficiary's or provider's right to appeal'. This counters a boilerplate (or AI-written) denial: the practice can demand the missing elements. Risk: (a)(9) lets an appeal decision 'address all pertinent issues ... (for example, the entire episode of care in the appeal)', so an appeal can reopen paid lines.",
+  "10 U.S.C. 1095c note, Pub. L. 109-364, div. A, title VII, sec. 731(a)-(b) (https://uscode.house.gov/us/usc/t10/s1095c/): TRICARE claims processing on '(2) The documentation required to substantiate medical necessity for items and services that are covered under both the TRICARE program and the Medicare program' 'shall be identical to the claims processing requirements under the Medicare program'. This is stronger than 1095c(d) for records demands and medical-necessity denials.",
+  "TRICARE Operations Manual Ch. 3 Sec. 2, interest on clean claims (https://manuals.health.mil/pages/DisplayManualHtmlFile/2024-08-07/AsOf/tot5/c3s2.html): NOT VERIFIED (site blocked by a JavaScript bot check). Search extracts indicate a contractor duty to pay interest from day 31 at the Prompt Payment Act rate (none under $1.00, one-year cap, contractor fiscally responsible unless the government caused the delay). If a person confirms it in a browser, TRICARE interest becomes a stated contract-manual duty on Humana Military/PGBA, not just the statutory 'may'.",
+  "VA fact sheet IB-10-1186 'Community Care Network (CCN)' (updated Jan. 27, 2022), Q8 (https://www.va.gov/COMMUNITYCARE/docs/pubfiles/factsheets/FactSheet_26-03.pdf): 'Community providers under CCN will be paid within 30 days of submitting a clean claim to their region's respective third-party administrator. Optum will pay claims submitted by community providers in Regions 1-3'. This is VA's own written promise to all CCN providers, stronger than the dental-only sheet the researcher cited.",
+  "Optum Medical Service Model and Claims Guide (version 2026 1104), p. 1 (https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnClaims/ccnMedServClaimGuide): providers must 'Submit complete* or partial medical records, as requested, to Optum directly or through its designee, immediately on receipt of request, no later than twenty-one (21) calendar days for expedited requests or thirty (30) calendar days for routine requests'; 'Lack of participation or response may result in recommendation of removal from the VA CCN Provider Network'; 'Optum is not authorized to reimburse providers for the costs for retrieving, copying, postage and/or handling of medical records'. A provider duty the worklist must track as a deadline.",
+  "Optum VA CCN Provider Manual (version 2026 1102), p. 47 and p. 43 (https://vacommunitycare.com/api/vaccnportal/v1/webcomponentcode/trainingdoc/ccnProvManual/ccnPrManual): 'Claims for ancillary services will be processed in accordance with CMS NCCI, MUE and related edits' and 'All providers are required to follow CMS billing and coding requirements outlined in the Medicare Claims Processing Manual, unless their VA CCN agreement states otherwise.' The CCN underpayment and edit checks can reuse Medicare logic.",
+  "Humana Military TRICARE Provider Handbook, East Region 2026, p. 18 (https://www.humanamilitary.com/content/dam/sites/humana-military-com/provider/tricare-provider-handbook.pdf): 'A network provider who submits a claim for an unauthorized service is subject to a penalty of up to 50 percent the TRICARE-allowable charge and the beneficiary may be held harmless.' This cuts against the practice for referral and authorization misses (network providers only).",
+  "VA Community Care 'Provider claims' page (updated Oct. 20, 2026) (https://department.va.gov/vha/community-care/provider-claims/): 'Supporting documentation for claims processing applies only to unauthorized emergency care claims. It is not required for authorized care claims.' This applies to claims VA processes itself (VCA, VA-paid). For CCN claims, Optum's separate records duty above still applies.",
+  "84 FR 26301 (June 5, 2019) (https://www.govinfo.gov/content/pkg/FR-2019-06-05/html/2019-11575.htm): 'We clarify that the compensation options are part of the contract between VA and the TPA.' VA's own statement that CCN payment terms live in the VA-Optum contract and the provider's Optum agreement, which supports the researcher's open question about the practice's VA CCN payment appendix and dispute clause."
+ ]
+}

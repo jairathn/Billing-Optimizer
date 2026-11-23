@@ -1,0 +1,260 @@
+{
+ "lens": "L5, undo and explanation: every automatic change and every ingest recorded with its rule and evidence, shown in the item's 'Why did this change?', and undoable; every effect that sticks after a bad input is removed. Snapshot 2f9c6ea (push 2), both hosts.",
+ "instances": [
+  {
+   "id": "L5-1",
+   "file": "remitwatch/runlog.py",
+   "where": "runlog.snapshot_items 1721, record_decisions 1936, record_changes 2076: no caller outside runlog.py (grep). Detector.run (detect.py 4312-4363) has no hook; runlog.start_run is not called by either cycle. api.app has 85 routes and none is GET /api/findings/{finding_id}/decisions (api_ops.py absent), so api.meta 'decisions' (api.py 419-420, _route_here 389) is false and features.js xpDecisions (565-575) / index.html 756 never render. cloud.SERVING_TABLES (cloud.py 1148) has no item_decisions.",
+   "what_it_can_do": "Every automatic change is unexplained on both hosts: an item closed, reopened, moved to Waiting, Expired or Can't check, re-dated or re-valued shows no 'Why did this change?', and the diagnostic bundle's decisions.json and examples are empty, so a bad run cannot be traced item by item. Live image (aggregates): no item_decisions table; 5,003 of 5,088 automatic closures ($603,346.51 of the $609,126.51 counted as recovered) carry only their auto_note text, no dated line naming the run that closed them; run-20261115 (rules 2.1 to 2.3) took the list from 17,446 to 15,995 items (net -1,451, -$34,097.35) and the store cannot say which items left or why (progress_snapshots keep counts only; 550 reopenings and 82 closures are the only per-item lines).",
+   "scenario": "Two ordinary detection runs on invented data: a denial, then the remittance that pays it. The item closes as paid; item_decisions stays empty; the decisions route does not exist; the drawer shows nothing.",
+   "evidence": "guard/L5/test_l5_undo.py::test_a_detection_run_writes_its_own_decision_log[file|compact], ::test_the_item_drawer_can_ask_why_an_item_changed, ::test_the_dashboard_copy_carries_the_decision_log fail; control ::test_control_record_decisions_names_a_closure_when_called passes (the module works; nothing calls it). Wiring is planned in wire/needs_H.md D1-D4, O1-O2, C9, not in the snapshot.",
+   "severity": "high",
+   "status": "open",
+   "guard": "Land needs_H D1-D4, O1-O2 and C9 inside the class guard's change journal (decisions computed in Detector.save from the in-memory diff before DELETE FROM findings), served on both hosts; release gate: a cycle on each host that changes any item writes at least one decision row per changed item."
+  },
+  {
+   "id": "L5-2",
+   "file": "remitwatch/api.py",
+   "where": "api._send_followup 4593-4690 and _fax_refresh 4443 (fax.match_inbound 679 auto-ties) write only free-text 'event' lines (actions.apply_event 135); actions.apply_hide_rule 242-279 (api.hide_add 4994, at request time) and apply_hide_rules 287-297 dismiss and reopen with actor 'hide rule', no rule key, no run id; selfcheck._hold 1366, _keep_vanished 1400, apply_expected_values 2432 change findings after the run; archive retire (archive.py 1005), restore 1844, restore_touched 1962; uploads.rematch 1121 auto-matches notes; cloud.apply_actions 242 folds journal entries days late; ema_checks.set_policy 2628 and actions.apply 'ema_policy' 377 change items at the next run; DETECT_VERSION (detect.py 113) hashes only RULE_FILES (92), so a setting such as REMITWATCH_EMA_CLOSES (detect.py 90), a payer alias or a stale-days value changes items with no version change and no forced re-detection; runlog.settings_names 1280 records names, never values.",
+   "what_it_can_do": "The changes most likely to surprise people are explained by nothing structured: an unattended second request or next-level appeal, an incoming fax tied to the wrong item, a hide rule that lets go 200 items at the click, a write-off policy that drops a pattern from Work now, an expected-value rewrite that re-sorts the worklist, a setting changed on one host that moves hundreds of items. The planned snapshot diff around Detector.run misses them or credits them to 'detect' (a policy fold reads 'no longer raised', a setting change reads 'state').",
+   "scenario": "The owner sets REMITWATCH_EMA_CLOSES=0 on the server only. DETECT_VERSION does not change, so no re-detection is forced; when detection next runs, closures reopen and nothing records that a setting did it, while the other host keeps them closed.",
+   "evidence": "Code reading; L2-18 (settings without bounds); 0c-4 (a setting on one host only).",
+   "severity": "high",
+   "status": "open",
+   "guard": "One change journal: every function that writes findings, finding_events, hide_rules, faxes, payer_fax, the policy meta or the archive calls journal.record(item, cause, rule, rule_version, input_ids, before, after) in the same transaction; causes run, person, hide_rule(key), policy(decision id), fax_engine, fax_tie, selfcheck, archive, take_back, release, setting(fingerprint). A build test (AST scan of every SQL write to those tables) fails any writer outside a @journaled function. Detection-affecting settings are fingerprinted into the rules version recorded with each decision, and a change forces one re-detection."
+  },
+  {
+   "id": "L5-3",
+   "file": "remitwatch/detect.py",
+   "where": "Detector.save 4018-4271 writes no row and no event for an unworked item the rules stop producing; fold_payer_policy 3027-3055 deletes items under a default 'accept' (line 3046, del 3053); run_ema_denials 3233-3240 replaces a NO_ANSWER chase by its EMA denial; runlog.record_decisions 2024-2031 would write kind 'gone', rule 'detect:no_longer_raised', evidence = the item's own keys; pairing only by (line_key, category) 1963-1975; prune_store 1682 deletes orphan rows after 90 days; GET /api/findings/{id} needs a findings row; results.js 54-55 shows 'no longer listed' with no link.",
+   "what_it_can_do": "The most dangerous change is the least explained: paid claims vanishing behind a cut-short copy (0e-1), 1,600 items flooding in and out with the feed date (0b-1), a payer pattern folded away with no person. The item leaves every list and the drawer; even once the decision log is wired its row names no cause and no input, so nobody can tell which file to take back, and the row is deleted 90 days later while the claim's appeal window runs a year or more.",
+   "scenario": "File A (25 paid visits and 1 denial, an open item) is read; file B, another copy of A's remittance (same payer, trace and payment date, newer ISA date) without the denial, supersedes A. The item vanishes. Its decision row is {kind: gone, rule: detect:no_longer_raised, evidence: [{source: item, line_key, claim_key}]}: nothing says 'superseded by B'.",
+   "evidence": "guard/L5/test_l5_undo.py::test_an_item_that_vanishes_names_the_input_that_removed_it[file|compact] fails (evidence holds only the item's own keys). Live run-20261115: net -1,451 items with no record of which. L3-4: check_vanished counts supersession as an explanation.",
+   "severity": "high",
+   "status": "open",
+   "guard": "A tombstone per vanished item (finding_tombstones: last row, cause, rule, input_ids from provenance, run id) kept while any of its windows is open plus a year; the drawer opens tombstones by deep link ('left the list on <date> because <cause>: <input>'); a 'Left the list since the last run' view; pairing by heir keys and claim keys as well as line keys; a fold or policy that removes items names its decision row."
+  },
+  {
+   "id": "L5-4",
+   "file": "remitwatch/detect.py",
+   "where": "findings carry only line_key, claim_key, transaction_key (Detector.save cols 4022-4027); claims and lines file_sha256 are nulled on the compact store (store.py 311-315); EMA-derived items (NO_ANSWER, EMA_DENIED, ema_outcome closures, written_off_*) carry no source id; postings carry src, A/R rows file_id, ema_rows source_sha256, but nothing joins an item, its state or its closure to them; the files table (store.py 33) records no effects.",
+   "what_it_can_do": "Neither question a take-back needs can be answered: which inputs an item (or its closure, state, amount) rests on, and what one file changed. A person who finds a bad file cannot see what it did; code cannot compute what to undo or verify that undoing it restored everything.",
+   "scenario": "A Production export from the wrong location filter is applied today and moves 300 items' outcomes. Tomorrow someone notices: there is no list of the 300 items, the dollars moved, or a way to restore exactly those.",
+   "evidence": "Code reading (schema of findings, claims, lines on both store kinds).",
+   "severity": "high",
+   "status": "open",
+   "guard": "item_inputs(finding_id, run_id, role in raised_by, state_by, amount_by, closed_by, superseded_by, input_id) written by Detector.save from the evidence it already builds (line to transaction to file sha; EMA rows to source sha; postings to ledger file; A/R to file id; policy decision id; rules and settings version); an input_effects(input_id) view on the Data tab (items raised, closed, moved, dollars); the compact store keeps one transaction-to-file link per transaction."
+  },
+  {
+   "id": "L5-5",
+   "file": "remitwatch/runlog.py",
+   "where": "TRACKED 1695-1696 lacks recovered_cents, recovered_date, first_seen, value_per_minute_cents, minutes_est, appeal_block, hint, ema_status, written_off_*; _value_moved 1755 with VALUE_MIN_CENTS 500 and VALUE_MIN_SHARE 0.10 (82-83).",
+   "what_it_can_do": "Money the Results tab, Progress and the weekly email count as recovered can move with no explanation (a later copy pays less, a reversal partly stands, a typed amount over the payment on file: 0c-6); the worklist re-sorts with no record; changes under $5 are never explained although PLAN decision 9 says no dollar floor anywhere.",
+   "scenario": "An automatic closure's recovered amount falls from $127.80 to $20.00 when another copy is read; record_decisions writes nothing.",
+   "evidence": "guard/L5/test_l5_undo.py::test_a_change_of_recovered_dollars_is_a_decision[file|compact] fails (written 0).",
+   "severity": "medium",
+   "status": "open",
+   "guard": "TRACKED generated from the columns pages show or totals sum (api.FINDING_COLS money, date and state columns) with a test that fails when a money column is not tracked; no floor on money columns (sub-$5 moves aggregated per item per run, never dropped)."
+  },
+  {
+   "id": "L5-6",
+   "file": "remitwatch/runlog.py",
+   "where": "record_decisions 2033-2038: a state, follow_up, status, hidden, stale or reopened change on an item a person touched since the previous run is only counted ('after_person'); _person_touched 1906.",
+   "what_it_can_do": "On exactly the items people are working, the run's own changes go unrecorded: an item marked Started this morning that the night run moves to Can't check, Waiting or Expired has no row saying the run did it.",
+   "scenario": "A biller marks an item Started at 09:00; that night the run moves it to Can't be checked. decisions_for returns nothing.",
+   "evidence": "guard/L5/test_l5_undo.py::test_an_automatic_state_change_is_recorded_even_on_an_item_a_person_touched[file|compact] fails.",
+   "severity": "low",
+   "status": "open",
+   "guard": "Record both: the person's change stays theirs (finding_events); the run's later change is a decision with cause 'run'; suppress only the field the person set in that window."
+  },
+  {
+   "id": "L5-7",
+   "file": "remitwatch/runlog.py",
+   "where": "DECISIONS_ORPHAN_DAYS 80 and prune_store 1668-1690 delete the rows of items not in findings after 90 days; DECISIONS_MAX_ROWS 500,000 evicts oldest first; needs_H C9 serves 180 days; archive.MOVED (archive.py 112-113) moves findings and finding_events but not item_decisions and restore 1844 brings none back; actions._hide_matching 237 writes 'hidden' events with no run_id, so selfcheck._hold 1385-1386 cannot remove them when it holds a run.",
+   "what_it_can_do": "The explanation is gone before the question comes: appeal windows run one to two years, but the rows of a vanished or archived item are deleted after 90 days and a restored item comes back with no decision history; a held run leaves 'hidden' lines on items it put back open.",
+   "scenario": "An item vanished in a flood in March; in July, inside its window, a biller asks why it left the list. Nothing remains.",
+   "evidence": "Code reading.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Retention by item: an item's decisions and tombstone stay while any of its windows is open plus a year; the archive moves item_decisions with the bill and restore brings them back; every history and decision row carries its run id."
+  },
+  {
+   "id": "L5-8",
+   "file": "remitwatch/selfcheck.py",
+   "where": "needs_H D4 writes record_decisions at the end of Detector.run; selfcheck.after_detection and _hold (1366-1398) may then restore the previous list; needs_H section 8 relies on G adding 'held' rows; L3's swing guard holds candidates before publishing.",
+   "what_it_can_do": "Once wired as planned, the drawer would say an item was closed or raised by a run nobody saw (held), or miss that a release later published it; people would act on explanations of changes that never reached their list.",
+   "scenario": "Safe mode holds a run that closed 400 items; the decision log already says 'closed' for each.",
+   "evidence": "Planned order in wire/needs_H.md D4 versus selfcheck._hold.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Decisions are written 'proposed' with the run id inside the save; the publish step (swing.assess, safe mode) marks them published or held; a release marks them published with who released; the drawer shows published rows and a held-update notice."
+  },
+  {
+   "id": "L5-9",
+   "file": "remitwatch/store.py",
+   "where": "No function, route or CLI deletes a file's transactions, claims, lines, adjustments, remarks, plb or problems (no DELETE on them outside archive.py); Store.file_seen 279 and ingest_835_paths 353 skip known bytes; content fingerprints skip a re-delivered copy (ingest_parsed 303); dropbox_sync list_folder include_deleted False (168); mark_superseded 390 recomputes only when new files arrive (dropbox_sync 935, cli 51).",
+   "what_it_can_do": "One wrong 835 is permanent: another clinic's ERA keeps its items and patients (0e-5); a cut-short copy keeps the complete remittance superseded (0e-1: deleting the cut file or re-dropping the complete one changes nothing, the complete copy is filed as a duplicate); a stray future-dated file keeps moving the feed date (0b-1, 0e-2, 0e-3). The live image holds 32,696 835 files and 80 superseded transactions (473 claims, $46,330.83 paid) hidden from every count; hotfix 2d found 12 of those claims ($696.84) hidden wrongly, and only code can undo one.",
+   "scenario": "An invented ERA for another clinic (other tax ID and NPI) is read and raises items; no mechanism exists to take it back.",
+   "evidence": "guard/L5/test_l5_undo.py::test_a_remittance_read_by_mistake_can_be_taken_back[file|compact] fails ('no way to take a file back'); chaos_r0_e 0e-1, 0e-5; verify_r0_e 0e-5 ('Dropbox deletions are ignored ... no way to take back a file that was read'); backlog 0e-5 [INTAKE]; L2-1, L2-2.",
+   "severity": "high",
+   "status": "open",
+   "guard": "door.forget(input_id, actor, why), owner-only (server route; serverless journal entry 'take_back'): delete every row the input added, re-run supersession and detection, write before and after per item with cause take_back, keep a tombstone so the same bytes reappearing are held ('you took this back on <date>') with an owner 'Read it again'."
+  },
+  {
+   "id": "L5-10",
+   "file": "remitwatch/ema_reports.py",
+   "where": "ema_reports _HISTORY_SQL 2955-2976 (ema_ar_items first_seen, worked_on, worked_how, note_changed advanced in place by each A/R snapshot) and _LINKS_SQL 2977-2983 (ema_claim_links MIN first_seen); ema_ledger refresh 2071-2073 (ema_link_events INSERT OR IGNORE, pruned only by retention); selfcheck._update_track 1616-1675 (INSERT OR IGNORE waits, closures, missed deadlines); results.update_registry 417-466 (earliest first_flagged; expired_on, lost_on, lost_cents never cleared; gone items keep counting money); archive.apply_frozen_rates 1445 (a year's baselines frozen once the archive takes its lines); ema_reports._learn_prefix_from (claim-link prefix); fax.known_senders 653-668 (a number trusted for a payer from any fax a person tied).",
+   "what_it_can_do": "Even with a take-back the world does not come back: an A/R snapshot whose notes changed leaves items marked worked (states._evidence reads hist_note_changed and hist_first_seen, so they read as Waiting: missed money); an action value seen once in a wrong Production file stays dated in ema_link_events; Results keeps an item lost to its deadline after it is back in Work now; the track record keeps 'lost to deadlines' and skewed answer times; a mis-tied fax number stays trusted to tie later faxes without a person.",
+   "scenario": "A run (a future-dated file, or the 0f-1 evening clock) moves a Work now item to Expired; the next run, with the input gone, puts it back. The track record still counts one missed deadline and results_items keeps lost_on with $100.00 lost.",
+   "evidence": "guard/L5/test_l5_undo.py::test_a_missed_deadline_that_the_next_run_undoes_is_withdrawn[file|compact] and ::test_the_results_registry_withdraws_a_loss_the_next_run_undid[file|compact] fail.",
+   "severity": "high",
+   "status": "open",
+   "guard": "Classify every table INPUT (rows carry their input id), EVENT (people's acts, append-only) or DERIVED; each DERIVED table is rebuilt from inputs in force each run, or every fact in it carries the input id and run id that produced it so a take-back or a reversed run withdraws exactly those facts; a registry test fails on any unclassified table; property derive(store) == derive(rebuild(inputs in force, events))."
+  },
+  {
+   "id": "L5-11",
+   "file": "remitwatch/ema_ledger.py",
+   "where": "Ledger.commit 778-840 deletes older live files' postings inside the new file's box; Ledger.forget 911-929 ('the rows of older files it replaced do not come back'); reachable only through the server CLI ema-reports --reread (cli.py 190); copies_to_drop 931, pipeline.drop_kept_copies 393 and cloud.ProductionSlot.drop_copies 640 delete kept copies once REMITWATCH_EMA_REPORT_KEEP (2) newer files cover their box.",
+   "what_it_can_do": "A wrong Production export that passes the holds (a re-saved old export ranked newest, L1-8 and 0e-9; another tenant's, L2-13; a filter H3 misses) replaces good postings; taking it back leaves a hole (payments vanish from EMA's side, items read unpaid or unposted), mended only by re-reading older kept copies that are deleted after two newer files; Vercel has no CLI at all.",
+   "scenario": "A service-year export, then a posted-date pull that replaces the April 20 payment; taking the pull back leaves 3 rows ($60.00) where 4 ($130.00) were.",
+   "evidence": "guard/L5/test_l5_undo.py::test_taking_a_production_file_back_restores_the_rows_it_replaced fails: (3, 6000) against (4, 13000).",
+   "severity": "high",
+   "status": "partly",
+   "guard": "Ledger apply is reversible: replaced postings move to postings_replaced(src, replaced_by) instead of being deleted (or the kept copy is held while the replacing file is inside its take-back window); forget restores them and refreshes; door.forget covers Production on both hosts."
+  },
+  {
+   "id": "L5-12",
+   "file": "remitwatch/ema_reports.py",
+   "where": "apply_ar_snapshot 3010 replaces each service year's ema_ar rows and advances ema_ar_items; Store.ingest_ema_rows (store.py 417) INSERT OR IGNORE by row_fingerprint; only the one-time migrate_misread uses _purge_source 3347.",
+   "what_it_can_do": "An A/R from the wrong practice, a filtered one past the holds, or a re-saved older one ranked newer (L1-8) replaces a year's snapshot, its claim links, notes and worked marks for good; a wrong weekly export's rows stay and keep shaping 'never answered' (0e-9, 0e-10).",
+   "scenario": "A re-saved March A/R is ranked newest by its file creation time; it replaces the November snapshot's rows for 2026 and there is no way back but a newer export.",
+   "evidence": "Code reading; chaos 0e-9, 0e-10; L1-8.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "door.forget for A/R (the previous snapshot rows of each year it replaced are kept as ema_ar_prior until superseded twice, and come back) and for weekly exports (rows by source_sha256), with the derived recompute of L5-10."
+  },
+  {
+   "id": "L5-13",
+   "file": "remitwatch/ema_reports.py",
+   "where": "decide 3287-3313 acts only on status 'held'; _ingest_one 2572 (st in DONE_STATUSES or st == 'discarded' -> 'already').",
+   "what_it_can_do": "A held export discarded by mistake is lost until EMA exports it again (the same bytes are 'already'); an applied held export can be withdrawn only through a take-back that does not exist (L5-9, L5-11).",
+   "scenario": "A biller discards a held Production export; the owner wants it applied. decide answers 'Only a held report waits for a decision.' and reading it again answers 'already'.",
+   "evidence": "guard/L5/test_l5_undo.py::test_a_held_report_discarded_by_mistake_can_still_be_applied fails.",
+   "severity": "low",
+   "status": "open",
+   "guard": "decide() accepts apply on a discarded row (held again, with the decision), every decision is an appended row (who, when, from, to), and an applied file goes back through door.forget."
+  },
+  {
+   "id": "L5-14",
+   "file": "remitwatch/detect.py",
+   "where": "Detector.save 4236-4241 keeps every worked item the rules no longer produce and sets stale 0 for a resolved EMA_CLAIM_SIGNALS item ('a recovery on the record'); 4193 gives a re-raised id its old status with no event; worked() 4070.",
+   "what_it_can_do": "Statuses set on items a bad input created outlive the input: a Paid typed on a flood 'never answered' item stays counted as money recovered in totals, Results and the weekly email (0b-6 made Paid default to the whole disputed amount); a Let go or Lost stays and is silently applied again if the same id is raised later for a real reason; a Sent keeps the follow-up engine running (L5-15). The 0b-1 flood put about 1,600 such items before billers in one run; nothing lists the work people did on items that later left the list.",
+   "scenario": "During a flood a biller marks a never-answered item Paid and types $500. The flood input is removed and the rules no longer raise the item: it stays resolved, stale 0, $500 recovered, no hint.",
+   "evidence": "guard/L5/test_l5_undo.py::test_a_recovery_typed_on_an_item_the_rules_no_longer_find_is_not_counted_silently[file|compact] fails. The live image has only 2 manual statuses so far: the exposure is ahead of the billers, not behind.",
+   "severity": "high",
+   "status": "open",
+   "guard": "When an item a person acted on leaves the list, keep the person's status but mark it 'acted on a list that changed' (cause and input from provenance): out of money totals, Results and follow-ups, into a review queue 'Your work on items RemitWatch no longer lists'; a re-raised id with an old person status comes back To do with a line naming the earlier decision and asks again."
+  },
+  {
+   "id": "L5-15",
+   "file": "remitwatch/fax.py",
+   "where": "fax.followups 475-622 takes every finding with status 'appealed' and an outbound fax, stale or not; api._send_followup 4593-4690 and still_ok 4669-4679 check the number, feed staleness, practice details and packet, never stale, take-back or what changed; cli.cmd_cycle 286-292 runs _fax_run after every server cycle; Detector.save via_bill 4174-4181 hands only notes to a claim's real answer and leaves the old appealed item stale with its chase.",
+   "what_it_can_do": "Letters keep going to a payer for a problem RemitWatch no longer sees: weekly second requests (up to MAX_REQUESTS 12), next-level appeals and payment requests, unattended, for an item a flood created and a take-back removed, or for a chase whose claim's real answer arrived (the answer gets a new item; the old one keeps chasing).",
+   "scenario": "An item faxed during a flood (appeal 60 days ago, number confirmed) is now stale; fax.followups lists an unattended second_request for it.",
+   "evidence": "guard/L5/test_l5_undo.py::test_no_letter_chases_an_item_the_rules_no_longer_find[file|compact] fails; control ::test_control_the_follow_up_engine_chases_an_item_still_raised passes. Hotfix 2d D4 (live code, in progress) stops chases for items the store shows paid and D3 moves faxes to signal-change heirs; neither covers 'no longer raised' or 'input taken back'.",
+   "severity": "high",
+   "status": "partly",
+   "guard": "An automatic send requires the item listed now (stale 0), no non-person change to it in the last published run, and no take-back touching its inputs since its last send; otherwise it waits for a person with the reason. Follow-ups go through an outbox the swing guard freezes (L3 sections 5 and 9)."
+  },
+  {
+   "id": "L5-16",
+   "file": "remitwatch/uploads.py",
+   "where": "uploads.remove_note 1094-1109 deletes the file and row and marks the upload removed, with no history line and no actor; api.uploads_note_remove 3286 does not pass the user; api._packet_problem 3521-3550 blocks only future sends; faxes rows keep packet_id; cloud.mark_packet_emailed 1479 and the packet email route (api.py 5149) record emailed packets; note_lessons rows from that note's review stay.",
+   "what_it_can_do": "When a note turns out to be another patient's (0b-2, 0b-3), the faxes and emailed packets that already carried it are flagged nowhere: nobody is prompted to review a disclosure, tell the payer, or send the appeal again with the right note; nobody can tell who took it back; the AI lesson drawn from the wrong note keeps shaping templates.",
+   "scenario": "A note matched to a claim and faxed in its packet is taken back; the item has no line in its history and the Faxes page shows the earlier fax as normal.",
+   "evidence": "guard/L5/test_l5_undo.py::test_taking_a_note_back_writes_a_line_in_the_history_of_its_items fails. Hotfix 2 H6 (live code) stops a wrong-patient note from being faxed in the first place.",
+   "severity": "high",
+   "status": "partly",
+   "guard": "remove_note(note_id, actor) writes a history line on every item the note was matched to, lists every fax and emailed packet that carried it (faxes.packet_id to the packet's note_sha256) under 'Sent with a note you took back' with an owner review (disclosure checklist, send again with the right note), and removes its lessons."
+  },
+  {
+   "id": "L5-17",
+   "file": "remitwatch/actions.py",
+   "where": "actions.apply_hide_rule removal 252-273 reopens only items whose current signal matches and whose last deciding event is 'hidden'; Detector.save heir 4183-4191 inherits 'dismissed' with only a 'signal_changed' event; _hide_matching 215-239 writes 'hidden' events with actor 'hide rule', no rule key, no run id; Detector.save auto_status else-branch treats a rule's Let go as a person's (0c-9).",
+   "what_it_can_do": "The owner's 'Show again' does not bring back what the rule let go once new data changed the items' signal (0c-3: the strongest DOWNCODE_VS_BILLED items let go for ever while Hidden says 0 items, $0); a payment on a rule-hidden item stays Let go 'because a person set it' (0c-9).",
+   "scenario": "Hide a reason for a payer (3 items), claim files arrive and relabel them, Show again: all 3 stay Let go.",
+   "evidence": "chaos/r0_c/scripts/test_chaos_0c.py::test_a_reason_hidden_then_shown_again_brings_its_items_back_after_their_signal_changed (verify_r0_c: reproduced, high, both hosts); routed to INT.",
+   "severity": "high",
+   "status": "open",
+   "guard": "Every 'hidden' event carries the rule's id and five-part key; heirs inherit hidden_by; removal reopens by rule id whatever the signal is now; a rule's Let go is never a person's decision (a payment closes it as paid with a line naming the rule)."
+  },
+  {
+   "id": "L5-18",
+   "file": "remitwatch/ema_checks.py",
+   "where": "ema_checks.set_policy 2628-2637 and actions.apply 'ema_policy' 377-395 overwrite pol[pattern] (only the newest decision survives); Detector.fold_payer_policy 3046 treats an undecided never-paid pattern as 'accept' and deletes its items (3053); selfcheck.accept_findings 1543-1563 and _apply_acceptances 1565 make offenders baseline permanently, with no withdrawal.",
+   "what_it_can_do": "A pattern accepted while a bad input inflated it stays accepted for every future item; the earlier decision, who made it and which items it let go meanwhile are overwritten; undecided never-paid patterns are accepted with no person (PLAN decision 14 says nothing defaults to accept); a safe-mode acceptance of a flood ('use the new results') cannot be withdrawn.",
+   "scenario": "The owner accepts a write-off pattern on a day a duplicated Production export doubled its count; a week later the export is replaced, the pattern's basis halves, and the acceptance keeps letting its new items go.",
+   "evidence": "Code reading; L3-16; PLAN decision 14.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Decisions are appended rows (pattern, decision, by, at, basis at decision time) with a withdrawal; default 'decide'; a decision whose basis moves past its own counts asks again; each item a decision lets go gets a line naming the decision row; the owner can withdraw a self-check acceptance."
+  },
+  {
+   "id": "L5-19",
+   "file": "remitwatch/alerts.py",
+   "where": "AlertEngine.run 388-411 clears every alert a run does not raise; alerts.notify 434; pipeline.run_cycle 598-608 and cloud 1786-1799 mail alerts and the weekly report ('New this run', report.py 60) from any run.",
+   "what_it_can_do": "A bad run's mail goes out (an alert cleared, a flood reported as new work) and is never corrected when the run is reversed or its input taken back.",
+   "scenario": "A stray file clears STALE_FEED and the weekly email lists 1,600 new items; the file is taken back the next day; nobody is told the email was wrong.",
+   "evidence": "Code reading; L3-12, L3-13.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "An outbox keyed by the published run id; a take-back or release that reverses a run queues one plain correction ('The update of <date> was wrong because of <input>: N items it added are gone; the alert it cleared is back')."
+  },
+  {
+   "id": "L5-20",
+   "file": "remitwatch/results.py",
+   "where": "results.snapshot 1778-1820 freezes a week (final=1) 14 days after it ends; results.update_registry 417-466; selfcheck._update_track 1616-1675 and track_record 1677-1720 (missed deadlines, closures, answer days into meta selfcheck:answer_days); selfcheck.given_up 2107-2157 (weeks kept in meta).",
+   "what_it_can_do": "Owner rule 5's scoreboard (recovered, lost to deadlines, given up) and payers' answer times keep what a reversed run did: an item lost to a bad run's clock stays 'lost'; a recovery counted from a superseded copy stays in a frozen week.",
+   "scenario": "As in L5-10: the item is back in Work now and the scoreboard still counts it lost.",
+   "evidence": "guard/L5/test_l5_undo.py::test_a_missed_deadline_that_the_next_run_undoes_is_withdrawn and ::test_the_results_registry_withdraws_a_loss_the_next_run_undid fail; L3-14.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Counters are computed from the change journal with reversals; a take-back or release writes compensating entries; a frozen week is amended with a visible line ('corrected on <date>: -$X, because <input> was taken back'), never silently kept or rewritten."
+  },
+  {
+   "id": "L5-21",
+   "file": "remitwatch/cloud.py",
+   "where": "cloud.save_raw 207-213 overwrites store.sqlite.gz in place; cli.backup_store 349-388 keeps REMITWATCH_BACKUP_KEEP=7 daily copies on a server; journal entries are deleted after each fold (cloud.py 1779-1781), so people's acts live only inside the image.",
+   "what_it_can_do": "A bad input noticed after a week has no rollback on the server and none at any age on Vercel (only Dropbox's own version history, which nothing in the app reads); any restore erases every person's status, note and fax record since.",
+   "scenario": "A wrong file read on the 1st is noticed on the 10th: the server's oldest backup is from the 3rd; on Vercel the image has been overwritten ten times.",
+   "evidence": "guard/L5/test_l5_undo.py::test_the_serverless_store_keeps_the_image_before_each_save fails (only store.sqlite.gz). Hotfix 2d D2 (live code) records the image's size and sha256 and documents Dropbox version history.",
+   "severity": "medium",
+   "status": "partly",
+   "guard": "Keep the input journal and the people's event journal outside the image (append-only, in the state folder and beside the store) so a store can be rebuilt as inputs in force plus events; keep N image generations on Vercel; the documented recovery is 'take the input back', never 'restore a backup'."
+  },
+  {
+   "id": "L5-22",
+   "file": "remitwatch/archive.py",
+   "where": "archive.run retires bills (MOVED 112, delete 1005); restore 1844, request_restore 1894; restore_touched 1962-1990 reacts only to new rows; lookup_finding explains 'Moved to the archive ... Rule archive.retire'.",
+   "what_it_can_do": "Once wired, a bill a bad input made look settled can be retired; taking the input back does not restore it (restore_touched looks only for new rows), and its decision history does not travel (L5-7).",
+   "scenario": "A future-dated file makes a 3-year-old bill's items Expired; the archive retires the bill; the file is taken back; the bill stays in the archive.",
+   "evidence": "Code reading.",
+   "severity": "low",
+   "status": "partly",
+   "guard": "Retirement records item_inputs; a take-back touching a retired bill's inputs restores it before re-detection; the archive moves item_decisions with the bill."
+  },
+  {
+   "id": "L5-23",
+   "file": "remitwatch/detect.py",
+   "where": "Detector.save keeps prev_status with each automatic closure ('remembered so it can be undone exactly') and writes paid_on_later_remit, reopened and signal_changed events; selfcheck._keep_vanished 1400 writes 'kept_by_selfcheck' with a hint; trizetto is read-only (module doc); uploads.remove_note with _packet_problem blocks a taken-back note's future sends; hide_rules keep removed_at and removal reopens what the rule hid; archive files are never deleted and restore exists; intake keeps upload copies 180 days; spot checks: newest answer wins; ema_reports.migrate_misread purges one class of misread rows exactly by source sha.",
+   "what_it_can_do": "These already make one change explainable or reversible: the models for the class guard.",
+   "scenario": "An automatic closure whose payment is later superseded reopens to exactly the status it had, with a 'reopened' line.",
+   "evidence": "Code reading; control tests in test_l5_undo.py pass.",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "guard": "Reuse them: prev_status for every automatic change, _purge_source as the core of door.forget, removed_at as the model for appended decisions, kept_by_selfcheck as the first form of a tombstone."
+  }
+ ],
+ "class_guard": "UNDO AND EXPLANATION SPEC (one module, remitwatch/journal.py; both hosts; composes with L2's door and L3's swing guard). Principle: every change has a recorded cause, every cause can be withdrawn, and nothing leaves the building on a change nobody can explain. 1. Inputs have identity and status. Every input the door admits (835, weekly export, A/R, Production, upload, note, incoming fax, journal entry, owner or policy decision, detection-affecting setting fingerprint, rules version) gets input_id and an inputs row {input_id, kind, origin, admitted_at, admitted_by, verdict, status in_force|taken_back|held, taken_back_by, at, why}. Every row an input writes carries its input_id (transactions.file_sha256; ema_rows.source_sha256; postings src; ema_ar file_id; uploads; learned meta values carry learned_from). 2. Provenance. Detector.save writes item_inputs(finding_id, run_id, role raised_by|state_by|amount_by|closed_by|superseded_by, input_id) from the evidence it already builds; input_effects(input_id) answers 'what did this file do' (items raised, closed, moved, dollars) on the Data tab. 3. One change journal. item_decisions gains cause (run, person, hide_rule, policy, fax_engine, fax_tie, selfcheck, archive, take_back, release, setting), input_ids, run_id, published. Detector.save writes it from the in-memory diff before DELETE FROM findings (status proposed); the publish step (swing.assess, safe mode) marks rows published or held. Every other writer to findings, finding_events, hide_rules, faxes, payer_fax, policy meta and archive tables writes through journal.record in the same transaction; a build test (AST scan of SQL writes) fails any writer outside it. TRACKED is generated from the columns pages show or totals sum, money with no floor. A run's change to an item a person touched is still recorded. 4. Tombstones. An item that leaves the list gets finding_tombstones (last row, cause, rule, input_ids, run id); the drawer opens tombstones; a 'Left the list since the last run' view; item decisions and tombstones are kept while any window of the item is open plus a year, travel with archived bills, and are served on Vercel. 5. Take-back. door.forget(input_id, actor, why), owner-only (server route; serverless journal entry): delete every row with that input id and restore what it replaced (postings_replaced for Production, ema_ar_prior for A/R); re-run supersession; recompute every DERIVED table (each table is classified INPUT, EVENT or DERIVED in a registry; a test fails on an unclassified table) or withdraw its facts tagged with the input id; re-run detection through the swing guard with cause take_back (published with a notice); keep a tombstone of the input so the same bytes are held if they reappear, with 'Read it again'. Held-report decisions are reversible the same way. 6. Compensation, never silence. After a take-back or a reversed run, a pass over the journal lists every effect whose cause no longer stands: people's statuses on items that left the list (kept, marked 'acted on a list that changed', out of totals and follow-ups, in a review queue; a re-raised id never silently gets an old Let go or Paid); faxes and emailed packets sent for withdrawn causes or with a note taken back ('Sent on a basis that changed', owner review with disclosure checklist); hide rules and policy decisions made meanwhile (re-confirm with counts then and now); counters (compensating entries, amended frozen weeks); outward mail (one correction through the outbox). 7. Outward gate. Automatic sends (follow-ups, retries, bulk) need the item listed now, no non-person change in the last published run, and no take-back touching its inputs since the last send; otherwise a person decides. 8. Rebuildable. The input journal and the people's event journal live outside the store image (append-only), so store = rebuild(inputs in force, events); Vercel keeps N image generations; the documented recovery is take-back, not backup restore. Owners: HOOK (wiring of runlog and journal in both cycles, api_ops route, serving tables), INTAKE (door.forget for 835, exports, A/R, Production; postings_replaced), INT (detect.save tombstones, provenance, heirs and hide keys, person-status freeze), PORT (fax outbox gate, note take-back aftermath, review queues, drawer), R and G (counters from the journal), E (archive restore by cause).",
+ "property_test": "Generated undo test (release gate 8 addition; both hosts: the file store through pipeline.run_cycle and the compact image through cloud.run_cloud_cycle with LocalState; invented data from tests/test_features, tests/test_selfcheck, tests/test_remitwatch and tests/ema_fixtures builders). World(seed): 3 to 8 payer groups, 20 to 60 weeks of 835s, weekly exports, A/R and Production; run to a published state P0. Then a random sequence of inputs, some bad (another payee's ERA, a cut-short or same-trace copy, a future-dated 835, a wrong-practice or re-saved A/R, a posted-scope Production pull, a hide rule, a policy decision, a setting change), interleaved with people's actions on random listed items including the bad inputs' items (Paid with an amount, Let go with a reason, Sent with a fake-line fax, a note attached and faxed). Then take back a random subset B of the bad inputs (door.forget, random order, sometimes one batch) and run. Invariants: U1 exact undo: inputs-derived state (live transactions, supersession flags, ledger postings, A/R rows, every DERIVED table in the registry, items, states, money to the cent) equals a fresh rebuild from the inputs in force plus people's events, table by table. U2 complete explanation: every item whose status, work_state, signal, money (shortfall, expected, recovered), deadline, follow-up or stale flag differs between two consecutive published runs has at least one published decision row in that run with a cause and, for non-person causes, input_ids or a rules or settings version; every vanished item has a tombstone; GET /api/findings/{id}/decisions returns them on both hosts. U3 no silent stickies: every journal effect whose input is in B is withdrawn (derived) or listed in a compensation queue with its reason (people's acts, faxes, emails, hide rules, policies, counters), never silently kept; after the take-back no automatic fax goes out for an item whose inputs include B; totals and Results exclude statuses awaiting re-confirmation. U4 round trip: 'Read it again' on a taken-back input restores the store from before its take-back (same items, same cents), and taking it back again returns to U1's state. U5 order independence: the same B taken back in any order or as one batch gives the same store. U6 privacy: journal rows, tombstones and compensation lists hold only finding ids, store keys, codes, counts and dollars (extend tests/test_runlog.py's planted-identifier scan to them). The 24 failing tests in guard/L5/test_l5_undo.py are the seed cases and must pass, with their 4 controls."
+}

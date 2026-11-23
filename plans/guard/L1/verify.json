@@ -1,0 +1,198 @@
+{
+ "lens": "L1 skeptic (one input moves a shared value), checked against guard/snap. 22 of 23 instances are real; L1-23 is a list of guarded patterns, not a defect. All 15 finder tests fail on the snapshot for the reason they state. Corrections: (1) L1-1 is narrower for other payers and worse for the stray payer's own group than described: states.py already keeps the cross-payer flood in 'Can't be checked' (per-group MAX), but one adjustment-only 835 from Medicare KY put 610 claims ($143,356) into Work now on a copy of the live image with the snapshot's code. (2) Production and A/R are worse than stated, shown through the real read path: the correct newer A/R is superseded, and G8 lists answered claims as never answered. (3) Severity is lower for L1-6, L1-7 and L1-19. (4) L1-12 does not reach the worklist yet: selfcheck's hooks are not wired in the snapshot. (5) The source lint counts 60 sites, but about 15 are grouped, per-claim, per-file or display only, and it misses the Python-side extremes. My tests, scripts and aggregate results are in guard/L1/verify/ (10 tests fail for the stated reason, 4 controls pass). Real data was used only as copies (an in-memory copy, and a file copy deleted after use), and only aggregates are reported.",
+ "verdicts": [
+  {
+   "id": "L1-1",
+   "real": true,
+   "severity": "high",
+   "status": "confirmed; the snapshot partly guards the other payers (states.py), the stray payer's own group is not guarded; shapes (b) and (c) are not guarded",
+   "why": "Detector.run_ema_open_claims gates every payer's open claims with MAX/MIN(payment_date) (2514-2520), with the due day compared to the global newest date (2774-2777) and severity set by first <= newest+30 (2880). Reproduced. The finder missed a partial guard: states._cant_check reads group_last_835, the MAX per payer group (states.py 973-980, 2521-2542). So another payer's claims that a stray file lets through become 'Can't be checked' (next step: call), not 'Chase the payer'. The stray payer's own group goes to Work now. Nothing catches the one-day bundle (c) or the future date (b). The real hotfix-2 feed_date also bridges (c). The selfcheck 'vanished' rule would put back the items a future-dated file wipes, but it is not wired in the snapshot (it is in needs_G.md only).",
+   "evidence": "The finder's 3 tests fail. Mine (guard/L1/verify/test_v_l1_states.py): a Humana adjustment-only file leaves the Anthem claim cant_check (passes) but puts the Humana claim in work_now (fails); a file dated 2099 wipes the work_now item while meta ema:unanswered_unseen stays n=0 (fails). On a copy of the live image with the snapshot's code (measure_l1_1_live.py and its JSON files; detection about 2.5 minutes, peak 1.1 GB): the baseline has NO_ANSWER 75 work_now ($21,063) plus 24 cant_check, REJECTED_PRE_PAYER 70, Work now 3,680 ($1,295,878) and 23 high. After one invented adjustment-only HUMANA 835 dated 2026-11-20: cant_check 1,649 (+1,625, $373,214), work_now 76, REJECTED_PRE_PAYER 89 (+19, $4,884), high 191. After one invented adjustment-only KY MEDICARE 835: work_now 685 (+610, all Medicare KY, +$143,356), cant_check 1,040, Work now 4,309 ($1,444,117). Chaos measured +1,626 'chase' on live code, which has no states.py. Real hotfix2/wt detect.feed_date, run read-only: 2026-09-01 / 2026-09-01 / 2026-11-20 for world / stray / one-day bundle (h8_world.py, h8_check.py). reference_feed on the live image gives 2026-10-09 under both rules."
+  },
+  {
+   "id": "L1-2",
+   "real": true,
+   "severity": "high",
+   "status": "confirmed through the real read path (push-2 feature)",
+   "why": "Reachable without writing to the catalog by hand. A two-day posted-date export and a service-date box never meet, so H3 and H4 never compare them, and H5 needs 2,000 rows. Both files stay 'current', and MAX(as_of) makes Production fresh and every service date 'covered'.",
+   "evidence": "guard/L1/verify/test_v_l1_production.py::test_one_small_posted_export_makes_production_fresh_and_every_service_covered reads the files through er.ingest_file and the Ledger: a service export pulled Sept 20, then 4 payments posted Nov 21-22. Both catalog rows are current, freshness says fresh as of 2026-11-22, and states._covered is true for an Aug 31 service. After el.refresh, G8 lists 10 claims as never answered, though all 10 were answered in the weeks no export holds. Control (the big export alone): Production is 64 days old and G8 lists none."
+  },
+  {
+   "id": "L1-3",
+   "real": true,
+   "severity": "high",
+   "status": "confirmed (H8 fixes asof in live code only)",
+   "why": "AlertEngine.asof is MAX(payment_date) with no clamp. Every window and the STALE_FEED check follow it. run() puts a cleared alert back as status 'new' with notified_at NULL, so it is mailed again when the file goes.",
+   "evidence": "The finder's 2 tests fail. On an in-memory copy of the live image with the snapshot's AlertEngine (guard/L1/verify/alerts_live.py): asof 2026-10-09 gives 10 alerts (RAMP 1, RISING 4, PROVIDER_TARGETED 3, DEADLINE 1, STALE_FEED 1; $58,648). Asof 2026-11-20 gives 3 ($28,418), with STALE_FEED gone. Asof 2099-12-31 gives DEADLINE only."
+  },
+  {
+   "id": "L1-4",
+   "real": true,
+   "severity": "high",
+   "status": "confirmed",
+   "why": "Every 'blindness is loud' surface rests on one MAX date. selfcheck.blindness itself is not called by the snapshot's cycle (not wired), so the live paths are: api_ema.blind_spot's MAX fallback, insights.data_health ('Payments are current'), the header chip (days_behind; green when the date is in the future, because the number is negative), status.json, pipeline.status and the weekly email.",
+   "evidence": "Both finder tests fail (blindness, and Today's feed health after one adjustment-only file). Code read: api.py 2658-2665, features.js 27-29, report.py 29, cloud.py 1811."
+  },
+  {
+   "id": "L1-5",
+   "real": true,
+   "severity": "high",
+   "status": "open in the snapshot (H8 fixes the live api.py and must be ported); the follow-up override is in neither",
+   "why": "_data_behind_days = today - MAX(payment_date) gates the appeal hold and the second-request and payment hold. A person can override neither the second-request nor the payment hold (api.py 4626-4631).",
+   "evidence": "The finder's test fails ('3 days old'). Read-only on the live image: 7,619 open denial, bundling and downcoding items ($879,340) sit behind this hold. hotfix2/wt replaces it with feed_date in live code."
+  },
+  {
+   "id": "L1-6",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed, narrower than stated (finder: high)",
+   "why": "to_decide, follow_ups and the decide/older/followup filters use the newest payment as the clock. Items move between Today's 'To decide' and 'Older ones'; they do not leave the worklist. In the snapshot each Sent item's follow-up state comes from states._follow, by today, so Sent items do come back as Work now. Only Today's 'Follow up on what you sent' card and the 'followup' filter stop moving. 0f-2 was measured on live code, which has no states.py.",
+   "evidence": "Read-only on the live image with the snapshot's insights: to_decide 268 ($45,276), then 178 ($26,395) with newest 2026-11-20, then 0 with 2099. follow_ups is 0 (no Sent item on the image)."
+  },
+  {
+   "id": "L1-7",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed with items in an invented world (finder: high); on the live image one line cannot flip a tier",
+   "why": "No floor per NPI. Top = MAX of each NPI's usual Medicare amount, and the tier comes from the median ratio. A flip removes or moves rate-based items. Each tier is the median over the NPI's (year, code) pairs, so one line moves only one pair.",
+   "evidence": "guard/L1/verify/test_v_l1_tiers.py fails: the physician's 3 underpayment items ($49.50) vanish after one +10% line from a new NPI. probe_l1_7.py, with 4 more lines: 7 items, $109.50. Live provider_tiers: the 4 physicians have 12, 12, 12 and 3 pairs, so a flip needs higher lines in 7 of 12 pairs (2 of 3 for one physician). The finder's live figure injected one line per year and code. Payer rate baselines do have n >= 10 floors (detect.py 875-904)."
+  },
+  {
+   "id": "L1-8",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed; the 're-saved' path is narrower, the CSV path is wider",
+   "why": "A status export is ranked by the workbook's dcterms:created. Excel, LibreOffice and openpyxl keep that stamp on a plain re-save. It moves only when an old export is rebuilt as a new workbook (copied into a new file, made by a script, downloaded from Google Sheets). A CSV has no stamp. ema_paid then ranks by file name, and M-D-YY names sort wrong ('Encounter 10-12-26.csv' < 'Encounter 9-14-26.csv'). run_ema_open_claims ranks a CSV by the newest date in any one row (2573-2581).",
+   "evidence": "The finder's test fails. openpyxl 3.1.5 load, delete a column, save: dcterms:created unchanged (checked in verify/). Code read: detect.py 762-775 and 2566-2616."
+  },
+  {
+   "id": "L1-9",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed through the real read path",
+   "why": "answers_through = max(newest 835, Production as_of - 8) once a group has one EMA insurance posting in the 30 days before as_of. One small check is enough.",
+   "evidence": "guard/L1/verify/test_v_l1_production.py::test_one_check_row_makes_a_group_count_as_posting_through_production: Optum's postings stop Sept 20, except one $25 check posted Nov 21. With Production fresh, answers_through(Optum) returns 2026-11-14."
+  },
+  {
+   "id": "L1-10",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed; the harm is larger than stated",
+   "why": "The A/R as_of is max(service date, aging date), capped at today. One service date typed up to a month ahead (date_bounds allows it) dates an old A/R 'today'. _ar_holds compares only a newer file against an older current one, so the correct newer A/R is superseded and nothing is held.",
+   "evidence": "guard/L1/verify/test_v_l1_ar.py reads through er.ingest_file: an A/R pulled Oct 20 with one service date 2026-12-15, read Nov 23, gets as_of 2026-11-23. The correct A/R pulled Nov 20 then ends 'superseded' with 0 rows applied, and freshness says the A/R is fresh as of 2026-11-23."
+  },
+  {
+   "id": "L1-11",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed for a future-dated file (no door clamp on 835 payment dates)",
+   "why": "response_table's two-year window is anchored on MAX(payment_date). A 2099 row empties it, and every payer's answer time falls to the 45-day default.",
+   "evidence": "In-memory copy of the live image (guard/L1/verify/states_live.py): 55 groups measured (31 with >= 20 answers, all-payer p90 25). With a Nov 20 row: 53. With a 2099 row: 0, all-payer None."
+  },
+  {
+   "id": "L1-12",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed at function level; latent in the snapshot (apply_expected_values is not called; the hook is in needs_G.md)",
+   "why": "The maturity window is MAX(payment_date) - 90, so one file moves the denial cases behind every recovery rate. The worklist sorts by COALESCE(expected_value_cents, shortfall_cents), and nothing in the snapshot writes expected_value_cents yet.",
+   "evidence": "In-memory copy: recovery_rates cases 24,617, then 25,851 with a Nov 20 row, then 27,049 with a 2099 row."
+  },
+  {
+   "id": "L1-13",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed with invented data",
+   "why": "classify_checks judges only checks posted inside [MIN, MAX+3] of payment_date. One old 835 widens the window to its own year. The REMITS_MISSING alert also needs the cause 'feed_gap', which did not fire in my world.",
+   "evidence": "guard/L1/verify/test_v_l1_checks.py fails: one 835 dated 2019-06-03 moves the window from 2024-02-05..2026-10-12 to 2019-06-03..2026-10-12, and 12 EMA checks from 2022-2023 go from 'before_feed' to 'no_era' ('the payer sends no 835 here', a feed cause)."
+  },
+  {
+   "id": "L1-14",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed through the real read path",
+   "why": "scope_of reads one row's service date. A service-date export with one old row becomes a 'posted' box covering every service, and commit replaces older files' postings inside it. H3 needs 200 older claims in the box. H4 is defeated by the same row (svc_lo is 2016).",
+   "evidence": "guard/L1/verify/test_v_l1_production.py::test_one_old_service_row...: with [40, odd row], scope 'posted', status current, no hold, and the older pull's 40 payments for 2025 visits ($1,600) are erased from the ledger. With [40, no odd row] (control) they are kept. With [260, odd row] the file is held by H3."
+  },
+  {
+   "id": "L1-15",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed",
+   "why": "For the weekly exports, arrivals() gives as_of None. The checklist's age then comes from MAX(ingested_at), the arrival of any new bytes, not from the content.",
+   "evidence": "guard/L1/verify/test_v_l1_arrivals.py: the Claim & Claim Status row goes from 'overdue' (67 days) to 'Up to date: the newest is 3 days old' when the Sept export is dropped again."
+  },
+  {
+   "id": "L1-16",
+   "real": true,
+   "severity": "low",
+   "status": "confirmed",
+   "why": "_newest_fees: since = MAX(service_date over all lines) - 90. No reader checks 835 service dates.",
+   "evidence": "The finder's test fails (1 item, then 0). The live image has 0 lines with a service date after their payment date."
+  },
+  {
+   "id": "L1-17",
+   "real": true,
+   "severity": "low",
+   "status": "confirmed by code; needs a future-dated file with at least one claim line",
+   "why": "_ratio's window is max(payment date over self.lines); StoreRules.ratio uses MAX(month) of exposure. An adjustment-only file adds no line, so it does not move _ratio.",
+   "evidence": "Code read: detect.py 2983-2997, ema_checks.py 366-382."
+  },
+  {
+   "id": "L1-18",
+   "real": true,
+   "severity": "low",
+   "status": "confirmed by code",
+   "why": "votes[ema_payer].most_common(1) has no minimum count. va_names next to it does have a 20-row / 90% floor.",
+   "evidence": "Code read: detect.py 2590-2597, 3095-3101."
+  },
+  {
+   "id": "L1-19",
+   "real": true,
+   "severity": "medium",
+   "status": "confirmed, narrower path (finder: high); the impact (patient records to a wrong fax line) is high",
+   "why": "A first saved number gets auto_ok=1. number_hold lets an automatic send use it when the item has no earlier fax at that level. The daily run (_send_followups, from api.py 4872 and cli.py 465) sends next-level appeals, with the payer's decision attached, to the level_2 number, else the appeal number. So a first-saved level-2 number gets an automatic send that no person pressed. At level 1, retries and second requests go only to the number the item's last fax went to, and a person pressed that send.",
+   "evidence": "Code read: actions.py 89-120, fax.py 421-460 and 580-590, api.py 4395-4415 and 4593-4712, faxes.js 307."
+  },
+  {
+   "id": "L1-20",
+   "real": true,
+   "severity": "low",
+   "status": "confirmed by code",
+   "why": "wo_sign is the store-wide majority sign of line_handling rows, and one large export decides it.",
+   "evidence": "Code read: detect.py 755-760, 1651."
+  },
+  {
+   "id": "L1-21",
+   "real": true,
+   "severity": "low",
+   "status": "confirmed by code",
+   "why": "learn_claim_prefix does INSERT OR REPLACE with the newest file's prefix. It checks the domain pattern and refuses two prefixes in one file.",
+   "evidence": "Code read: ema_reports.py 1356-1374."
+  },
+  {
+   "id": "L1-22",
+   "real": true,
+   "severity": "low",
+   "status": "confirmed by code (owner-only figures)",
+   "why": "The activity, calculator and Results windows, and first_prod/first_ar, are each taken from one extreme date.",
+   "evidence": "Code read: activity.py 451-459, calculator.py 340-364, results.py 532-541 and 1465-1478, states.py 965-971."
+  },
+  {
+   "id": "L1-23",
+   "real": false,
+   "severity": "none",
+   "status": "not a defect: guarded patterns, verified",
+   "why": "_retention_cut clamps (min(max(have, newest), today)), the ledger refresh clamps its cutoff to today (2168), payer rate baselines need n >= 10, and va_names needs 20 rows and 90%. Caveat: date_bounds' month-ahead allowance for service dates is what L1-10 uses, so it is a safe model only where as_of ignores service dates.",
+   "evidence": "Code read: ema_ledger.py 889-901 and 2168-2172, detect.py 875-904 and 2543, ema_reports.py 924-929."
+  }
+ ],
+ "missed": [
+  "states._context group_last_835 (states.py 973-980), read by _cant_check (2521-2542): MAX(payment_date) per payer group decides whether a group's NO_ANSWER items are 'Can't be checked' or Work now. One adjustment-only 835 from Medicare KY dated 2026-11-20 put 610 claims ($143,356) into Work now on a live-image copy with the snapshot's code. Test: guard/L1/verify/test_v_l1_states.py::test_one_adjustment_only_file_puts_its_own_payers_unanswerable_claims_in_work_now. H8's store-wide median does not reach it (states.py is push 2), so the guard must give _cant_check payer_through/judgeable by coverage.",
+  "detect.run_ema_open_claims gates claims still in EMA's print batch and never sent (REJECTED_PRE_PAYER 'unsent') on the remittance date (due > newest, about 2765-2777), though no 835 can answer a claim that was never sent. While the feed is stale they stay hidden: guard/L1/verify/test_v_l1_states.py::test_a_claim_never_sent_is_listed_by_todays_date_not_by_the_remittance_date fails with the feed stopped Sept 1 and passes with it current. On the live-image copy, 19 such claims ($4,884) appear only when a newer (even stray) 835 arrives.",
+  "Silent drop at detect.py 2777: claims dropped because the remittances do not reach their due day are counted nowhere. meta ema:unanswered_unseen counts only claims dropped later, in _ema_check_open_claims, so a future-dated file wipes the open items with n=0 recorded. Owner rules 1 and 3.",
+  "api._note_batch_since (api.py 3028-3038): MIN(service_date) over the open note items sets ModMed's export _since for every 'Build packets from EMA' batch. One item with a far-past service date widens every export. Low.",
+  "selfcheck._ar_balance uses MAX(as_of) FROM ema_ar (selfcheck.py 2024), and the self-audit check window uses MIN/MAX of ema_checks posted dates (2899): store-wide values from one row each. Not wired today. Low.",
+  "The class lint: about 15 of its 60 hits are not store-wide (grouped beyond its 400-character look-ahead: archive.py 1248, alerts.py 299, ema_ledger.py 1431/1437/1548/1573/1574; per-claim or per-file keys it does not recognise: detect.py 4098, ema_checks.py 1636, ema_reports.py 2920; display-only statistics: ema_ledger.py 544, cli.py 148/504, api.py 427-428, cloud.py 1200-1201), so it needs an allowlist from day one. It also misses extremes outside its 5 column names or outside SQL: Python max() in detect._ratio and _newest_fees, iter_ar's flush, coverage() and freshness(); MAX(month) in ema_checks.py 376; the CSV content rank at detect.py 2573; the ledger box bounds at ema_ledger.py 625; MIN(service_date) at api.py 3034.",
+  "Property test: assertion (3) checks only S0's items. Also assert that no item appears or vanishes for payer groups x does not touch, and that severity is unchanged. Under the snapshot's partial guard, a stray file keeps work_state but adds 1,625 cant_check items and moves 168 items to severity high."
+ ]
+}

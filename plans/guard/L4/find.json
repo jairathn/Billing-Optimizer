@@ -1,0 +1,271 @@
+{
+ "lens": "L4 every write checks what the person saw",
+ "instances": [
+  {
+   "id": "L4-1",
+   "file": "remitwatch/api.py",
+   "where": "set_status (api.py:1400-1417) -> _record_status (1335-1362) -> actions.apply_status (actions.py:310-334). Pages: index.html openDetail status bar (714-717), features.js setFindingStatus (426-434) and xpBind status() (584), today.js decideAndGo (386-393). No page sends the status it showed; on Vercel _record_status logs as 'seen' the status of the instance's copy at request time (api.py:1343), not the person's screen.",
+   "what_it_can_do": "A Sent, Let go or Lost pressed on a panel drawn before the run closed the item as Paid replaces the Paid. On the server apply_status logs from_status 'resolved', so detect.save (detect.py:4035-4041) treats it as a deliberate override for ever: the recovery leaves Paid back and the item later comes up for follow-up on a paid claim (chaos 0a-4). Two people on one item: the last click wins with no word to the first.",
+   "scenario": "Invented world: a denied 99214 ($223.65) is open. The hourly run finds a later payment and closes it Paid. The biller's panel, drawn before, still says To do; she presses Sent. Snapshot answers 200, status appealed, recovered_cents null; the next run keeps it Sent.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_1 fails on the snapshot and on live main (rc0), passes on hotfix 2 (H3: seen_status, _person_status in one BEGIN IMMEDIATE). Real store copy, aggregates: 5,088 items worth $1,317,634.54 are closed by the run today, each a target for a stale panel once billers work in the app.",
+   "severity": "high",
+   "status": "guarded_by_hotfix2",
+   "guard": "Hotfix 2 H3 guards live code; the snapshot does not (push 2 rewrote api.py and the pages: PORT must carry tests/test_hotfix2.py::test_h3_* and the page check). Every status change carries seen_status and the id the panel was drawn for; the server compares inside the write transaction and answers 409 code changed with the current status, who and when; a request without seen_status is refused for an item whose last decision was the run's. apply_status logs from_status as the status it replaced."
+  },
+  {
+   "id": "L4-2",
+   "file": "remitwatch/api.py",
+   "where": "bulk_status (api.py:1420-1434) -> _record_status -> apply_status per id. Callers that post ids only: desk.js bindBulk (299-338, post at 336), desk.js fee 'Not asked yet' (528-531: status open for the fee months captured when the list was drawn), desk.js 'Mark asked' (566-569: status appealed for p.ids), index.html #bulkAppealed (537).",
+   "what_it_can_do": "A list drawn before another tab faxed an item lets the faxed appeal go; fax.followups chases only 'appealed' items, so its second requests and next level never go (chaos 0a-5). 'Not asked yet' on a fee list drawn earlier reopens fee months a person or the run has closed since. Repeated ids in one call count and log twice (0d-9).",
+   "scenario": "Invented world: tab B faxes item A (Sent, fax queued, provider id F-1). Tab A, drawn before, ticks A and B and lets them go with a reason. Snapshot: A is Let go, its follow-ups stop; the answer names nothing.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_2 fails on the snapshot and rc0, passes on hotfix 2 (bulk 'seen' map, 'changed' and 'in_flight' lists, ids de-duplicated; hotfix 2's desk.js sends seen for the fee buttons too).",
+   "severity": "high",
+   "status": "guarded_by_hotfix2",
+   "guard": "PORT hotfix 2's bulk contract into push 2: every bulk caller sends {id: status its row showed}; the server leaves changed and in-flight items as they are and names them; the page says how many were left and why. The fee letter buttons get the same seen map from /api/fees/payers."
+  },
+  {
+   "id": "L4-3",
+   "file": "remitwatch/detect.py",
+   "where": "Detector.save (detect.py:4018-4270): reads every finding at 4021, works out heirs and states (_set_states at 4244), then DELETE FROM findings (4258) and INSERT of the rows it read (4259). Run by the server cycle after any person's change (pipeline.py:565-576 people_changed_since_detection; hourly per SERVER_RUNBOOK, and on Sync, freshen at page open, webhook, upload). Same read-then-blind-write shape, shorter windows: actions._hide_matching (actions.py:232-238, UPDATE without AND status='open'), apply_hide_rule remove (269-273), apply_hide_rules after each analysis.",
+   "what_it_can_do": "A status a person saves while the run computes its save is rolled back silently: the item is To do again while its history says Let go (or Sent, or Paid with an amount). In push 2, a save landing as the run starts writing makes the run itself die on 'database is locked' and its whole analysis is lost. Breaks the owner's rule that a person's decision is never overwritten by an automatic one; nobody is told.",
+   "scenario": "Invented world on a server store: the hourly cycle runs detection because a biller set statuses. During its save, another biller lets an item go with a reason (committed, 200). When the run ends the item is To do; the history row 'open -> dismissed' remains. Measured window on a copy of the live store with the snapshot code: 51.4 s from the read to the end of the states step (16,165 items; detection 107 s on a shared, loaded machine).",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_3[after_the_read] fails (rolled back to 'open') on the snapshot, hotfix 2 and live main; [at_the_delete] fails on the snapshot with the run dying ('database is locked') and on hotfix 2 and live main with the rollback. The hook is the connection's trace callback: no code of the run is replaced. Not in any chaos finding or hotfix.",
+   "severity": "high",
+   "status": "open",
+   "guard": "An automatic writer never writes back a person's columns it read earlier. In Detector.save: open BEGIN IMMEDIATE just before the DELETE, re-read status, notes, recovered_cents, recovered_date, appealed_at, status_changed_at and the newest manual event id per finding, and for every finding a person changed since the read keep the current values (and mark its state for the next run) before writing; count them in the run manifest. Better: stop DELETE plus INSERT and UPDATE the run's own columns with WHERE status_version = <read>. Every rule-driven UPDATE (_hide_matching, unhide, rematch) adds AND status = <expected> and counts rows changed. Close every cursor before the write so a person's save never kills the run."
+  },
+  {
+   "id": "L4-4",
+   "file": "remitwatch/cloud.py",
+   "where": "run_cloud_cycle folds the journal at its start (cloud.py:1593-1594) and again for left entries (1714-1718); apply_actions (242-263) -> actions.apply -> apply_status (actions.py:310-334) applies every entry blind; cli.py _cloud_image (import-cloud, cli.py:619-640) replays the same way onto the server store. The request check (hotfix 2's _person_status) is made against the instance's serving copy only.",
+   "what_it_can_do": "A change written after a run's fold and before its new copy is served (the run takes 100 s on Vercel's real image, chains up to 30 runs, and freshen starts one when someone opens the site three hours after the last pull, from 13:17 UTC as billers start) is applied at the next fold over whatever the run decided. A stale Let go or Lost lands on an item the run closed Paid and stands for ever (detect.save keeps a person's Let go over a payment: 'kept as dismissed because a person set it'); the recovery leaves Paid back and the dollars count as let go.",
+   "scenario": "Invented world: the 10:17 run folds the journal at 10:17:05, finds a later payment and closes item A Paid. At 10:18 a biller whose page shows A To do (the instance still serves the 10:16 copy) lets it go; the request check passes. The next run folds the entry: A is Let go with its payment hidden.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_4 fails on the snapshot, hotfix 2 and live main (status dismissed over resolved; no record of a refusal). Vercel baseline (PLAN): run 98.6 s, detect 51.7 s; REFRESH_SECONDS 45 (cloud.py:70).",
+   "severity": "high",
+   "status": "partly",
+   "guard": "The fold is the point of application, so it is where the compare happens: each status entry carries expected (the seen status, and the item's status_changed_at the page showed); apply_status applies it only if the item still has them, else writes a non-status 'not_applied' event (who, what, when, why: 'the run found it paid at 10:17') and counts it in status.json; the page shows the person's own refused changes on their next load. import-cloud uses the same apply."
+  },
+  {
+   "id": "L4-5",
+   "file": "remitwatch/actions.py",
+   "where": "apply_status replay check (actions.py:322-324): an entry is 'already applied' when an event with the same second, status and person exists; record_action (cloud.py:218-222) gives entries no id.",
+   "what_it_can_do": "Sent, To do, Sent within one second ends To do on Vercel and Sent on the server (chaos 0d-8): the third change is taken for the first. Everyone signs in as the shared user, so two people's identical changes in one second also collapse.",
+   "scenario": "Invented world: a biller double-taps on a phone: Sent, To do, Sent within one second. Vercel shows To do.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_5 fails on the snapshot and rc0, passes on hotfix 2 (entry id in record_action, run_id 'journal:<id>' on the event, replay de-duplicated by id).",
+   "severity": "low",
+   "status": "guarded_by_hotfix2",
+   "guard": "PORT the entry id (tests/test_hotfix2.py::test_h3_serverless_keeps_every_change_a_person_made_within_one_second and test_h3_an_old_journal_entry_with_no_id_is_applied_once_as_before)."
+  },
+  {
+   "id": "L4-6",
+   "file": "remitwatch/cloud.py",
+   "where": "ServingCopy.record applies an instance's own entry at once (cloud.py:1375-1390); ServingCopy.ensure reads other instances' entries every JOURNAL_SECONDS=15 and applies them in arrival order (1350-1359); apply_status has no 'older than the item's latest manual change' rule. api._reserve on Vercel checks still_ok on the instance's own copy without forcing a journal read (api.py:3800-3821).",
+   "what_it_can_do": "Two instances show different statuses for one item until the next run (0a-6): the phone shows Sent, the laptop Let go. A Let go recorded on one instance 1.2 s before another instance reserves a fax does not stop the fax, and that instance then shows the faxed item as Let go.",
+   "scenario": "Invented world: a phone lets item A go at t1; a laptop on another instance marks A Sent at t2 > t1. The laptop's instance applies its own Sent, then the phone's older Let go 15 s later: it shows Let go until the next run.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_6 fails on the snapshot, hotfix 2 and rc0 (copies end 'appealed' and 'dismissed'). Chaos 0a-6, verified; listed for push 2 (PORT) in chaos_r0_backlog.md.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Last change by time wins on every copy: apply_status records the history line but keeps the status when the entry's 'at' is older than the item's newest manual change; a serverless fax reservation and a serverless status check first call SERVING_COPY.ensure(force=True)."
+  },
+  {
+   "id": "L4-7",
+   "file": "remitwatch/api.py",
+   "where": "faxes_settle (api.py:4795-4817): checks status 'sending' on the copy at hand, then _settle -> _record_action -> actions.apply_fax/upsert_fax (actions.py:52-67), which overwrites the given fields whatever the fax's state is now; on Vercel the entry is folded later with no check. Page: faxes.js data-settle (366-370), fax_key and went only.",
+   "what_it_can_do": "A person's 'It did not go out', answered on a screen drawn while the send was unsettled, lands after the fax run learned the line took it (provider id, queued or sent): the fax becomes a failed try and _retry faxes the patient's records to the payer again.",
+   "scenario": "Invented world: a send is 'sending' with no provider id; the Faxes page offers the two answers. The hourly fax run gets SRFax's id and marks it queued. The biller, who checked SRFax's list a minute earlier, presses 'It did not go out'. The record turns 'failed'; the next fax run retries it.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_7 fails on the snapshot, hotfix 2 and rc0 (status 'failed' over 'queued' with a provider id). Not in any chaos finding.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "A person's settle carries the state it was made on (status 'sending', provider_id null) and lands only while the record still has it (one transaction on a server; re-checked at the fold on Vercel); otherwise 409 'That fax was settled by the line at <time>'. Every fax record update from the line carries updated_at and is applied only if newer than the record's."
+  },
+  {
+   "id": "L4-8",
+   "file": "remitwatch/api.py",
+   "where": "ema_report_decision (api.py:4881-4926) -> ema_reports.decide (ema_reports.py:3287-3309): checks status 'held' only; 'apply' keeps status held with decision apply, so a later 'discard' passes. On Vercel the decision is journaled (actions.apply kind ema_report_decision) and the run is started at request time. Page: data.js dtBind (294-303) sends {decision} only, though it draws the pending decision ('Discard it instead').",
+   "what_it_can_do": "Two people on one held report (a filtered-looking A/R, a Production file that would replace a box): the second decision, made on a screen drawn before the first, silently replaces it. An applied report is discarded and its rows never reach the site, or a discarded one is read.",
+   "scenario": "Invented world: a held A/R. The practice manager presses Apply; a biller, on the Data tab drawn earlier, presses Discard. Snapshot: 200, discarded.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_8 fails on the snapshot (200, ('discarded','discard')); the route is new in push 2 (404 on live main).",
+   "severity": "medium",
+   "status": "open",
+   "guard": "The decision carries seen_decision (null, apply or discard) and the report's status as drawn; decide refuses with 409 and names who decided what and when when either differs; the Vercel fold re-checks it."
+  },
+  {
+   "id": "L4-9",
+   "file": "remitwatch/api.py",
+   "where": "fax_payer_save (api.py:4353-4374) -> actions.apply_payer_fax (actions.py:89-119): newest save wins; the request names no number it replaces. Page: faxes.js data-psave (378-389) and the no-number panels' data-fxsave (faxes.js:155 and 199-207).",
+   "what_it_can_do": "The owner replaced a payer's appeal number X with Y; a second page drawn before still shows X, and its save of Z replaces Y with no word that Y existed. Patient records then go to Z (unconfirmed for retries, used at once by single sends, see L4-17). Saving the original number back after a brief change leaves it unconfirmed (0c-14).",
+   "scenario": "Invented world: saves of (800) 555-0142 then (800) 555-0177; a stale page that showed 555-0142 saves 555-0199. Snapshot: 200, the number is 555-0199.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_9 fails on the snapshot, hotfix 2 and rc0.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "A save names seen_number (the number shown, empty for none); the server refuses 409 'This payer's number is now <Y>, saved by <who> on <date>' when it differs; on Vercel apply_payer_fax re-checks at the fold and records a refused save in the row's history. A save equal to a number confirmed before keeps its confirmation."
+  },
+  {
+   "id": "L4-10",
+   "file": "remitwatch/api_ema.py",
+   "where": "policy_set (api_ema.py:1013-1046): any sign-in (_user), no owner check, no count; ema_checks.set_policy (ema_checks.py:2628-2637) and the Vercel fold (actions.py:377-396) keep the newest decision. Pages: policy.js polBindSegs (153-175) and features.js xpAccept (662-672) post {pattern, decision, name}; the confirm text shows the counts as drawn but they are not sent.",
+   "what_it_can_do": "Accept takes every item of a write-off pattern off the work list now and in future and out of the open totals (decision 14: only the owner's Accept may). Any signed-in person can do it, on a count seen hours earlier, and a stale Pursue silently undoes the owner's Accept (its items return to Work now).",
+   "scenario": "Invented world with an owner's password set: a biller accepts the pattern 'payer|99214||CO-50' from the policy page without the owner's password. Snapshot: 200, accepted.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_10 fails on the snapshot (200 with an owner's password set); the route is new in push 2 (404 on live main). Same shape as the hide finding 0b-5 and 0d-7, which hotfix 2 H7 closes for hides only.",
+   "severity": "high",
+   "status": "open",
+   "guard": "As H7 for hides: a GET preview (items, dollars, how many inside a window) from the copy served; Accept and Pursue need the owner's password where one is set and a typed confirmation equal to the count the server computes now (409 changed otherwise); the decision carries seen_decision so a stale Pursue cannot undo a newer Accept."
+  },
+  {
+   "id": "L4-11",
+   "file": "remitwatch/api.py",
+   "where": "hide_add (api.py:4993-5052): any sign-in, the count only after; desk.js hideReason (618-642) prefills the reason and shows the count afterwards; desk.js hiddenManage Show again (644-659).",
+   "what_it_can_do": "One link and Enter hides every open item of a reason for a payer, now and in future (0b-5: 262 items, $13,838 on a copy; 0d-7: the largest in-window hides $15K-$26K).",
+   "scenario": "Invented world with an owner's password set: a biller hides 'denied, not medically necessary' for the payer with no password and no count. Snapshot: 200, 3 items hidden.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_11 fails on the snapshot and rc0, passes on hotfix 2 (H7: /api/hide/preview, owner password, confirm count, typed reason).",
+   "severity": "high",
+   "status": "guarded_by_hotfix2",
+   "guard": "PORT H7 (tests/test_hotfix2.py::test_h7_*). Show again also carries the rule's 'at' as drawn so a stale page cannot remove a rule re-made since."
+  },
+  {
+   "id": "L4-12",
+   "file": "remitwatch/alerts.py",
+   "where": "api.alert_ack (api.py:2637-2649) -> actions.apply_alert_ack (actions.py:337-338): by alert_id only; AlertEngine.run (alerts.py:388-410) updates a re-raised alert's severity, title and figures but keeps its status, and pending_notifications (420-423) mails only status 'new'. Ids are stable per rule (STALE_FEED key ('feed',), RISING and RATE_CUT per payer and family). Page: features.js data-ack (47).",
+   "what_it_can_do": "An acknowledgement of a small alert silences every larger version of it until it clears: a feed 15 days behind acknowledged stays acknowledged at 60 days; a $400 rate cut acknowledged becomes $9,000 and high, and is never mailed. Works against 'blindness is loud'.",
+   "scenario": "Invented world: RATE_CUT raised medium, 4 lines, $400; the manager acknowledges it. Later runs raise it high, 60 lines, $9,000. It stays 'acknowledged'; no email.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_12 fails on the snapshot, hotfix 2 and rc0. Hotfix 2b's SWING alarm keys each run apart (('swing', run_id)), so it is not affected.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "An acknowledgement covers the version shown: it stores the alert's severity and figures at the time (sent by the page as seen_version); a re-raise that is higher in severity, or at least double in items or dollars, returns to 'new' and is mailed, naming what was acknowledged before."
+  },
+  {
+   "id": "L4-13",
+   "file": "remitwatch/cloud.py",
+   "where": "apply_actions puts an entry whose finding the store lacks in 'left' (cloud.py:242-263); run_cloud_cycle deletes 'left' entries older than 7 days (expired, 266-272; deletion 1778-1781) and records only actions_waiting for that run (1721-1722).",
+   "what_it_can_do": "A person's change for an item whose id the run replaced (a signal change gives the line a new id) or removed is deleted from the journal after a week with nothing that says it was never applied. The Let go never reaches the heir: the item comes back To do and is worked again; a Sent is lost and its follow-ups never start.",
+   "scenario": "Invented world on Vercel: a biller lets an item go; the next run changes its signal and its id. The entry waits, then is deleted eight days later; the store and status.json hold no trace of it.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_13 fails on the snapshot, hotfix 2 and rc0 (entry gone; no event, no dropped count).",
+   "severity": "medium",
+   "status": "open",
+   "guard": "An entry is never dropped without a trace: one that cannot land is moved to the heir when detect.save knows it (the old id's orphan), else after 7 days written to a 'dropped changes' list (store table and status.json) shown on the Data tab with the item's claim and what the person did, and counted in the run manifest."
+  },
+  {
+   "id": "L4-14",
+   "file": "remitwatch/actions.py",
+   "where": "apply_status (actions.py:310-334) writes an event and status_changed_at even when the status is unchanged and no note or amount was given; index.html status bar (714-717) is not disabled while saving.",
+   "what_it_can_do": "A fast double click on Sent writes 'To do -> Sent' and 'Sent -> Sent' (0a-10); holding the 's' shortcut (push 2) writes one line per key repeat. The history no longer reads as one decision.",
+   "scenario": "Invented world: Sent twice within 20 ms on one item: two manual events.",
+   "evidence": "guard/L4/test_l4_stale_writes.py::test_l4_14 fails on the snapshot, hotfix 2 and rc0.",
+   "severity": "low",
+   "status": "partly",
+   "guard": "apply_status writes nothing when the status is unchanged and no note or amount is given (returns 'unchanged'); the page disables the status bar from the first click until the answer (hotfix 2 H1 does this on live pages; PORT)."
+  },
+  {
+   "id": "L4-15",
+   "file": "remitwatch/api.py",
+   "where": "appeals_send (api.py:3982-4186): live = _faxes_out(fid) counts a reservation still 'sending' with no provider id as a fax that went out and marks the item Sent (4092-4097, _mark_sent_appeal 3598-3615); the final _record_status(appealed) (4184) is a blind write over a status set during the send; set_status knows nothing of a send in flight. Pages: features.js xpFaxPreview (674-701), faxes.js bindFaxDrawer (242-268) show no 'being faxed'.",
+   "what_it_can_do": "Sent pressed during the minute a fax is prepared: nothing is faxed and the item is Sent (0a-1). A second 'Appeal by fax' while the first is sending marks the item Sent even when that send then fails (0d-2). Let go during the send is replaced by Sent (0a-8). After a server stop mid-send, a press says 'already faxed' and marks Sent (0a-12).",
+   "scenario": "Invented world: Appeal by fax, then within the minute 'Mark sent and open the next': the line sent 0 faxes, the item is Sent with no fax, the skip reason is never shown.",
+   "evidence": "Chaos 0a-1, 0d-2, 0a-8, 0a-12 (verified). Hotfix 2 H2 tests: tests/test_hotfix2.py::test_h2_* (in_flight 409, unknown_send, never counted as sent).",
+   "severity": "high",
+   "status": "guarded_by_hotfix2",
+   "guard": "PORT H2: a send in flight (reserved, no provider id, younger than the send can take) and a preparation (note lookup and review) are visible to every write on the item: status changes answer 409 in_flight on both hosts; an old reservation with no id is 'unknown', never 'sent'; the final mark Sent is a compare-and-set on the status the send started from."
+  },
+  {
+   "id": "L4-16",
+   "file": "remitwatch/api.py",
+   "where": "appeals_send takes its reservation only after the note lookup and the review (3982-4176); appeals_build (2905-2933) and appeals_from_ema (3076-3114, skip_if_packet checked before the build, not atomically) have no per-item preparation lock; desk.js emaBatch (590-616) run from two tabs works the same queue; packet_email (5149-5171) sends again on a second click.",
+   "what_it_can_do": "Concurrent presses for one item run one paid review each and store one packet each (0a-9); two people running 'Build packets from EMA' build every item twice; a double click on Send emails a packet with the patient's record twice.",
+   "scenario": "Invented world: three Appeal by fax requests 150 ms apart: one fax, three reviews, three packets.",
+   "evidence": "Chaos 0a-9 (verified). Hotfix 2 H2 adds _preparing for appeals_send only (hotfix2 api.py diff).",
+   "severity": "low",
+   "status": "partly",
+   "guard": "One preparation per item: a short-lived lock row (item_locks: finding_id, kind, token, since, by; on Vercel a marker file written with mode add) taken before any note lookup, review, build or email, released after; a second request answers 'already being prepared by <who> since <time>'. Sends of mail carry a request id and are recorded once."
+  },
+  {
+   "id": "L4-17",
+   "file": "remitwatch/api.py",
+   "where": "appeals_send reads the number saved now (_payer_number, api.py:4087) and does not look at its confirmation (auto_ok, fax.number_for fax.py:421-437); still_ok (4166-4176) compares it with the cover sheet built in the same request, not with anything the person saw. The preview (features.js xpFaxPreview 674-701) never shows the number: 'It goes as it is to the payer's confirmed appeal fax number'. Send the appeal again (faxes.js faxDrawerHtml 219-240) the same.",
+   "what_it_can_do": "After a number is changed and not yet confirmed (retries and follow-ups wait for that), every single 'Appeal by fax' and 'Send the appeal again' goes to the new number at once, and the person who pressed never saw it. With L4-9, that can be a number nobody meant to keep.",
+   "scenario": "Invented world: the payer's number is changed to (800) 555-0199 (unconfirmed). A biller opens an item, reads the packet, presses Send the fax: it goes to 555-0199; the modal never named a number.",
+   "evidence": "Code read (api.py:4087-4091 and 4166-4176; fax.py:440-458 holds only sends nobody pressed); the follow-up path already binds the number shown (faxes_follow_up person_number, api.py:4620-4625).",
+   "severity": "medium",
+   "status": "open",
+   "guard": "The preview shows the destination number and its state (confirmed, changed on <date>) and the send carries it (number), as the follow-up's person send does; the server refuses 409 when it differs from the number saved now, and an unconfirmed number needs the person to tick 'this number is right' first."
+  },
+  {
+   "id": "L4-18",
+   "file": "remitwatch/static/faxes.js",
+   "where": "appealByFax (faxes.js:86-134): the stop test shown() looks at the shared #modalBox (faxModal 39), so a newer batch revives an older one (0a-3); 'Fax them anyway' resends with stale_ok for the whole batch, accepted with bulk by appeals_send (api.py:4050); no number travels with the batch (0c-5); a network error makes it race through the rest (0a-11).",
+   "what_it_can_do": "With REMITWATCH_BULK_APPEAL=1: faxes go after the window that started them was closed, on a stale feed for every item at once, and to a number changed mid-batch that the biller never saw.",
+   "scenario": "Invented world, bulk on: the biller confirms 12 appeals for (800) 555-0142; the owner changes the number after the second; ten go to the new, unconfirmed number; the summary is silent.",
+   "evidence": "Chaos 0a-3, 0b-4, 0c-5, 0a-11 (backlog: PORT before bulk is switched on). Bulk is off by default (api.bulk_appeals_on, api.py:3879-3883).",
+   "severity": "high",
+   "status": "open",
+   "guard": "A batch is bound to the confirmation that started it: its own stop flag; the numbers the confirmation showed, per payer, sent with each item and checked by the server; stale_ok refused with bulk; a network error stops the batch; the summary lists the number each payer's faxes went to."
+  },
+  {
+   "id": "L4-19",
+   "file": "remitwatch/api.py",
+   "where": "faxes_follow_up with no ids (api.py:4734-4747) sends every follow-up due at that moment; faxes.js fxPush (346-353) says 'Send the N follow-ups now' with N from the page and posts {}.",
+   "what_it_can_do": "The button sends a set the person did not see: follow-ups that came due after the page was drawn (a fax run read an upheld decision meanwhile: a next-level appeal goes), and more than N.",
+   "scenario": "Invented world: the page lists 3 follow-ups; the fax run reads two payer letters; the button sends 5, including a next-level appeal nobody looked at.",
+   "evidence": "Code read. Each send still passes still_ok and the number hold, and the daily run would send them anyway, so the harm is a person's 'send these' covering ones they never saw.",
+   "severity": "low",
+   "status": "open",
+   "guard": "The button sends the ids it listed (finding_ids plus the action each row showed); the server sends only those that are still due with the same action and says what it left."
+  },
+  {
+   "id": "L4-20",
+   "file": "remitwatch/api.py",
+   "where": "faxes_match (api.py:4755-4792): ties an incoming fax to an item and sets what it says (upheld, overturned...), replacing the current tie and reading whatever they are now; faxes.js data-tie (372-377) and tieFaxHtml (398-414) send fax_key, finding_id and says only.",
+   "what_it_can_do": "A person on a stale Faxes page moves a fax another person tied since, or overwrites their reading: an 'overturned' (a payment request follows) becomes 'upheld', and the engine faxes a next-level appeal for a claim the payer reversed, or the reverse. The fax's events say it moved, but nobody is asked.",
+   "scenario": "Invented world: the manager ties a payer letter to item A as overturned; a biller, on the page drawn before, ties it to A as upheld: fax.followups now plans a next-level appeal.",
+   "evidence": "Code read: the record is replaced field by field (actions.upsert_fax) with no check of tied, decision or read_by.",
+   "severity": "medium",
+   "status": "open",
+   "guard": "A tie carries the fax's tie and reading as drawn (seen_tied, seen_decision); a mismatch answers 409 naming who tied it to what and when; a change of reading on a fax that already drove a send needs a confirm that says which follow-up changes."
+  },
+  {
+   "id": "L4-21",
+   "file": "remitwatch/uploads.py",
+   "where": "choose (uploads.py:1078-1091) and _set_match (1009-1022) overwrite a note's match with no check of what the page showed; rematch (1121-1148), run by the server cycle after detection (pipeline.py:590-596), reads the unmatched notes first, extracts each note's text (seconds per note), then writes its match with UPDATE ... WHERE note_id=? (no AND status='unmatched'). Page: upload.js data-pick (913-922).",
+   "what_it_can_do": "A person's 'this note is for item X' is overwritten by another person's stale page, or by the cycle's automatic re-match a few seconds later (an automatic overwrite of a person's decision). Packets built from it are then held (_packet_problem: matched again since), so the appeal stalls with no reason the person can trace.",
+   "scenario": "Invented world: 30 unmatched notes; the cycle's rematch starts; a biller attaches note 12 to its item; rematch reaches note 12 and writes its text match ('choose' between two visits) over the biller's.",
+   "evidence": "Code read (uploads.py:1126-1134 then _set_match 1014-1021).",
+   "severity": "medium",
+   "status": "open",
+   "guard": "Every match write is a compare-and-set on (status, matched_at) as read: rematch adds AND status='unmatched' and skips a note changed since; a person's choose carries seen_status and seen_matched_at and answers 409 when another person matched it since."
+  },
+  {
+   "id": "L4-22",
+   "file": "remitwatch/results.py",
+   "where": "record_spot_check (results.py:2250-2272) and record_spot_check_state (2331-2345): 'a newer answer replaces an older one'; results.js posts {day, finding_id, answer, reason, note, name} (282).",
+   "what_it_can_do": "Two people answer the same daily spot check; the second, on a page drawn before the first answer, replaces it with no trace, so a disagreement (the input to a diagnostic case) can vanish from the agreement rate.",
+   "scenario": "Invented world: the manager answers 'disagree: already paid'; a biller, page drawn before, answers 'agree': the disagreement is gone.",
+   "evidence": "Code read.",
+   "severity": "low",
+   "status": "open",
+   "guard": "An answer carries seen_answer (null when unanswered); a second answer to an answered pick is kept beside the first (both counted, the disagreement kept) or refused with 409 naming the first."
+  },
+  {
+   "id": "L4-23",
+   "file": "remitwatch/static/index.html",
+   "where": "today.js decideAndGo and go (375-396): 'Mark sent and open the next' disables only itself, then openDetail(next) draws a fresh enabled button in the same place; index.html keyboard shortcuts (623-645): no e.repeat check, and 's' falls through from #sentNext (disabled while saving) to the status bar's Sent; status bar (714-717) not disabled while saving and reopens its id after the answer whatever the panel shows; features.js xpFaxPreview (694) closes the shared modal and reopens its item after a send; faxes.js bindFaxDrawer fallback (242-268) looks its answer buttons up in the drawer after the await. openDetail (655-665) does drop a late answer (guarded).",
+   "what_it_can_do": "A double click marks the next, unseen item Sent; a triple click two (0a-2). Holding 's' (a key repeat every ~33 ms) marks the open item Sent twice, then each item the walk opens, unseen (new in push 2, which added the shortcuts). A fax finishing for item A yanks the panel back to A over item B and loses B's typed text (0d-5).",
+   "scenario": "Invented world, push 2 pages: an item whose story could not be worked out shows 'Mark sent and open the next'; the biller holds 's' for half a second: the item and the next several are Sent, none of them seen.",
+   "evidence": "Chaos 0a-2, 0a-7, 0d-4, 0d-5, 0d-1 (verified on live pages; hotfix 2 H1 page check tests/test_hotfix2_pages.py, walkGuarded, panelShows). Keyboard repeat: code read of the snapshot's index.html:623-637 (no e.repeat test; shortcuts exist only in push 2).",
+   "severity": "high",
+   "status": "partly",
+   "guard": "PORT H1 into push 2's pages, plus: every action ignores key auto-repeat (e.repeat) and activations within ~800 ms of the panel drawing a new item; the shortcut never falls through to another button of the same item; every action is bound to the id and the seen status the panel was drawn with; code after an await touches the panel only if it still shows that item, else a short notice names what finished."
+  },
+  {
+   "id": "L4-24",
+   "file": "remitwatch/api.py",
+   "where": "Writes already bound to what the person saw, the pattern to generalise: activity_assumptions_save (api.py:2529-2576, X-Figures-Version, Dropbox rev); results.save_settings (results.py:356-397, base_version); uploads howto (api_uploads.py:476-511, base_at); fax_payer_confirm (api.py:4377-4390, the number shown, re-checked at the fold by apply_payer_fax_check actions.py:122-132); faxes_follow_up person send (api.py:4620-4625, the number shown); appeals_send packet_id (4101-4107, the packet read); upload pieces and finish (api_uploads.py:248-270, 325-369, idempotent by index, sha and record version); hide and policy replays ordered by time (actions.py:252-254, 392-393); trizetto hold (actions.py:397-417); spot picks first written wins (results.py:2304-2328).",
+   "what_it_can_do": "Nothing: each refuses (409) or ignores a write made from an older version, and a replay in any order changes nothing.",
+   "scenario": "Two windows save the owner's figures: the second gets 409 'changed in another window since this one read them'.",
+   "evidence": "Code read; existing tests in the snapshot (tests/test_calculator.py, tests/test_results.py, tests/test_upload_chunks.py, tests/test_api_review.py::test_a_hide_rules_entries_applied_again_in_any_order_change_nothing).",
+   "severity": "low",
+   "status": "guarded_in_snapshot",
+   "guard": "Keep, and move these onto the one compare-and-set helper of the class guard so every new route gets it by construction."
+  }
+ ],
+ "class_guard": "Every write is a compare-and-set against what its author saw, enforced where and when it is applied, and every refusal or loss is kept and shown. Spec for a builder: (1) One write path. remitwatch/writes.py (or actions.py) exposes apply_person_write(conn, kind, target, expected, change, actor, entry_id) and every state-changing route on both hosts, the Vercel fold, import-cloud and the CLI go through it. Each kind names its version: item status (status plus a status_version integer column bumped by every status write, a person's or the run's); bulk (that per item); payer fax number (the number); hide rule (rule key, at, and the count it hides now); write-off policy (decision and the count now); held report (status, decision); alert acknowledgement (severity and figures); fax settle (status sending, provider_id null); fax tie (tied, decision); note match (status, matched_at); spot answer (answer). A write whose expected version differs changes nothing: server 409 {code: changed, now, by, at}; Vercel checks the serving copy at request time and the journal entry carries expected; the fold re-checks on the raw store and a mismatch writes a 'not_applied' event on the item and a count in status.json, and the page shows a person their own refused changes. (2) Automatic writers obey the same rule. Detector.save never writes back a person's columns it read earlier: re-read them under BEGIN IMMEDIATE before writing and keep any changed since (better: UPDATE its own columns WHERE status_version = read); every rule UPDATE (hide pass, unhide, rematch, mark-sent-after-send) adds AND <version> = expected; a person's save never makes a run fail. (3) The journal: each entry has an id (dedup by id), carries expected, and 'last change by time wins' on every copy (apply_status keeps the status when the entry is older than the item's newest manual change); serverless reservations and status checks force a journal read first; an entry that cannot land is moved to the item's heir or, after 7 days, listed as a dropped change, never deleted silently. (4) In-flight state is visible: sends and preparations hold a per-item lock row (Vercel: a marker file written with mode add) that every other write on the item checks (409 in_flight). (5) Pages: every write sends the version it was drawn from and the id it was rendered for; every action button is disabled from the first activation until its answer, ignores key auto-repeat and activations within ~800 ms of the panel drawing a new item; code after an await touches the panel only if it still shows the same item; sweeping writes (hide, policy, bulk, 'send all') show the count, dollars and destination and send them back, and owner-class writes need the owner's password where one is set. (6) A unit test per kind (stale version refused, both hosts) and the property test below are release gate 8; test_l4_stale_writes.py's 15 cases must pass on push 2.",
+ "property_test": "Generated multi-actor test, both hosts (release gate 8). Build an invented store (tests/test_features builders, a few hundred items over three payers, faxes, held reports, alerts, notes, hide rules and policy rows). Generate a random schedule of 50-500 steps interleaving: people (2-4 actors, each with tabs whose screen is a snapshot of object versions taken at a random earlier step) doing single status, bulk status, hide add or remove, policy accept or pursue, fax number save or confirm, held report apply or discard, fax settle, fax tie, alert ack, note match, spot answer, double submits and key repeats; and the system doing detection runs (later payment closes items, a signal change gives an item a new id, a takeback reopens one), fax runs (settle sent or failed), alert runs (re-raise worse), and on Vercel cron folds at random points, two ServingCopy instances reading the journal in random arrival orders, a replay of the whole journal twice, and entry expiry. On the server, person writes are injected inside the run's save through the connection's trace callback (after the read and at the DELETE). Invariants after every schedule: I1 no stale landing: every person write that changed an object found it at the version on its author's screen; I2 no silent loss: every person write is applied (current, or superseded by a later write whose author saw it), refused with a 409 to its author, recorded as not_applied, still pending, or listed as dropped; no automatic writer reverts one (status after any run equals the last applied person status unless a later person write changed it); I3 one decision, one line: duplicates (double submit, key repeat, replay twice, any order) leave one history line and the same final state; I4 convergence: the server store and the Vercel store fed the same writes end with identical statuses, numbers, rules, decisions and histories (ignoring run ids), and two serving copies end identical whatever the arrival order; I5 authority: no hide, policy decision or bulk change lands without the owner's password where set and a confirmed count equal to the count at application time; no fax goes to a number its sender did not see; I6 pages (Playwright on invented stores, both hosts): random double and triple clicks, key auto-repeat on s and l, slow and out-of-order answers and panel switches during awaits; the server's write log holds only (finding_id, seen_status) pairs that were on screen for at least the dwell time before the activation. Seeds that fail are saved as named regression tests."
+}
