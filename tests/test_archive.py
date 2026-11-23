@@ -1707,3 +1707,34 @@ def test_a_patients_day_stays_whole_when_one_of_its_bills_also_has_a_later_day(t
     assert res["bills"] == 27 and len(res["files"]) == 26
     assert store.conn.execute("SELECT COUNT(DISTINCT file) FROM archive_bills WHERE bill IN ('DA01AAAAA','DB01AAAAA')").fetchone()[0] == 1
     store.close()
+
+
+def test_a_line_with_no_date_of_its_own_takes_the_date_detection_gives_it(tmp_path):
+    """Detection dates a line that has no date of its own by its one-day service period, else its claim's one-day
+    statement (detect.load), and weighs the patient's claims of that date together. The archive's patient day is that
+    same date: bills of one patient on other days are not held together (a patient's undated lines are not one day), and
+    an undated line meets the patient's dated bill of its statement day, in the plan, on a reopening and on new data."""
+    store = crafted("file", tmp_path)
+    put_claim(store, "KA01AAAAA", "2021-03-01", name="SAME", paid_on="2026-06-01")   # stays: paid inside the horizon
+    put_claim(store, "KB01AAAAA", "2021-04-01", name="SAME")                          # the patient's other day: leaves
+    put_claim(store, "KC01AAAAA", "2021-03-01", name="SAME")                          # KA01's day by its statement
+    put_claim(store, "KD01AAAAA", "2021-03-01", name="SAME")                          # KA01's day by its line's period
+    c = store.conn
+    c.execute("UPDATE lines SET service_date = NULL")
+    c.execute("UPDATE lines SET service_period_start = '2021-03-01', service_period_end = '2021-03-01' WHERE patient_control_number = 'KD01AAAAAC017'")
+    c.execute("UPDATE claims SET statement_from = '2021-02-01', statement_to = '2021-03-31' WHERE patient_control_number = 'KD01AAAAAC017'")
+    c.commit()
+    freeze_all(store)
+    p = archive.plan(c, today=TODAY)
+    assert [b for b, *_ in p["bills"]] == ["KB01AAAAA"] and p["held"] == {archive.HELD_DAY: 2}
+    # later all four leave; the patient's 2021-03-01 day comes back whole, the other day stays in the archive
+    sink = sink_of(tmp_path, "file")
+    assert archive.run(c, sink=sink, today="2029-07-01")["bills"] == 4
+    put_claim(store, "KE01AAAAA", "2021-03-01", name="SAME", paid_on="2029-06-01")   # a late claim of that day, undated line
+    c.execute("UPDATE lines SET service_date = NULL WHERE patient_control_number = 'KE01AAAAAC017'")
+    c.commit()
+    back = archive.restore_touched(c, sink=sink, today="2029-07-01")
+    assert back["restored"] == 3 and back["why"] == {archive.WHY_DAY_HOT: 1, archive.WHY_DAY_BACK: 2}
+    assert {b for (b,) in c.execute("SELECT bill FROM archive_bills")} == {"KB01AAAAA"}
+    assert archive.restore(c, "KB01AAAAA", sink=sink, today="2029-07-01")["bills"] == 1
+    store.close()
