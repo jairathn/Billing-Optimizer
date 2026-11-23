@@ -31,6 +31,7 @@ a{color:var(--accent)}
 </head>
 <body>
 <main>
+  <div id="swingBar" hidden></div>
   <h1>RemitWatch setup</h1>
   <div class="muted">Every setting this site needs, checked live. Work from the top. After you change a setting, apply it (on the server, with configure.sh; on Vercel, redeploy), then press Check again.</div>
 
@@ -208,5 +209,7 @@ $('#run').onclick = async () => { $('#run').disabled = true; $('#loadMsg').textC
   try { await api('/api/sync/run', {method:'POST', body:'{}'}); setTimeout(check, 6000); } catch(e){ $('#loadMsg').innerHTML = `<span class="no">${esc(e.message)}</span>`; $('#run').disabled = false; } };
 check();
 </script>
+<script src="/static/swing.js"></script>
+<script>swingLoad(document.getElementById('swingBar'));</script>
 </body>
 </html>

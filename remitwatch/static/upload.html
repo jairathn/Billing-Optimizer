@@ -46,6 +46,7 @@ details summary{cursor:pointer;font-weight:600}
 </head>
 <body>
 <main>
+  <div id="swingBar" hidden></div>
   <div class="top"><h1>Upload from EMA</h1><a href="/">Back to the dashboard</a></div>
   <div class="muted">Until ModMed approves the API connection, EMA's side comes in by hand: run the reports in EMA, save them, and drop them here. They go through the same reading and analysis as the files from Dropbox, and visit notes reach appeals as notes read from EMA would. Files stay on the practice's server with the rest of RemitWatch's data.</div>
 
@@ -217,5 +218,7 @@ $('#files').onchange = () => { const l = [...$('#files').files]; $('#files').val
 $('#runNow').onclick = async () => { $('#runNow').disabled = true; try { await api('/api/sync/run', {method: 'POST', body: '{}'}); $('#cycle').textContent = 'Started: the files are read within about a minute.'; setTimeout(refresh, 20000); } catch(e){ $('#cycle').textContent = e.message; } };
 refresh();
 </script>
+<script src="/static/swing.js"></script>
+<script>swingLoad(document.getElementById('swingBar'));</script>
 </body>
 </html>

@@ -285,6 +285,8 @@ After each cycle the last four weeks of payments are compared with the six month
 
 New alerts go to `REPORT_TO` by email and to `ALERT_WEBHOOK_URL` if set (Slack and Teams incoming webhooks both accept the format). An alert stays active until the pattern stops, then clears itself. If the pattern returns, it is raised and sent again. Acknowledge an alert in the Alerts tab to mark it as seen.
 
+**Big change in one run.** When one analysis run adds or removes far more open items or dollars than a run normally does, whatever the reason (one wrong file is enough), a red banner sits at the top of every page, on both sites, and every alert email leads with it. It says how many open items and dollars there were before and after, by category, and how many files of each kind were read since the run before; it gives the alarm levels too (they were set from the practice's own history, above the largest change a normal day or week of remittances makes). What to do: before working new items, open the Data tab and check the files read since the time the banner gives. If one is wrong, tell the practice owner and do not work the new items yet. The banner stays for seven days after the run, even when the next runs are quiet, unless someone presses "I checked the files: acknowledge". After a release that changed the rules it is amber, not red: a release re-checks every claim once. It only warns: nothing is held or changed. Status changes people make themselves between two runs are not counted as the run's.
+
 ## 6. Appeal packets from the visit note
 
 ### Connecting ModMed EMA
