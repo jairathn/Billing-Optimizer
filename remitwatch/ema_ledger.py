@@ -34,6 +34,7 @@ import io
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import time
 import urllib.parse
@@ -51,6 +52,14 @@ LEDGER_FILE = "ema_ledger.sqlite"
 STATE_NAME = "ema_ledger.sqlite.gz"
 ATTEMPTS_NAME = "ema_attempts.json"
 RETAIN_DAYS = 1100                  # postings whose service date is this much older than the newest posting are dropped
+SERVERLESS_RETAIN_DAYS = 730        # ... on a serverless host, whose temporary folder (512 MB) must hold the ledger twice over
+RETAIN_HOLD_SHARE = 0.60            # retention deleting more than this share of the ledger at once waits for a person (a year of
+                                    #   service arriving at once on a two-year ledger deletes about half)
+WORK_STALE_SECONDS = 3600           # a refresh's work file this old was left by a run that was killed: it is deleted
+# serverless: the temporary space a refresh needs, per ledger row (measured on the real files at two service years, with
+# about 15% added): the ledger file, the work file at the end of Part A (the ledger is let go then), and at the end of Part B
+LEDGER_BYTES_PER_ROW, WORK_A_BYTES_PER_ROW, WORK_B_BYTES_PER_ROW = 170, 200, 300
+TMP_MARGIN = 32 * 1024 * 1024       #   ... plus this much
 SCOPE_GAP_DAYS = 45                 # posted_lo - svc_lo above this: the file was filtered by posted date
 APPLIED = ("current", "partly_replaced", "replaced", "superseded")      # in the ledger (its box counts for the invariant)
 LIVE = ("current", "partly_replaced")                                   # still holds rows
@@ -58,9 +67,9 @@ MAX_ATTEMPTS = 3                    # serverless: a file whose read was started 
 XLSX_MAX_ROWS = 120_000             # H6: a larger Excel Production export is not read on a serverless host
 STAGE_BATCH = 5000
 
-# holds (spec 6.3)
-H1_NO_DATE_SHARE = 0.01
-H1_BREAK_SHARE = 0.005
+# holds (spec 6.3); H1 and H7 are judged on what the reader counted (ema_reports.production_format_holds)
+H1_NO_DATE_SHARE = er.H1_NO_DATE_SHARE
+H1_BREAK_SHARE = er.H1_BREAK_SHARE
 H2_CHARGE_SHARE = 0.97
 H2_MIN_LINES = 20                   # a file of fewer claim lines says nothing about its scope
 H3_MIN_LINKS = 200
@@ -80,6 +89,7 @@ META_REV = "ema:ledger_rev"
 META_MAP_DIRTY = er.META_MAP_DIRTY
 META_KEEP_DIRTY = "ema:keep_dirty"
 META_MAP_COVERAGE = "ema:map_coverage"
+META_RETAIN_HELD = "ema:retain_held"        # retention that waits for a person (the Data tab shows it)
 
 # the work database refresh() attaches to the store connection (and the ledger's alias there)
 _W = "emaw"
@@ -138,6 +148,46 @@ def _remove(*paths: str) -> None:
                 os.remove(q)
             except OSError:
                 pass
+
+
+WORK_PREFIX = "ema_refresh-"
+
+
+def clean_work_files(folder: str, older_than: float = WORK_STALE_SECONDS) -> int:
+    """Delete the work files (and their journals) refreshes left in this folder when they were killed (an out-of-memory
+    stop, a container stopped mid-refresh): a live refresh's file is younger than `older_than` seconds. Returns how many
+    went."""
+    n = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    now = time.time()
+    for f in names:
+        if not f.startswith(WORK_PREFIX):
+            continue
+        p = os.path.join(folder, f)
+        try:
+            if now - os.path.getmtime(p) < older_than:
+                continue
+            os.remove(p)
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def retain_days() -> int:
+    """How many days of service the ledger keeps before its newest posting: REMITWATCH_EMA_RETAIN_DAYS when set, else
+    RETAIN_DAYS on a server and SERVERLESS_RETAIN_DAYS on a serverless host (its temporary folder holds the ledger and
+    the refresh's work file; at three service years they do not fit)."""
+    raw = os.environ.get("REMITWATCH_EMA_RETAIN_DAYS", "").strip()
+    if raw:
+        try:
+            return max(366, int(raw))
+        except ValueError:
+            pass
+    return SERVERLESS_RETAIN_DAYS if runtime.serverless() else RETAIN_DAYS
 
 
 def _meta_get(conn: sqlite3.Connection, key: str) -> str | None:
@@ -298,6 +348,8 @@ class FileMeta:
     rows_read: int = 0
     rows_kept: int = 0
     links: int | None = None
+    content_id: str | None = None       # a hash of its postings in order: the same rows saved again are one batch
+    source_kind: str | None = None      # 'file', 'upload' or 'api' (amendment 10)
 
     @property
     def order(self) -> tuple:
@@ -319,6 +371,16 @@ def ledger_path(db_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(db_path)), LEDGER_FILE)
 
 
+def open_for_store(db_path: str) -> "Ledger":
+    """The server's ledger of the store at db_path (ledger_path), its retention archiving to the store's archive folder
+    (unit E's archive.sink_for: REMITWATCH_ARCHIVE_DIR, else archive/ beside the store), wherever the ledger itself is."""
+    from . import archive
+    lg = Ledger.open(ledger_path(db_path))
+    if db_path and db_path != ":memory:":
+        archive.attach_ledger(lg, archive.sink_for(db_path=db_path))
+    return lg
+
+
 # ------------------------------------------------------------------------------------------------------------ the ledger
 class Ledger:
     """The posting ledger: one SQLite file of Production postings (keys only), the files applied to it and their boxes.
@@ -334,6 +396,7 @@ class Ledger:
         self.scratch = scratch
         self.rev: str | None = None         # the state folder's revision this copy came from (serverless)
         self._stage_stats: dict | None = None
+        self.archive_error: str | None = None   # why the last retention deleted nothing: its archive could not be written
 
     # ------------------------------------------------------------------ opening
     @classmethod
@@ -376,7 +439,12 @@ class Ledger:
         elif schema != LEDGER_SCHEMA:
             conn.close()
             raise RuntimeError("The posting ledger was written by another version of RemitWatch.")
+        have = {r[1] for r in conn.execute("PRAGMA table_info(ledger_files)")}
+        for col in ("content_id", "source_kind"):           # added after the first ledgers were written
+            if col not in have:
+                conn.execute(f"ALTER TABLE ledger_files ADD COLUMN {col} TEXT")
         lg._remove_stage_file()             # a staging file left by a run that was killed
+        clean_work_files(d)                 # and the work files of refreshes that were killed
         return lg
 
     def __enter__(self) -> "Ledger":
@@ -449,6 +517,17 @@ class Ledger:
         cur = self.conn.execute("SELECT * FROM ledger_files WHERE file_id=?", (file_id,))
         r = cur.fetchone()
         return dict(zip([d[0] for d in cur.description], r)) if r else None
+
+    def duplicate_of(self, content_id: str | None, file_id: str | None) -> dict | None:
+        """An applied file whose postings, in order, are exactly these (the same export saved again: another save time,
+        other zip times, other line endings), or None."""
+        if not content_id:
+            return None
+        cur = self.conn.execute("SELECT file_id, applied_at, status FROM ledger_files WHERE content_id=? AND file_id IS NOT ? "
+                                f"AND status IN ({','.join('?' * len(APPLIED))}) ORDER BY src LIMIT 1",
+                                (content_id, file_id, *APPLIED))
+        r = cur.fetchone()
+        return {"file_id": r[0], "applied_at": r[1], "status": r[2]} if r else None
 
     def boxes(self, statuses: tuple = LIVE) -> list[Box]:
         """The boxes of the applied files with these statuses (by default those that still hold rows)."""
@@ -569,41 +648,91 @@ class Ledger:
             self._remove_stage_file()
 
     # ------------------------------------------------------------------ holds
+    def tmp_need(self, staged_rows: int = 0, *, newest: str | None = None, replaced: int = 0) -> tuple[int, int]:
+        """(bytes the ledger and a refresh's work file need in the ledger's folder once a file of `staged_rows` postings
+        whose newest posting is `newest` is applied, bytes there are for them: what is free plus what the ledger and the
+        staging file hold now). The ledger after it holds today's rows less what retention takes (as of `newest`) and
+        what the file replaces (`replaced`), plus its own; its file never shrinks. A refresh needs the ledger and Part A's
+        work file at once, then (the ledger let go) Part B's. A serverless host's temporary folder is 512 MB, so a file
+        that would not leave room for its own summaries is held there (H8) instead of failing in the refresh, attempt
+        after attempt."""
+        c = self.conn
+        rows_now = c.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0
+        cut = self._retention_cut(newest=newest)
+        gone = cut[1] if cut and not cut[2] else 0
+        rows_after = max(0, rows_now - gone - max(0, replaced)) + max(0, staged_rows)
+        sizes = []
+        for p in (self.path, self._stage_path()):
+            try:
+                sizes.append(os.path.getsize(p))
+            except OSError:
+                sizes.append(0)
+        ledger_after = max(sizes[0], rows_after * LEDGER_BYTES_PER_ROW)
+        need = max(ledger_after + rows_after * WORK_A_BYTES_PER_ROW, rows_after * WORK_B_BYTES_PER_ROW) + TMP_MARGIN
+        folder = os.path.dirname(os.path.abspath(self.path)) if self.path != ":memory:" else runtime.tmp_dir()
+        try:
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            return need, need
+        return need, free + sum(sizes)
+
     def _older_newer(self, mine: Box) -> tuple[list[Box], list[Box]]:
-        boxes = [b for b in self.boxes(APPLIED) if b.file_id != mine.file_id and b.meets(mine)]
-        return [b for b in boxes if b.order < mine.order], [b for b in boxes if b.order > mine.order]
+        """The applied files whose boxes meet the staged file's, as (older, newer). Newer is the later as_of, then the
+        later workbook creation time. Two exports of the same day that say nothing more (CSVs) are told apart by what
+        they hold: the later export of a day holds what was posted that day after the earlier one was made, so the one
+        with more postings on that day where the two meet is the newer; only when they hold as many does arrival decide."""
+        older, newer = [], []
+        for b in self.boxes(APPLIED):
+            if b.file_id == mine.file_id or not b.meets(mine):
+                continue
+            later = b.order > mine.order
+            if b.as_of and b.as_of == mine.as_of and b.order[1] == mine.order[1] and self._stage_attached():
+                theirs, ours = self._same_day_rows(b, mine)
+                if theirs != ours:
+                    later = theirs > ours
+            (newer if later else older).append(b)
+        return older, newer
+
+    def _same_day_rows(self, b: Box, mine: Box) -> tuple[int, int]:
+        """(postings of applied file b, postings of the staged file) posted on their shared as_of day, where both boxes
+        hold them."""
+        c = self.conn
+        p_b, a_b = b.sql("s")
+        p_m, a_m = mine.sql("p")
+        ours = c.execute(f"SELECT COUNT(*) FROM stage.rows s WHERE s.posted = ? AND {p_b}", [mine.as_of] + a_b).fetchone()[0]
+        theirs = c.execute(f"SELECT COUNT(*) FROM main.postings p WHERE p.src = ? AND p.posted = ? AND {p_m}",
+                           [b.src, b.as_of] + a_m).fetchone()[0]
+        return int(theirs or 0), int(ours or 0)
 
     def holds(self, meta: FileMeta, stats: dict, *, serverless: bool, fmt: str = "csv",
               dimension: int | None = None) -> list[tuple[str, str]]:
         """The holds (spec 6.3) a staged file meets, as (code, message). A held file waits for a person to press Apply or
-        Discard; Apply skips holds, never refusals. `stats` is what stage() returned plus the reader's rows_read and
-        no_date counts."""
+        Discard; Apply skips holds, never refusals. `stats` is what stage() returned plus the reader's counts (rows_read,
+        no_date, misaligned, cut_short, damaged_checks, check_rows): H1 (format, cut short) and H7 (check numbers a
+        spreadsheet changed) are judged on those (ema_reports.production_format_holds)."""
         out: list[tuple[str, str]] = []
         if serverless and fmt == "xlsx" and (dimension or 0) > XLSX_MAX_ROWS:
             out.append(("H6", f"Save it as CSV: an Excel Production export of more than {XLSX_MAX_ROWS:,} rows is not read on "
                               "this site."))
-        read = int(stats.get("rows_read") or stats.get("rows") or 0)
-        no_date = int(stats.get("no_date") or 0)
-        breaks = int(stats.get("identity_breaks") or 0)
-        if read and (no_date > H1_NO_DATE_SHARE * read or breaks > H1_BREAK_SHARE * read):
-            out.append(("H1", f"The layout or format changed: {no_date:,} rows have no readable date and {breaks:,} rows break "
-                              "EMA's own money totals. Export it again from EMA without opening it in Excel."))
+        out += er.production_format_holds(stats)
         share = stats.get("charge_line_share")
         if (meta.scope == "service" and share is not None and int(stats.get("lines") or 0) >= H2_MIN_LINES
                 and share < H2_CHARGE_SHARE):
             out.append(("H2", f"Only {int(share * 100)}% of its claim lines carry their charge, so it looks filtered by posted "
                               "date while its dates read as a service-date export. Export it again with one date filter."))
         if not self._stage_attached():
-            return out
+            return out + (self._tmp_hold(meta, stats, 0) if serverless else [])
         mine = meta.box()
         older, newer = self._older_newer(mine)
         live_older = [b for b in older if b.status in LIVE]
         c = self.conn
+        replaced = 0
         if live_older:
             pred, args = mine.sql("p")
             srcs = [b.src for b in live_older]
             base = f"FROM main.postings p WHERE p.src IN ({','.join('?' * len(srcs))}) AND {pred}"
             bargs = srcs + args
+            replaced = c.execute(f"SELECT COUNT(*) {base}", bargs).fetchone()[0] or 0
             links_old = c.execute(f"SELECT COUNT(DISTINCT p.link) {base} AND p.link IS NOT NULL", bargs).fetchone()[0]
             when = _day(max(b.as_of for b in live_older))
             if links_old >= H3_MIN_LINKS:
@@ -633,7 +762,17 @@ class Ledger:
             if rows >= H5_MIN_ROWS and payers < H5_MIN_PAYERS:
                 out.append(("H5", f"It names {payers} insurer{'s' if payers != 1 else ''} on {rows:,} rows and it is the first "
                                   "Production file for its dates: was it filtered by payer? It must hold every payer."))
+        if serverless:
+            out += self._tmp_hold(meta, stats, replaced)
         return out
+
+    def _tmp_hold(self, meta: FileMeta, stats: dict, replaced: int) -> list[tuple[str, str]]:
+        need, have = self.tmp_need(int(stats.get("rows") or 0), newest=meta.posted_hi, replaced=replaced)
+        if need <= have:
+            return []
+        return [("H8", f"Too large for this site's temporary space: the summaries after it need about {need >> 20:,} MB and "
+                       f"{have >> 20:,} MB is free. The server reads it; this site keeps {retain_days():,} days of postings "
+                       "(REMITWATCH_EMA_RETAIN_DAYS).")]
 
     # ------------------------------------------------------------------ applying
     def commit(self, meta: FileMeta) -> dict:
@@ -654,9 +793,11 @@ class Ledger:
             c.execute("DELETE FROM ledger_files WHERE file_id=?", (meta.file_id,))
             src = c.execute(
                 "INSERT INTO ledger_files (file_id, scope, svc_lo, svc_hi, posted_lo, posted_hi, as_of, created_at, received_at, "
-                "rows, live_rows, status, source_name, via, rows_read, applied_at, links) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "rows, live_rows, status, source_name, via, rows_read, applied_at, links, content_id, source_kind) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (meta.file_id, mine.scope, meta.svc_lo, meta.svc_hi, meta.posted_lo, meta.posted_hi, meta.as_of, meta.created_at,
-                 meta.received_at, rows, 0, "current", meta.source_name, meta.via, meta.rows_read, now, links)).lastrowid
+                 meta.received_at, rows, 0, "current", meta.source_name, meta.via, meta.rows_read, now, links, meta.content_id,
+                 meta.source_kind)).lastrowid
             c.execute("INSERT OR IGNORE INTO main.names (id, name) SELECT id, name FROM stage.new_names")
             pred, args = mine.sql()
             for b in older:
@@ -695,19 +836,39 @@ class Ledger:
                 "src": src, "replaced_by": by}
 
     # ------------------------------------------------------------------ retention and copies
-    def retain(self, days: int = RETAIN_DAYS) -> int:
-        """Delete postings whose service date is more than `days` before the ledger's newest posting. Returns the rows
-        deleted (and adds 1 to seq when there were any)."""
+    def retain(self, days: int | None = None, *, force: bool = False, today: str | None = None,
+               newest: str | None = None) -> int:
+        """Delete postings whose service date is more than `days` (retain_days()) before the ledger's newest posting (or
+        `newest`, the newest posting of a file about to be applied, when later), or before today when that is later than
+        today (a damaged date must never wipe the ledger). When that would delete more than RETAIN_HOLD_SHARE of the ledger
+        at once, nothing is deleted: the cutoff and the count are kept (retain_held) until a person runs it with force
+        (retention normally takes a few days of service a week). Returns the rows deleted (and adds 1 to seq when there
+        were any)."""
         if self.readonly:
             return 0
+        days = retain_days() if days is None else int(days)
         c = self.conn
-        newest = c.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
-        if not newest:
+        cut = self._retention_cut(days, today=today, newest=newest)
+        if cut is None:
             return 0
-        cutoff = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
+        cutoff, gone, would_wait = cut
+        if not gone:
+            if self._meta("retain_held"):
+                self.conn.execute("DELETE FROM ledger_meta WHERE key='retain_held'")
+            return 0
         per = c.execute("SELECT src, COUNT(*) FROM postings WHERE svc < ? GROUP BY src", (cutoff,)).fetchall()
-        if not per:
+        total = c.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0
+        if not force and would_wait:
+            self._meta_put("retain_held", json.dumps({"cutoff": cutoff, "rows": gone, "of": total, "days": days, "at": _now()},
+                                                     sort_keys=True))
             return 0
+        from . import archive           # unit E: the postings are archived, read back and checked before they go
+        try:
+            archive.before_ledger_retain(self, cutoff)
+            self.archive_error = None
+        except (OSError, RuntimeError) as exc:   # ArchiveError, or the folder or Dropbox refused the write
+            self.archive_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            return 0                    # the archive could not be written: nothing is deleted; the next run tries again
         c.execute("BEGIN IMMEDIATE")
         try:
             n = c.execute("DELETE FROM postings WHERE svc < ?", (cutoff,)).rowcount
@@ -717,12 +878,35 @@ class Ledger:
                 c.execute("UPDATE ledger_files SET live_rows=?, status=CASE WHEN ?=0 THEN 'replaced' ELSE status END WHERE src=?",
                           (left, left, src))
             self._meta_put("retained_before", cutoff)
+            c.execute("DELETE FROM ledger_meta WHERE key='retain_held'")
             self._bump()
             c.execute("COMMIT")
         except BaseException:
             c.execute("ROLLBACK")
             raise
         return n
+
+    def _retention_cut(self, days: int | None = None, *, today: str | None = None,
+                       newest: str | None = None) -> tuple[str, int, bool] | None:
+        """(cutoff, postings retention would delete, whether that waits for a person), or None on an empty ledger."""
+        days = retain_days() if days is None else int(days)
+        c = self.conn
+        have = c.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
+        if not have:
+            return None
+        top = min(max(have, newest or "")[:10], (today or er.today_iso())[:10])
+        cutoff = (date.fromisoformat(top) - timedelta(days=days)).isoformat()
+        gone = c.execute("SELECT COUNT(*) FROM postings WHERE svc < ?", (cutoff,)).fetchone()[0] or 0
+        total = c.execute("SELECT COUNT(*) FROM postings").fetchone()[0] or 0
+        return cutoff, gone, bool(total) and gone > RETAIN_HOLD_SHARE * total
+
+    def retain_held(self) -> dict | None:
+        """Retention that waits for a person: {'cutoff', 'rows', 'of', 'days', 'at'}, or None."""
+        raw = self._meta("retain_held")
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return None
 
     def forget(self, file_id: str) -> int:
         """Take one file out of the ledger (its rows and its record), to read it again (the CLI's --reread). The rows of
@@ -824,31 +1008,178 @@ class _Hashing(io.RawIOBase):
 
 
 def _already(store: Any, ledger: Ledger, file_id: str) -> dict | None:
+    """The ledger already holds this file: nothing is read again. The whole catalog is brought in line with the ledger
+    (a run that died between the ledger's commit and the store's lost this file's row and the statuses of the files it
+    replaced); ema_reports then writes the files and ema_sources rows the store lacks."""
     have = ledger.file(file_id)
     if not have or have.get("status") not in APPLIED:
         return None
-    sync_catalog(store, ledger, file_ids=[file_id])
+    sync_catalog(store, ledger)
     box = next((b for b in ledger.boxes(APPLIED) if b.file_id == file_id), None)
     return _result("already", file_id, reason=have.get("status"), rows_read=have.get("rows_read") or 0,
                    rows_kept=have.get("rows") or 0, rows_applied=have.get("rows") or 0, live_rows=have.get("live_rows") or 0,
                    scope=have.get("scope"), box=box, as_of=have.get("as_of"))
 
 
+def _ledger_of(target: Any) -> "Ledger":
+    """A Ledger from what a caller holds: the ledger, a LedgerHandle (opened), or a zero-argument opener."""
+    if isinstance(target, Ledger):
+        return target
+    if isinstance(target, LedgerHandle):
+        return target.open()
+    if callable(target):
+        return target()
+    raise TypeError("apply_postings needs a Ledger, a LedgerHandle or a callable that opens one")
+
+
+def _bind(store: Any, ledger: Ledger, file_id: str | None, log: Any) -> None:
+    """Tie the ledger to the store's key salt; a ledger keyed for another store is emptied and its files read again."""
+    reread = ledger.bind_salt(er.salt_fingerprint(er.key_salt(store.conn)))
+    if reread:
+        _mark_reread(store.conn, [f for f in reread if f != file_id],
+                     "The posting ledger was keyed for another store; the file is read again.")
+        log(f"  EMA posting ledger: emptied (keyed for another store); {len(reread)} file(s) to read again")
+
+
+def _box_fields(box: Any) -> dict:
+    keys = ("scope", "svc_lo", "svc_hi", "posted_lo", "posted_hi", "as_of")
+    if isinstance(box, dict):
+        return {k: box.get(k) for k in keys}
+    return {k: getattr(box, k, None) for k in keys}
+
+
+def apply_postings(target: Any, source_id: str | None, box: Any, postings: Iterable[Any], *, source_kind: str, store: Any,
+                   source_name: str | None = None, via: str | None = None, account: Any = None, force: bool = False,
+                   deadline: float | None = None, serverless: bool = False, log: Any = print, fmt: str = "csv",
+                   dimension: int | None = None, created_at: str | None = None, resolve_id: Any = None) -> dict:
+    """The seam every source of postings goes through (amendment 10): apply an iterable of ema_reports.Posting for one
+    box, with the same replacement, holds and invariant as a file. The file readers are one adapter that calls this
+    (apply_production_file); an API pull would be another, with nothing else to change.
+
+    `target`: a Ledger, a LedgerHandle, or a zero-argument callable that opens one. `box`: None to take the box from the
+    postings (a file: service scope when it starts posting when its services start, else posted scope), or the range the
+    postings were asked for (a Box, or a dict of scope, svc_lo, svc_hi, posted_lo, posted_hi, as_of). `source_kind`:
+    'file', 'upload' or 'api', recorded on the applied batch with a content id (a hash of its postings in order): a batch
+    whose postings are those of a batch on file is 'already' and changes nothing (the same export saved again). Postings
+    are never de-duplicated one by one: two identical postings are two postings. `account`: the reader's counts (an
+    ema_reports.Account) when a reader made the postings. `resolve_id`: for a batch whose id is known only once it is
+    read (a stream), a callable that returns it after staging. Returns what apply_production_file returns, plus
+    'content_id' and 'source_kind'."""
+    if source_kind not in er.SOURCE_KINDS:
+        raise ValueError("source_kind is file, upload or api")
+    ledger = _ledger_of(target)
+    conn = store.conn
+    er.ensure_schema(conn)
+    _bind(store, ledger, source_id, log)
+    if source_id is not None:
+        done = _already(store, ledger, source_id)
+        if done is not None:
+            return done
+    acct = account if account is not None else er.Account()
+    digest = hashlib.sha256()
+
+    def hashed(rows: Iterable[Any]) -> Iterable[Any]:
+        for p in rows:
+            digest.update(repr(tuple(p)).encode())
+            yield p
+    t0 = time.time()
+    try:
+        stats = ledger.stage(hashed(postings), deadline=deadline)
+    except er.ReadTimeout:
+        ledger.drop_stage()
+        log("  EMA Production: stopped at the time limit; it is read again on the next run")
+        return _result("waiting", source_id, reason="Reading stopped at the time limit; it is read again on the next run.",
+                       rows_read=acct.get("rows_read") or 0)
+    except BaseException:
+        ledger.drop_stage()
+        raise
+    if resolve_id is not None:
+        source_id = resolve_id()
+        done = _already(store, ledger, source_id)
+        if done is not None:
+            ledger.drop_stage()
+            return done
+    content_id = digest.hexdigest()
+    dup = ledger.duplicate_of(content_id, source_id)
+    if dup is not None:
+        ledger.drop_stage()
+        reason = f"It holds the same postings as the export read on {_day(dup['applied_at'])} (saved again): nothing changed."
+        log("  EMA Production: already read (the same postings as a file on file)")
+        return _result("already", source_id, reason=reason, duplicate_of=dup["file_id"], content_id=content_id,
+                       rows_read=acct.get("rows_read") or stats.get("rows") or 0)
+    try:
+        rows_kept = acct.get("rows_kept") if account is not None else stats.get("rows")
+        if not rows_kept:
+            raise er.ReportRefused("empty", "It holds no posting with a posted date and a service date.", "production")
+        left = acct.get("left") or {}
+        stats.update(rows_read=acct.get("rows_read") or stats.get("rows") or 0, no_date=left.get("no_date") or 0,
+                     misaligned=left.get("misaligned") or 0, cut_short=bool(acct.get("cut_short")),
+                     damaged_checks=acct.get("damaged_checks") or 0, check_rows=acct.get("check_rows") or 0,
+                     identity_breaks=acct.get("identity_breaks") or stats.get("identity_breaks") or 0)
+        lo = {k: acct.get(k) or stats.get(k) for k in ("svc_lo", "svc_hi", "posted_lo", "posted_hi")}
+        if box is None:
+            scope = scope_of(lo["svc_lo"], lo["posted_lo"])
+            as_of = acct.get("as_of") or lo["posted_hi"]
+        else:
+            b = _box_fields(box)
+            scope = b["scope"] if b["scope"] in ("service", "posted") else scope_of(lo["svc_lo"], lo["posted_lo"])
+            lo.update({k: b[k] for k in ("svc_lo", "svc_hi", "posted_lo", "posted_hi") if b.get(k)})
+            as_of = b.get("as_of") or lo["posted_hi"]
+        meta = FileMeta(file_id=source_id, source_name=source_name or "postings", via=via or source_kind, scope=scope,
+                        svc_lo=lo["svc_lo"], svc_hi=lo["svc_hi"], posted_lo=lo["posted_lo"], posted_hi=lo["posted_hi"],
+                        as_of=as_of, created_at=created_at, received_at=_catalog_received(conn, source_id) or _now(),
+                        rows_read=stats["rows_read"], rows_kept=rows_kept, links=stats.get("links"), content_id=content_id,
+                        source_kind=source_kind)
+        acc = dict(acct)
+        acc.update(links=stats.get("links"), payers=stats.get("payers"), claim_lines=stats.get("lines"),
+                   charge_line_share=stats.get("charge_line_share"))
+        holds = [] if force else ledger.holds(meta, stats, serverless=serverless, fmt=fmt, dimension=dimension)
+        if holds:
+            reason = " ".join(m for _c, m in holds)
+            log(f"  EMA Production: held ({', '.join(c for c, _m in holds)})")
+            return _result("held", source_id, reason=reason, holds=[{"code": c, "message": m} for c, m in holds],
+                           rows_read=meta.rows_read, rows_kept=meta.rows_kept, scope=meta.scope, box=meta.box(), as_of=meta.as_of,
+                           account=acc, links=stats.get("links"), received_at=meta.received_at, content_id=content_id,
+                           source_kind=source_kind)
+        # retention first, as of the batch's own newest posting: the pages the old postings free are the ones its rows
+        # take, so the ledger file does not grow by a year of service on the day a new service year arrives (a
+        # serverless host's temporary folder holds it twice over during the refresh)
+        ledger.retain(newest=meta.posted_hi)
+        res = ledger.commit(meta)
+    finally:
+        ledger.drop_stage()
+    if getattr(acct, "status_words", None):
+        er.record_unknown_statuses(conn, acct.status_words)
+    secs = round(time.time() - t0, 1)
+    log(f"  EMA Production: {res['status']}, {res['rows_applied']:,} of {meta.rows_kept:,} rows applied ({meta.scope} scope, "
+        f"{secs} s)" + (f"; {len(res['replaced'])} older file(s) replaced in part or whole" if res["replaced"] else ""))
+    reason = None
+    if res["status"] == "superseded":
+        reason = "Newer exports on file cover every posting it holds."
+    elif res["live_rows"] < res["rows"]:
+        reason = f"{res['rows'] - res['live_rows']:,} of its postings fall where a newer export is on file."
+    return _result(res["status"], source_id, reason=reason, rows_read=meta.rows_read, rows_kept=meta.rows_kept,
+                   rows_applied=res["rows_applied"], live_rows=res["live_rows"], scope=meta.scope, box=res["box"],
+                   as_of=meta.as_of, replaced=res["replaced"], account=acc, links=stats.get("links"),
+                   received_at=meta.received_at, seq=ledger.seq(), seconds=secs, content_id=content_id, source_kind=source_kind)
+
+
 def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | None, via: str, origin: dict | None = None,
                           force: bool = False, ledger: Ledger, deadline: float | None = None, serverless: bool = False,
-                          log: Any = print, source_name: str | None = None) -> dict:
-    """Read one Production file into the ledger: stage it, check the holds, and apply it under the box invariant.
+                          log: Any = print, source_name: str | None = None, source_kind: str | None = None) -> dict:
+    """Read one Production file into the ledger: the file adapter of apply_postings (it reads the rows and hands them on).
     ema_reports.ingest_file calls this and writes the catalog, files and ema_sources rows from the result; it does not
     write them here (except a catalog row the ledger holds and the store lost: see sync_catalog).
 
-    `path` is a file on disk (CSV, xlsx or a zip member as `rec` says), or a binary stream of delimited text (a download
-    read as it arrives, never written anywhere). For a stream `file_id` may be None: the SHA-256 of the bytes read becomes
-    the file's id, and a file the ledger already holds is then left as it is ('already').
+    `path` is a file on disk (CSV, gzipped CSV, xlsx or a zip member as `rec` says), or a binary stream of delimited text
+    (a download read as it arrives, never written anywhere). For a stream `file_id` may be None: the SHA-256 of the bytes
+    read becomes the file's id, and a file the ledger already holds is then left as it is ('already').
 
     Result: {'status': 'current'|'superseded'|'held'|'waiting'|'already', 'reason', 'rows_read', 'rows_kept',
     'rows_applied', 'live_rows', 'scope', 'box', 'as_of', 'replaced': [(file_id, status)], 'account', 'links', 'holds',
-    'received_at', 'seq'}. A refusal raises ema_reports.ReportRefused (never applied, whatever `force` says). Past
-    `deadline` the file is left 'waiting' and the ledger is unchanged."""
+    'received_at', 'seq', 'content_id', 'source_kind'} ('duplicate_of' when the same postings are on file under another
+    file). A refusal raises ema_reports.ReportRefused (never applied, whatever `force` says). Past `deadline` the file is
+    left 'waiting' and the ledger is unchanged."""
     conn = store.conn
     er.ensure_schema(conn)
     salt = er.key_salt(conn)
@@ -864,14 +1195,10 @@ def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | Non
         path = io.BufferedReader(hasher, 1 << 20)
     else:
         path = os.fspath(path)
-        source_name = source_name or (os.path.basename(rec.member) if getattr(rec, "member", None) else os.path.basename(path))
+        source_name = source_name or er._names_of(path, rec)[0]
         if file_id is None:
-            file_id = er._member_id(path, rec.member) if getattr(rec, "member", None) else er.file_id_of(path)
-    reread = ledger.bind_salt(er.salt_fingerprint(salt))
-    if reread:
-        _mark_reread(conn, [f for f in reread if f != file_id],
-                     "The posting ledger was keyed for another store; the file is read again.")
-        log(f"  EMA posting ledger: emptied (keyed for another store); {len(reread)} file(s) to read again")
+            file_id = er.report_id(path, rec)
+    _bind(store, ledger, file_id, log)
     if file_id is not None:
         done = _already(store, ledger, file_id)
         if done is not None:
@@ -882,70 +1209,23 @@ def apply_production_file(store: Any, path: Any, rec: Any, *, file_id: str | Non
         msg = (f"Save it as CSV: an Excel Production export of more than {XLSX_MAX_ROWS:,} rows is not read on this site.")
         log("  EMA Production: held (H6)")
         return _result("held", file_id, reason=msg, holds=[{"code": "H6", "message": msg}], rows_read=rec.dimension or 0)
-    acct = er.Account()
-    t0 = time.time()
-    try:
-        stats = ledger.stage(er.iter_production(path, rec, salt=salt, account=acct, deadline=deadline), deadline=deadline)
-    except er.ReadTimeout:
-        ledger.drop_stage()
-        log("  EMA Production: stopped at the time limit; it is read again on the next run")
-        return _result("waiting", file_id, reason="Reading stopped at the time limit; it is read again on the next run.",
-                       rows_read=acct.get("rows_read") or 0)
-    except BaseException:
-        ledger.drop_stage()
-        raise
-    if hasher is not None:
+    created = None
+    if hasher is None:
+        try:
+            created = er._created_at(path, rec)
+        except Exception:       # noqa: BLE001  (the workbook does not say when it was made)
+            created = None
+
+    def stream_id() -> str | None:
         while path.read(1 << 20):           # what the reader left (lines after the last row) is part of the file's bytes
             pass
-        file_id = file_id or hasher.sha.hexdigest()
-        done = _already(store, ledger, file_id)
-        if done is not None:
-            ledger.drop_stage()
-            return done
-    try:
-        if not acct.get("rows_kept"):
-            raise er.ReportRefused("empty", "It holds no posting with a posted date and a service date.", "production")
-        left = acct.get("left") or {}
-        stats.update(rows_read=acct.get("rows_read") or 0, no_date=left.get("no_date") or 0,
-                     identity_breaks=acct.get("identity_breaks") or stats.get("identity_breaks") or 0)
-        created = None
-        if hasher is None:
-            try:
-                created = er._created_at(path, rec)
-            except Exception:       # noqa: BLE001  (the workbook does not say when it was made)
-                created = None
-        meta = FileMeta(file_id=file_id, source_name=source_name, via=via,
-                        scope=scope_of(acct["svc_lo"], acct["posted_lo"]), svc_lo=acct["svc_lo"], svc_hi=acct["svc_hi"],
-                        posted_lo=acct["posted_lo"], posted_hi=acct["posted_hi"], as_of=acct.get("as_of") or acct["posted_hi"],
-                        created_at=created, received_at=_catalog_received(conn, file_id) or _now(),
-                        rows_read=acct.get("rows_read") or 0, rows_kept=acct.get("rows_kept") or 0, links=stats.get("links"))
-        account = dict(acct)
-        account.update(links=stats.get("links"), payers=stats.get("payers"), claim_lines=stats.get("lines"),
-                       charge_line_share=stats.get("charge_line_share"))
-        holds = [] if force else ledger.holds(meta, stats, serverless=serverless, fmt=getattr(rec, "fmt", "csv"),
-                                              dimension=getattr(rec, "dimension", None))
-        if holds:
-            reason = " ".join(m for _c, m in holds)
-            log(f"  EMA Production: held ({', '.join(c for c, _m in holds)})")
-            return _result("held", file_id, reason=reason, holds=[{"code": c, "message": m} for c, m in holds],
-                           rows_read=meta.rows_read, rows_kept=meta.rows_kept, scope=meta.scope, box=meta.box(), as_of=meta.as_of,
-                           account=account, links=stats.get("links"), received_at=meta.received_at)
-        res = ledger.commit(meta)
-    finally:
-        ledger.drop_stage()
-    er.record_unknown_statuses(conn, acct.status_words)
-    secs = round(time.time() - t0, 1)
-    log(f"  EMA Production: {res['status']}, {res['rows_applied']:,} of {meta.rows_kept:,} rows applied ({meta.scope} scope, "
-        f"{secs} s)" + (f"; {len(res['replaced'])} older file(s) replaced in part or whole" if res["replaced"] else ""))
-    reason = None
-    if res["status"] == "superseded":
-        reason = "Newer exports on file cover every posting it holds."
-    elif res["live_rows"] < res["rows"]:
-        reason = f"{res['rows'] - res['live_rows']:,} of its postings fall where a newer export is on file."
-    return _result(res["status"], file_id, reason=reason, rows_read=meta.rows_read, rows_kept=meta.rows_kept,
-                   rows_applied=res["rows_applied"], live_rows=res["live_rows"], scope=meta.scope, box=res["box"],
-                   as_of=meta.as_of, replaced=res["replaced"], account=account, links=stats.get("links"),
-                   received_at=meta.received_at, seq=ledger.seq(), seconds=secs)
+        return file_id or hasher.sha.hexdigest()
+    acct = er.Account()
+    return apply_postings(ledger, file_id, None, er.iter_production(path, rec, salt=salt, account=acct, deadline=deadline),
+                          source_kind=source_kind or er.source_kind_of(via), store=store, source_name=source_name, via=via,
+                          account=acct, force=force, deadline=deadline, serverless=serverless, log=log,
+                          fmt=getattr(rec, "fmt", "csv"), dimension=getattr(rec, "dimension", None), created_at=created,
+                          resolve_id=stream_id if hasher is not None else None)
 
 
 def sync_catalog(store: Any, ledger: Ledger, file_ids: Iterable[str] | None = None) -> int:
@@ -971,6 +1251,7 @@ def sync_catalog(store: Any, ledger: Ledger, file_ids: Iterable[str] | None = No
             er._catalog_put(conn, f["file_id"], report="production", source_name=f.get("source_name"), via=f.get("via"),
                             received_at=f.get("received_at"), applied_at=f.get("applied_at"), created_at=f.get("created_at"),
                             rows_read=f.get("rows_read"), rows_kept=f.get("rows"), links=f.get("links"),
+                            source_kind=f.get("source_kind"), content_id=f.get("content_id"),
                             status_reason="Restored from the posting ledger after an interrupted run.", **want)
             n += 1
         elif any(row.get(k) != v for k, v in want.items()):
@@ -988,7 +1269,7 @@ def sync_catalog(store: Any, ledger: Ledger, file_ids: Iterable[str] | None = No
 
 
 # ---------------------------------------------------------------------------------------------------- the keep rule
-KEEP_RULES = ("nonroutine", "no835", "unmapped", "on_ar", "finding", "open_status")
+KEEP_RULES = ("nonroutine", "no835", "unmapped", "on_ar", "finding", "open_status", "second_payer")
 _LIVE_FINDING = ("COALESCE(stale, 0) = 0 AND (status IN ('open','in_progress','appealed','lost','dismissed') "
                  "OR notes IS NOT NULL OR appealed_at IS NOT NULL OR (status = 'resolved' AND auto_note IS NULL))")
 
@@ -1018,6 +1299,10 @@ def _keep_conditions(lines: str, payments: str, link_map: str, claim_links: str,
         ("finding", (f"{L}.link IN (SELECT m.link FROM {link_map} m WHERE COALESCE(m.conflict, 0) = 0 AND m.bill IN ({finding_bills}))"
                      if finding_bills else "0")),
         ("open_status", f"COALESCE({L}.status_class, 'none') <> 'paid'"),
+        # a second payer on file, the first payer paid and EMA still shows a balance: detection's "second payer never
+        # billed" needs the line whether or not the bill has an item yet (3,861 more lines of 70,285 on the real archive)
+        ("second_payer", f"COALESCE({L}.secondary_payer, '') <> '' AND COALESCE({L}.ins_paid, 0) > 0 "
+                         f"AND COALESCE({L}.balance, 0) > 0"),
     ]
 
 
@@ -1028,8 +1313,9 @@ def keep_rule_sql(lines: str = "ema_lines", payments: str = "main.ema_line_payme
     of these holds: a non-routine insurance adjustment (a payer's CARC, group not PR, code not in detect.IGNORE_CARCS);
     an insurance payment under a check that is not an 835 trace; its link is not mapped to a bill (or is a conflict);
     its link is on the A/R; its mapped bill has a finding that is open, started, sent or worked; its newest status is not
-    Resolved/Paid. The finding rule reads the store's findings (pass `conn` to leave it out when there are none) and
-    needs rw_bill registered (ema_reports.register_functions)."""
+    Resolved/Paid; a second payer is on file, the first payer paid and a balance is left. The finding rule reads the
+    store's findings (pass `conn` to leave it out when there are none) and needs rw_bill registered
+    (ema_reports.register_functions)."""
     if finding_bills == "auto":
         finding_bills = _finding_bills_sql(conn) if conn is not None else (
             "SELECT rw_bill(patient_control_number) AS bill FROM main.findings WHERE patient_control_number IS NOT NULL "
@@ -1040,13 +1326,16 @@ def keep_rule_sql(lines: str = "ema_lines", payments: str = "main.ema_line_payme
 # ------------------------------------------------------------------------------------------------------- refresh work
 class _Work:
     """A scratch database attached to the store connection for one refresh (in the ledger's folder, or the temporary
-    folder), so intermediate tables never grow the store and are deleted whole when the refresh ends."""
+    folder), so intermediate tables never grow the store and are deleted whole when the refresh ends. On a serverless
+    host SQLite's own sorts stay in memory (temp_store=MEMORY): written to the temporary folder, they took 50 MB of its
+    512 MB at two service years. A server sorts to files, as before."""
 
     def __init__(self, conn: sqlite3.Connection, where: str | None):
         self.conn = conn
         d = where or runtime.tmp_dir()
         os.makedirs(d, exist_ok=True)
-        self.path = os.path.join(d, f"ema_refresh-{os.getpid()}-{secrets.token_hex(4)}.sqlite")
+        clean_work_files(d)
+        self.path = os.path.join(d, f"{WORK_PREFIX}{os.getpid()}-{secrets.token_hex(4)}.sqlite")
         self.temp_store: int | None = None
         self.ledger_attached = False
 
@@ -1054,7 +1343,7 @@ class _Work:
         c = self.conn
         c.commit()
         self.temp_store = c.execute("PRAGMA temp_store").fetchone()[0]
-        c.execute("PRAGMA temp_store=FILE")
+        c.execute("PRAGMA temp_store=MEMORY" if runtime.serverless() else "PRAGMA temp_store=FILE")
         c.execute(f"ATTACH DATABASE ? AS {_W}", (self.path,))
         c.execute(f"PRAGMA {_W}.journal_mode=OFF")
         c.execute(f"PRAGMA {_W}.synchronous=OFF")
@@ -1068,6 +1357,14 @@ class _Work:
         self.conn.execute(f"ATTACH DATABASE ? AS {_L}", (ledger.path,))
         self.conn.execute(f"PRAGMA {_L}.cache_size=-32768")
         self.ledger_attached = True
+
+    def detach_ledger(self) -> None:
+        """Part B and the publish never read the ledger: once Part A is done it is let go, so a serverless run can save
+        and delete its scratch copy before the larger half of the work."""
+        if self.ledger_attached:
+            self.conn.commit()
+            self.conn.execute(f"DETACH DATABASE {_L}")
+            self.ledger_attached = False
 
     def __exit__(self, *exc: Any) -> None:
         c = self.conn
@@ -1117,6 +1414,9 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
     cpt = "COALESCE(p.cpt, '')"
     cptc = "CAST(COALESCE(p.cpt, '') AS TEXT)"          # work tables get declared types, so their indexes are used
     newest = "MAX(p.posted || printf('%012d', p.rowid))"
+    # the months first, while the work file is empty: their grouping is one more full pass over the ledger, and its
+    # intermediate tables are dropped before the line tables are made
+    n_mon = _months(conn, nr, adj)
     # one row per claim line (link, service date, code)
     x(f"""CREATE TABLE {W}.pa_agg AS
         SELECT p.link AS link, p.svc AS svc, {cptc} AS cpt, CAST(MAX(p.person) AS INTEGER) AS person,
@@ -1236,6 +1536,11 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
     n_rsn = _insert_select(conn, f"{W}.pa_rsn", REASON_EXPRS, _reason_tail(f"p.link IS NOT NULL AND ({nr} OR (p.grp IS NULL "
                                                                            "AND p.kind IS NOT NULL))"))
     x(f"CREATE INDEX {W}.ix_pa_rsn ON pa_rsn(link, svc, cpt)")
+    # the routine reasons (and group PR) of every line: the store keeps them only for lines whose bill has an item, which
+    # Part B's map decides; they are read here so the ledger can be let go before Part B
+    x(f"CREATE TABLE {W}.pa_rsr AS SELECT * FROM main.ema_line_reasons WHERE 0")
+    _insert_select(conn, f"{W}.pa_rsr", REASON_EXPRS, _reason_tail(f"p.link IS NOT NULL AND p.grp IS NOT NULL AND NOT {nr}"))
+    x(f"CREATE INDEX {W}.ix_pa_rsr ON pa_rsr(link, svc, cpt)")
     # checks (insurance rows with a check number; never product or patient-side rows)
     x(f"CREATE TABLE {W}.pa_chk AS SELECT * FROM main.ema_checks WHERE 0")
     n_chk = _insert_select(conn, f"{W}.pa_chk", {
@@ -1256,7 +1561,6 @@ def _part_a(conn: sqlite3.Connection, log: Any) -> dict:
               cause = (SELECT c.cause FROM main.ema_checks c WHERE c.check_no = pa_chk.check_no AND c.payer = pa_chk.payer),
               pair_trace = (SELECT c.pair_trace FROM main.ema_checks c WHERE c.check_no = pa_chk.check_no AND c.payer = pa_chk.payer)""")
     _drop(conn, "pa_twc")
-    n_mon = _months(conn, nr, adj)
     conn.commit()               # only the work database changed: the store is written in one step by _publish
     return {"lines": n_lines, "payments": n_pay, "reasons": n_rsn, "checks": n_chk, "months": n_mon, "events": n_ev,
             "seconds": round(time.time() - t0, 1)}
@@ -1619,6 +1923,7 @@ def _patient_day(conn: sqlite3.Connection, boxes: Sequence[Box], now: str) -> di
               GROUP BY bill, ck, nk, svc, code)
           GROUP BY bill, nk, svc, code""")
     x(f"CREATE INDEX {W}.ix_pd_key ON pd_key(nk, svc, code)")
+    x(f"CREATE INDEX {W}.ix_pd_key_b ON pd_key(bill)")         # the winners' claim id and code count, per bill
     x(f"""CREATE TABLE {W}.pd_cl AS SELECT l.link AS link, l.svc AS svc, l.cpt AS cpt, l.name_key AS name_key, l.charges AS charges
           FROM {W}.pa_full l WHERE l.name_key IS NOT NULL AND l.link NOT IN (SELECT link FROM {W}.pb_map)""")
     x(f"CREATE INDEX {W}.ix_pd_cl ON pd_cl(name_key, svc, cpt)")
@@ -1746,12 +2051,11 @@ def _publish(conn: sqlite3.Connection, *, part_a: bool, pruned: bool, meta: dict
                       WHERE {lkeep} AND (COALESCE(r.reason_class, 'other') NOT IN ({routine}) OR l.keep IS NULL
                                          OR instr(',' || l.keep || ',', ',finding,') > 0)""").rowcount
         if part_a:
-            # every reason, routine ones too, of the lines whose bill has a finding: read from the ledger
-            fk = "(keep IS NULL OR instr(',' || keep || ',', ',finding,') > 0)"
-            n_rsn += _insert_select(conn, "main.ema_line_reasons", REASON_EXPRS, _reason_tail(
-                f"p.link IN (SELECT link FROM {W}.pa_full WHERE {fk}) AND (p.grp IS NOT NULL OR p.kind IS NOT NULL) "
-                f"AND EXISTS (SELECT 1 FROM {W}.pa_full l WHERE l.link = p.link AND l.svc = p.svc AND l.cpt = COALESCE(p.cpt, '') "
-                f"AND {fk.replace('keep', 'l.keep')})"), verb="INSERT OR IGNORE")
+            # every reason, routine ones too, of the lines whose bill has a finding (Part A read them from the ledger)
+            fk = "(l.keep IS NULL OR instr(',' || l.keep || ',', ',finding,') > 0)"
+            n_rsn += x(f"""INSERT OR IGNORE INTO main.ema_line_reasons ({rc}) SELECT {', '.join('r.' + c for c in rc.split(', '))}
+                           FROM {W}.pa_rsr r JOIN {W}.pa_full l ON l.link = r.link AND l.svc = r.svc AND l.cpt = r.cpt
+                           WHERE {fk}""").rowcount
         x("DELETE FROM main.ema_checks")
         cc = cols("ema_checks")
         n_chk = x(f"INSERT INTO main.ema_checks ({cc}) SELECT {cc} FROM {W}.pa_chk").rowcount
@@ -1798,20 +2102,26 @@ def _ledger_changed(conn: sqlite3.Connection, ledger: Ledger) -> bool:
     return _meta_get(conn, META_KEEP_DIRTY) is not None
 
 
-def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", log: Any = print) -> dict:
+def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", log: Any = print,
+            release: Any = None) -> dict:
     """Bring the store's EMA summaries up to date.
 
     parts: 'auto' runs Part A when a ledger is given and it changed since the store last read it (its seq, or the state
     folder revision on a serverless host, differs from meta ema:ledger_seq / ema:ledger_rev; retention deleted rows; or
     meta ema:keep_dirty is set), and Part B after Part A or when meta ema:map_dirty is set. 'A', 'B' and 'AB' run those
     parts. Part A needs the ledger; Part B reads only the store. With a ledger, retention runs first and the catalog is
-    brought in line with the ledger (sync_catalog). The store changes in one transaction at the end."""
+    brought in line with the ledger (sync_catalog). The store changes in one transaction at the end.
+
+    `release` (serverless): called with no argument as soon as the ledger is no longer needed (after Part A, before Part
+    B), to save the scratch ledger to the state folder and delete it, so the temporary folder never holds the ledger and
+    the larger half of the work at once (LedgerHandle.save). What it returns, the state folder's new revision, is what
+    meta ema:ledger_rev records."""
     conn = store.conn
     er.ensure_schema(conn)
     salt = er.key_salt(conn)
     _register(conn, salt)
     t0 = time.time()
-    out: dict = {"part_a": None, "part_b": None, "retained": 0, "catalog": 0}
+    out: dict = {"part_a": None, "part_b": None, "retained": 0, "catalog": 0, "retain_held": None, "released": False}
     if parts not in ("auto", "A", "B", "AB"):
         raise ValueError("parts is one of auto, A, B, AB")
     if ledger is not None and not ledger.readonly:
@@ -1819,6 +2129,20 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
         if bind:
             log(f"  EMA posting ledger: emptied (keyed for another store); {len(bind)} file(s) to read again")
         out["retained"] = ledger.retain()
+        if getattr(ledger, "archive_error", None):
+            out["retain_archive_error"] = ledger.archive_error
+            log(f"  EMA posting ledger: old postings kept this time: their archive could not be written ({ledger.archive_error})")
+        held = ledger.retain_held()
+        out["retain_held"] = held
+        if held:
+            log(f"  EMA posting ledger: retention waits for a person: it would delete {held['rows']:,} of {held['of']:,} "
+                f"postings at once (service before {held['cutoff']})")
+        if bool(held) != (_meta_get(conn, META_RETAIN_HELD) is not None):
+            if held:
+                _meta_set(conn, META_RETAIN_HELD, json.dumps(held, sort_keys=True))
+            else:
+                conn.execute("DELETE FROM meta WHERE key=?", (META_RETAIN_HELD,))
+            conn.commit()
         out["catalog"] = sync_catalog(store, ledger)
     want_a = parts in ("A", "AB") or (parts == "auto" and ledger is not None and _ledger_changed(conn, ledger))
     if want_a and ledger is None:
@@ -1830,17 +2154,28 @@ def refresh(store: Any, ledger: Ledger | None = None, *, parts: str = "auto", lo
     where = os.path.dirname(os.path.abspath(ledger.path)) if ledger is not None and ledger.path != ":memory:" else None
     meta: dict = {}
     cutoff = None
+
+    def let_go() -> None:
+        if release is not None and not out["released"]:
+            rev = release()
+            out["released"] = True
+            if rev:
+                meta[META_REV] = rev
     with _Work(conn, where) as w:
         if want_a:
             w.attach_ledger(ledger)
             out["part_a"] = _part_a(conn, log)
             newest = conn.execute(f"SELECT MAX(posted) FROM {_L}.postings").fetchone()[0]
             if newest:
-                cutoff = (date.fromisoformat(newest[:10]) - timedelta(days=RETAIN_DAYS)).isoformat()
+                top = min(newest[:10], er.today_iso())
+                cutoff = (date.fromisoformat(top) - timedelta(days=retain_days())).isoformat()
             meta[META_SEQ] = ledger.seq()
             if ledger.rev is not None:
                 meta[META_REV] = ledger.rev
+            w.detach_ledger()
+            let_go()
         else:
+            let_go()
             _copy_store(conn)
         if want_b:
             out["part_b"] = _part_b(conn, full=want_a, boxes=boxes, log=log)
@@ -1992,6 +2327,8 @@ class LedgerHandle:
             self.rev = meta.get("rev")
         self.ledger = Ledger.open(self.path, scratch=True)
         self.ledger.rev = self.rev
+        from . import archive           # unit E: retention of this scratch copy archives to the state folder's archive/
+        archive.attach_ledger(self.ledger, archive.StateSink(self.state))
         return self.ledger
 
     def save(self, conn: sqlite3.Connection | None = None) -> str | None:
@@ -2078,6 +2415,10 @@ def hold_slow_file(store: Any, file_id: str, reason: str = ATTEMPT_HOLD_REASON) 
     er.ensure_schema(conn)
     n = conn.execute("UPDATE ema_report_files SET status='held', status_reason=? WHERE file_id=? AND status IN ('waiting','reread')",
                      (reason, file_id)).rowcount
+    # held, a person chose Apply, and the runs ran out of attempts again: the decision goes, so the Data tab asks again
+    # and the runs stop fetching a file they cannot read (cloud._held_to_apply)
+    n += conn.execute("UPDATE ema_report_files SET status_reason=?, decision=NULL, decided_by=NULL, decided_at=NULL "
+                      "WHERE file_id=? AND status='held' AND decision='apply'", (reason, file_id)).rowcount
     conn.commit()
     if n:
         store.ema_changed = True

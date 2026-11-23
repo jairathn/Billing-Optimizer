@@ -8,6 +8,7 @@ Every row is invented (tests/ema_fixtures.py); claim links use a host under a re
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import io
 import json
 import os
@@ -17,6 +18,8 @@ import subprocess
 import sys
 import tracemalloc
 import types
+import zipfile
+from unittest import mock
 
 import pytest
 
@@ -28,11 +31,16 @@ D = dt.date
 SALT = b"t" * 32
 
 
+TODAY = "2026-12-31"        # the day the readers take files to be read on (a posting may be dated at most the day after)
+
+
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
+    monkeypatch.setattr(er, "today_iso", lambda: TODAY)
     monkeypatch.setenv("REMITWATCH_MODE", "server")
-    for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES"):
+    for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES",
+              "REMITWATCH_EMA_LEDGER", "REMITWATCH_EMA_RETAIN_DAYS"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -183,7 +191,8 @@ def test_dates_as_ema_writes_them():
     assert er.parse_date("3/4/26") == "2026-03-04"
     assert er.parse_date("2026-03-04") == er.parse_date("2026-03-04 10:31:00") == "2026-03-04"
     assert er.parse_date(dt.datetime(2026, 3, 4, 9)) == er.parse_date(D(2026, 3, 4)) == "2026-03-04"
-    assert er.parse_date(46085) == er.parse_date("46085") == "2026-03-04"          # Excel serial day numbers
+    assert er.parse_date(46085) == er.parse_date(46085.0) == "2026-03-04"          # an Excel serial day number, typed
+    assert er.parse_date("46085") is None             # the same digits written as text are a damaged cell, not a date
     assert er.parse_date("13/4/2026", "dmy") == "2026-04-13"
     assert er.parse_date("2/30/2026") is None and er.parse_date("-") is None and er.parse_date(12) is None
     assert er.date_order(["3/4/2026", "12/31/2026"]) == "mdy"
@@ -250,7 +259,8 @@ def test_flags_counts_and_left_out_lines(tmp_path):
     assert len(out) == 3
     assert out[0].flags & er.FLAG_POSTED_BEFORE_SERVICE and out[1].flags & er.FLAG_IDENTITY_BREAK
     assert out[2].charges is None and acct["bad_amounts"] == 1 and acct["identity_breaks"] == 1
-    assert acct["bad_dates"] == 1 and acct["left"] == {"blank": 1, "total": 1, "no_date": 1} and acct["rows_read"] == 6
+    assert acct["bad_dates"] == 1 and acct["rows_read"] == 6
+    assert acct["left"] == {"blank": 1, "total": 1, "no_date": 1, "misaligned": 0}
 
 
 def test_day_first_files_and_files_in_two_date_orders(tmp_path):
@@ -415,6 +425,51 @@ def test_the_dashboard_copy_has_no_salt_and_no_keys(store, tmp_path, monkeypatch
 
 
 # ------------------------------------------------------------------------------------------- 5. the repository holds no tenant host
+HOST = re.compile(r"(?<![a-z0-9-])([a-z0-9-]+(?:\.[a-z0-9-]+)*)\." + re.escape("ema") + r"\." + re.escape("md") + r"\b", re.I)
+VENDOR_LABELS = {"sso"}                 # ModMed's own public sign-in service, not a practice's system
+CONTAINERS = (".xlsx", ".xlsm", ".docx", ".pptx", ".zip")
+
+
+def _tenant_hosts(data: bytes, name: str, depth: int = 0) -> set[str]:
+    """The labels under the vendor's domain written anywhere in a file: as a URL or bare (prose, JSON, an .env line, a
+    protocol-relative address), and inside the members of a zip-based file (a workbook, a document) or a gzip."""
+    low = name.lower()
+    found: set[str] = set()
+    if depth < 2 and (low.endswith(CONTAINERS) or data[:4] == b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for info in zf.infolist():
+                    if not info.is_dir() and info.file_size <= 64 << 20:
+                        found |= _tenant_hosts(zf.read(info), info.filename, depth + 1)
+            return found
+        except zipfile.BadZipFile:
+            pass
+    if depth < 2 and (low.endswith(".gz") or data[:2] == b"\x1f\x8b"):
+        try:
+            return _tenant_hosts(gzip.decompress(data), name[:-3] if low.endswith(".gz") else name, depth + 1)
+        except (OSError, EOFError):
+            pass
+    text = data.decode("utf-8", "replace") if b"\x00" not in data[:4096] else data.decode("latin-1")
+    for m in HOST.finditer(text):
+        label = m.group(1).lower().rsplit(".", 1)[-1]
+        if label not in VENDOR_LABELS:
+            found.add(label)
+    return found
+
+
+def test_the_host_scan_finds_a_tenant_written_any_way():
+    tenant = "acme" + "-derm"                # an invented label, kept apart so this file holds no host
+    dom = "." + "ema" + "." + "md"
+    for text in (f"https://{tenant}{dom}/ema/ws/v9/qlikRedirect/claim/1", f"{tenant}{dom}", f'{{"host": "{tenant}{dom}"}}',
+                 f"EMA_HOST={tenant}{dom}", f"//{tenant}{dom}/x", f"see {tenant.upper()}{dom.upper()} today"):
+        assert _tenant_hosts(text.encode(), "a.txt") == {tenant}, text
+    assert _tenant_hosts(f"https://sso{dom}/login".encode(), "a.txt") == set()
+    assert _tenant_hosts(f"<tenant>{dom} and the domain{dom[0]} {dom[1:]}".encode(), "a.txt") == set()
+    assert _tenant_hosts(F.zipped("r.csv", f"x,{tenant}{dom}".encode()), "r.zip") == {tenant}
+    assert _tenant_hosts(gzip.compress(f"{tenant}{dom}".encode()), "r.csv.gz") == {tenant}
+    assert _tenant_hosts(F.ar_xlsx([F.ar_row(note=f"https://{tenant}{dom}/x")]), "a.xlsx") == {tenant}
+
+
 def test_no_ema_tenant_host_anywhere_in_the_repository():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
@@ -423,22 +478,18 @@ def test_no_ema_tenant_host_anywhere_in_the_repository():
     except (OSError, subprocess.SubprocessError):
         files = [os.path.relpath(os.path.join(dp, f), root) for dp, ds, fs in os.walk(root)
                  for f in fs if not any(x in dp for x in (".git", "__pycache__", "node_modules", os.sep + "data"))]
-    host = re.compile(r"[a-z]+://([a-z0-9-]+(?:\.[a-z0-9-]+)*)\." + re.escape("ema") + r"\." + re.escape("md") + r"\b", re.I)
-    vendor = {"sso"}                    # ModMed's own public sign-in service, not a practice's system
-    found = []
+    found = {}
     for rel in filter(None, files):
         p = os.path.join(root, rel)
         try:
             with open(p, "rb") as fh:
-                data = fh.read(4 << 20)
+                data = fh.read(64 << 20)
         except OSError:
             continue
-        if b"\x00" in data[:4096]:
-            continue
-        for m in host.finditer(data.decode("utf-8", "replace")):
-            if m.group(1).lower() not in vendor:
-                found.append(rel)
-    assert not found, f"a URL under the vendor's domain names a practice's EMA system in: {sorted(set(found))}"
+        labels = _tenant_hosts(data, rel)
+        if labels:
+            found[rel] = len(labels)
+    assert not found, f"a host under the vendor's domain names a practice's EMA system in: {sorted(found)}"
 
 
 # ------------------------------------------------------------------------------------------------------ 6. the claim address
@@ -727,10 +778,15 @@ def test_schema_is_safe_on_every_start_and_adds_missing_columns(tmp_path):
     c = sqlite3.connect(str(tmp_path / "old.sqlite"))
     c.execute("CREATE TABLE ema_ar_items (item_key TEXT PRIMARY KEY, gone_since TEXT)")
     c.execute("INSERT INTO ema_ar_items VALUES ('I|x|1', '2026-01-01')")
+    c.execute("CREATE TABLE ema_line_payments (link INTEGER, svc TEXT, cpt TEXT, check_no TEXT, posted TEXT, payer TEXT, "
+              "PRIMARY KEY (link, svc, cpt, check_no, posted, payer)) WITHOUT ROWID")
+    c.execute("CREATE INDEX ix_elp_check ON ema_line_payments(check_no)")      # an earlier build's index no query used
     c.commit()
     er.ensure_schema(c)
     er.ensure_schema(c)
     assert c.execute("SELECT absent_since FROM ema_ar_items").fetchone()[0] == "2026-01-01"
+    assert c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='ix_elp_check'").fetchone()[0] == 0
+    assert "bucket" in {r[1] for r in c.execute("PRAGMA table_info(ema_ar)")}
     tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert set(er.EMA_TABLES) <= tables
     lines = {r[1] for r in c.execute("PRAGMA table_info(ema_lines)")}
@@ -750,10 +806,22 @@ def test_file_ids():
 
 
 # ------------------------------------------------------------------------------------------------- 9. misread report rows
+def _old_rows(path):
+    """The rows the export reader made of a file before it refused EMA's reports. The reader now refuses a report
+    (ema_exports.IsReport); the old code read it as an export, so its refusal is switched off here to make those rows."""
+    try:
+        return list(ema_exports.iter_rows(path, {}))
+    except getattr(ema_exports, "IsReport", ()):
+        pass
+    with mock.patch.object(ema_exports, "_refuse_report", lambda p: None, create=True), \
+            mock.patch.object(ema_exports, "detect_family", lambda cols: "unknown"):
+        return list(ema_exports.iter_rows(path, {}))
+
+
 def _old_load(store, path, family="claim_status"):
     """Load a file as the code before the reports did: its rows through the export reader, as Claim & Claim Status (the
     family the old test gave any header with a Claim Status column) or as an unknown layout."""
-    rows = list(ema_exports.iter_rows(path, {}))
+    rows = _old_rows(path)
     for r in rows:
         r["family"] = family
     store.ingest_ema_rows(rows)
@@ -796,7 +864,7 @@ def test_migration_of_an_upload_and_of_unknown_rows(store, tmp_path):
     store.conn.execute("INSERT INTO uploads (upload_id, stored_sha, kind, name, path, status) VALUES (?,?,?,?,?,?)",
                        (sha, sha, "ema", "AR 2026.xlsx", kept, "done"))
     other = put(tmp_path, "odd.xlsx", F.weekly_xlsx("claim_status", []))           # unknown layout rows of a non-report
-    junk = list(ema_exports.iter_rows(F.write(str(tmp_path / "junk.xlsx"), F.production_xlsx(prod_rows())), {}))
+    junk = _old_rows(F.write(str(tmp_path / "junk.xlsx"), F.production_xlsx(prod_rows())))
     for r in junk:
         r["family"] = "unknown"
     store.ingest_ema_rows(junk)
@@ -893,7 +961,7 @@ def fake_ledger(monkeypatch):
     calls = []
 
     def apply_production_file(store_, path, rec, *, file_id, via, origin=None, force=False, ledger, deadline=None,
-                              serverless=False, log=print):
+                              serverless=False, log=print, source_name=None, source_kind=None):
         acct = er.Account()
         rows = list(er.iter_production(path, rec, salt=er.key_salt(store_.conn), account=acct))
         calls.append((file_id, len(rows), ledger))
@@ -936,10 +1004,291 @@ def test_a_raw_csv_too_large_for_this_site_waits_until_a_zipped_copy_is_read(sto
     pid = er.provisional_id("c" * 64)
     er.record_waiting(store.conn, file_id=pid, report=rec.report, source_name="2026 Production.csv", via="dropbox",
                       origin={"dropbox_id": "id:big", "content_hash": "c" * 64}, reason=er.BIG_CSV_REASON, size=len(data))
-    assert er.waiting(store.conn)[0]["status_reason"].startswith("Too large to read on this site")
+    assert er.waiting(store.conn)[0]["status_reason"] == er.BIG_CSV_REASON
+    # the sentence says exactly what to do, wherever it shows (the catalog row, the Data tab, Today, the alert)
+    assert "Upload it on the Upload page (it compresses it), or put a zipped copy in the same Dropbox folder" in er.BIG_CSV_REASON
+    assert er.waiting_reason(store.conn, "production") == er.BIG_CSV_REASON and er.waiting_reason(store.conn, "ar_report") is None
     z = put(tmp_path, "2026 Production.zip", F.zipped("2026 Production.csv", data))
     res = er.ingest_file(store, z, via="dropbox", ledger="L")
     assert res["members"][0]["status"] == "current"
     assert one(store.conn, "SELECT status, replaced_by FROM ema_report_files WHERE file_id=?", pid) == ("superseded",
                                                                                                     res["members"][0]["file_id"])
     assert not er.waiting(store.conn)
+
+
+# ------------------------------------------------------------------------------------------- 11. what a damaged file can do
+def real_ledger(tmp_path):
+    from remitwatch import ema_ledger as el
+
+    return el, el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+
+
+def year_rows(year, n, last_posted, extra=()):
+    """A service-year Production file: a charge and a payment on n claims of three insurers."""
+    payers = [F.PAYERS["bcbs"], F.PAYERS["medicare"], F.PAYERS["commercial"]]
+    out = []
+    for i in range(n):
+        svc = D(year, 1 + i % 10, 2)
+        out.append(F.production_row(charges=150, posted=svc, svc=svc, link=F.link_no(year * 1000 + i), patient=i % 4,
+                                    payer=payers[i % 3], primary=payers[i % 3]))
+        out.append(F.production_row(ins_paid=80, check=F.check_no(i % 7), posted=min(D(svc.year, svc.month, 20), last_posted),
+                                    svc=svc, link=F.link_no(year * 1000 + i), patient=i % 4, payer=payers[i % 3],
+                                    primary=payers[i % 3]))
+    return out + list(extra)
+
+
+def test_a_date_no_export_can_hold_is_left_out_and_never_dates_the_file(tmp_path):
+    """A posted date after tomorrow, a service date more than a month ahead or before 2000, and five digits written as
+    text (a damaged cell, not an Excel serial) are left out and counted. The file's as_of is its newest real posting."""
+    good = [F.production_row(posted=D(2026, 4, 1), svc=D(2026, 3, 2)) for _ in range(5)]
+    bad = [F.production_row(posted="71234"),                                    # text: never read as the year 2095
+           F.production_row(posted=D(2095, 1, 10)),                             # after tomorrow
+           F.production_row(svc=D(2027, 3, 1), posted=D(2026, 12, 30)),         # a visit two months ahead
+           F.production_row(svc=D(1999, 12, 31), posted=D(2026, 4, 1))]         # before any real service
+    tomorrow = F.production_row(posted=D(2027, 1, 1), svc=D(2026, 12, 30))      # a posting stamped tomorrow is real
+    p = put(tmp_path, "p.csv", F.production_csv(good + bad + [tomorrow]))
+    acct = er.Account()
+    kept = list(er.iter_production(p, er.recognize(p, "p.csv"), salt=SALT, account=acct))
+    assert len(kept) == 6 and acct["left"]["no_date"] == 4 and acct["out_of_range_dates"] == 3 and acct["bad_dates"] == 4
+    assert acct["posted_hi"] == "2027-01-01" and acct["as_of"] == TODAY                # never later than the day it is read
+    # an .xlsx cell typed as a number is an Excel serial: 71234 is the year 2095, so it is left out too
+    x = put(tmp_path, "p.xlsx", F.production_xlsx(good + [F.production_row(posted=71234)]))
+    acct = er.Account()
+    assert len(list(er.iter_production(x, er.recognize(x, "p.xlsx"), salt=SALT, account=acct))) == 5
+    assert acct["out_of_range_dates"] == 1 and acct["as_of"] == "2026-04-01"
+    # the A/R: a service date in 2062 leaves its row out; an aging date after tomorrow is a damaged cell, left blank
+    rows = [F.ar_row(claim=F.claim_id(1), aging=D(2026, 11, 15)), F.ar_row(claim=F.claim_id(2), svc=D(2062, 1, 15)),
+            F.ar_row(claim=F.claim_id(3), aging=D(2031, 5, 5))]
+    a = put(tmp_path, "a.xlsx", F.ar_xlsx(rows))
+    acct = er.Account()
+    got = list(er.iter_ar(a, er.recognize(a, "a.xlsx"), salt=SALT, account=acct))
+    assert [r["claim_id"] for r in got] == [F.claim_id(1), F.claim_id(3)] and got[1]["aging_date"] is None
+    assert acct["left"]["no_date"] == 1 and acct["out_of_range_dates"] == 2 and acct["as_of"] == "2026-11-15"
+
+
+def test_a_mistyped_ar_service_year_never_wipes_the_claim_links_or_freezes_the_ar(store, tmp_path):
+    """A 2026 A/R with one service date typed as 2062: the row is left out, the snapshot covers 2026 alone, the 2025
+    snapshot and its claim links stay, and next month's corrected export is read."""
+    r25 = [F.ar_row(claim=F.claim_id(i), link=F.link_no(i), svc=D(2025, 6, 2), aging=D(2026, 11, 1)) for i in range(1, 301)]
+    assert er.ingest_file(store, put(tmp_path, "ar2025.xlsx", F.ar_xlsx(r25)), via="test")["status"] == "current"
+    r26 = [F.ar_row(claim=F.claim_id(1000 + i), link=F.link_no(1000 + i), svc=D(2026, 10, 2), aging=D(2026, 11, 15))
+           for i in range(1, 301)] + [F.ar_row(claim=F.claim_id(5000), link=F.link_no(5000), svc=D(2062, 1, 15))]
+    r = er.ingest_file(store, put(tmp_path, "ar2026.xlsx", F.ar_xlsx(r26)), via="test")
+    assert r["status"] == "current" and r["box"]["years"] == ["2026"] and r["as_of"] == "2026-11-15"
+    c = store.conn
+    assert one(c, "SELECT COUNT(*) FROM ema_claim_links") == (600,)
+    assert one(c, "SELECT COUNT(*) FROM ema_ar WHERE svc_year='2025'") == (300,)
+    later = [F.ar_row(claim=F.claim_id(1000 + i), link=F.link_no(1000 + i), svc=D(2026, 11, 2), aging=D(2026, 12, 15))
+             for i in range(1, 301)]
+    r2 = er.ingest_file(store, put(tmp_path, "ar2026b.xlsx", F.ar_xlsx(later)), via="test")
+    assert r2["status"] == "current" and one(c, "SELECT DISTINCT file_id FROM ema_ar WHERE svc_year='2026'") == (r2["file_id"],)
+    # a file with rows in 2023 and 2026 only takes those two years; the years between keep their own snapshots
+    gap = [F.ar_row(claim=F.claim_id(7000), link=F.link_no(7000), svc=D(2023, 3, 1), aging=D(2026, 12, 20)),
+           F.ar_row(claim=F.claim_id(7001), link=F.link_no(7001), svc=D(2026, 12, 1), aging=D(2026, 12, 20))]
+    r3 = er.ingest_file(store, put(tmp_path, "gap.xlsx", F.ar_xlsx(gap)), via="test")
+    assert r3["box"]["years"] == ["2023", "2026"] and r3["scope"] == "2023, 2026"
+    assert one(c, "SELECT COUNT(*) FROM ema_ar WHERE svc_year='2025'") == (300,)
+
+
+def shifted_production(tmp_path, n=200, shift=(5,)):
+    """A Production CSV of 2n rows in which the given data lines carry their description unquoted: the comma in it adds
+    a cell and shifts every later column by one (a patient's name lands in the payer column, a staff name in the check)."""
+    payers = [F.PAYERS["bcbs"], F.PAYERS["medicare"], F.PAYERS["commercial"]]
+    rows = []
+    for i in range(n):
+        rows.append(F.production_row(charges=150, posted=D(2026, 3, 2), svc=D(2026, 3, 2), link=F.link_no(i), patient=i % 4,
+                                     payer=payers[i % 3], primary=payers[i % 3]))
+        rows.append(F.production_row(ins_paid=80, check=F.check_no(i % 7), posted=D(2026, 4, 1 + i % 20), svc=D(2026, 3, 2),
+                                     link=F.link_no(i), patient=i % 4, payer=payers[i % 3], primary=payers[i % 3]))
+    lines = F.production_csv(rows).decode().split("\r\n")
+    for k in shift:
+        assert '"Office visit, test"' in lines[k + 1]
+        lines[k + 1] = lines[k + 1].replace('"Office visit, test"', "Office visit, test", 1)
+    return put(tmp_path, f"shifted{len(shift)}.csv", "\r\n".join(lines).encode())
+
+
+def test_a_shifted_csv_row_is_left_out_and_no_name_reaches_the_ledger_the_store_or_the_copy(store, tmp_path, monkeypatch):
+    from remitwatch import cloud, detect
+
+    p = shifted_production(tmp_path)
+    acct = er.Account()
+    kept = list(er.iter_production(p, er.recognize(p, "p.csv"), salt=SALT, account=acct))
+    assert len(kept) == 399 and acct["left"]["misaligned"] == 1 and acct["rows_read"] == 400
+    for r in kept:
+        _assert_clean([str(v) for v in r])
+    el, lg = real_ledger(tmp_path)
+    res = er.ingest_file(store, p, via="test", ledger=lg, log=Log())
+    assert res["status"] == "current" and res["rows_applied"] == 399            # one row in 400 is under the H1 share
+    el.refresh(store, lg, log=Log())
+    _assert_clean([n for (n,) in lg.conn.execute("SELECT name FROM names")])
+    _assert_clean(_text_cells(store.conn))
+    detect.ensure_schema(store.conn)
+    orig = detect.ensure_schema
+    monkeypatch.setattr(detect, "ensure_schema", lambda c: (orig(c), er.ensure_schema(c)))
+    tables = ([t for t in cloud.SERVING_TABLES if t[0] != "meta"] + [("meta", None, er.SERVING_META_FILTER)]
+              + er.serving_tables(store.conn))
+    monkeypatch.setattr(cloud, "SERVING_TABLES", tables)
+    copy = str(tmp_path / "serving.sqlite")
+    cloud.build_serving(store.conn, copy)
+    c = sqlite3.connect(copy)
+    _assert_clean(_text_cells(c))
+    c.close()
+    # many shifted rows: the layout changed, and the file waits for a person
+    many = shifted_production(tmp_path, shift=range(3, 60, 7))
+    held = er.ingest_file(store, many, via="test", ledger=lg, log=Log())
+    assert held["status"] == "held" and "more or fewer cells" in held["reason"]
+    lg.close()
+
+
+def test_a_file_cut_short_is_held_and_its_last_line_is_never_read(store, tmp_path):
+    rows = [F.production_row(charges=150, link=F.link_no(i), patient=i % 4) for i in range(50)]
+    rows.append(F.production_row(ins_paid=80, check=F.check_no(1), link=F.link_no(1), posted=D(2026, 4, 1)))
+    data = F.production_csv(rows)
+    last = data.rstrip(b"\r\n").rsplit(b"\r\n", 1)[1]
+    cuts = {"inside a quoted description": data.rfind(b'"Office visit, test"') + 8,
+            "after the check number": len(data) - len(last) + last.find(F.check_no(1).encode()) + 9 + 2}
+    el, lg = real_ledger(tmp_path)
+    for label, cut in cuts.items():
+        p = put(tmp_path, f"cut{cut}.csv", data[:cut])
+        acct = er.Account()
+        got = list(er.iter_production(p, er.recognize(p, "p.csv"), salt=SALT, account=acct))
+        assert acct["cut_short"] and len(got) == 50 and acct["left"]["misaligned"] == 1, label
+        assert all(g.check_no is None for g in got), label                       # the cut payment row is never kept
+        res = er.ingest_file(store, p, via="test", ledger=lg, log=Log())
+        assert res["status"] == "held" and "cut short" in res["reason"], label
+    assert one(lg.conn, "SELECT COUNT(*) FROM postings") == (0,)
+    a = F.ar_csv([F.ar_row(claim=F.claim_id(i), link=F.link_no(i)) for i in range(1, 30)])
+    r = er.ingest_file(store, put(tmp_path, "ar_cut.csv", a[:-30]), via="test")
+    assert r["status"] == "held" and "cut short" in r["reason"] and one(store.conn, "SELECT COUNT(*) FROM ema_ar") == (0,)
+    lg.close()
+
+
+@pytest.mark.parametrize("fmt", ["iso_csv", "xlsx"])
+def test_no_reader_holds_the_file_when_its_dates_need_no_order(tmp_path, monkeypatch, fmt):
+    """Typed dates in an .xlsx and ISO dates in a CSV give no sample for the date order: the reader still holds at most
+    ORDER_SAMPLES rows before the first row comes out (it held the whole file: 82 MB for 60,000 rows of an .xlsx)."""
+    monkeypatch.setattr(er, "ORDER_SAMPLES", 200)
+    n = 6000
+    p = str(tmp_path / ("big.xlsx" if fmt == "xlsx" else "big.csv"))
+    tot = F.big_production_xlsx(p, n) if fmt == "xlsx" else F.big_production_csv(p, n, iso=True)
+    rec = er.recognize(p, os.path.basename(p))
+    it = er.iter_production(p, rec, salt=SALT, account={})
+    tracemalloc.start()
+    try:
+        next(it)
+        held = tracemalloc.get_traced_memory()[0]
+    finally:
+        tracemalloc.stop()
+    assert held < 3 * 1024 * 1024, held
+    assert 1 + sum(1 for _ in it) == tot["rows"]
+
+
+def test_an_ar_whose_dates_cannot_be_read_is_held(store, tmp_path):
+    good = [F.ar_row(claim=F.claim_id(i), link=F.link_no(i), svc=D(2026, 10, 1 + i % 28), aging=D(2026, 11, 10))
+            for i in range(1, 1201)]
+    assert er.ingest_file(store, put(tmp_path, "ar1.csv", F.ar_csv(good)), via="test")["status"] == "current"
+    bad = [dict(r) for r in good]
+    for k, r in enumerate(bad):
+        r["Aging Date"] = D(2026, 11, 14)
+        if k % 2:
+            s = r["Service Date"]
+            r["Service Date"] = f"{s.year}.{s.month:02d}.{s.day:02d}"            # a format the reader does not know
+    res = er.ingest_file(store, put(tmp_path, "ar2.csv", F.ar_csv(bad)), via="test")
+    assert res["status"] == "held" and "layout or format changed" in res["reason"] and "600 rows" in res["reason"]
+    c = store.conn
+    assert one(c, "SELECT COUNT(*) FROM ema_ar") == (1200,)
+    assert one(c, "SELECT COUNT(*) FROM ema_ar_items WHERE absent_since IS NOT NULL") == (0,)
+    assert er.preview(c, put(tmp_path, "ar3.csv", F.ar_csv(bad)))["holds"][0]["code"] == "format"
+
+
+def test_a_shifted_ar_row_is_left_out_and_its_note_never_reaches_the_copy(store, tmp_path):
+    note = "Test note, spoke with Testpatient about the bill"
+    rows = [F.ar_row(claim=F.claim_id(i), link=F.link_no(i)) for i in range(1, 50)]
+    rows.append(F.ar_row(claim=F.claim_id(77), link=F.link_no(77), note=note))
+    text = F.ar_csv(rows).decode().replace(f'"{note}"', note)
+    r = er.ingest_file(store, put(tmp_path, "ar.csv", text.encode()), via="test")
+    assert r["status"] == "current" and r["rows_kept"] == 49 and r["account"]["left"]["misaligned"] == 1
+    assert one(store.conn, "SELECT COUNT(*) FROM ema_ar WHERE claim_id=?", F.claim_id(77)) == (0,)
+    assert not [t for t in _text_cells(store.conn) if "spoke with" in t or "Testpatient" in t]
+
+
+def test_a_report_never_replaces_an_exports_ema_sources_row(store, tmp_path):
+    """EMA names every download alike: an A/R named like a weekly export keeps the export's row and its pull time."""
+    store.record_export("Report.xlsx", "e" * 64, "claim_status", "2026-11-18T09:00:00", 40)
+    os.makedirs(tmp_path / "ar")
+    res = er.ingest_file(store, F.write(str(tmp_path / "ar" / "Report.xlsx"), F.ar_xlsx([F.ar_row()])), via="test")
+    assert res["status"] == "current"
+    c = store.conn
+    assert one(c, "SELECT family, created_at FROM ema_sources WHERE sha256=?", "e" * 64) == ("claim_status", "2026-11-18T09:00:00")
+    assert one(c, "SELECT source_name, family FROM ema_sources WHERE sha256=?", res["file_id"]) == ("report:Report.xlsx", "ar_report")
+
+
+def test_a_crash_between_the_ledger_and_the_store_is_repaired_on_the_next_cycle(store, tmp_path):
+    """The ledger committed a Production file and the process died before the store did: the next cycle finds it
+    'already' applied and writes back its catalog row, its files and ema_sources rows, and the claim address."""
+    el, lg = real_ledger(tmp_path)
+    payers = [F.PAYERS["bcbs"], F.PAYERS["medicare"], F.PAYERS["commercial"]]
+    rows = [F.production_row(charges=150, link=F.link_no(i), patient=i % 4, payer=payers[i % 3], primary=payers[i % 3])
+            for i in range(60)]
+    p = put(tmp_path, "prod.csv", F.production_csv(rows))
+    fid = er.file_id_of(p)
+    assert el.apply_production_file(store, p, er.recognize(p, "prod.csv"), file_id=fid, via="mirror", ledger=lg,
+                                    log=Log())["status"] == "current"
+    store.conn.rollback()                                    # the store's half never happened
+    c = store.conn
+    assert one(c, "SELECT COUNT(*) FROM files WHERE sha256=?", fid) == (0,)
+    r = er.ingest_file(store, p, via="mirror", ledger=lg, log=Log())
+    assert r["status"] == "already"
+    assert one(c, "SELECT status FROM ema_report_files WHERE file_id=?", fid) == ("current",)
+    assert one(c, "SELECT kind, lines FROM files WHERE sha256=?", fid) == ("ema:production", 60)
+    assert one(c, "SELECT source_name FROM ema_sources WHERE sha256=?", fid) == ("report:prod.csv",)
+    assert er.claim_url_template(c) == F.CLAIM_PREFIX + "{claim}"
+    lg.close()
+
+
+# ------------------------------------------------------------------------------- the A/R's billing notes (needs_D, SWEEP)
+def test_each_ar_billing_note_is_kept_as_what_it_says_never_its_words(store, tmp_path):
+    """Each A/R line's Last Billing Note is read as what it says was done (states.classify_note): its kinds, the newest
+    date it states and an "allow N days", stored as ema_ar.note_kind, note_date and note_wait. A date written without a
+    year is resolved on the file's own as_of (the newest service or aging date), not on the day the file is read: a file
+    read weeks after it was pulled keeps the dates its notes meant. The note's words are never stored or served."""
+    notes = {
+        1: "Test note: appeal sent 11/3/2026 to the payer, allow 45 days for a decision",
+        2: "Test note: called payer 11/15, claim resubmitted",       # after the file's as_of: last year's 11/15
+        3: "Test note: decided not to appeal this fixture claim",
+    }
+    rows = [F.ar_row(claim=F.claim_id(i), link=F.link_no(i), note=notes.get(i), aging=D(2026, 11, 10), svc=D(2026, 10, 1))
+            for i in (1, 2, 3, 4)]
+    p = put(tmp_path, "AR 2026.xlsx", F.ar_xlsx(rows))
+    res = er.ingest_file(store, p, via="mirror", log=lambda *a: None)
+    assert res["status"] == "current" and res["as_of"] == "2026-11-10"
+    got = {r[0]: r[1:] for r in store.conn.execute("SELECT claim_id, note_kind, note_date, note_wait FROM ema_ar")}
+    assert "appeal" in got[F.claim_id(1)][0].split(",") and got[F.claim_id(1)][1:] == ("2026-11-03", 45)
+    assert set(got[F.claim_id(2)][0].split(",")) >= {"call", "resubmitted"} and got[F.claim_id(2)][1:] == ("2025-11-15", None)
+    assert "no_appeal" in got[F.claim_id(3)][0].split(",") and "appeal" not in got[F.claim_id(3)][0].split(",")
+    assert got[F.claim_id(4)] == (None, None, None)
+    # never the words: no text column of the table holds any part of a note
+    texts = [v for r in store.conn.execute("SELECT * FROM ema_ar") for v in r if isinstance(v, str)]
+    assert not any(w in t for t in texts for w in ("Test note", "decided", "allow 45"))
+    # the same export saved again is still 'already' (what a note says is not part of the snapshot's content id)
+    again = er.ingest_file(store, put(tmp_path, "AR 2026 again.xlsx", F.ar_xlsx(rows, created=dt.datetime(2026, 11, 21, 9))),
+                           via="mirror", log=lambda *a: None)
+    assert again["status"] == "already"
+    # the dashboard's copy serves the three (no key, no words)
+    serving = dict((t, c) for t, c, _w in er.serving_tables(store.conn))
+    assert {"note_kind", "note_date", "note_wait"} <= set(serving["ema_ar"].split(","))
+
+
+def test_an_ar_file_read_by_a_build_without_note_columns_gets_them_and_keeps_its_rows(tmp_path):
+    """A store made before the note columns existed: ensure_schema adds them (rows read before stay empty until the next
+    A/R pull, which fills them), and nothing else changes."""
+    c = sqlite3.connect(str(tmp_path / "old.sqlite"))
+    c.execute("CREATE TABLE ema_ar (file_id TEXT, row_no INTEGER, as_of TEXT, claim_id TEXT, has_note INTEGER, "
+              "PRIMARY KEY (file_id, row_no))")
+    c.execute("INSERT INTO ema_ar (file_id, row_no, as_of, claim_id, has_note) VALUES ('f', 1, '2026-11-10', 'X', 1)")
+    c.commit()
+    er.ensure_schema(c)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(ema_ar)")}
+    assert {"note_kind", "note_date", "note_wait"} <= cols
+    assert tuple(c.execute("SELECT claim_id, has_note, note_kind FROM ema_ar").fetchone()) == ("X", 1, None)
+    c.close()
