@@ -106,7 +106,9 @@ BATCH_ROWS = 60_000                 # ... and at most about this many rows
 PIN_DAYS = 90                       # a reopened bill stays hot this long
 HISTORY_KEPT = 120                  # runs kept in meta archive:history
 COMPACT_FREE_SHARE = 0.10           # compact() vacuums when this share of the pages is free
-COMPACT_MARGIN_MB = 64              # ... and the budget leaves room for the compacted copy plus this much
+COMPACT_MARGIN_MB = 64              # ... and the budget leaves room for what VACUUM holds plus this much
+COMPACT_GROWTH = 1.75               # what VACUUM holds beside an in-memory store, in compacted sizes: the copy, and while it
+                                    # writes it back the journal of the pages it replaces (1.66 on Vercel's real image)
 OPEN_STATES = ("work_now", "waiting", "cant_check")
 CLOSED_STATES = ("done", "accepted", "expired")
 ACTIVE_STATUSES = ("open", "in_progress", "appealed")
@@ -2901,8 +2903,9 @@ def compact(conn: sqlite3.Connection, *, min_free_share: float = COMPACT_FREE_SH
 
     VACUUM builds the compacted copy beside the store. It is built in memory (temp_store=MEMORY while it runs): with
     SQLite's default it is written to a file of that size in the temporary folder, which on a serverless host is small
-    and shared with the dashboard's copy and the ledger. So it runs only when the memory budget (`budget`, else
-    budget_mb(mode)) less what the process holds now (`rss`, else its resident set) leaves room for the compacted copy
+    and shared with the dashboard's copy and the ledger. Writing it back into an in-memory store keeps a journal of the
+    pages it replaces, so VACUUM holds about COMPACT_GROWTH times the compacted size. It runs only when the memory budget
+    (`budget`, else budget_mb(mode)) less what the process holds now (`rss`, else its resident set) leaves room for that
     and `margin_mb`. It never raises: a skip or a failure is returned with its reason ({'skipped': why, ...}), and the
     store is then as it was."""
     try:
@@ -2914,11 +2917,11 @@ def compact(conn: sqlite3.Connection, *, min_free_share: float = COMPACT_FREE_SH
     if not pc or fl / pc < min_free_share:
         return {"skipped": "too little of the store is free to be worth it", "free_share": round(fl / pc, 3) if pc else 0,
                 "bytes": ps * pc}
-    need_mb = -(-ps * (pc - fl) // 1048576) + int(margin_mb)
+    need_mb = -(-int(COMPACT_GROWTH * ps * (pc - fl)) // 1048576) + int(margin_mb)
     bud = budget if budget is not None else budget_mb(mode, env=env)
     held = rss if rss is not None else _rss_mb()
     if bud and held is not None and bud - held < need_mb:
-        return {"skipped": f"not enough memory: the compacted copy needs about {need_mb:,} MB and {max(bud - held, 0):,} MB "
+        return {"skipped": f"not enough memory: compacting needs about {need_mb:,} MB and {max(bud - held, 0):,} MB "
                            f"of the {bud:,} MB budget is left", "bytes": ps * pc, "need_mb": need_mb, "rss_mb": held,
                 "budget_mb": bud}
     t0 = time.time()

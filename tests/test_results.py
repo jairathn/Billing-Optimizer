@@ -1646,3 +1646,15 @@ def test_a_payment_from_an_unknown_payer_is_never_counted_as_a_second_payers(sto
           claims=[{"pcn": F.claim_id(1, sub=2), "status": "2", "lines": [ln("99213", 150, 20, [("CO", "45", 130)])]}])
     run(store)
     assert {e["bucket"] for e in money_of(store, "S1")["events"] if e["cents"] > 0} == {"c"}
+
+
+def test_a_second_payer_item_whose_own_payer_is_unknown_never_counts_a_payment_as_found(store):
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", payer="",
+               claims=[{"pcn": F.claim_id(1), "lines": [ln("99213", 150, 80, [("PR", "2", 20), ("CO", "45", 50)])]}])
+    item(store, finding_id="S1", signal="SECONDARY_NOT_BILLED", category="denial", line_key=f"{tk}-0-0", claim_key=f"{tk}-0",
+         transaction_key=tk, payer_name="", payer_group="Unknown", first_seen="2026-04-01T08:00:00+00:00", work_state="work_now",
+         shortfall_cents=2000)
+    remit(store, trace=F.check_no(2), paid_on="2026-05-02",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "2", "lines": [ln("99213", 150, 20, [("CO", "45", 130)])]}])
+    run(store)
+    assert {e["bucket"] for e in money_of(store, "S1")["events"] if e["cents"] > 0} == {"c"}

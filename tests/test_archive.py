@@ -1178,6 +1178,28 @@ def test_compact_waits_when_the_memory_budget_has_no_room_and_never_raises(tmp_p
     assert archive.compact(gone)["skipped"]
 
 
+def test_compact_counts_the_copy_and_the_journal_vacuum_holds_beside_an_in_memory_store():
+    """VACUUM of an in-memory store holds the compacted copy and, while it writes it back, the rollback journal of the
+    pages it replaces: on Vercel's real image the process grew by 1.66 times the compacted size (needs_E section 7.4).
+    The guard counts archive.COMPACT_GROWTH times the compacted size, so room for the copy alone is not enough."""
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE t (b BLOB)")
+    db.executemany("INSERT INTO t VALUES (?)", [(os.urandom(4000),) for _ in range(2400)])     # about 10 MB of pages
+    db.execute("DELETE FROM t WHERE rowid % 2 = 0")
+    db.commit()
+    ps, pc, fl = (db.execute(f"PRAGMA {k}").fetchone()[0] for k in ("page_size", "page_count", "freelist_count"))
+    copy_mb = ps * (pc - fl) / 1048576
+    assert copy_mb > 4 and archive.COMPACT_GROWTH >= 1.66
+    room = int(copy_mb) + 2                     # room for the compacted copy, not for the journal beside it
+    out = archive.compact(db, min_free_share=0.01, budget=1000, rss=1000 - room, margin_mb=0)
+    assert out["skipped"].startswith("not enough memory") and out["need_mb"] >= archive.COMPACT_GROWTH * copy_mb
+    assert db.execute("PRAGMA page_count").fetchone()[0] == pc                    # nothing done
+    ok = archive.compact(db, min_free_share=0.01, budget=1000, rss=1000 - int(archive.COMPACT_GROWTH * copy_mb) - 2,
+                         margin_mb=0)
+    assert ok["after"] < ok["before"]
+    db.close()
+
+
 def test_a_serverless_archive_run_keeps_its_temporary_tables_in_memory(tmp_path, frozen_hook, monkeypatch):
     store = world(tmp_path, "compact")
     detect(store)

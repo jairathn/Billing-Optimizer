@@ -963,11 +963,16 @@ def _found_why(ev: dict, cover: list[str], reg: dict) -> str | None:
     if any(r.get("signal") == "NOT_SENT" for r in regs):
         return "not_sent"
     for r in regs:
+        # another payer's money only when both payers are known: a payment or an item with no payer named is never a guess
         if r.get("signal") == "SECONDARY_NOT_BILLED" and (
-                ev.get("kind") == "mark" or (ev.get("group") not in (None, "", "Unknown")
+                ev.get("kind") == "mark" or (_known_payer(ev.get("group")) and _known_payer(r.get("payer_group"))
                                              and not _same_payer(ev.get("group"), r.get("payer_group")))):
             return "secondary"
     return None
+
+
+def _known_payer(group: Any) -> bool:
+    return group not in (None, "", "Unknown")
 
 
 def _bucket(conn: sqlite3.Connection, ev: dict, cover: list[str], reg: dict, work: dict,
