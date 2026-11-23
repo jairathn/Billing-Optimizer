@@ -214,7 +214,10 @@ function tdBlindHtml(bl){
   const head = parts.length > 1 ? `: ${parts.map(p => `<span title="${esc(p.basis || '')}">${money(p.cents)} ${esc(p.words || '')}</span>`).join(' and ')}`
     : (bl.cents ? `: <span title="${esc((parts[0] || {}).basis || bl.basis || '')}">${money(bl.cents)}</span> the site cannot check` : '');
   const anchor = (bl.feeds || []).some(f => f.stale && f.feed === '835') ? 'dtMissing' : 'dtReports';
-  return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${head}.</b> ${lines.map(esc).join(' ')} <a href="#data" class="go-data" data-anchor="${anchor}">What to do</a></div>`;
+  const go = `<a href="#data" class="go-data" data-anchor="${anchor}">What to do</a>`;
+  // on a phone the headline keeps its dollars and the link; why folds away, so the plan stays on the first screen
+  if(tdNarrow()) return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${head}.</b> ${go}<details style="margin-top:4px"><summary>Why</summary>${lines.map(esc).join(' ')}</details></div>`;
+  return `<div class="banner" role="status" style="border-left-color:var(--bad)"><b>Blind spot${head}.</b> ${lines.map(esc).join(' ')} ${go}</div>`;
 }
 async function tdBlindBanner(el, given){
   if(!el) return undefined;

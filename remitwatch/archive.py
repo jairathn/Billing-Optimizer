@@ -1106,10 +1106,29 @@ def _index_rows(rec: dict, name: str, at: str, run_id: str | None, plb_seen: int
     return bill_row, id_rows, f_rows
 
 
+def _pattern_lines(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Every routine-rate pattern's line keys (finding id -> line keys): findings that list lines and belong to no claim.
+    Only detection makes them, and it never runs beside the archive, so the set is fixed for a run; their statuses are
+    what a person may change meanwhile."""
+    if not _have(conn, "findings"):
+        return {}
+    fcols = set(_cols(conn, "findings"))
+    if "evidence" not in fcols:
+        return {}
+    cond = " AND ".join(f"{c} IS NULL" for c in ("patient_control_number", "claim_key") if c in fcols) or "1"
+    out = {}
+    for fid, ev in conn.execute(f"SELECT finding_id, evidence FROM findings WHERE {cond} AND evidence LIKE '%\"line_keys\"%'"):
+        lks = _line_keys({"evidence": ev})
+        if lks:
+            out[fid] = lks
+    return out
+
+
 def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, name: str, meta: dict, *, at: str,
-                  run_id: str | None, years: set[str], today: str) -> dict:
+                  run_id: str | None, years: set[str], today: str, patterns: dict[str, list[str]] | None = None) -> dict:
     """One transaction: check each bill's items again, put the index rows in, take the hot rows out (the counts must equal
-    what the file holds), lock the service years taken."""
+    what the file holds), lock the service years taken. `patterns` (finding id -> line keys) are the routine-rate
+    findings: they reach no bill through a claim id or claim key, so each is read again by its id."""
     conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1138,6 +1157,17 @@ def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, n
             if any(_is_open(r[i["status"]] if "status" in i else None, r[i["work_state"]] if "work_state" in i else None,
                             r[i["stale"]] if "stale" in i else None) for r in x["rows"]):
                 changed.add(b)
+        # ... and a routine-rate pattern a person started meanwhile (or that is open now) keeps the bills of its lines
+        if patterns:
+            batch_lines = {lk: b for lk, b in conn.execute("SELECT line_key, bill FROM temp.arc_bl")}
+            touching = [fid for fid, lks in patterns.items() if any(k in batch_lines for k in lks)]
+            for i in range(0, len(touching), 500):
+                part = touching[i:i + 500]
+                for fid, status, ws, stale, notes, appealed in conn.execute(
+                        f"""SELECT finding_id, status, work_state, stale, notes, appealed_at FROM findings
+                            WHERE finding_id IN ({','.join('?' * len(part))})""", part):
+                    if _is_open(status, ws, stale) or _worked(status, notes, appealed):
+                        changed.update(batch_lines[k] for k in patterns[fid] if k in batch_lines)
         q = ",".join("?" * len(records))
         bills_now = [r["bill"] for r in records]
         changed.update(b for (b,) in conn.execute(f"SELECT bill FROM archive_pins WHERE until > ? AND bill IN ({q})",
@@ -1232,6 +1262,7 @@ def _run(conn: sqlite3.Connection, *, horizon: int | None, budget_state: dict | 
     if sink is not None:
         _meta_put(conn, META_WHERE, sink.describe())
         conn.commit()
+    patterns = _pattern_lines(conn) if sink is not None and bills and not p["blocked"] else {}
     if sink is not None and bills and not p["blocked"]:
         for batch in _batches(bills, size=batch_bills):
             if deadline is not None and time.time() > deadline:
@@ -1252,7 +1283,8 @@ def _run(conn: sqlite3.Connection, *, horizon: int | None, budget_state: dict | 
                         "horizon_months": p["horizon"]["months"], "cutoff": p["cutoff"]}
                 years = {y for r in records for y in (r.get("years") or [])}
                 del payload, gz
-                done = _commit_batch(conn, records, counts, name, meta, at=at, run_id=run_id, years=years, today=today)
+                done = _commit_batch(conn, records, counts, name, meta, at=at, run_id=run_id, years=years, today=today,
+                                     patterns=patterns)
             except ArchiveError as exc:
                 out["errors"].append(str(exc)[:300])
                 log(f"  archive: a batch was not archived ({str(exc)[:120]})")
@@ -1526,6 +1558,73 @@ def before_ledger_retain(ledger: Any, cutoff: str, *, sink: Any = None, run_id: 
         c.commit()
     log(f"  archive: {n_rows:,} ledger postings (service {str(lo)[:7]} to {str(hi)[:7]}) to {name}")
     return {"rows": n_rows, "file": name, "gz_bytes": put["gz_bytes"], "written": put["written"]}
+
+
+_NAME_SHA = re.compile(r"-([0-9a-f]{24})\.jsonl\.gz$")
+
+
+def _archive_names(conn: sqlite3.Connection, sink: Any) -> list[tuple[str, str | None]]:
+    """(file name, the full digest the index holds or None) of every file a moved archive must carry: each file the
+    store's index lists (bills/, ar/) and each ledger part the archive holds (the ledger keeps their index itself)."""
+    ensure_schema(conn)
+    out = [(n, s) for n, s in conn.execute("SELECT name, sha256 FROM archive_files ORDER BY name")]
+    have = {n for n, _s in out}
+    out += [(p["name"], None) for p in ledger_parts(sink) if p["name"] not in have]
+    return out
+
+
+def _file_ok(name: str, digest: str | None, data: bytes | None) -> str | None:
+    """None when the file is there, whole, and holds what its name and the index say; else why not, in a word."""
+    if data is None:
+        return "missing"
+    try:
+        sha = _sha(_gunzip(data))
+    except (ArchiveError, zlib.error, OSError):
+        return "damaged"
+    m = _NAME_SHA.search(name)
+    if (digest and sha != digest) or (m and not sha.startswith(m.group(1))):
+        return "damaged"
+    return None
+
+
+def verify_files(conn: sqlite3.Connection, sink: Any) -> dict:
+    """Every archive file the store needs (the index's files, the ledger parts) read back from `sink` and checked: there,
+    whole, and holding the content its digest names. Returns {'checked', 'missing': [names], 'damaged': [names]}."""
+    out: dict = {"checked": 0, "missing": [], "damaged": []}
+    for name, digest in _archive_names(conn, sink):
+        why = _file_ok(name, digest, sink.get(name))
+        out["checked"] += 1
+        if why:
+            out[why].append(name)
+    return out
+
+
+def copy_archive(conn: sqlite3.Connection, src: Any, dst: Any, *, log: Callable[..., Any] | None = None) -> dict:
+    """Carry the archive with its store to another host (cli import-cloud: the state folder's archive/ to the server's
+    folder; a server moved to another machine): every file the store's index lists and every ledger part, each read from
+    `src`, checked, then written to `dst` and read back (a file already there with the same content is left as it is).
+    Every file is checked before the first is written: when one is missing or damaged, nothing is copied and
+    ArchiveError names them (the store must not move without its archive: Find a claim and every reopening read it).
+    Returns {'files', 'written', 'bytes'}."""
+    log = log or _noop
+    names = _archive_names(conn, src)
+    bad = []
+    for name, digest in names:
+        why = _file_ok(name, digest, src.get(name))
+        if why:
+            bad.append(f"{name} ({why})")
+    if bad:
+        raise ArchiveError(f"{len(bad)} archive file(s) cannot be carried over: " + ", ".join(bad[:20])
+                           + (" and more" if len(bad) > 20 else ""))
+    out = {"files": 0, "written": 0, "bytes": 0}
+    for name, _digest in names:
+        data = src.get(name)
+        put = _put_verified(dst, name, data, _sha(_gunzip(data)))
+        out["files"] += 1
+        out["written"] += 1 if put["written"] else 0
+        out["bytes"] += len(data)
+    log(f"  archive: {out['files']:,} files carried over to {dst.describe()} ({out['written']:,} written)")
+    return out
 
 
 def ledger_parts(sink: Any) -> list[dict]:
@@ -1946,6 +2045,21 @@ def resolve_bill(conn: sqlite3.Connection, text: str) -> str | None:
     return r[0] if r else None
 
 
+def archived_835(conn: sqlite3.Connection, bills: Iterable[str]) -> set[str]:
+    """The bills among these (as EMA's reports write a bill, or as the store does) whose 835 claims are in the archive.
+    A second guard for EMA's checks, which find the remittance that answered a line by its bill: an archived bill was
+    answered by its 835 (the hold on bills EMA still lists keeps this from arising; this covers a store archived before
+    that rule). Reads the index only (the dashboard's copy has it)."""
+    ensure_schema(conn)
+    out: set[str] = set()
+    for b in sorted({str(x) for x in bills if x}):
+        for (i,) in conn.execute("SELECT id FROM archive_ids WHERE kind = 'pcn' AND id >= ? AND id < ?", (b, b + "~")):
+            if _ebill_fn(i) == b or _bill_of(i) == b:
+                out.add(b)
+                break
+    return out
+
+
 def lookup_claim(conn: sqlite3.Connection, claim_or_bill: str, *, sink: Any) -> dict | None:
     """Everything the archive holds for one bill (by claim id, bill id or payer claim number): {'bill', 'file',
     'archived_at', 'svc_lo', 'svc_hi', 'tables': {table: [row dicts]}}, or None when it is not archived. The rows are
@@ -1989,10 +2103,15 @@ def archived_note(f: dict) -> str:
             f"version {RULE_VERSION}. Find a claim still opens it; reopening brings it back.")
 
 
+SEARCH_NOT_BY = "the patient's name or member number"     # what Find a claim cannot find an archived claim by (the page says so)
+
+
 def search(conn: sqlite3.Connection, text: str, *, limit: int = 25) -> list[dict]:
-    """Archived bills a Find a claim search names: the start of a claim id (3 characters or more), a bill id, or a payer's
-    claim number (exact, or its first 6 characters or more). One row per bill: {'bill', 'claim_ids', 'svc_lo',
-    'svc_hi', 'archived_at', 'findings', 'file', 'archived': True}. Names are not searched in the archive."""
+    """Archived bills a Find a claim search names, by the same rules as a claim in the store: the start of a claim id (3
+    characters or more), a bill id, or a payer's claim number (exact, its first 6 characters or more, or any 8 in a row;
+    case, spaces, dashes and slashes do not matter). One row per bill: {'bill', 'claim_ids', 'svc_lo', 'svc_hi',
+    'archived_at', 'findings', 'file', 'archived': True}. Not searched in the archive: SEARCH_NOT_BY (the index holds no
+    patient detail), so the page says so under the box when such a search finds nothing."""
     ensure_schema(conn)
     up = re.sub(r"\s+", "", str(text or "")).upper()[:200]
     if len(up) < 3:
@@ -2009,6 +2128,10 @@ def search(conn: sqlite3.Connection, text: str, *, limit: int = 25) -> list[dict
         for (b,) in conn.execute("""SELECT DISTINCT bill FROM archive_ids WHERE kind = 'payer_ref' AND (id = ? OR (? >= 6 AND id >= ? AND id < ?))
                                     LIMIT 100""", (norm, len(norm), norm, norm + "￿")):
             found.append(b)
+        if len(norm) >= 8:      # any 8 characters in a row of the payer's number, as Find a claim finds a claim in the store
+            for (b,) in conn.execute("SELECT DISTINCT bill FROM archive_ids WHERE kind = 'payer_ref' AND INSTR(id, ?) > 0 LIMIT 100",
+                                     (norm,)):
+                found.append(b)
     out, seen = [], set()
     for b in found:
         if b in seen:

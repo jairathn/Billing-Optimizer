@@ -1372,3 +1372,155 @@ def test_an_open_items_ar_rows_stay_as_its_work_evidence_and_leave_once_it_is_se
     assert archive.archive_ar(store.conn, sink, today="2026-11-23") == {"files": 0, "rows": 0, "names": [], "kept_rows": 1,
                                                                          "kept_files": 1}
     store.close()
+
+
+# =========================================================================== 14. new data that names an archived bill
+def _plb_remittance(tmp_path, store, reference: str, amount: str, day: str, name: str, ctrl: str) -> None:
+    p = tmp_path / name
+    p.write_bytes(envelope("", "0.00", payer="ANTHEM", seg_count=99, isa_ctrl=ctrl, pay_date=day,
+                           plb=f"PLB*1777777772*{day[:4]}1231*{reference}*{amount}~"))
+    store.ingest_835_paths([str(p)])
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_a_payers_offset_of_an_archived_bills_payment_brings_the_bill_back(tmp_path, frozen_hook, kind):
+    """A payer takes back an archived bill's payment with a provider-level offset (PLB WO naming the claim id) rather
+    than a reversal: the bill comes back whole, so detection applies the takeback (a confirmed recovery reopens, and the
+    dispute window runs from the remittance that took the money). An offset the store held before the bill left (the
+    analysis saw it then) brings nothing back; the payer's claim number names the bill too."""
+    store = world(tmp_path, kind)
+    detect(store)
+    sink = sink_of(tmp_path, kind)
+    _plb_remittance(tmp_path, store, "WO:CB0000003C017", "50.00", "20250301", "old-plb.RMT", "000000701")   # before the archive
+    detect(store, "r2")
+    archive.run(store.conn, sink=sink, today=TODAY)
+    assert archive.resolve_bill(store.conn, "CB0000001C017") == "CB0000001"
+    assert archive.restore_touched(store.conn, sink=sink, today=TODAY)["restored"] == 0    # the old offset is no news
+    _plb_remittance(tmp_path, store, "WO:CB0000001C017", "117.60", "20261101", "late-plb.RMT", "000000777")
+    assert store.conn.execute("SELECT COUNT(*) FROM plb WHERE reference LIKE 'CB0000001C017%'").fetchone()[0] == 1
+    out = archive.restore_touched(store.conn, sink=sink, today=TODAY)
+    assert out["restored"] == 1 and out["why"] == {"payer offset": 1}
+    assert store.conn.execute("SELECT COUNT(*) FROM claims WHERE patient_control_number='CB0000001C017'").fetchone()[0] == 1
+    assert archive.restore_touched(store.conn, sink=sink, today=TODAY)["restored"] == 0
+    # by the payer's claim number (as the archive's index keeps it)
+    ref = store.conn.execute("SELECT id FROM archive_ids WHERE kind='payer_ref' AND bill='CB0000002'").fetchone()
+    assert ref
+    _plb_remittance(tmp_path, store, f"FB:{ref[0]}", "117.60", "20261102", "late-plb2.RMT", "000000778")
+    got = archive.restore_touched(store.conn, sink=sink, today=TODAY)
+    assert got["restored"] == 1 and store.conn.execute("SELECT 1 FROM archive_bills WHERE bill='CB0000002'").fetchone() is None
+    store.close()
+
+
+def test_a_reopening_recorded_for_a_bill_that_came_back_meanwhile_still_sets_the_persons_status(tmp_path, frozen_hook):
+    """Serverless: a person reopens an archived item from the dashboard's copy with "in progress". Before the next cycle
+    reads the journal, the bill came back on its own (new data). The reopening goes on as a plain status entry, so the
+    journal applies the person's status to the item; one for an item this copy does not hold waits in the journal."""
+    from remitwatch import cloud
+    store = world(tmp_path, "file")
+    detect(store)
+    conn = store.conn
+    sink = sink_of(tmp_path, "file")
+    fid = conn.execute("SELECT finding_id FROM findings WHERE patient_control_number='CB0000050C017'").fetchone()[0]
+    archive.run(conn, sink=sink, today=TODAY)
+    entry = archive.journal_entry("CB0000050C017", actor="biller", reason="payer agreed to reprocess", finding_id=fid,
+                                  status="in_progress", at="2026-11-22T15:00:00+00:00")
+    archive.restore(conn, "CB0000050C017", sink=sink, reason="new data arrived", today=TODAY)    # back meanwhile
+    ghost = archive.journal_entry("ZZ99GHOSTC017", actor="biller", finding_id="f" * 24, status="in_progress",
+                                  at="2026-11-22T15:01:00+00:00")
+    taken, rest = archive.take_journal(conn, [("actions/1.json", entry), ("actions/2.json", ghost)], sink=sink)
+    assert taken == [] and [n for n, _a in rest] == ["actions/1.json", "actions/2.json"]
+    done, left, wrote = cloud.apply_actions(conn, rest)
+    assert done == ["actions/1.json"] and left == ["actions/2.json"] and wrote
+    assert conn.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "in_progress"
+    ev = conn.execute("SELECT actor, to_status FROM finding_events WHERE finding_id=? AND kind='manual'", (fid,)).fetchall()
+    assert [tuple(e) for e in ev] == [("biller", "in_progress")]
+    # a reopening that asks for no status, of a bill that is not archived: nothing to do, taken
+    plain = archive.journal_entry("CB0000050C017", actor="biller", status=None)
+    assert archive.take_journal(conn, [("actions/3.json", plain)], sink=sink) == (["actions/3.json"], [])
+    store.close()
+
+
+def test_a_pattern_a_person_starts_while_the_run_works_keeps_its_lines(tmp_path, monkeypatch):
+    """Server: the dashboard writes statuses straight into the store while the cycle's archive runs. A routine-rate
+    pattern nobody worked (expired) does not hold its lines' bills, so the plan lets them leave; a person starts the
+    pattern after the plan, before the batch commits. The bills stay: a worked pattern keeps its lines."""
+    store = crafted("file", tmp_path)
+    keys = put_claim(store, "KN01AAAAA", "2021-03-01", n_lines=2)
+    put_claim(store, "KC01AAAAA", "2021-03-01")                          # nothing to do with the pattern: it leaves
+    put_item(store, "pat", work_state="expired", evidence={"line_keys": keys})
+    freeze_all(store)
+    real = archive._build_records
+
+    def meanwhile(c, bills):
+        out = real(c, bills)
+        c.execute("UPDATE findings SET status='in_progress', notes='calling the payer about this rate' WHERE finding_id='pat'")
+        c.commit()
+        return out
+    monkeypatch.setattr(archive, "_build_records", meanwhile)
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "file"), today=TODAY)
+    left = store.conn.execute("SELECT COUNT(*) FROM lines WHERE line_key IN (?, ?)", keys).fetchone()[0]
+    assert left == 2 and res["bills"] == 1 and res["changed_meanwhile"] == 1
+    assert store.conn.execute("SELECT 1 FROM archive_bills WHERE bill='KC01AAAAA'").fetchone()
+    store.close()
+
+
+def test_find_a_claim_finds_an_archived_claim_by_the_same_payer_number_rules_as_a_hot_one(tmp_path):
+    """Find a claim finds a claim in the store by any 8 characters in a row of the payer's claim number (the end of a
+    number, as an EOB often prints it): it finds it the same way once the claim is archived."""
+    store = crafted("file", tmp_path)
+    put_claim(store, "KA01AAAAA", "2021-03-01", payer_ref="77-ABC/12345678")
+    freeze_all(store)
+    archive.run(store.conn, sink=sink_of(tmp_path, "file"), today=TODAY)
+    for text in ("77ABC123", "12345678", "c/1234567", "77-abc/12345678"):
+        assert [x["bill"] for x in archive.search(store.conn, text)] == ["KA01AAAAA"], text
+    assert archive.search(store.conn, "2345678") == []                 # 7 in a row (not the start) is not enough
+    assert "member number" in archive.SEARCH_NOT_BY
+    store.close()
+
+
+# =========================================================================== 15. moving the store moves its archive
+def test_the_archive_moves_with_its_store_from_the_state_folder_to_a_server_folder(tmp_path, frozen_hook):
+    """Vercel to a server (cli import-cloud) or a server to another machine: the store keeps its index, so its archive
+    files must come along. copy_archive carries every indexed file and ledger part, checked; until then the server's
+    folder cannot open an archived claim, after it can. A missing or damaged file stops the copy before anything is
+    written, naming the file."""
+    store = world(tmp_path, "compact")
+    detect(store)
+    src = archive.StateSink(LocalState(str(tmp_path / "state")))
+    res = archive.run(store.conn, sink=src, today=TODAY)
+    lg = _ledger(tmp_path)
+    archive.before_ledger_retain(lg, "2023-12-31", sink=src)
+    lg.close()
+    dst = archive.DirSink(str(tmp_path / "server" / "archive"))
+    archive._LAST_FILE.clear()
+    with pytest.raises(archive.ArchiveError):
+        archive.lookup_claim(store.conn, "CB0000050C017", sink=dst)         # the server's folder is empty
+    assert archive.verify_files(store.conn, dst)["missing"]
+    out = archive.copy_archive(store.conn, src, dst)
+    assert out["files"] == len(res["files"]) + 1 and out["written"] == out["files"]
+    assert archive.verify_files(store.conn, dst) == {"checked": out["files"], "missing": [], "damaged": []}
+    archive._LAST_FILE.clear()
+    assert archive.lookup_claim(store.conn, "CB0000050C017", sink=dst)["bill"] == "CB0000050"
+    assert archive.ledger_postings(dst, [11])
+    assert archive.copy_archive(store.conn, src, dst)["written"] == 0       # again: nothing new written
+    # a damaged file in the source: refused, nothing copied, the file named
+    name = res["files"][0]["name"]
+    broken = archive.StateSink(LocalState(str(tmp_path / "state2")))
+    broken.put(name, gzip.compress(b"not the archived bills"))
+    for n in archive.ledger_parts(src):
+        broken.put(n["name"], src.get(n["name"]))
+    dst2 = archive.DirSink(str(tmp_path / "server2" / "archive"))
+    with pytest.raises(archive.ArchiveError, match=re.escape(name)):
+        archive.copy_archive(store.conn, broken, dst2)
+    assert dst2.list() == []
+    store.close()
+
+
+def test_archived_835_tells_emas_checks_which_bills_the_archive_answered(tmp_path):
+    store = crafted("file", tmp_path)
+    put_claim(store, "KA01AAAAA", "2021-03-01")
+    put_claim(store, "KB01AAAAA", "2026-03-01")                       # stays: too new
+    freeze_all(store)
+    archive.run(store.conn, sink=sink_of(tmp_path, "file"), today=TODAY)
+    assert archive.archived_835(store.conn, ["KA01AAAAA", "KB01AAAAA", "KA01AAAAB", None, ""]) == {"KA01AAAAA"}
+    store.close()
