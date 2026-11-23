@@ -301,7 +301,9 @@ def test_an_upload_lands_where_the_same_files_from_dropbox_land(tmp_path, monkey
     client = FakeClient(files)
     monkeypatch.setattr(dropbox_sync, "DropboxClient", lambda *a, **kw: client)
     feed = cycle(feed_db)
-    assert feed["ingest"] == {"remits": 1, "ema": 3, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []} and "detect" in feed
+    counts = {k: v for k, v in feed["ingest"].items() if k != "ema_files"}         # ema_files: what each export held (the words)
+    assert counts == {"remits": 1, "ema": 3, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []} and "detect" in feed
+    assert sorted(f["family"] for f in feed["ingest"].get("ema_files", [])) in ([], ["charge_lines", "claim_status", "era_lines"])
     # the manual route: the same files, uploaded, read by the next cycle (no Dropbox there)
     for path, data in files.items():
         r = site.up(os.path.basename(path), data)
@@ -1198,7 +1200,16 @@ def test_vercel_keeps_working_and_says_uploads_belong_to_the_server(tmp_path, mo
 def test_caddy_takes_large_uploads_only_on_the_upload_route():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     text = open(os.path.join(root, "deploy", "Caddyfile")).read()
-    assert "@uploads path /api/uploads /api/uploads/*" in text and "@other not path /api/uploads /api/uploads/*" in text
+    wide = "@uploads path /api/uploads /api/uploads/*" in text and "@other not path /api/uploads /api/uploads/*" in text
+    # the narrower form asked of the deploy files' owner (wire/needs_A2.md, section F): only POST /api/uploads takes 260 MiB,
+    # a piece of a large file at most 5 MiB, everything else (the JSON routes among them) 20 MB
+    narrow = re.search(r"@uploads \{\s*method POST\s*path /api/uploads\s*\}", text) and "@pieces path /api/uploads/chunk" in text
+    assert wide or narrow
+    if narrow:
+        pieces = text[text.index("request_body @pieces"):]
+        n, unit = re.search(r"max_size (\d+)(MiB|MB)", pieces).groups()
+        assert uploads.CHUNK_BYTES + 64 * 1024 < int(n) * (1024 * 1024 if unit == "MiB" else 1000 * 1000) <= 20 * 1000 * 1000
+        assert re.search(r"@other \{\s*not \{\s*method POST\s*path /api/uploads\s*\}\s*not path /api/uploads/chunk\s*\}", text)
     big = text[text.index("request_body @uploads"):text.index("@other")]
     small = text[text.index("request_body @other"):]
     assert re.search(r"max_size 20Mi?B", small[:60])

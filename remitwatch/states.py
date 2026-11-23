@@ -1367,8 +1367,7 @@ def windows(f: dict, deadline: str | None = None, dbasis: str | None = None, fx:
         if kind == "medicare" and (sig in codes.MEDICARE_CLERICAL_SIGNALS or sig == "DENIED_MEDICAL_NECESSITY"
                                    or carc in codes.MEDICARE_CLERICAL_CARCS or rarcs & CLERICAL_RARCS):
             out.append({"what": "a Medicare reopening", "date": _add(pay, REOPENING_DAYS), "process": "reopening", "own": False,
-                        "basis": "Medicare reopening of a clerical error (a wrong code, modifier or diagnosis): within one year of the "
-                                 "remittance (42 CFR 405.980)"})
+                        "basis": "Medicare reopening of a clerical error, within one year of the remittance (42 CFR 405.980)"})
     if sig in CLAIM_SIGNALS and f.get("service_date"):
         r = codes.filing_rule(grp, kind)
         out.append({"what": "the first-filing limit", "date": _add(f["service_date"], r["days"]), "basis": r["label"],
@@ -1864,11 +1863,34 @@ def _pending_action(fx: dict) -> str | None:
     return next((a for a in acts if action_kind(a) in PENDING_ACTIONS), None)
 
 
+# words a period follows without ending the sentence ("ch. 12 sec. 40.2", "e.g. a modifier")
+_ABBREV = frozenset({"ch", "sec", "secs", "no", "nos", "vs", "e.g", "i.e", "approx", "p", "pp", "para", "art", "fig", "inc", "co", "corp",
+                     "st", "dr", "mr", "mrs", "ms", "jr", "sr", "cf", "al", "dept", "vol", "rev", "ref", "u.s"})
+
+
+def sentence_end(text: str, semicolon: bool = True) -> int | None:
+    """Where a text's first sentence ends: the index of its '.' (or its first ';' when semicolon), or None when it is one
+    sentence. A period after an abbreviation (ch. 12, sec. 40.2, e.g.) or before a lower-case word or a number ends nothing."""
+    for m in re.finditer(r"(?<=[a-z0-9)])([.;]) ", text):
+        if m.group(1) == ";":
+            if semicolon:
+                return m.start()
+            continue
+        w = re.search(r"([A-Za-z.]+)$", text[:m.start()])
+        if w and w.group(1).lower().strip(".") in _ABBREV:
+            continue
+        nxt = text[m.end():m.end() + 1]
+        if nxt and not (nxt.isupper() or nxt in "(\"'"):
+            continue
+        return m.start()
+    return None
+
+
 def _short_label(basis: Any, n: int = 120) -> str:
     """A window's basis cut to its first clause, for sentences that name it."""
     b = str(basis or "").strip()
-    m = re.search(r"(?<=[a-z0-9)])[.;] ", b)
-    b = b[:m.start()] if m else b.rstrip(".")
+    cut = sentence_end(b)
+    b = b[:cut] if cut is not None else b.rstrip(".")
     return b if len(b) <= n else b[:n].rsplit(" ", 1)[0] + "..."
 
 

@@ -1719,17 +1719,20 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
         per = _per_unit([x for x in paid if x.status in PRIMARY_STATUSES] or paid, exp / max(a.billed_units, 1) or None)
         corrected = _corrective(r.claim, arch) or any(_corrective(x.claim, arch) for x in paid)
         billed_now = _corrected_units(a, arch) if corrected else None
-        if own_new and billed_now is not None and billed_now < a.billed_units <= need and got >= billed_now:
-            # the practice's corrected claim billed fewer units of the code than this line did, and the payer paid all of them
+        # the practice's corrected claim billed fewer units of the code than this line did: the units it left out are not owed
+        fewer = billed_now is not None and billed_now < a.billed_units
+        if own_new and fewer and got >= billed_now:
             hint = (f"{who} reversed this answer on {r.paid_on} for the practice's corrected claim, which bills {_units_text(billed_now)} of "
                     f"{a.billed_code} where this line billed {a.billed_units:g}, and paid them ({_usd(sum(x.standing for x in paid))}): the units "
                     "left out were dropped, and nothing is left to work unless one was dropped by mistake.")
             return _reclass(R_SAME_DAY, f, "dropped_on_correction", "Dropped on the corrected claim", hint, 0, "done", proof)
         if own_new:
-            left = max(a.billed_units - got, 0) or a.billed_units
+            units = billed_now if fewer else a.billed_units
+            left = max(units - got, 0) or units
             size = _cap(per * left, f) if per else f.get("shortfall_cents")
-            hint = (f"{who} reversed this answer on {r.paid_on} and paid {got:g} of the {_units_text(a.billed_units)} this line billed; "
-                    f"what is left is {'the unit' if left == 1 else f'{left:g} units'}"
+            hint = (f"{who} reversed this answer on {r.paid_on} and paid {got:g} of the {_units_text(units)} "
+                    + ("the practice's corrected claim bills" if fewer else "this line billed")
+                    + f"; what is left is {'the unit' if left == 1 else f'{left:g} units'}"
                     + (f", worth about {_usd(size)} at its own rate per unit." if per else "."))
             return _reclass(R_SAME_DAY, f, "units_on_reanswer", "Reversed and partly paid", hint, size, "work_now", proof)
         if corrected:
@@ -2435,15 +2438,18 @@ def drug_expected(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive
 def _drug_actions(conn: sqlite3.Connection, want: list, arch: Archive, rates: Mapping[tuple, list] | None, min_lines: int) -> list[dict]:
     codes = {c for f in want for c in _item_codes(f)} | {p[0] for f in want for p in _ev(f).get("unpaid") or [] if isinstance(p, (list, tuple)) and p}
     table = rates if rates is not None else drug_rates(conn, [c for c in codes if code_category(c) in DRUG_FAMILIES])
-    # one valued item per billed line of a service: the payer's newest answer of it
+    # one valued item per billed line of a service: the payer's newest answer of it (two answers of the line on one
+    # remittance, two submissions the payer answered together: the one billing more units, the fuller version)
     newest: dict[tuple, tuple] = {}
+    listed: Counter = Counter()             # the open listings of each service among these items
     for f in want:
         a = arch.lines.get(f.get("line_key")) if f.get("line_key") else None
         if a is not None and a.dos:
             k = (a.bill, a.billed_code, a.dos, _line_identity(a, arch))
-            rank = (a.paid_on or "", a.trace or "", f.get("finding_id") or "")
+            rank = (a.paid_on or "", a.trace or "", a.billed_units, f.get("finding_id") or "")
             if k not in newest or rank > newest[k][0]:
                 newest[k] = (rank, f.get("finding_id"))
+            listed[(a.bill, a.billed_code, a.dos)] += 1
     out = []
     for f in want:
         grp = f.get("payer_group") or ""
@@ -2453,8 +2459,10 @@ def _drug_actions(conn: sqlite3.Connection, want: list, arch: Archive, rates: Ma
             a = arch.lines.get(f["line_key"])
             if a is not None and (a.piece() or a.restated_cents()):
                 continue                    # a restatement, not a billed line: rule 1
-            if a is not None and _copy_denial(a):
-                continue                    # a duplicate copy's denial: the service is valued on its own answer
+            if a is not None and _copy_denial(a) and (listed[(a.bill, a.billed_code, a.dos)] > 1 or any(
+                    x.line_key != a.line_key and x.standing > 0 for x in arch.answers_of(a))):
+                continue                    # a duplicate copy's denial: the service is valued on its own answer (a copy
+                #                             that is the service's only live answer, its payment taken back, is valued)
             if a is not None and a.dos:
                 rs = a.denial_reasons()
                 if rs and all(r in WRONG_PAYER_CARCS for _g, r, _c in rs) and any(

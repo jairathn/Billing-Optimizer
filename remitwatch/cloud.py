@@ -1661,7 +1661,12 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         from .detect import DETECT_VERSION
         last_version = conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone() if has_run else None
         rules_changed = bool(last_version) and last_version[0] != DETECT_VERSION
-        need_detect = has_lines and (ingested or pending or force_detect or not has_run or rules_changed)
+        # a status, hide or write-off policy a person set since the last run (the journal above): the stored states catch up
+        from .pipeline import people_changed_since_detection
+        people = bool(has_run) and people_changed_since_detection(conn)
+        if people:
+            out["people_changed"] = True
+        need_detect = has_lines and (ingested or pending or force_detect or not has_run or rules_changed or people)
         ran_detect = False
         if applied:
             # a Production file was read: its summaries are in the store, and detection runs in a fresh invocation

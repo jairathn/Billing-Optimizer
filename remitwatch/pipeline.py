@@ -350,6 +350,36 @@ def ledger_turnaround(store, lg) -> dict | None:
     return {"groups": len(groups or {}), "seconds": round(time.time() - t, 1)}
 
 
+def people_changed_since_detection(conn) -> bool:
+    """Whether a person set a status (Sent, Paid, Let go, Lost, a hide) or the owner a write-off policy after the last
+    detection run started (one set while it ran counts too: it may not have seen it): the work states stored by that run
+    are behind it until detection runs again (the review of unit C1: a person's status must take the item off Work
+    now). Detection's own status changes are stamped with its start, so they never ask for another run."""
+    try:
+        row = conn.execute("SELECT started_at FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
+    except Exception:       # noqa: BLE001  (no runs table yet: detection runs for that reason anyway)
+        return False
+    last = row[0] if row else None
+    if not last:
+        return False
+    # a person's own status changes (kind 'manual'), and hide rules a person added or removed; never the hide pass that
+    # runs after each analysis (it stamps the items it hides with its own time)
+    for sql, args in (("SELECT 1 FROM finding_events WHERE kind='manual' AND at > ? LIMIT 1", (last,)),
+                      ("SELECT 1 FROM hide_rules WHERE at > ? OR removed_at > ? LIMIT 1", (last, last))):
+        try:
+            if conn.execute(sql, args).fetchone():
+                return True
+        except Exception:       # noqa: BLE001  (a store from before the table)
+            pass
+    try:
+        from .ema_checks import POLICY_KEY
+        raw = conn.execute("SELECT value FROM meta WHERE key=?", (POLICY_KEY,)).fetchone()
+        pol = json.loads(raw[0]) if raw and raw[0] else {}
+        return any(str((v or {}).get("at") or "") > last for v in pol.values() if isinstance(v, dict))
+    except Exception:       # noqa: BLE001
+        return False
+
+
 def sweep_uploads(db_path: str) -> dict:
     """The Upload page's leftovers on a server (remitwatch.uploads.ServerUploads.sweep): uploads unfinished for a day,
     records kept past their time, half pairs. Counts by kind; {} when there was nothing (or no Upload page here)."""
@@ -531,12 +561,17 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         has_run = bool(store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='detection_runs'").fetchone()) and \
             bool(store.conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone())
         rules_changed = False
+        people = False
         if has_run:
             from .detect import DETECT_VERSION
             last = store.conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
             rules_changed = bool(last) and last[0] != DETECT_VERSION     # a release that changed the rules re-analyses once
+            # a status, hide or write-off policy a person set since the last run: the stored states catch up with it
+            people = people_changed_since_detection(store.conn)
+            if people:
+                out["people_changed"] = True
         store.close()
-        if changed or force_detect or not has_run or rules_changed:
+        if changed or force_detect or not has_run or rules_changed or people:
             summary = run_detection(db_path)
             out["detect"] = {"findings": sum(summary.values())}
         store = Store(db_path)

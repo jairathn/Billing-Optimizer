@@ -1122,8 +1122,8 @@ def _lower(text: str) -> str:
 def _short(basis: Any, n: int = 160) -> str:
     """A deadline's basis cut to its first sentence, for sentences that name it."""
     b = str(basis or "").strip()
-    m = re.search(r"(?<=[a-z0-9)])[.;] ", b)
-    b = b[:m.start()] if m else b.rstrip(".")
+    cut = S.sentence_end(b)
+    b = b[:cut] if cut is not None else b.rstrip(".")
     return b if len(b) <= n else b[:n].rsplit(" ", 1)[0] + "..."
 
 
@@ -1555,12 +1555,22 @@ def item_verdict(conn: sqlite3.Connection, finding_id: str, *, ledger: Any = Non
 
 
 # ----------------------------------------------------------------------------------------------------- the next step
+def _mac_portal(f: dict) -> str:
+    """The Medicare contractor's portal by name where the payer group says which contractor it is (CGS: myCGS; WPS: the WPS
+    portal), else the contractor's portal."""
+    grp = f.get("payer_group") or ""
+    if re.search(r"^Medicare KY|CGS", grp):
+        return "myCGS"
+    if re.search(r"^Medicare IN|WPS", grp):
+        return "the WPS portal"
+    return "the contractor's portal"
+
+
 def _fax_number(conn: sqlite3.Connection, f: dict) -> tuple[bool, str]:
     """Whether a confirmed fax number for the payer's appeals is on file (a send then goes there, preview first). Medicare's
     contractors take no faxed redeterminations (CGS's job aid), so a Medicare appeal is never faxed from here."""
     if f.get("payer_kind") == "medicare":
-        return False, ("Medicare's contractor takes redeterminations through its portal (myCGS for CGS) or by mail, not by fax: "
-                       "file it there.")
+        return False, (f"Medicare's contractor takes redeterminations through {_mac_portal(f)} or by mail, not by fax: file it there.")
     try:
         from . import fax
         nb = fax.number_for(conn, f.get("payer_group"), f.get("payer_kind"), 1)
@@ -2060,9 +2070,9 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             if mroute == "new_claim":
                 steps.append("Send it from EMA through the clearinghouse as a new claim and keep the acceptance report (proof of timely filing).")
             elif mroute == "reopening":
-                steps.append("Ask for the reopening on the contractor's portal (myCGS for CGS) or by phone; write its reference number in Mark sent.")
+                steps.append(f"Ask for the reopening on {_mac_portal(f)} or by phone; write its reference number in Mark sent.")
             else:
-                steps.append("File the redetermination on the contractor's portal (myCGS for CGS) or by mail, with the records the remark asks for; "
+                steps.append(f"File the redetermination on {_mac_portal(f)} or by mail, with the records the remark asks for; "
                              "Medicare takes no faxed redeterminations.")
         else:
             steps.append("Send it from EMA through the clearinghouse and keep the acceptance report (proof of timely filing).")
@@ -2082,7 +2092,8 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         buttons += extra
     else:
         needs, argument = _appeal_needs(conn, f, fx)
-        first_sentence = re.split(r"(?<=[a-z0-9)])\. ", argument, maxsplit=1)
+        cut = S.sentence_end(argument, semicolon=False)
+        first_sentence = [argument[:cut], argument[cut + 2:]] if cut is not None else [argument]
         action = f"Appeal to {grp}: {first_sentence[0].rstrip('.')}."
         if f.get("payer_kind") == "medicare":
             action += " Medicare contractors take no faxed redeterminations: file it on the contractor's portal or by mail."
@@ -2118,6 +2129,9 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             steps.append(f"{'If' if route == 'decide' else 'When'} you send it, reverse EMA's write-off of "
                          f"{usd(o.get('written_off') or o.get('contractual_routine'))} ({', '.join(o.get('carcs') or []) or 'the denial'}) "
                          "so the line shows open until the payer answers.")
+        reopen = _clerical_remark_step(f, clocks, st) if not late else None
+        if reopen:
+            steps.append(reopen)
         rs = _recovery_step(f, rec) if route in ("appeal", "corrected", "rate", "decide") and rule not in S.CHECK_RULES else None
         if rs and not (rec.get("paid") == 0 and route == "appeal" and _payer_paid_like(conn, f)):
             steps.append(rs)
@@ -2127,9 +2141,11 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             if left is not None and left < 0 and legal and legal >= t:
                 lleft = S._days(t, legal) or 0
                 go = "send it now" if route in ("appeal", "rate", "corrected") else "act now"
-                action = (f"The safe date passed on {day(deadline)}, but {_poss(grp)} own limit is {day(legal)} ({lleft} day{'s' if lleft != 1 else ''} "
-                          f"left): {go}. " + action)
-            elif left is not None and 0 <= left <= 7:
+                when = "today is the last day" if lleft <= 0 else f"{lleft} day{'s' if lleft != 1 else ''} left"
+                action = f"The safe date passed on {day(deadline)}, but {_poss(grp)} own limit is {day(legal)} ({when}): {go}. " + action
+            elif left == 0:
+                action = f"Today is the last day ({day(deadline)}): do it today. " + action
+            elif left is not None and 0 < left <= 7:
                 action = f"Only {left} day{'s' if left != 1 else ''} left (by {day(deadline)}): do it today. " + action
         if late:
             deadline, basis = late["date"], late["basis"]
@@ -2571,7 +2587,7 @@ def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple
     late = st.get("late_window") if rule == "open_late" else None
     if late and late.get("process") == "reopening":
         return (f"{_late_words(st)} A reopening fixes a clerical error only (a wrong code, modifier or diagnosis): if that is what went wrong, "
-                "ask the Medicare contractor for it on its portal (myCGS for CGS) or by phone, with the correction; if not, Let go with the "
+                f"ask the Medicare contractor for it on {_mac_portal(f)} or by phone, with the correction; if not, Let go with the "
                 "reason \"window closed\".", ["Write the reopening's reference number in Mark sent."], "Coder, then the biller",
                 ["copy_instructions", "mark_sent", "log_outcome", "let_go"])
     if o.get("outcome") == "lost_to_timely_filing":
@@ -2725,6 +2741,24 @@ def _expected(f: dict, fx: dict, story: dict | None = None) -> tuple[int, str | 
         if took + open_ > 0 and took + open_ < exp:
             exp, basis = took + open_, "what the denial took in EMA (its write-off and what is still open)"
     return max(0, int(exp or 0)), basis
+
+
+def _clerical_remark_step(f: dict, clocks: list[dict], st: dict) -> str | None:
+    """A Medicare denial whose remark names a missing or invalid code (M51, M76 and the like, states.CLERICAL_RARCS) on a
+    signal whose own step does not speak of a reopening: the step that compares the line with a paid one and names the
+    reopening's date beside the redetermination's (C59)."""
+    from .codes import MEDICARE_CLERICAL_SIGNALS, rarc_text
+    if f.get("payer_kind") != "medicare" or f.get("signal") in MEDICARE_CLERICAL_SIGNALS or f.get("signal") == "DENIED_MEDICAL_NECESSITY":
+        return None
+    rarcs = [x.strip() for x in str(f.get("rarc") or "").split(",") if x.strip() in S.CLERICAL_RARCS]
+    reopen = next((c for c in clocks if c["process"] == "reopening"), None)
+    if not rarcs or not reopen:
+        return None
+    said = "; ".join(f"{r} ({rarc_text(r)})" if rarc_text(r) else r for r in rarcs)
+    redet = st.get("legal_deadline") or st.get("deadline")
+    return (f"The remark {said} points to a coding error: compare this line with a paid one of the same code (the code, NDC, units and "
+            f"modifiers). A clerical error is fixed by a Medicare reopening until {day(reopen['date'])}, which takes no documents"
+            + (f"; anything that needs records goes in a redetermination by {day(redet)}." if redet and redet < reopen["date"] else "."))
 
 
 def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:

@@ -194,10 +194,11 @@ def _summarise(res: dict) -> dict:
         if reps:
             return _result(reps[0].get("status") or "read", res.get("lines") or [], report=reps[0].get("report"),
                            file_id=reps[0].get("file_id"))
+        if r.get("remits") or r.get("ema") or r.get("claims_837"):
+            # read, in whole or in part (a zip whose damaged member is named among the lines)
+            return _result("read", res.get("lines") or ["Read."])
         if r.get("failed"):
             return _result("refused", res.get("lines") or ["Not read."])
-        if r.get("remits") or r.get("ema") or r.get("claims_837"):
-            return _result("read", res.get("lines") or ["Read."])
         return _result("not_read", res.get("lines") or ["Not read: it is none of the files RemitWatch reads."])
     if res.get("status") == "zip":
         members = res.get("members") or []

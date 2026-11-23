@@ -644,6 +644,15 @@ def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, ori
         _not_read(store, path, "ema:unknown")
         return
     want = set(names)
+    # an upload's members are named by their place in the zip, never by their own names (a person's file name can carry a
+    # patient's name: no log line or result names an upload's file)
+    label: dict[str, str] = {}
+
+    def said(*a) -> None:
+        text = " ".join(str(x) for x in a)
+        for name, stand_in in sorted(label.items(), key=lambda kv: -len(kv[0])):
+            text = text.replace(name, stand_in)
+        log(text)
     d = tempfile.mkdtemp(prefix="unzip-", dir=_scratch_dir())
     chunk: list[str] = []
     member_of: dict[str, str] = {}
@@ -655,11 +664,11 @@ def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, ori
         if not chunk:
             return
         origins = {q: dict(origin or {}, member=member_of[q]) for q in chunk}
-        part = ingest_new_files(store, list(chunk), log=log, origins=origins, ledger=ledger, via=via, deadline=deadline,
+        part = ingest_new_files(store, list(chunk), log=said, origins=origins, ledger=ledger, via=via, deadline=deadline,
                                 wait_reason=wait_reason, _in_zip=True)
         for k in ("remits", "ema", "claims_837", "skipped", "errors"):
             out[k] = out.get(k, 0) + int(part.get(k) or 0)
-        out["failed"] += [f"{n}: {f}" for f in part.get("failed") or []]
+        out["failed"] += [f"{n}: {_relabel(f, label)}" for f in part.get("failed") or []]
         for k in ("ema_reports", "ema_files"):
             if part.get(k):
                 out.setdefault(k, []).extend(part[k])
@@ -675,16 +684,19 @@ def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, ori
         for k, info in enumerate(i for i in zf.infolist() if i.filename in want):
             base = os.path.basename(info.filename.rstrip("/")) or "file"
             low = base.lower()
+            shown = base
+            if via == "upload":
+                shown = label.setdefault(base, f"file {k + 1} of the zip") if len(base) > 2 else f"file {k + 1} of the zip"
             if low.endswith(".zip"):
                 out["errors"] += 1
-                out["failed"].append(f"{n}: {base} (a zip inside a zip is not read)")
+                out["failed"].append(f"{n}: {shown} (a zip inside a zip is not read)")
                 continue
             if not low.endswith(WANTED_EXT):
                 out["skipped"] += 1
                 continue
             if info.file_size > max(MAX_X12_BYTES, MAX_EXPORT_BYTES):
                 out["errors"] += 1
-                out["failed"].append(f"{n}: {base} (too large)")
+                out["failed"].append(f"{n}: {shown} (too large)")
                 continue
             sub = os.path.join(d, f"{k:05d}")
             q = os.path.join(sub, base)
@@ -695,12 +707,12 @@ def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, ori
             except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as exc:
                 # a damaged member (its bytes do not match what the zip says): listed, the others are read
                 out["errors"] += 1
-                out["failed"].append(f"{n}: {base} (damaged in the zip: {type(exc).__name__})")
+                out["failed"].append(f"{n}: {shown} (damaged in the zip: {type(exc).__name__})")
                 shutil.rmtree(sub, ignore_errors=True)
                 continue
             except OSError as exc:      # a full disk: the whole zip is offered again (members read are skipped then)
                 out["errors"] += 1
-                out["failed"].append(f"{n}: {base} (not unpacked: {type(exc).__name__})")
+                out["failed"].append(f"{n}: {shown} (not unpacked: {type(exc).__name__})")
                 shutil.rmtree(sub, ignore_errors=True)
                 again(path)
                 continue
@@ -721,6 +733,12 @@ def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, ori
         shutil.rmtree(d, ignore_errors=True)
     log(f"  {n}: a zip of {read} file{'s' if read != 1 else ''}, each read on its own")
 
+
+
+def _relabel(text: str, label: dict[str, str]) -> str:
+    for name, stand_in in sorted(label.items(), key=lambda kv: -len(kv[0])):
+        text = text.replace(name, stand_in)
+    return text
 
 def _gunzip_to(path: str, folder: str, limit: int) -> str | None:
     """A gzipped file that is not a report, unpacked under its own name (less .gz) into `folder`; None when it unpacks to

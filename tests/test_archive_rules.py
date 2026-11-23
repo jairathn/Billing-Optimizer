@@ -728,6 +728,27 @@ def test_rule5_an_adjustment_request_marks_the_corrected_claim_without_a_reversa
     assert (a["reclass"], a["state_hint"]) == ("dropped_on_correction", "done")
 
 
+def test_rule5_units_the_practices_corrected_claim_left_out_are_not_owed(store):
+    """A line of 95044 billed 90 units, denied over the payer's maximum (CO-222). The practice's adjustment request bills 79
+    (the payer's CO-129/N770 note); the payer reverses the denial and pays the 79 on a new line. The 11 units the request
+    left out were dropped by the practice: done, not 'paid 79 of 90, work the 11'. Paid fewer than the request billed,
+    the rest of what the request billed is the work."""
+    def case(cid, paid_units, paid):
+        lks = remit(store, "2026-03-02", [cl(cid, [ln("95044", 672.30, 0, None, [("CO", "222", 672.30)], units=90, lcn="1", rem=["N640"])],
+                                             freq=None)])
+        remit(store, "2026-03-15", [cl(cid, [ln("95044", 590.13, 0, None, [("CO", "129", 590.13)], lcn="3", units=0, billed=79, rem=["N770"])],
+                                       status="4", freq=None)])
+        remit(store, "2026-04-13", [cl(cid, [neg(ln("95044", 672.30, 0, None, [("CO", "222", 672.30)], units=90, lcn="1"))], status="22", freq=None),
+                                    cl(cid, [ln("95044", 590.13, paid, paid, [("CO", "45", 590.13 - paid)], units=paid_units, billed=79, lcn="4")],
+                                       freq=None)])
+        return only(ar.same_day_answers(store.conn, [item(store, lks[0], "DENIED_FREQUENCY", expected=38250)]))
+    a = case("CB0002205C017", 79, 335.75)
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"]) == ("dropped_on_correction", "done", 0)
+    b = case("CB0002206C017", 60, 255.00)
+    assert (b["reclass"], b["state_hint"]) == ("units_on_reanswer", "work_now")
+    assert "19 units" in b["hint"] and "the practice's corrected claim bills" in b["hint"]
+
+
 def test_rule5_a_line_billed_again_under_another_code_is_done(store):
     """The payer reversed the claim and answered it again: the visit is billed 99213 now, not 99203, and paid. The 99203
     line was billed again under the new code: done, with the new code's answer as proof."""
@@ -1163,6 +1184,30 @@ def test_rule10_values_one_listing_of_a_billed_line(store):
     a2 = remit(store, "2026-04-05", [cl("CB0003104C018", [ln("J7345", 358.00, 0, None, [("CO", "50", 358.00)], units=200, lcn="1")])])[0]
     f1, f2 = item(store, a1, "DENIED_MISSING_INFO"), item(store, a2, "DENIED_MEDICAL_NECESSITY")
     assert {a["finding_id"] for a in ar.drug_expected(store.conn, [f1, f2])} == {f2["finding_id"]}
+
+
+def test_rule10_two_answers_of_one_billed_line_on_one_remittance_value_the_fuller_one(store):
+    """The payer answered two submissions of one billed line (the same line number) on the same remittance: 16 units, and
+    32 on the later submission. One is valued, the one billing more units, the fuller version of the line."""
+    _paid_j7345(store, 3, 1.79)
+    keys = remit(store, "2026-06-01", [cl("CB0003105C017", [ln("J7345", 179.00, 0, None, [("CO", "50", 179.00)], units=100, lcn="3")]),
+                                       cl("CB0003105C017", [ln("J7345", 358.00, 0, None, [("CO", "50", 358.00)], units=200, lcn="3")])])
+    f_small, f_full = item(store, keys[0], "DENIED_MEDICAL_NECESSITY"), item(store, keys[1], "DENIED_MEDICAL_NECESSITY")
+    acts = ar.drug_expected(store.conn, [f_small, f_full])
+    assert {a["finding_id"] for a in acts} == {f_full["finding_id"]}
+    assert acts[0]["expected_cents"] == 35800
+
+
+def test_rule10_values_a_duplicate_denial_that_is_the_services_only_live_answer(store):
+    """The payer took its payment of the drug line back and answered the line again as a duplicate (OA-18), with no other
+    answer of the service standing and no other listing of it: that denial is the service's only answer and is valued."""
+    _paid_j7345(store, 3, 1.79)
+    paid = ln("J7345", 358.00, 358.00, 358.00, units=200, lcn="1")
+    remit(store, "2026-03-20", [cl("CB0003106C017", [paid])])
+    keys = remit(store, "2026-05-04", [cl("CB0003106C017", [neg(paid)], status="22"),
+                                       cl("CB0003106C017", [ln("J7345", 358.00, 0, None, [("OA", "18", 358.00)], units=200, lcn="1")])])
+    f = item(store, keys[1], "DENIED_DUPLICATE_UNPAID")
+    assert {a["finding_id"] for a in ar.drug_expected(store.conn, [f])} == {f["finding_id"]}
 
 
 # ---- memory: the archive is released before the hooks return (review regression, medium)

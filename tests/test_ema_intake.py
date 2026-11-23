@@ -1814,3 +1814,88 @@ def test_a_damaged_member_of_a_zip_of_remittances_is_listed_and_the_others_are_r
         assert any("ERA 002.RMT (damaged in the zip" in f for f in out["failed"]) and "retry" not in out
     finally:
         store.close()
+
+
+def test_an_uploaded_zip_of_remittances_is_read_and_names_its_files_by_place_only(tmp_path):
+    """A zip uploaded in the app (the hand-off): its remittances are read, and a member it could not read is named by
+    its place in the zip, never by its own name, in the result and the log."""
+    from tests.test_remitwatch import CLAIM_DOWNCODE, remit
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("Doe Jane ERA.RMT", remit(CLAIM_DOWNCODE, "77.60", seg_count=20, isa_ctrl="000000501"))     # invented
+        zf.writestr("Roe Rich ERA.RMT", remit(CLAIM_DOWNCODE.replace("CB00TEST01C017", "CB00TEST09C017"), "77.60",
+                                                seg_count=20, isa_ctrl="000000502"))
+    data = bytearray(buf.getvalue())
+    data[data.find(b"TRACE000000502")] ^= 0x20
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    pair = _pair(intake.ready_dir(os.path.dirname(db)), "week 48.zip", bytes(data))
+    said: list[str] = []
+    pipeline.run_cycle(db, sync=False, email=False, report=False, log=lambda *a: said.append(" ".join(map(str, a))))
+    res = json.load(open(os.path.join(intake.done_dir(os.path.dirname(db)), pair + ".json")))["result"]
+    text = json.dumps(res) + "\n".join(said)
+    assert res["status"] == "applied" and "Read: 1 remittance file." in res["lines"], res
+    assert any("file 2 of the zip (damaged in the zip" in ln for ln in res["lines"])
+    assert "Doe" not in text and "Roe" not in text
+
+
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_a_status_a_person_set_after_the_last_run_brings_the_states_up_to_date_once(host, tmp_path, request):
+    """Sent, Paid, Let go or Lost set after the last detection run: the next cycle runs detection so the stored work
+    states catch up (the review of unit C1); the cycle after it, with nothing new, does not."""
+    from remitwatch import actions
+    from tests.test_remitwatch import CLAIM_DOWNCODE, remit
+    era = remit(CLAIM_DOWNCODE, "77.60", seg_count=20, isa_ctrl="000000601")
+
+    def let_go(conn):
+        fid = conn.execute("SELECT finding_id FROM findings ORDER BY finding_id LIMIT 1").fetchone()[0]
+        # the last run was a while ago (tests run within one second); the person acts now
+        conn.execute("UPDATE detection_runs SET started_at='2026-11-20T08:00:00+00:00', finished_at='2026-11-20T08:01:00+00:00'")
+        actions.apply_status(conn, fid, "dismissed", None, None, "staff", None, None)
+        conn.commit()
+    if host == "server":
+        db = str(tmp_path / "data" / "remitwatch.sqlite")
+        write(tmp_path / "drop" / "ERA 1.RMT", era)
+        assert "detect" in run(db, sync=False, local=str(tmp_path / "drop"))
+        assert "detect" not in run(db, sync=False)
+        s = open_store(db)
+        try:
+            let_go(s.conn)
+        finally:
+            s.close()
+        out = run(db, sync=False)
+        assert out.get("people_changed") and "detect" in out
+        assert "detect" not in run(db, sync=False)
+    else:
+        root, client, state = request.getfixturevalue("vercel")
+        write(root / DATA / "Trizetto" / "ERA 1.RMT", era)
+        assert "detect" in cycle(state, client)
+        assert "detect" not in cycle(state, client)
+        store, _ = cloud.load_raw(state)
+        let_go(store.conn)
+        cloud.save_raw(state, store)
+        out = cycle(state, client)
+        assert out.get("people_changed") and "detect" in out
+        assert "detect" not in cycle(state, client)
+
+
+def test_only_a_persons_change_after_the_last_run_asks_for_detection_never_the_hide_pass():
+    c = sqlite3.connect(":memory:")
+    c.executescript("""CREATE TABLE detection_runs (run_id TEXT, started_at TEXT, finished_at TEXT);
+        CREATE TABLE finding_events (finding_id TEXT, at TEXT, kind TEXT, actor TEXT);
+        CREATE TABLE hide_rules (payer_group TEXT, at TEXT, removed_at TEXT);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO detection_runs VALUES ('r1', '2026-11-20T08:00:00+00:00', '2026-11-20T08:02:00+00:00');""")
+    later = "2026-11-20T09:00:00+00:00"
+    assert not pipeline.people_changed_since_detection(c)
+    c.execute("INSERT INTO finding_events VALUES ('F1', ?, 'hidden', 'hide rule')", (later,))     # the pass after an analysis
+    c.execute("INSERT INTO finding_events VALUES ('F1', '2026-11-20T08:00:00+00:00', 'manual', 'staff')")   # before the run
+    assert not pipeline.people_changed_since_detection(c)
+    c.execute("INSERT INTO finding_events VALUES ('F2', '2026-11-20T08:01:00+00:00', 'manual', 'staff')")   # while it ran
+    assert pipeline.people_changed_since_detection(c)
+    c.execute("DELETE FROM finding_events WHERE kind='manual'")
+    c.execute("INSERT INTO hide_rules VALUES ('BCBS', '2026-11-19T00:00:00+00:00', ?)", (later,))        # a rule taken off
+    assert pipeline.people_changed_since_detection(c)
+    c.execute("DELETE FROM hide_rules")
+    from remitwatch.ema_checks import POLICY_KEY
+    c.execute("INSERT INTO meta VALUES (?, ?)", (POLICY_KEY, json.dumps({"p": {"decision": "accept", "at": later}})))
+    assert pipeline.people_changed_since_detection(c)
