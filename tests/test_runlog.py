@@ -331,6 +331,23 @@ def test_the_exception_that_ends_a_run_makes_it_failed(tmp_path):
     except MemoryError as exc:
         rl.fail(exc, "detect")
     assert rl.finish().split(": ")[1].startswith("failed")
+    # a cycle that finished with a feed's error noted (Dropbox did not answer; the rest ran) is partial, not failed
+    rl = runlog.start_run("cycle", db_path=str(tmp_path / "data" / "s.sqlite"), host="server")
+    assert rl.finish(out={"error": "Dropbox: Held", "finished": runlog._iso()}).split(": ")[1].startswith("partial")
+    rl = runlog.start_run("cycle", db_path=str(tmp_path / "data" / "s.sqlite"), host="server")
+    assert rl.finish(out={"error": "MemoryError: x"}).split(": ")[1].startswith("failed")      # it never reached its end
+
+
+def test_a_serverless_runs_file_holds_the_note_that_old_logs_were_dropped(tmp_path):
+    state = LocalState(str(tmp_path / "state"))
+    old = runlog.StateSink(state)
+    old.write_json("index.json", {"runs": []})
+    state.put("logs/runs/2025-01-02/run-20250102T000000Z-aaaa.jsonl.gz", b"x")
+    rl = runlog.start_run("cycle", state=state, host="serverless")
+    rl.finish()
+    _m, events = runlog.read_run(runlog.StateSink(state), rl.run_id)
+    assert [e["event"] for e in events][-1] == "logs_pruned"
+    assert not state.list("logs/runs/2025-01-02")
 
 
 def test_caught_logs_to_the_run_in_progress_and_is_harmless_without_one(tmp_path):

@@ -141,6 +141,13 @@ PRICING_MODIFIERS = {"26", "TC", "50", "52", "53", "54", "55", "56", "62", "66",
 DOWNCODE_SIGNALS = ("DOWNCODE_SVC06", "DOWNCODE_VS_BILLED", "DOWNCODE_CHARGE", "DOWNCODE_LEVEL_REDUCED", "DOWNCODE_RATE",
                     "DOWNCODE_LINE_SWAP", "DOWNCODE_LEVEL_DENIED")
 MANUAL_STATUSES = ("in_progress", "appealed", "lost")
+# money items from a remittance: each gets an end date (the payer's window to dispute its answer), so that every one can
+# expire (a review-type denial and a claim sent on to another carrier included)
+END_DATED_CATEGORIES = ("denial", "bundling", "downcoding", "underpayment")
+# denials a corrected claim can fix (the authorization number, the clinician's enrollment, the primary code, a modifier): where
+# the payer's manual sets a corrected-claim limit (codes.CORRECTED_RULES), that route stays open beside the dispute
+CORRECTABLE_APPEAL_SIGNALS = frozenset({"DENIED_AUTH", "DENIED_PROVIDER", "DENIED_MISSING_PRIMARY", "PROCEDURE_BUNDLED", "ADDON_BUNDLED",
+                                        "EM_BUNDLED_MOD25", "EM_BUNDLED_MOD57_MAJOR", "EM_BUNDLED_MOD24"})
 
 # Claims EMA shows sent and unpaid with no answer from the payer (Detector.run_ema_open_claims): how long a payer has to
 # answer before a claim counts as unanswered (Kentucky's prompt-pay law gives 30 days for a clean claim, KRS 304.17A-702).
@@ -1655,8 +1662,18 @@ class Detector:
             deadline = _add_days(start, fix["days"])
             legal = legal_deadline(start, fix)
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
-        elif actionable in ("appeal", "correct_and_resubmit") or signal == "TAKEBACK":
-            # a takeback is disputed inside the payer's appeal window from the remittance that took the money back
+            if kind != "medicare" and pay_date:
+                # the payer's own dispute of the determination stays open beside the corrected claim (Humana's 18 months from
+                # the determination outlast its corrected-claim year): the later of the two routes is the payer's limit. Medicare
+                # Part B is left out: an unprocessable claim (MA130) has no appeal rights, and its other windows are its own.
+                disp = legal_deadline(pay_date, rule) or _add_days(pay_date, rule["days"])
+                if disp and deadline and disp > (legal or deadline):
+                    legal = disp
+                    deadline_basis += f". After that, a dispute of the payer's answer stays open until {disp}: {rule['label']}"
+        elif actionable in ("appeal", "correct_and_resubmit") or signal == "TAKEBACK" or (category in END_DATED_CATEGORIES and pay_date):
+            # a takeback is disputed inside the payer's appeal window from the remittance that took the money back; any other
+            # money item from a remittance (a non-covered or timely-filing denial to review, a claim sent on to another
+            # carrier) ends with the payer's window to dispute that answer, so that it can expire
             deadline = _add_days(pay_date, rule["days"])
             legal = legal_deadline(pay_date, rule)
             deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
@@ -1665,6 +1682,24 @@ class Detector:
                                    "remittance does not carry, may start the clock earlier")
             if actionable == "correct_and_resubmit":
                 deadline_basis += AGREEMENT_FILING_NOTE
+            if signal == "FORWARDED_TO_CARRIER":
+                deadline_basis += (". Counted from the remittance that sent the claim on: past it, the payer that forwarded it takes no "
+                                   "dispute, and the other carrier's own filing limit applies")
+            elif actionable == "review":
+                deadline_basis += ". Counted from the remittance with this answer: past it, the payer takes no dispute of it"
+            if actionable in ("appeal", "review") and kind != "medicare" and signal in CORRECTABLE_APPEAL_SIGNALS and pay_date:
+                # what a corrected claim can fix (the authorization number, the clinician's enrollment, a modifier) can also go as a
+                # corrected claim inside the payer's corrected-claim limit, where its manual sets one (Anthem and Humana Medicare
+                # Advantage: a year from the date of service): the later date is the payer's limit
+                rems = ",".join(x for x in [rarc or ""] + list(self.claim_rem.get(base.get("claim_key"), [])) if x)
+                alt = corrected_rule(grp, kind, rems, signal, carc)
+                if alt:
+                    start2 = pay_date if alt["clock"] == "remit" else (self._first_service_day(base) or pay_date)
+                    cdate = legal_deadline(start2, alt) or _add_days(start2, alt["days"])
+                    if cdate and deadline and cdate > (legal or deadline):
+                        legal = cdate
+                        deadline_basis += (f". A corrected claim with what was missing (such as the authorization number) can still go "
+                                           f"until {cdate}: {alt['label']}")
         code = base.get("procedure_code")
         billed = evidence.get("billed_code") or base.get("original_procedure_code") or evidence.get("charge_implies") or code
         fam_b, fam_p = family_of(billed), family_of(code)
@@ -1711,7 +1746,7 @@ class Detector:
             "expected_cents": expected, "shortfall_cents": shortfall,
             "carc": carc, "carc_text": carc_text(carc), "rarc": rarc, "rarc_text": rarc_text((rarc or "").split(",")[0]),
             "evidence": json.dumps(evidence, default=str),
-            "appeal_deadline": deadline, "legal_deadline": legal if (legal and deadline and legal != deadline) else None,
+            "appeal_deadline": deadline, "legal_deadline": legal if (legal and deadline and legal > deadline) else None,
             "source": "835" if (base.get("line_key") or base.get("claim_key") or base.get("transaction_key")) else None,
             "ema_handling": ema_handling, "written_off_cents": written_off, "written_off_on": written_on,
             "auto_status": "resolved" if resolved_by else None,
@@ -3225,7 +3260,7 @@ class Detector:
             f = self.findings.get(_fid("SECONDARY_NOT_BILLED", l["line_key"]))
             if f is None:
                 continue
-            f["appeal_deadline"] = deadline
+            f["appeal_deadline"], f["legal_deadline"] = deadline, None
             f["deadline_basis"] = (f"{sgrp}'s filing limit, counted from {l['payer_group']}'s remittance ({paid_on}): {rule['label']}"
                                    + ("" if rule["verified"] else ", not confirmed against the payer's current manual"))
             f["ema_link"], f["source"] = e["link"], "835"

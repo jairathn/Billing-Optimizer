@@ -183,7 +183,7 @@ function tdStatesHtml(td){
   const also = [post.n ? `<a href="#" data-td="post">${esc(pl(post.n, 'payment'))} to post in EMA</a>` : '', refund.n ? `<a href="#" data-td="refund">${esc(pl(refund.n, 'credit'))} to refund</a>` : ''].filter(Boolean);
   return `<div class="tiles" id="tdStates" aria-label="Items by state">
       ${TD_STATES.map(([k, label, hint, more]) => tdTile(k, label, hint, st[k], k==='followup_due' && (st[k]||{}).n ? 't-amber' : '', more)).join('')}
-      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', 'EMA wrote off, nobody worked', aw, aw.n ? 't-red' : '',
+      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', "written off by EMA's rule, unworked", aw, aw.n ? 't-red' : '',
         "EMA's posting rule wrote the denial off the day it posted, nobody worked it, and its window is still open") : ''}
       ${un ? tdTile('unworked', 'Nobody has worked these', 'no work in 21 days', un, '', `No work in EMA or here in the 21 days to ${longDate(un.data_through)}`) : ''}
     </div>
@@ -194,7 +194,9 @@ function tdEmaLine(td, ex){
   ((ex && ex.exports) || []).forEach(e => { if(e.waiting) parts.push(`${esc(e.title)}: uploaded, waiting to be read`);
     else if(e.overdue) parts.push(`<span class="sev-high">${esc(e.title)}: ${e.age_days == null ? 'never arrived' : esc(pl(e.age_days, 'day')) + ' old'}</span>`); });
   const rm = td && td.remits_missing;
-  const missing = rm && rm.ok === false ? `<a href="#data" class="go-data">${esc(rm.title)}</a>` : '';
+  // the run's own judgment of last month (ema_checks data health), said in words: the month by name, the dollars
+  const missing = rm && rm.ok === false ? `<a href="#data" class="go-data">${rm.month && rm.cents != null
+    ? `EMA posted ${money(rm.cents)} of insurance payments in ${rwMonth(rm.month)} with no remittance` : esc(rm.title || 'Payments with no remittance')}</a>` : '';
   // a report that waits says why and what to do (the catalog's own words); a held one needs a person's decision
   const names = {ar_report: 'The A/R report', production: 'A Production report'};
   const waits = ((td && td.reports_waiting) || []).map(w => `${esc(names[w.report] || 'A report')} waits: ${esc(w.reason || 'the next run reads it')}`)

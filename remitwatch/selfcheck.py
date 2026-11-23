@@ -448,6 +448,11 @@ def pressure_of(status: dict | None, b: dict) -> dict:
     tvals = [v for v in tmpd.values() if isinstance(v, (int, float))] if isinstance(tmpd, dict) else []
     tmp = max(tvals) if tvals else None
     secs = st.get("seconds")
+    if not isinstance(secs, (int, float)) and st.get("started") and st.get("finished"):
+        try:                                    # the server's cycle summary has its start and end, not its seconds
+            secs = (datetime.fromisoformat(str(st["finished"])) - datetime.fromisoformat(str(st["started"]))).total_seconds()
+        except (TypeError, ValueError):
+            secs = None
     budget_s = st.get("budget_seconds") or b.get("seconds")
     share = {"memory": (peak / b["memory_mb"]) if peak and b.get("memory_mb") else None,
              "time": (float(secs) / float(budget_s)) if isinstance(secs, (int, float)) and budget_s else None,

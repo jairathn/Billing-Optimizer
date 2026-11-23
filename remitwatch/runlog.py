@@ -972,13 +972,16 @@ class RunLog:
             _note_internal("checkpoint", exc)
 
     def outcome(self, out: dict | None = None) -> str:
+        """failed: an exception ended the run (fail(), or a cycle summary with an error and no finish); safe_mode: the
+        self-check held this run's closures; partial: it finished, and a step failed and was contained (a feed that did
+        not answer, a file held); ok otherwise."""
         if out and out.get("skipped"):
             return "skipped"
-        if self.uncontained or (out and out.get("error")):
+        if self.uncontained or (out and out.get("error") and not out.get("finished")):
             return "failed"
         if self.manifest.get("sections", {}).get("safe_mode"):
             return "safe_mode"
-        if self.errors:
+        if self.errors or (out and out.get("error")):
             return "partial"
         return "ok"
 
@@ -1011,8 +1014,19 @@ class RunLog:
                     m["store"] = store_tables(conn)
             except Exception as exc:        # noqa: BLE001
                 _note_internal("finish_store", exc)
-        m["events"] = {"kept": len(self.events), "dropped": self.dropped, "errors": self.errors, "warnings": self.warnings}
         m["outcome"] = outcome or self.outcome(out)
+        # the index first (it remembers the day logs were last pruned), then the pruning (its note is one of this run's
+        # events), then the run's own file with every event, then the open marker goes
+        idx = None
+        try:
+            idx = update_index(self.sink, summary_of(m), whole=True)
+        except Exception as exc:        # noqa: BLE001
+            _note_internal("index", exc)
+        try:
+            prune_logs(self.sink, now=t, run=self, index=idx)
+        except Exception as exc:        # noqa: BLE001
+            _note_internal("prune", exc)
+        m["events"] = {"kept": len(self.events), "dropped": self.dropped, "errors": self.errors, "warnings": self.warnings}
         if _INTERNAL:
             m["logging_problems"] = list(_INTERNAL)
             _INTERNAL.clear()
@@ -1021,17 +1035,11 @@ class RunLog:
             self.sink.write_run(self.run_id, day, m, self.events)
         except Exception as exc:        # noqa: BLE001
             _note_internal("write_run", exc)
-        idx = None
         try:
-            idx = update_index(self.sink, summary_of(m), whole=True)
             if self._marker:
                 self.sink.delete(f"open/{self.run_id}.json")
         except Exception as exc:        # noqa: BLE001
-            _note_internal("index", exc)
-        try:
-            prune_logs(self.sink, now=t, run=self, index=idx)
-        except Exception as exc:        # noqa: BLE001
-            _note_internal("prune", exc)
+            _note_internal("open_marker", exc)
         if conn is not None:
             try:
                 save_run_row(conn, m)

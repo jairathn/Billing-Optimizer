@@ -18,6 +18,7 @@ button.primary{background:var(--accent);color:var(--accent-ink);border-color:var
 button{cursor:pointer}
 nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
 nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;cursor:pointer}
+#blindBar:empty{display:none}
 nav a.active{background:var(--chip);color:var(--ink);font-weight:600}
 main{padding:16px;max-width:1500px;margin:0 auto}
 .grid{display:grid;gap:12px}
@@ -260,6 +261,7 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
   <button id="themeBtn" title="theme">◐</button>
 </header>
 <nav id="nav"></nav>
+<div id="blindBar" style="max-width:1500px;margin:0 auto;padding:8px 16px 0"></div>
 <main id="view"></main>
 <div id="drawer"></div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
@@ -393,6 +395,7 @@ async function render(){
   $('#nav').dataset.cur = state.tab;            // between 641 and 1,359 px More stands for Progress, Data and Providers
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
   const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
+  blindBar();                                    // the blind-spot banner on every page; Today and Data draw their own
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
   if(!DESKS[state.tab] && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; state.wlKey = null; }   // "item 3 of 50" means something on a list page only
@@ -410,6 +413,19 @@ async function render(){
     alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab, calculator: calculatorTab}[state.tab] || todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
+}
+// The blind-spot banner (today.js tdBlindBanner, GET /api/ema/blind) under the tabs of every page but Today and the Data tab,
+// which draw their own, so it shows on every page and never twice. Asked once in ten minutes: it changes with a run only.
+async function blindBar(){
+  const el = $('#blindBar'), own = () => ['today','data'].includes(state.tab);
+  if(!el || typeof tdBlindBanner !== 'function') return;
+  if(own()){ el.innerHTML = ''; return; }
+  if(state.blind === undefined || Date.now() - (state.blindAt||0) > 600000){
+    state.blindAt = Date.now();
+    try { state.blind = await api('/api/ema/blind'); } catch(e){ state.blind = null; }
+  }
+  if(own()){ el.innerHTML = ''; return; }        // the page changed to Today or Data while it was asked
+  await tdBlindBanner(el, state.blind);
 }
 function notHere(title){ return async v => { v.innerHTML = `<div class="panel"><h2>${esc(title)}</h2><div class="note">This page is not on this site yet. Reload in a few minutes; if it stays like this, the site needs its next update.</div></div>`; }; }
 function sumBy(rows, key){ const m={}; rows.forEach(r=>{m[r[key]]=(m[r[key]]||0)+(r.shortfall_cents||0);}); return m; }

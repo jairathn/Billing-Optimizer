@@ -1009,3 +1009,11 @@ def test_the_banner_and_the_data_tab_requests(store):
     assert sc.banner(c)["level"] == "safe_mode"
     acc = sc.apply_request(c, {"what": "accept", "checks": ["closure_proof"], "user": "owner@example.test"})
     assert acc["accepted"] == {"closure_proof": 1}
+
+
+def test_a_server_cycle_summary_is_measured_by_its_start_and_end(store, monkeypatch):
+    c = store.conn
+    monkeypatch.setenv("REMITWATCH_CYCLE_BUDGET_SECONDS", "1000")
+    prev = {"started": "2026-11-02T10:00:00+00:00", "finished": "2026-11-02T10:15:00+00:00"}       # 900 s of 1,000
+    p = sc.plan_next(c, prev, mode="server")
+    assert p["level"] == 1 and p["pressure"]["worst"] == "time" and p["pressure"]["seconds"] == 900
