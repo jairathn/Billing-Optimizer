@@ -29,6 +29,8 @@ import hmac
 from contextlib import asynccontextmanager
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -135,6 +137,17 @@ class Refused(Exception):
 @app.exception_handler(Refused)
 async def _refused(_request: Request, exc: Refused):
     return JSONResponse(status_code=exc.http_status, content=dict(exc.extra, detail=exc.message, code=exc.code))
+
+
+@app.exception_handler(RequestValidationError)
+async def _unreadable_body(request: Request, exc: RequestValidationError):
+    """A body a route cannot read (not JSON, or not the object the route takes): 400 with a plain sentence, as the status
+    routes answer (_body_object), on every route that reads one, appeals_send and the hide routes among them; the
+    routes stay plain functions. What is wrong with the address or the query keeps FastAPI's 422. The answer never
+    repeats what was sent."""
+    if any((e.get("loc") or ("",))[0] == "body" for e in exc.errors()):
+        return JSONResponse(status_code=400, content={"detail": "The request could not be read. Reload the page and try again."})
+    return await request_validation_exception_handler(request, exc)
 
 
 def require_xhr(request: Request) -> None:

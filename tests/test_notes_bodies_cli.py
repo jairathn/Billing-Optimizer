@@ -2,6 +2,8 @@
 
 mr-7   one patient's note with a table of rows (a procedure list, a pathology history) is that patient's note; only a
        table that shows two or more different patients is refused as a report
+mr-11  a body that is not a JSON object, or not JSON, is refused with 400 and a plain sentence on every route that reads
+       one (appeals/send and hide among them), on both hosts; other checks of an address keep their 422
 
 Invented data only: names, record numbers, accession numbers, claim ids and amounts are made up."""
 from __future__ import annotations
@@ -16,7 +18,7 @@ from remitwatch import cloud, fax, uploads
 from tests.fake_fax import FakeLine
 from tests.test_cloud import DATA, PW, box, cycle, visits_with_downcodes  # noqa: F401  (box is a fixture)
 from tests.test_fax import GOOD_REVIEW, PAYER_FAX, XHR, _number, _rows, _send, site  # noqa: F401  (site is a fixture)
-from tests.test_hotfix2 import REPORT, _build, _events
+from tests.test_hotfix2 import REPORT, _build, _events, _journal, sl  # noqa: F401  (sl is a fixture)
 from tests.test_remitwatch import remit
 
 SEVERAL = "This looks like a report listing several patients, not one visit note."
@@ -225,3 +227,42 @@ def test_mr7_serverless_one_patients_tables_go_as_their_note_and_a_list_of_patie
         r = build(third, text)
         assert r.status_code == 400 and r.json()["detail"] == SEVERAL, r.text
     assert len(line.sent) == 2
+
+
+# =========================================================================== mr-11: a body that is not an object
+NOT_OBJECTS = [b"not json", b"{", b"[1, 2]", b'"appealed"', b"5", b"true"]
+UNREADABLE = "The request could not be read. Reload the page and try again."
+
+
+def _posted(c, url, headers) -> list[tuple]:
+    out = []
+    for raw in NOT_OBJECTS:
+        r = c.post(url, content=raw, headers=dict(headers, **{"Content-Type": "application/json"}))
+        out.append((raw, r.status_code, r.json().get("detail")))
+    return out
+
+
+def test_mr11_server_appeals_send_and_hide_refuse_a_body_that_is_not_an_object_plainly(site):
+    c = site.c
+    before = _rows(site.db, "SELECT finding_id, status FROM findings ORDER BY finding_id")
+    for url in ("/api/appeals/send", "/api/hide"):
+        for raw, code, detail in _posted(c, url, XHR):
+            assert code == 400 and detail == UNREADABLE, (url, raw, code, detail)
+    assert site.line.sent == {} and _rows(site.db, "SELECT finding_id, status FROM findings ORDER BY finding_id") == before
+    # what is not about the body keeps FastAPI's answer
+    assert c.get("/api/hide/preview").status_code == 422 and c.get("/api/findings?limit=-1").status_code == 422
+    # the routes stay plain functions: a send's review and fax must not hold up every other request
+    import inspect
+
+    import remitwatch.api as api
+    assert not inspect.iscoroutinefunction(api.appeals_send) and not inspect.iscoroutinefunction(api.hide_add)
+
+
+def test_mr11_serverless_appeals_send_and_hide_refuse_a_body_that_is_not_an_object_before_the_journal(sl):
+    c, h = sl.c, sl.h
+    n = len(_journal(sl.state))
+    for url in ("/api/appeals/send", "/api/hide"):
+        for raw, code, detail in _posted(c, url, h):
+            assert code == 400 and detail == UNREADABLE, (url, raw, code, detail)
+    assert len(_journal(sl.state)) == n
+    assert c.get("/api/hide/preview", headers=h).status_code == 422
