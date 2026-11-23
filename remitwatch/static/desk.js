@@ -615,8 +615,17 @@ async function emaBatch(btn, box){
 }
 
 // ---------------------------------------------------------------- reasons hidden for a payer (the biller: "we know which payers don't pay that")
-async function hideReason(payer, signal, label, after){
-  const note = prompt(`Hide “${label}” for ${payer}?\n\nIts open items go to Let go, and new ones will too; anything someone has worked stays. Undo it under Hidden.\n\nWhy (shown on each item):`, `${payer} does not pay these`);
+async function hideReason(payer, signal, label, after, item){
+  // from an item's panel: what the archive saw happen to earlier items like this one (same payer, code and payer's reason),
+  // the figure to read before hiding (/api/hide?patterns=1, archive_rules.hide_patterns)
+  let seen = '';
+  if(item){
+    try { const pats = (await api('/api/hide?patterns=1')).patterns || [], code = item.billed_code || item.procedure_code || '';
+      const p = pats.find(x => x.payer_group === payer && x.code === code && x.reason === (item.carc || ''));
+      if(p && p.all) seen = `\n\nThe archive saw ${pl(p.paid_later, 'earlier item')} of ${num(p.all)} like this one (same payer, code ${code} and reason ${item.carc}) paid later.`; }
+    catch(e){ seen = ''; }
+  }
+  const note = prompt(`Hide “${label}” for ${payer}?\n\nIts open items go to Let go, and new ones will too; anything someone has worked stays. Undo it under Hidden.${seen}\n\nWhy (shown on each item):`, `${payer} does not pay these`);
   if(note === null) return;
   let r;
   try { r = await post('/api/hide', {payer_group: payer, signal, note}); } catch(e){ alert('Not saved: ' + e.message); return; }
@@ -655,5 +664,5 @@ function hideDrawerHtml(f){
 }
 function bindHideDrawer(f, d){
   const a = d.querySelector('#hideFromItem'); if(!a) return;
-  a.onclick = e => { e.preventDefault(); hideReason(f.payer_group, f.signal, a.dataset.label, () => { closeDetail(); render(); }); };
+  a.onclick = e => { e.preventDefault(); hideReason(f.payer_group, f.signal, a.dataset.label, () => { closeDetail(); render(); }, f); };
 }

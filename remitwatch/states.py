@@ -2104,7 +2104,7 @@ def _decide(fx: dict, today: str) -> dict:
     if own_last and today > own_last and lastw and lastw >= today and not lastw_["own"]:
         # past the item's own deadline and the payer's own limit, inside a later window: which one, and what it is for
         res["late_window"] = next((w for w in wins if w["date"] >= today and not w["own"]), lastw_)
-    past_all = bool(lastw) and today > lastw
+    past_all = bool(lastw) and today > (_add(lastw, EXPIRE_GRACE_DAYS) or lastw)
 
     def put(state: str, rule: str, basis: str, rows: list | None = None, follow: str | None = None) -> dict:
         res.update(work_state=state, rule=rule, state_basis=basis[:300], follow_up_on=follow)

@@ -216,6 +216,20 @@ def test_classify_note_reads_kinds_dates_and_allow_days_without_keeping_words():
     assert states.classify_note(None) == {"kinds": [], "date": None, "wait_days": None}
 
 
+def test_a_sentence_ends_at_its_period_never_inside_an_abbreviation_or_a_number():
+    """The first sentence of a basis or an argument (states.sentence_end): never cut at 'ch. 12 sec. 40.2', 'e.g.' or a
+    period before a lower-case word; a semicolon ends a clause only when asked."""
+    t = "Modifier 57 (CMS Claims Processing Manual ch. 12 sec. 40.2). If a biopsy visit made the decision, let it go."
+    assert t[:states.sentence_end(t)] == "Modifier 57 (CMS Claims Processing Manual ch. 12 sec. 40.2)"
+    t = "Send the note, e.g. The operative note. Then wait."
+    assert t[:states.sentence_end(t)] == "Send the note, e.g. The operative note"
+    t = "Medicare Part B: redetermination within 120 days (42 CFR 405.942); a reopening takes no documents. More."
+    assert t[:states.sentence_end(t)] == "Medicare Part B: redetermination within 120 days (42 CFR 405.942)"
+    assert t[:states.sentence_end(t, semicolon=False)] == "Medicare Part B: redetermination within 120 days (42 CFR 405.942); a reopening takes no documents"
+    assert states.sentence_end("One sentence with no end") is None
+    assert states._short_label("Commercial plans: 180 days is the common default. Check the contract.") == "Commercial plans: 180 days is the common default"
+
+
 def test_action_kind_reads_emas_claim_actions():
     assert states.action_kind("Initial Appeal Electronic") == "appeal"
     assert states.action_kind("Submitted Corrected Claim Portal") == "corrected"

@@ -500,14 +500,18 @@ def test_notes_are_matched_by_patient_and_date_or_by_a_person(site, monkeypatch)
     import remitwatch.api as api
     nid = attached["note"]["note_id"]
     path, sha = table(site.db, f"SELECT path, sha256 FROM uploaded_notes WHERE note_id='{nid}'")[0]
-    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=True) is None
+    # before: nothing wrong with the note it rests on (first=False: before a first fax the packet is also built again when
+    # another note for the visit was matched after it, here the progress note attached above, which counts only when that
+    # fell in a later second than the build: timestamps are whole seconds)
+    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,))) is None
     assert c.post(f"/api/uploads/notes/{nid}/remove", headers=XHR).json() == {"removed": True}
     assert not os.path.exists(path) and c.get(f"/api/uploads/notes/{nid}/file").status_code == 404
     assert len(c.get(f"/api/packets?finding_id={fid}").json()) == 3            # each packet built stays
     assert table(site.db, f"SELECT status FROM uploads WHERE upload_id='{sha}'") == [("removed",)]
     assert table(site.db, f"SELECT 1 FROM uploaded_notes WHERE note_id='{nid}'") == []
-    assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=True) \
-        == "The note it was built from was taken back."
+    for first in (False, True):
+        assert api._packet_problem(from_attached, api.one("SELECT * FROM findings WHERE finding_id=?", (fid,)), first=first) \
+            == "The note it was built from was taken back."
     # a note view, for checking it is the right one
     gid = good["note"]["note_id"]
     v = c.get(f"/api/uploads/notes/{gid}/file")

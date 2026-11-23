@@ -641,3 +641,20 @@ def test_one_item_inside_the_payers_own_limit_is_sent_from_its_panel(site, monke
     conn.close()
     r = site.c.post("/api/appeals/send", json={"finding_id": fid}, headers=XHR).json()
     assert r.get("code") != "expired" and r["status"] == "sent" and len(site.line.sent) == 1, r
+
+
+def test_the_note_match_reads_its_body_after_the_sign_in(server, monkeypatch):
+    """needs_A2 F.2 (the A2 security review): a Body() parameter is read and parsed before the sign-in, so anyone could
+    make the server parse a large body on POST /api/uploads/notes/{id}/match. With a password set and no login, a
+    malformed or oversized body is refused by the sign-in (401), never parsed first (422); signed in, a bad body is a 400
+    and an oversized one a 413, and a good one is answered as before."""
+    monkeypatch.setattr(server.api, "PASSWORD", "a-long-enough-password")
+    path = "/api/uploads/notes/" + "a" * 24 + "/match"
+    hdr = dict(XHR, **{"Content-Type": "application/json"})
+    assert server.c.post(path, content=b"{not json", headers=hdr).status_code == 401
+    assert server.c.post(path, content=b"[" * 100_000, headers=hdr).status_code == 401
+    me = dict(hdr, **basic("biller", "a-long-enough-password"))
+    assert server.c.post(path, content=b"{not json", headers=me).status_code == 400
+    assert server.c.post(path, content=b" " * 70_000, headers=me).status_code == 413
+    r = server.c.post(path, json={"pick": 0}, headers=dict(XHR, **basic("biller", "a-long-enough-password")))
+    assert r.status_code == 400 and "note" in r.json()["detail"].lower()      # no such note: the route itself answers

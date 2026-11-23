@@ -1,9 +1,12 @@
 // RemitWatch Data tab: whether the numbers can be trusted, the feeds, and EMA's reports: what each report was read as,
-// the payments EMA posted that no remittance carries (with the request to send them again), 835 payments EMA never
-// posted, credits, the A/R accounted for, what the last run noted, and the write-off patterns waiting for the owner.
-// Loaded after today.js; uses index.html's helpers ($, api, esc, money, money2, state, render) and today.js's (longDate,
-// pl, dataChecks, tdBlindBanner) and features.js's feedPanel. Every number that opens a list opens one whose count line
-// shows that same number. Names here start with dt (one global scope with the other scripts).
+// the payments EMA posted that no remittance carries (with the request to send them again), payments the payer sent that
+// EMA never posted (with the list of them to post), credits (with the list of them to refund), the A/R accounted for,
+// what the last run noted, and the write-off patterns waiting for the owner. The checklist, the feeds and the fixed
+// panels draw at once; EMA's panels fill their place when their answer comes. A link from another page lands on what it
+// names (state.dataAnchor). Loaded after today.js; uses index.html's helpers ($, api, esc, money, money2, qs, state,
+// render, openDetail) and today.js's (longDate, pl, dataChecks, tdBlindBanner, tdBindLinks) and features.js's feedPanel.
+// Every number that opens a list opens one whose count line shows that same number. Names here start with dt (one global
+// scope with the other scripts).
 
 const DT_REPORT = {ar_report: 'A/R report', production: 'Production report'};
 const DT_STATUS = {current: ['Current', 'ok'], partly_replaced: ['Current, partly replaced', 'ok'], replaced: ['Replaced by a newer file', 'muted'],
@@ -31,14 +34,12 @@ function dtCopy(text, btn){
 async function dataTab(v){
   const m = state.meta;
   if(!m){ v.innerHTML = '<div class="panel"><h2>Data</h2><div class="note">The site did not answer with its settings. Reload the page in a minute.</div></div>'; return; }
-  let cov = {gaps: []}, ema = {ready: false};
-  const [c1, e1] = await Promise.all([api('/api/coverage').catch(()=>null), api('/api/ema/data').catch(e=>({ready:false, error: e.message}))]);
-  if(c1) cov = c1;
-  if(e1) ema = e1;
+  const covP = api('/api/coverage').catch(()=>null), emaP = api('/api/ema/data').catch(e=>({ready:false, error: e.message || 'no answer from the site'}));
+  const anchor = state.dataAnchor; state.dataAnchor = null;
   v.innerHTML = `<div id="dtBlind"></div><div id="checks"></div><div id="feedPanel"></div>
-    <div id="dtEma">${dtEmaHtml(ema)}</div>
+    <div id="dtEma"><div class="panel"><h2>EMA's reports</h2><div class="muted small">loading…</div></div></div>
     <section id="ops-panels"></section>
-    ${dtGapsHtml(cov)}
+    <div id="dtGaps"></div>
     <div class="grid two">
       <div class="panel"><h2>What is loaded</h2><table>
         <tr><td>Files ingested</td><td class="num">${((m.files||{}).n||0).toLocaleString()} (${(m.files||{}).n835||0} remits, ${(m.files||{}).nema||0} EMA exports)</td></tr>
@@ -64,15 +65,32 @@ async function dataTab(v){
         <li><b>The 2026 MIPS payment adjustment file</b> (qpp.cms.gov, Performance Feedback).</li>
       </ol>
       <div class="note">Not needed: 837 claim files (the remittance reports the billed code whenever the payer changes it, and the EMA charge export holds the rest) and the CMS fee schedule files (public).</div></details>`;
-  dtBind(v, ema);
-  const blind = v.querySelector('#dtBlind');
-  await Promise.all([dataChecks(v.querySelector('#checks')), feedPanel(v.querySelector('#feedPanel')),
-    (typeof tdBlindBanner === 'function' ? tdBlindBanner(blind, ema.blind) : Promise.resolve())]);
+  // the checklist and the feeds come from the brief and the sync status: they never wait for EMA's figures
+  const fixed = Promise.all([dataChecks(v.querySelector('#checks')), feedPanel(v.querySelector('#feedPanel'))]);
+  const gaps = covP.then(cov => { const el = v.querySelector('#dtGaps'); if(el) el.innerHTML = dtGapsHtml(cov || {gaps: []}); });
+  const emaDone = emaP.then(async ema => {
+    ema = ema || {ready: false};
+    const el = v.querySelector('#dtEma'); if(!el) return;
+    el.innerHTML = dtEmaHtml(ema);
+    dtBind(v, ema);
+    if(typeof tdBlindBanner === 'function') await tdBlindBanner(v.querySelector('#dtBlind'), ema.ready ? ema.blind : undefined);
+    if(anchor) await dtLand(v, anchor, ema);
+  });
+  await Promise.all([fixed, gaps, emaDone]);
+}
+
+// a link from another page names what it is about: its list opens, and the page scrolls to it
+async function dtLand(v, anchor, ema){
+  const key = {dtPostList: 'post', dtRefundList: 'refund'}[anchor];
+  if(key) await dtItemsOpen(v, key, ema);
+  const el = v.querySelector('#' + anchor);
+  if(el && el.scrollIntoView) el.scrollIntoView({block: 'start'});
 }
 
 function dtGapsHtml(cov){
+  cov = cov || {gaps: []};
   const gaps = (cov.gaps||[]).length ? `<div class="panel"><h2>Remittance weeks that look missing</h2>
-    <div class="note">A payer that pays every week sent next to nothing in these weeks and then started again, and the visits those weeks would have paid are still short. Either its 835 files for those weeks never reached the Dropbox folder or it paid nothing. Ask TriZetto to send the files again.</div>
+    <div class="note">A payer that pays every week sent next to nothing in these weeks and then started again, and the visits those weeks would have paid are still short. Either its remittance files for those weeks never reached the Dropbox folder or it paid nothing. Ask TriZetto to send the files again.</div>
     <div class="scroll"><table><thead><tr><th>Payer</th><th>Payer ID</th><th>From</th><th>To</th><th class="num">Weeks</th><th class="num">Claims received</th><th class="num">Usual for those weeks</th><th>Visits still short, about</th></tr></thead>
     <tbody>${cov.gaps.map(g=>`<tr><td>${esc(g.payer)}</td><td class="small muted">${esc(g.payer_id)}</td><td>${dtDay(g.from)}</td><td>${dtDay(g.to)}</td><td class="num">${esc(g.weeks)}</td><td class="num">${Number(g.seen||0).toLocaleString()}</td><td class="num">${Number(g.usual||0).toLocaleString()}</td>
       <td>${Object.entries(g.missing_by_month||{}).map(([mo,n])=>`${Number(n).toLocaleString()} claims for ${esc(rwMonth(mo))}`).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>` : '';
@@ -116,9 +134,7 @@ function dtReportsHtml(e){
   const line = [f.ar_as_of ? `A/R as of <b>${dtDay(f.ar_as_of)}</b> (${dtAge(f.ar_days, 8)})` : 'No A/R report yet',
     f.production_as_of ? `Production through <b>${dtDay(f.production_as_of)}</b> (${dtAge(f.production_days, 14)})` : 'No Production report yet',
     f.newest_835 ? `newest remittance ${dtDay(f.newest_835)}` : ''].filter(Boolean).join(' · ');
-  const heldHtml = held.map(x=>`<div class="warnbox"><b>${esc(DT_REPORT[x.report] || 'A report')} held${x.source_name ? ': ' + esc(x.source_name) : ''}.</b> ${esc(x.status_reason || 'It needs a decision before it is read.')}
-      ${x.decided_by ? `<div class="small">${esc(x.decision === 'apply' ? 'Apply' : 'Discard')} chosen by ${esc(x.decided_by)} on ${dtDay(x.decided_at)}; the next run reads it.</div>`
-        : `<div class="actions" style="margin-top:6px"><button class="primary" data-decide="apply" data-file="${esc(x.file_id)}">Apply it</button><button data-decide="discard" data-file="${esc(x.file_id)}">Discard it</button><span class="small muted dtDecideMsg"></span></div>`}</div>`).join('');
+  const heldHtml = held.map(dtHeldHtml).join('');
   const nr = cat.not_read || [];
   return `<div class="panel" id="dtReports"><div class="panel-head"><h2>EMA's reports</h2><span class="small muted">${line}</span></div>
     ${heldHtml}
@@ -133,6 +149,20 @@ function dtReportsHtml(e){
     <div class="small" style="margin-top:6px"><a href="/upload">Upload a report</a> · the Upload page lists the five exports, what each is for and how to pull it.</div></div>`;
 }
 
+// a held report: what held it, and Apply or Discard. Applying reads it as it is, so it is never the obvious button and it
+// asks first. A choice made since the newest run waits for the next run; one made before it and still held was not read
+// by that run, and is offered again
+function dtHeldHtml(x){
+  const name = DT_REPORT[x.report] || 'A report', file = esc(x.file_id);
+  const chose = x.decided_by ? `${x.decision === 'discard' ? 'Discard' : 'Apply'} chosen by ${esc(x.decided_by)} on ${dtDay(x.decided_at)}` : '';
+  const pending = !!x.decision_pending;
+  const said = chose ? `<div class="small">${chose}${pending ? '; the next run reads it.' : ', and it is still held: choose again.'}</div>` : '';
+  const btns = pending ? `<button data-decide="discard" data-file="${file}">Discard it instead</button>`
+    : `<button data-decide="apply" data-file="${file}">${chose ? 'Apply it again' : 'Apply it'}</button><button data-decide="discard" data-file="${file}">Discard it</button>`;
+  return `<div class="warnbox" data-held="${file}"><b>${esc(name)} held${x.source_name ? ': ' + esc(x.source_name) : ''}.</b> ${esc(x.status_reason || 'It needs a decision before it is read.')}
+      ${said}<div class="actions" style="margin-top:6px">${btns}<span class="small muted dtDecideMsg"></span></div></div>`;
+}
+
 function dtMissingHtml(e){
   const r = e.reconcile || {}, c1 = r.c1 || {}, rows = Array.isArray(e.resend) ? e.resend : [];
   if(r.error) return `<div class="panel"><h2>Payments with no remittance</h2><div class="note sev-high">These figures did not come back (${esc(r.error)}).</div></div>`;
@@ -140,7 +170,8 @@ function dtMissingHtml(e){
   const words = e.cause_words || {};
   const causes = Object.entries(c1.causes || {}).sort((a,b)=>(b[1].cents||0)-(a[1].cents||0));
   const since = r.since_feed_stopped || {};
-  return `<div class="panel" id="dtMissing"><div class="panel-head"><h2>Payments with no remittance</h2><span class="small muted">EMA posted ${money(c1.unmatched_cents)} of insurance payments that no 835 on file carries. Without the remittance nobody can see what the payer denied, cut or wrote off on those claims.</span></div>
+  const bs = e.basis || {};
+  return `<div class="panel" id="dtMissing"><div class="panel-head"><h2>Payments with no remittance</h2><span class="small muted">EMA posted <span title="${esc(bs.c1 || '')}">${money(c1.unmatched_cents)}</span> of insurance payments that no remittance on file carries. Without the remittance nobody can see what the payer denied, cut or wrote off on those claims.</span></div>
     ${since.cents ? `<div class="small"><b>${money(since.cents)}</b> of it was posted after the newest remittance (${esc(pl(since.checks, 'check'))}). ${esc((words.after_feed || {}).ask || 'The remittance feed is behind.')} Those checks match by themselves once their remittances are in, so they are not among the requests below.</div>` : ''}
     ${rows.length ? `<h3 class="small" style="margin:10px 0 4px">Remittances to ask for</h3>
       <div class="batches" id="dtAskList">${rows.slice(0, DT_ASK_SHOW).map(dtAskRow).join('')}</div>
@@ -160,22 +191,64 @@ function dtAskRow(x, i){
 }
 
 function dtUnpostedHtml(e){
-  const c4 = (e.reconcile || {}).c4;
-  if(!c4 || !(c4.n || c4.short_n)) return '';
-  return `<div class="panel" id="dtUnposted"><div class="panel-head"><h2>835 payments EMA never posted</h2><span class="small muted">The payer paid and sent the remittance, and EMA has no posting for it: the money is not on the patient's account.</span></div>
-    <div class="small"><b>${esc(pl(c4.n, 'payment'))}</b> not posted, ${money(c4.cents)}${c4.short_n ? ` · <b>${esc(pl(c4.short_n, 'payment'))}</b> posted short, ${money(c4.short_cents)}` : ''}${c4.as_of ? ` · Production through ${dtDay(c4.as_of)}` : ''}.</div>
-    <div class="small" style="margin-top:6px">Each one is an item on <a href="#fees" class="dtGo" data-tab="fees">Fees &amp; takebacks</a> with what to post. <a href="/api/ema/unposted.csv" download>Download the list (CSV)</a></div></div>`;
+  const c4 = (e.reconcile || {}).c4 || {}, it = (e.items || {}).post || {}, bs = e.basis || {};
+  if(!(c4.n || c4.short_n || it.n)) return '';
+  return `<div class="panel" id="dtUnposted"><div class="panel-head"><h2>Payments the payer sent that EMA never posted</h2><span class="small muted">The payer paid and sent the remittance, and EMA has no posting for it: the money is not on the patient's account.</span></div>
+    ${c4.n || c4.short_n ? `<div class="small" title="${esc(bs.c4 || '')}"><b>${esc(pl(c4.n, 'payment'))}</b> not posted, ${money(c4.cents)}${c4.short_n ? ` · <b>${esc(pl(c4.short_n, 'payment'))}</b> posted short, ${money(c4.short_cents)}` : ''}${c4.as_of ? ` · Production through ${dtDay(c4.as_of)}` : ''}. <a href="/api/ema/unposted.csv" download>Download the list (CSV)</a></div>` : ''}
+    ${dtItemsHtml('post', it)}</div>`;
 }
 
+// the run's items of one kind (to post, to refund): a count line that is Today's number, and the list on request (open
+// when a link landed here). A row opens its item; the item's Next walks the list
+const DT_ITEMS = {post: {id: 'dtPostList', one: 'payment', what: 'to post in EMA', sort: 'paid', how: 'Each one is an item that says what to post: open it, post the payment in EMA, then mark it posted.'},
+  refund: {id: 'dtRefundList', one: 'credit', what: 'to refund or take back', sort: 'deadline', how: "Each one is an item that says who overpaid and what to send back; Medicare's 60-day ones come first."}};
+function dtItemsHtml(key, it){
+  const d = DT_ITEMS[key];
+  if(!it || it.error) return it && it.error ? `<div class="small sev-high">These items did not come back (${esc(it.error)}).</div>` : '';
+  if(!it.n) return '';
+  return `<div id="${d.id}" style="margin-top:6px"><div class="small"><b>${esc(pl(it.n, d.one))} ${esc(d.what)}</b>, ${money(it.cents)}. ${esc(d.how)}
+      <a href="#" class="dtItemsGo" data-items="${key}">List ${it.n === 1 ? 'it' : 'them'}</a></div><div class="dtItemsBody"></div></div>`;
+}
+async function dtItemsOpen(v, key, ema, page){
+  const d = DT_ITEMS[key], box = v.querySelector('#' + d.id), go = (((ema || {}).items || {})[key] || {}).go;
+  if(!box || !go) return;
+  const body = box.querySelector('.dtItemsBody'); if(!body) return;
+  const size = 25; page = page || 1;
+  body.innerHTML = '<div class="muted small">loading…</div>';
+  const url = off => '/api/findings?' + qs(Object.assign({live: 1, limit: size, offset: off, sort: d.sort}, go));
+  let r; try { r = await api(url((page - 1) * size)); } catch(err){ body.innerHTML = `<div class="small sev-high">The items did not come back: ${esc(err.message || 'no answer from the site')}.</div>`; return; }
+  const items = r.items || [], pages = Math.max(1, Math.ceil((r.total || 0) / size));
+  const due = x => x.appeal_deadline ? `${key === 'refund' ? 'send by' : 'by'} ${longDate(x.appeal_deadline)}` : '';
+  const when = x => longDate(key === 'post' ? (x.payment_date || x.service_date) : (x.service_date || x.payment_date));
+  body.innerHTML = `<div class="small" style="margin:6px 0 2px">${esc(pl(r.total, d.one))} ${esc(d.what)}, ${money(r.shortfall_cents)}</div>
+    ${dtNarrow() ? `<div>${items.map(x=>`<div class="row check" tabindex="0" role="button" data-id="${esc(x.finding_id)}"><div><b>${money2(x.shortfall_cents)}</b> · ${esc(x.payer_group||'')} · ${esc(when(x))}
+        <div class="small">${esc(x.title||'')}</div><div class="small muted">${esc(DT_STATE_WORDS[x.work_state] || '')}${due(x) ? ' · ' + esc(due(x)) : ''}</div></div></div>`).join('')}</div>`
+      : `<div class="scroll"><table class="small"><thead><tr><th>Payer</th><th>${key === 'post' ? 'Paid on' : 'Service'}</th><th class="num">Amount</th><th>What</th><th>${key === 'refund' ? 'Send by' : 'Date'}</th><th>State</th></tr></thead>
+    <tbody>${items.map(x=>`<tr class="row" tabindex="0" data-id="${esc(x.finding_id)}"><td>${esc(x.payer_group||'')}</td><td class="day">${esc(when(x))}</td><td class="num">${money2(x.shortfall_cents)}</td><td>${esc(x.title||'')}</td><td>${esc(x.appeal_deadline ? longDate(x.appeal_deadline) : '')}</td><td>${esc(DT_STATE_WORDS[x.work_state] || '')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">None.</td></tr>'}</tbody></table></div>`}
+    ${pages > 1 ? `<div class="pager"><button class="dtItemsPrev" ${page<=1?'disabled':''}>‹ prev</button><span>page ${page} of ${pages}</span><button class="dtItemsNext" ${page>=pages?'disabled':''}>next ›</button></div>` : ''}`;
+  const ids = items.map(x => x.finding_id), wl = 'data:' + key;
+  body.querySelectorAll('.row[data-id]').forEach(tr => { const open = () => {
+      // the item's Next and "Mark sent and open the next" walk this list, page after page
+      state.worklist = ids.slice(); state.wlTotal = r.total; state.wlKey = wl;
+      state.wlNext = async () => { if(state.wlKey !== wl) return 0; const more = await api(url((page - 1) * size + (state.worklist || []).length));
+        if(state.wlKey !== wl) return 0; const seen = new Set(state.worklist || []); const fresh = (more.items || []).map(x => x.finding_id).filter(x => !seen.has(x));
+        state.worklist = (state.worklist || []).concat(fresh); return fresh.length; };
+      if(typeof openDetail === 'function') openDetail(tr.dataset.id); };
+    tr.onclick = open; tr.onkeydown = e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); open(); } }; });
+  const pv = body.querySelector('.dtItemsPrev'), nx = body.querySelector('.dtItemsNext');
+  if(pv) pv.onclick = () => dtItemsOpen(v, key, ema, page - 1);
+  if(nx) nx.onclick = () => dtItemsOpen(v, key, ema, page + 1);
+}
+const DT_STATE_WORDS = {work_now: 'Work now', waiting: 'Waiting', done: 'Done', accepted: 'Accepted', expired: 'Expired', cant_check: "Can't be checked"};
+
 function dtCreditsHtml(e){
-  const c8 = (e.reconcile || {}).c8;
-  if(!c8) return '';
+  const c8 = (e.reconcile || {}).c8 || {}, it = (e.items || {}).refund || {}, bs = e.basis || {};
   const mp = c8.medicare_primary_over60 || {}, oth = c8.other_over60 || {}, ins = c8.insurance || {}, pat = c8.patient || {};
-  if(!(ins.n || pat.n)) return '';
-  return `<div class="panel" id="dtCredits"><div class="panel-head"><h2>Credits</h2><span class="small muted">Money a payer or a patient paid beyond what the line owed, as the A/R shows it.</span></div>
-    ${mp.n ? `<div class="warnbox"><b>Compliance: ${esc(pl(mp.n, 'Medicare primary credit'))} over 60 days, ${money(-mp.cents)}.</b> Medicare expects an overpayment back within 60 days of finding it. A person decides each one with the compliance lead.</div>` : ''}
-    <div class="small">${esc(pl(ins.n, 'insurance credit'))}, ${money(-(ins.cents||0))} · ${esc(pl(pat.n, 'patient credit'))}, ${money(-(pat.cents||0))}${oth.n ? ` · ${esc(pl(oth.n, 'other credit'))} over 60 days, ${money(-oth.cents)}` : ''}.</div>
-    <div class="small" style="margin-top:6px"><a href="/api/ema/credits.csv" download>Download the ${esc(pl((ins.n||0)+(pat.n||0), 'credit'))} (CSV)</a></div></div>`;
+  if(!(ins.n || pat.n || it.n)) return '';
+  return `<div class="panel" id="dtCredits"><div class="panel-head"><h2>Credits</h2><span class="small muted">Money a payer or a patient paid beyond what the line owed.</span></div>
+    ${dtItemsHtml('refund', it)}
+    ${mp.n ? `<div class="warnbox"><b>Compliance: ${esc(pl(mp.n, 'Medicare primary credit'))} over 60 days on EMA's A/R, ${money(-mp.cents)}.</b> Medicare expects an overpayment back within 60 days of finding it. A person decides each one with the compliance lead.</div>` : ''}
+    ${ins.n || pat.n ? `<div class="small" title="${esc(bs.c8 || '')}">On EMA's A/R of the newest pull: ${esc(pl(ins.n, 'insurance credit'))}, ${money(-(ins.cents||0))} · ${esc(pl(pat.n, 'patient credit'))}, ${money(-(pat.cents||0))}${oth.n ? ` · ${esc(pl(oth.n, 'other credit'))} over 60 days, ${money(-oth.cents)}` : ''}. <a href="/api/ema/credits.csv" download>Download the ${esc(pl((ins.n||0)+(pat.n||0), 'credit'))} on the A/R (CSV)</a></div>` : ''}</div>`;
 }
 
 function dtArHtml(e){
@@ -185,7 +258,7 @@ function dtArHtml(e){
   const labels = w4.labels || {}, b = w4.buckets || {};
   const rows = order.filter(k => (b[k]||{}).n);
   const nin = w4.not_in_export || {};
-  return `<div class="panel" id="dtAr"><div class="panel-head"><h2>The A/R accounted for</h2><span class="small muted">Every insurance line on the A/R of ${dtDay(w4.as_of)}, in one place each. Click a line to list its rows.</span></div>
+  return `<div class="panel" id="dtAr"><div class="panel-head"><h2>The A/R accounted for</h2><span class="small muted" title="${esc((e.basis || {}).w4 || '')}">Every insurance line on the A/R of ${dtDay(w4.as_of)}, in one place each. Click a line to list its rows.</span></div>
     <div class="scroll"><table class="small"><thead><tr><th>Where it stands</th><th class="num">Rows</th><th class="num">Dollars</th></tr></thead>
     <tbody>${rows.map(k=>`<tr class="row dtBucket" tabindex="0" data-bucket="${esc(k)}"><td>${esc(labels[k] || k)}</td><td class="num">${Number(b[k].n).toLocaleString()}</td><td class="num">${money(b[k].cents)}</td></tr>`).join('')}
       <tr><td><b>Total</b> ${w4.adds_up ? '<span class="ok small">adds up</span>' : '<span class="sev-high small">does not add up: tell the maintainer</span>'}</td><td class="num"><b>${Number(w4.total.n||0).toLocaleString()}</b></td><td class="num"><b>${money(w4.total.cents)}</b></td></tr></tbody></table></div>
@@ -194,11 +267,15 @@ function dtArHtml(e){
 }
 
 function dtPolicyHtml(e){
-  const p = e.policy || {}, ub = e.upper_bound || {};
+  const p = e.policy || {}, ub = e.upper_bound || {}, dc = p.decide || {}, c7 = p.contractual || {}, bs = e.basis || {};
   if(p.error) return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>Denials written off in EMA</h2></div><div class="note sev-high">These figures did not come back (${esc(p.error)}).</div></div>`;
   if(!p.patterns && !ub.n) return '';
   return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>Denials written off in EMA</h2></div>
-    ${p.patterns ? `<div class="small">The denials written off in EMA, by its posting rules or later by a person, fall in <b>${esc(pl(p.patterns, 'pattern'))}</b> (payer, code, reason): ${money(p.cents)} in all, ${money(p.appealable_cents)} still inside a window. ${p.accepted ? esc(pl(p.accepted, 'pattern')) + ' accepted so far. ' : ''}<a href="#policy" class="dtGo" data-tab="policy">Decide them on the write-off policy page</a>.</div>` : ''}
+    ${p.patterns ? `<div class="small">The write-off policy page lists <b>${esc(pl(p.patterns, 'pattern'))}</b> (payer, code, reason) for the owner to decide.
+      ${p.cents || p.appealable_cents ? `Denials written off in EMA, by its posting rules or later by a person: <span title="${esc(bs.policy || '')}">${money(p.cents)} in all, ${money(p.appealable_cents)} still appealable (estimates)</span>${p.legal_only_cents ? `, of it ${money(p.legal_only_cents)} only inside the payer's own limit (one at a time)` : ''}.` : ''}
+      ${dc.patterns ? `<b>${esc(pl(dc.patterns, 'code'))} a payer almost never pays</b> (${esc(pl(dc.items, 'denial'))}, <span title="${esc(bs.payer_policy || '')}">${money(dc.cents)} est.</span>) ${dc.patterns===1?'waits':'wait'} for the owner's decision: out of Work now until then.` : ''}
+      ${c7.patterns ? `EMA posts ${esc(pl(c7.patterns, 'payer denial reason'))} as contractual: <span title="${esc(bs.contractual || '')}">${money(c7.written_off_cents)}</span> written off that way, in no total.` : ''}
+      ${p.accepted ? esc(pl(p.accepted, 'pattern')) + ' accepted so far. ' : ''}<a href="#policy" class="dtGo" data-tab="policy">Decide them on the write-off policy page</a>.</div>` : ''}
     ${ub.n ? `<div class="small muted" style="margin-top:4px">${esc(pl(ub.n, 'open item'))} ${ub.n===1?'has':'have'} no price, because no rate covers the line. EMA wrote off up to ${money(ub.cents)} on them (the charge less what was paid): an upper bound, left out of every total.</div>` : ''}</div>`;
 }
 
@@ -213,14 +290,18 @@ function dtBind(v, ema){
   v.querySelectorAll('.dtGo').forEach(a=>a.onclick=e=>{ e.preventDefault(); state.tab = a.dataset.tab; location.hash = a.dataset.tab; render(); });
   const all = v.querySelector('#dtAllFiles');
   if(all) all.onclick = () => { v.querySelector('#dtFiles').innerHTML = ((ema.catalog||{}).files || []).map(dtFileRow).join(''); all.remove(); };
+  const files = (ema.catalog || {}).files || [];
   v.querySelectorAll('[data-decide]').forEach(b=>b.onclick=async()=>{
     const box = b.closest('.warnbox'), msg = box && box.querySelector('.dtDecideMsg'), what = b.dataset.decide;
+    const x = files.find(f => f.file_id === b.dataset.file) || {};
     if(what === 'discard' && !confirm('Discard this report? It is not read, and nothing it holds reaches the site.')) return;
-    box.querySelectorAll('button').forEach(x=>x.disabled = true);
+    if(what === 'apply' && !confirm(dtApplyWords(x))) return;
+    if(box) box.querySelectorAll('button').forEach(x=>x.disabled = true);
     try { await api('/api/ema/reports/'+encodeURIComponent(b.dataset.file)+'/decision', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision: what})});
       if(msg) msg.textContent = what === 'apply' ? 'Saved: the next run reads it.' : 'Saved: discarded.'; setTimeout(()=>render(), 1200); }
-    catch(err){ box.querySelectorAll('button').forEach(x=>x.disabled = false); if(msg) msg.textContent = 'Not saved: ' + (err.message || 'no answer from the site') + '.'; }
+    catch(err){ if(box) box.querySelectorAll('button').forEach(x=>x.disabled = false); if(msg) msg.textContent = 'Not saved: ' + (err.message || 'no answer from the site') + '.'; }
   });
+  v.querySelectorAll('.dtItemsGo').forEach(a=>a.onclick=e=>{ if(e) e.preventDefault(); dtItemsOpen(v, a.dataset.items, ema); });
   const rows = Array.isArray(ema.resend) ? ema.resend : [];
   const bindAsk = () => v.querySelectorAll('.dtAsk').forEach(b=>b.onclick=async()=>{
     const x = rows[Number(b.dataset.i)]; if(!x) return;
@@ -234,6 +315,15 @@ function dtBind(v, ema){
   if(allAsk) allAsk.onclick = () => { v.querySelector('#dtAskList').innerHTML = rows.map(dtAskRow).join(''); allAsk.remove(); bindAsk(); };
   v.querySelectorAll('.dtBucket').forEach(tr=>{ const go = () => dtArRows(v, tr.dataset.bucket, 1, ema);
     tr.onclick = go; tr.onkeydown = e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); go(); } }; });
+}
+
+// what Applying a held report does, said before it is done: it is read as it is, and replaces what is on file for the
+// same report and dates; the safe way is to pull it again
+function dtApplyWords(x){
+  const name = DT_REPORT[x.report] || 'report', scope = dtScope(x).replace(/<[^>]*>/g, '');
+  return `Apply this ${name}${x.source_name ? ' (' + x.source_name + ')' : ''} as it is? The next run reads it and it replaces what is on file for `
+    + (scope ? `the same ${x.report === 'ar_report' ? 'year' : 'dates'} (${scope})` : `the same ${x.report === 'ar_report' ? 'year' : 'dates'}`)
+    + `.${x.status_reason ? '\n\nIt was held because: ' + x.status_reason : ''}\n\nThe safe way is to pull it again from EMA with no filter and upload that; then discard this one.`;
 }
 
 // the facts TriZetto or the payer needs to send remittances again: payer, month, and each check (number, date, amount)
@@ -257,12 +347,20 @@ async function dtArRows(v, bucket, page, ema){
   el.innerHTML = '<div class="muted small">loading…</div>';
   let r; try { r = await api('/api/ema/ar?'+qs({bucket, page})); } catch(err){ el.innerHTML = `<div class="small sev-high">The rows did not come back: ${esc(err.message)}.</div>`; return; }
   const url = r.claim_url, link = n => (url && /^\d{6,12}$/.test(String(n||''))) ? `<a href="${esc(url.replace('{claim}', String(n)))}" target="_blank" rel="noopener noreferrer">Open in EMA</a>` : '';
+  const item = x => x.finding_id ? `<a href="#" class="dtArItem" data-id="${esc(x.finding_id)}">Open the item</a>` : '';
   const pages = Math.max(1, Math.ceil((r.count||0) / (r.size||100)));
-  el.innerHTML = `<h3 class="small" style="margin:10px 0 4px">${esc(r.label)}: ${esc(pl(r.count, 'row'))}, ${money(r.cents)}</h3>
+  const rows = r.rows || [];
+  // a phone: one card per row, its actions first, so they are on screen
+  const body = dtNarrow() ? `<div>${rows.map(x=>`<div class="check"><div><div>${[link(x.link), item(x)].filter(Boolean).join(' · ')}</div>
+      <div class="small"><b>${esc(x.claim_id||'')}</b> · ${esc(x.payer_group||'')} · ${money2(x.balance_cents)}</div>
+      <div class="small muted">${[dtDay(x.service_date), esc(x.code||''), esc(x.status||''), x.days==null ? '' : esc(pl(x.days, 'day'))].filter(Boolean).join(' · ')}${x.has_note?' <span class="chip">note</span>':''}</div></div></div>`).join('') || '<div class="muted small">No rows.</div>'}</div>`
+    : `<div class="scroll"><table class="small"><thead><tr><th>Claim</th><th>Payer</th><th>Service</th><th>Code</th><th class="num">Balance</th><th>Status</th><th class="num">Days</th><th></th></tr></thead>
+    <tbody>${rows.map(x=>`<tr><td>${esc(x.claim_id||'')}</td><td>${esc(x.payer_group||'')}</td><td>${dtDay(x.service_date)}</td><td>${esc(x.code||'')}</td><td class="num">${money2(x.balance_cents)}</td><td>${esc(x.status||'')}${x.has_note?' <span class="chip">note</span>':''}</td><td class="num">${x.days==null?'':Number(x.days)}</td><td>${[link(x.link), item(x)].filter(Boolean).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">No rows.</td></tr>'}</tbody></table></div>`;
+  el.innerHTML = `<h3 class="small" style="margin:10px 0 4px" title="${esc(((ema || {}).basis || {}).w4 || '')}">${esc(r.label)}: ${esc(pl(r.count, 'row'))}, ${money(r.cents)}</h3>
     ${r.pending ? `<div class="small sev-medium">${esc(pl(r.pending, 'row'))} of a newer A/R ${r.pending===1?'is':'are'} not sorted yet: the next run sorts ${r.pending===1?'it':'them'}.</div>` : ''}
-    <div class="scroll"><table class="small"><thead><tr><th>Claim</th><th>Payer</th><th>Service</th><th>Code</th><th class="num">Balance</th><th>Status</th><th class="num">Days</th><th></th></tr></thead>
-    <tbody>${(r.rows||[]).map(x=>`<tr><td>${esc(x.claim_id||'')}</td><td>${esc(x.payer_group||'')}</td><td>${dtDay(x.service_date)}</td><td>${esc(x.code||'')}</td><td class="num">${money2(x.balance_cents)}</td><td>${esc(x.status||'')}${x.has_note?' <span class="chip">note</span>':''}</td><td class="num">${x.days==null?'':Number(x.days)}</td><td>${link(x.link)}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">No rows.</td></tr>'}</tbody></table></div>
+    ${body}
     <div class="pager"><button class="dtPrev" ${page<=1?'disabled':''}>‹ prev</button><span>page ${page} of ${pages}</span><button class="dtNext" ${page>=pages?'disabled':''}>next ›</button></div>`;
   el.querySelector('.dtPrev').onclick = () => dtArRows(v, bucket, page-1, ema);
   el.querySelector('.dtNext').onclick = () => dtArRows(v, bucket, page+1, ema);
+  el.querySelectorAll('.dtArItem').forEach(a=>a.onclick=e=>{ if(e) e.preventDefault(); if(typeof openDetail === 'function') openDetail(a.dataset.id); });
 }

@@ -18,6 +18,7 @@ import datetime as dt
 import itertools
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -884,83 +885,188 @@ const answers = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 const html = read('index.html');
 const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
 const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/, /function qs\([^\n]*\n/].map(re => grab(html, re)).join('\n');
-// a stand-in element: the tags of its HTML, flat, with their attributes, matched by tag, #id, .class and [data-x="y"]
+// A stand-in page. A root element holds its HTML as text; the elements in it are its tags, each with the range it spans,
+// matched by tag, #id, .class, [attr] and [attr="value"], with descendant selectors. Setting an element's innerHTML (or
+// removing it) rewrites that range of its root's HTML: the elements outside the range stay the same objects, as in a
+// browser, so their handlers stay bound, and the root's innerHTML shows what every slot was filled with.
+const VOID = new Set(['input', 'br', 'img', 'hr', 'meta', 'link', 'col', 'source', 'wbr', 'area', 'base', 'embed', 'param', 'track']);
+const scrolled = [];
+function closeOf(h, tag, from) {
+  const re = new RegExp('<(/?)' + tag + '(?=[\\s>/])[^>]*>', 'gi'); re.lastIndex = from; let depth = 1, m;
+  while ((m = re.exec(h))) { if (m[1]) { if (--depth === 0) return { index: m.index, len: m[0].length }; } else if (!/\/>$/.test(m[0])) depth++; }
+  return null;
+}
 class El {
-  constructor(tag, attrs) { this.tag = tag; this.attrs = attrs || {}; this.dataset = {}; this._html = ''; this.kids = null;
+  constructor(tag, attrs, root) {
+    this.tag = tag; this.attrs = attrs || {}; this.root = root || null; this.dataset = {};
     for (const [k, v] of Object.entries(this.attrs)) if (k.startsWith('data-')) this.dataset[k.slice(5).replace(/-([a-z])/g, (m, c) => c.toUpperCase())] = v;
     this.id = this.attrs.id || ''; this.cls = (this.attrs.class || '').split(/\s+/).filter(Boolean); this.hidden = 'hidden' in this.attrs;
-    this.disabled = 'disabled' in this.attrs; this.value = this.attrs.value || ''; this.textContent = ''; this.firstElementChild = null; }
-  set innerHTML(h) { this._html = String(h); this.kids = null; }
-  get innerHTML() { return this._html; }
-  _parse() { if (this.kids) return this.kids; const out = []; const re = /<([a-zA-Z][\w-]*)((?:\s+[\w-]+(?:="[^"]*")?)*)\s*\/?>/g; let m;
-    while ((m = re.exec(this._html))) { const attrs = {}; for (const a of m[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)) attrs[a[1]] = a[2] === undefined ? '' : a[2];
-      const e = new El(m[1].toLowerCase(), attrs); if (out.length && out[out.length - 1].tag === 'tr' && e.tag === 'td' && !out[out.length - 1].firstElementChild) out[out.length - 1].firstElementChild = e; out.push(e); }
-    return (this.kids = out); }
-  matches(sel) { const tag = (sel.match(/^[a-z]+/) || [''])[0], id = (sel.match(/#([\w-]+)/) || [])[1], cls = [...sel.matchAll(/\.([\w-]+)/g)].map(x => x[1]);
-    const data = [...sel.matchAll(/\[data-([\w-]+)(?:="([^"]*)")?\]/g)];
+    this.disabled = 'disabled' in this.attrs; this.value = this.attrs.value === undefined ? '' : this.attrs.value; this.textContent = '';
+    this._html = ''; this.kids = root ? null : []; this.start = this.innerStart = this.innerEnd = this.end = 0;
+    this.classList = { contains: c => this.cls.includes(c) };
+  }
+  get top() { return this.root || this; }
+  _kids() { const t = this.top; if (t.kids === null) t.kids = t._scan(0, t._html.length); return t.kids; }
+  _scan(from, to) {
+    const h = this.top._html, re = /<([a-zA-Z][\w-]*)((?:\s+[\w-]+(?:="[^"]*")?)*)\s*\/?>/g, out = []; re.lastIndex = from; let m;
+    while ((m = re.exec(h)) && m.index < to) {
+      const attrs = {}; for (const a of m[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)) attrs[a[1]] = a[2] === undefined ? '' : a[2];
+      const e = new El(m[1].toLowerCase(), attrs, this.top); e.start = m.index; e.innerStart = m.index + m[0].length;
+      const c = VOID.has(e.tag) || m[0].endsWith('/>') ? null : closeOf(h, e.tag, e.innerStart);
+      e.innerEnd = c ? c.index : e.innerStart; e.end = c ? c.index + c.len : e.innerStart; out.push(e);
+    }
+    return out;
+  }
+  _shift(a, b, d) {   // the range [a, b) of the root's HTML became d characters longer: move what is after it, stretch what holds it
+    return this._kids().filter(e => !(e.start >= a && e.start < b)).map(e => {
+      if (e.start >= b) { e.start += d; e.innerStart += d; e.innerEnd += d; e.end += d; } else if (e.end > a) { e.innerEnd += d; e.end += d; }
+      return e; });
+  }
+  set innerHTML(h) {
+    h = String(h);
+    if (!this.root) { this._html = h; this.kids = null; return; }
+    const t = this.root; if (!this._kids().includes(this)) return;       // no longer on the page
+    const a = this.innerStart, b = this.innerEnd, keep = this._shift(a, b, h.length - (b - a));
+    t._html = t._html.slice(0, a) + h + t._html.slice(b);
+    t.kids = keep.concat(t._scan(a, a + h.length)).sort((x, y) => x.start - y.start);
+  }
+  get innerHTML() { return this.root ? this.root._html.slice(this.innerStart, this.innerEnd) : this._html; }
+  remove() {
+    if (!this.root || !this._kids().includes(this)) return;
+    const t = this.root, a = this.start, b = this.end, keep = this._shift(a, b, -(b - a));
+    t._html = t._html.slice(0, a) + t._html.slice(b); t.kids = keep;
+  }
+  get isConnected() { return !this.root || this._kids().includes(this); }
+  get firstElementChild() { return this._kids().find(e => e !== this && e.start >= (this.root ? this.innerStart : 0) && e.end <= (this.root ? this.innerEnd : this._html.length)) || null; }
+  _ancestors() { return this._kids().filter(e => e !== this && e.start < this.start && e.end >= this.end && e.innerEnd >= this.end).sort((x, y) => y.start - x.start); }
+  matches(sel) {
+    const bare = sel.replace(/\[[^\]]*\]/g, ''), tag = (bare.match(/^[a-zA-Z][\w-]*/) || [''])[0].toLowerCase(), id = (bare.match(/#([\w-]+)/) || [])[1];
+    const cls = [...bare.matchAll(/\.([\w-]+)/g)].map(x => x[1]), at = [...sel.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)];
     return (!tag || tag === this.tag) && (!id || id === this.id) && cls.every(c => this.cls.includes(c))
-      && data.every(([, k, val]) => ('data-' + k) in this.attrs && (val === undefined || this.attrs['data-' + k] === val)); }
-  querySelectorAll(sel) { const parts = sel.split(',').map(s => s.trim().split(/\s+/).pop()); return this._parse().filter(e => parts.some(p => e.matches(p))); }
+      && at.every(([, k, v]) => k in this.attrs && (v === undefined || this.attrs[k] === v));
+  }
+  _chain(chain) {
+    if (!this.matches(chain[chain.length - 1])) return false;
+    let i = chain.length - 2;
+    for (const a of this._ancestors()) { if (i < 0) break; if (a.matches(chain[i])) i--; }
+    return i < 0;
+  }
+  querySelectorAll(sel) {
+    const lo = this.root ? this.innerStart : 0, hi = this.root ? this.innerEnd : this._html.length;
+    const chains = sel.split(',').map(x => x.trim().split(/\s*>\s*|\s+/).filter(Boolean));
+    return this._kids().filter(e => e !== this && e.start >= lo && e.end <= hi && chains.some(c => e._chain(c)));
+  }
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
-  closest() { return null; }
-  remove() {}
+  closest(sel) { if (this.matches(sel)) return this; return this._ancestors().find(a => a.matches(sel)) || null; }
+  scrollIntoView() { scrolled.push(this.id || this.tag); }
+  focus() {}
 }
-const calls = [], went = [];
-const answer = p => { const key = Object.keys(answers).filter(k => p === k || p.startsWith(k.endsWith('?') ? k : k + '?')).sort((a, b) => b.length - a.length)[0];
-  if (key === undefined) { const e = new Error('no answer for ' + p); e.status = 404; throw e; } return JSON.parse(JSON.stringify(answers[key])); };
+const calls = [], went = [], dialogs = [];
+const later = ms => new Promise(r => setTimeout(r, ms));
+const answer = async p => {
+  // a key 'prefix|part|part' matches a path that starts with the prefix and holds each part
+  const keys = Object.keys(answers).filter(k => { const [pre, ...need] = k.split('|');
+    return (p === pre || p.startsWith(pre.endsWith('?') ? pre : pre + '?')) && need.every(x => p.includes(x)); })
+    .sort((a, b) => b.length - a.length);
+  const key = keys[0];
+  const slow = Object.entries(answers.__delay || {}).find(([k]) => p.startsWith(k));
+  if (slow) await later(slow[1]);
+  if ((answers.__fail || []).some(k => p.startsWith(k))) { const e = new Error('Internal Server Error'); e.status = 500; throw e; }
+  if (key === undefined) { const e = new Error('no answer for ' + p); e.status = 404; throw e; }
+  return JSON.parse(JSON.stringify(answers[key]));
+};
 const ctx = { console, Date, Math, JSON, Promise, Set, Map, URLSearchParams, setTimeout: f => 0, Number, String, Object, Array, RegExp, encodeURIComponent,
   state: { tab: 'today', filt: {}, page: {}, meta: answers['/api/meta'] }, location: { hash: '' },
   api: async (p, o) => { calls.push({ path: p, body: o && o.body ? JSON.parse(o.body) : null, method: o && o.method || 'GET' }); return answer(p); },
-  render: async () => { went.push({ tab: ctx.state.tab, hash: ctx.location.hash, filt: ctx.state.filt.worklist ? JSON.parse(JSON.stringify(ctx.state.filt.worklist)) : null }); },
-  openDetail: id => went.push({ open: id }), localStorage: { getItem: () => '1', setItem() {}, removeItem() {} },
-  confirm: () => true, prompt: (q, d) => 'Owner Test', alert: m => calls.push({ alert: m }), navigator: {},
+  render: async () => { went.push({ tab: ctx.state.tab, hash: ctx.location.hash, anchor: ctx.state.dataAnchor || null, filt: ctx.state.filt.worklist ? JSON.parse(JSON.stringify(ctx.state.filt.worklist)) : null }); },
+  openDetail: id => went.push({ open: id, worklist: ctx.state.worklist ? ctx.state.worklist.slice() : null, total: ctx.state.wlTotal == null ? null : ctx.state.wlTotal }),
+  localStorage: { getItem: () => '1', setItem() {}, removeItem() {} },
+  confirm: m => { dialogs.push(['confirm', m]); return answers.__confirm !== false; }, prompt: (q, d) => { dialogs.push(['prompt', q]); return 'Owner Test'; },
+  alert: m => calls.push({ alert: m }), navigator: {},
   document: { querySelector: () => null, querySelectorAll: () => [] }, window: answers.__narrow ? { innerWidth: 390 } : {} };
 vm.createContext(ctx);
 for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js'), read('data.js'), read('policy.js')]) vm.runInContext(src, ctx);
-ctx.dataChecks = async () => {}; ctx.feedPanel = async () => {};
+const checksAt = [];
+ctx.dataChecks = async el => { checksAt.push(Date.now()); if (el) el.innerHTML = '<div class="panel"><h2>Can the numbers be trusted?</h2></div>'; };
+ctx.feedPanel = async () => {};
 const out = {};
 const click = async el => { if (!el) throw new Error('nothing to click'); await el.onclick({ preventDefault() {} }); await new Promise(r => setImmediate(r)); };
+const ids = (v, sel) => v.querySelectorAll(sel + ' [data-id]').map(e => e.dataset.id);
 (async () => {
   out.kind_styles = JSON.parse(JSON.stringify(vm.runInContext('KIND_STYLE', ctx)));
   let v = new El('main');
-  await ctx.todayTab(v);
+  const t0 = Date.now(), tdRun = ctx.todayTab(v);
+  if (answers.__delay) { await later(150); out.today_early = v.innerHTML; out.today_early_ms = Date.now() - t0; }
+  await tdRun;
   out.today_html = v.innerHTML;
   out.today_tiles = v.querySelectorAll('[data-td]').map(e => e.dataset.td);
   out.today_score = v.querySelectorAll('[data-score]').map(e => e.dataset.score);
+  out.today_titles = Object.fromEntries(v.querySelectorAll('[data-td]').map(e => [e.dataset.td, e.attrs.title || '']));
+  out.today_done = v.querySelectorAll('.step.is-done').length;
   const clicks = {};
-  for (const key of out.today_tiles) { went.length = 0; await click(v.querySelector(`[data-td="${key}"]`)); clicks[key] = went.slice(); }
+  for (const key of out.today_tiles) { went.length = 0; ctx.state.dataAnchor = null; await click(v.querySelector(`[data-td="${key}"]`)); clicks[key] = went.slice(); }
   out.today_clicks = clicks;
+  out.today_links = v.querySelectorAll('.go-data').map(e => e.dataset.anchor || null);
   went.length = 0; await click(v.querySelector('[data-score="lost"]')); out.score_click = went.slice(); out.results_open = ctx.state.resultsOpen;
-  v = new El('main'); calls.length = 0;
-  await ctx.dataTab(v);
+  ctx.state.dataAnchor = null;
+  v = new El('main'); calls.length = 0; dialogs.length = 0;
+  const d0 = Date.now(), dRun = ctx.dataTab(v);
+  if (answers.__delay) { await later(150); out.data_early = v.innerHTML; out.checks_ms = checksAt.length ? checksAt[checksAt.length - 1] - d0 : null; }
+  await dRun;
   out.data_html = v.innerHTML;
   out.data_calls = calls.map(c => c.path);
   out.buckets = v.querySelectorAll('.dtBucket').map(e => e.dataset.bucket);
   went.length = 0; calls.length = 0;
   await click(v.querySelector('.dtBucket'));
   out.bucket_calls = calls.map(c => c.path);
+  out.ar_rows_html = (v.querySelector('#dtArRows') || {}).innerHTML || '';
   out.request = await ctx.dtRequestText(answers['/api/ema/data'].resend[0]);
   calls.length = 0;
   const held = v.querySelector('[data-decide="apply"]');
   out.decide_button = held ? held.dataset.file : null;
+  out.decide_primary = held ? held.cls.includes('primary') : null;
+  if (held) { dialogs.length = 0; calls.length = 0; await click(held); out.apply_dialogs = dialogs.map(d => d[0]); out.apply_words = dialogs.map(d => d[1]).join(' ');
+    out.apply_calls = calls.filter(c => c.method === 'POST').map(c => c.path); }
   out.file_rows = v.querySelector('tbody#dtFiles') ? 'table' : (v.querySelector('div#dtFiles') ? 'list' : null);
-  out.file_items = v.querySelectorAll('div.check').length;
+  out.file_items = v.querySelectorAll('#dtFiles div.check').length;
   out.ask_buttons = v.querySelectorAll('.dtAsk').length;
-  v = new El('main'); calls.length = 0;
+  // a link from Today lands on its list: the list opens, the page scrolls to it
+  out.landing = {};
+  for (const [anchor, key] of [['dtPostList', 'post'], ['dtRefundList', 'refund']]) {
+    v = new El('main'); scrolled.length = 0; went.length = 0; ctx.state.dataAnchor = anchor;
+    await ctx.dataTab(v);
+    const row = v.querySelector(`#${anchor} .row[data-id]`);
+    if (row) row.onclick();
+    out.landing[key] = { ids: ids(v, '#' + anchor), scrolled: scrolled.slice(), html: (v.querySelector('#' + anchor) || {}).innerHTML || '', opened: went.slice() };
+  }
+  ctx.state.dataAnchor = null;
+  v = new El('main'); calls.length = 0; dialogs.length = 0;
   await ctx.policyTab(v);
   out.policy_html = v.innerHTML;
   out.policy_buttons = v.querySelectorAll('[data-dec]').map(e => [e.dataset.i, e.dataset.dec, e.attrs['aria-pressed']]);
   out.policy_cards = v.querySelectorAll('.lab-card').length;
-  calls.length = 0; went.length = 0;
+  out.policy_find_f = (v.querySelector('#polFind') || { attrs: {} }).attrs['data-f'] || null;
+  calls.length = 0; went.length = 0; dialogs.length = 0;
+  const nameBox = v.querySelector('#polName'); if (nameBox) nameBox.value = 'Owner Test';
+  const f0 = v.querySelector('#polFind'); if (f0) { f0.value = answers.__find || ''; f0.oninput(); }
+  out.policy_shown_before = v.querySelectorAll('#polTable [data-find]').filter(e => !e.hidden).length;
   await click(v.querySelector('[data-dec="accept"][data-i="1"]'));
   out.accept_calls = calls.filter(c => c.method === 'POST');
   out.accept_went = went.slice();
+  out.accept_dialogs = dialogs.map(d => d[0]);
+  out.policy_after = v.innerHTML;
+  out.policy_find_after = (v.querySelector('#polFind') || {}).value;
+  out.policy_shown_after = v.querySelectorAll('#polTable [data-find]').filter(e => !e.hidden).length;
+  const pur = v.querySelector('[data-dec="pursue"][data-i="1"]');
+  dialogs.length = 0; calls.length = 0;
+  if (pur) { await click(pur); out.pursue_dialogs = dialogs.map(d => d[0]); out.pursue_calls = calls.filter(c => c.method === 'POST').length; }
   calls.length = 0;
   const cell = new El('td');
   await ctx.polItems(cell, answers['/api/ema/policy'].patterns[1], 1);
   out.items_html = cell.innerHTML;
   went.length = 0;
-  const row = cell.querySelector('.row[data-id]'); if (row) row.onclick(); out.items_open = went.slice();
+  const row = cell.querySelector('.row[data-id]'); if (row) row.onclick(); out.items_open = went.slice().map(w => ({ open: w.open }));
+  out.items_walk = went.length ? { worklist: went[0].worklist, total: went[0].total } : null;
   if (answers.__caps) {             // the long lists: the first rows, the rest on request, the filter over all of them
     const caps = out.caps = {};
     v = new El('main');
@@ -1007,6 +1113,9 @@ def page_run(worlds, tmp_path, monkeypatch):
         answers["/api/ema/ar?"] = c.get("/api/ema/ar", params={"bucket": next(b for b, x in d["reconcile"]["w4"]["buckets"].items() if x["n"])}).json()
         answers["/api/ema/policy/items?"] = c.get("/api/ema/policy/items", params={"pattern": answers["/api/ema/policy"]["patterns"][1]["pattern"]}).json()
         answers["/api/ema/policy"] = answers["/api/ema/policy"]
+        # the two lists the Data tab opens (the payments to post, the credits to refund), as the real route answers them
+        for key, item in d["items"].items():
+            answers[f"/api/findings?|signal={item['go']['signal']}"] = c.get("/api/findings", params=dict(item["go"], live=1, limit=25)).json()
         answers.update(extra or {})
         f = tmp_path / "answers.json"
         f.write_text(json.dumps(answers), encoding="utf-8")
@@ -1027,15 +1136,17 @@ def test_today_draws_the_counts_the_routes_give_and_each_opens_its_list(page_run
     # each tile shows its route's number, and opens the Worklist with the very filter that number was counted with
     for key in ("todo", "followup_due", "waiting"):
         assert out["today_clicks"][key][-1]["tab"] == "worklist"
-        want = dict({"status": "open,in_progress", "deadline": "valid"}, sort="deadline", **t["states"][key]["go"])
+        # no order forced: the Worklist's own (worth most first), so Item 1 is the same item whichever door opened it
+        want = dict({"status": "open,in_progress", "deadline": "valid"}, **t["states"][key]["go"])
         assert out["today_clicks"][key][-1]["filt"] == want, key
     aw = t["auto_written_off"]
     assert out["today_clicks"]["auto_written_off"][-1]["filt"] == dict({"status": "open,in_progress", "deadline": "valid"}, **aw["go"])
-    assert 'data-td="todo"' in h and ">2<small>$210</small>" in h.replace("\n", "")
+    assert 'data-td="todo"' in h and ">2<small>$210 est.</small>" in h.replace("\n", "")
     assert "Auto write-offs still appealable" in h and "Nobody has worked these" in h
     assert "Not on today's list" in h and ">1 done</a>" in h
     assert "1 payment</a>" not in h and "1 payment to post in EMA" in h and "1 credit to refund" in h
-    assert out["today_clicks"]["post"][-1]["tab"] == "fees" and out["today_clicks"]["refund"][-1]["tab"] == "data"
+    assert [(out["today_clicks"][k][-1]["tab"], out["today_clicks"][k][-1]["anchor"]) for k in ("post", "refund")] == \
+        [("data", "dtPostList"), ("data", "dtRefundList")]
     # the scoreboard: a figure the route gives, and a dash (never a zero) for one it does not
     assert out["today_score"] == ["recovered", "lost", "at_risk", "given_up"]
     assert "$1,234" in h and h.count(">–</span>") >= 2
@@ -1058,7 +1169,7 @@ def test_today_says_the_blind_spot_in_dollars_and_says_no_all_clear(page_run):
     brief["health"] = [{"key": "feed", "ok": False, "title": "No payment newer than 2026-10-28 (25 days ago)", "detail": "", "who": ""}] + brief["health"]
     out, _ = page_run({"/api/ema/today": today, "/api/brief": brief})
     h = out["today_html"]
-    assert "Blind spot: $80 the site cannot check." in h and "No remittance after" in h
+    assert "Blind spot: $80 the site cannot check." in re.sub(r"<[^>]+>", "", h) and "No remittance after" in h
     assert "Nothing closes this week in the payments on file" in h and "is-done" not in h
     assert "No payment newer than" not in h          # the health banner does not say the blind spot a second time
 
@@ -1079,8 +1190,8 @@ def test_today_gives_no_all_clear_while_the_self_check_holds(page_run):
 def test_the_data_tab_draws_each_panel_and_its_lists(page_run):
     out, ans = page_run()
     h = out["data_html"]
-    for title in ("EMA's reports", "Payments with no remittance", "835 payments EMA never posted", "Credits", "The A/R accounted for",
-                  "Denials written off in EMA"):
+    for title in ("EMA's reports", "Payments with no remittance", "Payments the payer sent that EMA never posted", "Credits",
+                  "The A/R accounted for", "Denials written off in EMA"):
         assert title in h, title
     assert '<section id="ops-panels"></section>' in h
     assert out["decide_button"] == "heldfile1" and "This A/R lists far fewer lines" in h
@@ -1112,7 +1223,7 @@ def test_the_policy_page_draws_each_pattern_and_records_a_decision(page_run):
     out, ans = page_run()
     h = out["policy_html"]
     pats = ans["/api/ema/policy"]["patterns"]
-    assert "Write-off policy" in h and "2 patterns" in h and "$210</b> still inside a window" in h
+    assert "Write-off policy" in h and "2 patterns" in h and "$210</b> still appealable" in h
     assert [b for b in out["policy_buttons"] if b[2] == "true"] == [["0", "pursue", "true"], ["1", "pursue", "true"]]
     assert out["accept_calls"] == [{"path": "/api/ema/policy", "body": {"pattern": pats[1]["pattern"], "decision": "accept", "name": "Owner Test"},
                                     "method": "POST"}]

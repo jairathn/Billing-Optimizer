@@ -1049,3 +1049,482 @@ def test_a_server_cycle_summary_is_measured_by_its_start_and_end(store, monkeypa
     prev = {"started": "2026-11-02T10:00:00+00:00", "finished": "2026-11-02T10:15:00+00:00"}       # 900 s of 1,000
     p = sc.plan_next(c, prev, mode="server")
     assert p["level"] == 1 and p["pressure"]["worst"] == "time" and p["pressure"]["seconds"] == 900
+
+
+# ================================================================== the independent review's findings (each failed first)
+from remitwatch import actions  # noqa: E402
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _three_denials(c):
+    for i in range(3):
+        remit(c, "2026-10-20", f"ZZ00T000{i}C001", [("99213", 150, 0, [("CO", "197", 150)], "2026-10-01")])
+
+
+def _detect(store_obj, rid, today=TODAY):
+    """One detection run as needs_G section 1 wires it: begin_detection, Detector.run, after_detection."""
+    c = store_obj.conn
+    ctx = sc.begin_detection(c, run_id=rid, today=today)
+    Detector(store_obj, rid, today=today).run()
+    return sc.after_detection(c, ctx, mode="server", today=today, run_id=rid)
+
+
+def _listed(c):
+    return {r[0] for r in c.execute("SELECT finding_id FROM findings WHERE COALESCE(stale,0)=0 "
+                                    "AND work_state IN ('work_now','waiting')")}
+
+
+def test_a_dropped_rule_keeps_the_items_people_worked_on_the_list(kind, monkeypatch):
+    """detect.save keeps an item a person worked (Sent, Started, a note) as a stale row when no rule produces it any more;
+    stale rows are on no list. The vanished check counts them and keeps them listed, with the person's status and notes,
+    until a person accepts the change (review finding 1)."""
+    c = kind.conn
+    _three_denials(c)
+    _detect(kind.store, "d1")
+    listed = sorted(_listed(c))
+    assert len(listed) == 3
+    sent, started, untouched = listed
+    actions.apply_status(c, sent, "appealed", notes="Appeal faxed", actor="biller@example.test")
+    actions.apply_status(c, started, "in_progress", notes="Called the payer", actor="biller@example.test")
+    c.commit()
+    kind.reopen()
+    c = kind.conn
+    monkeypatch.setattr(Detector, "run_line_rules", lambda self: None)       # the bug: the line rules stopped
+    out = _detect(kind.store, "d2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert set(van["examples"]) == {sent, started, untouched} and out["kept"] == 3, (van["examples"], out["kept"])
+    assert {sent, started, untouched} <= _listed(c)
+    rows = {r[0]: r[1:] for r in c.execute("SELECT finding_id, status, notes, hint FROM findings")}
+    assert rows[sent][:2] == ("appealed", "Appeal faxed") and rows[started][:2] == ("in_progress", "Called the payer")
+    assert all(sc.KEPT_HINT in (rows[f][2] or "") for f in (sent, started, untouched))
+    kind.reopen()
+    c = kind.conn
+    assert _detect(kind.store, "d3")["kept"] == 3 and {sent, started, untouched} <= _listed(c)    # still broken: kept again
+    sc.accept_findings(c, "owner@example.test", ["vanished"])               # the owner says the change is intended
+    kind.reopen()
+    c = kind.conn
+    out = _detect(kind.store, "d4")
+    assert out["kept"] == 0 and not ({sent, started, untouched} & _listed(c))
+
+
+def test_an_old_decision_on_the_same_line_does_not_excuse_a_vanished_item(store):
+    """Only an item this run produced for the line carries it on, never one a person let go long ago (finding 1b)."""
+    c = store.conn
+    add_item(c, "F-old", line_key="L1", signal="UNDERPAID_VS_OWN_RATE", category="underpayment", status="dismissed",
+             work_state="accepted")
+    add_item(c, "F-denial", line_key="L1")
+    run(c, None, "r1")
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id='F-denial'"), "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert "F-denial" in _listed(c) and out["kept"] == 1, {"kept": out["kept"], "routes": van["info"].get("routes")}
+
+
+def test_safe_mode_keeps_a_change_a_person_made_while_detection_ran(tmp_path, monkeypatch):
+    """Server: the dashboard writes on its own connection while the cycle runs. A held run puts the items back as they
+    were before it, and then every status and note a person saved meanwhile (finding 2)."""
+    s = _new("file", tmp_path)
+    c = s.conn
+    _three_denials(c)
+    _detect(s, "d1")                                                          # the first run: the baseline
+    ids = sorted(r[0] for r in c.execute("SELECT finding_id FROM findings WHERE work_state='work_now'"))
+    person_fid, bug_fid = ids[0], ids[1]
+    real_rules = Detector.run_aggregate_rules
+
+    def rules_while_a_person_works(self):
+        real_rules(self)
+        other = sqlite3.connect(str(tmp_path / "s.sqlite"), timeout=30)      # the dashboard's own connection
+        actions.apply_status(other, person_fid, "appealed", notes="Appeal faxed today", actor="biller@example.test")
+        other.commit()
+        other.close()
+    monkeypatch.setattr(Detector, "run_aggregate_rules", rules_while_a_person_works)
+    real_hide = Detector.hook_hide
+
+    def hide_then_a_bug(self):
+        real_hide(self)
+        self.conn.execute("UPDATE findings SET status='resolved', work_state='done', auto_note='Paid', evidence='{}' "
+                          "WHERE finding_id=?", (bug_fid,))                   # a release's bug: a closure with no proof
+        self.conn.commit()
+    monkeypatch.setattr(Detector, "hook_hide", hide_then_a_bug)
+    out = _detect(s, "d2")
+    assert out["held"] and out["hold_checks"] == ["closure_proof"]
+    ev = c.execute("SELECT to_status FROM finding_events WHERE finding_id=? AND kind='manual'", (person_fid,)).fetchone()
+    assert ev is not None and ev[0] == "appealed"
+    row = tuple(c.execute("SELECT status, notes FROM findings WHERE finding_id=?", (person_fid,)).fetchone())
+    bug = c.execute("SELECT status FROM findings WHERE finding_id=?", (bug_fid,)).fetchone()[0]
+    s.close()
+    assert row == ("appealed", "Appeal faxed today") and bug == "open"
+
+
+def test_accepting_takes_exactly_the_offenders_a_person_was_shown(store):
+    """accept_findings records the offenders of the run the person looked at; a new one in a later run is still new: it
+    is kept (vanished) or holds the run (a closure without proof) (finding 3)."""
+    c = store.conn
+    for f in ("F-a", "F-b", "F-c"):
+        add_item(c, f, line_key="L" + f)
+    run(c, None, "r1")
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id='F-a'"), "r2")
+    assert out["kept"] == 1 and check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")["examples"] == ["F-a"]
+    acc = sc.accept_findings(c, "owner@example.test", ["vanished"])          # the owner accepts the change shown: F-a
+    assert acc["accepted"] == {"vanished": 1} and acc["run_id"] == "r2"
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id IN ('F-a','F-b')"), "r3")   # a 2nd rule broke
+    left = {r[0] for r in c.execute("SELECT finding_id FROM findings")}
+    assert "F-b" in left and "F-a" not in left and out["kept"] == 1, {"kept": out["kept"], "left": sorted(left)}
+    # an acceptance sent for a run that is no longer the latest accepts nothing
+    stale = sc.accept_findings(c, "owner@example.test", ["vanished"], run_id="r2")
+    assert stale["accepted"] == {} and stale.get("stale")
+
+
+def test_an_acceptance_does_not_wave_through_a_new_closure_without_proof(store):
+    c = store.conn
+    for f in ("F-1", "F-2", "F-3"):
+        add_item(c, f)
+    run(c, None, "r1")
+    assert run(c, bad_closure, "r2")["held"]
+    sc.accept_findings(c, "owner@example.test", ["closure_proof"])           # accepts F-2's closure, the one shown
+
+    def worse(cn):
+        bad_closure(cn)
+        cn.execute("UPDATE findings SET status='resolved', work_state='done', auto_note='Paid', evidence='{}' "
+                   "WHERE finding_id='F-3'")
+    out = run(c, worse, "r3")
+    assert out["held"] and out["new"]["closure_proof"] == 1, out["new"]
+
+
+def test_vercels_normal_runs_are_calm(store):
+    """The live Vercel baseline (peak 1,530 MB, 98.6 s of 240 s) and a detection-only run (1,365 MB) pass release gate 3
+    (under 1.75 GB): they are calm, so nothing is shed and no alert is raised (finding 4)."""
+    c = store.conn
+    days = [1530, 1365, 1530, 1365, 1530, 1365, 1530]
+    plans = [sc.plan_next(c, status(f"2026-11-{10 + i:02d}T10:17:00+00:00", peak, seconds=98.6, budget=240), mode="serverless")
+             for i, peak in enumerate(days)]
+    kinds = {a["kind"] for a in sc.alert_candidates(c, today=TODAY)}
+    assert [p["level"] for p in plans] == [0] * 7 and plans[-1]["skip"] == [] and "NEAR_LIMIT" not in kinds
+    assert sc.plan_next(c, status("2026-11-17T10:17:00+00:00", 1760), mode="serverless")["level"] == 1   # past the gate
+
+
+def test_the_weekly_steps_are_never_left_for_more_than_a_week(store):
+    """Under pressure day after day the optional steps are left for a calm run, but never longer than MAX_DEFER_DAYS: then
+    they run again (in a run that does no detection), and only once they ran can they be left again (finding 4)."""
+    c = store.conn
+
+    def day(d, peak=1900):
+        return sc.plan_next(c, status(f"2026-11-{d:02d}T10:17:00+00:00", peak), mode="serverless",
+                            now=f"2026-11-{d:02d}T10:20:00+00:00")
+    plans = {d: day(d) for d in range(1, 10)}
+    assert plans[3]["level"] == 3 and "audit" in plans[3]["skip"] and "report" in plans[3]["skip"]
+    assert "audit" in plans[9]["skip"]                                        # six days after it was first left
+    p = day(10)
+    assert "audit" not in p["skip"] and "report" not in p["skip"] and set(p["overdue"]) == set(sc.OPTIONAL_STEPS)
+    assert any("a week" in a for a in p["actions"])
+    assert "audit" not in day(11)["skip"]                                     # still owed: it has not run yet
+    sc.record_did(c, {"ran": list(sc.OPTIONAL_STEPS)}, today="2026-11-11")
+    assert "audit" in day(12)["skip"]                                         # it ran: it may be left again, for a week
+
+
+def test_a_run_the_platform_killed_counts_as_pressure(tmp_path):
+    """A run killed for memory writes no status (cloud.py and pipeline.py write it in a finally block). Its open marker
+    (remitwatch.runlog) is found when the next run's log starts; the plan counts it once as a pressured run (finding 4b)."""
+    import subprocess
+    import textwrap
+    from remitwatch import runlog
+    logs = tmp_path / "logs"
+    code = textwrap.dedent(f'''
+        import os, sys
+        sys.path.insert(0, {REPO_DIR!r})
+        from remitwatch import runlog
+        rl = runlog.start_run("cycle", trigger="cron", logs_dir={str(logs)!r}, host="server")
+        rl.checkpoint("detect", force=True)
+        os._exit(137)                       # the platform's kill: no finally block, no status, no finish
+    ''')
+    res = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=180)
+    assert res.returncode == 137, res.stderr[-600:]
+    s = _new("file", tmp_path)
+    c = s.conn
+    calm = status("2026-11-20T10:17:00+00:00", 900, seconds=80)
+    assert sc.plan_next(c, calm, mode="server")["level"] == 0                 # the last run that finished: calm
+    rl = runlog.start_run("cycle", trigger="cron", logs_dir=str(logs), host="server")
+    try:
+        p = sc.plan_next(c, calm, mode="server")                              # status.json still holds the calm run
+        assert p["level"] == 1 and p["pressure"]["killed"], p["pressure"]
+        assert "detect" in p["pressure"]["text"]
+        assert sc.plan_next(c, calm, mode="server")["level"] == 1             # counted once
+    finally:
+        rl.finish()
+        s.close()
+
+
+def test_the_audit_counts_lines_remitwatch_closed_or_expired_on_its_own_as_missed(kind):
+    """Coverage: a line the audit's own rules find unpaid and inside its window, which RemitWatch closed by itself or
+    marked expired, is missed (with the item that holds it), not 'held by a reason' (finding 5)."""
+    c = kind.conn
+    for i in range(4):                                                        # the payer's usual amount for 99213: $90
+        remit(c, "2026-02-05", f"ZZ00T{400 + i:04d}C001", [("99213", 150, 90, [("CO", "45", 60)], "2026-02-01")])
+    lk1 = remit(c, "2026-10-01", "ZZ00T0001C001", [("99213", 150, 0, [("CO", "197", 150)], "2026-09-20")])[0]
+    lk2 = remit(c, "2026-10-01", "ZZ00T0002C001", [("99213", 150, 0, [("CO", "197", 150)], "2026-09-20")])[0]
+    lk3 = remit(c, "2026-10-01", "ZZ00T0003C001", [("99213", 150, 0, [("CO", "197", 150)], "2026-09-20")])[0]
+    add_item(c, "F-closed", line_key=lk1, patient_control_number="ZZ00T0001C001", service_date="2026-09-20",
+             payment_date="2026-10-01", status="resolved", work_state="done", auto_note="Paid on a later remittance",
+             evidence={"paid_later": {"payment_date": "2026-10-20", "paid_cents": 9000, "trace": "T9"}})
+    add_item(c, "F-expired", line_key=lk2, patient_control_number="ZZ00T0002C001", service_date="2026-09-20",
+             payment_date="2026-10-01", work_state="expired", appeal_deadline="2026-10-15")
+    add_item(c, "F-let-go", line_key=lk3, patient_control_number="ZZ00T0003C001", service_date="2026-09-20",
+             payment_date="2026-10-01", status="dismissed", work_state="accepted")
+    kind.reopen()
+    a = sc.self_audit(kind.conn, today=TODAY, force=True)
+    assert a["coverage"]["missed"] == 2 and a["coverage"]["held_by_reason"] == 1, a["coverage"]
+    gaps = {g["key"]: g for g in sc.audit_lists(kind.conn, "gap")}
+    assert gaps["ZZ00T0001|2026-09-20|99213"]["finding_id"] == "F-closed"
+    assert a["coverage"]["missed_by"] == {"closed_by_remitwatch": 1, "expired": 1}
+
+
+def test_the_self_audit_reads_the_stores_own_lines_and_needs_no_ledger(ledger_world):
+    """The audit's rules read the store's EMA lines, which keep every line they look at (the lean keep rule keeps a line
+    with a non-routine write-off whether or not it has an item): a write-off at posting with no item is found without the
+    ledger, which the audit therefore does not take (finding 7)."""
+    import inspect
+    s, _lg = ledger_world
+    assert "ledger" not in inspect.signature(sc.self_audit).parameters
+    sc.self_audit(s.conn, today="2026-05-01", force=True)
+    gaps = sc.audit_lists(s.conn, "gap")
+    assert any(g["category"] == "auto_written_off_appealable" and g["cents"] == 20000 for g in gaps), gaps
+
+
+def _prod_with_april():
+    """prod_rows() and one posting in April, so March is a closed posting month."""
+    return prod_rows() + [F.production_row(posted=F.D(2026, 4, 10), svc=F.D(2026, 4, 6), cpt="99212", link=F.link_no(3),
+                                           charges=80.0, payer=F.PAYERS["bcbs"])]
+
+
+def test_a_payment_a_newer_export_of_the_same_box_drops_is_a_visible_gap(tmp_path):
+    """NON-NEGOTIABLE 1: a newer Production export of the same box that lacks one posting (a filtered or partial export)
+    replaces the old file and the ledger loses a $90 payment and its $40 contractual. Money posted in a closed month never
+    disappears: posted_money fails (critical) with the dollars, holds the next run, and counts in the gap total; a person
+    accepting the change moves the mark (finding 10)."""
+    s = _new("file", tmp_path)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        rows = _prod_with_april()
+        assert er.ingest_file(s, F.write(str(tmp_path / "p1.csv"), F.production_csv(rows)), via="test", ledger=lg,
+                              log=lambda *a: None)["status"] == "current"
+        el.refresh(s, lg, log=lambda *a: None)
+        add_item(s.conn, "F-1")
+        first = sc.check_ledger(s.conn, lg, today=TODAY)
+        assert check_of(first["checks"], "posted_money")["status"] == "ok"
+        run(s.conn, None, "r1")
+        rows2 = [r for r in rows if r.get("Insurance Payments") != 90.0]
+        rows2.append(F.production_row(posted=F.D(2026, 4, 12), svc=F.D(2026, 3, 9), cpt="99212", link=None, pat_adj=5.0,
+                                      payer="Patient", patient=1))
+        r2 = er.ingest_file(s, F.write(str(tmp_path / "p2.csv"), F.production_csv(rows2)), via="test", ledger=lg, log=lambda *a: None)
+        assert r2["status"] == "current" and r2["replaced"]
+        el.refresh(s, lg, log=lambda *a: None)
+        out = sc.check_ledger(s.conn, lg, today=TODAY)
+        pm = check_of(out["checks"], "posted_money")
+        assert pm["status"] == "fail" and pm["severity"] == "critical" and pm["cents"] == 13000, pm
+        assert out["gaps"]["posted_drop_cents"] == 13000 and out["gaps"]["total_cents"] >= 13000
+        held = run(s.conn, None, "r2")
+        assert held["held"] and held["hold_checks"] == ["posted_money"]
+        sc.accept_findings(s.conn, "owner@example.test", ["posted_money"])     # the export was meant to drop it
+        assert check_of(sc.check_ledger(s.conn, lg, today=TODAY)["checks"], "posted_money")["status"] == "ok"
+        assert not run(s.conn, None, "r3")["held"]
+    finally:
+        lg.close()
+        s.close()
+
+
+def test_a_line_the_ar_shows_settled_while_its_postings_leave_money_open_is_a_gap(tmp_path):
+    """The same lost payment seen with no earlier measurement: EMA's A/R says nothing is owed on the line while its
+    postings leave $130 (the patient's $20, paid on no claim number, is joined to the line first). line_balance compares
+    both ways now; a line that left the A/R while its postings leave money open is a gap too (finding 10)."""
+    s = _new("file", tmp_path)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        rows = prod_rows()
+        er.ingest_file(s, F.write(str(tmp_path / "p1.csv"), F.production_csv(rows)), via="test", ledger=lg, log=lambda *a: None)
+        el.refresh(s, lg, log=lambda *a: None)
+        rows2 = [r for r in rows if r.get("Insurance Payments") != 90.0]
+        er.ingest_file(s, F.write(str(tmp_path / "p2.csv"), F.production_csv(rows2)), via="test", ledger=lg, log=lambda *a: None)
+        el.refresh(s, lg, log=lambda *a: None)
+        s.conn.execute("""INSERT INTO ema_ar (file_id, row_no, as_of, link, svc, cpt, party, balance_cents, facility)
+                          VALUES ('ar1', 1, '2026-11-20', ?, '2026-03-02', '99213', 'Insurance', 0, 0)""", (F.link_no(1),))
+        s.conn.commit()
+        out = sc.check_ledger(s.conn, lg, today=TODAY)
+        lb = check_of(out["checks"], "line_balance")
+        assert lb["status"] == "fail" and lb["cents"] == 13000 and out["ar_balance"]["postings_above"] == 1, out["ar_balance"]
+        assert out["gaps"]["postings_above_cents"] == 13000
+    finally:
+        lg.close()
+        s.close()
+
+
+def test_blind_dollars_leave_out_claims_ema_shows_answered(ledger_world):
+    """'billed since then has no payer's answer on file': both March lines have the insurer's answer posted in EMA (a $90
+    payment; a CO-197 denial), so they are not blind dollars (finding 11)."""
+    s, lg = ledger_world
+    c = s.conn
+    remit(c, "2026-02-28", "ZZ00T0999C001", [("99213", 150, 90, [("CO", "45", 60)], "2026-02-20")])   # the newest 835
+    sc.check_ledger(c, lg, today=TODAY)
+    b = sc.blindness(c, today=TODAY)
+    src = next(x for x in b["sources"] if x["source"] == "835")
+    assert src["cents"] == 0 and not src["about"], (src["cents"], src["text"])
+    c.execute("UPDATE ema_lines SET ins_answer_rows = 0 WHERE cpt = '99214'")                       # one with no answer
+    c.commit()
+    src = next(x for x in sc.blindness(c, today=TODAY)["sources"] if x["source"] == "835")
+    assert src["cents"] == 20000
+
+
+def test_a_write_off_with_no_deadline_on_file_is_judged_by_the_payers_window(store):
+    """given_up splits recoverable and lost by the item's deadlines; with none on file (677 Work now items in the real
+    world) the payer's own appeal window from its answer decides, never 'lost' by default (finding 9)."""
+    c = store.conn
+    add_item(c, "F-nodl", written_off_cents=5000, written_off_when="at_posting", service_date="2026-10-02",
+             payment_date="2026-10-20", appeal_deadline=None, carc="96", signal="DENIED_NONCOVERED")
+    add_item(c, "F-old", written_off_cents=3000, written_off_when="at_posting", service_date="2025-02-02",
+             payment_date="2025-02-20", appeal_deadline=None, carc="96", signal="DENIED_NONCOVERED")
+    g = sc.given_up(c, today=TODAY)
+    assert (g["recoverable_cents"], g["lost_cents"]) == (5000, 3000), (g["recoverable_cents"], g["lost_cents"])
+    assert g["window_from_payer_cents"] == 8000
+
+
+def test_a_proof_row_with_no_money_is_not_proof_of_payment(store):
+    """has_proof needs money: a $0 payment row, a takeback or a denial row is not a payment that closes an item (finding 8)."""
+    c = store.conn
+    add_item(c, "F-zero", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"paid_later": {"payment_date": "2026-05-01", "paid_cents": 0, "trace": "EMA check ending 1234",
+                                      "proof": [{"date": "2026-05-01", "source": "production", "kind": "payment", "amount_cents": 0}]}})
+    add_item(c, "F-takeback", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"paid_later": {"proof": [{"date": "2026-05-01", "source": "835", "kind": "reversal", "amount_cents": -9000}]}})
+    add_item(c, "F-netted", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"paid_later": {"proof": [{"date": "2026-05-01", "kind": "payment", "amount_cents": 9000},
+                                                {"date": "2026-05-09", "kind": "reversal", "amount_cents": 9000}]}})
+    add_item(c, "F-denial-row", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"archive_rule": {"action": "close_with_proof", "rule": "invented",
+                                        "proof": [{"date": "2026-04-01", "source": "835", "kind": "denial", "amount_cents": 0}]}})
+    add_item(c, "F-paid", status="resolved", work_state="done", auto_note="Paid",
+             evidence={"archive_rule": {"action": "close_with_proof", "rule": "invented",
+                                        "proof": [{"date": "2026-04-01", "kind": "denial", "amount_cents": 0},
+                                                  {"date": "2026-05-01", "kind": "payment", "amount_cents": 9000}]}})
+    r = sc.check_closure_proof(c, TODAY)
+    assert sorted(r["examples"]) == ["F-denial-row", "F-netted", "F-takeback", "F-zero"], r["examples"]
+
+
+def test_the_precision_guard_counts_a_service_sent_again_once(kind):
+    """Two lines of one code on one claim are two units (their shortfalls add up); the same line sent again on a new claim
+    is the same money (finding 12)."""
+    c = kind.conn
+    lk1 = remit(c, "2026-03-20", "ZZ00T0004C001", [("99213", 150, 0, [("CO", "197", 150)])])[0]
+    lk2 = remit(c, "2026-05-20", "ZZ00T0004C002", [("99213", 150, 0, [("CO", "16", 150)])])[0]    # sent again, denied again
+    remit(c, "2026-07-20", "ZZ00T0004C003", [("99213", 150, 98, [("CO", "45", 52)])])            # sent again, paid in full
+    add_item(c, "F-orig", line_key=lk1, patient_control_number="ZZ00T0004C001", shortfall_cents=9800, payment_date="2026-03-20")
+    add_item(c, "F-resub", line_key=lk2, patient_control_number="ZZ00T0004C002", shortfall_cents=9800, payment_date="2026-05-20",
+             carc="16")
+    kind.reopen()
+    r = sc.check_precision_guard(kind.conn, TODAY)
+    assert sorted(r["examples"]) == ["F-orig", "F-resub"], r["info"]
+
+
+def test_a_held_run_still_lists_the_new_items_it_found(store):
+    """Safe mode holds the run's closures and keeps the worklist from before, plus the new items to work the run found
+    that no failing check names: a new denial due in ten days is not hidden while the run is held (finding 6)."""
+    c = store.conn
+    add_item(c, "F-1")
+    add_item(c, "F-2")
+    run(c, None, "r1")
+
+    def save(cn):
+        bad_closure(cn)                                                       # the run's bug: one closure without proof
+        add_item(cn, "F-new", line_key="Lnew", appeal_deadline="2026-12-02")  # a new denial, due in ten days
+    out = run(c, save, "r2")
+    assert out["held"] and "F-new" in _listed(c) and c.execute("SELECT status FROM findings WHERE finding_id='F-2'").fetchone()[0] == "open"
+    assert sc.safe_mode(c)["new_items"] == 1
+
+
+def test_write_offs_on_items_a_person_let_go_are_not_money_with_no_item(ledger_world):
+    """given_up's 'written off at posting with no RemitWatch item' counts every item on record, whatever its status: an
+    item a person let go is an item (finding 9b)."""
+    s, lg = ledger_world
+    c = s.conn
+    out = sc.check_ledger(c, lg, today=TODAY)
+    assert out["conservation"]["totals_since"]["wo_at_posting"] == 20000
+    add_item(c, "F-let-go", status="dismissed", work_state="accepted", written_off_cents=20000, written_off_when="at_posting",
+             service_date="2026-03-03", procedure_code="99214", carc="197")
+    g = sc.given_up(c, today=TODAY)
+    assert g["with_no_item_cents"] == 0 and g["items_written_off_cents"] == 20000, g
+
+
+def test_the_tmp_reading_sees_sqlites_unlinked_temporary_files(tmp_path):
+    """SQLite unlinks its temporary files as it opens them: the /tmp reading counts the open files in the folder too
+    (finding 14)."""
+    import subprocess
+    import textwrap
+    folder = tmp_path / "tmpdir"
+    folder.mkdir()
+    code = textwrap.dedent(f'''
+        import os, sqlite3, sys
+        sys.path.insert(0, {REPO_DIR!r})
+        from remitwatch import selfcheck as sc
+        c = sqlite3.connect(":memory:")
+        c.execute("PRAGMA temp.cache_size=-256")
+        c.execute("CREATE TEMP TABLE big AS WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 80000) "
+                  "SELECT i, randomblob(400) AS b FROM n")
+        held = 0
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{{fd}}")
+            except OSError:
+                continue
+            if target.startswith(sys.argv[1]):
+                held += os.fstat(int(fd)).st_size
+        print(sc.tmp_used_mb(sys.argv[1]), held >> 20)
+    ''')
+    env = dict(os.environ, SQLITE_TMPDIR=str(folder), TMPDIR=str(folder))
+    res = subprocess.run([sys.executable, "-I", "-c", code, str(folder)], env=env, capture_output=True, text=True, timeout=180)
+    seen, held = map(int, res.stdout.split())
+    assert held >= 20 and seen >= held, (seen, held, res.stderr[-300:])
+
+
+def test_a_critical_check_that_crashes_raises_an_alert_and_a_health_item(store, monkeypatch):
+    """run_checks turns a crash into status 'error'; the guard that check gives is off, so the alert and Data health say
+    so (finding 15)."""
+    c = store.conn
+    add_item(c, "F-1")
+    run(c, None, "r1")
+
+    def broken(cn, today):
+        raise sqlite3.OperationalError("no such column: invented")
+    monkeypatch.setitem(sc.ITEM_CHECKS, "precision_guard", broken)
+    for rid in ("r2", "r3"):
+        out = run(c, None, rid)
+    assert out["errors"] == ["precision_guard"] and not out["held"]
+    kinds = {a["key"]: a for a in sc.alert_candidates(c, today=TODAY)}
+    assert ("CHECK_FAILED", "precision_guard") in kinds and "could not run" in kinds[("CHECK_FAILED", "precision_guard")]["title"]
+    assert "selfcheck_precision_guard" in {d["key"] for d in sc.data_health(c, TODAY)}
+
+
+def test_the_first_run_keeps_vanished_items_too(store):
+    """The first wired run is the release that changes the rules most: an open item the new rules no longer produce is
+    kept like on any other run (only safe mode's hold needs a baseline) (finding 16)."""
+    c = store.conn
+    add_item(c, "F-a", line_key="La")                      # items saved by the release before (no self-check yet)
+    add_item(c, "F-b", line_key="Lb")
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id='F-a'"), "r1")   # the new rules drop F-a
+    assert out["first"] and check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")["examples"] == ["F-a"]
+    assert "F-a" in _listed(c) and out["kept"] == 1
+    assert [o["key"] for o in sc.offenders(c, "vanished")] == ["F-a"]          # the Data tab lists every one, not 20
+
+
+def test_any_new_coverage_gap_and_any_rise_in_money_given_up_raise_their_alerts(store):
+    """The owner's decision 9: no dollar floor. A new $3 coverage gap raises AUDIT_GAPS; money given up rising by $1
+    raises GIVEN_UP_RISING."""
+    c = store.conn
+    for i in range(4):
+        remit(c, "2026-02-05", f"ZZ00T{400 + i:04d}C001", [("99213", 150, 90, [("CO", "45", 60)], "2026-02-01")])
+    sc.self_audit(c, today="2026-11-08", force=True)
+    remit(c, "2026-10-01", "ZZ00T0001C001", [("99213", 3, 0, [("CO", "197", 3)], "2026-09-20")])
+    a = sc.self_audit(c, today=TODAY)
+    assert a["new_gaps_n"] == 1 and a["new_gaps_cents"] == 300 and a["alert"]
+    add_item(c, "F-wo", written_off_cents=10001, written_off_when="at_posting", service_date="2026-03-02")
+    sc.meta_set(c, sc.K_GIVEN_UP, {"weeks": [{"week": "2026-W46", "cents": 10000}]})
+    sc.given_up(c, today=TODAY)
+    kinds = {x["kind"] for x in sc.alert_candidates(c, today=TODAY)}
+    assert {"AUDIT_GAPS", "GIVEN_UP_RISING"} <= kinds

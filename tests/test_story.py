@@ -531,7 +531,8 @@ def test_a_write_off_decision_goes_through_the_policy_table_or_a_persons_let_go(
     auto_writeoff_world(store, ledger, tmp_path)
     n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
     assert "accept_pattern" in n["buttons"] and "let_go" in n["buttons"]
-    assert any("Accept this pattern" in s_ and "A single item is let go only by a person, with a reason." in s_ for s_ in n["steps"])
+    assert any("Accept this pattern (Anthem / BCBS, 99213, CO-197)" in s_ and "A single item is let go only by a person, with a reason." in s_
+               for s_ in n["steps"]), n["steps"]
     # the button accepts the pattern in one click: the next step carries the owner's policy key (needs_C1 1)
     assert n["pattern"] == f"{BCBS}|99213||CO-197"
     # an authorization denial is decided first (find the authorization): the reversal is said as a condition
@@ -917,12 +918,12 @@ def test_a_short_payment_reversed_and_repaid_at_the_same_amount_is_not_paid_agai
 
 
 def test_a_second_payers_copay_never_settles_the_first_payers_downcode(store):
-    """Money review 5: the first payer paid 99204 as 99203 ($25.00 short); the second plan later paid the $20.00 copay.
-    That is the patient's share, not the missing money."""
+    """Money review 5: the first payer paid 99204 as 99203 ($20.00 short); the second plan later paid the $20.00 copay.
+    That is the patient's share, not the missing money, even though it is the same amount."""
     tk = remit(store, trace="T1", paid_on="2026-03-11", claims=[{"pcn": F.claim_id(1), "received": "2026-03-05",
         "lines": [ln("99203", 280, 60, [("PR", "3", 20), ("CO", "186", 200)], lcn="1", allowed=80, ocode="99204")]}])
     item(store, signal="DOWNCODE_SVC06", category="downcoding", carc="186", procedure_code="99203", original_procedure_code="99204",
-         billed_code="99204", charge_cents=28000, paid_cents=6000, allowed_cents=8000, expected_cents=10500, shortfall_cents=2500,
+         billed_code="99204", charge_cents=28000, paid_cents=6000, allowed_cents=8000, expected_cents=10000, shortfall_cents=2000,
          line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
     remit(store, trace="T2", paid_on="2026-03-31", payer="SECONDARY TEST PLAN", claims=[
         {"pcn": F.claim_id(1, sub=2), "status": "2", "received": "2026-03-20",
@@ -1411,7 +1412,7 @@ def test_small_wording_and_button_rules(store):
     n = story.next_step(store.conn, "F2", today=TODAY)
     assert not any("(LCD)" in x for x in n["needs"] + n["steps"]), n["needs"]
     sib = [s_ for s_ in n["steps"] if s_.startswith("Also open on this visit")]
-    assert sib and "DENIED_FREQUENCY" not in sib[0], sib
+    assert sib and "DENIED_FREQUENCY" not in sib[0] and "17003 (denied: too many units or too often" in sib[0], sib
 
 
 # ------------------------------------------------------------------------------------------- the balance line

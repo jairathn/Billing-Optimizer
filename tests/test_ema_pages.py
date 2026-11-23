@@ -900,6 +900,17 @@ const out = {
   row_waiting: ctx.rowHtml(ctx.state.brief, { finding_id: 'w', signal: 'X', status: 'open', work_state: 'waiting', follow_up_on: '2026-06-10', state_basis: 'Faxed on May 1' }, {}),
   row_done: ctx.rowHtml(ctx.state.brief, { finding_id: 'd', signal: 'X', status: 'open', work_state: 'done', state_basis: 'Paid' }, {}),
   row_auto: ctx.rowHtml(ctx.state.brief, { finding_id: 'a', signal: 'X', status: 'open', work_state: 'work_now', ema_outcome: 'auto_written_off', appeal_deadline: '2026-06-01', legal_deadline: '2026-07-01' }, {}),
+  // review C1: the panel follows a person's newer status; no fax for a line the server will not send; a decision first
+  by_status: ctx.xpBoxHtml(Object.assign({}, f, { work_state: 'accepted', state_by_status: true, status: 'dismissed', status_changed_at: '2026-05-03T10:00:00+00:00' }),
+                           x('appeal', ['build_packet', 'fax_payer', 'let_go']), { packets: [] }),
+  no_fax_paid: ctx.xpBoxHtml(f, x('appeal', ['build_packet', 'fax_payer', 'let_go'], { appeal_ok: false, appeal_block: 'paid' }), { packets: [{ packet_id: 'p' }] }),
+  check_first: ctx.xpBoxHtml(f, x('appeal', ['build_packet', 'fax_payer'], { appeal_ok: false, appeal_block: 'likely_paid' }), { packets: [{ packet_id: 'p' }] }),
+  decide: primary('decide', ['copy_instructions', 'log_outcome', 'let_go']),
+  uncited: ctx.xpBoxHtml(f, (y => (y.explain.verdict.sentence = 'Denied CO-197 (row 2); nobody worked it (rows 2 and 3).', y))(x('appeal', ['build_packet'])), { packets: [] }),
+  ema_link: ctx.xpBoxHtml(Object.assign({}, f, { ema_link: 90000001 }), Object.assign(x('call', ['copy_instructions']), { ema_block: { claim_url: 'https://ema.example.test/claims/{claim}' } }), { packets: [] }),
+  ema_nolink: ctx.xpBoxHtml(Object.assign({}, f, { ema_link: 'CB0000300C017' }), Object.assign(x('call', ['copy_instructions']), { ema_block: { claim_url: 'https://ema.example.test/claims/{claim}' } }), { packets: [] }),
+  todo_link: (ctx.state.filt.worklist = { status: 'open,in_progress', deadline: 'week' }, ctx.deskFilter('worklist')),
+  closed_link: (ctx.state.filt.worklist = { status: 'open', deadline: 'missed' }, ctx.deskFilter('worklist')),
 };
 console.log(JSON.stringify(out));
 """
@@ -945,12 +956,127 @@ def test_the_rows_say_when_a_waiting_item_comes_back_and_what_emas_rule_did(page
     assert "Auto write-off" in page["row_auto"] and "the payer&#39;s own limit is 2026-07-01" in page["row_auto"]
 
 
+def test_the_panel_follows_a_persons_newer_status_and_offers_no_fax_the_server_would_hold(page):
+    """Review C1: a status set since the newest run decides the panel's state and next step (not the run's stored route);
+    no fax button for a line paid, credited, reprocessed or waiting; a line to check first keeps its fax under More, never
+    as the main button; a decision first gets the decision's three choices, not "Log what happened"."""
+    box = page["by_status"]
+    assert "Accepted" in box and "Let go by a person on May 3, 2026." in box and 'data-xp="reopen"' in box
+    assert 'data-xp="build_packet"' not in box and 'data-xp="let_go"' not in box
+    assert 'data-xp="fax_payer"' not in page["no_fax_paid"] and 'data-xp="build_packet"' in page["no_fax_paid"]
+    chk = page["check_first"]
+    assert 'id="xpMain">Build the appeal packet<' in chk and 'class="ghost" data-xp="fax_payer"' in chk
+    assert page["decide"] == "Decide what to do"
+
+
+def test_the_box_keeps_its_words_short_and_its_basis_on_hover(page):
+    """Review C1 (medium): the deadline's basis and the recovery rate's basis are on hover, not in the text; the steps are
+    folded; the verdict's own "(row 2)" goes when the Rows link says it; Open in EMA is offered from EMA's address and the
+    item's 6 to 12 digit EMA claim number."""
+    box = page["box"]
+    assert 'title="the payer limit"' in box and ": the payer limit" not in box
+    assert 'title="5 of the 10 earlier items like this were later paid"' in box and "(5 of the 10" not in box
+    assert '<details class="xp-steps">' in box and "xp-steps\" open" not in box
+    assert "Denied CO-197; nobody worked it." in page["uncited"] and "Rows 2" not in page["uncited"].split("xp-verdict")[0]
+    assert 'data-rows="2"' in page["uncited"]
+    assert 'data-xp="open_in_ema"' in page["ema_link"] and 'data-xp="open_in_ema"' not in page["ema_nolink"]
+
+
+def test_a_to_do_link_with_a_window_opens_the_work_never_an_item_that_only_waits(page):
+    """Review C1 (medium): Today's step 1, the guide's first item and the red number on a tab name a window and the to-do
+    statuses but no state; they open Work now and the follow-ups due inside that window, never a waiting item. A link to
+    a closed window, or about what was sent, keeps every state."""
+    assert page["todo_link"]["state"] == "todo" and page["todo_link"]["deadline"] == "week" and page["todo_link"]["status"] == "open,in_progress"
+    assert page["closed_link"]["state"] == "" and page["older_link"]["state"] == ""
+
+
 def test_items_let_go_one_at_a_time_mirror_the_server_and_say_so(page):
     from remitwatch.actions import NEVER_HIDDEN
     assert set(page["never"]) == set(NEVER_HIDDEN)
     assert page["left_claims"] == ("Let go leaves out 2 claims with no answer from the payer or rejected before the payer. "
                                    "Open each one to let it go, with a note.")
     assert page["left_mixed"].startswith("Let go leaves out 2 items that are let go one at a time")
+
+
+FAX_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/].map(re => grab(html, re)).join('\n');
+// a stand-in page: every #id answers with its own element; innerHTML is kept as text
+const els = {};
+const el = id => els[id] || (els[id] = { id, innerHTML: '', textContent: '', className: '', hidden: false, kids: [], onclick: null,
+  classList: { add() {}, remove() {}, contains: () => true }, querySelector: q => q.startsWith('#') ? el(q.slice(1)) : null,
+  querySelectorAll: () => [], prepend(k) { this.kids.unshift(k); }, appendChild(k) { this.kids.push(k); } });
+const sent = [];
+let answers = {};
+const ctx = { console, CSS: { escape: s => s }, state: { meta: { bulk_appeal: true } }, render: () => {}, openDetail: () => {},
+  $: q => el(q.slice(1)), document: { createElement: () => { const k = el('new' + Object.keys(els).length); return k; } },
+  post: async (p, body) => { sent.push(body); return Object.assign({ finding_id: body.finding_id, payer_group: 'Plan A', cents: 100 }, answers[body.finding_id] || { status: 'sent' }); } };
+vm.createContext(ctx);
+vm.runInContext(helpers + "\nconst pl = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;\n", ctx);
+vm.runInContext(read('faxes.js'), ctx);
+(async () => {
+  const out = {};
+  // the summary names every item held at send time, with its reason, whatever its code
+  const box = el('sum');
+  ctx.faxSummary(box, [{ finding_id: 'sent1', status: 'sent', cents: 100 },
+    { finding_id: 'held1', status: 'held', code: 'left_out', reason: 'Not appealed: its next step is not an appeal.', cents: 2500 },
+    { finding_id: 'held2', status: 'held', code: 'blocked', reason: 'Not sent: it was paid or settled.', cents: 500 },
+    { finding_id: 'held3', status: 'held', code: 'something_new', reason: 'A reason this page has no group for.', cents: 700 },
+    { finding_id: 'held4', status: 'held', code: 'check_first', reason: 'Not sent yet: check it first.', cents: 900 }], 0, {});
+  out.summary = box.innerHTML;
+  // a batch: the stale hold no longer stops it, and "Fax them anyway" goes again only for the items EMA could not vouch for
+  answers = { a: { status: 'held', code: 'stale', vouch: 'paid_after', reason: 'behind' }, b: { status: 'held', code: 'stale', vouch: 'no_ema', reason: 'behind' },
+              c: { status: 'sent' } };
+  await ctx.appealByFax(['a', 'b', 'c'], {});
+  out.tried = sent.map(x => x.finding_id).sort();
+  const anyway = el('fxOut').kids[0];
+  out.anyway = anyway ? anyway.innerHTML : null;
+  sent.length = 0; answers = {};
+  if (anyway) { await anyway.querySelector('#fxStaleGo').onclick(); await new Promise(r => setTimeout(r, 20)); }
+  out.again = sent.map(x => [x.finding_id, x.stale_ok, x.bulk]);
+  // paused on this site: what was not tried says so, not "fix what is below"
+  sent.length = 0; answers = { a: { status: 'held', code: 'bulk_paused', reason: 'Sending many appeals at once is paused.' } };
+  await ctx.appealByFax(['a', 'b', 'c', 'd'], {});
+  out.paused = el('fxOut').innerHTML;
+  // the panel: an appeal sent again after every fax failed goes past its own "waiting", never past a payment
+  const fax = (block) => ctx.faxDrawerHtml({ finding_id: 'z', signal: 'X', status: 'appealed', claim_key: 'k', appeal_block: block },
+                                            { faxes: [{ direction: 'out', status: 'failed', number: '8005550142', created_at: '2026-05-01T10:00:00' }] });
+  ctx.state.brief = { labels: { X: { work: 'rate' } }, work_types: [] };
+  vm.runInContext("kindFor = (b, r) => 'rate'", ctx);
+  out.again_waiting = fax('waiting'); out.again_paid = fax('paid');
+  // no bulk button while bulk appeals are paused
+  ctx.state.meta.bulk_appeal = false; out.bulk_off = vm.runInContext('bulkOn()', ctx);
+  ctx.state.meta.bulk_appeal = true; out.bulk_on = vm.runInContext('bulkOn()', ctx);
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+def test_a_bulk_send_names_every_item_it_held_and_faxes_anyway_only_what_ema_could_not_vouch_for(tmp_path):
+    """Review C1 (high and medium): a stale hold stopped the whole batch, and "Fax them anyway" sent every item again with
+    the stale check off, EMA's own sign of a payment included; the summary dropped items held for a code it had no group
+    for (left_out, blocked, and any new one). Now every item is tried, the summary names each held item with its reason,
+    and "Fax them anyway" goes again only for the items EMA could not vouch for. Paused bulk sends say so. In the panel, an
+    appeal sent again after every fax failed is offered past its own "waiting", never past a payment."""
+    if not NODE:
+        pytest.skip("node is not installed")
+    script = tmp_path / "fax.js"
+    script.write_text(FAX_JS, encoding="utf-8")
+    res = subprocess.run([NODE, str(script), STATIC], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    for fid, why in (("held1", "next step is not an appeal"), ("held2", "paid or settled"), ("held3", "no group for"), ("held4", "check it first")):
+        assert fid in out["summary"], fid
+        assert why in out["summary"], why
+    assert out["tried"] == ["a", "b", "c"]                              # the stale hold did not stop the batch
+    assert out["anyway"] and ">Fax it anyway<" in out["anyway"] and "1 item" in out["anyway"]
+    assert out["again"] == [["b", True, True]]                          # only the item EMA could not vouch for, in bulk
+    assert "sending in bulk is paused on this site" in out["paused"] and "fix what is below" not in out["paused"]
+    assert "Send the appeal again" in out["again_waiting"] and "Send the appeal again" not in out["again_paid"]
+    assert out["bulk_off"] is False and out["bulk_on"] is True
 
 
 BLIND_JS = r"""
@@ -996,7 +1122,8 @@ def test_the_blind_spot_banner_shows_under_the_tabs_of_every_page_and_never_twic
     res = subprocess.run([NODE, str(script), STATIC], capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout)
-    assert "Blind spot: $1,235 the site cannot check." in out["first"] and "The 835s stopped 12 days ago." in out["first"]
+    plain = re.sub(r"<[^>]+>", "", out["first"])                    # the words, whatever the banner marks up (a dollar figure's basis on hover)
+    assert "Blind spot: $1,235 the site cannot check." in plain and "The 835s stopped 12 days ago." in plain
     assert out["calls_first"] == 1 and out["calls_again"] == 1
     assert out["today"] == "" and out["calls_today"] == 1 and out["back"] is True and out["moved"] == ""
     assert out["failed"] == "" and out["retried"] == 1 and out["after_fail"] is True and out["current"] == ""

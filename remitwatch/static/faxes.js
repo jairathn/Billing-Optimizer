@@ -122,7 +122,7 @@ async function appealByFax(ids, opts){
   if(anyway.length && !opts.staleOk){
     const out = box.querySelector('#fxOut'), b = document.createElement('div');
     b.className = 'actions';
-    b.innerHTML = `<button id="fxStaleGo">Fax these ${anyway.length === 1 ? 'one' : anyway.length} anyway</button><span class="small muted">Only when you checked in EMA that ${anyway.length === 1 ? 'it is' : 'they are'} still unpaid. ${pl(anyway.length, 'item')}: ${esc(res.filter(r => anyway.includes(r.finding_id)).map(r => (r.payer_group || 'item') + ' ' + money2(r.cents)).slice(0, 8).join(', '))}${anyway.length > 8 ? '…' : ''}</span>`;
+    b.innerHTML = `<button id="fxStaleGo">${anyway.length === 1 ? 'Fax it anyway' : `Fax these ${anyway.length} anyway`}</button><span class="small muted">Only when you checked in EMA that ${anyway.length === 1 ? 'it is' : 'they are'} still unpaid. ${pl(anyway.length, 'item')}: ${esc(res.filter(r => anyway.includes(r.finding_id)).map(r => (r.payer_group || 'item') + ' ' + money2(r.cents)).slice(0, 8).join(', '))}${anyway.length > 8 ? '…' : ''}</span>`;
     out.prepend(b);
     b.querySelector('#fxStaleGo').onclick = () => appealByFax(anyway, Object.assign({}, opts, {staleOk: true}));
   }

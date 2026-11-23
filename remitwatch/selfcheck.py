@@ -10,12 +10,15 @@ so a test (or the fourteen simulated days of the verification) can drive it day 
 
 1. Self-regulation (plan_next, mark, budgets). Each run ends with its peak memory, wall time and /tmp use per step in its
    status (cloud.py already keeps memory per step; mark() adds /tmp and seconds beside it). The next run reads that status:
-   past 80% of a budget (serverless: 1.6 GB of the 2 GB function, its time budget, 512 MB of /tmp; server: the configured
-   budgets), it steps up one level, in this order, each step logged: 1 spread the work across runs (one report file per
+   past 80% of a budget (serverless: a 2,188 MB memory budget, whose 80% mark is release gate 3's 1.75 GB of the 2,278 MB
+   function, so Vercel's normal runs of 1.3-1.5 GB are calm; its time budget; 512 MB of /tmp; server: the configured
+   budgets), or killed by the platform before it wrote any status (runlog's open marker, found when the next run's log
+   starts), it steps up one level, in this order, each step logged: 1 spread the work across runs (one report file per
    run, detection in a fresh invocation), 2 run the archive at the tighter end of its allowed horizon (unit E's bounds),
-   3 leave the optional steps (provider tables, report email, export-time backfill, the weekly audit) for a calm run, and
-   4, when nothing more can be shed, one alert ("near its memory limit ... nothing was lost ... this is what it did").
-   Three calm runs in a row step it down again.
+   3 leave the optional steps (provider tables, report email, export-time backfill, the weekly audit) for a calm run, but
+   never one of them for more than MAX_DEFER_DAYS (then it runs, in a run that does no detection, before it may be left
+   again), and 4, when nothing more can be shed, one alert ("near its memory limit ... nothing was lost ... this is what
+   it did"). Three calm runs in a row step it down again.
 
 2. The self-check (begin_detection, after_detection, check_ledger, check_serving; CHECKS). A battery of rule-based
    invariants over the run's output, each with a name, a plain sentence, the count of offending items, their dollars and
@@ -23,19 +26,24 @@ so a test (or the fourteen simulated days of the verification) can drive it day 
    as a change. A critical check (money or state) that finds offenders the last good run did not have, beyond its small
    tolerance, puts the run in SAFE MODE: the store keeps everything the run read and worked out (the run's own items are
    kept, compressed, in selfcheck_held for diagnosis), but the worklist people see goes back to the items as they were
-   before the run (the last good run's, with every person's changes since), the run's automatic closures are held, and
-   an alert says why and what to check. The next good run releases it. Offenders the last good run already had keep the
-   check red and its alert on without freezing the worklist again (holding would not remove them, and would stop new
-   work from showing); a person can accept a change on the Data tab (accept_findings: a business decision, recorded with
-   who and when). The first run of the self-check sets the baseline and holds nothing. An open item that disappears with
-   no reason (no closure, no replacement for its line, not folded, not superseded) is KEPT on the worklist with a note,
-   never silently dropped.
+   before the run (the last good run's), with every status and note a person saved while the run ran put back on top,
+   and with the new items to work the run found that no failing check names (a hold never hides new work); the run's
+   automatic closures are held, and an alert says why and what to check. The next good run releases it. Offenders the
+   last good run already had keep the check red and its alert on without freezing the worklist again (holding would not
+   remove them, and would stop new work from showing); a person can accept a change on the Data tab (accept_findings: a
+   business decision, recorded with who and when, for exactly the offenders of the run the person looked at). The first
+   run of the self-check sets the baseline and holds nothing. An open item people were shown that disappears, or that
+   detection keeps only as a stale row (an item a person worked that no rule produces any more), with no reason (no
+   closure, no item this run made for its line, not folded, not superseded, nothing new on its claim since the run
+   before) is KEPT on the worklist with a note on every run, the first included, until a person accepts the change.
 
 3. The weekly self-audit (self_audit). Independent of the detection code: a separate, simpler rule set over the raw
-   tables (the 835 archive, EMA's lines, checks and A/R), on the rules of the frozen answer keys (gate 1: coverage of
-   every 2025+ line with recoverable dollars inside a window; gate 2: precision of the WORK NOW list). It lists coverage
-   gaps (with dollars) and possible wasted work (with the reason), keeps the confusion matrix week by week, and raises an
-   alert when new gaps over $500 or more than 10 new wasted items appear (both configurable).
+   tables (the 835 archive and the store's EMA lines, checks and A/R, which keep every line its rules look at), on the
+   rules of the frozen answer keys (gate 1: coverage of every 2025+ line with recoverable dollars inside a window; gate 2:
+   precision of the WORK NOW list). A line counts as covered only when it is listed or a person (or the owner's policy)
+   decided it; one RemitWatch closed, expired or set aside by itself is a gap the audit names with its item. It lists
+   coverage gaps (with dollars) and possible wasted work (with the reason), keeps the confusion matrix week by week, and
+   raises an alert when any new gap appears (no dollar floor: the owner's decision 9) or more than 10 new wasted items.
 
 4. The track record (updated by after_detection from what changed; track_record). Automatic closures later reopened (a
    payment taken back) as an error rate by rule; waiting items the payer then paid or denied, and how long it took (each
@@ -51,11 +59,14 @@ so a test (or the fourteen simulated days of the verification) can drive it day 
 
 6. Housekeeping (housekeeping): the clean-ups of units A1, A2 and E called from the cycle with their results recorded.
 
-8-12. Money (check_ledger, given_up, blindness, scoreboard, recovery_rates, expected_value): money conservation per service
-   month and payer group from the posting ledger, with every unattributed dollar and every line EMA's A/R and postings
-   disagree on counted as a gap with its amount; the dollars given up without a decision; what the app cannot see and
-   what that is worth; G's figures for the Results tab; and each item's dollars x the recovery rate of its pattern from the
-   835 archive (payer group x code x reason, then the fallbacks, always named in the basis).
+8-12. Money (check_ledger, check_posted, given_up, blindness, scoreboard, recovery_rates, expected_value): money
+   conservation per service month and payer group from the posting ledger (every posting's money lands in exactly one
+   piece); money posted in a closed month never disappears (a newer export of a box that lost a posting is a critical gap,
+   from the high-water mark of every earlier check); EMA's A/R against the postings both ways, including lines that left
+   the A/R while their postings leave money open; every unattributed dollar counted in a gap total with its amount; the
+   dollars given up without a decision; what the app cannot see and what that is worth; G's figures for the Results tab;
+   and each item's dollars x the recovery rate of its pattern from the 835 archive (payer group x code x reason, then the
+   fallbacks, always named in the basis).
 
 Everything a page shows is kept in meta selfcheck:* keys, so the dashboard's copy (which carries meta) shows the same
 panel as the store (panel, data_health). Nothing here deletes source data or hides an item.
@@ -98,18 +109,20 @@ PROVIDER_RARCS = frozenset({"N290", "N95", "N55", "M16"})
 SERVICE_FROM = "2025-01-01"         # the population the owner's gates measure
 
 # ------------------------------------------------------------------------------------------------------------ settings
-SERVERLESS_MEMORY_BUDGET_MB = 1600  # of the 2 GB function (cloud.NEEDED_MEMORY_MB)
+GATE_MEMORY_MB = 1750               # release gate 3: a serverless run peaks under 1.75 GB (Vercel's function has 2,278 MB)
+SERVERLESS_MEMORY_BUDGET_MB = 2188  # the budget whose 80% mark is that gate: Vercel's normal 1.3-1.5 GB runs are calm
 TMP_BUDGET_MB = 512                 # Vercel's /tmp
 PRESSURE_SHARE = 0.80               # a run past this share of a budget makes the next one act
 CALM_RUNS_TO_STEP_DOWN = 3
 LEVELS = ("calm", "spread", "archive", "shed", "alert")
 OPTIONAL_STEPS = ("activity", "report", "backfill", "audit")
+MAX_DEFER_DAYS = 7                  # an optional step is never left for a calm run longer than this
 HISTORY_RUNS = 30                   # invariant results kept in meta for the panel (all runs in selfcheck_runs, up to 400)
 EXAMPLES = 20
 AUDIT_EVERY_DAYS = 7
-AUDIT_GAP_ALERT_CENTS = 50_000      # any NEW coverage gap over $500 raises the audit alert
-AUDIT_WASTED_ALERT = 10             # ... as do more than 10 new possibly wasted items
-GIVEN_UP_ALERT_CENTS = 50_000       # the week's money given up without a decision rising by more than $500
+AUDIT_WASTED_ALERT = 10             # more than 10 new possibly wasted items raise the audit's alert (a count, not money)
+# The owner's decision 9 ("no dollar amount is too small"): ANY new coverage gap raises the audit alert, and ANY rise in
+# the week's money given up without a decision raises GIVEN_UP_RISING. There is no dollar floor to set.
 TRACK_ALERT_SHARE = 0.05            # a closure rule whose reopen rate passes 5% (with 20 closures at least)
 RATE_MIN_CASES = 10                 # a recovery-rate pattern needs this many cases, else the next level is used
 RATE_MATURE_DAYS = 90               # a denial younger than this (from the newest remittance) has not had time to be paid
@@ -321,7 +334,9 @@ def peak_mb() -> int | None:
 
 
 def tmp_used_mb(folder: str | None = None, limit: int = 20000) -> int | None:
-    """What the temporary folder holds now, in MB (the files under it, at most `limit` entries looked at)."""
+    """What the temporary folder holds now, in MB: the files under it (at most `limit` entries looked at) and the files
+    this process holds open there that are no longer listed (SQLite unlinks its temporary files as it opens them, so a
+    sort or a temporary table spilled to /tmp is on no directory listing yet takes the same space)."""
     import tempfile
     root = folder or tempfile.gettempdir()
     total, seen = 0, 0
@@ -330,14 +345,41 @@ def tmp_used_mb(folder: str | None = None, limit: int = 20000) -> int | None:
             for f in files:
                 seen += 1
                 if seen > limit:
-                    return total >> 20
+                    return (total + _open_unlinked_bytes(root)) >> 20
                 try:
                     total += os.lstat(os.path.join(dirpath, f)).st_size
                 except OSError:
                     pass
     except OSError:
         return None
-    return total >> 20
+    return (total + _open_unlinked_bytes(root)) >> 20
+
+
+def _open_unlinked_bytes(root: str) -> int:
+    """Bytes in files this process holds open under `root` that were deleted from it (Linux: /proc/self/fd), each counted
+    once; 0 where the platform has no /proc."""
+    try:
+        base = os.path.realpath(root).rstrip(os.sep) + os.sep
+        fds = os.listdir("/proc/self/fd")
+    except OSError:
+        return 0
+    total, seen = 0, set()
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if not target.endswith(" (deleted)") or not target.startswith(base):
+            continue                           # a listed file is counted by the walk
+        try:
+            st = os.fstat(int(fd))
+        except (OSError, ValueError):
+            continue
+        if (st.st_dev, st.st_ino) in seen:
+            continue
+        seen.add((st.st_dev, st.st_ino))
+        total += st.st_size
+    return total
 
 
 # ------------------------------------------------------------------------------------------------------------ schema
@@ -361,9 +403,16 @@ CREATE TABLE IF NOT EXISTS selfcheck_track (finding_id TEXT NOT NULL, kind TEXT 
     PRIMARY KEY (finding_id, kind, started)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS selfcheck_money (month TEXT NOT NULL, payer_group TEXT NOT NULL, measure TEXT NOT NULL, cents INTEGER,
     rows INTEGER, PRIMARY KEY (month, payer_group, measure)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS selfcheck_offenders (check_id TEXT NOT NULL, key TEXT NOT NULL, cents INTEGER, run_id TEXT,
+    PRIMARY KEY (check_id, key)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS selfcheck_facts (finding_id TEXT PRIMARY KEY, fp TEXT) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS selfcheck_posted (svc_month TEXT NOT NULL, posted_month TEXT NOT NULL, payer_group TEXT NOT NULL,
+    measure TEXT NOT NULL, high_cents INTEGER, last_cents INTEGER, at TEXT,
+    PRIMARY KEY (svc_month, posted_month, payer_group, measure)) WITHOUT ROWID;
 """
 TABLES = ("selfcheck_runs", "selfcheck_baseline", "selfcheck_held", "selfcheck_cycles", "selfcheck_audits",
-          "selfcheck_audit_items", "selfcheck_track", "selfcheck_money")
+          "selfcheck_audit_items", "selfcheck_track", "selfcheck_money", "selfcheck_offenders", "selfcheck_facts",
+          "selfcheck_posted")
 # the finding columns the worklist ranks by (written at detection save from recovery_rates and expected_value)
 VALUE_COLUMNS = {"expected_value_cents": "INTEGER", "recovery_rate": "REAL", "recovery_basis": "TEXT"}
 
@@ -375,6 +424,8 @@ K_AUDIT = "selfcheck:audit"
 K_TRACK = "selfcheck:track"
 K_PATTERNS = "selfcheck:patterns"
 K_MONEY = "selfcheck:money"
+K_POSTED = "selfcheck:posted"
+K_ACCEPTED = "selfcheck:acceptances"
 K_GIVEN_UP = "selfcheck:given_up"
 K_BLIND = "selfcheck:blind"
 K_RATES = "selfcheck:rates"
@@ -405,9 +456,10 @@ def ensure_value_columns(conn: sqlite3.Connection) -> list[str]:
 # 1. Self-regulation
 # =====================================================================================================================
 def budgets(mode: str, *, budget_s: Any = None) -> dict:
-    """The budgets a run is measured against. Serverless: 1.6 GB (REMITWATCH_MEMORY_BUDGET_MB), the run's time budget,
-    512 MB of /tmp. Server: the configured memory budget (none unless REMITWATCH_MEMORY_BUDGET_MB is set) and
-    REMITWATCH_CYCLE_BUDGET_SECONDS (3600)."""
+    """The budgets a run is measured against. Serverless: 2,188 MB (REMITWATCH_MEMORY_BUDGET_MB), so that its 80% mark is
+    release gate 3's 1.75 GB: Vercel's normal runs (1.3-1.5 GB of the 2,278 MB function) are calm and a run past the gate
+    makes the next one act; the run's time budget; 512 MB of /tmp. Server: the configured memory budget (none unless
+    REMITWATCH_MEMORY_BUDGET_MB is set) and REMITWATCH_CYCLE_BUDGET_SECONDS (3600)."""
     serverless = mode == "serverless"
     mem = setting("REMITWATCH_MEMORY_BUDGET_MB")
     try:
@@ -470,7 +522,7 @@ def pressure_of(status: dict | None, b: dict) -> dict:
     if tmp is not None and b.get("tmp_mb"):
         parts.append(f"/tmp {tmp:,} MB of {b['tmp_mb']:,} MB ({share['tmp']:.0%})")
     if killed:
-        parts.append("the run stopped before it finished")
+        parts.append(err[:160] if err else "the run stopped before it finished")
     return {**{k: (round(v, 3) if v is not None else None) for k, v in share.items()}, "peak_mb": peak, "seconds": secs,
             "tmp_mb": tmp, "pressured": bool(over) or killed, "killed": killed, "worst": worst or ("killed" if killed else None),
             "text": "; ".join(parts)}
@@ -486,27 +538,49 @@ def plan_for(level: int, pressure: dict | None = None) -> dict:
         actions.append("Ran the archive at the tighter end of its allowed horizon (never below the windows open items need).")
     if level >= 3:
         actions.append("Left the optional steps for a calm run: the provider tables, the report email, the export-time "
-                       "backfill and the weekly self-audit.")
+                       f"backfill and the weekly self-audit (never one of them for more than {MAX_DEFER_DAYS} days).")
     if level >= 4:
         actions.append("Nothing more can be shed: an alert asks a person to look.")
     return {"level": level, "name": LEVELS[level], "spread": level >= 1, "archive_tight": level >= 2,
-            "skip": list(OPTIONAL_STEPS) if level >= 3 else [], "alert": level >= 4, "actions": actions,
+            "skip": list(OPTIONAL_STEPS) if level >= 3 else [], "overdue": [], "alert": level >= 4, "actions": actions,
             "pressure": pressure or {}}
 
 
-def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_s: Any = None, now: Any = None) -> dict:
-    """At the start of a run: read the previous run's status (cloud: status.json; server: meta pipeline:last), record its
-    figures (selfcheck_cycles), step the regulation level up (it passed 80% of a budget, or stopped before finishing) or,
-    after three calm runs, down, and return this run's plan ({'level', 'name', 'spread', 'archive_tight', 'skip',
-    'alert', 'actions', 'pressure'}). A status already counted (same 'started') changes nothing."""
+def _killed_runs(killed: Any) -> list[dict]:
+    """The runs the platform stopped before they wrote any status: the given list (or one dict), else what the run log in
+    progress found when it started (remitwatch.runlog.start_run records each open marker of a run that is gone)."""
+    if killed is None:
+        try:
+            from . import runlog
+            rl = runlog.current()
+            killed = ((getattr(rl, "manifest", None) or {}).get("sections") or {}).get("killed_runs") if rl is not None else None
+        except Exception as exc:       # noqa: BLE001  (no run log: nothing known to be killed)
+            _caught(exc, "killed_runs")
+            killed = None
+    if isinstance(killed, dict):
+        killed = [killed]
+    return [k for k in (killed or []) if isinstance(k, dict)]
+
+
+def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_s: Any = None, now: Any = None,
+              killed: Any = None) -> dict:
+    """At the start of a run: read the previous run's status (cloud: status.json; server: meta pipeline:last) and the runs
+    the platform killed since (`killed`, else the run log in progress: their open markers), record their figures
+    (selfcheck_cycles), step the regulation level up (a run passed 80% of a budget, stopped before finishing, or was
+    killed) or, after three calm runs, down, and return this run's plan ({'level', 'name', 'spread', 'archive_tight',
+    'skip', 'overdue', 'alert', 'actions', 'pressure'}). A status or a killed run already counted changes nothing. An
+    optional step left for a calm run for MAX_DEFER_DAYS is not left again until it has run (record_did's 'ran', and the
+    self-audit's own record)."""
     ensure_tables(conn)
     reg = meta_get(conn, K_REGULATE, {}) or {}
     level = int(reg.get("level") or 0)
     calm = int(reg.get("calm") or 0)
     pressure = reg.get("last_pressure") or {}
-    if prev and prev.get("started") and prev.get("started") != reg.get("last_started") and not prev.get("skipped"):
-        b = budgets(mode, budget_s=prev.get("budget_seconds") or budget_s)
-        pressure = pressure_of(prev, b)
+    t = today_of(str(now)[:10] if now else None)
+
+    def step(st: dict, b: dict) -> None:
+        nonlocal level, calm, pressure
+        pressure = pressure_of(st, b)
         before = level
         if pressure["pressured"]:
             level, calm = min(level + 1, len(LEVELS) - 1), 0
@@ -514,21 +588,76 @@ def plan_next(conn: sqlite3.Connection, prev: dict | None, *, mode: str, budget_
             calm += 1
             if calm >= CALM_RUNS_TO_STEP_DOWN and level > 0:
                 level, calm = level - 1, 0
-        _record_cycle(conn, prev, pressure, b, level, mode)
-        reg.update(level=level, calm=calm, last_started=prev.get("started"), last_pressure=pressure,
-                   last_run={k: prev.get(k) for k in ("started", "finished", "seconds", "budget_seconds", "trigger", "more",
-                                                      "error", "deferred")})
+        _record_cycle(conn, st, pressure, b, level, mode)
         if level != before:
             reg["since"] = now_of(now)
             hist = list(reg.get("changes") or [])[-19:]
             hist.append({"at": now_of(now), "from": LEVELS[before], "to": LEVELS[level], "why": pressure.get("text")})
             reg["changes"] = hist
+    if prev and prev.get("started") and prev.get("started") != reg.get("last_started") and not prev.get("skipped"):
+        step(prev, budgets(mode, budget_s=prev.get("budget_seconds") or budget_s))
+        reg.update(last_started=prev.get("started"),
+                   last_run={k: prev.get(k) for k in ("started", "finished", "seconds", "budget_seconds", "trigger", "more",
+                                                      "error", "deferred")})
+    seen = list(reg.get("killed_seen") or [])
+    for k in _killed_runs(killed):
+        key = str(k.get("run_id") or k.get("started_at") or "")
+        if not key or key in seen:
+            continue
+        seen.append(key)
+        where = f" in its step {k['last_step']}" if k.get("last_step") else ""
+        st = {"started": k.get("started_at") or k.get("last_at") or now_of(now), "finished": None, "mode": mode,
+              "error": f"Killed by the platform{where} before it finished (no status written)",
+              "memory_mb": {"peak": k["peak_mb"]} if isinstance(k.get("peak_mb"), (int, float)) else {}}
+        step(st, budgets(mode, budget_s=budget_s))
+        _log("killed_run_counted", detail={"run": key, "last_step": k.get("last_step"), "peak_mb": k.get("peak_mb")})
+    reg["killed_seen"] = seen[-50:]
+    reg.update(level=level, calm=calm, last_pressure=pressure)
     plan = plan_for(level, pressure)
-    reg["plan"] = {k: plan[k] for k in ("level", "name", "spread", "archive_tight", "skip", "alert", "actions")}
+    _defer(conn, reg, plan, t)
+    reg["plan"] = {k: plan[k] for k in ("level", "name", "spread", "archive_tight", "skip", "overdue", "alert", "actions")}
     reg["mode"] = mode
     meta_set(conn, K_REGULATE, reg)
     conn.commit()
     return plan
+
+
+STEP_WORDS = {"activity": "the provider tables", "report": "the weekly report email", "backfill": "the export-time backfill",
+              "audit": "the weekly self-audit"}
+
+
+def _defer(conn: sqlite3.Connection, reg: dict, plan: dict, today: str) -> None:
+    """Never leave an optional step for a calm run for more than MAX_DEFER_DAYS: a step left that long stays in the plan
+    (it runs in a run that does no detection) until it has run (record_did 'ran'; the self-audit's own record), and only
+    then may it be left again. Changes plan['skip'] and plan['overdue'] in place and keeps the dates in `reg`."""
+    since = dict(reg.get("shed_since") or {})
+    ran = dict(reg.get("last_ran") or {})
+    try:
+        last_audit = conn.execute("SELECT MAX(today) FROM selfcheck_audits").fetchone()[0]
+    except sqlite3.Error:
+        last_audit = None
+    if last_audit:
+        ran["audit"] = max(str(ran.get("audit") or ""), str(last_audit))
+    keep, overdue = [], []
+    for s in plan.get("skip") or []:
+        first = since.get(s)
+        if first and ran.get(s) and str(ran[s]) >= str(first):
+            first = None                       # it ran since it was first left: a new stretch starts today
+        if not first:
+            since[s] = today
+            keep.append(s)
+        elif (_days(first, today) or 0) >= MAX_DEFER_DAYS:
+            overdue.append(s)
+        else:
+            keep.append(s)
+    if not plan.get("skip"):
+        since = {}
+    plan["skip"], plan["overdue"] = keep, overdue
+    if overdue:
+        plan["actions"] = list(plan["actions"]) + [
+            f"{'; '.join(STEP_WORDS.get(s, s) for s in overdue).capitalize()}: left for a calm run for a week already, so it runs "
+            "now (in a run that does no detection) and is never left longer."]
+    reg["shed_since"] = since
 
 
 def _record_cycle(conn: sqlite3.Connection, st: dict, p: dict, b: dict, level: int, mode: str) -> None:
@@ -545,11 +674,18 @@ def _record_cycle(conn: sqlite3.Connection, st: dict, p: dict, b: dict, level: i
     conn.execute("DELETE FROM selfcheck_cycles WHERE started NOT IN (SELECT started FROM selfcheck_cycles ORDER BY started DESC LIMIT 400)")
 
 
-def record_did(conn: sqlite3.Connection, did: dict) -> None:
-    """What this run actually did with its plan (what it shed, what the archive retired): kept with the regulation state
-    so the panel can say it. `did` is a small dict such as {'shed': ['activity'], 'archive': {...}, 'deferred': True}."""
+def record_did(conn: sqlite3.Connection, did: dict, *, today: Any = None) -> None:
+    """What this run actually did with its plan (what it shed, which optional steps ran, what the archive retired): kept
+    with the regulation state so the panel can say it, and 'ran' ends an optional step's deferral (plan_next). `did` is a
+    small dict such as {'shed': ['activity'], 'ran': ['report'], 'archive': {...}, 'deferred': True}."""
     reg = meta_get(conn, K_REGULATE, {}) or {}
     reg["did"] = dict(did or {}, at=now_of())
+    t = today_of(today)
+    ran = dict(reg.get("last_ran") or {})
+    for s in (did or {}).get("ran") or []:
+        if s in OPTIONAL_STEPS:
+            ran[s] = t
+    reg["last_ran"] = ran
     meta_set(conn, K_REGULATE, reg)
 
 
@@ -611,8 +747,16 @@ CHECKS: dict[str, tuple] = {
                  "kept on the worklist with a note; accept the change on the Data tab once it is intended."),
     "money_conservation": ("critical", "hold", 0, "Each month's money adds up to its charges",
                            "For every service month and payer group, charges = insurer paid + patient paid + contractual + "
-                           "written off + open +/- credits, to the dollar.",
-                           "The cell's pieces are in meta selfcheck:money; a gap means a posting was counted twice or in no piece."),
+                           "written off + open +/- credits, to the dollar: every posting's money lands in exactly one piece.",
+                           "The cell's pieces are in meta selfcheck:money; a gap means a posting was counted twice or in no piece "
+                           "(a reason the rules do not know). A posting that left the ledger is caught by 'posted money' and by "
+                           "the A/R check, not here."),
+    "posted_money": ("critical", "hold", 0, "Money posted in EMA never disappears",
+                     "The insurer's and the patient's payments and the adjustments EMA posted in a closed month stay in the "
+                     "posting ledger: a newer export of the same dates that lacks some of them is a gap with its dollars.",
+                     "Compare the newest Production export of those dates with the one before (a filtered or partial export "
+                     "replaced a complete one): send the complete export again, or accept the change on the Data tab if EMA "
+                     "itself removed those postings."),
     "ledger_store": ("critical", "hold", 0, "The store's EMA money equals the posting ledger's",
                      "The money the store's EMA summaries hold equals what the posting ledger holds, month by month and file by file.",
                      "A run that saved one and not the other, or a refresh that stopped part-way: ema_ledger.refresh repairs it "
@@ -633,8 +777,10 @@ CHECKS: dict[str, tuple] = {
                  "The Production report is at most 14 days old and the A/R at most 8.",
                  "Pull the weekly EMA reports (Upload page lists them)."),
     "line_balance": ("warning", None, 0, "EMA's A/R agrees with its postings",
-                     "Each line on EMA's newest A/R carries the balance its postings leave, to the dollar.",
-                     "A posting missing from the Production export or an A/R pulled before the postings: compare the lines."),
+                     "Each line carries on EMA's newest A/R the balance its postings leave, to the dollar, both ways; a line "
+                     "the A/R no longer lists (settled in EMA) leaves nothing open in its postings.",
+                     "A posting missing from the Production export (the postings leave more than the A/R), or one missing from "
+                     "the A/R, or an A/R pulled before the postings: compare the example lines in EMA."),
 }
 CRITICAL = tuple(k for k, v in CHECKS.items() if v[0] == "critical")
 # offenders' keys a result carries (the baseline and the items kept): more than the whole worklist

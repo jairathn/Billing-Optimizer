@@ -3253,8 +3253,16 @@ def uploads_needed(limit: int = Query(100, ge=1, le=500), _: str = Depends(requi
 
 
 @app.post("/api/uploads/notes/{note_id}/match", dependencies=[Depends(require_xhr)])
-def uploads_note_match(note_id: str, body: dict = Body(default={}), _: str = Depends(require_auth)):
-    """A person settles which visit an uploaded note is for: one of the visits it could be (pick), or an item (finding_id)."""
+async def uploads_note_match(note_id: str, request: Request, _: str = Depends(require_auth)):
+    """A person settles which visit an uploaded note is for: one of the visits it could be (pick), or an item (finding_id).
+    The body is read after the sign-in, and at most 64 KB of it (api_uploads._json_body): a Body() parameter would be read
+    and parsed before the sign-in, so anyone could make the server parse a large body (needs_A2 F.2)."""
+    from . import api_uploads
+    body = await api_uploads._json_body(request)
+    return await asyncio.to_thread(_uploads_note_match, note_id, body)
+
+
+def _uploads_note_match(note_id: str, body: dict):
     _uploads_here()
     from . import uploads
     if not re.fullmatch(r"[0-9a-f]{24}", note_id):
