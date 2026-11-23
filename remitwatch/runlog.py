@@ -46,6 +46,7 @@ import gzip
 import hashlib
 import io
 import json
+import operator
 import os
 import platform
 import re
@@ -161,8 +162,10 @@ _NAME_WORD = re.compile(r"[^\W\d_](?:[^\W\d_]|['\-])+")    # a word of a name as
 _TWO_LETTER_KEEP = frozenset("of to in is it on at by or as an be we he me my no so up us if go am ok id co pr oa pi cr ar".split())
 # what stands between the words of one name: "Last, First", "First Last", and the 835's own "LAST*FIRST"
 _NAME_GAPS = (" ", ", ", ",", "  ", "*")
-# the same with a middle initial or a suffix between them ("Mark J Smith", "SMITH JR, MARK")
-_NAME_GAP_RX = re.compile(r"(?: {1,2}|, ?|\*)(?:[A-Z][A-Za-z]?\.?(?: {1,2}|, ?|\*))?")
+# the same with a middle initial or a name's suffix between them ("Mark J Smith", "SMITH JR, MARK"); never a word
+# of two letters ("Blue Shield Of Texas" is no name)
+_NAME_GAP_RX = re.compile(r"(?: {1,2}|, ?|\*)(?:(?:[A-Z]\.?|[JS][Rr]\.?|II|IV)(?: {1,2}|, ?|\*))?")
+_START = operator.methodcaller("start")
 # the level words of the logs' own lines: the only words of the code's own kept beside a name the store holds
 _LOG_WORDS = frozenset("error warning warn info debug critical".split())
 _ALNUM_OK = frozenset({"sha256", "x86-64", "utf-16", "utf-32", "base64", "py313", "py312", "py311"})
@@ -185,6 +188,7 @@ class Scrubber:
 
     def __init__(self) -> None:
         self.names: set[str] = set()
+        self._pair_heads: set[str] = set()      # first words of the pairs in names
         self._vocab: set[str] | None = None
         self._code_words: set[str] | None = None
 
@@ -252,6 +256,7 @@ class Scrubber:
                         for x, y in zip(seq, seq[1:]):
                             if len(x) >= 2 and len(y) >= 2 and x not in self.names and y not in self.names:
                                 self.names.add(f"{x} {y}")
+                                self._pair_heads.add(x)
         except sqlite3.Error as exc:
             _note_internal("learn", exc)
         return len(self.names)
@@ -305,54 +310,51 @@ class Scrubber:
         names = self.names
         words2 = list(_WORD2.finditer(s)) if names else []
         short = [m for m in words2 if not m.group(0).islower() and m.group(0).lower() in names]
-        if not toks and not short and len(words2) < 2:
+        heads = self._pair_heads if names else None
+        if not toks and not short and not (heads and len(words2) > 1):
             return s
         code = self.code_words()
 
-        def low(w: str) -> str:
-            return w.lower().strip("'-")
-
         def known(w: str) -> bool:
-            lw = low(w)
+            lw = w.lower().strip("'-")
             return lw in code or lw in _TWO_LETTER_KEEP      # "Denied CO-45": the group code is the code's own
 
-        def cap(w: str) -> bool:
-            return w[:1].isupper()
         mask = [False] * len(toks)
         for i, m in enumerate(toks):
             w = m.group(0)
-            lw = low(w)
+            lw = w.lower().strip("'-")
             if names and lw in names:
                 mask[i] = True
             elif len(w) >= 4 and w.isupper() and not known(w):
                 mask[i] = True
-            if i + 1 < len(toks) and cap(w):
-                nxt = toks[i + 1].group(0)
-                gap = s[m.end():toks[i + 1].start()]
-                if cap(nxt) and _NAME_GAP_RX.fullmatch(gap) and not (known(w) and known(nxt)):
+            if i + 1 < len(toks) and w[:1].isupper():
+                n = toks[i + 1]
+                nxt = n.group(0)
+                if nxt[:1].isupper() and _NAME_GAP_RX.fullmatch(s, m.end(), n.start()) and not (known(w) and known(nxt)):
                     # the unknown word goes; a known one beside it goes too unless it is an ALL-CAPS word of the code's
                     # own (ERROR, EMA): "John Smith" loses both, "ERROR Smith" keeps ERROR. Beside a name the store
                     # holds only the level word stays: the 835 writes "SMITH, MARK", and MARK is a word of the code's
                     # own too
-                    held =bool(names) and (lw in names or low(nxt) in names)
+                    held = bool(names) and (lw in names or nxt.lower().strip("'-") in names)
                     for j, x in ((i, w), (i + 1, nxt)):
-                        if not known(x) or not x.isupper() or (held and low(x) not in _LOG_WORDS):
+                        if not known(x) or not x.isupper() or (held and x.lower().strip("'-") not in _LOG_WORDS):
                             mask[j] = True
         spans = {(m.start(), m.end()) for m, hide in zip(toks, mask) if hide} | {(m.start(), m.end()) for m in short}
-        if names:
+        if heads:
             # a name the store holds made only of words the code uses too (learn keeps its pairs): its words go where
             # they stand together with capitals ("PRICE, WILL ROSE", "Will Rose Price")
-            seq = sorted(toks + words2, key=lambda m: m.start())
-            for a, b in zip(seq, seq[1:]):
-                wa, wb = a.group(0), b.group(0)
-                if cap(wa) and cap(wb) and _NAME_GAP_RX.fullmatch(s[a.end():b.start()]) and f"{low(wa)} {low(wb)}" in names:
+            capped = sorted((m for m in toks + words2 if m.group(0)[:1].isupper()), key=_START)
+            for a, b in zip(capped, capped[1:]):
+                la = a.group(0).lower().strip("'-")
+                if (la in heads and _NAME_GAP_RX.fullmatch(s, a.end(), b.start())
+                        and f"{la} {b.group(0).lower().strip(chr(39) + '-')}" in names):
                     spans.update(((a.start(), a.end()), (b.start(), b.end())))
         if not spans:
             return s
         # a capitalized word of two letters beside a masked name is part of it ("ZORVATHIQ, AN", "My He Quillbrandt"):
         # the English words _TWO_LETTER_KEEP keeps out of the names learned are given names and surnames too (An, My,
         # He, No, Go), so they go with the name they stand beside, and only there
-        two = [(m.start(), m.end()) for m in _WORD2.finditer(s) if m.group(0)[:1].isupper() and (m.start(), m.end()) not in spans]
+        two = [(m.start(), m.end()) for m in (words2 or _WORD2.finditer(s)) if m.group(0)[:1].isupper() and (m.start(), m.end()) not in spans]
         while two:
             starts, ends = {a for a, _ in spans}, {b for _, b in spans}
             near = [(a, b) for a, b in two

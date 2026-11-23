@@ -1642,13 +1642,20 @@ def test_a_new_bill_for_an_archived_patients_day_brings_that_day_back(tmp_path, 
     sink = sink_of(tmp_path, "file")
     assert archive.run(conn, sink=sink, today=TODAY)["bills"] == 24
     assert archive.restore_touched(conn, sink=sink, today=TODAY)["restored"] == 0
+    # another patient's claim that day brings nothing back
+    day_remit(store, trace="DT90005", paid_on="2026-11-01", payer=HUMANA,
+              claims=[{"pcn": "DE01AAAAAC017", "last": "OTHER", "first": "ECHO", "member": "E00000000001",
+                       "lines": [(DAY, "17311", 900, 585.12, [("CO", "45", 314.88)], {"allowed_cents": 58512})]}])
+    assert archive.restore_touched(conn, sink=sink, today=TODAY)["restored"] == 0
+    # the same patient's late claim that day does
     day_remit(store, trace="DT90004", paid_on="2026-11-01", payer=HUMANA,
               claims=[{"pcn": "DC01AAAAAC017", "lines": [(DAY, "17312", 400, 0, [("CO", "29", 400)], {"allowed_cents": 0})]}])
     back = archive.restore_touched(conn, sink=sink, today=TODAY)
     assert back["restored"] == 2 and back["why"] == {archive.WHY_DAY_HOT: 1, archive.WHY_DAY_BACK: 1}
     assert {b for (b,) in conn.execute("SELECT bill FROM archive_pins")} == {"DA01AAAAA", "DB01AAAAA"}
-    # another patient's claim that day brings nothing back
-    assert archive.run(conn, sink=sink, today="2027-03-01")["bills"] == 0      # DC01 is new: the day stays whole in the store
+    # the pins run out: the late claim is new, so the day stays whole in the store
+    p = archive.plan(conn, today="2027-03-01")
+    assert p["bills"] == [] and p["held"] == {archive.HELD_DAY: 2}
     store.close()
 
 
@@ -1679,3 +1686,24 @@ def test_a_patients_day_is_never_split_between_files_runs_or_a_change_made_meanw
     assert {b for (b,) in store2.conn.execute("SELECT bill FROM archive_bills")} == {f"DM{n:03d}XXXX" for n in range(22)}
     store.close()
     store2.close()
+
+
+def test_a_patients_day_stays_whole_when_one_of_its_bills_also_has_a_later_day(tmp_path, frozen_hook):
+    """The 17311's bill has a later visit too (a second submission), and other patients' bills fall between the two
+    days: the plan still puts the day's two bills one after the other, so a batch of one bill a file holds both."""
+    store = _mohs_day("file", tmp_path)
+    day_remit(store, trace="DT90006", paid_on="2022-05-20", payer=HUMANA,
+              claims=[{"pcn": "DA01AAAAAC024", "lines": [("2022-05-02", "99213", 150, 80, [("CO", "45", 70)], {"allowed_cents": 8000})]}])
+    for n in range(3):
+        day_remit(store, trace=f"DT9100{n}", paid_on="2022-04-20", payer=HUMANA,
+                  claims=[{"pcn": f"DF0{n}AAAAAC017", "last": f"LATER{n}", "first": "FOX", "member": f"F{n:011d}",
+                           "lines": [("2022-04-01", "99213", 150, 80, [("CO", "45", 70)], {"allowed_cents": 8000})]}])
+    detect(store)
+    p = archive.plan(store.conn, today=TODAY)
+    order = [b for b, *_ in p["bills"]]
+    assert len(order) == 27 and abs(order.index("DA01AAAAA") - order.index("DB01AAAAA")) == 1
+    assert p["groups"]["DA01AAAAA"] == p["groups"]["DB01AAAAA"] and "DF00AAAAA" not in p["groups"]
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "file"), today=TODAY, batch_bills=1)
+    assert res["bills"] == 27 and len(res["files"]) == 26
+    assert store.conn.execute("SELECT COUNT(DISTINCT file) FROM archive_bills WHERE bill IN ('DA01AAAAA','DB01AAAAA')").fetchone()[0] == 1
+    store.close()

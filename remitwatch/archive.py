@@ -5,7 +5,9 @@ memory stays flat as the years add up, and nothing is lost.
 What stays in the store (hot): every bill with an open item (work now, waiting, can't be checked, or a person's open,
 started or sent status), every bill a worked or open routine-rate pattern lists, every bill reopened in the last 90 days,
 every bill EMA's reports in the store still name (the posting ledger's summaries, the claim-number map, the A/R: EMA's
-checks find the remittance that answered a line by its bill), and everything with service inside the retention horizon.
+checks find the remittance that answered a line by its bill), every bill that shares one patient's service day with a
+bill that stays (detection weighs one patient's claims of a day together: the payer's second procedure that day on
+another claim), and everything with service inside the retention horizon.
 What leaves (to compressed archive files the daily run never reads): a bill whose newest service and newest payment are
 older than the horizon and whose items are all settled (done, accepted, expired, or closed by a person): its 835 claims,
 lines, adjustments and remarks, its weekly EMA export rows, its 837 rows, its links, its items and their history. The
@@ -13,7 +15,8 @@ A/R snapshots older than 13 months go the same way (the rows of an item still op
 and the posting ledger's postings go to the archive before the ledger's own retention deletes them
 (`before_ledger_retain`, the hook in Ledger.retain). An archived bill comes back whole when new data names it: a
 remittance or reprocessing of its claim, a weekly EMA row, an 837, a payer's offset taking its money back (PLB WO, FB,
-72), or EMA's reports listing it again (`restore_touched`).
+72), EMA's reports listing it again, or a new claim of the same patient's service day (`restore_touched`). The bills of
+one patient's service day leave in one batch and come back together.
 
 Never archived: the remittances themselves (transactions and provider-level adjustments stay: they are the payments by
 month, and their content fingerprints stop a re-delivered remittance from being read twice), the files and Dropbox lists,
@@ -33,8 +36,8 @@ records of truth):
 The store keeps a small index: archive_files (each file, its digest and counts), archive_bills (bill -> file),
 archive_ids (claim ids and payer claim numbers -> bill, for Find a claim), archive_findings (each archived item's summary,
 so totals and deep links still count it), archive_rates / archive_market (the payer baselines of the years the archive
-took, measured on the whole year), archive_pins (bills reopened lately) and archive_requests (reopen requests waiting for
-the next run).
+took, measured on the whole year), archive_pins (bills reopened lately), archive_requests (reopen requests waiting for
+the next run) and archive_days (a hashed key of each patient service day an archived bill holds: no patient detail).
 
 Safety, in this order: a batch is written, read back and checked record by record (digest and row counts) before one
 transaction moves its index rows in and its hot rows out; inside that transaction the items and their history are checked
@@ -155,9 +158,11 @@ CREATE TABLE IF NOT EXISTS archive_market (year TEXT, code TEXT, tier TEXT, pos_
 CREATE TABLE IF NOT EXISTS archive_pins (bill TEXT PRIMARY KEY, until TEXT, why TEXT, at TEXT);
 CREATE TABLE IF NOT EXISTS archive_requests (bill TEXT, finding_id TEXT, status TEXT, actor TEXT, reason TEXT, at TEXT,
     PRIMARY KEY (bill, at));
+CREATE TABLE IF NOT EXISTS archive_days (k TEXT, bill TEXT, PRIMARY KEY (k, bill)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ix_archive_days_bill ON archive_days(bill);
 """
 TABLES = ("archive_files", "archive_bills", "archive_ids", "archive_findings", "archive_rates", "archive_market",
-          "archive_pins", "archive_requests")
+          "archive_pins", "archive_requests", "archive_days")
 # what the dashboard's copy needs for Find a claim and the Data tab (small; no row of a bill)
 SERVING_TABLES = (("archive_bills", None, None), ("archive_ids", None, None), ("archive_findings", None, None),
                   ("archive_files", "name,kind,gz_bytes,raw_bytes,records,rows,svc_lo,svc_hi,created_at,horizon_months,cutoff",
@@ -542,8 +547,27 @@ def _ebill_fn(claim_id: Any) -> str | None:
     return bill_of_claim(str(claim_id))
 
 
+_PATIENT_KEYS: Any = None
+
+
+def _pday_fn(pid: Any, last: Any, first: Any, day: Any) -> str | None:
+    """The key of one patient's service day: detection's own key for "this patient" across claims (detect.patient_keys:
+    the member number with the name, else the name alone; its rules that weigh two claims of a day together compare
+    exactly this) with the line's service day. Hashed: the index names no patient."""
+    global _PATIENT_KEYS
+    if _PATIENT_KEYS is None:
+        from .detect import patient_keys
+        _PATIENT_KEYS = patient_keys
+    ks = _PATIENT_KEYS(None if pid is None else str(pid), None if last is None else str(last),
+                       None if first is None else str(first))
+    k = ks[0] or ks[1]
+    if not k:
+        return None
+    return hashlib.sha256(f"{k}#{str(day or '')[:10]}".encode("utf-8")).hexdigest()[:24]
+
+
 def _register(conn: sqlite3.Connection) -> None:
-    for name, n, fn in (("rw_arc_bill", 2, _bill_fn), ("rw_arc_ebill", 1, _ebill_fn)):
+    for name, n, fn in (("rw_arc_bill", 2, _bill_fn), ("rw_arc_ebill", 1, _ebill_fn), ("rw_arc_pday", 4, _pday_fn)):
         try:
             conn.create_function(name, n, fn, deterministic=True)
         except (TypeError, sqlite3.NotSupportedError):        # an SQLite without deterministic functions
@@ -674,6 +698,12 @@ def _plan_tables(conn: sqlite3.Connection) -> None:
 # would hold nearly every bill for three years, since every claim waits on the A/R for a while.
 EMA_NAMES = (("ema_lines", "bill", "claim_id"), ("ema_link_map", "bill", "claim_id"), ("ema_ar", "bill", "claim_id"))
 HELD_EMA = "EMA still lists it"
+# one patient's service day (_day_groups): detection weighs the patient's claims of a day together (the payer's second
+# procedure that day on another claim, a CO-45 line another claim of the day answered), so their bills leave together,
+# stay together (HELD_DAY) and come back together (WHY_DAY_BACK; WHY_DAY_HOT: a new claim in the store names the day)
+HELD_DAY = "same patient and day as a bill that stays"
+WHY_DAY_BACK = "same patient and day as a bill brought back"
+WHY_DAY_HOT = "same patient and day as a claim in the store"
 
 
 def _ema_named(conn: sqlite3.Connection) -> int:
@@ -828,15 +858,83 @@ def _named_bills(conn: sqlite3.Connection, skip: set[str] | frozenset = frozense
     return named
 
 
+def _day_groups(conn: sqlite3.Connection) -> dict[str, str]:
+    """{bill: its group} for the store's bills that share one patient's service day with another bill, directly or
+    through a third (a group is named by its smallest bill). Detection weighs such claims together: a reducible
+    procedure is the payer's second one when another claim of the patient that day was allowed more (detect's
+    _settle_mppr_candidates), a CO-45 line is no denial when another claim of the day answered it, a denial closes on a
+    payment on another claim. A bill that left without the others of its day would change what the analysis says about
+    them. Bills with no patient on their claims (no name) group with nothing, as detection matches them with nothing."""
+    _register(conn)
+    conn.execute("DROP TABLE IF EXISTS temp.arc_pd")
+    conn.execute("CREATE TEMP TABLE arc_pd (k TEXT, bill TEXT, PRIMARY KEY (k, bill)) WITHOUT ROWID")
+    conn.execute("""INSERT OR IGNORE INTO temp.arc_pd SELECT k, bill FROM (
+                        SELECT rw_arc_pday(c.patient_id, c.patient_last, c.patient_first, d.service_date) AS k, cb.bill AS bill
+                        FROM (SELECT DISTINCT claim_key, service_date FROM lines) d
+                        JOIN claims c ON c.claim_key = d.claim_key JOIN temp.arc_cb cb ON cb.claim_key = d.claim_key)
+                    WHERE k IS NOT NULL AND bill IS NOT NULL""")
+    parent: dict[str, str] = {}
+
+    def root(x: str) -> str:
+        r = x
+        while parent.get(r, r) != r:
+            r = parent[r]
+        while parent.get(x, x) != r:            # shorten the path for the next look
+            parent[x], x = r, parent[x]
+        return r
+    last_k, first_b = None, None
+    for k, b in conn.execute("SELECT k, bill FROM temp.arc_pd ORDER BY k, bill"):
+        if k != last_k:
+            last_k, first_b = k, b
+            continue
+        ra, rb = root(first_b), root(b)
+        if ra != rb:
+            lo, hi = (ra, rb) if ra < rb else (rb, ra)
+            parent[hi] = lo
+            parent.setdefault(lo, lo)
+    conn.execute("DROP TABLE IF EXISTS temp.arc_pd")
+    return {b: root(b) for b in list(parent)}
+
+
+def _group_order(bills: list[tuple], groups: dict[str, str]) -> list[tuple]:
+    """The plan's bills (oldest first) with each patient's day together, at the place of its first bill."""
+    chunks: list[list[tuple]] = []
+    at: dict[str, int] = {}
+    for t in bills:
+        g = groups.get(t[0])
+        if g is None:
+            chunks.append([t])
+        elif g in at:
+            chunks[at[g]].append(t)
+        else:
+            at[g] = len(chunks)
+            chunks.append([t])
+    return [t for chunk in chunks for t in chunk]
+
+
+def _upto(bills: list[tuple], n: int, groups: dict[str, str]) -> list[tuple]:
+    """The first n bills, and the rest of the last one's patient day: a day is never split between runs."""
+    if n >= len(bills):
+        return bills
+    n = max(n, 1)
+    g = groups.get(bills[n - 1][0])
+    while g is not None and n < len(bills) and groups.get(bills[n][0]) == g:
+        n += 1
+    return bills[:n]
+
+
 def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: dict | None = None, today: Any = None,
          env: dict | None = None, floor: int | None = None, require_frozen: bool = True, limit: int | None = None) -> dict:
     """What a run would archive, nothing written but temporary tables: {'horizon', 'cutoff', 'bills': [(bill, newest,
-    lines, claims, years)], 'held': {reason: n}, 'waiting_rates': n, 'blocked': reason or None}."""
+    lines, claims, years)], 'groups': {bill: group}, 'held': {reason: n}, 'waiting_rates': n, 'blocked': reason or None}.
+    The bills of one patient's service day (_day_groups) leave together or stay together: a bill of the day that stays
+    for any reason keeps the others (HELD_DAY), and in 'bills' a day's bills come one after the other ('groups' names
+    the day of each bill that shares one), so no batch, run or `limit` ends inside a day."""
     ensure_schema(conn)
     today = _today(today)
     h = effective_horizon(conn, horizon=horizon, budget_state=budget_state, env=env, floor=floor)
     cutoff = _months_before(today, h["months"])
-    out: dict = {"today": today, "horizon": h, "cutoff": cutoff, "bills": [], "held": {}, "waiting_rates": 0,
+    out: dict = {"today": today, "horizon": h, "cutoff": cutoff, "bills": [], "groups": {}, "held": {}, "waiting_rates": 0,
                  "waiting_years": [], "blocked": None}
     if _meta(conn, META_DETECT_PENDING) is not None:
         out["blocked"] = "the analysis has not run on the newest data yet"
@@ -863,13 +961,25 @@ def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: 
         ys = {y for y in str(years or "").split(",") if y and y.isdigit()}
         return not (require_frozen and n_claims and any(y not in frozen for y in ys))
     leaving = {r[0] for r in rows if r[0] not in held and can_leave(r[1], r[2], r[4], r[5])}
-    for _round in range(10):            # a bill another item that stays names stays; repeated until nothing changes
-        named = _named_bills(conn, skip=leaving) & leaving
-        if not named:
-            break
+    groups = _day_groups(conn)
+    days: dict[str, list[str]] = defaultdict(list)
+    for b, g in groups.items():
+        days[g].append(b)
+    while True:     # until nothing changes (each round only keeps more bills, so it ends)
+        kept = False
+        for bs in days.values():        # one patient's day leaves whole or not at all
+            if any(b in leaving for b in bs) and not all(b in leaving for b in bs):
+                for b in bs:
+                    if b in leaving:
+                        held.setdefault(b, HELD_DAY)
+                        leaving.discard(b)
+                kept = True
+        named = _named_bills(conn, skip=leaving) & leaving        # a bill another item that stays names stays
         for b in named:
             held.setdefault(b, "named by another item")
         leaving -= named
+        if not named and not kept:
+            break
     for bill, newest, paid, n_lines, n_claims, years in rows:
         # the bill's last activity: its newest service, and its newest remittance or EMA posting (a payment this year on
         # an old service is part of the payer's recent activity, which the rules measure: the bill stays)
@@ -885,24 +995,33 @@ def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: 
             out["waiting_rates"] += 1
             continue
         out["bills"].append((bill, when, int(n_lines or 0), int(n_claims or 0), ys))
-        if limit and len(out["bills"]) >= limit:
-            break
+    if groups:
+        out["bills"] = _group_order(out["bills"], groups)
+        out["groups"] = {t[0]: groups[t[0]] for t in out["bills"] if t[0] in groups}
+    if limit:
+        out["bills"] = _upto(out["bills"], int(limit), out["groups"])
     out["held"] = dict(held_counts)
     out["waiting_years"] = sorted(waiting_years)
     return out
 
 
 # ----------------------------------------------------------------------------------------------- building records
-def _batches(bills: list[tuple], size: int = BATCH_BILLS, max_rows: int = BATCH_ROWS) -> Iterator[list[tuple]]:
+def _batches(bills: list[tuple], size: int = BATCH_BILLS, max_rows: int = BATCH_ROWS,
+             groups: dict[str, str] | None = None) -> Iterator[list[tuple]]:
+    """The plan's bills in batches of about `size` bills and `max_rows` rows; a batch never ends inside one patient's day
+    (`groups`: the plan's), whose bills come one after the other in the plan."""
     cur: list[tuple] = []
     rows = 0
+    last = None
     for b in bills:
         weight = max(1, b[2] * 4 + b[3])          # lines carry adjustments and remarks: about four rows each
-        if cur and (len(cur) >= size or rows + weight > max_rows):
+        g = (groups or {}).get(b[0])
+        if cur and (g is None or g != last) and (len(cur) >= size or rows + weight > max_rows):
             yield cur
             cur, rows = [], 0
         cur.append(b)
         rows += weight
+        last = g
     if cur:
         yield cur
 
@@ -1117,6 +1236,30 @@ def _index_rows(rec: dict, name: str, at: str, run_id: str | None, plb_seen: int
     return bill_row, id_rows, f_rows
 
 
+def _day_rows(rec: dict) -> list[tuple]:
+    """The archive_days rows of one bill's record: the key of each patient's service day its 835 lines hold (_pday_fn),
+    so a bill brought back brings back the archived bills of the same days (restore), and a new claim of such a day in
+    the store brings them back before the analysis (restore_touched)."""
+    t = rec["tables"]
+    cl, ln = t.get("claims"), t.get("lines")
+    if not cl or not ln:
+        return []
+    ci = {c: i for i, c in enumerate(cl["cols"])}
+    li = {c: i for i, c in enumerate(ln["cols"])}
+    if "claim_key" not in ci or "claim_key" not in li:
+        return []
+    who = {r[ci["claim_key"]]: tuple(r[ci[c]] if c in ci else None for c in ("patient_id", "patient_last", "patient_first"))
+           for r in cl["rows"]}
+    keys = set()
+    for r in ln["rows"]:
+        p = who.get(r[li["claim_key"]])
+        if p is not None:
+            k = _pday_fn(*p, r[li["service_date"]] if "service_date" in li else None)
+            if k:
+                keys.add(k)
+    return [(k, rec["bill"]) for k in sorted(keys)]
+
+
 def _pattern_lines(conn: sqlite3.Connection) -> dict[str, list[str]]:
     """Every routine-rate pattern's line keys (finding id -> line keys): findings that list lines and belong to no claim.
     Only detection makes them, and it never runs beside the archive, so the set is fixed for a run; their statuses are
@@ -1136,10 +1279,12 @@ def _pattern_lines(conn: sqlite3.Connection) -> dict[str, list[str]]:
 
 
 def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, name: str, meta: dict, *, at: str,
-                  run_id: str | None, years: set[str], today: str, patterns: dict[str, list[str]] | None = None) -> dict:
+                  run_id: str | None, years: set[str], today: str, patterns: dict[str, list[str]] | None = None,
+                  groups: dict[str, str] | None = None) -> dict:
     """One transaction: check each bill's items again, put the index rows in, take the hot rows out (the counts must equal
     what the file holds), lock the service years taken. `patterns` (finding id -> line keys) are the routine-rate
-    findings: they reach no bill through a claim id or claim key, so each is read again by its id."""
+    findings: they reach no bill through a claim id or claim key, so each is read again by its id. `groups` (the plan's
+    patient days): a bill that stays keeps the other bills of its day in the store too."""
     conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1184,6 +1329,9 @@ def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, n
         changed.update(b for (b,) in conn.execute(f"SELECT bill FROM archive_pins WHERE until > ? AND bill IN ({q})",
                                                   [today] + bills_now))
         changed.update(b for (b,) in conn.execute(f"SELECT DISTINCT bill FROM archive_requests WHERE bill IN ({q})", bills_now))
+        if groups and changed:      # one patient's day stays whole (the plan put its bills in this one batch)
+            days = {groups[b] for b in changed if b in groups}
+            changed.update(r["bill"] for r in records if groups.get(r["bill"]) in days)
         keep = [r for r in records if r["bill"] not in changed]
         _drop_from_keys(conn, changed)
         want: Counter = Counter()
@@ -1204,6 +1352,8 @@ def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, n
                          bill_row)
             conn.execute("DELETE FROM archive_ids WHERE bill = ?", (rec["bill"],))
             conn.executemany("INSERT OR IGNORE INTO archive_ids (id, kind, bill) VALUES (?,?,?)", id_rows)
+            conn.execute("DELETE FROM archive_days WHERE bill = ?", (rec["bill"],))
+            conn.executemany("INSERT OR IGNORE INTO archive_days (k, bill) VALUES (?,?)", _day_rows(rec))
             conn.executemany("INSERT OR REPLACE INTO archive_findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", f_rows)
         got: Counter = Counter()
         for table, sql in _DELETE:
@@ -1267,15 +1417,16 @@ def _run(conn: sqlite3.Connection, *, horizon: int | None, budget_state: dict | 
                  "files": [], "changed_meanwhile": 0, "more": False, "ar": {}, "errors": []}
     if sink is None:
         out["dry_run"] = True
-    bills = p["bills"][:max_bills] if max_bills else p["bills"]
-    if max_bills and len(p["bills"]) > max_bills:
+    groups = p.get("groups") or {}
+    bills = _upto(p["bills"], int(max_bills), groups) if max_bills else p["bills"]
+    if len(bills) < len(p["bills"]):
         out["more"] = True
     if sink is not None:
         _meta_put(conn, META_WHERE, sink.describe())
         conn.commit()
     patterns = _pattern_lines(conn) if sink is not None and bills and not p["blocked"] else {}
     if sink is not None and bills and not p["blocked"]:
-        for batch in _batches(bills, size=batch_bills):
+        for batch in _batches(bills, size=batch_bills, groups=groups):
             if deadline is not None and time.time() > deadline:
                 out["more"] = True
                 break
@@ -1295,7 +1446,7 @@ def _run(conn: sqlite3.Connection, *, horizon: int | None, budget_state: dict | 
                 years = {y for r in records for y in (r.get("years") or [])}
                 del payload, gz
                 done = _commit_batch(conn, records, counts, name, meta, at=at, run_id=run_id, years=years, today=today,
-                                     patterns=patterns)
+                                     patterns=patterns, groups=groups)
             except ArchiveError as exc:
                 out["errors"].append(str(exc)[:300])
                 log(f"  archive: a batch was not archived ({str(exc)[:120]})")
@@ -2252,12 +2403,27 @@ def _put_findings(conn: sqlite3.Connection, rows: list[dict]) -> int:
     return n
 
 
+def _day_mates(conn: sqlite3.Connection, bill: str) -> list[str]:
+    """The other archived bills of `bill`'s patient service days (archive_days), and those of their days in turn."""
+    seen, todo = {bill}, [bill]
+    while todo:
+        b = todo.pop()
+        for (m,) in conn.execute("""SELECT DISTINCT d2.bill FROM archive_days d1 JOIN archive_days d2 ON d2.k = d1.k
+                                    WHERE d1.bill = ? AND d2.bill <> d1.bill""", (b,)):
+            if m not in seen:
+                seen.add(m)
+                todo.append(m)
+    return sorted(seen - {bill})
+
+
 def restore(conn: sqlite3.Connection, bill_or_claim: str, *, sink: Any, actor: str = "", reason: str = "reopened",
             run_id: str | None = None, today: Any = None, pin_days: int = PIN_DAYS, log: Callable[..., Any] | None = None) -> dict:
     """Bring an archived bill back into the store (a person reopened one of its items, or new data arrived for it): its
-    rows go back in one transaction, its index rows go, and it stays hot for `pin_days`. The archive file stays (never
-    deleted). Run it from the cycle (process_requests, restore_touched), never beside a running detection. Returns
-    {'bill', 'rows': {table: n}, 'findings'} or {'missing': True}."""
+    rows go back in one transaction, its index rows go, and it stays hot for `pin_days`. The other archived bills of the
+    patient's service days come back with it, in the same transaction, pinned as WHY_DAY_BACK: the analysis weighs one
+    patient's claims of a day together. The archive files stay (never deleted). Run it from the cycle (process_requests,
+    restore_touched), never beside a running detection. Returns {'bill', 'bills' (brought back), 'rows': {table: n},
+    'findings', 'file'} or {'missing': True}."""
     log = log or _noop
     ensure_schema(conn)
     today = _today(today)
@@ -2267,29 +2433,35 @@ def restore(conn: sqlite3.Connection, bill_or_claim: str, *, sink: Any, actor: s
     got = _record_of(conn, sink, bill)
     if got is None:
         return {"missing": True}
-    rec, where = got
-    tables = {t: [dict(zip(x["cols"], [_dec(v) for v in r])) for r in x["rows"]] for t, x in rec["tables"].items()}
+    back = [(bill, got, str(reason))]
+    for m in _day_mates(conn, bill):
+        mate = _record_of(conn, sink, m)
+        if mate is not None:
+            back.append((m, mate, WHY_DAY_BACK))
+    rows_of = [(b, {t: [dict(zip(x["cols"], [_dec(v) for v in r])) for r in x["rows"]] for t, x in rec["tables"].items()}, why)
+               for b, (rec, _where), why in back]
+    until = (_d(today) + timedelta(days=int(pin_days))).isoformat()
     conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        rows: dict[str, int] = {}
-        for table in MOVED:
-            if table == "findings":
-                rows[table] = _put_findings(conn, tables.get(table) or [])
-            else:
-                rows[table] = _put_rows(conn, table, tables.get(table) or [])
-        for table in RESTORE_COPIES:
-            rows[table] = _put_rows(conn, table, tables.get(table) or [])
-        conn.execute("DELETE FROM archive_bills WHERE bill = ?", (bill,))
-        conn.execute("DELETE FROM archive_ids WHERE bill = ?", (bill,))
-        conn.execute("DELETE FROM archive_findings WHERE bill = ?", (bill,))
-        conn.execute("INSERT OR REPLACE INTO archive_pins (bill, until, why, at) VALUES (?,?,?,?)",
-                     (bill, (_d(today) + timedelta(days=int(pin_days))).isoformat(), str(reason)[:200], _now()))
+        rows: Counter = Counter()
+        for b, tables, why in rows_of:
+            for table in MOVED:
+                if table == "findings":
+                    rows[table] += _put_findings(conn, tables.get(table) or [])
+                else:
+                    rows[table] += _put_rows(conn, table, tables.get(table) or [])
+            for table in RESTORE_COPIES:
+                rows[table] += _put_rows(conn, table, tables.get(table) or [])
+            for t in ("archive_bills", "archive_ids", "archive_findings", "archive_days"):
+                conn.execute(f"DELETE FROM {t} WHERE bill = ?", (b,))
+            conn.execute("INSERT OR REPLACE INTO archive_pins (bill, until, why, at) VALUES (?,?,?,?)",
+                         (b, until, why[:200], _now()))
         if _have(conn, "ema_lines"):
-            _meta_put(conn, "ema:keep_dirty", "1")      # the ledger's next summary keeps the bill's EMA lines
+            _meta_put(conn, "ema:keep_dirty", "1")      # the ledger's next summary keeps the bills' EMA lines
         hist = _meta_json(conn, "archive:restores", [])
         hist.append({"at": _now(), "run_id": run_id, "reason": str(reason)[:80], "actor": bool(actor),
-                     "rows": sum(rows.values()), "file": where["file"]})
+                     "rows": sum(rows.values()), "bills": len(back), "file": got[1]["file"]})
         _meta_put(conn, "archive:restores", hist[-200:])
         conn.execute("COMMIT")
     except BaseException:
@@ -2298,8 +2470,10 @@ def restore(conn: sqlite3.Connection, bill_or_claim: str, *, sink: Any, actor: s
         except sqlite3.Error:
             pass
         raise
-    log(f"  archive: a bill came back from {where['file']} ({sum(rows.values()):,} rows; {reason})")
-    return {"bill": bill, "rows": rows, "findings": rows.get("findings", 0), "file": where["file"], "changed": True}
+    log(f"  archive: {len(back)} bill{'' if len(back) == 1 else 's'} came back from {got[1]['file']} "
+        f"({sum(rows.values()):,} rows; {reason})")
+    return {"bill": bill, "bills": len(back), "rows": dict(rows), "findings": rows.get("findings", 0), "file": got[1]["file"],
+            "changed": True}
 
 
 def request_restore(conn: sqlite3.Connection, bill_or_claim: str, *, actor: str = "", reason: str = "reopened",
@@ -2362,7 +2536,7 @@ def process_requests(conn: sqlite3.Connection, *, sink: Any, today: Any = None, 
             if res.get("missing"):
                 out["missing"] += 1
             else:
-                out["restored"] += 1
+                out["restored"] += res.get("bills", 1)
                 out["changed"] = True
         if fid and status:
             from .actions import STATUSES, apply_status
@@ -2437,12 +2611,29 @@ def _ema_touched(conn: sqlite3.Connection) -> set[str]:
     return got
 
 
+def _day_touched(conn: sqlite3.Connection) -> set[str]:
+    """Archived bills of a patient's service day that a claim in the store also holds (a corrected claim under a new
+    number, a late filing, a claim brought back): they come back, so the analysis sees the day whole. Only the store's
+    lines no newer than the newest archived service are keyed."""
+    if conn.execute("SELECT 1 FROM archive_days LIMIT 1").fetchone() is None:
+        return set()
+    _register(conn)
+    hi = str(conn.execute("SELECT MAX(svc_hi) FROM archive_bills").fetchone()[0] or "")[:10]
+    return {b for (b,) in conn.execute(
+        """SELECT DISTINCT a.bill FROM (SELECT DISTINCT rw_arc_pday(c.patient_id, c.patient_last, c.patient_first, d.service_date) AS k
+               FROM (SELECT DISTINCT claim_key, service_date FROM lines WHERE service_date IS NULL OR service_date <= ?) d
+               JOIN claims c ON c.claim_key = d.claim_key) h
+           JOIN archive_days a ON a.k = h.k""", (hi,))}
+
+
 def restore_touched(conn: sqlite3.Connection, *, sink: Any, today: Any = None, run_id: str | None = None, limit: int = 500,
                     log: Callable[..., Any] | None = None) -> dict:
     """Before detection: an archived bill that has new rows in the store comes back whole, so the rules see its history:
     a late remittance or a reprocessing of its claim, a weekly EMA export row or an 837 for it, a payer's offset that
-    takes its money back (PLB WO, FB or 72 added after it left), or EMA's reports naming it again (the A/R, the posting
-    ledger's summaries, the claim-number map). Returns {'restored', 'errors', 'changed', 'more', 'why': {reason: n}}."""
+    takes its money back (PLB WO, FB or 72 added after it left), EMA's reports naming it again (the A/R, the posting
+    ledger's summaries, the claim-number map), or a claim in the store of the same patient and service day (WHY_DAY_HOT).
+    The other archived bills of a returning bill's patient days come with it (WHY_DAY_BACK). Returns {'restored' (bills
+    brought back), 'errors', 'changed', 'more', 'why': {reason: n}}."""
     ensure_schema(conn)
     out: dict = {"restored": 0, "errors": 0, "changed": False, "more": False, "why": {}}
     archived = {b for (b,) in conn.execute("SELECT bill FROM archive_bills")}
@@ -2463,15 +2654,22 @@ def restore_touched(conn: sqlite3.Connection, *, sink: Any, today: Any = None, r
         why.setdefault(b, "payer offset")
     for b in _ema_touched(conn):
         why.setdefault(b, "EMA lists it again")
+    for b in _day_touched(conn):
+        why.setdefault(b, WHY_DAY_HOT)
     touched = set(why)
     for b in sorted(touched)[:limit]:
         try:
-            restore(conn, b, sink=sink, reason="new data arrived", run_id=run_id, today=today, log=log)
-            out["restored"] += 1
-            out["changed"] = True
-            out["why"][why[b]] = out["why"].get(why[b], 0) + 1
+            res = restore(conn, b, sink=sink, reason="new data arrived", run_id=run_id, today=today, log=log)
         except ArchiveError:
             out["errors"] += 1
+            continue
+        if res.get("missing"):
+            continue            # it came back already, with another bill of its patient's day
+        out["restored"] += res.get("bills", 1)
+        out["changed"] = True
+        out["why"][why[b]] = out["why"].get(why[b], 0) + 1
+        if res.get("bills", 1) > 1:
+            out["why"][WHY_DAY_BACK] = out["why"].get(WHY_DAY_BACK, 0) + res["bills"] - 1
     out["more"] = len(touched) > limit
     return out
 

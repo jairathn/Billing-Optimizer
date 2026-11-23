@@ -2200,11 +2200,11 @@ def _decide(fx: dict, today: str) -> dict:
     reopen_at = str((last_manual or {}).get("at") or "")[:10]
     auto_reopened = (st == "open" and last_manual is not None and last_manual.get("to") == "open"
                      and last_manual.get("from") in ("resolved", "dismissed", "lost"))
-    newer = auto_reopened and (any((x["paid"] or 0) > 0 and (x["date"] or "") > reopen_at for x in standing_rows(fx["r835"]["rows"])
-                                   if x.get("line_key") and x.get("code") == f.get("procedure_code"))
-                               or any((p["cents"] or 0) > 0 and (p["posted"] or "") > reopen_at for p in fx["ema"]["pays"]))
-    same_proof = bool(proof) and auto_reopened and not newer
-    if rejected or same_proof:
+    # a payment that came after the person's reopen is new money: the usual rules decide
+    newer = bool(reopen_at) and (any((x["paid"] or 0) > 0 and (x["date"] or "") > reopen_at for x in standing_rows(fx["r835"]["rows"])
+                                     if x.get("line_key") and x.get("code") == f.get("procedure_code"))
+                                 or any((p["cents"] or 0) > 0 and (p["posted"] or "") > reopen_at for p in fx["ema"]["pays"]))
+    if (rejected or (auto_reopened and proof)) and not newer:
         res["person"] = True
         r_ = rejected if isinstance(rejected, dict) else {}
         what = (f"EMA shows {usd(r_.get('cents'))} by {r_.get('payer') or 'a payer'} on {day(r_.get('date'))}" if r_ else

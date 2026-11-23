@@ -297,6 +297,8 @@ def test_a_word_of_the_codes_own_in_a_name_the_store_holds_is_masked_in_every_fo
     out = runlog.scrub_text("ERROR Zorvathiq held. The price will change; Mark the row. PRICE list. EMA BILLING row. Will retry.")
     for kept in ("ERROR <name> held", "The price will change", "Mark the row", "PRICE list", "EMA BILLING row", "Will retry"):
         assert kept in out, (kept, out)
+    # only an initial or a name's suffix stands inside a name: a payer's "Of" does not join two words into one
+    assert runlog.scrub_text("rebilled to Blue Shield Of Quivermont") == "rebilled to Blue Shield Of Quivermont"
     assert all(" " not in w for w in runlog.SCRUB.names if w.isalpha()) and runlog.SCRUB.learn(store.conn) > 0
     store.close()
 
