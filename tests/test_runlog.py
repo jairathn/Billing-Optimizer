@@ -1098,8 +1098,17 @@ def test_malformed_logs_and_state_never_stop_a_run_or_a_bundle(tmp_path):
     assert rl.finish(conn=store.conn).endswith("s)")
     assert runlog.read_index(runlog.DirSink(logs))[-1]["run_id"] == rl.run_id
     assert runlog.DirSink(logs).read_lines("events-2026-11-01.jsonl.gz") == []
+    day = rl.manifest["started_at"][:10]
+    with open(os.path.join(logs, f"events-{day}.jsonl"), "a") as fh:      # damaged lines that are JSON but not an event
+        fh.write(f'42\n"just text"\n[1, 2]\n{{"run_id": "{rl.run_id}", "event": 7}}\n')
+    with open(os.path.join(logs, f"runs-{day}.jsonl"), "a") as fh:
+        fh.write('"not a manifest"\n')
     res = diagnose.build_bundle(db_path=db, days=60)
-    assert "runs/" + rl.run_id + ".json" in diagnose.unpack(res["bytes"])
+    files = diagnose.unpack(res["bytes"])
+    assert "runs/" + rl.run_id + ".json" in files
+    assert all(isinstance(json.loads(ln), dict) for ln in files[f"events/{rl.run_id}.jsonl"].decode().splitlines())
+    _m, events = runlog.read_run(runlog.DirSink(logs), rl.run_id)
+    assert all(isinstance(e, dict) for e in events)
     store.close()
 
 
