@@ -142,11 +142,11 @@ def _read_runs(sink: Any, runs: list[dict], conn: sqlite3.Connection | None) -> 
         for d in sorted(set(days) | extra):
             for suffix in (".jsonl", ".jsonl.gz"):
                 for ln in sink.read_lines(f"runs-{d}{suffix}"):
-                    m = runlog._loads(ln)
+                    m = runlog._obj(ln)
                     if m and m.get("run_id") in out:
                         out[m["run_id"]] = (m, out[m["run_id"]][1])
                 for ln in sink.read_lines(f"events-{d}{suffix}"):
-                    e = runlog._loads(ln)
+                    e = runlog._obj(ln)
                     if e and e.get("run_id") in out:
                         out[e["run_id"]][1].append(e)
     elif isinstance(sink, runlog.StateSink):
@@ -156,7 +156,7 @@ def _read_runs(sink: Any, runs: list[dict], conn: sqlite3.Connection | None) -> 
             name = files.get(r["run_id"])
             lines = sink.read_lines(name) if name else []
             if lines:
-                out[r["run_id"]] = (runlog._loads(lines[0]), [e for e in (runlog._loads(x) for x in lines[1:]) if e])
+                out[r["run_id"]] = (runlog._obj(lines[0]), [e for e in (runlog._obj(x) for x in lines[1:]) if e])
     else:
         for r in runs:
             out[r["run_id"]] = runlog.read_run(sink, r["run_id"])

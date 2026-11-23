@@ -1560,8 +1560,8 @@ def read_run(sink, run_id: str) -> tuple[dict | None, list[dict]]:
         for n in names[:1]:
             lines = sink.read_lines(n)
             if lines:
-                manifest = _loads(lines[0])
-                events = [e for e in (_loads(x) for x in lines[1:]) if e]
+                manifest = _obj(lines[0])
+                events = [e for e in (_obj(x) for x in lines[1:]) if e]
         return manifest, events
     days = [day] if day else []
     if day:
@@ -1570,13 +1570,13 @@ def read_run(sink, run_id: str) -> tuple[dict | None, list[dict]]:
     for d in days:
         for suffix in (".jsonl", ".jsonl.gz"):
             for ln in sink.read_lines(f"runs-{d}{suffix}"):
-                m = _loads(ln)
+                m = _obj(ln)
                 if m and m.get("run_id") == run_id:
                     manifest = m
             for ln in sink.read_lines(f"events-{d}{suffix}"):
                 if f'"run_id":"{run_id}"' in ln:
-                    e = _loads(ln)
-                    if e:
+                    e = _obj(ln)
+                    if e and e.get("run_id") == run_id:
                         events.append(e)
     return manifest, events
 
@@ -1586,6 +1586,13 @@ def _loads(s: str) -> Any:
         return json.loads(s)
     except ValueError:
         return None
+
+
+def _obj(s: str) -> dict | None:
+    """A log line that is a JSON object, else None: a damaged line (a number, a string, half an object) is skipped,
+    never a reason for a reader or a bundle to stop."""
+    v = _loads(s)
+    return v if isinstance(v, dict) else None
 
 
 # ---------------------------------------------------------------------------------------------------- the store tables

@@ -232,11 +232,12 @@ def test_a_structured_value_under_a_word_key_loses_names_dates_and_ids():
     """A key that says what its value is (status, result, source, how, action, rule...) does not make free text safe:
     a value is kept as it is only where the scrubber would keep it anyway, or where its key has a strict shape (a
     timestamp, a finding id, a code, a version)."""
-    text = "held: Zelphine Orbwick born 02/29/1960 member W123456789"
-    for key in ("status", "result", "source", "how", "action", "rule", "kind", "target", "state", "decision", "payer_group"):
-        out = json.dumps(runlog.scrub({key: text}))
-        for planted in ("Zelphine", "Orbwick", "02/29/1960", "W123456789"):
-            assert planted not in out, (key, out)
+    for text in ("held: Zelphine Orbwick born 02/29/1960 member W123456789",
+                 "Zelphine Orbwick born 02/29/1960 member W123456789"):       # this one fits a payer's shape
+        for key in ("status", "result", "source", "how", "action", "rule", "kind", "target", "state", "decision", "payer_group"):
+            out = json.dumps(runlog.scrub({key: text}))
+            for planted in ("Zelphine", "Orbwick", "02/29/1960", "W123456789"):
+                assert planted not in out, (key, out)
     # what those keys really carry stays as it is
     kept = {"rule": "hide_rule:Anthem / BCBS|DENIED_AUTH", "status": "in_progress", "source": "paid_later", "how": "rebilled to another payer",
             "target": "ar:0011223344556677", "python": "3.11.10", "sqlite": "3.40.0", "rule_version": "2.11-b9ce3828",
