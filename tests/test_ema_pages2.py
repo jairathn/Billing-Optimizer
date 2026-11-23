@@ -1195,7 +1195,7 @@ def test_the_data_tab_draws_each_panel_and_its_lists(page_run):
         assert title in h, title
     assert '<section id="ops-panels"></section>' in h
     assert out["decide_button"] == "heldfile1" and "This A/R lists far fewer lines" in h
-    assert "Compliance: 1 Medicare primary credit over 60 days, $25." in h
+    assert "Compliance: 1 Medicare primary credit over 60 days on EMA's A/R, $25." in h
     assert "1 payment</b> not posted, $85" in h
     assert out["buckets"] == [b for b in ["waiting", "chase", "paid_elsewhere", "denied_todo", "denied_started", "denied_sent", "denied_worked",
                                          "denied_no_item", "not_sent", "settled", "facility", "unbilled", "other", "credits"]
@@ -1227,7 +1227,8 @@ def test_the_policy_page_draws_each_pattern_and_records_a_decision(page_run):
     assert [b for b in out["policy_buttons"] if b[2] == "true"] == [["0", "pursue", "true"], ["1", "pursue", "true"]]
     assert out["accept_calls"] == [{"path": "/api/ema/policy", "body": {"pattern": pats[1]["pattern"], "decision": "accept", "name": "Owner Test"},
                                     "method": "POST"}]
-    assert out["accept_went"]                                  # the page redraws with the decision
+    # the row changes in place (no redraw: the filter and the place on the page stay), with who and that the next run applies it
+    assert out["accept_went"] == [] and "Accepted by Owner Test on" in out["policy_after"] and "the next run applies it" in out["policy_after"]
     assert "1 item</b>, $90" in out["items_html"] and out["items_open"] == [{"open": ans["/api/ema/policy/items?"]["rows"][0]["finding_id"]}]
     assert "—" not in h + out["items_html"]
 
