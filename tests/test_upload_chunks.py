@@ -739,26 +739,46 @@ def test_no_request_body_over_4_mb_reaches_dropbox(build):
 
 
 def test_the_dropbox_relay_takes_a_piece_whose_answer_was_lost(build):
+    """A request relays a piece to Dropbox, then dies before it saves the upload's record: the page sends the piece
+    again, Dropbox answers that it holds bytes past that offset, and the piece is taken as arrived, because the record
+    carries the mark the first request saved before it relayed (this piece, these bytes, this offset)."""
     site = build("dropbox", chunk=1024)
     store = site.store()
     rec = uploads.new_record("anonymous", NAME, 3000, False, None, None)
     store.create(rec)
     a, b = os.urandom(1024), os.urandom(1024)
-    store.append(rec, a)
-    uploads.record_piece(rec, 0, 0, hashlib.sha256(a).hexdigest(), 1024)
-    store.append(rec, b)                                # reached Dropbox, then the request died before its record was saved
-    store.append(rec, b)                                # sent again: Dropbox says it has it; taken as done
-    with pytest.raises(uploads.PieceRefused) as exc:
-        store.append(rec, os.urandom(10))               # other bytes at a place Dropbox has moved past: out of step
-    assert exc.value.status == 409
-    uploads.record_piece(rec, 1, 0, hashlib.sha256(b).hexdigest(), 1024)
+    sa, sb = hashlib.sha256(a).hexdigest(), hashlib.sha256(b).hexdigest()
+    rec, v = store.load(rec["upload_id"])
+    v = store.append(rec, a, index=0, sha=sa, version=v)
+    uploads.record_piece(rec, 0, 0, sa, 1024)
+    v = store.save(rec, v)
+    store.append(dict(rec, chunks=list(rec["chunks"])), b, index=1, sha=sb, version=v)   # relayed; its record never saved
+    again, v2 = store.load(rec["upload_id"])           # the page sends piece 2 again: a new request, the saved record
+    assert again["pending"] == {"index": 1, "sha": sb, "offset": 1024} and again["chunks"] == [sa]
+    v3 = store.append(again, b, index=1, sha=sb, version=v2)       # Dropbox says it has it: taken as arrived
+    uploads.record_piece(again, 1, 0, sb, 1024)
+    assert "pending" not in again
+    store.save(again, v3)
+    rec, v = store.load(rec["upload_id"])
     store.commit(rec)
     store.commit(rec)                                   # a finish whose answer was lost, sent again
     assert site.intake()[rec["pair"]] == a + b
-    gone = dict(rec, session="fake-session-none", bytes=2048)
+    # another upload: Dropbox holds bytes past its place that no saved mark accounts for: out of step, never recorded
+    other = uploads.new_record("anonymous", "other.csv", 3000, False, None, None)
+    store.create(other)
+    other, v = store.load(other["upload_id"])
+    v = store.append(other, a, index=0, sha=sa, version=v)
+    uploads.record_piece(other, 0, 0, sa, 1024)
+    v = store.save(other, v)
+    site.fake._content_call("files/upload_session/append_v2", {"cursor": {"session_id": other["session"], "offset": 1024},
+                                                               "close": False}, os.urandom(1024))
     with pytest.raises(uploads.PieceRefused) as exc:
-        store.append(gone, b)
-    assert exc.value.status == 410
+        store.append(other, b, index=1, sha=sb, version=v)
+    assert exc.value.status == 409 and exc.value.restart and exc.value.dead
+    gone = dict(other, session="fake-session-none")
+    with pytest.raises(uploads.PieceRefused) as exc:
+        store.append(gone, b, index=1, sha=sb, version=store.load(other["upload_id"])[1])
+    assert exc.value.status == 410 and exc.value.dead
 
 
 def test_file_names_are_made_safe_for_both_hosts():

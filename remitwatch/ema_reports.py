@@ -137,8 +137,8 @@ def _mb(n: int) -> str:
 
 def unpack_refusal(limit: int, packed: int | None = None, report: str | None = None) -> ReportRefused:
     """The refusal of a file that unpacks to more than `limit`: in plain words, what was seen and what to do."""
-    what = f"from a file of {_mb(packed)} " if packed else ""
-    return ReportRefused("unpacks_too_large", f"It unpacks to more than {_mb(limit)} {what}, far beyond any export EMA makes, so it "
+    what = f" from a file of {_mb(packed)}" if packed else ""
+    return ReportRefused("unpacks_too_large", f"It unpacks to more than {_mb(limit)}{what}, far beyond any export EMA makes, so it "
                          "was set aside without being read. Export it again from EMA (a damaged or wrongly saved file does "
                          "this).", report)
 
@@ -230,6 +230,7 @@ class Account(dict):
         self.prefixes: list[str] = []
         self.status_words: set[str] = set()
         self.content_id: str | None = None      # a hash of the rows read, in order (the same export saved again has it too)
+        self.dated_notes: dict[int, str] = {}   # A/R: row -> billing note that may state a date (read once, then dropped)
 
 
 # ------------------------------------------------------------------------------------------------------ the layouts
@@ -1421,7 +1422,8 @@ CREATE TABLE IF NOT EXISTS ema_ar (file_id TEXT, row_no INTEGER, as_of TEXT, svc
   denial_cents INTEGER, aging_date TEXT, follow_up TEXT, claim_action TEXT, claim_status TEXT, status_class TEXT,
   cpt TEXT, product INTEGER, denial_category TEXT, has_note INTEGER, note_chars INTEGER, note_hash INTEGER,
   primary_payer TEXT, secondary_payer TEXT, payer_group TEXT, payer_kind TEXT, svc TEXT, initials TEXT,
-  name_key INTEGER, mrn_key INTEGER, exposure_cents INTEGER, facility INTEGER, bucket TEXT, PRIMARY KEY (file_id, row_no));
+  name_key INTEGER, mrn_key INTEGER, exposure_cents INTEGER, facility INTEGER, bucket TEXT,
+  note_kind TEXT, note_date TEXT, note_wait INTEGER, PRIMARY KEY (file_id, row_no));
 CREATE INDEX IF NOT EXISTS ix_ar_claim ON ema_ar(claim_id);
 CREATE INDEX IF NOT EXISTS ix_ar_link ON ema_ar(link);
 CREATE INDEX IF NOT EXISTS ix_ar_year ON ema_ar(svc_year);
@@ -1933,11 +1935,44 @@ AR_ROW_COLUMNS = ("row_no", "svc_year", "item_key", "coverage", "party", "claim_
                   "balance_cents", "denial_cents", "aging_date", "follow_up", "claim_action", "claim_status", "status_class",
                   "cpt", "product", "denial_category", "has_note", "note_chars", "note_hash", "primary_payer",
                   "secondary_payer", "payer_group", "payer_kind", "svc", "initials", "name_key", "mrn_key", "exposure_cents",
-                  "facility")
+                  "facility", "note_kind", "note_date", "note_wait")
+_NOTE_DATED = re.compile(r"\d[/-]\d")      # a billing note that may state a date (states.classify_note reads it)
 
 
 def _cap(s: str | None, n: int) -> str | None:
     return s[:n] if s else s
+
+
+def _note_classifier() -> Any:
+    """states.classify_note (what an A/R billing note says was done: its kinds, the newest date it states and an "allow N
+    days"), or None on a build without it: the note columns then stay empty and the states see only that a note exists."""
+    try:
+        from .states import classify_note
+    except Exception:       # noqa: BLE001
+        return None
+    return classify_note
+
+
+def _stage_ar_notes(conn: sqlite3.Connection, acct: Any, as_of: str | None) -> int:
+    """The dates the staged A/R rows' billing notes state, resolved on the file's own as_of (a date written without a year
+    takes as_of's year, or the year before when it would fall after as_of; one after as_of is no work done yet): the
+    reader resolved them on the day it read the file, which a file read later than it was pulled must not keep. The
+    notes' words are dropped here. Returns how many rows changed."""
+    notes = getattr(acct, "dated_notes", None) or {}
+    classify = _note_classifier() if notes and as_of else None
+    n = 0
+    if classify is not None:
+        batch = []
+        for row_no, text in notes.items():
+            try:
+                batch.append((classify(text, as_of).get("date"), row_no))
+            except Exception:       # noqa: BLE001  (left as the reader resolved it)
+                continue
+        n = conn.executemany("UPDATE temp.ema_ar_stage SET note_date=? WHERE row_no=? AND note_date IS NOT ?",
+                             [(d, r, d) for d, r in batch]).rowcount
+    if hasattr(acct, "dated_notes"):
+        acct.dated_notes = {}
+    return n
 
 
 def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, account: dict,
@@ -1981,6 +2016,8 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
     status_seen: set[str] = set()
     account_extra = account if isinstance(account, Account) else None
     bucket_names = sorted(name for name in ix if _is_bucket(name) or _is_total(name))
+    classify = _note_classifier()
+    dated: dict[int, str] = {}          # row -> note, for the notes that may state a date (resolved on the file's as_of)
 
     def mv(v: Any) -> int | None:
         x = _money(v)
@@ -2021,6 +2058,7 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
         if account_extra is not None:
             account_extra.prefixes = prefixes[:3]
             account_extra.status_words |= status_seen
+            account_extra.dated_notes = dated       # never stored or served: _stage_ar_notes reads it once, then drops it
 
     order = "mdy"
     with open_report(src, rec) as fh:
@@ -2094,6 +2132,17 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
                     who = mk if mk is not None else nk
                     base = f"{tag}|" + _h16(salt, f"{tag}|{who}|{cpt or ''}|{svc}|{(coverage if insurance else btype) or ''}")
                 k = occurrences[base] = occurrences.get(base, 0) + 1
+                # what the billing note says was done (an appeal, a call, a resubmission...), never its words: the kinds
+                # and an "allow N days" now; a date it states is resolved on the file's own as_of once the file is read
+                n_kind = n_date = n_wait = None
+                if note and classify is not None:
+                    try:
+                        said = classify(note, day)
+                        n_kind, n_date, n_wait = ",".join(said.get("kinds") or []) or None, said.get("date"), said.get("wait_days")
+                    except Exception:   # noqa: BLE001  (a note the classifier cannot read is a note with no kind)
+                        n_kind = n_date = n_wait = None
+                    if _NOTE_DATED.search(note) and len(dated) < 200_000:
+                        dated[n] = note
                 yield {
                     "row_no": n, "svc_year": svc[:4], "item_key": f"{base}|{k}", "coverage": coverage,
                     "party": _cap(party, 20), "claim_id": claim_id, "bill": bill_of_claim(claim_id), "link": link,
@@ -2105,6 +2154,7 @@ def iter_ar(src: str | bytes | BinaryIO, rec: Recognized, *, salt: bytes, accoun
                     "primary_payer": _cap(_text(row[i_primary]), 120), "secondary_payer": _cap(_text(opt(row, i_secondary)), 120),
                     "payer_group": None, "payer_kind": None, "svc": svc, "initials": _initials(name), "name_key": nk,
                     "mrn_key": mk, "exposure_cents": exposure, "facility": 1 if is_facility_claim(claim_id) else 0,
+                    "note_kind": n_kind, "note_date": n_date, "note_wait": n_wait,
                 }
         except (ReportRefused, ReadTimeout):
             raise
@@ -2669,7 +2719,9 @@ def _ar_cols() -> list[str]:
     return _AR_COLS
 
 
-AR_CONTENT_SKIP = ("file_id", "as_of", "payer_group", "payer_kind")      # not the export's own rows: left out of its content id
+# not the export's own rows (or worked out from them: what a billing note says, already in its note_hash): left out of the
+# snapshot's content id, so the same export read by another build is still 'already'
+AR_CONTENT_SKIP = ("file_id", "as_of", "payer_group", "payer_kind", "note_kind", "note_date", "note_wait")
 
 
 def _stage_ar_rows(conn: sqlite3.Connection, rows: Iterable[dict], file_id: str) -> tuple[int, str]:
@@ -2711,6 +2763,7 @@ def _stage_ar(conn: sqlite3.Connection, path: str, rec: Recognized, salt: bytes,
     acct = Account()
     _n, acct.content_id = _stage_ar_rows(conn, iter_ar(path, rec, salt=salt, account=acct), file_id)
     _stage_ar_groups(conn, acct.get("as_of"))
+    _stage_ar_notes(conn, acct, acct.get("as_of"))
     return acct
 
 
@@ -2947,6 +3000,7 @@ def apply_ar_snapshot(target: Any, source_id: str, as_of: str | None, rows: Iter
     as_of = as_of or acct.get("as_of")
     acct["as_of"] = as_of
     _stage_ar_groups(conn, as_of)
+    _stage_ar_notes(conn, acct, as_of)
     try:
         if not acct.get("rows_kept"):
             conn.rollback()

@@ -161,7 +161,7 @@ table.calc-fall tr.calc-total td{border-top:2px solid var(--ink)}
 .lab-card .lab-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer}
 .lab-impact{margin:4px 0}
 .sheet h2{margin-top:0}
-@media print{header,nav,#drawer,.no-print,#calcCtl,.panel:not(.sheet){display:none !important} body{background:#fff} .sheet{border:0}}
+@media print{header,nav,#blindBar,#drawer,.no-print,#calcCtl,.panel:not(.sheet){display:none !important} body{background:#fff} .sheet{border:0}}
 .more-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
 .more-card{display:flex;flex-direction:column;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;color:var(--ink);text-decoration:none}
 .more-card:hover{border-color:var(--accent)}
@@ -422,7 +422,7 @@ async function blindBar(){
   if(own()){ el.innerHTML = ''; return; }
   if(state.blind === undefined || Date.now() - (state.blindAt||0) > 600000){
     state.blindAt = Date.now();
-    try { state.blind = await api('/api/ema/blind'); } catch(e){ state.blind = null; }
+    try { state.blind = await api('/api/ema/blind'); } catch(e){ state.blind = null; state.blindAt = 0; }   // a failed ask (a cold start) is asked again on the next page
   }
   if(own()){ el.innerHTML = ''; return; }        // the page changed to Today or Data while it was asked
   await tdBlindBanner(el, state.blind);

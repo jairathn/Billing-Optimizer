@@ -538,7 +538,7 @@ def test_a_later_payment_no_835_carries_closes_the_item(store, ledger, tmp_path)
     assert (o["link"], o["anchor"], o["anchor_basis"]) == (F.link_no(1), "2026-03-31", "own_posting")
     assert o["outcome"] == "paid_after" and o["paid_after_same"] == 9000 and o["outcome_on"] == "2026-04-20"
     got = ec.paid_in_ema(store.conn, [f], {"F1": o})["F1"]
-    assert got["action"] == "close" and got["paid_cents"] == 9000 and got["used"] == ("PAPER-1", "2026-04-20", F.link_no(1))
+    assert got["action"] == "close" and got["paid_cents"] == 9000 and got["used"] == ("PAPER-1", "2026-04-20", F.link_no(1), "2026-03-02", "99213")   # one line's payment
     assert got["note"] == (f"EMA shows $90.00 paid by {P['bcbs']} on 2026-04-20 (check ending PER1, postings through 2026-05-01). "
                            "Reopen it if that payment is for something else.")
     assert "PAPER-1" not in got["note"]
@@ -659,6 +659,21 @@ def test_an_automatic_write_off_and_its_evidence(store, ledger, tmp_path):
     store.conn.execute("INSERT INTO line_handling (line_key, carc, adjustment_status, adjustments_cents) VALUES ('LK-1', 'CO-197', 'WRITE_OFF', 15000)")
     store.conn.commit()
     assert outcomes(store, [f])["F1"]["evidence_level"] == "rule_proven"
+
+
+def test_a_write_off_emas_export_says_its_rule_ignored_is_not_an_automatic_write_off(store, ledger, tmp_path):
+    """EMA's ERA-lines export has a row for the line's reason and it reads IGNORE (no WRITE_OFF): EMA's posting rule left the
+    adjustment alone, so the same-day write-off was someone's, not the rule's. Written off at posting, evidence
+    'rule_ignored', never 'auto written off, inferred from the posting date'."""
+    tk = denial_world(store, ledger, tmp_path)
+    f = finding(tk)
+    store.conn.execute("""CREATE TABLE IF NOT EXISTS line_handling (id INTEGER PRIMARY KEY AUTOINCREMENT, line_key TEXT, claim_id TEXT,
+                          cpt TEXT, service_date TEXT, carc TEXT, rarc TEXT, adjustment_status TEXT, adjustment_subtype TEXT,
+                          adjustments_cents INTEGER, payments_cents INTEGER, transaction_date TEXT, ema_source TEXT)""")
+    store.conn.execute("INSERT INTO line_handling (line_key, carc, adjustment_status, adjustments_cents) VALUES ('LK-1', 'CO-197', 'IGNORE', 15000)")
+    store.conn.commit()
+    o = outcomes(store, [f])["F1"]
+    assert o["evidence_level"] == "rule_ignored" and o["outcome"] == "written_off_at_posting", (o["outcome"], o["evidence_level"])
 
 
 def test_written_off_later_while_pending_and_lost_to_timely_filing(store, ledger, tmp_path):

@@ -328,6 +328,16 @@ def reread_waiting(store, *, ledger=None, data_dir: str | None = None, log=print
     return out
 
 
+def sweep_uploads(db_path: str) -> dict:
+    """The Upload page's leftovers on a server (remitwatch.uploads.ServerUploads.sweep): uploads unfinished for a day,
+    records kept past their time, half pairs. Counts by kind; {} when there was nothing (or no Upload page here)."""
+    try:
+        from .uploads import ServerUploads
+    except ImportError:         # a build without the Upload page's pieces
+        return {}
+    return {k: v for k, v in (ServerUploads(db_path).sweep() or {}).items() if v}
+
+
 def drop_kept_copies(store, ledger, db_path: str, log=print) -> int:
     """The kept upload copies of Production files whose rows newer files have replaced (REMITWATCH_EMA_REPORT_KEEP newer
     files cover each whole) are deleted; the catalog row stays. Only copies the Upload page made (the intake folder or
@@ -393,6 +403,11 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             lg_box.append(ema_ledger.Ledger.open(ema_ledger.ledger_path(db_path)))
         return lg_box[0]
     try:
+        # uploads cut off part-way (their pieces and records, after a day) go at every cycle, not only when someone opens
+        # the Upload page: a cut-off report can hold patient data and up to the upload cap
+        swept = _ema_step(out, "uploads_sweep", sweep_uploads, db_path)
+        if swept:
+            out["uploads_swept"] = swept
         mig = _ema_step(out, "ema_migrate", ema_reports.migrate_misread, store, serverless=False, log=beat_log)
         if mig and not mig.get("skipped") and mig.get("candidates"):
             out["ema_migrate"] = {k: v for k, v in mig.items() if isinstance(v, int)}
@@ -400,6 +415,10 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         up_in = _ema_step(out, "intake", intake.process_ready, store, ledger=ledger, log=beat_log) or {}
         if up_in.get("pairs"):
             out["intake"] = {k: v for k, v in up_in.items() if k != "results"}
+        # read uploads kept past their time go (never a held, waiting or live report's copy, nor each report's newest)
+        kept = _ema_step(out, "intake_retain", intake.retain_done_server, store, log=beat_log) or {}
+        if kept.get("removed"):
+            out["intake_retain"] = kept
         new_files: list[str] = []
         refound: list[str] = []
         if sync:

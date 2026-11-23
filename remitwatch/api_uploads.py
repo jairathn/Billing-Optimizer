@@ -15,13 +15,16 @@ part a browser talks to.
     PUT  /api/ema/exports/{key}/howto                      {text, name, base_at}: saves the box (any signed-in person)
 
 Every route needs the sign-in, as every other route does (api.require_auth); the ones that change something also need the
-header a cross-site form cannot set (api.require_xhr). Both hosts take these uploads: a server keeps the pieces beside the
-store, a serverless host relays each piece to a Dropbox upload session, so no request body is ever over 4 MiB. Nothing
-here writes a file's name, or what is in a file, to a log: an error says only its kind.
+header a cross-site form cannot set (api.require_xhr). A request's body is read only after both, inside the route, and a
+JSON body at most BODY_MAX bytes: a request without the sign-in costs nothing however large its body. Both hosts take
+these uploads: a server keeps the pieces beside the store, a serverless host relays each piece to a Dropbox upload
+session, so no request body is ever over 4 MiB. Nothing here writes a file's name, or what is in a file, to a log: an
+error says only its kind.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +32,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -38,8 +41,24 @@ from . import runtime, uploads
 router = APIRouter()
 _security = HTTPBasic(auto_error=False)
 _SWEPT = {"at": 0.0}
-DISK_MARGIN = 512 * 1024 * 1024         # a server keeps this much disk free besides the file it takes
+DISK_MARGIN = uploads.DISK_MARGIN       # a server keeps this much disk free besides the file it takes
 RECENT_MAX = 30                          # uploads listed by /api/uploads/recent
+BODY_MAX = 64 * 1024                     # a JSON body (a start, a finish, a how-to box of 4,000 characters) is far smaller
+
+
+async def _json_body(request: Request) -> dict:
+    """The request's JSON body: read here, after the sign-in and the header check have passed (a Body() parameter would
+    be read and parsed before them), and never more than BODY_MAX bytes of it."""
+    data = bytearray()
+    async for part in request.stream():
+        data += part
+        if len(data) > BODY_MAX:
+            raise HTTPException(413, "The request is too large.")
+    try:
+        body = json.loads(bytes(data) or b"{}")
+    except ValueError:
+        raise HTTPException(400, "The request is not valid JSON.") from None
+    return body if isinstance(body, dict) else {}
 
 
 def _api():
@@ -58,8 +77,27 @@ def _xhr(request: Request) -> None:
 
 
 def _answer(exc: uploads.PieceRefused) -> JSONResponse:
-    return JSONResponse({"detail": exc.message, "next_index": exc.next_index}, status_code=exc.status,
-                        headers={"Cache-Control": "no-store"})
+    body: dict = {"detail": exc.message, "next_index": exc.next_index}
+    if exc.restart:
+        body["restart"] = True          # the page sends the file again as a new upload (start with new: true)
+    return JSONResponse(body, status_code=exc.status, headers={"Cache-Control": "no-store"})
+
+
+def _close_dead(store, rec: dict, exc: uploads.PieceRefused) -> None:
+    """An upload whose received bytes are lost (its pieces gone, its Dropbox session out of step or expired) is closed,
+    so choosing the file again starts afresh instead of carrying on with it. Best effort: a later start with new: true
+    retires it anyway."""
+    if not exc.dead or rec.get("state") != "receiving":
+        return
+    try:
+        again, version = store.load(rec["upload_id"])
+        if again is None or again.get("state") != "receiving":
+            return
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        again.update(state="refused", finished_at=now, updated_at=now, message=f"Not finished: {exc.message}")
+        store.save(again, version)
+    except Exception:
+        pass
 
 
 def _store():
@@ -133,13 +171,16 @@ def _reveal() -> bool:
 
 # ----------------------------------------------------------------------------------------------------------- starting
 @router.post("/api/uploads/start", dependencies=[Depends(_xhr)])
-async def upload_start(body: dict = Body(default={}), user: str = Depends(_user)):
+async def upload_start(request: Request, user: str = Depends(_user)):
     """Start sending a file in pieces. The page gives the file's name, its size, whether it compresses it on the way, what
     it recognised it as from its column names, and the SHA-256 of the file as it is: when RemitWatch already has a file
     of exactly these bytes, nothing is sent ("already"); when this person's upload of it was cut off, it carries on
-    from the first piece that did not arrive ("resume")."""
+    from the first piece that did not arrive ("resume"). With new: true the file is sent afresh, and this person's
+    cut-off uploads of it are let go (the page asks so when its pieces do not match theirs: compressed by another
+    browser)."""
     if runtime.serverless() and runtime.preview():
         raise HTTPException(409, "This is a preview deployment. Only the production site takes the practice's files.")
+    body = await _json_body(request)
     try:
         name, size, gz, hint, sha = uploads.check_start(body.get("name"), body.get("size"), body.get("gz"),
                                                         body.get("report_hint"), body.get("sha256"))
@@ -163,12 +204,20 @@ def _start(store, user: str, name: str, size: int, gz: bool, hint: str | None, s
                 seen = uploads.known_file(c, sha, store.pending())
             if seen:
                 return {"status": "already", "lines": [seen["line"]], "already": {k: seen.get(k) for k in ("how", "status", "at")}}
-            if not new:
-                for rec in store.records(recent=True):
-                    if (rec.get("user") == user and rec.get("state") == "receiving" and rec.get("sha256") == sha
-                            and rec.get("size") == size and bool(rec.get("gz")) == gz):
-                        view = uploads.record_view(rec, reveal=_reveal(), pieces=True)
-                        return dict(view, status="resume", next_index=view["received"])
+            mine = sorted((r for r in store.records(recent=True)
+                           if r.get("user") == user and r.get("state") == "receiving" and r.get("sha256") == sha
+                           and r.get("size") == size and bool(r.get("gz")) == gz),
+                          key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+            if new:
+                # sent afresh: this person's cut-off uploads of the file are let go, so choosing it again never lands on
+                # one whose pieces this browser cannot match (one still receiving pieces from another tab is left alone)
+                idle = time.time() - uploads.RETIRE_IDLE_SECONDS
+                for old in mine:
+                    if uploads._epoch(old.get("updated_at")) < idle:
+                        store.remove(old["upload_id"])
+            elif mine:
+                view = uploads.record_view(mine[0], reveal=_reveal(), pieces=True)
+                return dict(view, status="resume", next_index=view["received"])
         rec = uploads.new_record(user, name, size, gz, hint, sha)
         store.create(rec)
         return dict(uploads.record_view(rec, reveal=_reveal(), pieces=True), status="started", next_index=0)
@@ -203,13 +252,15 @@ def _chunk(store, user: str, uid: str, index: int, total: int, sha: str, data: b
         try:
             if not uploads.check_piece(rec, index, total, sha, data):
                 return {"received": len(rec["chunks"]), "bytes": rec["bytes"], "again": True}
-            store.append(rec, data)
-        except uploads.PieceRefused as exc:
-            return _answer(exc)
-        uploads.record_piece(rec, index, total, sha, len(data))
-        try:
+            version = store.append(rec, data, index=index, sha=sha, version=version)
+            uploads.record_piece(rec, index, total, sha, len(data))
             store.save(rec, version)
+        except uploads.PieceRefused as exc:
+            _close_dead(store, rec, exc)
+            return _answer(exc)
         except uploads.Stale:
+            # another request for this upload saved its record meanwhile (the page sent a piece again while the first try
+            # was still under way): what that one recorded decides
             again, _v = store.load(uid)
             got = (again or {}).get("chunks") or []
             if len(got) > index and got[index] == sha:
@@ -253,18 +304,25 @@ def upload_status(upload_id: str, user: str = Depends(_user)):
 
 # ----------------------------------------------------------------------------------------------------------- finishing
 @router.post("/api/uploads/{upload_id}/finish", dependencies=[Depends(_xhr)])
-def upload_finish(upload_id: str, request: Request, body: dict = Body(default={}), user: str = Depends(_user)):
+async def upload_finish(upload_id: str, request: Request, user: str = Depends(_user)):
     """The last piece is in: the whole file is checked against the SHA-256 of the original the page gives (unpacked on
     the way when it came compressed), then it goes to the intake folder with its sidecar, for the next cycle. A file
-    RemitWatch already has is not kept ("already"); one that does not match is not kept either ("refused"). Sent
+    RemitWatch already has is not kept ("already"); one that does not match is not kept either ("refused"), nor one no
+    host would read (it unpacks to far more than any export, or one of its lines is longer than any export has). Sent
     twice, it answers the same."""
     _check_id(upload_id)
+    body = await _json_body(request)
     sha = str(body.get("sha256") or "").lower()
     try:
         chunks, nbytes = int(body.get("chunks", -1)), int(body.get("bytes", -1))
     except (TypeError, ValueError):
         raise HTTPException(400, "The number of pieces is missing.") from None
     store = _store()
+    base = _api().base_url(request) if store.serverless else None
+    return await asyncio.to_thread(_finish, store, user, upload_id, sha, chunks, nbytes, base)
+
+
+def _finish(store, user: str, upload_id: str, sha: str, chunks: int, nbytes: int, base: str | None):
     with _storage(), store.lock(upload_id):
         rec, version = store.load(upload_id)
         _own(rec, user)
@@ -276,17 +334,23 @@ def upload_finish(upload_id: str, request: Request, body: dict = Body(default={}
             return _answer(exc)
         rec["sha256"] = sha
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        store.commit(rec)
         checked = True
         try:
-            bad = uploads.verify(store.committed(rec), gz=bool(rec.get("gz")), sha256=sha, size=int(rec["size"]),
-                                 deadline=time.time() + uploads.VERIFY_SECONDS if store.serverless else None)
+            store.commit(rec)
+            pieces = store.committed(rec)
+            bad = uploads.verify(pieces, gz=bool(rec.get("gz")), sha256=sha, size=int(rec["size"]),
+                                 deadline=time.time() + uploads.VERIFY_SECONDS if store.serverless else None,
+                                 sent=int(rec["bytes"]), lines=bool(rec.get("report_hint")))
+        except uploads.PieceRefused as exc:     # what was received is gone: said in plain words, never a server error
+            _close_dead(store, rec, exc)
+            return _answer(exc)
         except TimeoutError:
             bad, checked = None, False          # a very large file: the cycle checks the sidecar's SHA-256 as it reads it
         if bad:
             store.discard(rec)
             rec.update(state="refused", finished_at=now, updated_at=now,
-                       message=f"The file did not arrive whole, so it was not kept: {bad} Choose it again to send it again.")
+                       message=str(bad) if isinstance(bad, uploads.Unreadable) else
+                       f"The file did not arrive whole, so it was not kept: {bad} Choose it again to send it again.")
             _save_end(store, rec, version)
             return _finished(store, rec, woke=None)
         with _conn() as c:
@@ -300,8 +364,9 @@ def upload_finish(upload_id: str, request: Request, body: dict = Body(default={}
                                                       rec.get("report_hint"), received_at=now))
         rec.update(state="finished", finished_at=now, updated_at=now, checked=checked)
         _save_end(store, rec, version)
-    woke = _wake(store, request)
-    return _finished(store, rec, woke=woke)
+    busy = _run_going(store)
+    woke = _wake(store, base)
+    return _finished(store, rec, woke=woke, busy=busy)
 
 
 def _save_end(store, rec: dict, version: Any) -> None:
@@ -313,32 +378,46 @@ def _save_end(store, rec: dict, version: Any) -> None:
             store.save(rec, v2)             # a piece sent again crossed the finish: the finish stands
 
 
-def _wake(store, request: Request) -> bool:
+def _run_going(store) -> bool:
+    """Whether a serverless run holds the cycle lock now. The run asked for after an upload is then skipped; the run
+    going now starts the next one as it ends, because it finds the pair waiting in intake/ (api.cron_cycle)."""
+    if not store.serverless:
+        return False
+    try:
+        from . import cloud
+        return cloud.running(store.state) is not None
+    except Exception:
+        return False
+
+
+def _wake(store, base: str | None) -> bool:
     """Ask for the file to be read soon: the server's cycle reads its intake folder (remitwatch.intake.kick); a
-    serverless host asks for a run the way the Sync button does."""
+    serverless host asks for a run the way the Sync button does (`base`: this site's own address)."""
     if not store.serverless:
         return uploads.kick_intake(store.db_path)
     if runtime.preview():
         return False
     try:
         from . import cloud
-        ok = cloud.trigger_cycle(_api().base_url(request), "upload")
+        ok = cloud.trigger_cycle(base, "upload")
         cloud.SERVING_COPY._status = (0.0, None)
         return bool(ok)
     except Exception:
         return False
 
 
-def _finished(store, rec: dict, woke: bool | None):
+def _finished(store, rec: dict, woke: bool | None, busy: bool = False):
     """The answer to a finish, the same however often it is sent: the upload as the page shows it; a file that did not
-    arrive whole is a 422."""
+    arrive whole, or that no host would read, is a 422."""
     pair = store.pair_state(rec["pair"]) if rec.get("state") == "finished" else None
     with _conn() as c:
         view = uploads.record_view(rec, conn=c, pair=pair, reveal=_reveal())
     if rec.get("state") == "refused":
         return JSONResponse(dict(view, detail=rec.get("message") or "Not taken."), status_code=422)
     if rec.get("state") == "finished" and woke is not None and pair and pair[0] == "waiting":
-        if store.serverless:
+        if store.serverless and busy:
+            view["lines"].append("A run is going now. When it ends, the next run starts and reads this file first.")
+        elif store.serverless:
             view["lines"].append("The next run was asked to start now; it reads the file first." if woke else
                                  "The next run reads it: the daily run, or press Sync and analyse now on the Data tab.")
         else:
@@ -379,6 +458,8 @@ def ema_exports_list(user: str = Depends(_user)):
     serverless = runtime.serverless()
     return {"exports": rows, "recognition": uploads.recognition(), "mode": "serverless" if serverless else "server",
             "chunk_bytes": uploads.CHUNK_BYTES, "chunk_from": uploads.CHUNK_FROM_BYTES, "max_bytes": uploads.max_upload_bytes(),
+            "original_max": uploads.original_max(True), "read_max": uploads.read_limit(),
+            "read_max_line": uploads.too_big_here(uploads.read_limit()) if serverless else None,
             "notes_here": not serverless, "show_phi": _reveal(), "user": user}
 
 
@@ -392,12 +473,18 @@ def ema_howto_get(key: str, user: str = Depends(_user)):
 
 
 @router.put("/api/ema/exports/{key}/howto", dependencies=[Depends(_xhr)])
-def ema_howto_put(key: str, body: dict = Body(default={}), user: str = Depends(_user)):
+async def ema_howto_put(key: str, request: Request, user: str = Depends(_user)):
     """Save the practice's own steps for pulling one export from EMA. Any signed-in person may; the box keeps who saved
     each version and when, and the versions before it. `base_at` is when the version the person started from was saved
-    (empty for an empty box): when someone saved the box since, nothing is saved and the answer says so."""
+    (empty for an empty box): when someone saved the box since, nothing is saved and the answer says so, with their
+    text."""
     if key not in uploads.EXPORT_KEYS:
         raise HTTPException(404, "There is no such export.")
+    body = await _json_body(request)
+    return await asyncio.to_thread(_howto_put, key, body, user)
+
+
+def _howto_put(key: str, body: dict, user: str):
     base_at = body.get("base_at")
     try:
         with _storage():

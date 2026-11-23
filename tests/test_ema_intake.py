@@ -493,7 +493,9 @@ def test_one_production_file_per_run_the_ledger_saved_first_and_detection_in_the
     first = cycle(state, client)
     assert first["more"] is True and first["deferred"] == "detection" and first["ema_apply"]["files"] == 1
     order = [n for n in saved if n in (el.STATE_NAME, cloud.RAW, cloud.SERVING, cloud.CURSOR)]
-    assert order == [el.STATE_NAME, cloud.RAW, cloud.SERVING, cloud.CURSOR]      # the ledger, the store, the copy, the position
+    # the store with its new key salt (once, before the ledger is keyed with it), then the ledger, the store, the copy,
+    # the position
+    assert order == [cloud.RAW, el.STATE_NAME, cloud.RAW, cloud.SERVING, cloud.CURSOR]
     assert saved.index(el.ATTEMPTS_NAME) < saved.index(el.STATE_NAME)            # the attempt before the read
     cat = catalog(state_store(state))
     assert sorted(cat[sha(z)] for z in (z25, z26)) == ["current", "waiting"]
@@ -1037,3 +1039,414 @@ def test_a_file_held_because_it_would_not_fit_the_sites_temporary_space_is_no_fa
     out = cycle(state, client)
     assert catalog(state_store(state))[sha(data)] == "held" and "ema_apply" not in out
     assert sha(data) not in json.loads(state.get(el.ATTEMPTS_NAME) or b"{}")
+
+
+# ============================================================================== a gzip bomb, one giant line (SWEEP)
+import random  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import zipfile  # noqa: E402
+import zlib  # noqa: E402
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _gz_of(unpacked: int, *, head: bytes = b"", fill: bytes = b"\0", level: int = 9) -> tuple[bytes, str]:
+    """A gzip of `head` followed by `fill` up to `unpacked` bytes (built piece by piece: never whole in memory), and the
+    SHA-256 of what it unpacks to. Zeros at level 9 pack about 1,000 to 1."""
+    co = zlib.compressobj(level, zlib.DEFLATED, 31)
+    h = hashlib.sha256(head)
+    out = [co.compress(head)]
+    piece = fill * ((1 << 20) // len(fill))
+    left = unpacked - len(head)
+    while left > 0:
+        p = piece[:min(len(piece), left)]
+        h.update(p)
+        out.append(co.compress(p))
+        left -= len(p)
+    out.append(co.flush())
+    return b"".join(out), h.hexdigest()
+
+
+def _raw_pair(folder, name: str, gz_bytes: bytes, sha256: str, size: int, *, uid: str | None = None) -> str:
+    """An intake pair whose data file is already gzipped (as the Upload page leaves it), with the original's hash and size."""
+    uid = uid or hashlib.md5(name.encode() + gz_bytes[:64]).hexdigest()
+    pair = f"{uid}__{name}.gz"
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, pair), "wb") as fh:
+        fh.write(gz_bytes)
+    sc = {"name": name, "origin": "upload", "user": "staff", "sha256": sha256, "size": size, "gz": True,
+          "received_at": "2026-11-20T10:00:00+00:00", "report_hint": "production"}
+    with open(os.path.join(folder, pair + ".json"), "w") as fh:
+        json.dump(sc, fh)
+    return pair
+
+
+def _header() -> bytes:
+    return (",".join(F.PRODUCTION_COLUMNS) + "\r\n").encode()
+
+
+def _long_line(n: int) -> bytes:
+    """n bytes of text with no line break and no comma that compresses like real text (about 4 to 3), not like zeros."""
+    rnd = random.Random(7)
+    return bytes(rnd.choice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") for _ in range(n))
+
+
+_CHILD = r"""
+import json, os, resource, sys
+sys.path.insert(0, sys.argv[1])
+os.environ["REMITWATCH_MODE"] = "serverless"
+os.environ["REMITWATCH_TMP"] = sys.argv[3]
+from remitwatch import intake
+from remitwatch.state import LocalState
+from remitwatch.store import Store
+store = Store(os.path.join(sys.argv[3], "store.sqlite"))
+size = next(int(l.split()[1]) * 1024 for l in open("/proc/self/status") if l.startswith("VmSize:"))
+lim = size + int(sys.argv[4]) * 1024 * 1024
+resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+out = intake.process_state(store, LocalState(sys.argv[2]), max_bytes=60 << 20, log=lambda *a: None)
+row = store.conn.execute("SELECT status, status_reason FROM ema_report_files").fetchone()
+print(json.dumps({"results": out["results"], "catalog": list(row) if row else None}))
+"""
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/status"), reason="reads its own size from /proc")
+def test_a_gzip_bomb_uploaded_on_vercel_is_refused_without_ever_being_unpacked_whole(tmp_path):
+    """A 1 MB upload that unpacks to 1 GiB (a gzip bomb with a sidecar that matches it) used to be unpacked one stored
+    piece at a time with no limit: the run's memory grew by the whole gigabyte and Vercel killed every run. It is read
+    in a process allowed only 384 MB more than it starts with: it must be refused, and the process must finish."""
+    state = tmp_path / "state"
+    bomb, digest = _gz_of(1 << 30)
+    assert len(bomb) < 2 << 20
+    _raw_pair(state / "intake", "2026 Production.csv", bomb, digest, 1 << 30)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    r = subprocess.run([sys.executable, "-I", "-c", _CHILD, REPO, str(state), str(scratch), "384"], capture_output=True, text=True,
+                       timeout=300)
+    assert r.returncode == 0, r.stderr[-800:]
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+    assert got["results"][0]["status"] == "refused"
+    assert got["catalog"][0] == "refused" and "It unpacks to more than 199 MB from a file of 1 MB, far beyond" in got["catalog"][1]
+    done = json.loads((state / "intake" / "done" / (os.listdir(state / "intake" / "done")[0].split(".gz")[0] + ".gz.json")).read_text())
+    assert done["result"]["status"] == "refused" and "far beyond any export" in " ".join(done["result"]["lines"])
+
+
+def test_a_gzip_bomb_uploaded_on_a_server_is_set_aside_and_the_cycle_goes_on(tmp_path):
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    ready = intake.ready_dir(os.path.dirname(db))
+    bomb, digest = _gz_of(160 << 20)
+    _raw_pair(ready, "2026 Production.csv", bomb, digest, 160 << 20, uid="a" * 32)
+    ar = F.ar_xlsx(ar_rows())
+    _pair(ready, "AR 2026.xlsx", ar)
+    out = run(db, sync=False)
+    s = open_store(db)
+    try:
+        cat = catalog(s.conn)
+        reason = s.conn.execute("SELECT status_reason FROM ema_report_files WHERE file_id=?", (digest,)).fetchone()[0]
+    finally:
+        s.close()
+    assert cat[sha(ar)] == "current" and cat[digest] == "refused"          # the A/R behind it is read all the same
+    assert "unpacks to more than 64 MB" in reason and out["intake"]["pairs"] == 2
+    done = json.loads(open(os.path.join(intake.done_dir(os.path.dirname(db)), "a" * 32 + "__2026 Production.csv.gz.json")).read())
+    assert done["result"]["status"] == "refused" and done["result"]["file_id"] == digest
+    again = run(db, sync=False)                                              # nothing is read twice
+    assert not again.get("intake")
+
+
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_one_giant_line_in_a_report_is_refused_as_soon_as_it_passes_the_cap(tmp_path, monkeypatch, host):
+    """A report whose second line is 3 MB long (no export EMA makes has a line over 621 bytes) is refused as the reader
+    reaches the cap, with a plain reason, on both hosts; the line is never held whole."""
+    monkeypatch.setenv("REMITWATCH_MODE", host)
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    data = _header() + _long_line(3 << 20) + b"\r\n"
+    p = write(tmp_path / "in" / "2026 Production.csv", data)
+    store = open_store(tmp_path / "s.sqlite")
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        res = er.ingest_file(store, p, via="mirror", ledger=lg, log=lambda *a: None)
+        assert res["status"] == "refused" and res["code"] == "long_line"
+        st, why = store.conn.execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?", (sha(data),)).fetchone()
+        assert st == "refused" and why.startswith("Line 2 is longer than 1 MB")
+        assert ledger_rows(lg.path) == 0
+    finally:
+        lg.close()
+        store.close()
+    # the same line in a gzipped A/R upload read by the serverless intake: refused, with the same plain reason
+    data = (",".join(F.AR_COLUMNS) + "\r\n").encode() + _long_line(3 << 20) + b"\r\n"
+    gz = gzip.compress(data, mtime=0)
+    folder = tmp_path / "state" / "intake"
+    _raw_pair(folder, "AR 2026.csv", gz, sha(data), len(data))
+    from remitwatch.state import LocalState
+    st2 = open_store(tmp_path / "s2.sqlite")
+    try:
+        out = intake.process_state(st2, LocalState(str(tmp_path / "state")), ledger=None, max_bytes=60 << 20, log=lambda *a: None)
+        assert out["results"][0]["status"] in ("refused",)
+        why = st2.conn.execute("SELECT status_reason FROM ema_report_files WHERE file_id=?", (sha(data),)).fetchone()[0]
+        assert catalog(st2.conn)[sha(data)] == "refused" and why.startswith("Line 2 is longer than 1 MB")
+    finally:
+        st2.close()
+
+
+def _workbook_bomb(path, member: str = "xl/sharedStrings.xml", unpacked: int = 96 << 20) -> str:
+    """A workbook-shaped zip one part of which unpacks to `unpacked` bytes from a few hundred KB (openpyxl would hold a
+    workbook's shared strings whole)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+        z.writestr("xl/workbook.xml", '<?xml version="1.0"?><workbook/>')
+        with z.open(member, "w", force_zip64=True) as m:
+            piece = b"<si><t>" + b"a" * 65000 + b"</t></si>"
+            left = unpacked
+            while left > 0:
+                m.write(piece[:min(len(piece), left)])
+                left -= len(piece)
+    return str(path)
+
+
+def test_a_workbook_whose_parts_unpack_far_past_any_export_is_set_aside_unopened(tmp_path, monkeypatch):
+    p = _workbook_bomb(tmp_path / "in" / "AR 2026.xlsx")
+    assert os.path.getsize(p) < 2 << 20
+
+    def never(*a, **k):
+        raise AssertionError("the workbook was opened")
+    import openpyxl
+    monkeypatch.setattr(openpyxl, "load_workbook", never)
+    with pytest.raises(er.ReportRefused) as e:
+        er.recognize(p, "AR 2026.xlsx")
+    assert e.value.code == "unpacks_too_large"
+    # read as one of the weekly exports it is refused too (TooLarge), before openpyxl
+    with pytest.raises(ema_exports.TooLarge):
+        ema_exports._raw_rows(p, open(p, "rb").read())
+    store = open_store(tmp_path / "s.sqlite")
+    try:
+        out = dropbox_sync.ingest_new_files(store, [p], log=lambda *a: None)
+        assert out["ema_reports"][0]["status"] == "refused"
+        st, why = store.conn.execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?", (sha(open(p, "rb").read()),)).fetchone()
+        assert st == "refused" and "far beyond any export" in why
+    finally:
+        store.close()
+
+
+def test_a_zip_whose_member_unpacks_far_past_any_export_is_refused_and_listed(tmp_path):
+    zpath = tmp_path / "in" / "reports.zip"
+    os.makedirs(zpath.parent)
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("2026 Production.csv", _header() + b"\0" * (96 << 20))
+    assert os.path.getsize(zpath) < 2 << 20
+    store = open_store(tmp_path / "s.sqlite")
+    try:
+        out = dropbox_sync.ingest_new_files(store, [str(zpath)], log=lambda *a: None)
+        assert out["errors"] == 0
+        st, why = store.conn.execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?",
+                                     (sha(open(zpath, "rb").read()),)).fetchone()
+        assert st == "refused" and "unpacks to more than 64 MB" in why
+        # the same zip again is not unpacked again: the catalog knows it
+        again = dropbox_sync.ingest_new_files(store, [str(zpath)], log=lambda *a: None)
+        assert again["ema_reports"][0]["status"] in ("refused",) or again["skipped"]
+    finally:
+        store.close()
+
+
+def test_a_gzip_that_is_no_report_and_unpacks_too_far_is_listed_as_not_read(tmp_path):
+    gz, _digest = _gz_of(80 << 20, head=b"just some text\n", fill=b"x")
+    p = write(tmp_path / "in" / "notes.txt.gz", gz)
+    big = write(tmp_path / "in" / "huge.RMT", b"ISA*00*" + b"x" * 10)
+    store = open_store(tmp_path / "s.sqlite")
+    try:
+        out = dropbox_sync.ingest_new_files(store, [p], log=lambda *a: None)
+        assert out["errors"] == 1
+        row = store.conn.execute("SELECT kind, status FROM files WHERE sha256=?", (sha(gz),)).fetchone()
+        assert tuple(row) == ("ema:too_large", "not_read")
+    finally:
+        store.close()
+    assert os.path.getsize(big) < dropbox_sync.MAX_X12_BYTES
+
+
+def test_an_x12_file_far_larger_than_any_payer_sends_is_listed_as_not_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(dropbox_sync, "MAX_X12_BYTES", 1000)
+    p = write(tmp_path / "in" / "big.RMT", b"ISA*00*          *00*          *ZZ*" + b"x" * 2000)
+    store = open_store(tmp_path / "s.sqlite")
+    try:
+        out = dropbox_sync.ingest_new_files(store, [p], log=lambda *a: None)
+        assert out["remits"] == 0 and out["errors"] == 1 and "big.RMT (too large)" in out["failed"]
+        assert tuple(store.conn.execute("SELECT kind, status FROM files WHERE sha256=?", (sha(p),)).fetchone()) == ("ema:too_large", "not_read")
+    finally:
+        store.close()
+
+
+def test_a_pair_that_stops_the_server_cycle_twice_is_set_aside_and_the_rest_goes_on(tmp_path, monkeypatch):
+    """The cycle dies while reading an upload (the memory limit, a container stop): the next cycle tries once more; after
+    the second death the pair is set aside unread (held on the Data tab with Apply or Discard), and the uploads behind it
+    are read."""
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    ready = intake.ready_dir(os.path.dirname(db))
+    bad = F.production_csv(prod_rows())
+    pair = _pair(ready, "2026 Production.csv", bad)
+    real = intake.read_file
+
+    def dies(store, path, **kw):
+        if os.path.basename(path).startswith(pair.split("__")[0]):
+            raise Killed()
+        return real(store, path, **kw)
+    monkeypatch.setattr(intake, "read_file", dies)
+    for n in (1, 2):
+        with pytest.raises(Killed):
+            run(db, sync=False)
+        s = open_store(db)
+        try:
+            assert intake._meta_attempts(s.conn)[pair]["n"] == n           # counted though the cycle died
+            s.conn.execute("DELETE FROM meta WHERE key=?", (pipeline.LOCK_KEY,))
+            s.conn.commit()
+        finally:
+            s.close()
+    ar = F.ar_xlsx(ar_rows())
+    _pair(ready, "AR 2026.xlsx", ar)
+    out = run(db, sync=False)
+    s = open_store(db)
+    try:
+        cat = catalog(s.conn)
+        why = s.conn.execute("SELECT status_reason FROM ema_report_files WHERE file_id=?", (sha(bad),)).fetchone()[0]
+        left = intake._meta_attempts(s.conn)
+    finally:
+        s.close()
+    assert cat[sha(bad)] == "held" and why.startswith("Set aside without being read: reading it stopped the cycle 2 times")
+    assert cat[sha(ar)] == "current" and out["intake"]["pairs"] == 2 and left == {}
+    done = json.loads(open(os.path.join(intake.done_dir(os.path.dirname(db)), pair + ".json")).read())
+    assert done["result"]["status"] == "held"
+
+
+def test_a_pair_that_stops_the_run_twice_is_set_aside_on_vercel_and_production_keeps_the_slots_own_count(vercel, monkeypatch):
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    ar = F.ar_xlsx(ar_rows())
+    pair = _pair(root / "RemitWatch-state" / "intake", "AR 2026.xlsx", ar)
+    real = intake.read_file
+
+    def dies(store, path, **kw):
+        if "AR 2026" in os.path.basename(path):
+            raise Killed()
+        return real(store, path, **kw)
+    monkeypatch.setattr(intake, "read_file", dies)
+    for n in (1, 2):
+        with pytest.raises(Killed):
+            cycle(state, client)
+        assert json.loads(state.get(intake.STATE_ATTEMPTS))[pair]["n"] == n
+        state.delete(cloud.LOCK)
+    monkeypatch.setattr(intake, "read_file", real)
+    cycle(state, client)
+    conn = state_store(state)
+    assert catalog(conn)[sha(ar)] == "held"
+    assert json.loads(state.get(intake.STATE_ATTEMPTS) or b"{}") == {}
+    done = json.loads(state.get(f"intake/done/{pair}.json"))
+    assert done["result"]["status"] == "held" and done["result"]["lines"][0].startswith("Set aside without being read")
+    # a Production upload killed inside the slot's read: the pair's own note goes when the slot takes it, so the slot's
+    # three attempts (then its hold, with what to do on this site) decide, never two stops of the pair's count
+    data = F.production_csv(prod_rows())
+    ppair = _pair(root / "RemitWatch-state" / "intake", "2026 Production.csv", data, gz=True)
+    real_apply = el.apply_production_file
+
+    def killed(*a, **k):
+        raise Killed()
+    monkeypatch.setattr(el, "apply_production_file", killed)
+    for _ in range(3):
+        with pytest.raises(Killed):
+            cycle(state, client)
+        assert ppair not in json.loads(state.get(intake.STATE_ATTEMPTS) or b"{}")
+        state.delete(cloud.LOCK)
+    monkeypatch.setattr(el, "apply_production_file", real_apply)
+    cycle(state, client)
+    row = state_store(state).execute("SELECT status, status_reason FROM ema_report_files WHERE file_id=?", (sha(data),)).fetchone()
+    assert tuple(row) == ("held", el.ATTEMPT_HOLD_REASON)
+
+
+# ================================================================== waiting reports, follow-up runs, sweeps (SWEEP)
+def test_a_production_upload_kept_waiting_by_the_switch_is_read_once_the_host_reads_production(vercel, monkeypatch):
+    """Vercel's default reads the A/R only: a Production report uploaded then waits. Its catalog origin kept the
+    original's size, larger than the site's 60 MB rule, though the kept copy is a gzip well under it, so it was never read
+    again once Production was switched on, and sending it again was 'already'. The kept copy's own size decides."""
+    root, client, state = vercel
+    data = F.production_csv(prod_rows(n=12))
+    gz = gzip.compress(data, mtime=0)
+    monkeypatch.setattr(cloud, "MAX_FILE_BYTES", (len(gz) + len(data)) // 2)
+    assert len(gz) < cloud.MAX_FILE_BYTES < len(data)
+    _pair(root / "RemitWatch-state" / "intake", "2026 Production.csv", data, gz=True)
+    cycle(state, client)
+    assert catalog(state_store(state))[sha(data)] == "waiting"
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    out = cycle(state, client)
+    assert catalog(state_store(state))[sha(data)] == "current" and out["ema_apply"]["files"] == 1
+
+
+def test_an_upload_finished_while_a_run_went_on_starts_a_follow_up_run(vercel, monkeypatch):
+    root, client, state = vercel
+    write(root / DATA / "Reports" / "AR 2026.xlsx", F.ar_xlsx(ar_rows()))
+    ar2 = F.ar_xlsx(ar_rows(first=20))
+    real = intake.close_state_pairs
+
+    def during(st, to_close):
+        _pair(root / "RemitWatch-state" / "intake", "AR 2026 b.xlsx", ar2)      # finished while the run went on
+        return real(st, to_close)
+    monkeypatch.setattr(intake, "close_state_pairs", during)
+    out = cycle(state, client)
+    assert out["more"] is True and out["intake_waiting"] == 1
+    monkeypatch.setattr(intake, "close_state_pairs", real)
+    nxt = cycle(state, client)
+    assert catalog(state_store(state))[sha(ar2)] == "current" and not nxt.get("intake_waiting")
+
+
+def test_every_cycle_sweeps_what_uploads_left_behind_on_both_hosts(tmp_path, vercel, monkeypatch):
+    from remitwatch import uploads
+    calls: list = []
+    monkeypatch.setattr(uploads.ServerUploads, "sweep", lambda self, now=None: calls.append("server") or {"abandoned": 1, "x": 0})
+    out = run(str(tmp_path / "data" / "remitwatch.sqlite"), sync=False)
+    assert calls == ["server"] and out["uploads_swept"] == {"abandoned": 1}
+    root, client, state = vercel
+
+    class Fake:
+        def sweep(self):
+            calls.append("state")
+            return {"half_pair": 2}
+    monkeypatch.setattr(uploads, "state_uploads", lambda st: Fake())
+    out = cycle(state, client)
+    assert calls[-1] == "state" and out["uploads_swept"] == {"half_pair": 2}
+
+    def broken(st):
+        raise OSError("disk")
+    monkeypatch.setattr(uploads, "state_uploads", broken)
+    out = cycle(state, client)                                  # a sweep that fails never stops the run
+    assert out["uploads_sweep"] == {"error": "OSError"} and "error" not in out
+
+
+def test_a_first_production_file_saves_the_stores_key_salt_before_the_ledger_on_vercel(vercel, monkeypatch):
+    """A store with no key salt yet (no report read) takes its first Production file, and the run dies after saving the
+    ledger and before saving the store. The salt must already be in the saved store image: otherwise the next run makes
+    another, the ledger (keyed for the lost one) is emptied and every Production file is read again."""
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    data = F.production_csv(prod_rows())
+    write(root / DATA / "Reports" / "2026 Production.zip", F.zipped("2026 Production.csv", data))
+    real_save = cloud.save_raw
+    saves: list = []
+
+    def save(st, store):
+        saves.append(er.stored_salt(store.conn) is not None)
+        if len(saves) == 2:                 # the store's own save at the end of the run: the platform stops it here
+            raise Killed()
+        return real_save(st, store)
+    monkeypatch.setattr(cloud, "save_raw", save)
+    with pytest.raises(Killed):
+        cycle(state, client)
+    assert saves == [True, True] and state.meta(el.STATE_NAME) is not None
+    monkeypatch.setattr(cloud, "save_raw", real_save)
+    salt = er.stored_salt(state_store(state))
+    assert salt is not None                                    # the image the next run loads holds the salt
+    out = cycle(state, client)
+    conn = state_store(state)
+    assert er.stored_salt(conn) == salt and catalog(conn)[sha(data)] == "current"
+    assert "reread" not in catalog(conn).values() and out.get("ema_repair", {}).get("repaired") is True
+    h = el.LedgerHandle(state, tmp_dir=str(root.parent / "look"))
+    try:
+        assert h.open().conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 12       # never emptied, never twice
+    finally:
+        h.discard()

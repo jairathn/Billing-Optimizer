@@ -55,7 +55,7 @@ async function rsOpenList(key, title, page){
       : `${esc(it.label || it.signal || 'Item')} <span class="chip">no longer listed</span>`;
     return `<tr><td>${where}<div class="small muted">${esc(it.payer_group || '')}${it.procedure_code ? ' · ' + esc(it.procedure_code) : ''}${it.service_date ? ' · ' + esc(it.service_date) : ''}${it.claim_id ? ' · claim ' + esc(it.claim_id) : ''}</div>${why}</td>
       <td class="small">${esc((state.rsData && state.rsData.labels && state.rsData.labels.states[it.work_state]) || it.work_state || '')}${it.first_flagged ? `<div class="muted">flagged ${esc(it.first_flagged)}</div>` : ''}</td>
-      <td class="num">${it.cents ? money(it.cents) : (it.shortfall_cents ? `<span class="muted">${money(it.shortfall_cents)}</span>` : '')}${split}</td></tr>`;
+      <td class="num">${it.cents ? money(it.cents) : (it.shortfall_cents ? `<span class="muted">${money(it.shortfall_cents)}</span>` : '')}${split}${it.returned == null && it.expected_value_cents != null ? `<div class="small muted" title="${esc(it.recovery_basis || 'Its dollars times its pattern\'s recovery rate')}">likely ${money(it.expected_value_cents)}</div>` : ''}</td></tr>`;
   }).join('');
   box.innerHTML = `<div class="dr-head" style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><h2 style="margin:0">${esc(title || 'Items')}</h2><button id="rsClose" aria-label="Close">✕</button></div>
     <div class="note">${rsPl(r.total, 'item')}. Open an item to see its story and why RemitWatch counts it. <a href="/api/results/list.csv?${qs({key})}">Download as CSV</a></div>
@@ -102,7 +102,7 @@ function rsScoreHtml(s){
     <div class="grid kpis">
       ${rsTile('Recovered', s.recovered_cents == null ? '–' : money(s.recovered_cents), s.counts.recovered == null ? 'after the first run' : rsPl(s.counts.recovered, 'item'), 'returned')}
       ${rsTile('Lost to deadlines', s.lost_cents == null ? '–' : money(s.lost_cents), s.counts.lost == null ? 'after the first run' : rsPl(s.counts.lost, 'item') + ' expired in Work now', 'lost')}
-      ${rsTile('At risk in 14 days', money(s.at_risk_cents), rsPl(s.counts.at_risk, 'item') + ' in Work now', 'at_risk')}
+      ${rsTile('At risk in 14 days', money(s.at_risk_cents), rsPl(s.counts.at_risk, 'item') + ' in Work now' + (s.at_risk_expected_cents != null ? `; about ${money(s.at_risk_expected_cents)} likely to come back if worked` : ''), 'at_risk', '', s.at_risk_expected_cents != null ? RS_BASIS.at_risk + '. Likely: ' + ((s.basis && s.basis.at_risk_expected) || '') : '')}
       ${rsTile('Given up without a decision', s.given_up_cents == null ? '–' : money(s.given_up_cents), (s.counts.given_up == null ? '' : rsPl(s.counts.given_up, 'item') + '. ') + (s.given_up_source === 'selfcheck' ? 'From the self-check.' : 'Worked out here.'), 'given_up')}
     </div>
     ${w.length ? `<div class="scroll"><table><thead><tr><th>Week of</th><th class="num">Recovered</th><th class="num">Lost</th><th class="num">At risk</th><th class="num">Given up</th></tr></thead><tbody>

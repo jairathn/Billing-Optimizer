@@ -1241,3 +1241,51 @@ def test_a_crash_between_the_ledger_and_the_store_is_repaired_on_the_next_cycle(
     assert one(c, "SELECT source_name FROM ema_sources WHERE sha256=?", fid) == ("report:prod.csv",)
     assert er.claim_url_template(c) == F.CLAIM_PREFIX + "{claim}"
     lg.close()
+
+
+# ------------------------------------------------------------------------------- the A/R's billing notes (needs_D, SWEEP)
+def test_each_ar_billing_note_is_kept_as_what_it_says_never_its_words(store, tmp_path):
+    """Each A/R line's Last Billing Note is read as what it says was done (states.classify_note): its kinds, the newest
+    date it states and an "allow N days", stored as ema_ar.note_kind, note_date and note_wait. A date written without a
+    year is resolved on the file's own as_of (the newest service or aging date), not on the day the file is read: a file
+    read weeks after it was pulled keeps the dates its notes meant. The note's words are never stored or served."""
+    notes = {
+        1: "Test note: appeal sent 11/3/2026 to the payer, allow 45 days for a decision",
+        2: "Test note: called payer 11/15, claim resubmitted",       # after the file's as_of: last year's 11/15
+        3: "Test note: decided not to appeal this fixture claim",
+    }
+    rows = [F.ar_row(claim=F.claim_id(i), link=F.link_no(i), note=notes.get(i), aging=D(2026, 11, 10), svc=D(2026, 10, 1))
+            for i in (1, 2, 3, 4)]
+    p = put(tmp_path, "AR 2026.xlsx", F.ar_xlsx(rows))
+    res = er.ingest_file(store, p, via="mirror", log=lambda *a: None)
+    assert res["status"] == "current" and res["as_of"] == "2026-11-10"
+    got = {r[0]: r[1:] for r in store.conn.execute("SELECT claim_id, note_kind, note_date, note_wait FROM ema_ar")}
+    assert "appeal" in got[F.claim_id(1)][0].split(",") and got[F.claim_id(1)][1:] == ("2026-11-03", 45)
+    assert set(got[F.claim_id(2)][0].split(",")) >= {"call", "resubmitted"} and got[F.claim_id(2)][1:] == ("2025-11-15", None)
+    assert "no_appeal" in got[F.claim_id(3)][0].split(",") and "appeal" not in got[F.claim_id(3)][0].split(",")
+    assert got[F.claim_id(4)] == (None, None, None)
+    # never the words: no text column of the table holds any part of a note
+    texts = [v for r in store.conn.execute("SELECT * FROM ema_ar") for v in r if isinstance(v, str)]
+    assert not any(w in t for t in texts for w in ("Test note", "decided", "allow 45"))
+    # the same export saved again is still 'already' (what a note says is not part of the snapshot's content id)
+    again = er.ingest_file(store, put(tmp_path, "AR 2026 again.xlsx", F.ar_xlsx(rows, created=dt.datetime(2026, 11, 21, 9))),
+                           via="mirror", log=lambda *a: None)
+    assert again["status"] == "already"
+    # the dashboard's copy serves the three (no key, no words)
+    serving = dict((t, c) for t, c, _w in er.serving_tables(store.conn))
+    assert {"note_kind", "note_date", "note_wait"} <= set(serving["ema_ar"].split(","))
+
+
+def test_an_ar_file_read_by_a_build_without_note_columns_gets_them_and_keeps_its_rows(tmp_path):
+    """A store made before the note columns existed: ensure_schema adds them (rows read before stay empty until the next
+    A/R pull, which fills them), and nothing else changes."""
+    c = sqlite3.connect(str(tmp_path / "old.sqlite"))
+    c.execute("CREATE TABLE ema_ar (file_id TEXT, row_no INTEGER, as_of TEXT, claim_id TEXT, has_note INTEGER, "
+              "PRIMARY KEY (file_id, row_no))")
+    c.execute("INSERT INTO ema_ar (file_id, row_no, as_of, claim_id, has_note) VALUES ('f', 1, '2026-11-10', 'X', 1)")
+    c.commit()
+    er.ensure_schema(c)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(ema_ar)")}
+    assert {"note_kind", "note_date", "note_wait"} <= cols
+    assert tuple(c.execute("SELECT claim_id, has_note, note_kind FROM ema_ar").fetchone()) == ("X", 1, None)
+    c.close()

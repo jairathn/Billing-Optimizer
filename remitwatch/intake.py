@@ -637,6 +637,133 @@ def _finish_orphans(store, data_dir: str, *, ledger, log, out: dict) -> None:
         out["read"] += 1
 
 
+# ------------------------------------------------------------------------------------------------- done/ retention
+DONE_KEEP_DAYS = 180            # a read upload's kept copy and its sidecar are removed this long after they arrived...
+KEEP_STATUSES = ("held", "waiting", "reread", "current", "partly_replaced")      # ... never while its file is one of these
+
+
+def _days_since(iso: Any, now: float) -> float | None:
+    try:
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (now - t.timestamp()) / 86400
+
+
+def _kept_copies(conn) -> tuple[set, set]:
+    """What retention never removes: the file ids and kept-copy paths (server 'path', serverless 'state_path') of every
+    report the catalog holds as held, waiting, to be read again or still live, and of the newest file of each report."""
+    ids: set = set()
+    paths: set = set()
+    try:
+        rows = conn.execute("SELECT file_id, report, status, received_at, origin FROM ema_report_files").fetchall()
+    except Exception:       # noqa: BLE001  (no catalog yet: nothing is a report's copy)
+        return ids, paths
+    newest: dict = {}
+    for fid, report, status, received, origin in rows:
+        try:
+            o = json.loads(origin) if origin else {}
+        except ValueError:
+            o = {}
+        where = o.get("path") or o.get("state_path")
+        if status in KEEP_STATUSES:
+            ids.add(fid)
+            if where:
+                paths.add(where)
+        if where and report and status not in ("refused", "discarded") and str(received or "") >= str((newest.get(report) or ("",))[0]):
+            newest[report] = (str(received or ""), fid, where)
+    for _r, fid, where in newest.values():
+        ids.add(fid)
+        paths.add(where)
+    return ids, paths
+
+
+def retain_done_server(store, data_dir: str | None = None, *, now: float | None = None, log=print) -> dict:
+    """A server's read uploads (<data_dir>/incoming/done/: each data file, its sidecar with the result, and the folder a
+    file that is no report was read from) are removed DONE_KEEP_DAYS after they arrived, never the copy of a report held,
+    waiting or still live, nor the newest file of each report. The catalog row and the files row stay (the Upload page
+    then says when it was read). Returns counts."""
+    data_dir = data_dir or os.path.dirname(os.path.abspath(store.db_path))
+    folder = done_dir(data_dir)
+    now = now or time.time()
+    out = {"removed": 0, "kept": 0}
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    ids, paths = _kept_copies(store.conn)
+    for f in names:
+        if not f.endswith(".json") or f.startswith("."):
+            continue
+        pair = f[:-5]
+        data = os.path.join(folder, pair)
+        try:
+            with open(os.path.join(folder, f), "rb") as fh:
+                sc = read_sidecar(fh.read()) or {}
+        except OSError:
+            sc = {}
+        age = _days_since(sc.get("received_at"), now)
+        if age is None:
+            try:
+                age = (now - os.path.getmtime(os.path.join(folder, f))) / 86400
+            except OSError:
+                continue
+        if age <= DONE_KEEP_DAYS:
+            continue
+        if sc.get("sha256") in ids or data in paths or os.path.abspath(data) in paths:
+            out["kept"] += 1
+            continue
+        for p in (data, os.path.join(folder, f)):
+            _remove_quietly(p)
+        shutil.rmtree(os.path.join(folder, "read-" + (upload_id_of(pair) or "x")), ignore_errors=True)
+        out["removed"] += 1
+    if out["removed"]:
+        log(f"  {out['removed']} read upload(s) older than {DONE_KEEP_DAYS} days removed from the intake folder")
+    return out
+
+
+def retain_done_state(store, state, *, now: float | None = None, log=print) -> dict:
+    """The same on a serverless host, for the state folder's intake/done/ (ages from the folder's own times: when each
+    pair was moved there, that is, read)."""
+    now = now or time.time()
+    out = {"removed": 0, "kept": 0}
+    try:
+        listing = state.list(f"{STATE_INTAKE}/{DONE}")
+    except Exception:       # noqa: BLE001  (no done folder yet)
+        return out
+    ids, paths = _kept_copies(store.conn)
+    prefix = f"{STATE_INTAKE}/{DONE}/"
+    by_name = {m["name"]: m for m in listing if str(m.get("name") or "").startswith(prefix)}
+    gone: list[str] = []
+    for name, m in by_name.items():
+        rest = name[len(prefix):]
+        if not rest or "/" in rest or rest.endswith(".json") or rest.startswith("."):
+            continue
+        age = _days_since(m.get("modified"), now)
+        if age is None or age <= DONE_KEEP_DAYS:
+            continue
+        if name in paths:
+            out["kept"] += 1
+            continue
+        gone += [name] + ([name + ".json"] if name + ".json" in by_name else [])
+        out["removed"] += 1
+    for name, m in by_name.items():          # a sidecar whose data file went before (an older clean-up of a copy)
+        if name.endswith(".json") and name[:-5] not in by_name and name not in gone:
+            age = _days_since(m.get("modified"), now)
+            if age is not None and age > DONE_KEEP_DAYS and name[:-5] not in paths:
+                gone.append(name)
+    if gone:
+        try:
+            state.delete_many(gone)
+        except Exception as exc:       # noqa: BLE001  (tried again by a later run)
+            log(f"  intake clean-up could not finish ({type(exc).__name__})")
+            return dict(out, error=type(exc).__name__)
+        log(f"  {out['removed']} read upload(s) older than {DONE_KEEP_DAYS} days removed from the intake folder")
+    return out
+
+
 def kick(data_dir: str | None = None) -> bool:
     """An upload has finished on a server: ask for a cycle soon (it reads the intake folder first, under the cycle's
     lock). The scheduler in the web process runs it after its short wait, or after the cycle already going; without a

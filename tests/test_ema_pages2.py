@@ -220,13 +220,14 @@ def _site(monkeypatch, db, *, serverless=False, tmp=None):
     monkeypatch.setattr(api, "_FAILED", {})
     monkeypatch.setattr(api, "DB_PATH", db)
     if serverless:
+        # the copy is built in this test's own folder, never in the shared one another process may be building in
+        monkeypatch.setenv("REMITWATCH_TMP", str(tmp / "scratch"))
         st = LocalState(str(tmp / "state"))
         conn = sqlite3.connect(db)
         try:
             cloud.save_serving(st, conn)
         finally:
             conn.close()
-        monkeypatch.setenv("REMITWATCH_TMP", str(tmp / "scratch"))
         monkeypatch.setenv("REMITWATCH_STATE_DIR", str(tmp / "state"))
         monkeypatch.setenv("REMITWATCH_MODE", "serverless")
         monkeypatch.setattr(cloud, "SERVING_COPY", cloud.ServingCopy())

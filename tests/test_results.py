@@ -625,6 +625,34 @@ def test_the_scoreboard_shows_the_self_checks_given_up_figure_when_the_run_store
     assert (sb["given_up_cents"], sb["given_up_source"]) == (5000, "selfcheck")
 
 
+def test_the_self_checks_ranking_columns_when_the_run_writes_them_show_what_at_risk_items_are_likely_worth(store):
+    fid, _ = denial(store, 1, appeal_deadline="2026-07-10")
+    denial(store, 2, appeal_deadline="2026-07-12")
+    run(store)
+    have = results._cols(store.conn, "findings")
+    if "expected_value_cents" not in have:      # before the hook-in agent adds them, nothing is shown and nothing breaks
+        assert "expected_cents" not in results.live_figures(store.conn, TODAY)["at_risk"]
+        assert "at_risk_expected_cents" not in results.scoreboard(store.conn, TODAY)
+        assert results.list_rows(store.conn, "at_risk", today=TODAY)["items"][0]["expected_value_cents"] is None
+    for col, kind in (("expected_value_cents", "INTEGER"), ("recovery_rate", "REAL"), ("recovery_basis", "TEXT")):
+        if col not in have:
+            store.conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {kind}")
+    store.conn.execute("UPDATE findings SET expected_value_cents=3150, recovery_rate=0.35, recovery_basis='payer group x code x reason, 40 cases' "
+                       "WHERE finding_id=?", (fid,))
+    store.conn.commit()
+    live = results.live_figures(store.conn, TODAY)
+    assert live["at_risk"]["n"] == 2 and live["at_risk"]["cents"] == 18000
+    assert (live["at_risk"]["expected_cents"], live["at_risk"]["expected_n"]) == (3150, 1)
+    sb = results.scoreboard(store.conn, TODAY)
+    assert (sb["at_risk_cents"], sb["at_risk_expected_cents"], sb["counts"]["at_risk_expected"]) == (18000, 3150, 1)
+    assert "recovery rate" in sb["basis"]["at_risk_expected"]
+    rows = {r["finding_id"]: r for r in results.list_rows(store.conn, "at_risk", today=TODAY)["items"]}
+    assert rows[fid]["expected_value_cents"] == 3150 and rows[fid]["recovery_basis"].endswith("40 cases")
+    assert rows["F2"]["expected_value_cents"] is None
+    text = results.list_csv(store.conn, "at_risk", today=TODAY)
+    assert "expected_value_cents" in text.splitlines()[0] and ",3150," in text
+
+
 # ================================================================================================ work done and outcomes
 def test_work_done_and_the_open_book(store):
     w1, _ = denial(store, 1)

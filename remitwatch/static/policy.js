@@ -28,7 +28,7 @@ async function policyTab(v){
   const pats = t.patterns || [], tot = t.totals || {};
   v.innerHTML = `<div class="page-head"><h1 class="page-title">Write-off policy</h1><span class="muted small">Denials written off in EMA, by its posting rules or later by a person, grouped by payer, code and reason. Pursue keeps them in the work queue. Accept takes them off at the next run; they stay findable.</span></div>
     ${pats.length ? `<div class="panel" style="margin-top:0">
-      <div class="wl-bar"><span class="small"><b>${esc(pl(pats.length, 'pattern'))}</b> · ${money(tot.cents)} written off · <b>${money(tot.appealable_cents)}</b> still inside a window (${esc(pl(tot.appealable, 'item'))}) · ${esc(pl(tot.accepted||0, 'pattern'))} accepted</span>
+      <div class="wl-bar"><span class="small"><b>${esc(pl(pats.length, 'pattern'))}</b> · ${money(tot.cents)} in all · <b>${money(tot.appealable_cents)}</b> still inside a window (${esc(pl(tot.appealable, 'item'))}) · ${esc(pl(tot.accepted||0, 'pattern'))} accepted</span>
         <input id="polFind" type="search" maxlength="80" placeholder="Filter by payer, code or reason" aria-label="Filter the patterns by payer, code or reason" style="min-width:14rem"></div>
       ${polNarrow() ? `<div id="polTable">${pats.map((p,i)=>polCard(p, i)).join('')}</div>`
         : `<div class="scroll"><table class="small" id="polTable"><thead><tr><th>Payer</th><th>Code</th><th>Reason</th><th class="num">Items</th><th class="num">Dollars</th><th class="num">Still appealable</th><th class="num">By EMA's rule</th><th class="num">Paid later before</th><th>Decision</th></tr></thead>

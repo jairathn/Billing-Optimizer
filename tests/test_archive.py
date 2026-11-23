@@ -318,6 +318,16 @@ def test_a_bill_another_items_proof_names_stays_until_the_item_goes(tmp_path):
     freeze_all(store)
     p = archive.plan(store.conn, today=TODAY)
     assert [b for b, *_ in p["bills"]] == ["KC01AAAAA"] and p["held"] == {"named by another item": 2}
+    # an item of a bill that leaves names nothing: the bill it names leaves in the same run, and a second run has nothing
+    put_claim(store, "KE01AAAAA", "2021-05-01")
+    put_claim(store, "KF01AAAAA", "2021-05-01")
+    put_item(store, "old-dup", bill="KE01AAAAA", work_state="done", status="resolved")
+    store.conn.execute("UPDATE findings SET auto_note='Already paid under claim KF01AAAAAC017' WHERE finding_id='old-dup'")
+    store.conn.commit()
+    sink = sink_of(tmp_path, "file")
+    res = archive.run(store.conn, sink=sink, today=TODAY)
+    assert res["bills"] == 3 and res["held"] == {"named by another item": 2}        # KC01, KE01 and KF01 leave
+    assert archive.run(store.conn, sink=sink, today=TODAY)["eligible"] == 0
     store.close()
 
 
@@ -505,15 +515,36 @@ def test_a_person_changing_an_item_while_the_run_works_keeps_the_bill(tmp_path, 
 
     def meanwhile(c, bills):
         out = real(c, bills)
-        c.execute("UPDATE findings SET status='in_progress', notes='calling the payer' WHERE finding_id=?", (fid,))
+        # a note on the settled item (it stays settled: no open status that would keep the bill on its own)
+        c.execute("UPDATE findings SET notes='the payer agreed to look again' WHERE finding_id=?", (fid,))
         c.commit()
         return out
     monkeypatch.setattr(archive, "_build_records", meanwhile)
     res = archive.run(conn, sink=sink_of(tmp_path, "file"), today=TODAY)
     assert res["changed_meanwhile"] == 1 and res["bills"] == 8
-    assert conn.execute("SELECT status, notes FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "in_progress"
+    assert conn.execute("SELECT notes FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "the payer agreed to look again"
     assert conn.execute("SELECT COUNT(*) FROM claims WHERE patient_control_number='CB0000050C017'").fetchone()[0] == 1
     assert conn.execute("SELECT 1 FROM archive_bills WHERE bill='CB0000050'").fetchone() is None
+    store.close()
+
+
+def test_a_file_whose_every_bill_a_person_changed_meanwhile_is_written_but_not_listed(tmp_path, frozen_hook, monkeypatch):
+    store = world(tmp_path, "file")
+    detect(store)
+    conn = store.conn
+    real = archive._build_records
+
+    def meanwhile(c, bills):
+        out = real(c, bills)
+        c.execute("UPDATE findings SET status='in_progress' WHERE patient_control_number='CB0000050C017'")
+        c.commit()
+        return out
+    monkeypatch.setattr(archive, "_build_records", meanwhile)
+    sink = sink_of(tmp_path, "file")
+    res = archive.run(conn, sink=sink, today=TODAY, batch_bills=1)
+    assert res["bills"] == 8 and res["changed_meanwhile"] == 1 and len(sink.list("bills")) == 9
+    assert conn.execute("SELECT COUNT(*) FROM archive_files").fetchone()[0] == 8
+    assert archive.summary(conn)["files"] == 8
     store.close()
 
 
@@ -784,7 +815,7 @@ def test_a_run_over_80_percent_of_its_budget_tightens_the_horizon_down_to_the_fl
     # the last run's memory, as recorded, is what the next run tightens on
     assert archive.budget_state(conn) is None
     archive.record_run(conn, run_id="a", measured={"peak_mb": 1450, "budget_mb": 1600, "share": 0.906, "mode": "serverless"})
-    archive.record_run(conn, run_id="b", measured={"mode": "serverless"})            # a run that measured nothing
+    archive.record_run(conn, run_id="b", measured={"budget_mb": 1600, "mode": "serverless"})   # a run with no peak measured
     assert archive.budget_state(conn) == {"peak_mb": 1450, "budget_mb": 1600, "share": 0.906}
     store.close()
 
@@ -850,7 +881,7 @@ def _correlated_scans(plan: list) -> list[str]:
     subquery."""
     node = {r[0]: (r[1], r[3]) for r in plan}
     bad = []
-    for _nid, (parent, detail) in node.items():
+    for parent, detail in node.values():
         if not detail.startswith("SCAN ") or "AUTOMATIC" in detail or "CONSTANT" in detail:
             continue
         p = parent

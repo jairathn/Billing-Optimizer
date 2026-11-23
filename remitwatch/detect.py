@@ -215,6 +215,7 @@ EMA_NATIVE_SIGNALS = ("NOT_SENT", "REMIT_NOT_POSTED", "EMA_DENIAL_AS_CONTRACTUAL
                       "CREDIT_BALANCE")
 EMA_WIRING_KEY = "ema:wiring"               # meta: what the run did with EMA's reports (counts by step, failed steps)
 POLICY_SUMMARY_KEY = "ema:policy_summary"   # meta: the write-off pattern table for the owner's policy (O11), from the run
+PAYMENT_OUTCOMES = ("paid_after", "paid_after_other")   # the line outcomes an EMA closure (C6, rebilled) rests on
 
 
 def _usd(cents) -> str:
@@ -1352,13 +1353,15 @@ class Detector:
 
     def _mark_paid(self, f: dict, paid_date: str | None, paid: int, note: str, detail: dict, used: tuple | None = None) -> None:
         """Close a finding the way a later payment on the same bill does, after the line rules have run. `used` names the
-        payment (one payment counts as recovered on one finding only); by default its date, trace and claim."""
+        payment (one payment counts as recovered on one finding only); by default its date, trace and claim, and the
+        finding's code and date of service (each line of a claim is paid on its own)."""
         short = f.get("shortfall_cents")
         ev = json.loads(f["evidence"]) if f.get("evidence") else {}
         if not short or short <= 0:
             f["expected_cents"] = f["shortfall_cents"] = short = paid
             ev["basis"] = "amount paid later (no baseline for this code)"
-        used = used or (paid_date, detail.get("trace"), detail.get("claim"))
+        # one payment of one line: a later claim paying two of the claim's lines brings two recoveries, never one
+        used = used or (paid_date, detail.get("trace"), detail.get("claim"), f.get("procedure_code"), f.get("service_date"))
         f["recovered_cents"], f["recovered_date"] = (0 if used in self.used_payments else min(paid, short)), paid_date
         if used in self.used_payments:
             detail = dict(detail, recovery_counted_elsewhere=True)
@@ -1718,7 +1721,8 @@ class Detector:
                 expected = shortfall = resolved_by[2] or 0
                 evidence = dict(evidence, basis="amount paid on the later remittance (no baseline for this code)")
             recovered = min(resolved_by[2] or 0, shortfall)
-            used = (resolved_by[0], resolved_by[1], resolved_by[4] if len(resolved_by) > 4 else None)
+            # one payment of one line (its code and date): a later claim paying two lines is two recoveries
+            used = (resolved_by[0], resolved_by[1], resolved_by[4] if len(resolved_by) > 4 else None, code, dos)
             if used in self.used_payments:
                 recovered = 0           # this payment is already counted as recovered on another finding
                 evidence = dict(evidence, recovery_counted_elsewhere=True)
@@ -2721,6 +2725,9 @@ class Detector:
             f["written_off_cents"] = min(expected, owed) if expected else owed
             f["written_off_on"] = (k["status_at"][0] or "")[:10] or None
         hints = []
+        if cd.get("status_context"):
+            hints.append(cd["status_context"] + ", but no payment, $0 answer or payer's reason is posted on it: check the payer's portal "
+                         "before you send it again")
         if unsent:
             hints.append("EMA shows it waiting in its print batch, with no date it was sent: print and mail it, or send it electronically")
         if cd.get("bill_answered"):
@@ -2887,12 +2894,16 @@ class Detector:
             if st and str(st.get("as_of") or "")[:10] > export_at:
                 cls = st.get("class")
                 if cls in ("denied", "paid", "settled", "void", "answered"):
-                    self.ema_counts["export_newer_status"] += 1
-                    continue
-                if cls == "not_sent":
+                    # a status alone never answers a claim (amendment E6): the item stays, with the status as context; a
+                    # denial EMA posted answers it through C5's item for the claim (run_ema_denials drops this one then)
+                    self.ema_counts["export_newer_status_kept"] += 1
+                    cd = dict(cd, status_context=(f"EMA's {'A/R' if st.get('source') == 'ar' else 'Production'} report calls the "
+                                                  f"claim {st.get('status') or cls} ({str(st.get('as_of') or '')[:10]})"),
+                              status_class=cls)
+                elif cls == "not_sent":
                     self.ema_counts["export_not_sent"] += 1
                     continue                    # never left EMA after all: listed by ema_checks.not_sent
-                if cls == "rejected" and not cd["rejected"]:
+                elif cls == "rejected" and not cd["rejected"]:
                     cd = dict(cd, rejected=True, status=st.get("status") or cd["status"])
                 elif cls == "gave_up":
                     cd = dict(cd, gave_up=True, status=st.get("status") or cd["status"])
@@ -2919,7 +2930,8 @@ class Detector:
         if f is None:
             return None
         f["appeal_deadline"], f["deadline_basis"] = p.get("appeal_deadline"), p.get("deadline_basis")
-        f["legal_deadline"] = None
+        legal_p = p.get("legal_deadline")           # the payer's own limit a check worked out beside its safe date
+        f["legal_deadline"] = legal_p if (legal_p and f["appeal_deadline"] and legal_p > f["appeal_deadline"]) else None
         if p["signal"] == "EMA_DENIED" and f["appeal_deadline"]:
             rule = appeal_rule(claim.get("payer_group"), claim.get("payer_kind"))
             legal = legal_deadline(_add_days(f["appeal_deadline"], -rule["days"]), rule)
@@ -2966,8 +2978,18 @@ class Detector:
             return
         from . import ema_checks as ec
         self.__dict__.pop("_f835", None)        # the run's 835 items as they stand now
-        self._emit_protos("ema_denials", self._ema_step("ema_denials", ec.ema_denials, self.conn, today=self.today, rate=self._rate,
-                                                        ratio=self._ratio, has_835_finding=self._has_835_finding))
+        protos = self._ema_step("ema_denials", ec.ema_denials, self.conn, today=self.today, rate=self._rate, ratio=self._ratio,
+                                has_835_finding=self._has_835_finding) or []
+        self._emit_protos("ema_denials", protos)
+        # a claim listed as unanswered whose denial EMA posted: C5's item is the claim's answer (it inherits the chase's work
+        # through its heir keys), so the chase is not listed beside it
+        for p in protos:
+            for h in p.get("heir_keys") or []:
+                fid = _fid(*h)
+                f = self.findings.get(fid)
+                if f is not None and f.get("signal") == "NO_ANSWER" and _fid(p.get("id_signal") or p["signal"], *p["key_parts"]) in self.findings:
+                    del self.findings[fid]
+                    self.ema_counts["export_answered_by_ema_denial"] += 1
 
     def run_ema_contractual(self) -> None:
         """Step 7 (C7): a payer's denials EMA posts as contractual adjustments (outside the money totals)."""
@@ -3257,6 +3279,7 @@ class Detector:
             return
         ema = self._ema_lines_for(keys)
         groups: dict[str, tuple] = {}
+        boxes = (self._ema_step("freshness", ec.freshness, self.conn, self.today) or {}).get("boxes") or []
         for key in keys:
             e = ema.get(key)
             l = cands[key]
@@ -3269,6 +3292,11 @@ class Detector:
                 # keep the line, and EMA then shows any answer
                 carrier = self.crossover_carrier(l["claim_key"]) if crossed else None
                 if not carrier:
+                    continue
+                if not ec._svc_covered(boxes, key[1]):
+                    # EMA's Production report does not reach this date of service: nothing could ever show the carrier's
+                    # answer or the patient's payment, so it is counted, not listed
+                    self.ema_counts["snb_crossover_not_covered"] += 1
                     continue
                 sec, owed, bal, pat, link, wrote_off = carrier, pr, None, None, None, False
             else:
@@ -3343,26 +3371,66 @@ class Detector:
         was owed, else the patient), how much, the lines. A Medicare credit is due back within 60 days of being found."""
         rows = self.conn.execute("""SELECT link, MIN(svc), SUM(COALESCE(balance,0)), SUM(COALESCE(charges,0)), SUM(COALESCE(ins_paid,0)),
                                            SUM(COALESCE(pat_paid_joined,0)), MAX(payer_group), MAX(payer_kind), MAX(primary_payer),
-                                           MAX(claim_id), MAX(bill), MAX(as_of), MIN(COALESCE(balance,0)), MAX(last_posted)
+                                           MAX(claim_id), MAX(bill), MAX(as_of), MIN(COALESCE(balance,0)), MAX(last_posted),
+                                           SUM(COALESCE(contractual,0)), SUM(COALESCE(noncontractual,0)), MAX(pat_join = 'several')
                                     FROM ema_lines WHERE (COALESCE(flags,0) & 17) = 0
                                     GROUP BY link HAVING SUM(COALESCE(balance,0)) < -100 AND MIN(COALESCE(balance,0)) < -100""").fetchall()
-        for lk, svc, bal, chg, ins, pat, grp, kind, payer, cid, bill, as_of, _mn, last in rows:
+        # the patient's share the payers' 835s set on these claims' lines (PR 1, 2, 3), where an 835 answered them
+        from .ema_reports import bill_of_claim
+        want: dict[tuple, int] = {}
+        line_keys: dict[int, list] = defaultdict(list)
+        for i in range(0, len(rows), 400):
+            part = [r[0] for r in rows[i:i + 400]]
+            for lk_, b_, s_, c_ in self.conn.execute(f"SELECT link, bill, svc, cpt FROM ema_lines WHERE link IN ({','.join('?' * len(part))})",
+                                                     part):
+                if b_ and s_ and c_:
+                    line_keys[lk_].append((b_, s_, c_))
+                    want[(b_, s_, c_)] = -1
+        if want:
+            for l in self.lines:
+                if l.get("claim_status_code") not in ("1", "19"):
+                    continue
+                k = (bill_of_claim(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code"))
+                if k in want:
+                    pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
+                    want[k] = max(want[k], pr)
+        for lk, svc, bal, chg, ins, pat, grp, kind, payer, cid, bill, as_of, _mn, last, contr, nonc, shared in rows:
             credit = -bal
+            shares = [want.get(k, -1) for k in line_keys.get(lk, [])]
+            share = sum(shares) if shares and all(x >= 0 for x in shares) else 0       # known only where an 835 set every line's
             lines = [list(r) for r in self.conn.execute("""SELECT cpt, svc, COALESCE(balance,0), COALESCE(ins_paid,0) FROM ema_lines
                                                             WHERE link=? AND COALESCE(balance,0) < 0 ORDER BY svc, cpt""", (lk,))]
             pays = self.conn.execute("""SELECT payer_group, payer, SUM(COALESCE(ins_paid,0)), MAX(posted), COUNT(DISTINCT check_no)
                                         FROM ema_line_payments WHERE link=? AND COALESCE(ins_paid,0) > 0 GROUP BY payer_group, payer
                                         ORDER BY 3 DESC""", (lk,)).fetchall()
-            insurance = ins > 0 and ins >= credit
-            who = (pays[0][0] or pays[0][1]) if (insurance and pays) else "the patient"
+            # who paid more than their part: insurance owed at most what was left after the write-downs (the charge less the
+            # contractual and other adjustments; less still where the patient owed a share), so insurance money above that
+            # is its overpayment and the rest of the credit is the patient's. The patient's share is not on EMA's lines, so
+            # the insurer's part is a lower bound: the payer is named only for it, and Medicare's 60 days only for it.
+            ins_over = min(credit, max(0, ins - max(0, chg - contr - nonc - share)))
+            pat_over = credit - ins_over
+            insurance = ins_over > 100
+            payer_name = (pays[0][0] or pays[0][1]) if pays else (grp or "insurance")
+            if insurance and pat_over <= 100:
+                who = payer_name
+            elif insurance:
+                who = f"{payer_name} ({_usd(ins_over)}) and the patient ({_usd(pat_over)})"
+            elif shared or not pat:
+                who = "check who overpaid"          # the patient's money is shared by several claims, or nothing shows who
+            else:
+                who = "the patient"
             age = _days_between(last, as_of) if last and as_of else None
             medicare = kind == "medicare" and insurance
-            title = (f"Credit of {_usd(credit)}: {who} paid more than this claim was owed"
+            title = ((f"Credit of {_usd(credit)}: check who overpaid this claim" if who == "check who overpaid" else
+                      f"Credit of {_usd(credit)}: {who} paid more than this claim was owed")
                      + (f" ({age} days since the last posting)" if age is not None else ""))
-            claim = {"patient_control_number": cid or bill, "payer_name": who, "payer_group": grp if insurance else "Patient",
-                     "payer_kind": kind if insurance else "other", "service_date": svc, "year": (svc or "")[:4] or None,
-                     "procedure_code": max(lines, key=lambda x: -x[2])[0] if lines else None, "charge_cents": chg or None}
+            claim = {"patient_control_number": cid or bill, "payer_name": payer_name if insurance else who,
+                     "payer_group": grp if insurance else "Patient", "payer_kind": kind if insurance else "other", "service_date": svc,
+                     "year": (svc or "")[:4] or None, "procedure_code": max(lines, key=lambda x: -x[2])[0] if lines else None,
+                     "charge_cents": chg or None}
             ev = {"credit_cents": credit, "lines": lines, "overpaid_by": who, "insurance_paid_cents": ins, "patient_paid_cents": pat,
+                  "insurance_over_cents": ins_over, "patient_over_cents": pat_over,
+                  "owed_after_write_downs_cents": max(0, chg - contr - nonc), "patient_share_835_cents": share or None,
                   "payers": [[p[0] or p[1], p[2], p[3], p[4]] for p in pays[:5]], "ema_as_of": as_of, "ema_link": lk,
                   "days_since_last_posting": age,
                   "next_step": ("A refund or a recoupment is the owner's decision (with the compliance lead): check the payments, "
@@ -3374,9 +3442,9 @@ class Detector:
                 continue
             f["ema_link"], f["source"] = lk, "ema"
             if medicare:
-                f["appeal_deadline"] = _add_days(as_of or self.today, 60)
-                f["deadline_basis"] = ("Medicare expects an overpayment back within 60 days of finding it (42 CFR 401.305); counted "
-                                       "from the report that shows it")
+                f["appeal_deadline"], f["legal_deadline"] = _add_days(as_of or self.today, 60), None
+                f["deadline_basis"] = (f"Medicare expects its overpayment ({_usd(ins_over)}) back within 60 days of finding it "
+                                       "(42 CFR 401.305); counted from the report that shows it")
             self.ema_counts["CREDIT_BALANCE"] += 1
 
     # ------------------------------------------------------------------ hooks for the archive-only rules (unit B2)
@@ -3437,8 +3505,17 @@ class Detector:
             return
         # each payer group's usual answer time, measured once per run (meta states:response_days; the copy reads it)
         self._ema_step("response_days", states.save_response_days, self.conn)
-        got = self._ema_step("states", states.states_of, self.conn, items, outcomes=self.ema_outcomes if self.ema_on else {},
-                             today=self.today) or {}
+        outcomes = dict(self.ema_outcomes) if self.ema_on else {}
+        reopened = getattr(self, "_overridden", set()) or set()
+        for r in items:
+            o = outcomes.get(r["finding_id"])
+            if o and r["finding_id"] in reopened and r.get("status") != "resolved" and o.get("outcome") in PAYMENT_OUTCOMES:
+                # a person moved it off the closure EMA's payment made ("that payment was for another visit"): the state is
+                # judged on the rest of the line's facts, and the payment they rejected is passed on as a conflict to show
+                outcomes[r["finding_id"]] = dict(o, outcome="open", outcome_on=None, person_reopened=True,
+                                                 rejected_payment=o.get("first_paid_after"), paid_after_same=0, paid_after_other=0)
+                self.ema_counts["state_person_reopened"] += 1
+        got = self._ema_step("states", states.states_of, self.conn, items, outcomes=outcomes, today=self.today) or {}
         for r in items:
             st = got.get(r["finding_id"])
             if not st:
@@ -3883,7 +3960,9 @@ class Detector:
                 continue
             prev["stale"] = 0 if (prev.get("signal") in EMA_CLAIM_SIGNALS and prev["status"] == "resolved") else 1
             out_rows.append(prev)
-        # every item's state, decided in one place (remitwatch.states) on the status just settled
+        # every item's state, decided in one place (remitwatch.states) on the status just settled; an item a person set
+        # back to work after an automatic closure is judged without the payment that closure rested on (they rejected it)
+        self._overridden = overridden
         self._set_states(out_rows)
         rows = [tuple(r.get(k) for k in cols) for r in out_rows]
         if self.ema_on:

@@ -41,7 +41,8 @@ STATES = ("work_now", "waiting", "done", "accepted", "expired", "cant_check")
 LABELS = {"work_now": "Work now", "waiting": "Waiting", "done": "Done", "accepted": "Accepted", "expired": "Expired",
           "cant_check": "Can't be checked"}
 
-EXPIRE_GRACE_DAYS = 30          # past every window by this many days: expired
+EXPIRE_GRACE_DAYS = 0           # past every window: expired that day (orchestrator decision 1: no grace in the work queue)
+ARCHIVE_GRACE_DAYS = 30         # what unit E's archive waits after the last window before retiring an expired item
 DEFAULT_RESPONSE_DAYS = 45      # a payer group with fewer than MIN_ANSWERS answers measured
 MIN_ANSWERS = 20
 RESPONSE_YEARS = 2              # the answers measured: remittances of the two years before the newest one

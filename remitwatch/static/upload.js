@@ -449,13 +449,14 @@
   }
 
   // one file at a time, its bytes as the body: a large export shows how far it has got. The file's name (often the
-  // patient's, for a note) goes in a header where the server reads one, so it is never in an address a log keeps.
+  // patient's, for a note) always goes in a header, never in the address: an access log keeps addresses. (The server
+  // reads the header since this page has sent it; the page and the server ship together.)
   function send(file, findingId) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
-      const q = new URLSearchParams(info.name_header ? {} : {name: file.name}); if (findingId) q.set('finding_id', findingId);
+      const q = new URLSearchParams(); if (findingId) q.set('finding_id', findingId);
       x.open('POST', '/api/uploads' + (q.toString() ? '?' + q.toString() : ''));
-      if (info.name_header) x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+      x.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
       x.setRequestHeader('X-Requested-With', 'remitwatch');
       x.setRequestHeader('Content-Type', 'application/octet-stream');
       x.upload.onprogress = e => { if (e.lengthComputable && send.onprogress) send.onprogress(e.loaded / e.total); };
@@ -470,9 +471,20 @@
     matched: ['note matched', 'ok'], choose: ['pick its visit', 'warn'], unmatched: ['note not matched yet', 'warn'], zip: ['zip', ''], removed: ['taken back', ''],
     checking: ['checking', ''], hashing: ['checking', ''], sending: ['sending', ''], paused: ['paused', 'warn'], verifying: ['checking on the server', ''],
     waiting: ['to be read', 'warn'], applied: ['read', 'ok'], held: ['held', 'warn'], refused: ['not taken', 'no'], wrong: ['not this export', 'no'],
+    unread: ['not read yet', 'warn'], notread: ['not read', 'no'], stuck: ['upload not read', 'no'],
     receiving: ['unfinished', 'warn'], finished: ['received', 'ok'], stopped: ['not sent', 'no'], overdue: ['overdue', 'no'], fresh: ['up to date', 'ok']};
   const chip = s => { const c = CHIP[s] || [s, '']; return `<span class="chip ${c[1]}">${esc(c[0])}</span>`; };
   const linesHtml = ls => (ls || []).length ? `<ul>${ls.map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : '';
+  // What became of a file the cycle (or run) has looked at, from the server's 'applied': a report's catalog status, the
+  // hand-off's result word, or 'read'. Only a file RemitWatch read is green; one kept and not read yet is amber; one it
+  // did not read (refused, too large, none of its files, failed, discarded) is red. A word this page does not know is
+  // amber, never green.
+  const OUTCOME = {current: 'applied', partly_replaced: 'applied', replaced: 'applied', superseded: 'applied', applied: 'applied', read: 'applied',
+    already: 'already', held: 'held', waiting: 'unread', reread: 'unread',
+    not_read: 'notread', too_large: 'notread', failed: 'notread', refused: 'notread', discarded: 'notread'};
+  const outcomeChip = applied => OUTCOME[applied] || 'unread';
+  // the chip of an upload as the server describes it (a finish's answer, a status, a row of the recent list)
+  const uploadChip = u => u.state === 'finished' ? (u.applied ? outcomeChip(u.applied) : 'waiting') : u.state;
 
   // ----------------------------------------------------------------------------------- the checklist of exports
   function exportRow(e) {
@@ -794,8 +806,7 @@
   }
 
   function showResult(ui, r, warn) {
-    const st = r.state === 'finished' ? (r.applied ? (r.applied === 'held' ? 'held' : r.applied === 'refused' ? 'refused' : 'applied') : 'waiting')
-      : r.state === 'already' ? 'already' : r.state === 'refused' ? 'refused' : r.state;
+    const st = uploadChip(r);
     const lines = (r.lines || []).concat((r.checks || []).map(c => c.message)).concat(warn || []);
     ui.bar(1);
     ui.set(st, lines, '');
@@ -820,7 +831,7 @@
     const items = r.items || [];
     $('#recentPanel').hidden = !items.length;
     $('#recent').innerHTML = items.map(u => {
-      const st = u.state === 'finished' ? (u.applied ? (u.applied === 'held' ? 'held' : u.applied === 'refused' ? 'refused' : 'applied') : 'waiting') : u.state;
+      const st = uploadChip(u);
       return `<div class="card"><div class="name">${esc(u.name)} ${chip(st)} <span class="muted small" style="font-weight:400">${esc(when(u.created_at))}</span></div>
         ${linesHtml((u.lines || []).concat((u.checks || []).map(c => c.message)))}</div>`;
     }).join('');

@@ -55,7 +55,8 @@ STATUS = "status.json"
 LOCK = "lock.json"
 CURSOR = "cursor.json"
 SERVING_MARK = "serving.json"       # which version of the store the dashboard's copy was built from, and by which build
-SERVING_BUILD = "7"                 # bump when SERVING_TABLES changes: a copy made by another build is made again (7: EMA's reports)
+SERVING_BUILD = "8"                 # bump when SERVING_TABLES changes: a copy made by another build is made again (7: EMA's
+                                    # reports; 8: what the A/R's billing notes say, and the 835 claims of whole bills)
 MARKS = "notified.json"             # which alerts have been mailed, and when the last report went out
 ACTIONS = "actions"
 PACKETS = "packets"
@@ -541,6 +542,14 @@ class ProductionSlot:
                 ema_ledger.hold_slow_file(self.store, f)
             say(f"  EMA Production {name}: held after {ema_ledger.MAX_ATTEMPTS} runs that did not finish reading it")
             return dict(res, status="held", reason=ema_ledger.ATTEMPT_HOLD_REASON)
+        if er.stored_salt(conn) is None:
+            # The store's key salt is made now, and the store image saved with it before the ledger is keyed with it: a
+            # run that died after saving the ledger and before saving the store would otherwise leave a store with no
+            # salt, the next run would make another, and the ledger (keyed for the lost one) would be emptied and every
+            # Production file read again. Once per host: the A/R usually makes the salt first.
+            er.key_salt(conn)
+            save_raw(self.state, self.store)
+            say("  EMA: the store's key salt was made and saved before the posting ledger")
         for f in fids:
             h.note_attempt(f)               # in the state folder, before a byte of it is read
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (APPLY_PENDING, ",".join(fids)))
@@ -1075,6 +1084,21 @@ def has_new_files(state, client) -> bool:
 # --------------------------------------------------------------------------- the dashboard's copy
 
 DETAIL = "claim_key IN (SELECT claim_key FROM main.findings WHERE claim_key IS NOT NULL)"
+
+
+def _whole_bills() -> str:
+    """Every 835 claim of a bill that has an item (any submission of the bill: a corrected claim, a second payer's answer),
+    not only the item's own claim, so the dashboard's copy can work out an item's state from the whole bill as the server
+    does (needs_D: about 22,700 claims, 63,100 lines and 108,300 adjustments against 21,600, 30,500 and 52,800; the copy
+    grows from about 152 MB to 188 MB on the real archive). Plain SQL only (ema_reports.bill_sql), so the copy can be
+    built on any connection."""
+    from .ema_reports import bill_sql
+    pcn = "patient_control_number"
+    return (f"claim_key IN (SELECT c.claim_key FROM main.claims c WHERE c.{pcn} IS NOT NULL AND {bill_sql('c.' + pcn)} IN "
+            f"(SELECT {bill_sql('f.' + pcn)} FROM main.findings f WHERE f.{pcn} IS NOT NULL))")
+
+
+BILLS = _whole_bills()
 SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     # table, column whitelist (None = every shared column), filter
     ("findings", None, None), ("payer_rates", None, None), ("fee_table", None, None), ("provider_tiers", None, None),
@@ -1084,8 +1108,8 @@ SERVING_TABLES: list[tuple[str, str | None, str | None]] = [
     ("files", "sha256,kind,ingested_at", None),
     ("transactions", "transaction_key,source_name,payer_name,payer_id,payer_contact_phone,payer_contact_url,payment_method,"
                      "payment_amount_cents,payment_date,trace_number,production_date,payee_npi,superseded", None),
-    ("claims", None, f"{DETAIL} OR patient_control_number IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
-    ("lines", None, DETAIL), ("adjustments", None, DETAIL), ("remarks", None, DETAIL),
+    ("claims", None, f"{DETAIL} OR {BILLS} OR patient_control_number IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
+    ("lines", None, f"{DETAIL} OR {BILLS}"), ("adjustments", None, f"{DETAIL} OR {BILLS}"), ("remarks", None, f"{DETAIL} OR {BILLS}"),
     ("ema_rows", None, "claim_id IN (SELECT patient_control_number FROM main.findings WHERE patient_control_number IS NOT NULL)"),
     ("line_links", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
     ("line_handling", None, "line_key IN (SELECT line_key FROM main.findings WHERE line_key IS NOT NULL)"),
@@ -1523,6 +1547,15 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         journal = read_actions(state)
         done, left, wrote = apply_actions(conn, journal) if journal else ([], [], False)
 
+        # uploads cut off part-way (their pieces and records, after a day) go at every run, not only when someone opens the
+        # Upload page (a cut-off report can hold patient data)
+        try:
+            from .uploads import state_uploads
+            swept = {k: v for k, v in (state_uploads(state).sweep() or {}).items() if v}
+            if swept:
+                out["uploads_swept"] = swept
+        except Exception as exc:       # noqa: BLE001  (tried again by the next run)
+            out["uploads_sweep"] = {"error": type(exc).__name__}
         # what people uploaded in the app (remitwatch.intake): read before the Dropbox folder
         up_in: dict = {}
         try:
@@ -1669,6 +1702,21 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         # the uploads read this run go to intake/done/ now that what they changed is saved (a run stopped before this
         # point reads them again: 'already' once applied)
         intake.close_state_pairs(state, up_in.get("to_close") or [])
+        # read uploads kept past their time go (never a held, waiting or live report's copy, nor each report's newest)
+        try:
+            kept = intake.retain_done_state(store, state, log=log)
+            if kept.get("removed") or kept.get("error"):
+                out["intake_retain"] = kept
+        except Exception as exc:       # noqa: BLE001  (tried again by the next run)
+            out["intake_retain"] = {"error": type(exc).__name__}
+        # an upload finished while this run went on (its own request to start a run was turned away by this run's lock):
+        # a follow-up run reads it now, not tomorrow
+        try:
+            left_pairs = 0 if up_in.get("error") else len(intake.state_pending(state))
+        except Exception:       # noqa: BLE001  (the next scheduled run reads it)
+            left_pairs = 0
+        if left_pairs:
+            out["intake_waiting"] = left_pairs
         if applied:
             slot.drop_copies()
         if shown_changed or serving_stale:
@@ -1702,7 +1750,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
                     out["report_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
                 marks["last_report"] = _now()
                 _write_json(state, MARKS, marks)
-        out["more"] = bool(remaining or "deferred" in out)
+        out["more"] = bool(remaining or "deferred" in out or left_pairs)
         out["progress"] = bool(progressed or ran_detect or ran_activity)
         out["changed"] = bool(shown_changed or progressed)
         try:

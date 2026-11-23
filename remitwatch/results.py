@@ -1565,6 +1565,12 @@ def live_figures(conn: sqlite3.Connection, today: Any = None) -> dict:
             out["states"][key.split(":", 1)[1]] = {"n": n, "cents": c}
         else:
             out[key.replace(":", "_")] = {"n": n, "cents": c}
+    if "expected_value_cents" in fc:    # the self-check's ranking (brief_3a), where the run has written it: what the at-risk items are likely worth
+        w, p = live_sql("at_risk", t)
+        n_ev, c_ev = conn.execute(f"SELECT COUNT(f.expected_value_cents), COALESCE(SUM(f.expected_value_cents),0) FROM findings f WHERE {w}",
+                                  p).fetchone()
+        if n_ev:
+            out["at_risk"].update(expected_cents=int(c_ev), expected_n=n_ev)
     out["given_up"]["source"] = "results"
     out["given_up"]["basis"] = ("Worked out here until the self-check is in place: dollars EMA wrote off on service from 2025 on "
                                 "that no person decided and no owner-approved policy covers.")
@@ -1921,7 +1927,8 @@ def list_rows(conn: sqlite3.Connection, key: str, *, today: Any = None, page: in
     if ids and _fx(conn):
         fc = _cols(conn, "findings")
         sel = [c for c in ("finding_id", "signal", "category", "payer_group", "procedure_code", "service_date", "shortfall_cents",
-                           "work_state", "status", "appeal_deadline", "state_basis", "patient_control_number", "first_seen") if c in fc]
+                           "work_state", "status", "appeal_deadline", "state_basis", "patient_control_number", "first_seen",
+                           "expected_value_cents", "recovery_basis") if c in fc]
         _temp_ids(conn, "rs_lr", ids)
         for r in conn.execute(f"SELECT {', '.join(sel)} FROM findings WHERE finding_id IN (SELECT id FROM temp.rs_lr)"):
             found[r[0]] = dict(zip(sel, r))
@@ -1941,7 +1948,8 @@ def list_rows(conn: sqlite3.Connection, key: str, *, today: Any = None, page: in
                    service_date=(f or {}).get("service_date") or g.get("service_month"), work_state=(f or {}).get("work_state"),
                    status=(f or {}).get("status"), appeal_deadline=(f or {}).get("appeal_deadline"),
                    state_basis=((f or {}).get("state_basis") or "")[:200], first_flagged=d.get("F") or g.get("first_flagged"),
-                   shortfall_cents=(f or {}).get("shortfall_cents", g.get("flagged_cents")))
+                   shortfall_cents=(f or {}).get("shortfall_cents", g.get("flagged_cents")),
+                   expected_value_cents=(f or {}).get("expected_value_cents"), recovery_basis=(f or {}).get("recovery_basis"))
         if d:
             row.update(a=d.get("a"), b=d.get("b"), c=d.get("c"), returned=d.get("returned"), taken_back=d.get("taken_back"),
                        events=d.get("events") or [], members=d.get("members") or [])
@@ -1952,7 +1960,7 @@ def list_rows(conn: sqlite3.Connection, key: str, *, today: Any = None, page: in
 
 
 CSV_COLUMNS = ("finding_id", "label", "signal", "payer_group", "procedure_code", "service_date", "first_flagged", "work_state", "status",
-               "cents", "a", "b", "c", "taken_back", "rule")
+               "cents", "a", "b", "c", "taken_back", "expected_value_cents", "recovery_basis", "rule")
 
 
 def list_csv(conn: sqlite3.Connection, key: str, *, today: Any = None, show_phi: bool = False) -> str:
@@ -1999,6 +2007,11 @@ def scoreboard(conn: sqlite3.Connection, today: Any = None) -> dict:
                      "at_risk": f"Work now items whose filing date is in the next {AT_RISK_DAYS} days.",
                      "given_up": (gu.get("basis") or "Dollars written off with no person's decision and no owner-approved policy.")},
            "given_up_source": gu.get("source")}
+    if live["at_risk"].get("expected_n"):
+        out["at_risk_expected_cents"] = live["at_risk"]["expected_cents"]
+        out["counts"]["at_risk_expected"] = live["at_risk"]["expected_n"]
+        out["basis"]["at_risk_expected"] = ("Each at-risk item's dollars at stake times its pattern's recovery rate (payer group, code "
+                                            "and reason, from the payment archive), where the run has worked it out.")
     weeks: dict = {}
     for r in (d or {}).get("weeks") or []:
         weeks[r["week"]] = {"week": r["week"], "recovered_cents": r.get("recovered_cents", 0), "lost_cents": r.get("lost_cents", 0),

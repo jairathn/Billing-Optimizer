@@ -69,6 +69,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 import time
 import zlib
 from collections import Counter, defaultdict
@@ -531,11 +532,15 @@ def _norm_ref(text: Any) -> str:
 
 # ---------------------------------------------------------------------------------------------- which items are open
 def _is_open(status: Any, work_state: Any, stale: Any) -> bool:
-    """An item that keeps its bill in the store: work now, waiting, can't be checked; with no state, a person's open,
-    started or sent status; a stale row (a person's work on an item the rules no longer list) only while started or sent."""
+    """An item that keeps its bill in the store: a person's started or sent status (whatever the last analysis said: the
+    person's status wins, and the stored state may be older than it); else work now, waiting, can't be checked; with no
+    state, a person's open status. A stale row (a person's work on an item the rules no longer list) only while started or
+    sent."""
     st = str(status or "open")
+    if st in ("in_progress", "appealed"):
+        return True         # a person is working it: their status wins over the last analysis's state (states.py)
     if stale:
-        return st in ("in_progress", "appealed")
+        return False
     ws = str(work_state or "")
     if ws in OPEN_STATES:
         return True
@@ -671,7 +676,6 @@ def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
             part = need_claims[i:i + 500]
             for (b,) in conn.execute(f"SELECT bill FROM temp.arc_cb WHERE claim_key IN ({','.join('?' * len(part))})", part):
                 held.setdefault(b, "open item")
-        _named_bills(conn, held)
         if remits:
             conn.execute("DROP TABLE IF EXISTS temp.arc_tx")
             conn.execute("CREATE TEMP TABLE arc_tx (transaction_key TEXT PRIMARY KEY)")
@@ -699,28 +703,35 @@ _TOKEN = re.compile(r"[A-Z0-9]{6,40}")
 _KEY_FIELDS = ("claim_key", "line_key", "claim_keys", "line_keys")
 
 
-def _named_bills(conn: sqlite3.Connection, held: dict[str, str]) -> None:
+def _named_bills(conn: sqlite3.Connection, skip: set[str] | frozenset = frozenset()) -> set[str]:
     """Bills another item's proof names: an item that stays may rest on a claim of another bill (a duplicate denial
     "already paid under claim ...", a payment the payer made on a corrected claim, an archive rule's proof row). The claim
     ids in its automatic note, its state, its hint, a person's note and its evidence, and the claim and line keys its
     evidence holds, keep their bills in the store, so the proof never leaves before the item. A routine-rate pattern's
-    claim list is not a proof (the pattern itself is kept as it was, carry_locked_aggregates)."""
+    claim list is not a proof (the pattern itself is kept as it was, carry_locked_aggregates). Items of a bill in `skip`
+    (leaving with this run) name nothing: their proof leaves with them. Returns the bills named."""
+    named: set[str] = set()
     fcols = set(_cols(conn, "findings"))
     texts = [c for c in ("auto_note", "state_basis", "hint", "notes", "evidence") if c in fcols]
     if not texts:
-        return
+        return named
     known = {b for (b,) in conn.execute("SELECT bill FROM temp.arc_bd")}
+    seen: dict[str, str] = {}
     want_claims: set[str] = set()
     want_lines: set[str] = set()
     for row in conn.execute(f"SELECT patient_control_number, {', '.join(texts)} FROM findings WHERE patient_control_number IS NOT NULL"):
         own = _bill_of(row[0])
+        if own in skip:
+            continue
         for t in row[1:]:
             if not t:
                 continue
             for tok in _TOKEN.findall(str(t).upper()):
-                b = _bill_of(tok)
+                b = seen.get(tok)
+                if b is None:
+                    b = seen[tok] = _bill_of(tok)
                 if b != own and b in known:
-                    held.setdefault(b, "named by another item")
+                    named.add(b)
         ev = row[-1] if texts[-1] == "evidence" else None
         if ev and any(k in ev for k in _KEY_FIELDS):
             try:
@@ -745,13 +756,14 @@ def _named_bills(conn: sqlite3.Connection, held: dict[str, str]) -> None:
         conn.execute("CREATE TEMP TABLE arc_nk (k TEXT PRIMARY KEY)")
         conn.executemany("INSERT OR IGNORE INTO temp.arc_nk VALUES (?)", [(x,) for x in want_claims])
         for (b,) in conn.execute("SELECT DISTINCT k.bill FROM temp.arc_nk n JOIN temp.arc_cb k ON k.claim_key = n.k"):
-            held.setdefault(b, "named by another item")
+            named.add(b)
         conn.execute("DELETE FROM temp.arc_nk")
         conn.executemany("INSERT OR IGNORE INTO temp.arc_nk VALUES (?)", [(x,) for x in want_lines])
         for (b,) in conn.execute("""SELECT DISTINCT k.bill FROM temp.arc_nk n JOIN lines l ON l.line_key = n.k
                                     JOIN temp.arc_cb k ON k.claim_key = l.claim_key"""):
-            held.setdefault(b, "named by another item")
+            named.add(b)
         conn.execute("DROP TABLE IF EXISTS temp.arc_nk")
+    return named
 
 
 def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: dict | None = None, today: Any = None,
@@ -782,6 +794,20 @@ def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: 
     waiting_years: set[str] = set()
     held_counts: Counter = Counter()
     rows = conn.execute("SELECT bill, newest, paid, lines, claims, years FROM temp.arc_bd ORDER BY newest, bill").fetchall()
+    def can_leave(newest: Any, paid: Any, n_claims: Any, years: Any) -> bool:
+        when = max(str(newest or "")[:10], str(paid or "")[:10])
+        if not when or not newest or when >= cutoff:
+            return False
+        ys = {y for y in str(years or "").split(",") if y and y.isdigit()}
+        return not (require_frozen and n_claims and any(y not in frozen for y in ys))
+    leaving = {r[0] for r in rows if r[0] not in held and can_leave(r[1], r[2], r[4], r[5])}
+    for _round in range(10):            # a bill another item that stays names stays; repeated until nothing changes
+        named = _named_bills(conn, skip=leaving) & leaving
+        if not named:
+            break
+        for b in named:
+            held.setdefault(b, "named by another item")
+        leaving -= named
     for bill, newest, paid, n_lines, n_claims, years in rows:
         # the bill's last activity: its newest service, and its newest remittance or EMA posting (a payment this year on
         # an old service is part of the payer's recent activity, which the rules measure: the bill stays)
@@ -1027,7 +1053,7 @@ def _index_rows(rec: dict, name: str, at: str, run_id: str | None) -> tuple[tupl
 
 
 def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, name: str, meta: dict, *, at: str,
-                  run_id: str | None, years: set[str]) -> dict:
+                  run_id: str | None, years: set[str], today: str) -> dict:
     """One transaction: check each bill's items again, put the index rows in, take the hot rows out (the counts must equal
     what the file holds), lock the service years taken."""
     conn.commit()
@@ -1048,6 +1074,21 @@ def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, n
         for rec in records:
             if _volatile_digest(cur.get(rec["bill"], {})) != rec["volatile"]:
                 changed.add(rec["bill"])
+        # ... and a bill that has an open item now (a person reopened one after the plan was made, before this batch was
+        # built), a fresh pin or a reopening asked for stays too
+        for b, tabs in cur.items():
+            x = tabs.get("findings")
+            if not x or b in changed:
+                continue
+            i = {c: x["cols"].index(c) for c in ("status", "work_state", "stale") if c in x["cols"]}
+            if any(_is_open(r[i["status"]] if "status" in i else None, r[i["work_state"]] if "work_state" in i else None,
+                            r[i["stale"]] if "stale" in i else None) for r in x["rows"]):
+                changed.add(b)
+        q = ",".join("?" * len(records))
+        bills_now = [r["bill"] for r in records]
+        changed.update(b for (b,) in conn.execute(f"SELECT bill FROM archive_pins WHERE until > ? AND bill IN ({q})",
+                                                  [today] + bills_now))
+        changed.update(b for (b,) in conn.execute(f"SELECT DISTINCT bill FROM archive_requests WHERE bill IN ({q})", bills_now))
         keep = [r for r in records if r["bill"] not in changed]
         _drop_from_keys(conn, changed)
         want: Counter = Counter()
@@ -1055,11 +1096,12 @@ def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, n
             for table, x in r["tables"].items():
                 if table in MOVED:
                     want[table] += len(x["rows"])
-        conn.execute("""INSERT OR REPLACE INTO archive_files (name, kind, sha256, gz_bytes, raw_bytes, records, rows, svc_lo, svc_hi,
-                        created_at, run_id, horizon_months, cutoff, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                     (name, "bills", meta["sha256"], meta["gz_bytes"], meta["raw_bytes"], len(records), meta["rows"],
-                      meta.get("svc_lo"), meta.get("svc_hi"), at, run_id, meta.get("horizon_months"), meta.get("cutoff"),
-                      _canon({"tables": counts, "bills": len(records)})))
+        if keep:                    # a file whose every bill a person changed meanwhile indexes nothing: it is not listed
+            conn.execute("""INSERT OR REPLACE INTO archive_files (name, kind, sha256, gz_bytes, raw_bytes, records, rows, svc_lo,
+                            svc_hi, created_at, run_id, horizon_months, cutoff, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         (name, "bills", meta["sha256"], meta["gz_bytes"], meta["raw_bytes"], len(records), meta["rows"],
+                          meta.get("svc_lo"), meta.get("svc_hi"), at, run_id, meta.get("horizon_months"), meta.get("cutoff"),
+                          _canon({"tables": counts, "bills": len(records), "indexed": len(keep)})))
         for rec in keep:
             bill_row, id_rows, f_rows = _index_rows(rec, name, at, run_id)
             conn.execute("INSERT OR REPLACE INTO archive_bills VALUES (?,?,?,?,?,?,?,?,?,?)", bill_row)
@@ -1136,7 +1178,7 @@ def run(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: d
                         "horizon_months": p["horizon"]["months"], "cutoff": p["cutoff"]}
                 years = {y for r in records for y in (r.get("years") or [])}
                 del payload, gz
-                done = _commit_batch(conn, records, counts, name, meta, at=at, run_id=run_id, years=years)
+                done = _commit_batch(conn, records, counts, name, meta, at=at, run_id=run_id, years=years, today=today)
             except ArchiveError as exc:
                 out["errors"].append(str(exc)[:300])
                 log(f"  archive: a batch was not archived ({str(exc)[:120]})")
@@ -1571,18 +1613,21 @@ def _rewrite_payer_rates(det: Any, locked: set[str]) -> None:
 
 # ------------------------------------------------------------------------------------------------- finding it again
 _LAST_FILE: dict = {}          # the last archive file read, uncompressed (a claim view often opens a few bills of one file)
+_LAST_LOCK = threading.Lock()  # the dashboard answers requests on several threads
 
 
 def _file_bytes(sink: Any, name: str) -> bytes:
     key = (id(sink), getattr(sink, "root", None) or getattr(sink, "prefix", None), name)
-    if _LAST_FILE.get("key") == key:
-        return _LAST_FILE["data"]
+    with _LAST_LOCK:
+        if _LAST_FILE.get("key") == key:
+            return _LAST_FILE["data"]
     data = sink.get(name)
     if data is None:
         raise ArchiveError(f"{name} is not in the archive")
     raw = _gunzip(data)
-    _LAST_FILE.clear()
-    _LAST_FILE.update(key=key, data=raw)
+    with _LAST_LOCK:
+        _LAST_FILE.clear()
+        _LAST_FILE.update(key=key, data=raw)
     return raw
 
 

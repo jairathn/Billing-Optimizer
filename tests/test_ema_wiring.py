@@ -805,3 +805,225 @@ def test_a_supplements_own_zero_answer_as_if_primary_after_the_first_payer_means
     denial_world(store, ledger, tmp_path)
     run(store, today="2026-06-01")
     assert items(store, "signal='SECONDARY_NOT_BILLED'") == []
+
+
+def test_a_crossover_before_emas_reports_begin_is_counted_not_listed(store, ledger, tmp_path):
+    """A 2024 crossover: EMA's Production report does not reach that date of service, so nothing could ever show the
+    carrier's answer or the patient's payment. Counted where the Data tab shows it, never listed blind."""
+    remit(store, trace="777000227", paid_on="2024-07-01", payer="MEDICARE OF KENTUCKY TEST", status="19",
+          claims=[{"pcn": F.claim_id(12), "last": "SAMPLE", "first": "DELTA", "crossover": "TEST MEDIGAP LIFE",
+                   "lines": [("2024-06-03", "99213", 150, 90, [("CO", "45", 30), ("PR", "2", 30)], {"allowed_cents": 12000})]}])
+    denial_world(store, ledger, tmp_path)
+    det = run(store, today="2024-09-01")
+    assert items(store, "signal='SECONDARY_NOT_BILLED'") == []
+    assert det.ema_counts["snb_crossover_not_covered"] == 1
+
+
+def test_a_person_who_reopens_an_ema_closure_keeps_the_item_in_work_now(store, ledger, tmp_path):
+    """C6 closes the item on a paper check; a person reopens it ('that payment was for another visit'). The status stays
+    theirs (open), and the state is judged without the payment they rejected: work now, not done with appeal_block
+    'paid', so it stays on Today and in the worklist."""
+    from remitwatch.actions import apply_status
+    denial_world(store, ledger, tmp_path, [pay(F.link_no(1), "PAPER-1", 90, posted=D(2026, 4, 20)),
+                                           adj(F.link_no(1), "CO-197", -150, posted=D(2026, 4, 20)),
+                                           adj(F.link_no(1), "CO-45", 60, posted=D(2026, 4, 20), contractual=True)])
+    run(store)
+    f = one(store, "signal='DENIED_AUTH'")
+    assert f["status"] == "resolved" and f["work_state"] == "done"
+    apply_status(store.conn, f["finding_id"], "open", notes="that payment was for another visit", actor="biller")
+    store.conn.commit()
+    det = run(store)
+    f = one(store, "finding_id=?", f["finding_id"])
+    assert f["status"] == "open" and "kept as open" in (f["hint"] or "")
+    assert f["work_state"] == "work_now" and f["appeal_block"] != "paid", (f["work_state"], f["state_basis"], f["appeal_block"])
+    assert det.ema_counts["state_person_reopened"] == 1
+
+
+def test_two_lines_paid_on_one_ema_check_each_count_their_own_recovery(store, ledger, tmp_path):
+    """One paper check (no 835) pays two denied lines of one claim, $90 and $60: both items close (C6), each on its own
+    line's payment, so each counts its own recovery (44 closures, $5,518.91 on real data recorded $0)."""
+    remit(store, trace=F.check_no(1), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(1), "lines": [(S, "99213", 150, 0, [("CO", "197", 150)]),
+                                                   (S, "17000", 100, 0, [("CO", "197", 100)])]}])
+    L = F.link_no(1)
+    rows = [charge(L), charge(L, cpt="17000", amount=100),
+            pay(L, F.check_no(1), 0, posted=D(2026, 3, 31)), pay(L, F.check_no(1), 0, cpt="17000", posted=D(2026, 3, 31)),
+            adj(L, "CO-197", 150, posted=D(2026, 3, 31)), adj(L, "CO-197", 100, cpt="17000", posted=D(2026, 3, 31)),
+            pay(L, "PAPER-1", 90, posted=D(2026, 4, 20)), pay(L, "PAPER-1", 60, cpt="17000", posted=D(2026, 4, 20)),
+            charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1), status="Payment Pending")]
+    ar = [F.ar_row(claim=F.claim_id(1), link=L, status="Denied", denial=250, current=0, aging=D(2026, 4, 25), svc=SVC)]
+    load(store, ledger, tmp_path, rows, ar)
+    run(store)
+    got = {f["procedure_code"]: f for f in items(store, "status='resolved'")}
+    assert set(got) == {"99213", "17000"}
+    assert got["99213"]["recovered_cents"] == 9000 and got["17000"]["recovered_cents"] == 6000
+
+
+def test_two_lines_a_later_remittance_pays_each_count_their_own_recovery(store):
+    """The 835 side: two denied lines of one claim, both paid on the same later remittance of the same bill. Each closes
+    with its own line's payment counted as recovered, not one of them at $0."""
+    remit(store, trace=F.check_no(41), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(41), "lines": [(S, "99213", 150, 0, [("CO", "16", 150)]),
+                                                    (S, "17000", 100, 0, [("CO", "16", 100)])]}])
+    remit(store, trace=F.check_no(42), paid_on="2026-04-28",
+          claims=[{"pcn": F.claim_id(41, sub=2), "lines": [(S, "99213", 150, 90, [("CO", "45", 60)]),
+                                                           (S, "17000", 100, 60, [("CO", "45", 40)])]}])
+    run(store)
+    got = {f["procedure_code"]: f for f in items(store, "status='resolved' AND patient_control_number=?", F.claim_id(41))}
+    assert set(got) == {"99213", "17000"}, [(g["signal"], g["status"]) for g in items(store)]
+    assert got["99213"]["recovered_cents"] > 0 and got["17000"]["recovered_cents"] > 0, \
+        [(c, g["recovered_cents"], g["evidence"]) for c, g in got.items()]
+
+
+def test_two_lines_paid_under_a_new_bill_each_count_their_own_recovery(store):
+    """resolve_elsewhere: two denied lines of one claim, paid later on a corrected claim under a new bill number (the same
+    patient, date and codes). Each closes with its own line's payment counted as recovered."""
+    for n in range(22):                      # both codes are paid at most once a day per patient (detect.once_codes)
+        remit(store, trace=f"7773{n:05d}", paid_on="2026-02-10",
+              claims=[{"pcn": F.claim_id(300 + n), "last": f"ONCE{n}", "first": "GOLF", "member": f"G{n:011d}",
+                       "lines": [("2026-02-02", "99213", 150, 90, [("CO", "45", 60)]), ("2026-02-02", "17000", 100, 60, [("CO", "45", 40)])]}])
+    remit(store, trace=F.check_no(43), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(43), "lines": [(S, "99213", 150, 0, [("CO", "16", 150)]),
+                                                    (S, "17000", 100, 0, [("CO", "16", 100)])]}])
+    remit(store, trace=F.check_no(44), paid_on="2026-04-28",
+          claims=[{"pcn": F.claim_id(44), "lines": [(S, "99213", 150, 90, [("CO", "45", 60)]),
+                                                    (S, "17000", 100, 60, [("CO", "45", 40)])]}])
+    run(store)
+    got = {f["procedure_code"]: f for f in items(store, "status='resolved' AND patient_control_number=?", F.claim_id(43))}
+    assert set(got) == {"99213", "17000"}, [(g["signal"], g["status"], g["patient_control_number"]) for g in items(store)]
+    assert got["99213"]["recovered_cents"] > 0 and got["17000"]["recovered_cents"] > 0, \
+        [(c, g["recovered_cents"], g["evidence"]) for c, g in got.items()]
+
+
+def _credit_world(store, ledger, tmp_path, ins_extra=0, ar_rows=None):
+    """Medicare allowed $100 of a $150 visit (CO-45 $50) and paid $80; the patient paid $40 against a $20 share."""
+    kw = dict(patient=2, primary=P["medicare"])
+    rows = [charge(F.link_no(6), payer=P["medicare"], **kw),
+            pay(F.link_no(6), "PAPER-61", 80, posted=D(2026, 3, 20), payer=P["medicare"], **kw),
+            adj(F.link_no(6), "CO-45", 50, posted=D(2026, 3, 20), contractual=True, payer=P["medicare"], **kw),
+            F.production_row(link=F.link_no(6), cpt="99213", pat_paid=40, patient=2, svc=SVC, posted=D(2026, 3, 25),
+                             payer=P["medicare"], primary=P["medicare"])]
+    if ins_extra:
+        rows.append(pay(F.link_no(6), "PAPER-62", ins_extra, posted=D(2026, 3, 27), payer=P["medicare"], **kw))
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar_rows)
+    run(store)
+    return one(store, "signal='CREDIT_BALANCE'")
+
+
+def test_a_credit_the_patients_payments_made_names_the_patient_not_medicare(store, ledger, tmp_path):
+    """Insurance paid no more than the claim was owed after its write-downs; the $20 credit is the patient's money: never
+    labelled as Medicare's overpayment, and never given Medicare's 60-day refund deadline (35 items, $5,027 on real data)."""
+    f = _credit_world(store, ledger, tmp_path)
+    ev = json.loads(f["evidence"])
+    assert f["shortfall_cents"] == 2000 and ev["overpaid_by"] == "the patient" and ev["insurance_over_cents"] == 0
+    assert ev["patient_over_cents"] == 2000 and f["appeal_deadline"] is None and f["payer_group"] == "Patient"
+
+
+def test_a_credit_insurance_and_the_patient_both_made_names_each_part(store, ledger, tmp_path):
+    """Medicare paid $110 on a claim owed $100 after its write-downs (no 835 gives the patient's share) and the patient $40:
+    of the $50 credit, Medicare's part is at least $10 (named, with its 60 days for that part) and the rest is the
+    patient's."""
+    f = _credit_world(store, ledger, tmp_path, ins_extra=30)
+    ev = json.loads(f["evidence"])
+    assert f["shortfall_cents"] == 5000 and ev["insurance_over_cents"] == 1000 and ev["patient_over_cents"] == 4000
+    assert "the patient" in ev["overpaid_by"] and f["appeal_deadline"] and "$10.00" in f["deadline_basis"]
+
+
+def test_a_credit_uses_the_patients_share_the_835_set(store, ledger, tmp_path):
+    """Where the payer's 835 set the patient's share ($20 coinsurance), the insurer's overpayment is exact: Medicare paid
+    $110 against its $80 part ($30 over) and the patient $40 against $20 ($20 over)."""
+    remit(store, trace="777000661", paid_on="2026-03-18", payer="MEDICARE OF KENTUCKY TEST",
+          claims=[{"pcn": F.claim_id(6), "last": "SAMPLE", "first": "CHARLIE",
+                   "lines": [(S, "99213", 150, 80, [("CO", "45", 50), ("PR", "2", 20)], {"allowed_cents": 10000})]}])
+    ar = [F.ar_row(claim=F.claim_id(6), link=F.link_no(6), status="Payment Pending", current=0, aging=D(2026, 3, 27), svc=SVC,
+                   patient=2, primary=P["medicare"])]
+    f = _credit_world(store, ledger, tmp_path, ins_extra=30, ar_rows=ar)
+    ev = json.loads(f["evidence"])
+    assert ev["patient_share_835_cents"] == 2000 and ev["insurance_over_cents"] == 3000 and ev["patient_over_cents"] == 2000
+
+
+def test_a_production_claim_charged_on_time_keeps_the_proof_of_timely_filing_route(store, ledger, tmp_path):
+    """G8 (Production only): a claim charged on time that no payer ever answered can be chased with proof of timely filing
+    past the first-filing limit, until that limit plus the payer's dispute window, as the weekly exports' path dates it
+    (24 items on real data read expired while that route was open)."""
+    svc = D(2026, 1, 2)
+    rows = [charge(F.link_no(41), patient=3, svc=svc, posted=D(2026, 1, 5), status="Payment Pending"),
+            pay(F.link_no(42), "PAPER-42", 80, patient=1, posted=D(2026, 4, 20))]
+    denial_world(store, ledger, tmp_path, rows)
+    run(store, today="2026-05-08")
+    f = [g for g in items(store, "signal='NO_ANSWER'") if g["ema_link"] == F.link_no(41)]
+    assert f, "the G8 claim is listed"
+    f = f[0]
+    assert f["appeal_deadline"] > "2028-01-01" and f["legal_deadline"] and "proof of timely filing" in f["deadline_basis"]
+    assert f["work_state"] != "expired", (f["appeal_deadline"], f["state_basis"])
+
+
+def test_a_production_claim_to_medicare_keeps_its_firm_year(store, ledger, tmp_path):
+    """Medicare's year from the date of service is firm: no proof-of-timely-filing route past it."""
+    svc = D(2026, 1, 2)
+    kw = dict(payer=P["medicare"], primary=P["medicare"])
+    rows = [charge(F.link_no(43), patient=3, svc=svc, posted=D(2026, 1, 5), status="Payment Pending", **kw),
+            pay(F.link_no(44), "PAPER-44", 80, patient=1, posted=D(2026, 4, 20), **kw)]
+    denial_world(store, ledger, tmp_path, rows)
+    run(store, today="2026-05-08")
+    f = [g for g in items(store, "signal='NO_ANSWER'") if g["ema_link"] == F.link_no(43)]
+    assert f and f[0]["appeal_deadline"] == "2027-01-02" and f[0]["legal_deadline"] is None
+
+
+def test_a_newer_claim_status_alone_never_answers_an_unanswered_claim(store, monkeypatch):
+    """Amendment E6: a status never answers a claim on its own. A weekly-export claim with no answer in Production whose
+    newer A/R status reads Resolved/Paid is still listed, with that status as context (E6 measured 13 never-answered claims
+    reading Resolved/Paid with no posting at all)."""
+    monkeypatch.setattr(ec, "claim_statuses", lambda conn, claim_ids=(), links=(): {
+        "CLAIMX": {"class": "paid", "status": "Resolved/Paid", "as_of": "2026-05-01", "source": "ar"}})
+    monkeypatch.setattr(ec, "claim_answers", lambda conn, claims: {
+        "CLAIMX": {"answered": False, "how": None, "on": None, "paid_cents": 0, "link": 7, "bridge": "claim_id"}})
+    det = Detector(store, run_id="rv", today=TODAY)
+    det.ema_on = True
+    cd = {"pcn": "CLAIMX", "sent": "2026-02-01", "grp": "Anthem / BCBS", "kind": "commercial", "rejected": False,
+          "due": "2026-03-03", "k": {"status_at": ["2026-04-01"]}, "status": "Submitted", "unsent": False, "gave_up": False}
+    out = det._ema_check_open_claims([(cd, [("99213", "2026-01-30", 15000)])])
+    assert len(out) == 1 and "Resolved/Paid" in out[0][0]["status_context"]
+    assert det.ema_counts["export_newer_status_kept"] == 1
+
+
+def test_an_unanswered_claims_chase_gives_way_to_the_denial_ema_posted_for_it(store, monkeypatch):
+    """A claim listed as unanswered whose denial EMA posted: C5's item for the claim is its answer, and the chase is not
+    listed beside it (its work goes to the denial through the heir key)."""
+    det = Detector(store, run_id="rv", today=TODAY)
+    det.ema_on = True
+    det.load()
+    det.findings[_fid("EMA_OPEN_CLAIM", "CLAIMY")] = {"finding_id": _fid("EMA_OPEN_CLAIM", "CLAIMY"), "signal": "NO_ANSWER"}
+    proto = ec._proto("EMA_DENIED", "denial", "medium", "appeal", "Denied in EMA", key_parts=(F.link_no(9), "auth"),
+                      claim={"patient_control_number": "CLAIMY", "payer_group": BCBS, "payer_kind": "commercial",
+                             "service_date": S, "payment_date": "2026-04-10"},
+                      expected=9000, shortfall=9000, evidence={"lines": []}, heir_keys=[("EMA_OPEN_CLAIM", "CLAIMY")])
+    monkeypatch.setattr(ec, "ema_denials", lambda conn, **kw: [proto])
+    det.run_ema_denials()
+    assert _fid("EMA_OPEN_CLAIM", "CLAIMY") not in det.findings and _fid("EMA_DENIED", F.link_no(9), "auth") in det.findings
+    assert det.ema_counts["export_answered_by_ema_denial"] == 1
+
+
+def test_a_second_payers_claim_never_sent_is_worth_its_balance_and_waits_from_the_first_payment(store, ledger, tmp_path):
+    """The A/R holds the claim's SECONDARY coverage row 'Batched for Printing' with $20 left after the first payer paid
+    (on 2026-04-02). The money at stake is that $20, not the second payer's full usual rate ($90 here), and the claim could
+    only go once the first payer had paid: it waits from that payment, not from the first charge (7 items on real data,
+    $4,978 listed against $879 of balance)."""
+    kw = dict(patient=3, primary=P["bcbs"], secondary=P["commercial"], status="Batched for Printing")
+    rows = [charge(F.link_no(4), **kw), pay(F.link_no(4), "PAPER-41", 90, posted=D(2026, 4, 2), **kw)]
+    ar = [F.ar_row(claim=F.claim_id(4), link=F.link_no(4), coverage="Secondary", status="Batched for Printing", current=20.0,
+                   aging=None, patient=3, svc=SVC, primary=P["bcbs"], secondary=P["commercial"])]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    protos = ec.not_sent(store.conn, today="2026-04-25", rate=lambda g, c, y: 9000)
+    p = next(x for x in protos if x["key_parts"] == (F.claim_id(4),))
+    assert p["expected_cents"] == 2000 and p["evidence"]["since"] == "2026-04-02", (p["expected_cents"], p["evidence"]["since"])
+    assert "first payer" in p["evidence"]["since_basis"] and p["severity"] == "medium"
+
+
+def test_a_rejected_second_payer_claim_is_worth_its_balance(store, ledger, tmp_path):
+    ar = [F.ar_row(claim=F.claim_id(4), link=F.link_no(4), coverage="Secondary", status="Rejected", current=20.0, aging=None,
+                   patient=3, svc=SVC, primary=P["bcbs"], secondary=P["commercial"])]
+    denial_world(store, ledger, tmp_path, ar_rows=ar)
+    protos = ec.rejected_claims(store.conn, today=TODAY, rate=lambda g, c, y: 9000)
+    p = next(x for x in protos if x["key_parts"] == (F.claim_id(4),))
+    assert p["expected_cents"] == 2000

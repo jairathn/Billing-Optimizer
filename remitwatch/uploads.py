@@ -357,7 +357,7 @@ def _already(conn: sqlite3.Connection, sha: str) -> dict | None:
     if report:                          # an A/R or Production report RemitWatch read, held, refused or keeps waiting
         return dict(report, name=None)
     f = conn.execute("SELECT source_name, source_path, ingested_at FROM files WHERE sha256=?", (sha,)).fetchone() \
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'").fetchone() else None
+        if _file_read(conn, sha) else None              # a file the loader set aside unread is not one RemitWatch has
     if f:
         return {"how": "upload" if "/uploads/" in (f[1] or "") else "feed", "at": f[2], "name": f[0], "status": "done"}
     n = conn.execute("SELECT note_id FROM uploaded_notes WHERE sha256=?", (sha,)).fetchone()
@@ -1345,7 +1345,11 @@ def _note_public(n: dict, reveal: bool, conn: sqlite3.Connection | None = None) 
 CHUNK_BYTES = 4 * 1024 * 1024           # a piece. Every piece but the last is exactly this long: a Dropbox upload session takes
                                         # whole 4 MiB parts, and Vercel refuses a request body over about 4.5 MB
 CHUNK_FROM_BYTES = 20 * 1024 * 1024     # the page sends a file larger than this in pieces (an A/R or Production report always)
-ORIGINAL_MAX_FACTOR = 10                # the file before the page compressed it may be at most this many times the cap
+ORIGINAL_MAX_FACTOR = 10                # the file before the page compressed it may be at most this many times the cap, and never
+                                        # more than the readers unpack (ema_reports.UNPACK_MAX): see original_max
+DISK_MARGIN = 512 * 1024 * 1024         # a server keeps this much disk free besides what an upload writes (the store lives there)
+WAITING_FRESH_DAYS = 2                  # an upload waiting for its cycle longer than this is no longer a fresh arrival: it is stuck
+RETIRE_IDLE_SECONDS = 120               # a file sent afresh lets go of its cut-off uploads that got no piece for this long
 SESSION_MAX_AGE = 24 * 60 * 60          # an upload left unfinished this long is removed, pieces and all
 SESSION_KEEP = 30 * 24 * 60 * 60        # what became of a finished upload is shown this long
 SWEEP_EVERY = 600                       # seconds between two clean-ups made by one process
@@ -1368,6 +1372,39 @@ def max_upload_bytes() -> int:
     return int(max(gb, 0.001) * 1024 ** 3)
 
 
+def original_max(gz: bool) -> int:
+    """The most the file itself may weigh. Sent as it is: the cap. Compressed by the page on the way: up to
+    ORIGINAL_MAX_FACTOR times the cap, but never more than the readers unpack from any file (ema_reports.UNPACK_MAX):
+    a larger one could never be read."""
+    from . import ema_reports
+    cap = max_upload_bytes()
+    return min(cap * ORIGINAL_MAX_FACTOR, ema_reports.UNPACK_MAX) if gz else cap
+
+
+def read_limit() -> int | None:
+    """The most a file may weigh as it is sent for this host to read it: a serverless host's run reads at most
+    cloud.MAX_FILE_BYTES of one file (a larger one would wait there for ever); a server has no such limit (None)."""
+    from . import runtime
+    if not runtime.serverless():
+        return None
+    from . import cloud
+    return int(cloud.MAX_FILE_BYTES)
+
+
+def too_big_here(limit: int) -> str:
+    return (f"Too big to read on this site: it reads files of at most {_size_words(limit)} as they are sent. Upload it on "
+            "the practice's server, or export a shorter date range.")
+
+
+def sent_limit(rec: dict) -> int:
+    """The most an upload may send: the size it gave at its start (a file sent as it is), or that size plus what
+    compressing can add to bytes that do not shrink (a thousandth, and 64 KB for gzip's own framing), never past the
+    cap. More than that is not the file the page read, and is refused as it arrives, not at the finish."""
+    size = int(rec.get("size") or 0)
+    limit = size + size // 1000 + (64 << 10) if rec.get("gz") else size
+    return min(limit, max_upload_bytes())
+
+
 def _size_words(n: int) -> str:
     if n >= 1024 ** 3:
         return f"{n / 1024 ** 3:.1f} GB".replace(".0 GB", " GB")
@@ -1384,11 +1421,14 @@ def _next_read() -> str:
 
 class PieceRefused(Exception):
     """What an upload cannot take (a start, a piece or a finish), with the HTTP status for it and a message in plain
-    words. `next_index` is the piece the upload waits for, when the page should carry on from there."""
+    words. `next_index` is the piece the upload waits for, when the page should carry on from there. `restart`: this
+    upload cannot go on, and the page sends the file again as a new upload (start with new: true). `dead`: what it
+    received is lost (its pieces are gone, or Dropbox lost its place), so it is closed and never carried on."""
 
-    def __init__(self, status: int, message: str, next_index: int | None = None):
+    def __init__(self, status: int, message: str, next_index: int | None = None, *, restart: bool = False, dead: bool = False):
         super().__init__(message)
         self.status, self.message, self.next_index = status, message, next_index
+        self.restart, self.dead = restart or dead, dead
 
 
 class Stale(Exception):
@@ -1406,9 +1446,18 @@ def intake_safe_name(name: str) -> str:
     n = unicodedata.normalize("NFC", os.path.basename(str(name or "").replace("\\", "/")))
     stem, ext = os.path.splitext(n)
     stem = re.sub(r"[^\w .,()&+'#=@-]", "_", stem)
-    stem = re.sub(r"_{2,}", "_", re.sub(r" {2,}", " ", stem)).strip(" ._")[:100].strip(" ._") or "file"
+    stem = re.sub(r"_{2,}", "_", re.sub(r" {2,}", " ", stem)).strip(" ._")
+    # at most 100 bytes as UTF-8, not 100 letters: a pair's name (and its sidecar's temporary name) must stay well under
+    # the 255 bytes a file name may have, whatever the alphabet
+    stem = stem.encode("utf-8")[:STEM_BYTES].decode("utf-8", "ignore").strip(" ._") or "file"
     ext = re.sub(r"[^A-Za-z0-9]", "", ext)[:10].lower()
+    if ext in RESERVED_ENDINGS:         # endings the intake and the clean-up read as their own (a sidecar, pieces, a lock)
+        stem, ext = f"{stem}_{ext}", ""
     return stem + (f".{ext}" if ext else "")
+
+
+STEM_BYTES = 100
+RESERVED_ENDINGS = ("json", "part", "tmp", "lock")
 
 
 def pair_name(upload_id: str, name: str, gz: bool) -> str:
@@ -1449,9 +1498,13 @@ def check_start(name: str, size: Any, gz: Any, report_hint: Any, sha256: Any) ->
     if size <= 0:
         raise PieceRefused(400, "The file is empty.")
     gz = gz is True or str(gz).lower() in ("1", "true")
-    cap = max_upload_bytes()
-    if size > cap * (ORIGINAL_MAX_FACTOR if gz else 1):
-        raise PieceRefused(413, f"A file can be at most {_size_words(cap)} as it is sent. Export a shorter date range.")
+    most = original_max(gz)
+    if size > most:
+        raise PieceRefused(413, f"A file can be at most {_size_words(most)}{'' if gz else ' as it is sent'}. Export a shorter "
+                                "date range.")
+    here = read_limit()
+    if here is not None and not gz and size > here:
+        raise PieceRefused(413, too_big_here(here))
     hint = report_hint if report_hint in REPORT_HINTS else None
     sha = str(sha256 or "").lower() or None
     if sha is not None and not SHA256_HEX.fullmatch(sha):
@@ -1464,7 +1517,7 @@ def check_piece(rec: dict, index: int, total: int, sha256: str, data: bytes) -> 
     answer was lost; nothing to do). Raises PieceRefused for a piece the upload cannot take."""
     n = len(rec["chunks"])
     if rec["state"] != "receiving":
-        raise PieceRefused(409, "This upload is finished: nothing more can be added to it.")
+        raise PieceRefused(409, "This upload is finished: nothing more can be added to it.", restart=True)
     if index < 0 or total < 0:
         raise PieceRefused(400, "The piece number is not valid.")
     if not data:
@@ -1476,27 +1529,35 @@ def check_piece(rec: dict, index: int, total: int, sha256: str, data: bytes) -> 
     if index < n:
         if rec["chunks"][index] == sha256:
             return False
+        # the same file with other bytes in this piece: compressed again by another browser or computer, or changed
         raise PieceRefused(409, f"Piece {index + 1} came before with other bytes: the file changed while it was sent. "
-                                "Start the upload again.")
+                                "Start the upload again.", restart=True)
     if index > n:
         raise PieceRefused(409, f"Piece {index + 1} came before piece {n + 1}: the pieces go in order. "
                                 f"The page carries on from piece {n + 1}.", n)
     known = rec.get("total") or 0
     if total and known and total != known:
-        raise PieceRefused(409, "The number of pieces changed while the file was sent. Start the upload again.")
+        raise PieceRefused(409, "The number of pieces changed while the file was sent. Start the upload again.", restart=True)
     last = (total or known) - 1 if (total or known) else None
     if last is not None and index > last:
         raise PieceRefused(400, "That piece is past the last one.")
     if rec.get("closed"):
-        raise PieceRefused(409, "The last piece has arrived already, so nothing more can be added. Start the upload again.")
+        raise PieceRefused(409, "The last piece has arrived already, so nothing more can be added. Start the upload again.",
+                           restart=True)
     if len(data) < CHUNK_BYTES and last is not None and index != last:
         raise PieceRefused(400, f"Only the last piece may be shorter than {CHUNK_BYTES // (1024 * 1024)} MB.")
     if rec["bytes"] + len(data) > max_upload_bytes():
         raise PieceRefused(413, f"A file can be at most {_size_words(max_upload_bytes())} as it is sent. Export a shorter date range.")
+    if rec["bytes"] + len(data) > sent_limit(rec):
+        raise PieceRefused(413, "More has arrived than the file holds, so nothing more is taken. Choose the file again to send it.")
+    here = read_limit()
+    if here is not None and rec["bytes"] + len(data) > here:
+        raise PieceRefused(413, too_big_here(here))
     return True
 
 
 def record_piece(rec: dict, index: int, total: int, sha256: str, size: int) -> None:
+    rec.pop("pending", None)            # the piece the relay was sending (DropboxStateUploads.append) is in the record now
     rec["chunks"].append(sha256)
     rec["bytes"] += size
     if total:
@@ -1521,10 +1582,58 @@ def check_finish(rec: dict, sha256: str, chunks: int, nbytes: int) -> None:
                                 "was sent. Start the upload again.")
 
 
-def verify(pieces: Iterable[bytes], *, gz: bool, sha256: str, size: int, deadline: float | None = None) -> str | None:
+class Unreadable(str):
+    """verify's answer for a file that arrived whole but that no host would read (it unpacks to far more than any export,
+    or holds a line longer than any export has): said as it is, not as a file damaged on the way."""
+
+
+class LineWatch:
+    """The longest line of a text file, watched as its bytes stream by (a CR or an LF ends a line, as the readers count
+    them): feed() says False once one line is longer than `limit` bytes. A zip (an .xlsx) is no text and is not watched.
+    Nothing is held but the length of the line the bytes are in; each block is looked at in strides of `limit`."""
+
+    def __init__(self, limit: int):
+        self.limit, self.run, self.started, self.off = int(limit), 0, False, False
+
+    def feed(self, b: bytes) -> bool:
+        if self.off or not b:
+            return True
+        if not self.started:
+            self.started = True
+            if b[:2] == b"PK":
+                self.off = True
+                return True
+        pos, n = 0, len(b)
+        while pos < n:
+            end = pos + self.limit - self.run + 1         # the line must end within these bytes
+            if end > n:                                   # the rest of the block is shorter than that: no line in it is too long
+                last = max(b.rfind(b"\n", pos), b.rfind(b"\r", pos))
+                self.run = self.run + n - pos if last < 0 else n - last - 1
+                return True
+            last = max(b.rfind(b"\n", pos, end), b.rfind(b"\r", pos, end))
+            if last < 0:
+                return False
+            self.run, pos = 0, last + 1
+        return True
+
+
+def verify(pieces: Iterable[bytes], *, gz: bool, sha256: str, size: int, deadline: float | None = None,
+           sent: int | None = None, lines: bool = False) -> str | None:
     """Check a received file against the SHA-256 and size of the original, unpacking it on the way when it came
     compressed. None when it is the file, else what is wrong, in plain words. The file is never held in memory, and
-    unpacking stops as soon as it holds more than the original did. TimeoutError past `deadline`."""
+    unpacking stops as soon as it holds more than the original did. TimeoutError past `deadline`.
+
+    What no host would read is refused here, before it reaches the intake folder: a compressed file whose original is
+    larger than the readers unpack from `sent` bytes (ema_reports.unpack_limit: about 200 to 1; EMA's text compresses
+    about 14 to 1, a gzip bomb about 1,000 to 1), and, with `lines` (an export, as text), a line longer than
+    ema_reports.LINE_MAX."""
+    from . import ema_reports
+    if gz and sent is not None and size > ema_reports.unpack_limit(sent):
+        return Unreadable(f"It unpacks to {_size_words(size)} from the {_size_words(sent)} sent, far more than any export EMA "
+                          "makes, so it was not kept. Export it again from EMA.")
+    watch = LineWatch(ema_reports.LINE_MAX) if lines else None
+    too_long = Unreadable(f"One line of it is longer than {_size_words(ema_reports.LINE_MAX)}, which no export EMA makes has, so "
+                          "it was not kept. Export it again from EMA.")
     h = hashlib.sha256()
     n = 0
     d = zlib.decompressobj(31) if gz else None
@@ -1535,6 +1644,8 @@ def verify(pieces: Iterable[bytes], *, gz: bool, sha256: str, size: int, deadlin
             if d is None:
                 h.update(piece)
                 n += len(piece)
+                if watch is not None and not watch.feed(piece):
+                    return too_long
             else:
                 if d.eof:
                     return "Something follows the end of the compressed file."
@@ -1545,6 +1656,8 @@ def verify(pieces: Iterable[bytes], *, gz: bool, sha256: str, size: int, deadlin
                     n += len(out)
                     if n > size:
                         break
+                    if watch is not None and not watch.feed(out):
+                        return too_long
                     if d.eof:
                         if d.unused_data:
                             return "Something follows the end of the compressed file."
@@ -1560,6 +1673,8 @@ def verify(pieces: Iterable[bytes], *, gz: bool, sha256: str, size: int, deadlin
             n += len(out)
             if not d.eof:
                 return "The compressed file stops before its end."
+            if watch is not None and n <= size and not watch.feed(out):
+                return too_long
     except zlib.error:
         return "The compressed file is damaged."
     if n != size:
@@ -1696,11 +1811,17 @@ class ServerUploads:
                     out.append(rec)
         return out
 
-    def append(self, rec: dict, data: bytes) -> None:
+    def append(self, rec: dict, data: bytes, *, index: int | None = None, sha: str | None = None, version: Any = None) -> Any:
+        """Add a piece at the record's offset; returns the record's version (unchanged here). The disk is measured for
+        every piece: an upload never leaves the store's disk with less than DISK_MARGIN free, whatever size it gave."""
         p = self.part_path(rec["upload_id"])
         if not os.path.exists(p):
-            raise PieceRefused(410, "The pieces received so far are gone from the server. Start the upload again.")
+            raise PieceRefused(410, "The pieces received so far are gone from the server. Start the upload again.", dead=True)
+        if shutil.disk_usage(self.root).free - len(data) < DISK_MARGIN:
+            raise PieceRefused(507, "The server's disk has too little room for this file just now. Ask whoever looks after the "
+                                    "server to free some space; the upload carries on from here once it has.")
         _append_at(p, rec["bytes"], data)
+        return version
 
     def commit(self, rec: dict) -> None:
         """The received bytes become the intake file (no sidecar yet: the cycle does not touch it)."""
@@ -1713,7 +1834,7 @@ class ServerUploads:
             os.replace(part, dest)
             os.chmod(dest, 0o600)
         elif not os.path.exists(dest):
-            raise PieceRefused(410, "The pieces received are gone from the server. Start the upload again.")
+            raise PieceRefused(410, "The pieces received are gone from the server. Start the upload again.", dead=True)
 
     def committed(self, rec: dict) -> Iterator[bytes]:
         return _file_pieces(self.ready_path(rec["pair"]))
@@ -1834,7 +1955,7 @@ class _StateUploads:
     def committed(self, rec: dict) -> Iterator[bytes]:
         chunks = self.state.get_chunks(f"{STATE_INTAKE}/{rec['pair']}")
         if chunks is None:
-            raise PieceRefused(410, "The finished file is gone from the intake folder. Start the upload again.")
+            raise PieceRefused(410, "The finished file is gone from the intake folder. Start the upload again.", dead=True)
         return chunks
 
     def discard(self, rec: dict) -> None:
@@ -1914,11 +2035,12 @@ class LocalStateUploads(_StateUploads):
                     out.append(rec)
         return out
 
-    def append(self, rec: dict, data: bytes) -> None:
+    def append(self, rec: dict, data: bytes, *, index: int | None = None, sha: str | None = None, version: Any = None) -> Any:
         p = self.part_path(rec["upload_id"])
         if not os.path.exists(p):
-            raise PieceRefused(410, "The pieces received so far are gone. Start the upload again.")
+            raise PieceRefused(410, "The pieces received so far are gone. Start the upload again.", dead=True)
         _append_at(p, rec["bytes"], data)
+        return version
 
     def commit(self, rec: dict) -> None:
         _private_dir(self._intake())
@@ -1930,7 +2052,7 @@ class LocalStateUploads(_StateUploads):
             os.replace(part, dest)
             os.chmod(dest, 0o600)
         elif not os.path.exists(dest):
-            raise PieceRefused(410, "The pieces received are gone. Start the upload again.")
+            raise PieceRefused(410, "The pieces received are gone. Start the upload again.", dead=True)
 
     def write_sidecar(self, rec: dict, sc: dict) -> None:
         super().write_sidecar(rec, sc)
@@ -2032,24 +2154,34 @@ class DropboxStateUploads(_StateUploads):
         with ThreadPoolExecutor(max_workers=8) as ex:
             return [rec for rec, _v in ex.map(self.load, ids) if rec]
 
-    def append(self, rec: dict, data: bytes) -> None:
+    def append(self, rec: dict, data: bytes, *, index: int | None = None, sha: str | None = None, version: Any = None) -> Any:
+        """Relay a piece to the upload's Dropbox session. Which piece goes out (its place, checksum and offset) is saved in
+        the record first: when Dropbox answers that it already holds bytes past this offset, they are this piece only if
+        an earlier request saved that same mark (it relayed the piece, then lost its answer); any other bytes there are
+        another file's, and the upload cannot go on. Returns the record's new version."""
+        prev = rec.get("pending") if isinstance(rec.get("pending"), dict) else {}
+        sha = sha or hashlib.sha256(data).hexdigest()
+        rec["pending"] = {"index": index, "sha": sha, "offset": rec["bytes"]}
+        version = self.save(rec, version)
         if not rec.get("session"):
             if rec["bytes"]:
-                raise PieceRefused(409, "This upload lost its place in Dropbox. Start the upload again.")
+                raise PieceRefused(409, "This upload lost its place in Dropbox. Start the upload again.", dead=True)
             rec["session"] = self.client._content_call("files/upload_session/start", {"close": False}, data)["session_id"]
-            return
+            return version
         try:
             self.client._content_call("files/upload_session/append_v2",
                                       {"cursor": {"session_id": rec["session"], "offset": rec["bytes"]}, "close": False}, data)
         except RuntimeError as exc:
             text = str(exc)
-            if _correct_offset(text) == rec["bytes"] + len(data):
-                return                  # this very piece reached Dropbox before: a request whose answer was lost
+            if (_correct_offset(text) == rec["bytes"] + len(data) and prev.get("offset") == rec["bytes"]
+                    and prev.get("sha") == sha and prev.get("index") == index):
+                return version          # this very piece reached Dropbox before: a request whose answer was lost
             if "incorrect_offset" in text:
-                raise PieceRefused(409, "This upload went out of step with Dropbox. Start the upload again.") from None
+                raise PieceRefused(409, "This upload went out of step with Dropbox. Start the upload again.", dead=True) from None
             if "not_found" in text or "closed" in text:
-                raise PieceRefused(410, "This upload's place in Dropbox has expired. Start the upload again.") from None
+                raise PieceRefused(410, "This upload's place in Dropbox has expired. Start the upload again.", dead=True) from None
             raise
+        return version
 
     def commit(self, rec: dict) -> None:
         from .dropbox_sync import DropboxConflict
@@ -2123,6 +2255,24 @@ def kick_intake(db_path: str) -> bool:
         return False
 
 
+def sweep_server(db_path: str, now: float | None = None) -> dict:
+    """The clean-up a server's cycle runs first, whoever opens the Upload page: uploads left unfinished for a day (their
+    pieces and records), half pairs, temporary files (ServerUploads.sweep). Never raises: an error comes back as
+    {'error': its kind} (never its text, which can name a file) and the next cycle tries again."""
+    try:
+        return ServerUploads(db_path).sweep(now)
+    except Exception as exc:        # noqa: BLE001
+        return {"error": type(exc).__name__}
+
+
+def sweep_state(state, now: float | None = None) -> dict:
+    """The same for a serverless host's run, in its state folder (upload_sessions/ and intake/)."""
+    try:
+        return state_uploads(state).sweep(now)
+    except Exception as exc:        # noqa: BLE001
+        return {"error": type(exc).__name__}
+
+
 # ------------------------------------------------------------------------- what RemitWatch already has, and what a file became
 REPORT_TITLES = {"ar_report": "A/R report", "production": "Production (collections) report",
                  "charge_lines": "Encounter & Charge Lines", "era_lines": "ERA & Payment Line Adjustments",
@@ -2145,6 +2295,39 @@ def _catalog(conn: sqlite3.Connection | None, sha: str) -> dict | None:
     return dict(zip([d[0] for d in cur.description], r)) if r else None
 
 
+def waiting_words(row: dict) -> str:
+    """Why a report kept as waiting is not read yet, as it stands now: the setting that kept it may have changed since
+    (ema_reports.reads). Said after "kept and ..."."""
+    from . import ema_reports
+    rep = row.get("report")
+    why = (row.get("status_reason") or "").strip()
+    if rep in ema_reports.REPORTS:
+        title = REPORT_TITLES.get(rep, "report")
+        if not ema_reports.reads(rep):
+            return (f"not read yet: this site does not read the {title} yet. It is read once it does; the practice's server "
+                    "reads it now.")
+        if "REMITWATCH_EMA_REPORTS" in why:     # kept while the site did not read it: it does now
+            return f"read by the next {_next_read()}: this site reads the {title} now."
+    return f"not read yet: {why}" if why else "not read yet."
+
+
+def _file_read(conn: sqlite3.Connection | None, sha256: str) -> tuple | None:
+    """The files row of a file the loader read (kind, ingested_at), or None: one it set aside as not read (a layout it
+    does not know, a file too large) is not a file RemitWatch has. The dashboard's copy keeps no status column; there
+    the kinds the loader gives such files tell them apart."""
+    if not _has(conn, "files"):
+        return None
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    r = conn.execute(f"SELECT kind, ingested_at, {'status' if 'status' in cols else 'NULL'} FROM files WHERE sha256=?",
+                     (sha256,)).fetchone()
+    if not r or r[2] == "not_read" or r[0] in NOT_READ_KINDS:
+        return None
+    return r[0], r[1]
+
+
+NOT_READ_KINDS = ("ema:too_large", "ema:unknown")       # dropbox_sync's kinds for a file it records and does not read
+
+
 def known_file(conn: sqlite3.Connection | None, sha256: str, pending: Iterable[dict] = (), skip_pair: str | None = None) -> dict | None:
     """What RemitWatch did with a file of exactly these bytes before, if it has one: a report read, held, refused or
     waiting (the report catalog), an export or a remittance read (files), a file uploaded and waiting for the cycle
@@ -2160,13 +2343,12 @@ def known_file(conn: sqlite3.Connection | None, sha256: str, pending: Iterable[d
         elif st == "refused":
             line = f"This exact file was read before and not taken: {why} Export it again from EMA."
         else:
-            line = f"Already have this; it waits to be read: {why}".strip()
+            line = f"Already have this; it is kept and {waiting_words(row)}"
         return {"how": "report", "status": st, "at": row.get("applied_at") or row.get("received_at"), "line": line}
-    if _has(conn, "files"):
-        r = conn.execute("SELECT kind, ingested_at FROM files WHERE sha256=?", (sha256,)).fetchone()
-        if r:
-            return {"how": "read", "status": "done", "at": r[1],
-                    "line": f"Already have this; nothing changed. RemitWatch read this exact file on {_day(r[1])}."}
+    r = _file_read(conn, sha256)
+    if r:
+        return {"how": "read", "status": "done", "at": r[1],
+                "line": f"Already have this; nothing changed. RemitWatch read this exact file on {_day(r[1])}."}
     if _has(conn, "uploads"):
         r = conn.execute("SELECT status, uploaded_at FROM uploads WHERE upload_id=? AND status IN ('queued','ready','done')",
                          (sha256,)).fetchone()
@@ -2263,7 +2445,7 @@ def report_outcome(conn: sqlite3.Connection | None, sha256: str, today: date | N
     elif st == "discarded":
         lines.append(f"Recognised as the {title}; it was held, and a person discarded it.")
     else:
-        lines.append(f"Recognised as the {title}, kept and not read yet: {why}".strip())
+        lines.append(f"Recognised as the {title}, kept and {waiting_words(row)}")
     return {"status": st, "report": row.get("report"), "title": title, "lines": lines,
             "checks": upload_checks(row, today) if st in _READ_STATUSES or st == "held" else []}
 
@@ -2298,12 +2480,21 @@ def record_view(rec: dict, *, conn: sqlite3.Connection | None = None, pair: tupl
             applied = res["status"]
         elif where == "done" and isinstance((sc or {}).get("result"), dict):
             r = sc["result"]
-            lines += [str(x) for x in (r.get("lines") or [])][:12] or [f"Read: {r.get('status') or 'done'}."]
-            applied = r.get("status")
+            before = _file_read(conn, rec.get("sha256") or "") if r.get("status") == "not_read" else None
+            if before:                  # the loader passed it over because it had read these same bytes before
+                lines.append(f"Already have this; nothing changed. RemitWatch read this exact file on {_day(before[1])}.")
+                applied = "already"
+            else:
+                lines += [str(x) for x in (r.get("lines") or [])][:12] or [f"Read: {r.get('status') or 'done'}."]
+                applied = r.get("status")
         elif where == "done" or (where == "gone" and conn is not None and known_file(conn, rec.get("sha256") or "")):
             seen = known_file(conn, rec.get("sha256") or "") if conn is not None else None
-            lines.append(f"Read on {_day(seen['at'])}." if seen and seen.get("at") else "Read by the cycle.")
-            applied = "read"
+            if seen and seen.get("status") in ("queued", "ready", "waiting"):
+                lines.append(seen["line"])
+                applied = "waiting"
+            else:
+                lines.append(f"Read on {_day(seen['at'])}." if seen and seen.get("at") else "Read by the cycle.")
+                applied = "read"
         else:
             sent = f" (sent compressed: {_size_words(rec.get('bytes') or 0)})" if rec.get("gz") else ""
             lines.append(f"Received and checked on {_day(rec.get('finished_at'))}: {_size_words(rec.get('size') or 0)}{sent}. "
@@ -2380,28 +2571,44 @@ def recognition() -> dict:
 
 
 def arrivals(conn: sqlite3.Connection | None) -> dict:
-    """When each export last arrived and how fresh its data is: {key: {'arrived', 'as_of', 'via', 'status'}}. The reports
-    from the report catalog, the weekly exports from the files RemitWatch read."""
+    """When each export last arrived and what of it RemitWatch has read: {key: {'arrived', 'via', 'status', 'reason',
+    'read_at', 'as_of'}}. 'arrived', 'via', 'status' and 'reason' are those of the newest file that arrived, read or not
+    (a report can be held, or kept waiting); 'read_at' is when the newest file that was read arrived, and 'as_of' how far
+    the data read runs. Only a file that was read makes an export fresh. The reports from the report catalog, the weekly
+    exports from the files RemitWatch read."""
     out: dict = {}
     if _has(conn, "ema_report_files"):
+        done = ",".join(f"'{s}'" for s in _READ_STATUSES)
         for e in EXPORTS:
             if not e.get("report"):
                 continue
-            last = conn.execute("""SELECT received_at, via, status FROM ema_report_files WHERE report=? AND status NOT IN ('refused','discarded')
-                                   ORDER BY received_at DESC LIMIT 1""", (e["report"],)).fetchone()
+            last = conn.execute("""SELECT received_at, via, status, status_reason FROM ema_report_files
+                                   WHERE report=? AND status NOT IN ('refused','discarded') ORDER BY received_at DESC LIMIT 1""",
+                                (e["report"],)).fetchone()
+            read_at = conn.execute(f"SELECT MAX(received_at) FROM ema_report_files WHERE report=? AND status IN ({done})",
+                                   (e["report"],)).fetchone()[0]
             as_of = conn.execute("""SELECT MAX(as_of) FROM ema_report_files WHERE report=? AND status IN ('current','partly_replaced')""",
                                  (e["report"],)).fetchone()[0]
-            if last or as_of:
+            if last or as_of or read_at:
                 out[e["key"]] = {"arrived": last[0] if last else None, "via": last[1] if last else None,
-                                 "status": last[2] if last else None, "as_of": as_of}
+                                 "status": last[2] if last else None, "reason": ((last[3] if last else "") or "").strip(),
+                                 "read_at": read_at, "as_of": as_of}
     if _has(conn, "files"):
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+        read = " AND COALESCE(status, '') <> 'not_read'" if "status" in cols else ""
         for e in EXPORTS:
             if not e.get("family"):
                 continue
-            r = conn.execute("SELECT MAX(ingested_at) FROM files WHERE kind=?", (f"ema:{e['family']}",)).fetchone()
+            r = conn.execute(f"SELECT MAX(ingested_at) FROM files WHERE kind=?{read}", (f"ema:{e['family']}",)).fetchone()
             if r and r[0]:
-                out[e["key"]] = {"arrived": r[0], "via": None, "status": "read", "as_of": None}
+                out[e["key"]] = {"arrived": r[0], "via": None, "status": "read", "reason": "", "read_at": r[0], "as_of": None}
     return out
+
+
+VIA_WORDS = {"upload": "uploaded here", "dropbox": "from the Dropbox folder", "mirror": "from the Dropbox folder",
+             "cli": "read on the server"}
+UNREAD = ("held", "waiting", "reread")      # catalog statuses of a report that arrived and was not read (yet)
+FLAG_WORDS = ("fresh", "waiting", "overdue", "stuck", "held", "unread")
 
 
 def _howto_public(box: dict | None) -> dict:
@@ -2412,11 +2619,20 @@ def _howto_public(box: dict | None) -> dict:
 
 def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None, today: date | None = None,
                      pending: Iterable[dict] = ()) -> list[dict]:
-    """The five rows of the checklist (GET /api/ema/exports). `pending`: the sidecars of uploads waiting in the intake
-    folder; one of an export makes its row "received, waiting to be read" rather than overdue."""
+    """The five rows of the checklist (GET /api/ema/exports). An export is fresh only by what RemitWatch has read of it:
+    a report that arrived and was held, or kept waiting, never makes its row "up to date" (the row says why it was not
+    read). `pending`: the sidecars of uploads waiting in the intake folder; one received within WAITING_FRESH_DAYS makes
+    its row "received, waiting to be read" rather than overdue; one older than that is stuck, and the row says so and
+    is overdue when the data read is.
+
+    Each row's 'flag' is what its chip says: fresh, waiting (an upload the next cycle reads), overdue, stuck (an upload
+    no cycle has read in WAITING_FRESH_DAYS), held or unread (the newest file arrived and was not read). 'age_days' is
+    the age of the newest data read (None when none was read)."""
+    from . import ema_reports
     today = today or datetime.now(timezone.utc).date()
     seen = arrivals(conn)
     howto = howto or {}
+    word = _next_read()
     waiting: dict = {}
     for sc in pending:
         key = {"ar_report": "ar"}.get(sc.get("report_hint"), sc.get("report_hint"))
@@ -2425,29 +2641,56 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
     rows = []
     for e in EXPORTS:
         a = seen.get(e["key"]) or {}
-        fresh = _iso_day(a.get("as_of")) or _iso_day(a.get("arrived"))
+        fresh = _iso_day(a.get("as_of")) or _iso_day(a.get("read_at"))
         age = (today - fresh).days if fresh else None
+        late = age is None or age > e["overdue_days"]
         up = waiting.get(e["key"])
-        overdue = not up and (age is None or age > e["overdue_days"])
+        up_day = _iso_day((up or {}).get("received_at"))
+        up_age = (today - up_day).days if up_day else None
+        up_fresh = up is not None and up_age is not None and up_age <= WAITING_FRESH_DAYS
+        stuck = up is not None and not up_fresh
+        unread = a.get("status") if a.get("status") in UNREAD else None
+        overdue = late and not up_fresh
+        reads_here = ema_reports.reads(e["report"]) if e.get("report") else True
         box = howto.get(e["key"]) or {}
-        if a:
-            via = {"upload": "uploaded here", "dropbox": "from the Dropbox folder", "mirror": "from the Dropbox folder",
-                   "cli": "read on the server"}.get(a.get("via") or "", "")
-            last = f"Last arrived {_day(a.get('arrived'))}{' (' + via + ')' if via else ''}" if a.get("arrived") else "Arrival not recorded"
-            if a.get("as_of"):
-                last += f"; its data runs to {_day(a['as_of'])}"
-            last += "."
+        if a.get("arrived"):
+            via = VIA_WORDS.get(a.get("via") or "", "")
+            last = f"Last arrived {_day(a['arrived'])}{' (' + via + ')' if via else ''}"
+            if unread == "held":
+                last += f", and held: {a.get('reason') or 'it waits for a decision.'} Apply or Discard it on the Data tab."
+            elif unread:
+                last += f", kept and {waiting_words({'report': e.get('report'), 'status_reason': a.get('reason')})}"
+            elif a.get("as_of"):
+                last += f"; its data runs to {_day(a['as_of'])}."
+            else:
+                last += "."
+            if unread:
+                last += (f" The newest read runs to {_day(a['as_of'])}." if a.get("as_of") else
+                         f" The newest read arrived {_day(a['read_at'])}." if a.get("read_at") else " None has been read yet.")
+        elif a:
+            last = "Arrival not recorded."
         else:
             last = "Has not arrived yet."
         if up:                           # an upload waiting for the cycle is the newest arrival
-            last = (f"Last arrived {_day(up.get('received_at'))} (uploaded here)."
-                    + (f" The one before it, read already, arrived {_day(a['arrived'])}." if a.get("arrived") else ""))
-            state = f"Waiting to be read: the next {_next_read()} reads it, then this row says what it held."
+            last = (f"Last arrived {_day(up.get('received_at'))} (uploaded here)"
+                    + ("." if up_fresh else f", and no {word} has read it in {_n(up_age or 0, 'day')}.")
+                    + (f" The one before it, read already, arrived {_day(a['read_at'])}." if a.get("read_at") else ""))
+        if up_fresh:
+            state = f"Waiting to be read: the next {word} reads it, then this row says what it held."
         elif overdue:
             state = (f"Overdue: the newest is {age} days old (it should be no more than {e['overdue_days']}). Pull it now."
                      if age is not None else "Overdue: RemitWatch has none yet. Pull it now.")
         else:
             state = f"Up to date: the newest is {_n(age, 'day')} old."
+        if stuck:
+            state += f" An upload of it has waited {_n(up_age or 0, 'day')} and no {word} has read it: see the Data tab."
+        elif unread == "held" and not up:
+            state += " The newest file is held: Apply or Discard it on the Data tab."
+        flag = ("waiting" if up_fresh else "overdue" if overdue else "stuck" if stuck else "held" if unread == "held" and not up
+                else "unread" if unread and not up else "fresh")
+        host_line = None if reads_here else (
+            f"This site does not read the {e['title']} yet. One uploaded here is kept and read once it does; the practice's "
+            "server reads it now.")
         ask = None if (box.get("text") or "").strip() else (
             "Nobody has written down yet how to pull this in our EMA. Ask the person who last pulled it"
             + (f" (it last arrived {_day(a.get('arrived'))})" if a.get("arrived") else "") + " to write the steps here.")
@@ -2455,8 +2698,9 @@ def exports_overview(conn: sqlite3.Connection | None, howto: dict | None = None,
                      "purpose": e["purpose"], "filters": list(e["filters"]), "columns_note": e["columns_note"],
                      "columns": export_columns(e), "format": e["format"], "cadence": e["cadence"],
                      "overdue_days": e["overdue_days"], "arrived": a.get("arrived"), "as_of": a.get("as_of"), "via": a.get("via"),
-                     "age_days": age, "overdue": overdue, "waiting": bool(up), "last_line": last, "state_line": state,
-                     "howto": _howto_public(box), "ask": ask})
+                     "read_at": a.get("read_at"), "age_days": age, "overdue": overdue, "waiting": up_fresh, "stuck": stuck,
+                     "held": unread == "held", "unread": unread, "flag": flag, "reads_here": reads_here, "host_line": host_line,
+                     "last_line": last, "state_line": state, "howto": _howto_public(box), "ask": ask})
     return rows
 
 

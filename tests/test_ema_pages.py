@@ -16,6 +16,7 @@ import datetime as dt
 import itertools
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -173,6 +174,9 @@ def _site(world, tmp_path, monkeypatch, mode: str):
     for k in ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "REMITWATCH_STATE_DIR", "SRFAX_ACCESS_ID", "SRFAX_ACCESS_PWD",
               "ANTHROPIC_API_KEY", "MODMED_CLIENT_ID", "VERCEL", "VERCEL_ENV", "CRON_SECRET", "REMITWATCH_EMA_LEDGER"):
         monkeypatch.delenv(k, raising=False)
+    # the serving copy is built and fetched in the site's own scratch folder: another test process building one at the
+    # same time (the shared default folder) would replace the file under this one
+    monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
     monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", F.HOST_SUFFIX)
     monkeypatch.setattr(api, "PASSWORD", "")
     monkeypatch.setattr(api, "SHOW_PHI", False)
@@ -746,6 +750,8 @@ for (const src of [helpers, read('today.js'), fn]) vm.runInContext(src, ctx);
   const p = ctx.blindBar(); ctx.state.tab = 'data'; open(); await p; out.moved = el.innerHTML;
   hold = null; ctx.state.tab = 'worklist'; ctx.state.blindAt = 0; answer = new Error('down'); el.innerHTML = 'stale';
   await ctx.blindBar(); out.failed = el.innerHTML;                         // a failed ask clears the banner, never an error
+  answer = { blind: true, cents: 100, basis: 'Back again.' }; const before = calls; await ctx.blindBar();
+  out.retried = calls - before; out.after_fail = el.innerHTML.includes('Back again.');   // and is asked again on the next page
   answer = { blind: false }; ctx.state.blindAt = 0; await ctx.blindBar(); out.current = el.innerHTML;
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e); process.exit(1); });
@@ -757,6 +763,7 @@ def test_the_blind_spot_banner_shows_under_the_tabs_of_every_page_and_never_twic
         pytest.skip("node is not installed")
     html = open(os.path.join(STATIC, "index.html"), encoding="utf-8").read()
     assert html.index('<nav id="nav"></nav>') < html.index('<div id="blindBar"') < html.index('<main id="view">')
+    assert re.search(r"@media print\{[^{]*#blindBar", html)          # a printed letter or batch never carries the banner
     script = tmp_path / "blind.js"
     script.write_text(BLIND_JS, encoding="utf-8")
     res = subprocess.run([NODE, str(script), STATIC], capture_output=True, text=True, timeout=60)
@@ -765,7 +772,7 @@ def test_the_blind_spot_banner_shows_under_the_tabs_of_every_page_and_never_twic
     assert "Blind spot: $1,235 the site cannot check." in out["first"] and "The 835s stopped 12 days ago." in out["first"]
     assert out["calls_first"] == 1 and out["calls_again"] == 1
     assert out["today"] == "" and out["calls_today"] == 1 and out["back"] is True and out["moved"] == ""
-    assert out["failed"] == "" and out["current"] == ""
+    assert out["failed"] == "" and out["retried"] == 1 and out["after_fail"] is True and out["current"] == ""
 
 
 # ------------------------------------------------------------------ an upload finished while a Vercel run was going

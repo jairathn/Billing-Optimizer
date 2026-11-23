@@ -42,7 +42,8 @@ def ln(code, charge, paid=0.0, allowed=None, adj=(), **kw):
 
 
 def cl(pcn, lines, **kw):
-    """One claim: the claim id and its lines; optional status ('1'), freq ('1'), cfi ('CI'), icn, rem and adj."""
+    """One claim: the claim id and its lines; optional status ('1'), freq ('1'), cfi ('CI'), icn, rem, adj (claim-level
+    adjustments) and claim_paid (the claim's own payment, CLP04, in dollars, when it differs from its lines' sum)."""
     return dict(pcn=pcn, lines=lines, **kw)
 
 
@@ -63,7 +64,9 @@ def remit(store, paid_on, claims, payer="ACME HEALTH PLAN", payer_id="ACME1", tr
 
     def cents(v):
         return None if v is None else int(round(v * 100))
-    total = sum(cents(x.get("paid") or 0) for k in claims for x in k["lines"])
+    def claim_paid(k):
+        return cents(k["claim_paid"]) if "claim_paid" in k else sum(cents(x.get("paid") or 0) for x in k["lines"])
+    total = sum(claim_paid(k) for k in claims)
     c.execute("INSERT INTO transactions (transaction_key, trace_number, payment_date, payer_name, payer_id, superseded, "
               "claim_paid_total_cents, payment_amount_cents) VALUES (?,?,?,?,?,0,?,?)", (tk, trace, paid_on, payer, payer_id, total, total))
     keys = []
@@ -76,7 +79,7 @@ def remit(store, paid_on, claims, payer="ACME HEALTH PLAN", payer_id="ACME1", tr
                      claim_filing_indicator, payer_claim_control_number, claim_frequency_code, patient_last, patient_first, patient_id,
                      payer_name, payer_id, payment_date, trace_number, statement_from, statement_to)
                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (ck, tk, k["pcn"], st, sum(cents(x["charge"]) for x in lines), sum(cents(x.get("paid") or 0) for x in lines),
+                  (ck, tk, k["pcn"], st, sum(cents(x["charge"]) for x in lines), claim_paid(k),
                    k.get("cfi", "CI"), k.get("icn", f"ICN{n:05d}{i}"), k.get("freq", "1"), "TESTPATIENT", "ALPHA", "M00000001",
                    payer, payer_id, paid_on, trace, dos, dos))
         for g, r, a in k.get("adj", []):
@@ -233,11 +236,13 @@ def test_rule4_a_supplemental_payment_to_the_expected_amount_closes_the_short_pa
 
 
 def test_rule4_a_second_full_payment_is_a_possible_overpayment(store):
+    """Paid $60 twice for a line the payer allows at $60: by the payer's own reckoning it owes $60 once and overpaid $60,
+    which is what it will take back (the expected $100 is the practice's figure, not the payer's)."""
     lk = remit(store, "2026-03-20", [cl("CB0000402C017", [ln("17110", 177.56, 60.00, 60.00, [("CO", "45", 117.56)], lcn="1")])])[0]
     remit(store, "2026-04-20", [cl("CB0000402C017", [ln("17110", 177.56, 60.00, 60.00, [("CO", "45", 117.56)], lcn="1")])])
     f = item(store, lk, "UNDERPAID_VS_OWN_RATE", "underpayment", expected=10000, shortfall=4000)
     a = only(ar.short_pay_topped_up(store.conn, [f]))
-    assert (a["reclass"], a["shortfall_cents"], a["possible_overpayment_cents"]) == ("overpaid", 0, 2000)
+    assert (a["reclass"], a["shortfall_cents"], a["possible_overpayment_cents"]) == ("overpaid", 0, 6000)
 
 
 def test_rule4_another_payers_later_payment_is_no_top_up(store):
@@ -557,3 +562,412 @@ def test_without_the_hooks_nothing_changes(tmp_path):
     j = store.query("SELECT expected_cents FROM findings WHERE patient_control_number LIKE 'CB0000300%' AND procedure_code = 'J7345'")
     assert [r["expected_cents"] for r in j] == [None, None]
     store.close()
+
+
+# =========================================================================== fixes from the two reviews of unit B2
+# Each test names the finding it guards. Invented data only.
+
+def _det(*items):
+    """The part of a Detector apply_actions uses for reclassifications and folds: its items."""
+    class _D:
+        def __init__(self):
+            self.findings = {f["finding_id"]: dict(f) for f in items}
+    return _D()
+
+
+def _wire(monkeypatch):
+    """needs_B2.md section 1: the three hook bodies, patched into the real Detector."""
+    monkeypatch.setattr(Detector, "hook_expected", lambda self: ar.hook_expected(self))
+    monkeypatch.setattr(Detector, "hook_archive_rules", lambda self: ar.hook_archive_rules(self))
+    monkeypatch.setattr(Detector, "hook_fold", lambda self: ar.hook_fold(self))
+
+
+# ---- a remittance that restates an earlier payment (review money, high)
+def test_rule4_a_reprocessing_that_restates_the_earlier_payment_is_not_a_second_payment(store):
+    """The payer reprocesses the claim 56 days later: the line lists $81.08 again, but the claim pays $0 and takes the
+    amount off at the claim level (OA-23). A restatement, not a second payment: no 'possible overpayment, refund it'."""
+    first = remit(store, "2026-04-01", [cl("CB0002001C017", [ln("11102", 89.47, 81.08, 82.42, [("CO", "45", 8.39)])])], payer="TEST FUND",
+                  payer_id="TFUND")
+    remit(store, "2026-05-27", [cl("CB0002001C017", [ln("11102", 89.47, 81.08, 82.42, [("CO", "45", 8.39)])], claim_paid=0.0,
+                                   adj=[("OA", "23", 81.08)])], payer="TEST FUND", payer_id="TFUND")
+    f = item(store, first[0], "UNDERPAID_VS_OWN_RATE", "underpayment", expected=9095, shortfall=853)
+    res = ar.evaluate(store.conn, [f], rules=[ar.R_TOPPED_UP, ar.R_PAID_BEFORE], hide_rules=[])
+    assert not [a for a in res["actions"] if a.get("possible_overpayment_cents")], res["actions"]
+
+
+def test_rule4_a_restating_remittance_that_pays_a_top_up_closes_the_short_payment(store):
+    """The reprocessing restates the earlier $81.08 on the line, allows it at the expected amount, and its claim pays only
+    the difference ($9.87): a top-up to the expected amount, closed with that remittance as proof, for $9.87."""
+    first = remit(store, "2026-04-01", [cl("CB0002002C017", [ln("11102", 99.47, 81.08, 81.08, [("CO", "45", 18.39)], lcn="1")])])
+    remit(store, "2026-05-27", [cl("CB0002002C017", [ln("11102", 99.47, 90.95, 90.95, [("CO", "45", 8.52)], lcn="1")], claim_paid=9.87,
+                                   adj=[("OA", "23", 81.08)])])
+    f = item(store, first[0], "UNDERPAID_VS_OWN_RATE", "underpayment", expected=9095, shortfall=987)
+    a = only(ar.short_pay_topped_up(store.conn, [f]))
+    assert (a["action"], a["paid_cents"]) == ("close_with_proof", 987)
+    assert any("a restatement, not a new payment" in p["text"] for p in a["proof"])
+
+
+def test_rule1_does_not_call_a_restated_line_paid_twice(store):
+    """The short payment is on a remittance whose claim paid $0 (claim-level CO-B13 takes the line's $76.11 off): it repeats
+    the $89.54 paid before. Already paid (restated), done, never 'paid twice'."""
+    remit(store, "2026-04-01", [cl("CB0002003C017", [ln("17110", 99.31, 89.54, 91.37, [("CO", "45", 7.94), ("CO", "253", 1.83)], lcn="1")])])
+    again = remit(store, "2026-06-20", [cl("CB0002003C017", [ln("17110", 99.31, 76.11, 77.66, [("CO", "172", 21.65), ("CO", "253", 1.55)], lcn="2")],
+                                           claim_paid=0.0, adj=[("CO", "B13", 76.11)])])
+    f = item(store, again[0], "UNDERPAID_VS_OWN_RATE", "underpayment", expected=9137, shortfall=1371)
+    a = only(ar.same_payer_paid_before(store.conn, [f]))
+    assert a.get("possible_overpayment_cents") is None
+    assert (a["reclass"], a["label"], a["state_hint"], a["shortfall_cents"]) == ("paid_before", "Already paid by this payer (restated)", "done", 0)
+    assert "it is not a second one" in a["hint"]
+
+
+def test_rule1_a_restated_payment_whose_original_was_taken_back_proves_nothing(store):
+    """The only 'payment' before the denial is a restatement (its claim paid $0, PI-B13), and the real payment it repeats was
+    taken back later: the line is unpaid today, so the denial stays to work."""
+    paid = ln("17311", 1078.33, 699.49, 735.00, [("CO", "45", 343.33), ("PR", "3", 35.51)], lcn="1")
+    remit(store, "2026-02-01", [cl("CB0002004C017", [paid])])
+    remit(store, "2026-02-20", [cl("CB0002004C017", [ln("17311", 1078.33, 201.28, 201.28, [("CO", "45", 877.05)], lcn="1")], claim_paid=0.0,
+                                   adj=[("PI", "B13", 201.28)])])
+    lk = remit(store, "2026-03-01", [cl("CB0002004C018", [ln("17311", 1078.33, 0, None, [("CO", "50", 1078.33)], lcn="1")])])[0]
+    remit(store, "2026-04-18", [cl("CB0002004C017", [neg(paid)], status="22")])
+    assert ar.same_payer_paid_before(store.conn, [item(store, lk, "DENIED_MEDICAL_NECESSITY", expected=73500)]) == []
+
+
+def test_a_restated_claim_nets_its_lines_to_what_it_paid(store):
+    """The money is the claim's: a claim that lists $175.54 on two lines and pays $5.35 (claim-level OA-23 $170.19) leaves
+    each line its share of the $5.35; a claim whose lines add up to its payment keeps them as they are."""
+    keys = remit(store, "2026-04-01", [cl("CB0002005C017", [ln("11102", 100.00, 81.08, 81.08, lcn="1"), ln("11103", 100.00, 94.46, 94.46, lcn="2")],
+                                          claim_paid=5.35, adj=[("OA", "23", 170.19)])])
+    plain = remit(store, "2026-04-02", [cl("CB0002006C017", [ln("11102", 100.00, 81.08, 81.08, lcn="1")])])
+    arch = ar.load_archive(store.conn, [item(store, keys[0], "X"), item(store, plain[0], "X")])
+    a, b, c = arch.lines[keys[0]], arch.lines[keys[1]], arch.lines[plain[0]]
+    assert a.restated and b.restated and not c.restated
+    assert (a.standing + b.standing, c.standing) == (535, 8108)
+    assert abs(a.standing - round(8108 * 535 / 17554)) <= 1
+
+
+# ---- one company's two plans (review money, medium)
+BIG_MA = {"payer": "BIGCO HEALTH", "payer_id": "BIG01"}
+
+
+def test_rule2_a_medicaid_plans_denial_after_the_same_companys_advantage_plan_paid_is_not_closed(store):
+    """The company's Medicare Advantage plan paid 11103 and left $16.54 coinsurance; its Medicaid plan denied the line the
+    same day (CO-16/N257). Two plans: not 'paid the same day on another remittance', but another payer paid first, and
+    the Medicaid plan's denial is about the $16.54 the Advantage plan left (never the member's)."""
+    remit(store, "2026-05-04", [cl("CB0002101C017", [ln("11103", 87.08, 64.86, 82.72, [("CO", "45", 4.36), ("CO", "253", 1.32), ("PR", "2", 16.54)],
+                                                        lcn="1")], cfi="16")], trace="TRCMA1", **BIG_MA)
+    den = remit(store, "2026-05-04", [cl("CB0002101C017", [ln("11103", 87.08, 0, None, [("CO", "16", 87.08)], lcn="1", rem=["N257"])], cfi="MC")],
+                trace="TRCMC1", **BIG_MA)
+    f = item(store, den[0], "DENIED_MISSING_INFO", expected=8272)
+    acts = [a for a in ar.evaluate(store.conn, [f], hide_rules=[])["actions"] if a.get("finding_id") == f["finding_id"]]
+    assert not any(x["action"] == "close_with_proof" for x in acts), acts
+    a = only(acts)
+    assert (a["reclass"], a["shortfall_cents"], a["state_hint"]) == ("other_payer_paid", 1654, "work_now")
+
+
+def test_rule1_a_medicaid_plans_later_denial_is_not_paid_before_by_the_same_payer(store):
+    remit(store, "2026-05-04", [cl("CB0002102C017", [ln("99213", 85.14, 44.96, 80.88, [("CO", "45", 4.26), ("CO", "253", 0.92), ("PR", "3", 35.00)],
+                                                        lcn="1")], cfi="16")], **BIG_MA)
+    den = remit(store, "2026-05-29", [cl("CB0002102C017", [ln("99213", 85.14, 0, None, [("CO", "299", 85.14)], lcn="1", rem=["N767"])],
+                                         cfi="MC")], **BIG_MA)
+    f = item(store, den[0], "DENIED_NONCOVERED", expected=8514)
+    acts = [a for a in ar.evaluate(store.conn, [f], hide_rules=[])["actions"] if a.get("finding_id") == f["finding_id"]]
+    assert not any(x.get("reclass") == "paid_before" for x in acts), acts
+    assert only(acts)["shortfall_cents"] == 3500           # the copay the Advantage plan left is the Medicaid plan's to pay
+
+
+# ---- rule 5: lines the practice dropped or recoded (review money medium; review regression medium)
+def test_rule5_a_claim_reanswered_without_the_line_is_not_waiting_on_the_payer(store):
+    """The payer reversed the claim and answered the claim id again with the Mohs line only, its charge lower by exactly
+    the visit's charge: the practice resubmitted without the visit. Dropped, done; not 'waiting on the payer'."""
+    em = ln("99204", 269.12, 0, None, [("CO", "97", 269.12)], lcn="1", mods=("57",))
+    mohs = ln("17311", 1078.33, 625.00, 660.00, [("CO", "45", 418.33), ("PR", "3", 35.00)], lcn="2")
+    first = remit(store, "2026-04-01", [cl("CB0002201C017", [em, mohs], icn="PCN-A")])
+    remit(store, "2026-06-24", [cl("CB0002201C017", [neg(em), neg(mohs)], icn="PCN-A", status="22"),
+                                cl("CB0002201C017", [ln("17311", 1078.33, 812.49, 847.49, [("CO", "45", 230.84), ("PR", "3", 35.00)], lcn="1")],
+                                   icn="PCN-B")])
+    a = only(ar.same_day_answers(store.conn, [item(store, first[0], "EM_BUNDLED_MOD57_MINOR", "bundling", expected=12177)]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"]) == ("dropped_on_correction", "done", 0)
+
+
+def test_rule5_a_reanswer_that_drops_the_second_line_of_a_code_is_not_a_unit_to_work(store):
+    l1 = ln("77401", 63.88, 0, None, [("CO", "222", 63.88)], lcn="1", rem=["N640"])
+    l2 = ln("77401", 63.88, 0, None, [("CO", "222", 63.88)], lcn="2", mods=("59",), rem=["N640"])
+    other = ln("77280", 238.79, 186.00, 186.00, [("CO", "45", 52.79)], lcn="3")
+    first = remit(store, "2026-04-01", [cl("CB0002202C017", [l1, l2, other], icn="PCN-C")])
+    remit(store, "2026-05-20", [cl("CB0002202C017", [ln("77401", 63.88, 21.37, 21.37, [("CO", "45", 42.51)], lcn="1"), other], icn="PCN-C"),
+                                cl("CB0002202C017", [neg(l1), neg(l2), neg(other)], icn="PCN-C", status="22")])
+    a = only(ar.same_day_answers(store.conn, [item(store, first[1], "DENIED_FREQUENCY", expected=2137)]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"]) == ("dropped_on_correction", "done", 0)
+
+
+def test_rule5_a_line_the_practices_adjustment_request_dropped_is_done(store):
+    """Two fractions of 77401 denied over the daily maximum (CO-222/N640). The practice's adjustment request, which the payer
+    answers CO-129/N770 with no frequency code, bills one fraction; the payer reverses both denials and pays that one.
+    The second fraction was dropped by the practice: done, not 'the payer paid the other line, work this one'."""
+    first = ln("77401", 63.88, 0, None, [("CO", "222", 63.88)], lcn="14", rem=["N640"])
+    second = ln("77401", 63.88, 0, None, [("CO", "222", 63.88)], mods=("59",), lcn="13", rem=["N640"])
+    lks = remit(store, "2026-03-20", [cl("CB0002203C017", [first, second], freq=None)])
+    remit(store, "2026-05-10", [cl("CB0002203C017", [ln("77401", 63.88, 0, None, [("CO", "129", 63.88)], lcn="14", units=0, billed=1,
+                                                        rem=["N770"])], status="4", freq=None)])
+    remit(store, "2026-05-17", [cl("CB0002203C017", [neg(first), neg(second)], status="22", freq=None),
+                                cl("CB0002203C017", [ln("77401", 63.88, 21.37, 21.37, [("CO", "45", 42.51)], lcn="14")], freq=None)])
+    a = only(ar.same_day_answers(store.conn, [item(store, lks[1], "DENIED_FREQUENCY", expected=2137)]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"]) == ("dropped_on_correction", "done", 0)
+
+
+def test_rule5_an_adjustment_request_marks_the_corrected_claim_without_a_reversal(store):
+    """The same practice correction where the payer sends no reversal: after its CO-129/N770 note, its answer of the claim
+    id bills only the first fraction. The second fraction was dropped on the corrected claim (5f)."""
+    lks = remit(store, "2026-03-20", [cl("CB0002204C017", [ln("77401", 63.88, 0, None, [("CO", "222", 63.88)], lcn="14"),
+                                                           ln("77401", 63.88, 0, None, [("CO", "222", 63.88)], mods=("59",), lcn="13")],
+                                         freq=None)])
+    remit(store, "2026-05-10", [cl("CB0002204C017", [ln("77401", 63.88, 0, None, [("CO", "129", 63.88)], lcn="14", rem=["N770"])],
+                                   status="4", freq=None)])
+    remit(store, "2026-05-17", [cl("CB0002204C017", [ln("77401", 63.88, 21.37, 21.37, [("CO", "45", 42.51)], lcn="14")], freq=None)])
+    a = only(ar.same_day_answers(store.conn, [item(store, lks[1], "DENIED_FREQUENCY", expected=2137)]))
+    assert (a["reclass"], a["state_hint"]) == ("dropped_on_correction", "done")
+
+
+def test_rule5_a_line_billed_again_under_another_code_is_done(store):
+    """The payer reversed the claim and answered it again: the visit is billed 99213 now, not 99203, and paid. The 99203
+    line was billed again under the new code: done, with the new code's answer as proof."""
+    denial = ln("99203", 180.00, 0, None, [("CO", "151", 180.00)], mods=("25",), lcn="1")
+    proc = ln("11102", 120.00, 90.00, 90.00, [("CO", "45", 30.00)], lcn="2")
+    lk = remit(store, "2026-03-20", [cl("CB0002205C017", [denial, proc])])[0]
+    remit(store, "2026-05-01", [cl("CB0002205C017", [neg(denial), neg(proc)], status="22"),
+                                cl("CB0002205C017", [ln("99213", 140.00, 70.00, 70.00, [("CO", "45", 70.00)], mods=("25",), lcn="1"), proc])])
+    a = only(ar.same_day_answers(store.conn, [item(store, lk, "DENIED_FREQUENCY", expected=11000)]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"]) == ("recoded", "done", 0)
+    assert "99213" in a["hint"] and any(p["code"] == "99213" and p["decisive"] for p in a["proof"])
+
+
+def test_rule5_a_reversal_with_no_answer_of_the_claim_id_still_waits(store):
+    """No answer of the claim id since the reversal: the payer is reprocessing, waiting (the fate check needs an answer)."""
+    denial = ln("17110", 177.56, 0, None, [("CO", "16", 177.56)], lcn="1")
+    lk = remit(store, "2026-03-20", [cl("CB0002206C017", [denial])])[0]
+    remit(store, "2026-04-20", [cl("CB0002206C017", [neg(denial)], status="22")])
+    a = only(ar.same_day_answers(store.conn, [item(store, lk, "DENIED_MISSING_INFO", expected=10000)]))
+    assert (a["reclass"], a["state_hint"]) == ("reversed_no_answer", "waiting")
+
+
+# ---- rule 5: a later answer onto the deductible, no reversal (review money, medium)
+def test_rule5_a_later_answer_that_moves_the_line_to_the_deductible_settles_the_denial(store):
+    den = remit(store, "2026-04-01", [cl("CB0002301C017", [ln("97597", 87.94, 0, None, [("CO", "16", 87.94)], lcn="1", rem=["MA130"])], icn="PCN-D")])
+    remit(store, "2026-04-08", [cl("CB0002301C017", [ln("97597", 87.94, 0, 87.94, [("PR", "1", 87.94)], lcn="1")], icn="PCN-E")])
+    a = only(ar.same_day_answers(store.conn, [item(store, den[0], "DENIED_MISSING_INFO", expected=8794)]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"], a["patient_share_cents"]) == ("moved_to_patient", "done", 0, 8794)
+
+
+def test_rule5_a_later_answer_that_denies_again_is_no_settlement(store):
+    den = remit(store, "2026-04-01", [cl("CB0002302C017", [ln("97597", 87.94, 0, None, [("CO", "16", 87.94)], lcn="1")])])
+    remit(store, "2026-04-08", [cl("CB0002302C017", [ln("97597", 87.94, 0, 87.94, [("PR", "1", 87.94)], lcn="1")])])
+    remit(store, "2026-04-20", [cl("CB0002302C017", [ln("97597", 87.94, 0, None, [("CO", "50", 87.94)], lcn="1")])])
+    assert ar.same_day_answers(store.conn, [item(store, den[0], "DENIED_MISSING_INFO", expected=8794)]) == []
+
+
+def test_rule3_a_line_the_payer_later_put_on_the_deductible_is_no_unit_to_work(store):
+    lks = remit(store, "2026-03-20", [cl("CB0002303C017", [ln("11312", 156.00, 90.00, 110.99, [("CO", "45", 45.01), ("PR", "2", 20.99)], lcn="1"),
+                                                           ln("11312", 156.00, 0, None, [("CO", "151", 156.00)], mods=("59",), lcn="2")])])
+    remit(store, "2026-04-20", [cl("CB0002303C017", [ln("11312", 156.00, 0, 110.99, [("CO", "45", 45.01), ("PR", "1", 110.99)], mods=("59",),
+                                                        lcn="2")])])
+    f = item(store, lks[1], "DENIED_FREQUENCY", expected=11099)
+    assert ar.units_split(store.conn, [f]) == []
+    assert only(ar.same_day_answers(store.conn, [f]))["reclass"] == "moved_to_patient"
+
+
+def test_rule5_a_reversal_onto_the_deductible_with_the_cut_coded_co16_is_done(store):
+    """The payer put the whole allowed $330 on the deductible and coded the cut above it CO-16 (where CO-45 belongs): the
+    line went to the patient; nothing to work."""
+    denial = ln("J7345", 400.00, 0, None, [("CO", "16", 400.00)], units=200, lcn="1")
+    lk = remit(store, "2026-03-20", [cl("CB0002304C017", [denial])])[0]
+    remit(store, "2026-04-20", [cl("CB0002304C017", [neg(denial)], status="22"),
+                                cl("CB0002304C017", [ln("J7345", 400.00, 0, 330.00, [("CO", "16", 70.00), ("PR", "1", 330.00)], units=200, lcn="1")])])
+    a = only(ar.same_day_answers(store.conn, [item(store, lk, "DENIED_MISSING_INFO", expected=33000)]))
+    assert (a["reclass"], a["state_hint"]) == ("moved_to_patient", "done")
+
+
+# ---- rule 5: a short payment taken back with no new answer (review money, low)
+def test_rule5_a_short_payment_taken_back_with_no_new_answer_is_the_whole_line(store):
+    paid = ln("17000", 120.00, 52.48, 52.48, [("CO", "45", 67.52)], lcn="1")
+    lk = remit(store, "2026-03-20", [cl("CB0002401C017", [paid])])[0]
+    remit(store, "2026-06-20", [cl("CB0002401C017", [neg(paid)], status="22")])
+    f = item(store, lk, "UNDERPAID_VS_OWN_RATE", "underpayment", expected=5604, shortfall=356)
+    a = only(ar.same_day_answers(store.conn, [f]))
+    assert (a["reclass"], a["state_hint"], a["shortfall_cents"], a["taken_back_cents"]) == ("reversed_no_answer", "waiting", 5604, 5248)
+    assert "took this payment back" in a["hint"] and a["proof"][1]["kind"] == "reversal" and a["proof"][1]["date"] == "2026-06-20"
+
+
+# ---- rule 2 (review money, lows)
+def test_rule2_share_is_not_halved_when_the_denied_line_reports_no_units(store):
+    remit(store, "2026-04-01", [cl("CB0002501C017", [ln("11103", 89.88, 64.85, 76.40, [("PR", "2", 15.28), ("CO", "45", 13.48)], units=2, lcn="1")],
+                                   status="19", cfi="MB")], payer="STATE MEDICARE", payer_id="MCR01")
+    den = remit(store, "2026-04-08", [cl("CB0002501C017", [ln("11103", 89.88, 0, None, [("OA", "A1", 89.88)], units=0, rem=["N130"])], cfi="15")],
+                payer="TEST MEDIGAP CO", payer_id="GAP01")
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, den[0], "DENIED_MEDICAL_NECESSITY", expected=4354)]))
+    assert a["shortfall_cents"] == 1528
+
+
+def test_rule2_a_line_that_billed_fewer_units_gets_its_part_of_the_share(store):
+    """The primary paid two lines of 11103 (one unit each, $15.28 coinsurance in all); the secondary denied one of them at
+    half the charge: its part of the share is half."""
+    remit(store, "2026-04-01", [cl("CB0002502C017", [ln("11103", 44.94, 32.42, 38.20, [("PR", "2", 7.64), ("CO", "45", 6.74)], lcn="1"),
+                                                     ln("11103", 44.94, 32.43, 38.20, [("PR", "2", 7.64), ("CO", "45", 6.74)], lcn="2")],
+                                   status="19", cfi="MB")], payer="STATE MEDICARE", payer_id="MCR01")
+    den = remit(store, "2026-04-08", [cl("CB0002502C017", [ln("11103", 44.94, 0, None, [("OA", "A1", 44.94)], units=1, lcn="2")], cfi="15")],
+                payer="TEST MEDIGAP CO", payer_id="GAP01")
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, den[0], "DENIED_MEDICAL_NECESSITY", expected=3820)]))
+    assert a["shortfall_cents"] == 764
+
+
+def test_rule2_not_its_to_pay_with_no_other_plan_leaves_the_share_to_the_patient(store):
+    """The plan's delegated payer paid and left a $55 copay; the plan itself answered B11/N418 (not its to process). No
+    other plan answered: no payer owes the copay; 'done', size 0, the share kept as information. Once another plan has
+    answered the service, the share is that plan's as a secondary claim."""
+    remit(store, "2026-03-20", [cl("CB0002503C017", [ln("99213", 156.66, 21.15, 76.15, [("CO", "45", 80.51), ("PR", "3", 55.00)])])], **BETA)
+    lk = remit(store, "2026-04-20", [cl("CB0002503C017", [ln("99213", 156.66, 0, None, [("CO", "B11", 156.66)], rem=["N418"])])])[0]
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_COB", expected=7615)]))
+    assert (a["state_hint"], a["shortfall_cents"], a["patient_share_left_cents"]) == ("done", 0, 5500)
+    remit(store, "2026-04-25", [cl("CB0002503C017", [ln("99213", 156.66, 0, None, [("CO", "16", 156.66)])], status="2")],
+          payer="GAMMA MUTUAL", payer_id="GAMMA1")
+    b = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_COB", expected=7615)]))
+    assert (b["state_hint"], b["shortfall_cents"]) == ("work_now", 5500) and "GAMMA MUTUAL" in b["hint"]
+
+
+def test_rule2_two_medicare_contractors_are_not_primary_and_secondary(store):
+    """One Medicare contractor paid, the other denied: no secondary claim to send. The item keeps its size, 'likely', with
+    the jurisdiction to check while the window to dispute the denial is open."""
+    remit(store, "2026-03-20", [cl("CB0002504C017", [ln("17311", 969.13, 600.00, 750.00, [("CO", "45", 219.13), ("PR", "2", 150.00)])],
+                                   cfi="MB")], payer="MEDICARE OF KENTUCKY", payer_id="MCRKY")
+    lk = remit(store, "2026-04-20", [cl("CB0002504C017", [ln("17311", 969.13, 0, None, [("CO", "B12", 969.13)])], cfi="MB")],
+               payer="MEDICARE OF INDIANA", payer_id="MCRIN")[0]
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_NONCOVERED", expected=75000)]))
+    assert (a["reclass"], a["strength"], a["shortfall_cents"], a["state_hint"]) == ("other_medicare_contractor", "likely", None, "work_now")
+    assert "secondary claim" not in a["hint"] and "jurisdiction" in a["hint"]
+
+
+# ---- rule 1: a B13 answered under another code (review money, low)
+def test_rule1_a_b13_answered_under_another_code_is_not_the_items_payment(store):
+    lk = remit(store, "2026-03-20", [cl("CB0002601C017", [ln("77401", 63.88, 0, None, [("CO", "96", 63.88)], lcn="1")])])[0]
+    remit(store, "2026-04-20", [cl("CB0002601C018", [ln("77280", 222.31, 0, None, [("CO", "B13", 222.31)], orig="77401", lcn="1")])])
+    assert ar.same_payer_paid_before(store.conn, [item(store, lk, "DENIED_NONCOVERED", expected=6388)]) == []
+    # the payer's B13 under the item's own code still speaks for it
+    lk2 = remit(store, "2026-03-20", [cl("CB0002602C017", [ln("77401", 63.88, 0, None, [("CO", "96", 63.88)], lcn="1")])])[0]
+    remit(store, "2026-04-20", [cl("CB0002602C018", [ln("77401", 63.88, 0, None, [("CO", "B13", 63.88)], lcn="1")])])
+    assert only(ar.same_payer_paid_before(store.conn, [item(store, lk2, "DENIED_NONCOVERED", expected=6388)]))["reclass"] == "paid_before"
+
+
+# ---- folds never remove a person's work (review regression, high)
+def test_rule5_never_folds_an_item_a_person_worked(store):
+    """The payer reversed a CO-16 denial and denied the line again (CO-50), which has its own item. A person had already
+    appealed the CO-16 item: it stays listed ('replaced', naming the new item), never folded away."""
+    ensure_schema(store.conn)
+    denial = ln("17110", 177.56, 0, None, [("CO", "16", 177.56)], lcn="1")
+    lk1 = remit(store, "2026-03-20", [cl("CB0002701C017", [denial])])[0]
+    keys = remit(store, "2026-04-20", [cl("CB0002701C017", [neg(denial)], status="22"),
+                                       cl("CB0002701C017", [ln("17110", 177.56, 0, None, [("CO", "50", 177.56)], lcn="1")])])
+    f1 = item(store, lk1, "DENIED_MISSING_INFO", expected=10000)
+    f2 = item(store, keys[1], "DENIED_MEDICAL_NECESSITY", expected=10000)
+    unworked = ar.evaluate(store.conn, [f1, f2], hide_rules=[])
+    assert [(a["finding_id"], a["into"]) for a in unworked["actions"] if a["action"] == "fold_into"] == [(f1["finding_id"], f2["finding_id"])]
+    store.conn.execute("INSERT INTO findings (finding_id, status, notes) VALUES (?, 'appealed', 'appeal faxed')", (f1["finding_id"],))
+    res = ar.evaluate(store.conn, [f1, f2], hide_rules=[])
+    assert [a for a in res["actions"] if a["action"] == "fold_into"] == []
+    a = only([a for a in res["actions"] if a.get("finding_id") == f1["finding_id"]])
+    assert (a["action"], a["reclass"], a["new_item"], a["shortfall_cents"]) == ("reclassify", "replaced", f2["finding_id"], None)
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_wired_rule5_fold_does_not_drop_a_worked_item_from_the_worklist(tmp_path, monkeypatch, kind):
+    """The same through the real Detector with the hooks wired: after a person appealed the first denial, the next run keeps
+    it listed (not stale) with its status."""
+    s = Store(str(tmp_path / "s.sqlite")) if kind == "file" else Store(":memory:", compact=True)
+    denial = ln("17110", 177.56, 0, None, [("CO", "16", 177.56)], lcn="1")
+    lk1 = remit(s, "2026-03-20", [cl("CB0002702C017", [denial])])[0]
+    remit(s, "2026-04-20", [cl("CB0002702C017", [neg(denial)], status="22"),
+                            cl("CB0002702C017", [ln("17110", 177.56, 0, None, [("CO", "50", 177.56)], lcn="1")])])
+    Detector(s, run_id="r1", today="2026-05-01").run()                     # unwired: both denials listed
+    fid = s.conn.execute("SELECT finding_id FROM findings WHERE line_key=?", (lk1,)).fetchone()[0]
+    s.conn.execute("UPDATE findings SET status='appealed', notes='appeal faxed', appealed_at='2026-05-02' WHERE finding_id=?", (fid,))
+    s.conn.commit()
+    _wire(monkeypatch)
+    Detector(s, run_id="r2", today="2026-05-03").run()
+    row = s.conn.execute("SELECT status, COALESCE(stale, 0), evidence FROM findings WHERE finding_id=?", (fid,)).fetchone()
+    s.close()
+    assert row is not None and tuple(row[:2]) == ("appealed", 0), row
+    assert json.loads(row[2])["archive_rule"]["reclass"] == "replaced"
+
+
+def test_hook_fold_reads_a_persons_work_again_before_folding(store):
+    """A status set while the run was going counts: hook_fold checks the findings table again."""
+    ensure_schema(store.conn)
+    f1, f2 = {"finding_id": "F1", "evidence": "{}", "signal": "S"}, {"finding_id": "F2", "evidence": "{}", "signal": "S"}
+    det = _det(f1, f2)
+    det.conn = store.conn
+    det.archive_folds = [{"action": "fold_into", "rule": ar.R_FOLD, "finding_id": "F1", "into": "F2", "proof": [], "note": "n"}]
+    store.conn.execute("INSERT INTO findings (finding_id, status) VALUES ('F1', 'in_progress')")
+    assert ar.hook_fold(det) == {} and set(det.findings) == {"F1", "F2"}
+
+
+# ---- the first decision's dispute deadline (review regression, high; practice-manager case C26)
+def test_rule7_fold_keeps_the_first_decisions_dispute_deadline_on_the_listed_item(store):
+    """The payer denied the line, then carried the denial unchanged through its own reprocessing under the same payer claim
+    number. The dispute window runs from the first decision: the item that stays shows the earlier deadline, with the
+    basis saying so. A resubmission under a new claim number keeps its own deadline."""
+    lk1 = remit(store, "2025-01-21", [cl("CB0002801C017", [ln("17311", 969.13, 0, None, [("CO", "97", 969.13)], lcn="1", rem=["M144"])],
+                                         icn="PAYERCLAIM01")])[0]
+    lk2 = remit(store, "2025-05-21", [cl("CB0002801C017", [ln("17311", 969.13, 0, None, [("CO", "97", 969.13)], lcn="1", rem=["M144"])],
+                                         icn="PAYERCLAIM01")])[0]
+    f1 = item(store, lk1, "PROCEDURE_BUNDLED", "bundling", expected=57499, appeal_deadline="2026-07-21", legal_deadline="2026-08-21")
+    f2 = item(store, lk2, "PROCEDURE_BUNDLED", "bundling", expected=57499, appeal_deadline="2026-11-21", legal_deadline="2026-12-21",
+              deadline_basis="18 months from the remittance")
+    acts = ar.fold_repeat_denials(store.conn, [f1, f2], worked=set())
+    assert [(a["finding_id"], a["into"]) for a in acts] == [(f1["finding_id"], f2["finding_id"])]
+    det = _det(f1, f2)
+    ar.apply_actions(det, acts)
+    kept = det.findings[f2["finding_id"]]
+    assert (kept["appeal_deadline"], kept["legal_deadline"]) == ("2026-07-21", "2026-08-21")
+    assert "first decision of 2025-01-21" in kept["deadline_basis"] and kept["deadline_basis"].startswith("18 months")
+    # another claim number: a new determination with its own window
+    lk3 = remit(store, "2025-01-21", [cl("CB0002802C017", [ln("17311", 969.13, 0, None, [("CO", "97", 969.13)], lcn="1")], icn="PAYERCLAIM02")])[0]
+    lk4 = remit(store, "2025-05-21", [cl("CB0002802C018", [ln("17311", 969.13, 0, None, [("CO", "97", 969.13)], lcn="1")], icn="PAYERCLAIM03")])[0]
+    g1 = item(store, lk3, "PROCEDURE_BUNDLED", "bundling", expected=57499, appeal_deadline="2026-07-21")
+    g2 = item(store, lk4, "PROCEDURE_BUNDLED", "bundling", expected=57499, appeal_deadline="2026-11-21")
+    det2 = _det(g1, g2)
+    ar.apply_actions(det2, ar.fold_repeat_denials(store.conn, [g1, g2], worked=set()))
+    assert det2.findings[g2["finding_id"]]["appeal_deadline"] == "2026-11-21"
+
+
+# ---- a 'likely' reading changes no dollars (review regression, medium)
+def test_a_likely_reading_leaves_the_items_dollars_until_a_person_confirms(store):
+    """A B13 'previously paid' with no payment of the line on file is 'likely': apply_actions keeps the item's size and
+    keeps the proposed one beside it for a person to confirm. A 'proven' reading sets the size and records the old one."""
+    lk = remit(store, "2026-04-20", [cl("CB0002901C018", [ln("17313", 548.44, 0, None, [("CO", "B13", 548.44)], lcn="1")])])[0]
+    f = item(store, lk, "DENIED_DUPLICATE_UNPAID", expected=54844)
+    a = only(ar.same_payer_paid_before(store.conn, [f]))
+    assert (a["strength"], a["shortfall_cents"]) == ("likely", 0)
+    det = _det(f)
+    ar.apply_actions(det, [a])
+    got = det.findings[f["finding_id"]]
+    rule = json.loads(got["evidence"])["archive_rule"]
+    assert got["shortfall_cents"] == 54844 and rule["proposed_shortfall_cents"] == 0 and "size_before_cents" not in rule
+    proven = dict(a, strength="proven")
+    det2 = _det(f)
+    ar.apply_actions(det2, [proven])
+    rule2 = json.loads(det2.findings[f["finding_id"]]["evidence"])["archive_rule"]
+    assert det2.findings[f["finding_id"]]["shortfall_cents"] == 0 and rule2["size_before_cents"] == 54844
+
+
+def test_a_likely_closure_never_closes_an_item():
+    """Orchestrator decision 4: a 'likely' done never closes an item. The item stays open with the reading as its hint."""
+    f = {"finding_id": "F1", "evidence": "{}", "auto_status": None, "shortfall_cents": 500}
+    det = _det(f)
+
+    def boom(*_a, **_k):
+        raise AssertionError("closed on a likely reading")
+    det._mark_paid = boom
+    act = {"action": "close_with_proof", "rule": ar.R_SAME_DAY, "finding_id": "F1", "strength": "likely", "proof": [], "note": "probably paid",
+           "paid_date": "2026-01-01", "paid_cents": 500, "detail": {}}
+    assert ar.apply_actions(det, [act]) == {"likely_close_kept_open": 1}
+    got = det.findings["F1"]
+    assert got["auto_status"] is None and got["hint"] == "probably paid" and got["shortfall_cents"] == 500
+    assert json.loads(got["evidence"])["archive_rule"]["state_hint"] == "done"
