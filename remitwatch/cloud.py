@@ -218,7 +218,7 @@ def load_raw(state, check: bool = True):
     from .store import Store
     chunks = state.get_chunks(RAW)
     if chunks is None:
-        if check and (state.meta(STATUS) is not None or state.meta(CURSOR) is not None):
+        if check and _saved_before(state):
             raise StoreImageProblem(IMAGE_MISSING)
         # Start from a serialized image even when it is empty. SQLite keeps such a database in one block of memory and
         # can hand that block out when the store is saved; a plain in-memory database has to be copied twice instead.
@@ -237,6 +237,27 @@ def load_raw(state, check: bool = True):
     del data
     gc.collect()
     return store, True
+
+
+def _saved_before(state) -> bool:
+    """Whether an earlier run saved a store image here: the Dropbox cursor (written only after the store is saved), the
+    record of the last save in status.json (IMAGE_KEY, which every run keeps), or a status.json written by a release from
+    before that record (the size of the store it saved, its totals). A status.json left by runs that had nothing to read
+    proves nothing: the next run is still a first load. One that cannot be read counts as proof: nobody can tell that no
+    store existed."""
+    if state.meta(CURSOR) is not None:
+        return True
+    if state.meta(STATUS) is None:
+        return False
+    try:
+        st = json.loads(state.get(STATUS) or b"{}")
+    except ValueError:
+        return True
+    if not isinstance(st, dict):
+        return True
+    store, totals = st.get("store"), st.get("totals")
+    return bool(st.get(IMAGE_KEY) or (isinstance(store, dict) and store.get("gz_bytes"))
+                or (isinstance(totals, dict) and totals.get("remit_files")))
 
 
 def save_raw(state, store, log=print) -> dict:
@@ -1022,8 +1043,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         try:
             store, existed = load_raw(state)
         except StoreImageProblem as exc:
-            # the store is missing or is not the one last saved: stop before anything is read, folded or saved
+            # the store is missing or is not the one last saved: stop before anything is read, folded or saved. The status
+            # this run writes keeps the proof that a store existed, so the next run stops too until the image is back
             out["error"] = str(exc)
+            out[IMAGE_KEY] = prev_status.get(IMAGE_KEY) or {"missing": True, "since": _now()}
             _image_alert(prev_status, out, email, log)
             out["finished"] = _now()
             out["seconds"] = round(time.time() - t0, 1)

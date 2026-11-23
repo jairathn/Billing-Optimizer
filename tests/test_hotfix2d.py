@@ -301,6 +301,34 @@ def test_serverless_a_first_load_needs_both_status_and_cursor_absent(tmp_path, m
     assert "error" not in out and out["ingest"]["remits"] == 1
 
 
+def test_serverless_runs_that_never_saved_a_store_still_start_from_empty(tmp_path, monkeypatch):
+    """A new site whose first runs had nothing to read leaves status.json behind but no store image and no cursor: no store
+    ever existed there, so the next run is still a first load. Refusing it would stop that site for ever."""
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    state.put(cloud.STATUS, json.dumps({"started": "2026-11-20T10:17:00+00:00", "ingest": {"remits": 0}}).encode())
+    _two_runs_folder(root)
+    out = _cycle(state, client)
+    assert "error" not in out and out["ingest"]["remits"] == 1
+
+
+def test_serverless_a_status_written_before_the_image_record_proves_a_store_until_it_is_back(tmp_path, monkeypatch):
+    """The live site's status.json was written by a release that recorded no image, only the size of the store it saved.
+    With the image gone that is a stop, and it stays one run after run (the refusal keeps the proof in status.json) until
+    the image is put back. An unreadable status.json is a stop as well: nobody can tell that no store existed."""
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    _two_runs_folder(root)
+    state.put(cloud.STATUS, json.dumps({"store": {"gz_bytes": 106831319, "save_seconds": 11.0},
+                                        "totals": {"remit_files": 32718}}).encode())
+    for _ in range(2):
+        out = _cycle(state, client)
+        assert "missing" in (out.get("error") or ""), out
+        assert state.get(cloud.RAW) is None
+    state.put(cloud.STATUS, b"{not json")
+    for _ in range(2):
+        assert "missing" in (_cycle(state, client).get("error") or "")
+        assert state.get(cloud.RAW) is None
+
+
 def test_serverless_records_the_image_it_saved_and_refuses_another(tmp_path, monkeypatch):
     """Each save records the image's size and sha256 in status.json (at once, so a run killed after the save still leaves
     it right). An image that is not the one last saved (an older copy put back) is refused until a person accepts it."""
