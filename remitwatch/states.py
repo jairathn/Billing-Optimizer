@@ -1712,6 +1712,8 @@ def _close_floor(own: list[dict], pays: list[dict]) -> int:
 CONTRACTUAL_CARCS = frozenset({"45", "253", "144", "59", "131", "94", "237", "2", "23"})
 COB_CARCS = frozenset({"22"})
 CHECK_HINTS = ("Possibly paid", "Processed on claim", "Partly paid")
+# work-now rules whose next step is a check before anything else: never a packet, a fax or a bulk appeal
+CHECK_RULES = ("check_first", "settled_in_ema")
 # appeal_block for a work-now item whose next step is not an appeal (unit B's bulk SQL reads appeal_block IS NULL): its
 # route's reason, in unit C's BLOCK_WORDS
 ROUTE_BLOCKS = {"decide": "check_first", "corrected": "corrected", "call": "call", "cob": "cob", "eob_first": "eob_first",
@@ -1834,8 +1836,8 @@ def settled_in_ema(fx: dict) -> dict | None:
     the payer put on the patient), 'patient_co' (the patient paid what the payer put on the practice: refund or appeal),
     'ins', 'pat', 'open', 'group'}, else None. EMA's line, never its claim status (C02, H6)."""
     f = fx["item"]
-    if f.get("category") not in ("denial", "bundling") or f.get("signal") in OWN_RULES:
-        return None
+    if f.get("category") not in ("denial", "bundling") or f.get("signal") in OWN_RULES or str(f.get("carc") or "") in COB_CARCS:
+        return None             # a coordination-of-benefits denial is a task to find the first payer, whatever EMA shows
     tot = _ema_line_totals(fx)
     if not tot["n"] or tot["balance"] > 0:
         return None

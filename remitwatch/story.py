@@ -977,21 +977,29 @@ def _is_copy(conn: sqlite3.Connection) -> bool:
 def _state_of(conn: sqlite3.Connection, fx: dict, today: str | None) -> dict:
     """The state the detection run stored on the item, with state_of's reasons; state_of's own answer when none is stored.
     When the newest data no longer gives the stored state, the stored one is explained and the live one kept beside it; on
-    the dashboard's copy, which keeps only part of the remittances, the stored state stands alone."""
+    the dashboard's copy, which keeps only part of the remittances, the stored state stands alone. The route then follows
+    the stored rule (state_rule, when detection keeps it); with none, an item a person sent or started is followed up,
+    never appealed afresh (M22)."""
     t = S._today(today)
     fx["_conn"] = conn
     try:
-        live = S._public(S._decide(fx, t))
+        live = S._public(S.decide(fx, t, conn))
     finally:
         fx.pop("_conn", None)
-    stored = S.stored_state(fx["item"])
+    f = fx["item"]
+    stored = S.stored_state(f)
     if not stored:
         return live
     if stored["work_state"] == live["work_state"]:
         return dict(live, stored=True, follow_up_on=stored.get("follow_up_on") or live.get("follow_up_on"),
                     state_basis=stored.get("state_basis") or live.get("state_basis"))
-    out = dict(live, stored=True, work_state=stored["work_state"], label=stored["label"], rule="stored",
-               state_basis=stored.get("state_basis") or "", follow_up_on=stored.get("follow_up_on"), proof=None, answered=None)
+    srule = f.get("state_rule")
+    person = f.get("status") in ("appealed", "in_progress") and stored["work_state"] == "work_now"
+    rule = srule or ("stored_person" if person else "stored")
+    out = dict(live, stored=True, stored_differs=True, work_state=stored["work_state"], label=stored["label"], rule=rule,
+               state_basis=stored.get("state_basis") or "", follow_up_on=stored.get("follow_up_on"), proof=None, answered=None,
+               person=live.get("person") or person, appeal_block=f.get("appeal_block") if "appeal_block" in f else live.get("appeal_block"))
+    out["route"] = S.route_of(fx, out, conn)
     if not _is_copy(conn):
         out["live"] = {"work_state": live["work_state"], "rule": live.get("rule"), "state_basis": live.get("state_basis"),
                        "label": live.get("label")}
@@ -1009,7 +1017,7 @@ def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: s
     sent = ""
     ns: list[int] = []
     ema_pay = any(r["source"] == "production" and r["kind"] == "payment" for r in rows)
-    if rule == "stored":
+    if st.get("stored_differs"):
         live = st.get("live")
         sent = f"{S.LABELS.get(state, state)}: {st.get('state_basis') or 'as the last detection run stored it'}."
         if live:
@@ -1030,11 +1038,12 @@ def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: s
             sent = proof.get("text", "Paid") + f" {_refs(ns)}."
             strength = "proven" if ema_pay else "one_source"
         elif rule == "moved_to_patient":
-            ns = _mark(rows, "reversal") + [r["n"] for r in rows if r["source"] == "835" and r["date"] == proof.get("date")]
-            ns += _mark(rows, "patient", limit=3)
+            ns = _mark(rows, "reversal") + [r["n"] for r in rows if r["source"] == "835" and r["date"] == proof.get("date") and proof.get("date")]
+            ns += _mark(rows, "patient", limit=3) + (_mark(rows, "own_remit") if proof.get("source") == "production" else [])
             _decide_rows(rows, ns)
             sent = ("Moved to the patient: " if proof.get("source") == "835" else "") + proof.get("text", "") + f" {_refs(ns)}."
-            strength = "proven" if proof.get("source") == "835" and any("patient" in r["tags"] for r in rows) else "one_source"
+            strength = "proven" if (proof.get("source") == "835" and any("patient" in r["tags"] for r in rows)) or (
+                proof.get("source") == "production" and any("own_remit" in r["tags"] for r in rows)) else "one_source"
         elif rule in DONE_PAID_BEFORE:
             ns = [r["n"] for r in rows if r["source"] in ("835", "production") and r["kind"] == "payment" and r["date"] == proof.get("date")]
             ns += _mark(rows, "own_remit")
@@ -1056,7 +1065,7 @@ def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: s
         else:
             sent = (st.get("state_basis") or "Done") + "."
     elif state == "waiting":
-        ns = _mark(rows, "work", "fax", "rw:manual", "ar_note", limit=2)
+        ns = _mark(rows, "work", "fax", "rw:manual", "ar_note", limit=2) if rule != "forwarded" else _mark(rows, "own_remit")
         sent = f"Waiting: {st['state_basis']} {_refs(ns)}."
     elif state == "accepted":
         ns = _mark(rows, "rw:manual", "rw:hidden", limit=1)
@@ -1070,13 +1079,12 @@ def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: s
         if st.get("answered"):
             ns += [r["n"] for r in rows if r["date"] == st["answered"].get("date") and r["source"] in ("835", "production")]
             _decide_rows(rows, ns)
-        basis = _short(st.get("closed_basis") or st.get("deadline_basis"))
-        sent = f"Expired: {_lower(st['state_basis'])} {_refs(ns)}." + (f" That window: {basis}." if basis else "")
-        strength, why = "inferred", "past every window plus 30 days"
+        sent = f"Expired: {_lower(st['state_basis'])} {_refs(ns)}."
+        strength, why = "inferred", "past every window"
     elif state == "cant_check":
-        sent = f"Can't be checked: {st['state_basis']}"
+        sent = f"Can't be checked: {st['state_basis']}" + ("" if str(st.get("state_basis") or "").endswith(".") else ".")
         strength, why = "inferred", "no source carries this money"
-    elif rule in ("owner_decision", "fees", "post_payment") or f.get("signal") in S.CONTRACT + S.FEES:
+    elif rule in ("owner_decision", "fees") or (f.get("signal") in S.CONTRACT + S.FEES and rule != "person_started"):
         ns = _mark(rows, "raised", "own_remit", limit=2)
         sent = f"{st.get('state_basis')}: {f.get('title') or ''} {_refs(ns)}."
     else:
@@ -1093,18 +1101,19 @@ def _verdict(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: s
         tn = [r["n"] for r in rows if "twin" in r["tags"]]
         sent += (f" The payment on this day belongs to the surgery center's facility claim ({usd(tw['insurer_paid_cents'])}), not this line"
                  + (f" {_refs(tn)}" if tn else "") + ".")
-    if st.get("person") and st.get("proof") and state != "done":
+    if st.get("person") and st.get("proof") and state != "done" and rule != "person_billed_paid":
         sent += " A person's status decides this item: " + (st["proof"].get("text") or "") + ": mark it Paid if that settles it."
     return {"state": state, "label": S.LABELS.get(state, ""), "sentence": _clean(sent), "rows": sorted(set(ns)), "strength": strength,
             "rule": why or rule, "code": rule, "follow_up_on": st.get("follow_up_on"), "state_basis": st.get("state_basis"),
-            "stored": bool(st.get("stored")), "deadline": deadline}
+            "stored": bool(st.get("stored")), "deadline": deadline, "route": st.get("route")}
 
 
 def _lower(text: str) -> str:
     """A sentence continued after a colon: its first letter in lower case, unless it starts with a name or code."""
     t = str(text or "")
     return t[:1].lower() + t[1:] if t[:1].isupper() and (len(t) < 2 or t[1:2].islower()) and t.split(" ", 1)[0] in (
-        "Every", "The", "Past", "Paid", "Already", "Settled", "Forwarded", "Moved", "Marked", "No", "Nothing", "A", "An") else t
+        "Every", "The", "Past", "Paid", "Already", "Settled", "Forwarded", "Moved", "Marked", "No", "Nothing", "A", "An", "Not",
+        "Started", "Billed", "This", "It", "Its") else t
 
 
 def _short(basis: Any, n: int = 160) -> str:
@@ -1117,16 +1126,7 @@ def _short(basis: Any, n: int = 160) -> str:
 
 def _carcs(fx: dict) -> str:
     """The item's reasons with their groups, as its own remittance gives them (CO-97, not 97)."""
-    f = fx["item"]
-    o = fx.get("outcome") or {}
-    if o.get("carcs"):
-        return ", ".join(o["carcs"])
-    carc = str(f.get("carc") or "")
-    for x in S.own_rows(fx):
-        for g, c, _a in list(x["adj"]) + list(x["cadj"]):
-            if c == carc:
-                return f"{g}-{c}"
-    return f"reason {carc}" if carc else "the denial"
+    return S._carcs_text(fx)
 
 
 def _reason_words(fx: dict) -> str:
@@ -1148,91 +1148,56 @@ def _clean(s: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", s).strip()
 
 
-def _window(deadline: str | None, today: str, legal: str | None = None) -> str:
-    """The appeal window in one sentence. legal: the payer's own limit when detection found it later than the safe date."""
+def _window(deadline: str | None, today: str, legal: str | None = None, route: str = "appeal", second: str | None = None,
+            basis: str | None = None) -> str:
+    """The item's window in one sentence, in the words of the work its route asks for (an appeal, a corrected claim, a
+    bill to the second payer, or only the payer's window). legal: the payer's own limit when detection found it later than
+    the safe date."""
     if not deadline:
         return ""
+    if route in ("refund", "post", "bill_patient", "contract", "policy", "fees", "nothing", "wait"):
+        return ""
+    if route in ("appeal", "rate"):
+        if deadline >= today:
+            return f" You can still appeal until {day(deadline)}."
+        if legal and legal >= today:
+            return f" The safe date to appeal passed on {day(deadline)}; the payer's own limit is {day(legal)}, so it can still be sent."
+        return f" The appeal window closed on {day(legal if legal and legal > deadline else deadline)}."
+    if route == "corrected":
+        if deadline >= today:
+            return f" You can still send a corrected claim until {day(deadline)}."
+        if legal and legal >= today:
+            return f" The safe date passed on {day(deadline)}; the payer's own limit is {day(legal)}, so it can still be sent."
+        return f" The window to send a corrected claim closed on {day(legal if legal and legal > deadline else deadline)}."
+    if route == "bill_secondary":
+        return (f" Bill it by {day(deadline)} ({_poss(second or 'the second payer')} filing limit)." if deadline >= today else
+                f" {_poss(second or 'The second payer')} filing limit passed on {day(deadline)}.")
+    if route == "cob":
+        return f" Act by {day(deadline)}" + (f" ({_short(basis, 90)})." if basis else ".") if deadline >= today else ""
     if deadline >= today:
-        return f" You can still appeal until {day(deadline)}."
+        return f" The payer's window closes on {day(deadline)}."
     if legal and legal >= today:
-        return f" The safe date to appeal passed on {day(deadline)}; the payer's own limit is {day(legal)}, so it can still be sent."
-    return f" The appeal window closed on {day(legal if legal and legal > deadline else deadline)}."
+        return f" The safe date passed on {day(deadline)}; the payer's own limit is {day(legal)}."
+    return f" The payer's window closed on {day(legal if legal and legal > deadline else deadline)}."
 
 
 def _same_day_lines(conn: sqlite3.Connection, f: dict) -> list[dict]:
-    """The other procedures of the item's patient on its date of service, as the 835s answered them (the item's bill, and
-    the patient's other claims that day by the payer's member record; standing answers, the best allowed amount of each
-    code): what a multiple-procedure reduction ranks the item's code against. The member record is only matched, never
-    shown."""
-    svc, code = f.get("service_date"), f.get("procedure_code")
-    if not svc or not S._table(conn, "claims") or not S._table(conn, "lines"):
-        return []
-    lcols, ccols = S._cols(conn, "lines"), S._cols(conn, "claims")
-    allowed = "l.allowed_cents" if "allowed_cents" in lcols else "NULL"
-    rows = []
-    b = S.bill_of(f.get("patient_control_number"))
-    if b:
-        rows += conn.execute(
-            f"""SELECT c.patient_control_number, c.claim_status_code, l.procedure_code, {allowed}, l.paid_cents, l.charge_cents, 1
-                FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key JOIN lines l ON l.claim_key = c.claim_key
-                WHERE c.patient_control_number >= ? AND c.patient_control_number < ? AND COALESCE(l.service_date, c.statement_from) = ?
-                  AND COALESCE(t.superseded, 0) = 0""", (b, b + "~", svc)).fetchall()
-    if "patient_id" in ccols and f.get("claim_key") and "service_date" in lcols:
-        pid = conn.execute("SELECT patient_id FROM claims WHERE claim_key = ?", (f["claim_key"],)).fetchone()
-        if pid and pid[0]:
-            rows += conn.execute(
-                f"""SELECT c.patient_control_number, c.claim_status_code, l.procedure_code, {allowed}, l.paid_cents, l.charge_cents, 0
-                    FROM lines l JOIN claims c ON c.claim_key = l.claim_key JOIN transactions t ON t.transaction_key = c.transaction_key
-                    WHERE l.service_date = ? AND c.patient_id = ? AND COALESCE(t.superseded, 0) = 0""", (svc, pid[0])).fetchall()
-    best: dict[str, dict] = {}
-    for pcn, st, cd, al, paid, chg, same_bill in rows:
-        if (same_bill and S.bill_of(pcn) != b) or str(st) == "22" or not cd or cd == code:
-            continue
-        cur = best.get(cd)
-        if cur is None or (al or 0) > (cur["allowed"] or 0):
-            best[cd] = {"code": cd, "allowed": al, "paid": paid, "charge": chg}
-    return sorted(best.values(), key=lambda d: -(d["allowed"] or 0))
+    """The other procedures of the item's patient on its date of service (states.same_day_lines)."""
+    return S.same_day_lines(conn, f)
 
 
 def _short_check(conn: sqlite3.Connection, fx: dict) -> dict | None:
-    """Why a short payment may be right: a higher-valued procedure the same day (the payer pays the second procedure at a
-    reduced rate) or a surgery-center day (the payer pays its lower facility rate for the professional service), or why
-    it is not (the day's highest-valued procedure was cut as if it were a second one). {'kind': 'reduced' | 'top_cut',
-    'text'} or None. Memoized on the facts."""
-    if "_short_check" in fx:
-        return fx["_short_check"]
-    f = fx["item"]
-    out = None
-    if f.get("category") in S.SHORT and (f.get("expected_cents") or 0) > 0:
-        exp, allowed = f.get("expected_cents") or 0, f.get("allowed_cents")
-        ratio = (allowed / exp) if allowed is not None and exp else None
-        others = _same_day_lines(conn, f)
-        higher = [d for d in others if (d["allowed"] or 0) > exp]
-        tot = S._ema_line_totals(fx)
-        facility = tot["several"] or bool(fx["ema"]["twins"]) or (f.get("pos_class") or "") == "facility"
-        visit = str(f.get("procedure_code") or "").startswith("99")
-        if visit:
-            # a visit is not reduced as a second procedure; on a surgery-center day the payer pays its lower facility rate
-            if facility:
-                out = {"kind": "reduced", "text": (f"this looks like a surgery-center day (EMA ties this patient, date and code to a second "
-                                                   f"claim, or the place of service is a facility), where {f.get('payer_group') or 'the payer'} "
-                                                   "pays its lower facility rate, so the difference may be smaller than shown")}
-            fx["_short_check"] = out
-            return out
-        if higher and (facility or (ratio is not None and 0.4 <= ratio <= 0.6)):
-            h = higher[0]
-            text = (f"{h['code']} was billed the same day and is valued higher (allowed {usd(h['allowed'])}), so the payer pays "
-                    f"{f.get('procedure_code')} as a second procedure, usually at half its rate")
-            if facility:
-                text += ("; and this looks like a surgery-center day (EMA ties this patient, date and code to a second claim, or "
-                         "the place of service is a facility), where the payer pays its lower facility rate")
-            out = {"kind": "reduced", "text": text}
-        elif others and ratio is not None and 0.4 <= ratio <= 0.6 and all((d["allowed"] or 0) < exp for d in others):
-            low = ", ".join(f"{d['code']} (allowed {usd(d['allowed'])})" for d in others[:3])
-            out = {"kind": "top_cut", "text": (f"{f.get('procedure_code')} was the highest-valued procedure of the day (the others: {low}) "
-                                               "and was still paid at about half: only the lower-valued procedures take that reduction")}
-    fx["_short_check"] = out
-    return out
+    """Why a short payment may be right, or why it is not (states.short_check)."""
+    return S.short_check(conn, fx)
+
+
+def _late_words(st: dict) -> str:
+    """'Its own deadline passed on <date>; <window> is open until <date>.' for an item open only under a later window."""
+    late = st.get("late_window") or {}
+    own = S._later(st.get("deadline"), st.get("legal_deadline"))
+    if not late or not own:
+        return ""
+    return f"Its own deadline passed on {day(own)}; {late['what']} is open until {day(late['date'])} ({_short(late['basis'], 120)})."
 
 
 def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: str) -> tuple[str, list[int], str, str | None]:
@@ -1243,105 +1208,217 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
     rule = st.get("rule") or ""
     sig = f.get("signal") or ""
     deadline = st.get("deadline")
+    route = st.get("route") or S.route_of(fx, st, conn)
     ns: list[int] = []
-    window = _window(deadline, today, st.get("legal_deadline"))
+    started = rule == "person_started"
+    late = _late_words(st) if rule == "open_late" else ""
+    window = "" if late else _window(deadline, today, st.get("legal_deadline"), route, S._ev(f).get("second_payer"), st.get("deadline_basis"))
     resolved = str(o.get("status") or "").lower().startswith("resolved") or o.get("status_class") in ("paid", "settled")
     carcs = _carcs(fx)
     wo = usd(o.get("written_off") or o.get("contractual_routine"))
     void = [r for r in rows if r["kind"] == "charge_void"]
     hint = str(f.get("hint") or "")
+    noted = any(a.get("has_note") for a in fx["ar"])
+    nobody = ("" if started else ("; EMA's billing note names no appeal, call or resubmission" if noted else " and nobody has worked it"))
+
+    def done(text: str, marks: list[int], strength: str = "one_source", why: str | None = None):
+        if started:
+            text = f"{_started_words(st)}. {text}"
+        if late:
+            text = f"{late} {text}"
+        return text, marks, strength, why
     if void and story["balance"].get("charge_cents", 1) <= 0:
         ns = _decide_rows(rows, [r["n"] for r in void] + _mark(rows, "own_remit"))
-        return (f"Check first: EMA reversed this charge on {day(void[0]['date'])} {_refs(ns)}, so the claim was voided or re-created and the "
-                "service may be billed and paid on another claim" + (f" ({hint})" if hint else "") + ".", ns, "one_source", None)
-    if hint.startswith(("Possibly paid", "Processed on claim", "Partly paid")):
+        return done(f"Check first: EMA reversed this charge on {day(void[0]['date'])} {_refs(ns)}, so the claim was voided or re-created and the "
+                    "service may be billed and paid on another claim" + (f" ({hint})" if hint else "") + ".", ns)
+    if rule == "check_first":
+        h = S._archive_hint(f) or {}
+        ns = _mark(rows, "own_remit")
+        return done(f"Check first: {S._hint_text(h) or st.get('state_basis')} {_refs(ns)}. RemitWatch did not close it because the payment is not on "
+                    "file to prove it.", ns, "inferred", f"the 835 archive's rule '{h.get('rule') or 'archive'}': a payment it cannot tie to this "
+                    "service for sure")
+    if hint.startswith(S.CHECK_HINTS):
         ns = _mark(rows, "hint", "own_remit")
-        return (f"Check first: {hint} {_refs(ns)}. The analysis did not close it because the proof was not complete.", ns, "inferred",
-                "a payment found that does not meet every closing test")
+        return done(f"Check first: {hint} {_refs(ns)}. The analysis did not close it because the proof was not complete.", ns, "inferred",
+                    "a payment found that does not meet every closing test")
+    if rule == "possible_overpayment":
+        ns = _mark(rows, "own_remit") + _mark(rows, "pay_835", "pay_no835", limit=2)
+        return done(f"Paid twice: {st.get('state_basis')} {_refs(ns)}. Nothing more is owed; the extra is the owner's decision to refund.", ns)
+    if rule == "settled_in_ema":
+        se = st.get("settled") or {}
+        ns = _mark(rows, "pay_no835", "pay_835", "patient", limit=4) + _mark(rows, "own_remit")
+        return done(f"Check first: EMA shows this line settled: insurance paid {usd(se.get('ins'))}, the patient paid {usd(se.get('pat'))}, "
+                    f"{usd(se.get('open'))} open {_refs(ns)}. Find which payer paid and whether it settles this service; if it does, close it as "
+                    "Paid.", ns)
+    if rule == "patient_paid_co":
+        se = st.get("settled") or {}
+        ns = _mark(rows, "patient", limit=3) + _mark(rows, "own_remit")
+        return done(f"EMA shows the patient paid {usd(se.get('pat'))} and the line settled {_refs(ns)}, but {_poss(f.get('payer_group') or 'the payer')} "
+                    f"denial ({carcs}) puts this service on the practice, not the patient: appeal it and refund the patient if the payer pays, or "
+                    "refund the patient if the denial stands.", ns)
+    if rule == "decided_no_appeal":
+        ns = _mark(rows, "ar_note", limit=1) + _mark(rows, "own_remit")
+        return done(f"{st.get('state_basis')} {_refs(ns)}. If that decision stands, let it go with that reason.{window}", ns)
+    if rule == "note_unread":
+        ns = _mark(rows, "ar_note", limit=1) + _mark(rows, "own_remit")
+        return done(f"Read EMA's billing note first: {_lower(st.get('state_basis') or '')} {_refs(ns)}.{window}", ns)
+    if rule == "credit_unposted_takeback":
+        ns = _mark(rows, "reversal", "takeback", "pay_835", "pay_no835", limit=4)
+        return done(f"Not money owed back: {_lower(st.get('state_basis') or '')} {_refs(ns)}.", ns, "proven" if fx["r835"]["rows"] else "one_source")
+    if rule in ("person_billed_paid",):
+        ns = _mark(rows, "rw:manual", limit=1) + _mark(rows, "pay_no835", "pay_835", limit=2)
+        return done(f"{st.get('state_basis')} {_refs(ns)}.", ns)
     if rule in ("work_answered", "work_stale", "follow_up_due"):
         ns = _mark(rows, "work", "fax", "ar_note", "rw:manual", limit=2)
         if st.get("answered"):
             ns += [r["n"] for r in rows if r["date"] == st["answered"].get("date") and r["source"] in ("835", "production")]
         _decide_rows(rows, ns)
-        return (f"Work now: {st['state_basis']} {_refs(ns)}.", ns, "inferred" if (st.get("answered") or {}).get("inferred") else "one_source",
-                "a repeat answer of the same claim read as the answer to undated work" if (st.get("answered") or {}).get("inferred") else None)
+        inferred = (st.get("answered") or {}).get("inferred")
+        return done(f"Work now: {st['state_basis']} {_refs(ns)}.", ns, "inferred" if inferred else "one_source",
+                    "a repeat answer of the same claim read as the answer to undated work" if inferred else None)
     if rule == "credit_refund":
         ns = _mark(rows, "pay_no835", "pay_835", limit=3)
-        return (f"Overpaid: {st['state_basis']} {_refs(ns)}. The owner decides whether to refund it or let the payer recoup it.", ns,
-                "one_source", None)
+        return done(f"Overpaid: {st['state_basis']} {_refs(ns)}.", ns)
     if rule == "bill_patient":
         ns = _mark(rows, "reversal") + _mark(rows, "patient", limit=2)
-        return f"Moved to the patient, not yet collected: {st['state_basis']} {_refs(ns)}.", ns, "one_source", None
+        return done(f"Moved to the patient, not yet collected: {st['state_basis']} {_refs(ns)}.", ns)
     if rule in ("forwarded", "forwarded_late"):
         ns = _mark(rows, "own_remit")
-        return f"{st['state_basis']} {_refs(ns)}.", ns, "one_source", None
+        return done(f"{st['state_basis']} {_refs(ns)}.", ns)
     if sig == "NO_ANSWER":
         ev = S._ev(f)
         waited = ev.get("days_waiting") or S._days(ev.get("sent") or f.get("service_date"), today)
         tat = ev.get("turnaround_days") or _turnaround(conn, f.get("payer_group"))
         both = not fx["r835"]["rows"] and not fx["ema"]["pays"]
         ns = _mark(rows, "charge", "claim_status", limit=2)
-        return (f"Unanswered: no answer from any payer in {waited} days; this payer usually answers in {tat} days (95% of its claims) "
-                f"{_refs(ns)}.", ns, "proven" if both and fx["ema"]["lines"] else "one_source", None)
-    if sig == "REMIT_NOT_POSTED":
+        try:
+            from .ema_checks import turnaround_text
+            usual = turnaround_text(f.get("payer_group"), tat)
+        except Exception:       # noqa: BLE001  (an older checks module)
+            usual = f"{f.get('payer_group') or 'This payer'} answers 95% of claims within {tat} days"
+        return done(f"Unanswered: no answer from any payer in {waited} days; {usual} {_refs(ns)}.", ns,
+                    "proven" if both and fx["ema"]["lines"] else "one_source")
+    if sig == "REMIT_NOT_POSTED" or rule == "post_payment":
         ns = _mark(rows, "own_remit")
-        return (f"The 835 paid {usd(f.get('shortfall_cents'))} {_refs(ns)}, but EMA never posted it.", ns, "proven", None)
+        paid = f.get("paid_cents") or f.get("shortfall_cents")
+        return done(f"The 835 paid {usd(paid)} {_refs(ns)}, but EMA never posted it.", ns, "proven" if ns else "one_source")
+    if sig == "SECONDARY_NOT_BILLED":
+        return done(*_secondary_sentence(fx, story, st, today)[:2])
     if sig in ("REJECTED_PRE_PAYER", "NOT_SENT"):
         ns = _mark(rows, "ar", "ema_status", "claim_status", limit=2)
         word = "Never reached the payer" if sig == "REJECTED_PRE_PAYER" else "Never left EMA"
-        return f"{word}: {f.get('title') or ''} {_refs(ns)}.", ns, "one_source", None
+        return done(f"{word}: {f.get('title') or ''} {_refs(ns)}.", ns)
     if f.get("category") in S.SHORT:
-        return _short_sentence(conn, fx, story, st, today)
+        s_, n_, st_, why_ = _short_sentence(conn, fx, story, st, today)
+        return done(s_, n_, st_, why_)
     if str(f.get("carc") or "") in COB_CARCS:
-        return _cob_sentence(fx, story, st, today)
+        s_, n_, st_, why_ = _cob_sentence(fx, story, st, today)
+        return done(s_, n_, st_, why_)
     if oc == "auto_written_off":
         proven = o.get("evidence_level") == "rule_proven"
         ns = _mark(rows, "adj_at_posting") + _mark(rows, "own_remit") + (_mark(rows, "era") if proven else [])
-        lead = ("EMA shows this claim as Resolved, but nobody worked this line." if resolved else
-                "EMA shows this line closed, but nobody worked it.")
+        if started:
+            lead = "EMA shows this claim as Resolved;" if resolved else "EMA shows this line closed;"
+        else:
+            lead = ("EMA shows this claim as Resolved, but nobody worked this line." if resolved else
+                    "EMA shows this line closed, but nobody worked it.")
         evid = "Recorded by EMA's ERA export." if proven else "Inferred from the posting date."
-        return (f"{lead} EMA's posting rule wrote off the denial ({carcs}, {wo}) on {day(o.get('outcome_on'))}, the day the payer's remittance "
-                f"was posted. The payer paid nothing.{window} {evid} {_refs(ns)}", ns, "proven" if proven else "inferred",
-                None if proven else "posting day: an adjustment posted the day the remittance posted is EMA's posting rule")
+        return done(f"{lead} EMA's posting rule wrote off the denial ({carcs}, {wo}) on {day(o.get('outcome_on'))}, the day the payer's remittance "
+                    f"was posted. The payer paid nothing.{window} {evid} {_refs(ns)}", ns, "proven" if proven else "inferred",
+                    None if proven else "posting day: an adjustment posted the day the remittance posted is EMA's posting rule")
     if oc == "written_off_while_pending":
         ns = _mark(rows, "adj_at_posting") + _mark(rows, "own_remit")
         asked = "information" if any(c.endswith(("-16", "-252", "-226")) for c in (o.get("carcs") or [])) else "a review"
-        return (f"EMA wrote this off the day it posted, but the payer had not finished: it asked for {asked}. This can usually be corrected "
-                f"and sent again.{window} {_refs(ns)}", ns, "inferred", "posting day")
+        return done(f"EMA wrote this off the day it posted, but the payer had not finished: it asked for {asked}. This can usually be corrected "
+                    f"and sent again.{window} {_refs(ns)}", ns, "inferred", "posting day")
     if oc == "lost_to_timely_filing":
         first = next((r for r in rows if r["source"] == "835" and r["kind"] == "adjudication"), None)
         first_carc = (first["codes"][0]["code"] if first and first["codes"] else f.get("carc")) or "another reason"
         ns = _mark(rows, "adj:CO-29") + ([first["n"]] if first else [])
-        return (f"This was written off for late filing. The payer first denied it for {first_carc}; it ran out of time before anyone fixed it. "
-                f"{_refs(ns)}", ns, "one_source", None)
+        return done(f"This was written off for late filing. The payer first denied it for {first_carc}; it ran out of time before anyone fixed it. "
+                    f"{_refs(ns)}", ns)
     if oc in ("written_off_later", "contractual_later"):
         ns = _mark(rows, "adj_later") + _mark(rows, "own_remit")
-        return (f"A person wrote this off in EMA on {day(o.get('outcome_on'))} ({carcs}, {wo}), on a day with no remittance posted, while the "
-                f"payer had paid nothing; RemitWatch keeps it on the list while it can still be recovered (owner policy: pursue).{window} {_refs(ns)}",
-                ns, "one_source", None)
+        return done(f"A person wrote this off in EMA on {day(o.get('outcome_on'))} ({carcs}, {wo}), on a day with no remittance posted, while the "
+                    f"payer had paid nothing; RemitWatch keeps it on the list while it can still be recovered (owner policy: pursue).{window} {_refs(ns)}", ns)
     if oc in ("written_off_at_posting", "contractual_at_posting"):
         ns = _mark(rows, "adj_at_posting") + _mark(rows, "own_remit")
         if o.get("contractual_routine") and not o.get("written_off"):
-            return (f"EMA closed this line with a routine contractual adjustment ({usd(o.get('contractual_routine'))}) the day the remittance "
-                    f"posted {_refs(ns)}, while the payer paid nothing for it ({carcs}).{window}", ns, "one_source", None)
-        return (f"EMA wrote off {carcs} ({wo}) the day the remittance posted {_refs(ns)}; the payer paid nothing.{window}", ns, "inferred",
-                "posting day")
+            return done(f"EMA closed this line with a routine contractual adjustment ({usd(o.get('contractual_routine'))}) the day the remittance "
+                        f"posted {_refs(ns)}, while the payer paid nothing for it ({carcs}).{window}", ns)
+        return done(f"EMA wrote off {carcs} ({wo}) the day the remittance posted {_refs(ns)}; the payer paid nothing.{window}", ns, "inferred",
+                    "posting day")
     if oc == "paid_after_partial":
         ns = _mark(rows, "pay_no835", "pay_835", limit=2) + _mark(rows, "own_remit")
-        return (f"Partly paid: EMA shows {usd((o.get('paid_after_same') or 0) + (o.get('paid_after_other') or 0))} paid since {_refs(ns)}, less "
-                f"than half of what this should bring.{window}", ns, "one_source", None)
+        return done(f"Partly paid: EMA shows {usd((o.get('paid_after_same') or 0) + (o.get('paid_after_other') or 0))} paid since {_refs(ns)}, less "
+                    f"than half of what this should bring.{window}", ns)
     if oc == "paid_before" or rule == "paid_before":
         ns = _decide_rows(rows, _mark(rows, "own_remit") + [r["n"] for r in rows if r["kind"] == "payment"
                                                             and (r["date"] or "") < (f.get("payment_date") or "")])
-        return (f"Check first: this line was paid before this denial {_refs(ns)}; the denial may be a duplicate or a second payer's answer.",
-                ns, "one_source", None)
+        return done(f"Check first: this line was paid before this denial {_refs(ns)}; the denial may be a duplicate or a second payer's answer.", ns)
     ns = _mark(rows, "own_remit")
-    open_ = story["balance"].get("open_cents")
-    if story["balance"].get("basis") == "production":
+    bal = story["balance"]
+    open_ = bal.get("open_cents")
+    head = "Unpaid" + nobody
+    if bal.get("basis") == "production":
         ns += _mark(rows, "ar", limit=1)
-        return (f"Unpaid and nobody has worked it: {f.get('payer_group') or 'the payer'} answered {carcs} {_refs(ns)}, and EMA shows "
-                f"{usd(open_)} still open.{window}", ns, "proven" if fx["r835"]["rows"] else "one_source", None)
-    return (f"Unpaid and nobody has worked it: {f.get('payer_group') or 'the payer'} answered {carcs} {_refs(ns)}.{window}", ns, "one_source", None)
+        shows = (f"EMA shows {usd(open_)} still open" if (open_ or 0) > 0 else
+                 "EMA shows the line closed with no payment on it" if (open_ or 0) == 0 else f"EMA shows a credit of {usd(-open_)}")
+        return done(f"{head}: {f.get('payer_group') or 'the payer'} answered {carcs} {_refs(ns)}, and {shows}.{window}", ns,
+                    "proven" if fx["r835"]["rows"] and (open_ or 0) > 0 else "one_source")
+    return done(f"{head}: {f.get('payer_group') or 'the payer'} answered {carcs} {_refs(ns)}.{window}", ns)
+
+
+def _started_words(st: dict) -> str:
+    """'Started by <who> on <date>' from a person-started state."""
+    b = str(st.get("state_basis") or "")
+    return b.split(".", 1)[0] if b.startswith("Started by") else "Started by a person"
+
+
+def _secondary_sentence(fx: dict, story: dict, st: dict, today: str) -> tuple[str, list[int]]:
+    """A second payer never billed: what the first payer paid and left, how EMA closed the share instead of billing the
+    second payer, and the second payer's filing limit (never the words of a denial to appeal, M14)."""
+    f = fx["item"]
+    rows = story["rows"]
+    ev = S._ev(f)
+    second = _second_name(fx)
+    first = ev.get("first_payer") or f.get("payer_group") or "The first payer"
+    share = int(f.get("shortfall_cents") or 0)
+    word = {"coinsurance": "of coinsurance", "copay": "of copay", "deductible": "of deductible"}.get(str(ev.get("share") or ""), "")
+    ns = _mark(rows, "own_remit", limit=1)
+    wo_rows = [r for r in rows if r["source"] == "production" and r["kind"] == "adjustment"
+               and not any(c["code"].split("-")[-1] in CONTRACTUAL for c in r["codes"])]
+    how = ""
+    if ev.get("ema_wrote_off_share") and wo_rows:
+        w = wo_rows[-1]
+        code = w["codes"][0]["code"] if w["codes"] else "an adjustment"
+        how = f"; EMA wrote it off ({code}, {usd(w['amount_cents'])}) on {day(w['date'])} {_refs([w['n']])} instead of billing {second}"
+        _decide_rows(rows, [w["n"]])
+    elif ev.get("ema_wrote_off_share"):
+        how = f"; EMA wrote it off instead of billing {second}"
+    deadline = st.get("deadline")
+    by = (f" Bill {second} by {day(deadline)} (its filing limit)." if deadline and deadline >= today else
+          (f" {_poss(second)} filing limit passed on {day(deadline)}." if deadline else ""))
+    return (f"Not billed to {second}: {first} paid {usd(f.get('paid_cents'))} on {day(f.get('payment_date'))} and left {usd(share)}"
+            + (f" {word}" if word else "") + f" {_refs(ns)}{how}.{by}", ns)
+
+
+def _second_name(fx: dict) -> str:
+    """The second payer to bill: the item's, or EMA's own secondary payer when the item names a group of many insurers
+    (a Medigap carrier, a Medicaid plan the group does not name)."""
+    ev = S._ev(fx["item"])
+    second = ev.get("second_payer") or "the second payer"
+    try:
+        from . import fax
+        many = fax.shared_group(second)
+    except Exception:       # noqa: BLE001
+        many = False
+    if many:
+        named = next((ln.get("secondary_payer") for ln in fx["ema"]["lines"] if ln.get("secondary_payer")
+                      and str(ln.get("secondary_payer")).strip().lower() not in ("none", "-", "")), None)
+        if named:
+            return f"{named} (one of the {second})"
+    return second
 
 
 def _short_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, today: str) -> tuple[str, list[int], str, str | None]:
@@ -1373,7 +1450,7 @@ def _short_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, t
         ns += en
         ema = f" A person wrote the difference off in EMA on {day(o.get('outcome_on'))} {_refs(en)}."
     chk = _short_check(conn, fx)
-    window = _window(st.get("deadline"), today, st.get("legal_deadline"))
+    window = _window(st.get("deadline"), today, st.get("legal_deadline"), st.get("route") or "rate")
     if chk and chk["kind"] == "reduced":
         return (f"Check first: {chk['text']}. {head}{ema}", ns, "inferred", "a same-day procedure or the facility rate may explain the cut")
     if chk and chk["kind"] == "top_cut":
@@ -1402,7 +1479,8 @@ def _cob_sentence(fx: dict, story: dict, st: dict, today: str) -> tuple[str, lis
         parts.append(f"The patient has paid {usd(pat)} on this line.")
     if rev and tot["n"] and tot["balance"] <= 0:
         parts.append("EMA never posted the reversal, so it still shows the line settled.")
-    parts.append("This is a task to find the plan that pays first, not an appeal." + _window(st.get("deadline"), today, st.get("legal_deadline")))
+    parts.append("This is a task to find the plan that pays first, not an appeal." + _window(st.get("deadline"), today, st.get("legal_deadline"),
+                                                                                             "cob", basis=st.get("deadline_basis")))
     return " ".join(parts), ns, "one_source", None
 
 
@@ -1447,6 +1525,26 @@ def _siblings(conn: sqlite3.Connection, f: dict) -> list[dict]:
     return sorted(out, key=lambda d: (d.get("deadline") or "9999", d["finding_id"]))[:8]
 
 
+def _sibling_words(sib: list[dict]) -> str:
+    """The visit's other open items in words, repeats of one code folded: '17003 x3 (denied: too many units or too often,
+    $270.00, due Jun 1, 2026)'."""
+    try:
+        from .insights import SIGNAL_LABELS
+    except Exception:       # noqa: BLE001
+        SIGNAL_LABELS = {}
+    by: dict[tuple, list] = {}
+    for s_ in sib:
+        by.setdefault((s_["code"] or "the claim", s_["signal"]), []).append(s_)
+    out = []
+    for (code, sig), group in by.items():
+        label = (SIGNAL_LABELS.get(sig) or ("",))[0] or str(sig or "").replace("_", " ").lower()
+        label = label[:1].lower() + label[1:]
+        cents = sum(g["cents"] or 0 for g in group)
+        due = min((g["deadline"] for g in group if g.get("deadline")), default=None)
+        out.append(f"{code}" + (f" x{len(group)}" if len(group) > 1 else "") + f" ({label}, {usd(cents)}" + (f", due {day(due)}" if due else "") + ")")
+    return "; ".join(out)
+
+
 def item_verdict(conn: sqlite3.Connection, finding_id: str, *, ledger: Any = None, today: str | None = None) -> dict:
     """The item's state as plain sentences naming the decisive story rows, with the strength of the proof:
     {'state', 'sentence', 'rows', 'strength', 'rule', 'label', 'follow_up_on', 'state_basis', 'stored'}."""
@@ -1455,7 +1553,11 @@ def item_verdict(conn: sqlite3.Connection, finding_id: str, *, ledger: Any = Non
 
 # ----------------------------------------------------------------------------------------------------- the next step
 def _fax_number(conn: sqlite3.Connection, f: dict) -> tuple[bool, str]:
-    """Whether a confirmed fax number for the payer's appeals is on file (a send then goes there, preview first)."""
+    """Whether a confirmed fax number for the payer's appeals is on file (a send then goes there, preview first). Medicare's
+    contractors take no faxed redeterminations (CGS's job aid), so a Medicare appeal is never faxed from here."""
+    if f.get("payer_kind") == "medicare":
+        return False, ("Medicare's contractor takes redeterminations through its portal (myCGS for CGS) or by mail, not by fax: "
+                       "file it there.")
     try:
         from . import fax
         nb = fax.number_for(conn, f.get("payer_group"), f.get("payer_kind"), 1)
@@ -1464,10 +1566,37 @@ def _fax_number(conn: sqlite3.Connection, f: dict) -> tuple[bool, str]:
         if nb.get("number") and nb.get("auto_ok", 1):
             return True, f"Fax to {f.get('payer_group')} appeals at the confirmed number ending {nb['number'][-4:]}, preview first."
         if nb.get("number"):
-            return False, f"{f.get('payer_group')}'s appeal fax number was changed and nobody has confirmed it: confirm it on the Faxes page."
-        return False, f"No fax number is saved for {f.get('payer_group') or 'this payer'}: add it on the Faxes page, or send the packet the way the payer takes it."
+            return False, f"{_poss(f.get('payer_group'))} appeal fax number was changed and nobody has confirmed it: confirm it on the Faxes page."
+        return False, ""
     except Exception:       # noqa: BLE001  (no fax tables on this copy)
-        return False, "No fax number is on file for this payer."
+        return False, ""
+
+
+# Where a first-level dispute goes, by payer group (docs/RESEARCH_DOMAIN.md: Anthem and Aetna disputes on Availity,
+# Cigna's reconsideration on CignaforHCP or its secure fax, UnitedHealthcare's on UHCprovider.com, CGS's redeterminations
+# on myCGS and never by fax). First match wins; the pattern is on the payer group's name.
+APPEAL_CHANNELS = [
+    (r"^Medicare KY|CGS", "medicare", "File a redetermination on myCGS (CGS takes no faxed redeterminations), attaching the packet's PDF."),
+    (r"^Medicare IN|WPS", "medicare", "File a redetermination on the WPS portal (or by mail), attaching the packet's PDF; Medicare takes no "
+                                     "faxed redeterminations."),
+    (r"^Medicare|^Railroad", "medicare", "File a redetermination on the Medicare contractor's portal (or by mail), attaching the packet's PDF."),
+    (r"^Anthem", None, "File it on Availity as a Claim Payment Dispute (Claims & Payments > Disputes), attaching the packet's PDF."),
+    (r"^Humana", None, "File it on Availity (Dispute Claim), attaching the packet's PDF."),
+    (r"^Aetna", None, "File it on Availity (Disputes & Appeals), attaching the packet's PDF."),
+    (r"^UMR\b", None, "File it on umr.com, attaching the packet's PDF."),
+    (r"^(UnitedHealthcare|UHC)", None, "File a claim reconsideration on UHCprovider.com, attaching the packet's PDF."),
+    (r"^Cigna", None, "File it on CignaforHCP (Claims > Search Claims > Start a reconsideration), or fax it to the confirmed number."),
+]
+
+
+def _appeal_channel(f: dict) -> str:
+    """Where the payer takes a first-level dispute, in one step (M15)."""
+    grp, kind = f.get("payer_group") or "", f.get("payer_kind")
+    for rx, k, words in APPEAL_CHANNELS:
+        if re.search(rx, grp) and (k is None or k == kind):
+            return words
+    return (f"Send it the way {_poss(grp or 'the payer')} provider manual says (its portal first); add its appeal fax number on the Faxes "
+            "page to fax it from here.")
 
 
 def _note_on_file(conn: sqlite3.Connection, f: dict) -> bool:
@@ -1664,7 +1793,8 @@ def _appeal_needs(conn: sqlite3.Connection, f: dict, fx: dict) -> tuple[list[str
     if sig == "DENIED_MEDICAL_NECESSITY":
         reopen = " For Medicare, a wrong diagnosis code is a clerical error: ask for a reopening (within a year of the remittance) before a redetermination." \
             if f.get("payer_kind") == "medicare" else ""
-        return ([note, "the pathology report", "the coverage policy (LCD) with the criteria met highlighted"],
+        policy = "the coverage policy (the LCD)" if f.get("payer_kind") == "medicare" else "the payer's medical policy for the service"
+        return ([note, "the pathology report", f"{policy} with the criteria met highlighted"],
                 "The service meets the coverage criteria: the diagnosis on the claim and the record show the indication. Check the diagnosis "
                 f"first: a wrong diagnosis code is fixed by a corrected claim (or a Medicare reopening), not an appeal.{reopen}{paid_like}")
     if sig == "DENIED_LEVEL_OF_SERVICE":
@@ -1672,7 +1802,7 @@ def _appeal_needs(conn: sqlite3.Connection, f: dict, fx: dict) -> tuple[list[str
     if sig == "DENIED_FREQUENCY":
         return ([note, "the documentation of each unit, site or session"], "The units billed were rendered and documented.")
     if sig == "DENIED_AUTH":
-        return (["the authorization number or the portal page showing it"], "The service was authorized (or needed no authorization).")
+        return (["the authorization number or the portal page showing it"], "The service was authorized: the authorization covers the date of service.")
     if sig == "DENIED_TIMELY_FILING":
         return (["the clearinghouse acceptance report (or 277CA) with the original submission date"], "The claim reached the payer in time.")
     if sig == "DENIED_PROVIDER":
@@ -1681,70 +1811,13 @@ def _appeal_needs(conn: sqlite3.Connection, f: dict, fx: dict) -> tuple[list[str
 
 
 def _timely_proof(conn: sqlite3.Connection, f: dict, fx: dict) -> dict:
-    """For a timely-filing denial: the first day the payer received any claim of this bill (the 835's received dates), the
-    first submission EMA's claim-status export shows, and the first-filing limit from the date of service."""
-    from .codes import filing_rule
-    recv = sorted(x["received"] for x in fx["r835"]["rows"] if x.get("received"))
-    sub = sorted(x["submitted"] for x in fx["exports"] if x.get("submitted"))
-    r = filing_rule(f.get("payer_group"), f.get("payer_kind"))
-    limit = S._add(f.get("service_date"), r["days"]) if f.get("service_date") else None
-    first = min([d for d in (recv[:1] + sub[:1]) if d] or [None]) if (recv or sub) else None
-    return {"received": recv[0] if recv else None, "submitted": sub[0] if sub else None, "limit": limit, "label": r["label"],
-            "in_time": bool(first and limit and first <= limit)}
+    """For a timely-filing denial: when the claim first reached the payer and the first-filing limit (states.timely_proof)."""
+    return S.timely_proof(f, fx)
 
 
 def _route_for(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> str:
-    """The kind of work the item takes: appeal, corrected, call, post, bill_patient, bill_secondary, refund, contract, fees,
-    eob_first, cob, rate, decide, wait, nothing."""
-    state = st["work_state"]
-    sig = f.get("signal") or ""
-    if state in ("done", "accepted", "expired"):
-        return "nothing"
-    if state == "waiting":
-        return "wait"
-    if state == "cant_check":
-        return "call"
-    rule = st.get("rule") or ""
-    if rule == "credit_refund" or sig == "CREDIT_BALANCE" or f.get("category") == "refund":
-        return "refund"
-    if rule == "bill_patient":
-        return "bill_patient"
-    if sig == "SECONDARY_NOT_BILLED" and rule in ("open", "stored"):
-        return "bill_secondary"         # a stored state on the dashboard's copy keeps the signal's own work
-    if rule in ("work_answered", "work_stale", "follow_up_due", "forwarded_late"):
-        return "call"
-    if rule == "post_payment" or sig == "REMIT_NOT_POSTED":
-        return "post"
-    if sig in S.CONTRACT:
-        return "contract"
-    if sig in S.FEES:
-        return "fees"
-    if sig in ("NO_ANSWER", "DENIED_DUPLICATE_UNPAID"):
-        return "call"
-    if sig in ("REJECTED_PRE_PAYER", "NOT_SENT"):
-        return "corrected"
-    if sig == "EMA_DENIED":
-        return "eob_first"
-    carc = str(f.get("carc") or "")
-    if carc in COB_CARCS:
-        return "cob"
-    if (fx.get("outcome") or {}).get("outcome") == "paid_before":
-        return "decide"
-    if str(f.get("hint") or "").startswith(("Possibly paid", "Processed on claim", "Partly paid")):
-        return "decide"
-    if f.get("category") in S.SHORT:
-        chk = _short_check(conn, fx)
-        if chk and chk["kind"] == "reduced":
-            return "decide"
-    if sig == "DENIED_TIMELY_FILING" or carc == "29":
-        return "decide" if not _timely_proof(conn, f, fx)["in_time"] else "appeal"
-    if sig in ("DENIED_NONCOVERED", "DENIED_OTHER", "CODE_CHANGED", "CLAIM_DENIED_UNPAID", "DENIED_MISSING_PRIMARY", "DENIED_PROVIDER"):
-        return "decide"
-    if f.get("actionable") == "correct_and_resubmit" or (sig == "DENIED_MISSING_MODIFIER"):
-        return "corrected"
-    if sig in ("UNDERPAID_VS_OWN_RATE", "MPPR_EXCESS", "SECOND_RATE") or f.get("category") in S.SHORT and not sig.startswith("DOWNCODE"):
-        return "rate"
-    return "appeal"
+    """The kind of work the item takes (states.route_of, the one place it is decided)."""
+    return st.get("route") or S.route_of(fx, st, conn)
 
 
 def _unposted(fx: dict) -> dict | None:
@@ -1759,8 +1832,7 @@ def _unposted(fx: dict) -> dict | None:
     if str(x.get("method") or "").upper() == "NON" and (x["paid"] or 0) > 0:
         return None             # an informational notice of a payment that comes on another remittance
     traces = {p.get("trace_key") for p in fx["ema"]["pays"] if p.get("trace_key")}
-    tails = {p["check_tail"] for p in fx["ema"]["pays"] if p.get("check_tail")}
-    if x.get("tk") in traces or (x.get("check_tail") and x["check_tail"] in tails):
+    if x.get("tk") in traces or any(p.get("check") and x.get("trace") and S._same_check(p["check"], x["trace"]) for p in fx["ema"]["pays"]):
         return None
     as_of = max((ln.get("as_of") or "" for ln in fx["ema"]["lines"]), default="")
     if not as_of or (S._days(x["date"], as_of) or 0) < 14:
@@ -1769,12 +1841,8 @@ def _unposted(fx: dict) -> dict | None:
 
 
 def _plb_unbooked(fx: dict) -> list[dict]:
-    """Takebacks (PLB WO or 72) whose reference names the item's claim that EMA shows no takeback for on the line."""
-    plb = [p for p in fx["r835"].get("plb") or [] if p["reason"] in ("WO", "72")]
-    if not plb:
-        return []
-    neg = [p for p in fx["ema"]["pays"] if (p["cents"] or 0) < 0]
-    return [p for p in plb if not any(abs(abs(n["cents"]) - abs(p["cents"])) <= 1 for n in neg)]
+    """Takebacks (PLB WO or 72) naming the item's claim that EMA shows no takeback for (states.plb_unbooked)."""
+    return S.plb_unbooked(fx)
 
 
 def _recovery_step(f: dict, rec: dict) -> str | None:
@@ -1801,12 +1869,17 @@ def _recovery_step(f: dict, rec: dict) -> str | None:
     return None
 
 
+CLOSE_RECOVERED = ("paid_later_ema", "paid_later_835", "rebilled_paid", "forwarded_paid", "second_payer_paid", "claim_paid_in_ema")
+ACCEPT_REOPENS = ("person_let_go", "person_lost", "hidden_rule")
+
+
 def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: dict, today: str | None) -> dict:
     f = fx["item"]
     t = S._today(today)
     o = fx.get("outcome") or {}
     sig = f.get("signal") or ""
     grp = f.get("payer_group") or "the payer"
+    rule = st.get("rule") or ""
     route = _route_for(conn, f, fx, st)
     deadline, basis = st.get("deadline"), st.get("deadline_basis")
     proof = st.get("proof") or {}
@@ -1815,25 +1888,35 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
     needs: list[str] = []
     who = "Biller"
     action = ""
-    expected = _expected(f, fx)
+    expected, expected_basis = _expected(f, fx, story)
     clocks = _clocks(f, fx, st)
     url = _claim_url(conn, fx)
     appeal_block = st.get("appeal_block")
     bal = story.get("balance") or {}
     tot = S._ema_line_totals(fx)
     rec = S.recovery_of(conn, f) if f.get("category") in S.MONEY else None
+    pattern = None
     if bal.get("credit") and not appeal_block:
         appeal_block = "credit"
+    late = st.get("late_window") if rule == "open_late" else None
     # the binding deadline: the earliest clock that is still the item's own (a first denial of the same service counts)
     first = next((c for c in clocks if c["what"] == "first denial of this service"), None)
-    if first and deadline and first["date"] < deadline and route in ("appeal", "call", "decide", "rate", "corrected"):
+    if first and deadline and first["date"] < deadline and route in ("appeal", "call", "decide", "rate", "corrected") \
+            and rule not in ("work_answered", "follow_up_due", "work_stale"):
         deadline, basis = first["date"], first["basis"]
     if route == "nothing":
-        expected = 0
-        if st["work_state"] == "done":
+        expected, expected_basis = 0, None
+        state = st["work_state"]
+        if state == "done":
             action = "Nothing to do: " + (proof.get("text") or st.get("state_basis") or "it is settled") + "."
-            if f.get("status") == "open":
-                steps.append("Close it in RemitWatch: Paid, with the amount and the note shown.")
+            if f.get("status") == "open" and rule not in ("stale", "auto_closed", "person_paid"):
+                if proof.get("rule") in CLOSE_RECOVERED and (proof.get("cents") or 0) > 0:
+                    steps.append(f"Close it as Paid, recovered {usd(proof.get('cents'))} (the payment of {day(proof.get('date'))}): Log what "
+                                 "happened > The payer paid.")
+                else:
+                    steps.append("Close it as Paid with $0.00 recovered: the money came before this item was listed (Log what happened > "
+                                 "The payer paid, amount 0).")
+                buttons.append("log_outcome")
             if proof.get("watch"):
                 steps.append("Watch for a takeback: if the payer recoups the payment, dispute it with the remittance that paid it.")
             if proof.get("source") == "production" or proof.get("rule") in ("paid_later_ema", "rebilled_paid", "claim_paid_in_ema", "forwarded_paid"):
@@ -1841,7 +1924,7 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                 if era:
                     steps.append(era)
                     buttons.append("request_era")
-            if tot["n"] and tot["balance"] > 0:
+            if tot["n"] and tot["balance"] > 0 and rule != "stale":
                 unj = [r for r in story.get("rows") or [] if "patient_unjoined" in r["tags"] and (r["amount_cents"] or 0) > 0]
                 if unj:
                     steps.append(f"EMA still shows {usd(tot['balance'])} open on this line, but the patient paid {usd(sum(r['amount_cents'] for r in unj))} "
@@ -1851,67 +1934,60 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                     steps.append(f"EMA still shows {usd(tot['balance'])} open on this line: if it is the patient's share (deductible, "
                                  "coinsurance or copay), put it on the patient's next statement; if it is the payer's, the line is not settled.")
                     buttons.append("mark_billed")
-            if st.get("rule") in ("auto_closed",) or f.get("auto_note"):
+            if rule == "auto_closed" or f.get("auto_note"):
                 buttons.append("reopen")
-        elif st["work_state"] == "accepted":
+        elif state == "accepted":
             action = "Nothing to do: " + (st.get("state_basis") or "a loss someone accepted") + "."
-            buttons.append("reopen")
+            if rule in ACCEPT_REOPENS:
+                buttons.append("reopen")
+            elif rule == "policy":
+                steps.append("To work these again, change the decision on the Write-off policy page.")
         else:
-            action = f"Nothing can be recovered: {_lower(st.get('state_basis') or 'every window closed')}."
-            if f.get("status") == "open":
-                steps.append("Mark it Lost so it leaves the list (it stays findable).")
-                buttons.append("let_go")
+            closed = st.get("closed_on") or deadline
+            cb = _short(st.get("closed_basis") or basis, 120)
+            action = (f"Nothing can be recovered: the last window closed on {day(closed)}" + (f" ({cb})" if cb else "")
+                      + ". It left the work list on its own and counts as lost to the deadline.")
+            buttons.append("log_outcome")
         deadline, basis = None, None
     elif route == "wait":
-        action = f"Wait for {grp}'s answer to the work already done; follow up on {day(st.get('follow_up_on'))} if nothing comes."
-        steps.append(f"On {day(st.get('follow_up_on'))}, check the payer's portal or call about the claim, quoting what was sent and when.")
-        if deadline:
-            steps.append(f"If the payer has no record of it then, send it again in writing before {day(deadline)}.")
+        action, steps, who = _wait_step(f, fx, st)
         buttons += ["log_outcome"]
-        deadline, basis = st.get("follow_up_on"), "the payer's usual answer time after the work was seen"
-        who = "A/R follow-up biller"
+        deadline, basis = st.get("follow_up_on"), "the payer's usual answer time after the work was seen" if st.get("follow_up_on") else None
+        if rule == "ema_follow_up":
+            basis = "the follow-up date a person set in EMA"
+        expected, expected_basis = (expected, expected_basis)
     elif route == "refund":
-        credit = st.get("credit_cents") or (-bal.get("open_cents", 0) if bal.get("open_cents", 0) < 0 else 0)
-        pays = [p for p in fx["ema"]["pays"] if (p["cents"] or 0) > 0]
-        payers = sorted({p["payer"] for p in pays if p["payer"]})
-        allowed = max((x.get("allowed") or 0 for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key")), default=0)
-        listing = "; ".join(f"{usd(p['cents'])} from {p['payer'] or 'insurance'} posted {day(p['posted'])}" for p in pays[:6])
-        action = (f"Overpaid by {usd(credit)}: decide whether to refund it or let {', '.join(payers) or grp} recoup it. Do not appeal or ask for "
-                  "more on this line.")
-        steps += [f"Who paid: {listing}" + (f", against an allowed amount of {usd(allowed)}" if allowed else "") + ".",
-                  "Call the payer (or use its portal) to confirm which plan is primary and whether it will recoup or wants a refund check.",
-                  "The owner decides and signs the refund; post the refund or the recoupment in EMA so the credit clears."]
-        who = "Billing lead; owner decides"
+        action, steps, who, deadline, basis = _refund_step(f, fx, st, bal, deadline, basis)
         buttons += ["copy_instructions", "log_outcome"]
-        expected = 0
-        if not (sig == "CREDIT_BALANCE" and deadline):
-            deadline = None
-            basis = "Commercial plans usually ask for an identified overpayment back within 30 days; Medicare within 60 days of finding it"
+        expected, expected_basis = 0, "nothing to collect: money owed back"
+    elif route == "post":
+        action, steps, who, deadline, basis = _post_step(f, fx, st)
+        buttons += ["mark_posted", "copy_instructions"]
+        if rule == "credit_unposted_takeback":
+            expected, expected_basis = 0, "nothing to collect: a takeback to post"
+        else:
+            expected, expected_basis = int(f.get("paid_cents") or f.get("shortfall_cents") or 0), "the 835's payment"
     elif route == "bill_patient":
-        pr = proof.get("patient_cents") or bal.get("open_cents") or 0
-        owed = bal.get("open_cents") if (bal.get("open_cents") or 0) > 0 else pr
-        action = f"Bill the patient {usd(owed)}: {proof.get('text') or st.get('state_basis')}."
-        if f.get("payer_kind") == "medicaid":
-            action = "Do not bill the patient: a Medicaid member cannot be billed for a covered service. " + (st.get("state_basis") or "")
-        steps.append("Put the amount on the patient's next statement; the payer owes nothing more on this line.")
-        who = "Patient accounts"
-        buttons += ["mark_billed", "copy_instructions"]
-        expected = max(0, bal.get("open_cents") or 0)
+        action, steps, who, owed, extra = _bill_patient_step(f, fx, st, tot)
+        buttons += extra
+        expected, expected_basis = owed, ("the patient's share on the 835" if owed else
+                                          "a Medicaid member is not billed beyond the plan's copay")
+        deadline, basis = None, "the next statement cycle"
     elif route == "bill_secondary":
         ev = S._ev(f)
-        second = ev.get("second_payer") or "the second payer"
+        second = _second_name(fx)
         first_payer = ev.get("first_payer") or grp
         owed = int(f.get("shortfall_cents") or 0)
         share = ev.get("share") or "the patient's share"
         if ev.get("crossover"):
             action = (f"Ask {second} for its payment: {first_payer} paid on {day(f.get('payment_date'))} and forwarded the claim, and nothing from "
                       f"{second} is on file ({usd(owed)}, {share}).")
-            steps.append(f"Check {second}'s portal or call about the claim; if it has no record of it, bill it from EMA with {first_payer}'s "
+            steps.append(f"Check {_poss(second)} portal or call about the claim; if it has no record of it, bill it from EMA with {_poss(first_payer)} "
                          "remittance attached.")
         else:
             action = (f"Bill {second} for {usd(owed)} ({share}): {first_payer} paid on {day(f.get('payment_date'))} and left it, and {second} is "
                       "on file and was never billed.")
-            steps.append(f"Send the claim to {second} from EMA with {first_payer}'s remittance (its EOB) attached"
+            steps.append(f"Send the claim to {second} from EMA with {_poss(first_payer)} remittance (its EOB) attached"
                          + (f", before {day(deadline)}" if deadline else "") + "; keep the acceptance report as proof of timely filing.")
         if ev.get("ema_wrote_off_share"):
             steps.append(f"EMA wrote the share off: reverse that write-off so the line shows {usd(owed)} open until {second} answers.")
@@ -1919,17 +1995,7 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
             steps.append("Medicaid pays last: never bill the patient for what Medicaid covers.")
         who = "Biller"
         buttons += ["copy_instructions", "mark_billed"]
-        expected = owed
-    elif route == "post":
-        ev = S._ev(f)
-        action = (f"Post the payment in EMA: {grp} paid {usd(f.get('shortfall_cents'))} on {day(f.get('payment_date'))} "
-                  f"(trace ending {ev.get('trace_tail') or '?'}), and EMA has not posted it.")
-        steps += ["Find the deposit on the bank statement (or the payer's portal) for that date and amount.",
-                  "Post each claim line of the remittance in EMA under that trace: payment, contractual adjustment and patient share as the 835 shows.",
-                  "If EMA posted it under another number, correct the number; if it never arrived, ask the payer to reissue it."]
-        who = "Payment poster"
-        buttons += ["mark_posted", "copy_instructions"]
-        deadline, basis = None, "Post it now: the deposit is in the bank and nobody else will find it"
+        expected, expected_basis = owed, "the share the first payer left (its 835)"
     elif route == "contract":
         action = ("A contract or billing-policy question for the owner, not a claim to appeal: bring it to the payer's contract review with the "
                   "rates and volumes shown." if sig != "G2211_DENIED" else
@@ -1937,6 +2003,11 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         who = "Owner"
         buttons += ["copy_instructions"]
         deadline, basis = None, "the agreement's renewal or notice date"
+    elif route == "policy":
+        action, steps, who, pattern = _policy_step(f)
+        buttons += ["accept_pattern", "copy_instructions"]
+        deadline, basis = None, "the owner's decision; the lines still inside their window can be worked once EMA posts them as denials"
+        expected, expected_basis = int(S._ev(f).get("inside_window_cents") or 0), "the write-offs still inside their window (EMA's postings)"
     elif route == "fees":
         action = ("Ask the payer or its payment vendor for standard EFT with no fee, and for the fees withheld back." if sig == "FEE_SKIM" else
                   "Match the takeback to the payer's overpayment letter; if it was not owed, dispute it; either way post it in EMA as a "
@@ -1946,44 +2017,78 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
     elif route == "call":
         action, steps, who = _call_step(conn, f, fx, st, t)
         buttons += ["copy_instructions", "log_outcome"]
+        if rule == "person_billed_paid":
+            buttons = ["log_outcome", "copy_instructions"]
+        if rule in ("follow_up_due", "work_stale"):
+            deadline, basis = (st.get("follow_up_on") if (st.get("follow_up_on") or "") >= t else t), "the follow-up is due"
+        elif rule == "work_answered" and (st.get("answer_window") or {}).get("date"):
+            aw = st["answer_window"]
+            deadline, basis = aw["date"], aw["basis"]
     elif route == "eob_first":
-        action = (f"Get the EOB from {grp}'s portal (no 835 reached RemitWatch for this answer), then work the denial: "
+        action = (f"Get the EOB from {_poss(grp)} portal (no 835 reached RemitWatch for this answer), then work the denial: "
                   + ("send a corrected claim." if f.get("actionable") == "correct_and_resubmit" else "appeal with the record."))
         steps += ["Download the EOB for the check that carried the denial (EMA shows the posting day).",
                   "Read its reason and remark codes; fix and resend, or appeal, as they say."]
-        buttons += ["copy_instructions", "request_era", "mark_sent"]
+        zero = next((p for p in sorted(fx["ema"]["pays"], key=lambda p: p["posted"] or "") if not p.get("in_835") and p.get("check_tail")), None)
+        era = _era_request(conn, fx, {"check_tail": zero["check_tail"], "payer": zero.get("payer"), "rule": "eob_first"}) if zero else None
+        buttons += ["copy_instructions", "mark_sent"]
+        if era:
+            steps.append(era)
+            buttons.append("request_era")
     elif route == "cob":
         action, steps, who, expected = _cob_step(f, fx, story, expected)
+        expected_basis = "the 835's allowed amount for the visit"
         buttons += ["copy_instructions", "log_outcome", "mark_billed"]
     elif route == "corrected":
         action = _corrected_change(f, fx) + "."
-        if f.get("payer_kind") == "medicare" and sig not in ("REJECTED_PRE_PAYER", "NOT_SENT"):
+        medicare_fix = f.get("payer_kind") == "medicare" and sig not in ("REJECTED_PRE_PAYER", "NOT_SENT")
+        if medicare_fix:
             from . import appeals
             nxt = appeals.next_step(dict(f, evidence=S._ev(f)))
             if nxt:
                 action = nxt
+        if late and late.get("process") == "corrected":
+            action = f"{_late_words(st)} " + action
         who = "Coder, then the biller" if sig in ("DENIED_MISSING_INFO", "DENIED_CODING", "DENIED_MISSING_MODIFIER") else "Biller"
         buttons += ["copy_instructions", "mark_sent"]
-        steps.append("Send it from EMA through the clearinghouse and keep the acceptance report (proof of timely filing).")
+        if medicare_fix:
+            from . import appeals
+            mroute = appeals._medicare_route(dict(f, evidence=S._ev(f)))
+            if mroute == "new_claim":
+                steps.append("Send it from EMA through the clearinghouse as a new claim and keep the acceptance report (proof of timely filing).")
+            elif mroute == "reopening":
+                steps.append("Ask for the reopening on the contractor's portal (myCGS for CGS) or by phone; write its reference number in Mark sent.")
+            else:
+                steps.append("File the redetermination on the contractor's portal (myCGS for CGS) or by mail, with the records the remark asks for; "
+                             "Medicare takes no faxed redeterminations.")
+        else:
+            steps.append("Send it from EMA through the clearinghouse and keep the acceptance report (proof of timely filing).")
     elif route == "rate":
         chk = _short_check(conn, fx)
         action = (f"Ask {grp} to reprocess {f.get('procedure_code')} at its usual rate ({usd(f.get('expected_cents'))}); one request can list "
                   "every claim for the code.")
         if chk and chk["kind"] == "top_cut":
-            action += f" The argument: {chk['text']}."
+            steps.append(f"The argument: {chk['text']}.")
         else:
             steps.append("Check first that no multiple-procedure reduction (a higher-valued procedure the same day) or facility rate (a "
                          "surgery-center day) explains it.")
         who = "Biller"
         buttons += ["build_packet", "copy_instructions", "mark_sent"]
     elif route == "decide":
-        action, steps, who = _decide_step(conn, f, fx, st)
-        buttons += ["copy_instructions", "log_outcome", "let_go"]
+        action, steps, who, extra = _decide_step(conn, f, fx, st)
+        buttons += extra
     else:
         needs, argument = _appeal_needs(conn, f, fx)
-        how = _appeal_how(f)
-        action = f"Appeal to {grp}: {argument} {how}"
-        steps += [f"Build the appeal packet; it needs {', '.join(needs)}.", "Read the letter, fill anything in brackets, then send it."]
+        first_sentence = re.split(r"(?<=[a-z0-9)])\. ", argument, maxsplit=1)
+        action = f"Appeal to {grp}: {first_sentence[0].rstrip('.')}."
+        if f.get("payer_kind") == "medicare":
+            action += " Medicare contractors take no faxed redeterminations: file it on the contractor's portal or by mail."
+        if late and late.get("process") == "appeal":
+            action = f"{_late_words(st)} Dispute it with {grp}: {first_sentence[0].rstrip('.')}."
+        steps += [f"Build the appeal packet; it needs {', '.join(needs)}."]
+        if len(first_sentence) > 1:
+            steps.append("The argument, in full: " + argument)
+        steps += [_appeal_how(f), "Read the letter, fill anything in brackets, then send it."]
         who = "Coder reads the note, then the biller sends it" if any("note" in n for n in needs) else "Biller"
         buttons += ["build_packet"]
         buttons += ["attach_note"] if _note_on_file(conn, f) else (["find_note"] if _modmed_configured() else [])
@@ -1991,14 +2096,16 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
         ok, why = _fax_number(conn, f)
         if ok:
             buttons.append("fax_payer")
-        steps.append(why)
+            steps.append(why)
+        else:
+            steps.append(_appeal_channel(f) + (f" {why}" if why and "Faxes page" in why else ""))
         buttons += ["copy_instructions", "mark_sent"]
     working = route in ("appeal", "corrected", "rate", "decide", "call", "cob") and st["work_state"] == "work_now"
     if working:
         # what else the item's line needs, whatever the route
         un = _unposted(fx)
         if un:
-            steps.insert(0, f"First post {grp}'s remittance of {day(un['date'])} in EMA (check ending {un.get('check_tail') or '?'}; paid "
+            steps.insert(0, f"First post {_poss(grp)} remittance of {day(un['date'])} in EMA (check ending {un.get('check_tail') or '?'}; paid "
                             f"{usd(un['paid'])}; {', '.join(f'{g}-{c} {usd(a)}' for g, c, a in un['adj']) or 'no reasons'}): EMA has not posted "
                             "it, so EMA's A/R still shows the claim as pending.")
             buttons.append("mark_posted")
@@ -2006,59 +2113,62 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                 and (o.get("written_off") or o.get("contractual_routine")):
             steps.append(f"When you send it, reverse EMA's write-off of {usd(o.get('written_off') or o.get('contractual_routine'))} "
                          f"({', '.join(o.get('carcs') or []) or 'the denial'}) so the line shows open until the payer answers.")
-        rs = _recovery_step(f, rec) if route in ("appeal", "corrected", "rate", "decide") else None
+        rs = _recovery_step(f, rec) if route in ("appeal", "corrected", "rate", "decide") and rule not in S.CHECK_RULES else None
         if rs and not (rec.get("paid") == 0 and route == "appeal" and _payer_paid_like(conn, f)):
             steps.append(rs)
-        if deadline:
+        if deadline and rule not in ("follow_up_due", "work_stale") and not late:
             left = S._days(t, deadline)
             legal = st.get("legal_deadline")
             if left is not None and left < 0 and legal and legal >= t:
                 lleft = S._days(t, legal) or 0
-                action = (f"The safe date passed on {day(deadline)}, but {grp}'s own limit is {day(legal)} ({lleft} day{'s' if lleft != 1 else ''} "
-                          "left): send it now. " + action)
-            elif left is not None and left < 0:
-                closed = legal if legal and legal > deadline else deadline
-                gone = -(S._days(t, closed) or 0)
-                closed_why = _short(basis) if closed == deadline else "the payer's own limit"
-                action = (f"The window closed on {day(closed)}, {gone} days ago ({closed_why}). "
-                          "File today only if the payer counts it from a later date (some count from when the remittance was received); otherwise "
-                          "mark it Lost. " + action)
-                if "let_go" not in buttons:
-                    buttons.append("let_go")
-            elif left is not None and left <= 7:
+                go = "send it now" if route in ("appeal", "rate", "corrected") else "act now"
+                action = (f"The safe date passed on {day(deadline)}, but {_poss(grp)} own limit is {day(legal)} ({lleft} day{'s' if lleft != 1 else ''} "
+                          f"left): {go}. " + action)
+            elif left is not None and 0 <= left <= 7:
                 action = f"Only {left} day{'s' if left != 1 else ''} left (by {day(deadline)}): do it today. " + action
+        if late:
+            deadline, basis = late["date"], late["basis"]
     for p in _plb_unbooked(fx):
+        if rule == "credit_unposted_takeback":
+            break
         steps.append(f"{p['payer']} took back {usd(abs(p['cents']))} on {day(p['date'])} (provider-level adjustment {p['reason']} naming this "
                      "claim) and EMA shows no takeback on this line: post the takeback in EMA on this claim so its balance is right.")
         buttons.append("mark_posted")
     sib = _siblings(conn, f)
     if sib and st["work_state"] in ("work_now", "waiting"):
-        steps.append("Also open on this visit: " + "; ".join(f"{s['code'] or 'the claim'} ({s['signal']}, {usd(s['cents'])}"
-                                                            + (f", due {day(s['deadline'])}" if s.get("deadline") else "") + ")" for s in sib)
-                     + ". Work them together.")
+        steps.append("Also open on this visit: " + _sibling_words(sib) + ". Work them together.")
     if url:
         buttons.append("open_in_ema")
     # write-off decisions only through the owner's policy table or a person's Let go with a reason
     if (st["work_state"] == "work_now" and o.get("pattern") and o.get("outcome") in WRITE_OFFS and f.get("category") in ("denial", "bundling")
             and route in ("appeal", "corrected", "decide", "call")):
         buttons.append("accept_pattern")
-        steps.append(f"If the owner accepts these write-offs as policy, Accept pattern ({_pattern_words(o['pattern'])}); otherwise work it. "
+        pattern = o["pattern"]
+        steps.append(f"If the owner accepts these write-offs as policy, Accept this pattern ({_pattern_words(o['pattern'])}); otherwise work it. "
                      "A single item is let go only by a person, with a reason.")
-    if st["work_state"] == "work_now" and "let_go" not in buttons:
+    if st["work_state"] == "work_now" and "let_go" not in buttons and rule not in S.CHECK_RULES and route not in ("post", "policy"):
         buttons.append("let_go")
-    last_day = max(d for d in (deadline, st.get("legal_deadline")) if d) if (deadline or st.get("legal_deadline")) else None
-    appeal_ok = route in ("appeal", "rate") and st["work_state"] == "work_now" and not appeal_block and not (
-        last_day and last_day < t)
+    last_day = max(d for d in (deadline, st.get("legal_deadline"), (late or {}).get("date")) if d) if (
+        deadline or st.get("legal_deadline") or late) else None
+    appeal_ok = route in ("appeal", "rate") and st["work_state"] == "work_now" and not appeal_block and not (last_day and last_day < t)
     instructions = _instructions(f, fx, action, steps, needs, deadline, basis)
     btn = []
     for b in buttons:
         if b in BUTTONS and b not in btn:
             btn.append(b)
-    ranked = int(expected * rec["rate"]) if rec and rec.get("rate") is not None and expected else None
-    return {"action": _clean(action), "who": who, "deadline": deadline, "basis": basis, "expected_cents": expected, "buttons": btn,
-            "instructions": instructions, "route": route, "steps": [_clean(s) for s in steps], "needs": needs, "clocks": clocks,
-            "appeal_ok": appeal_ok, "appeal_block": appeal_block if not appeal_ok else None, "claim_url": url,
-            "recovery": rec, "ranked_cents": ranked, "siblings": sib}
+    if rule in S.CHECK_RULES:
+        btn = [b for b in btn if b not in ("build_packet", "fax_payer")]
+    stored_ev = f.get("expected_value_cents")
+    ranked = (min(int(stored_ev), expected) if stored_ev is not None and expected else
+              (int(expected * rec["rate"]) if rec and rec.get("rate") is not None and expected else None))
+    out = {"action": _clean(action), "who": who, "deadline": deadline, "basis": basis, "expected_cents": expected,
+           "expected_basis": expected_basis, "buttons": btn, "instructions": instructions, "route": route,
+           "steps": [_clean(s) for s in steps if s], "needs": needs, "clocks": clocks, "appeal_ok": appeal_ok,
+           "appeal_block": appeal_block if not appeal_ok else None, "claim_url": url, "recovery": rec, "ranked_cents": ranked,
+           "siblings": sib, "pattern": pattern}
+    if f.get("recovery_basis") and rec is not None:
+        out["recovery"] = dict(rec, basis=f["recovery_basis"])
+    return out
 
 
 def _pattern_words(pattern: str) -> str:
@@ -2069,8 +2179,8 @@ def _appeal_how(f: dict) -> str:
     from . import appeals
     kind = f.get("payer_kind")
     if kind == "medicare":
-        return ("Send it as a Medicare redetermination through the contractor's portal or by mail (Medicare contractors take no faxed "
-                "redeterminations), within 120 days of the remittance.")
+        return ("This is a Medicare redetermination, within 120 days of the remittance; Medicare contractors take no faxed "
+                "redeterminations.")
     return appeals._process(dict(f, evidence=S._ev(f)))
 
 
@@ -2087,6 +2197,152 @@ def _facts_line(f: dict, fx: dict) -> str:
     return "Have ready: " + ", ".join(facts) + ", the member ID and the rendering NPI."
 
 
+def _wait_step(f: dict, fx: dict, st: dict) -> tuple[str, list[str], str]:
+    """What waiting means, by what the item waits on (M10): a carrier's payment, a payer's new answer after a reversal, a
+    person's follow-up date in EMA, the answer to work sent; never 'work already done' where none was."""
+    grp = f.get("payer_group") or "the payer"
+    rule = st.get("rule") or ""
+    follow = st.get("follow_up_on")
+    work = st.get("work") or {}
+    wkind = S.WORK_WORDS.get(work.get("kind") or "", "the work")
+    when = day(work.get("date")) if work.get("date") and work.get("dated_by") != "first_report" else "on a date nobody recorded"
+    who = "A/R follow-up biller"
+    if not follow:
+        return (f"Check {_poss(grp)} portal now: nothing says when its answer is due.", [_facts_line(f, fx)], who)
+    if rule == "forwarded":
+        fwd = S._forwarded(fx) or {}
+        carrier = fwd.get("carrier") or "the carrier"
+        return (f"Wait for {_poss(carrier)} payment: {grp} forwarded the claim to it on {day(fwd.get('date'))}. If nothing comes by {day(follow)}, "
+                f"ask {carrier} whether it received the claim and when it will pay.",
+                [f"On {day(follow)}, check {_poss(carrier)} portal (or call it) for the claim, with {_poss(grp)} remittance at hand.",
+                 f"Check that TriZetto is enrolled for {_poss(carrier)} ERAs, so its answer reaches RemitWatch."], who)
+    if rule == "archive_waiting":
+        rev = max((r.get("date") or "" for r in (S._archive_hint(f) or {}).get("proof") or [] if r.get("date")), default="") or f.get("payment_date")
+        return (f"Wait for {_poss(grp)} new answer: it reversed its answer on {day(rev)} and has not answered again. If nothing comes by "
+                f"{day(follow)}, ask it when the claim will be reprocessed.", [_facts_line(f, fx)], who)
+    if rule == "ema_follow_up":
+        return (f"Wait: a person set an EMA follow-up date of {day(follow)} on this claim. Read the claim's notes in EMA for what was done; on that "
+                "day, follow up as they say.", [], who)
+    if f.get("signal") == "SECONDARY_NOT_BILLED" and work.get("kind") in ("billed", "sent", "secondary"):
+        second = _second_name(fx)
+        return (f"Wait for {_poss(second)} payment of the claim billed on {when}; follow up with {second} on {day(follow)} if nothing comes.",
+                [f"On {day(follow)}, ask {second} whether it received the claim and when it will pay the "
+                 f"{S._ev(f).get('share') or 'share'} ({usd(f.get('shortfall_cents'))})."], who)
+    steps = [f"On {day(follow)}, check {_poss(grp)} portal or call about {wkind} (sent {when}), quoting what was sent and when."]
+    if st.get("deadline"):
+        steps.append(f"If the payer has no record of it then, send it again in writing before {day(st['deadline'])}.")
+    return (f"Wait for {_poss(grp)} answer to {wkind} (sent {when}); follow up on {day(follow)} if nothing comes.", steps, who)
+
+
+def _refund_step(f: dict, fx: dict, st: dict, bal: dict, deadline: str | None, basis: str | None):
+    """A credit to refund or let the payer recoup (L24): who paid, by the line's own payments; the deadline only where
+    detection dated the refund (Medicare's 60 days); a possible overpayment the archive found (H2)."""
+    grp = f.get("payer_group") or "the payer"
+    rule = st.get("rule") or ""
+    pays = [p for p in fx["ema"]["pays"] if (p["cents"] or 0) > 0]
+    payers = sorted({p["payer"] for p in pays if p["payer"]})
+    allowed = max((x.get("allowed") or 0 for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key")), default=0)
+    listing = "; ".join(f"{usd(p['cents'])} from {p['payer'] or 'insurance'} posted {day(p['posted'])}" for p in pays[:6])
+    who_paid = (f"Who paid: {listing}" + (f", against an allowed amount of {usd(allowed)}" if allowed else "") + "." if listing else
+                "Who paid: open the claim's payments in EMA (none is tied to this line here).")
+    if rule == "possible_overpayment":
+        hint = S._archive_hint(f) or {}
+        over = st.get("credit_cents") or int(hint.get("possible_overpayment_cents") or 0)
+        action = (f"Paid twice: {S._hint_text(hint) or st.get('state_basis')}. Do not ask for more. Confirm with {grp} which payment stands, then "
+                  f"refund the extra {usd(over)} or let it recoup it.")
+        steps = [who_paid, f"Call {grp} (or use its portal) to confirm which payment stands and whether it will recoup the extra or wants a refund check.",
+                 "Post the refund or the recoupment in EMA so the line shows what the payer finally paid."]
+    else:
+        credit = st.get("credit_cents") or (-bal.get("open_cents", 0) if bal.get("open_cents", 0) < 0 else 0)
+        action = (f"Overpaid by {usd(credit)}: decide whether to refund it or let {', '.join(payers) or grp} recoup it. Do not appeal or ask for "
+                  "more on this line.")
+        steps = [who_paid, "Call the payer (or use its portal) to confirm which plan is primary and whether it will recoup or wants a refund check.",
+                 "Sign the refund (or record the recoupment) and post it in EMA so the credit clears."]
+        tb = st.get("takeback")
+        if tb and tb.get("cents"):
+            steps.insert(0, f"First post {S._takeback_words(tb)} in EMA: that part of EMA's credit is a takeback EMA never posted, not money "
+                            "owed back.")
+    if not (f.get("signal") == "CREDIT_BALANCE" and deadline):
+        deadline = None
+        basis = "Commercial plans usually ask for an identified overpayment back within 30 days; Medicare within 60 days of finding it"
+    return action, steps, "Billing lead; owner decides", deadline, basis
+
+
+def _post_step(f: dict, fx: dict, st: dict):
+    """A payment or a takeback the 835 carries that EMA never posted."""
+    grp = f.get("payer_group") or "the payer"
+    if st.get("rule") == "credit_unposted_takeback":
+        tb = st.get("takeback") or S.unposted_takebacks(fx)
+        credit = -min(0, S._ema_line_totals(fx)["balance"]) or int(S._ev(f).get("credit_cents") or 0)
+        action = (f"Post {S._takeback_words(tb)} in EMA on this claim: EMA shows a credit of {usd(credit)} only because it was never posted. "
+                  "Nothing is owed back: do not refund it.")
+        steps = ["Post the reversal as the 835 shows it: the payer's negative payment and the reversed adjustments, under that check.",
+                 "Then post the payer's new answer on the same check if it has one, so the line shows what the payer finally paid.",
+                 "Check the line afterwards: EMA's balance should match the 835 (the story's balance line)."]
+        return action, steps, "Payment poster", None, "Post it now: EMA's credit is not money owed back"
+    ev = S._ev(f)
+    paid = f.get("paid_cents") or f.get("shortfall_cents")
+    trace = ev.get("trace_tail") or next((x.get("check_tail") for x in S.own_rows(fx) if x.get("check_tail")), None)
+    action = (f"Post the payment in EMA: {grp} paid {usd(paid)} on {day(f.get('payment_date'))}"
+              + (f" (trace ending {trace})" if trace else "") + ", and EMA has not posted it.")
+    steps = ["Find the deposit on the bank statement (or the payer's portal) for that date and amount.",
+             "Post each claim line of the remittance in EMA under that trace: payment, contractual adjustment and patient share as the 835 shows.",
+             "If EMA posted it under another number, correct the number; if it never arrived, ask the payer to reissue it."]
+    return action, steps, "Payment poster", None, "Post it now: the deposit is in the bank and nobody else will find it"
+
+
+def _bill_patient_step(f: dict, fx: dict, st: dict, tot: dict):
+    """The patient's share after the payer reprocessed the line (H2): the share on the 835, never EMA's open balance when
+    that still holds the contractual reduction (post the payer's answer first); a Medicaid member is never billed beyond
+    the plan's copay."""
+    grp = f.get("payer_group") or "the payer"
+    proof = st.get("proof") or {}
+    pr = int(proof.get("patient_cents") or 0)
+    ema_open = tot["balance"] if tot["n"] else None
+    row = next((x for x in fx["r835"]["rows"] if x["date"] == proof.get("date") and x["status"] != "22" and x.get("line_key")), None)
+    co = sum(a for g, c, a in (row or {}).get("adj", []) if g == "CO")
+    what = S._pr_words((row or {}).get("adj", [])) if row else "share"
+    post = (f"Post {_poss(grp)} reprocessed answer of {day(proof.get('date'))} in EMA: contractual {usd(co)} and the patient's {what} {usd(pr)}, "
+            f"so EMA shows {usd(pr)} open.")
+    if f.get("payer_kind") == "medicaid":
+        return (f"Do not bill the patient beyond the copay the state plan allows: post {_poss(grp)} answer of {day(proof.get('date'))} in EMA "
+                "and write off the rest as Medicaid requires.", [post], "Patient accounts", 0, ["copy_instructions", "mark_posted"])
+    owed = min(pr, ema_open) if ema_open is not None and 0 < ema_open < pr else pr
+    steps, extra = [], ["mark_billed", "copy_instructions"]
+    if ema_open is not None and ema_open > pr:
+        steps.append(post)
+        extra = ["mark_posted"] + extra
+    steps.append(f"Put {usd(owed)} on the patient's next statement; the payer owes nothing more on this line.")
+    return f"Bill the patient {usd(owed)}: {proof.get('text') or st.get('state_basis')}.", steps, "Patient accounts", owed, extra
+
+
+def _policy_step(f: dict):
+    """EMA books a payer's denials as contractual write-offs (C7), so they never reach a denial queue: the owner accepts the
+    pattern as policy, or has EMA post the reason as non-contractual (M11). The pattern is the owner's policy key."""
+    ev = S._ev(f)
+    grp = f.get("payer_group") or "the payer"
+    reason = str(ev.get("reason") or f.get("carc") or "")
+    lines = ev.get("lines") if isinstance(ev.get("lines"), int) else None
+    total = ev.get("written_off_cents")
+    inside = ev.get("inside_window_cents")
+    year = ev.get("year")
+    bits = []
+    if lines:
+        bits.append(f"{lines} lines")
+    if total:
+        bits.append(f"{usd(total)}" + (f" in {year}" if year else ""))
+    action = (f"EMA writes {_poss(grp)} {reason} denials off as contractual" + (f" ({', '.join(bits)})" if bits else "")
+              + ", so they never reach a denial queue" + (f"; {usd(inside)} is still inside its window" if inside else "")
+              + ". Owner: accept them as policy, or have EMA post this reason as non-contractual so those lines are worked.")
+    steps = []
+    if ev.get("next_step"):
+        steps.append(str(ev["next_step"]))
+    codes = [c for c, _v in ev.get("top_codes") or []]
+    if codes:
+        steps.append("The codes it touches most: " + ", ".join(codes[:6]) + ".")
+    return action, steps, "Owner, with the billing lead", f"{grp}|||{reason}"
+
+
 def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str) -> tuple[str, list[str], str]:
     grp = f.get("payer_group") or "the payer"
     ev = S._ev(f)
@@ -2097,17 +2353,32 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
     a = st.get("answered") or {}
     work = st.get("work") or {}
     wkind = S.WORK_WORDS.get(work.get("kind") or "", "the work")
+    when = day(work.get("date")) if work.get("dated_by") not in ("first_report",) and work.get("date") else "on a date nobody recorded"
     fallback = _work_fallback(conn, f, fx, st)
+    if st.get("work_state") == "cant_check":
+        return _cant_check_step(f, fx, st, facts)
+    if rule == "person_billed_paid":
+        p = st.get("proof") or {}
+        return (f"Mark it Paid: {p.get('text') or 'the second payer paid'}. Log what happened > The payer paid, with that amount.", [facts],
+                "Biller")
+    second = _second_name(fx) if f.get("signal") == "SECONDARY_NOT_BILLED" else None
+    if second and rule in ("follow_up_due", "work_answered") and work.get("kind") in ("billed", "sent", "secondary"):
+        share = S._ev(f).get("share") or "share"
+        if rule == "work_answered" and a:
+            return (f"{second} answered on {day(a.get('date'))} ({', '.join(a.get('codes') or []) or 'no payment'}): open its answer and work it.",
+                    [f"Ask {second} why, if the answer is a denial; send what it asks for.", facts], "A/R follow-up biller")
+        return (f"Ask {second} whether it received the claim billed on {when} and when it will pay the {share} ({usd(f.get('shortfall_cents'))}).",
+                [facts, f"Not on file: send it again to {second} now, with the first payer's remittance attached."], "A/R follow-up biller")
     if rule == "work_answered" and a:
         if (a.get("paid") or 0) > 0:
             steps = [f"Open the payer's answer of {day(a.get('date'))}: it paid {usd(a['paid'])}.",
                      f"If that covers what this item lists ({usd(f.get('shortfall_cents'))}), mark it Paid with that amount; if not, ask the "
                      "payer for the rest (a reconsideration of the new answer).", facts]
-            return (f"Read {grp}'s answer of {day(a.get('date'))} to the work already done: it paid {usd(a['paid'])}. Close the item if that "
-                    "settles it.", steps, "Biller")
+            return (f"Read {_poss(grp)} answer of {day(a.get('date'))} to {wkind}: it paid {usd(a['paid'])}. Close the item if that settles it.",
+                    steps, "Biller")
         codes_ = ", ".join(a.get("codes") or []) or "no payment"
         if a.get("inferred"):
-            steps = [f"Check {grp}'s portal for the decision on {wkind} (the claim was answered again on {day(a.get('date'))} with the same "
+            steps = [f"Check {_poss(grp)} portal for the decision on {wkind} (the claim was answered again on {day(a.get('date'))} with the same "
                      f"reason, {codes_}).", facts]
             if fallback:
                 steps.append("If the payer upheld its denial: " + fallback)
@@ -2118,19 +2389,28 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
                  "Denied for something the resubmission still lacks: fix that and send it again.", facts]
         if fallback:
             steps.append("The case for it: " + fallback)
-        return (f"{grp} answered the work already done on {day(a.get('date'))} without paying ({codes_}): work that answer.", steps,
-                "A/R follow-up biller")
+        return (f"{grp} answered {wkind} on {day(a.get('date'))} without paying ({codes_}): work that answer.", steps, "A/R follow-up biller")
     if rule in ("work_stale", "follow_up_due"):
-        when = day(work.get("date")) if work.get("dated_by") not in ("first_report",) and work.get("date") else "a date nobody recorded"
-        steps = [f"Ask {grp} whether it has {wkind} for this claim (sent {when}), and what it decided.", facts]
-        steps.append("Paid or reprocessed: post it and close the item. Not on file: send it again now.")
+        if work.get("kind") in ("follow_up", "note"):
+            return (f"Read the claim's notes in EMA, then follow up with {grp}: {_lower(st.get('state_basis') or '')}.",
+                    [facts, "Paid or reprocessed: post it and close the item. Not on file: send it again now."], "A/R follow-up biller")
+        follow = st.get("follow_up_on")
+        steps = [f"Ask {grp} whether it received {wkind} (sent {when}) and what it decided.", facts,
+                 "Paid or reprocessed: post it and close the item. Not on file: send it again now."]
         if fallback:
             steps.append("Denied again, or nothing on file: " + fallback)
-        return (f"Follow up with {grp} on {wkind}: {st.get('state_basis')}.", steps, "A/R follow-up biller")
+        return (f"Follow up with {grp} on {wkind} (sent {when})" + (f": no answer by {day(follow)}." if follow else "."), steps,
+                "A/R follow-up biller")
     if rule == "forwarded_late":
-        steps = ["Ask the carrier named on the remittance whether it received the claim and when it will pay.", facts,
-                 "Check that TriZetto is enrolled for that carrier's ERAs, so its answer reaches RemitWatch."]
-        return f"{st.get('state_basis')}.", steps, "A/R follow-up biller"
+        fwd = S._forwarded(fx) or {}
+        carrier = fwd.get("carrier") or "the carrier"
+        steps = [f"Ask {carrier} whether it received the claim and when it will pay.", facts,
+                 f"Check that TriZetto is enrolled for {_poss(carrier)} ERAs, so its answer reaches RemitWatch."]
+        return (f"Ask {carrier} for its payment: {grp} forwarded the claim to it on {day(fwd.get('date'))}, and nothing has come by "
+                f"{day(st.get('follow_up_on'))}.", steps, "A/R follow-up biller")
+    if rule in ("stored_person",):
+        return (f"Follow up with {grp} on the work a person marked: {_lower(st.get('state_basis') or '')}.",
+                [facts, "Paid or reprocessed: post it and close the item. Denied again: work the new answer."], "A/R follow-up biller")
     if f.get("signal") == "DENIED_DUPLICATE_UNPAID":
         steps = [f"Ask {grp}: which claim and check paid this service the first time?", facts,
                  "If none was ever paid, ask the payer to reprocess this line."]
@@ -2142,8 +2422,30 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
              "When was it received, and what is its status?\"", facts,
              "Not on file: send it again now as a new claim and keep the clearinghouse acceptance report as proof of timely filing.",
              "Pending: ask what is missing and send it. Denied or paid: get the EOB and post or work it here."]
-    return (f"Look the claim up on {grp}'s portal or call: is it on file?" + (f" If not, it must reach the payer by {day(filing)}." if filing else ""),
+    return (f"Look the claim up on {_poss(grp)} portal or call: is it on file?" + (f" If not, it must reach the payer by {day(filing)}." if filing else ""),
             steps, "A/R follow-up biller")
+
+
+def _cant_check_step(f: dict, fx: dict, st: dict, facts: str) -> tuple[str, list[str], str]:
+    """What to do when no source RemitWatch reads can show the money: by why (M22: a surgery-center claim is never resent)."""
+    grp = f.get("payer_group") or "the payer"
+    rule = st.get("rule") or ""
+    if rule == "cant_check_facility":
+        return (f"Get the facility claim's EOB: the payer pays the surgery center's claims to the surgery center's own payee, so its remittances do "
+                f"not reach RemitWatch. Look the claim up on {_poss(grp)} portal under the surgery center's account (or ask the surgery center's "
+                "billing office), then post it in EMA and work the denial from it.", [facts], "A/R follow-up biller")
+    if rule == "cant_check_carrier":
+        fwd = S._forwarded(fx) or {}
+        carrier = fwd.get("carrier") or "the carrier"
+        return (f"Check whether {carrier} paid: {grp} forwarded the claim to it, and no source RemitWatch reads shows its money. Look it up on "
+                f"{_poss(carrier)} portal (or in EMA's payments for the claim); if it never received the claim, send it there with {_poss(grp)} "
+                "remittance.", [facts, f"Ask that TriZetto enroll for {_poss(carrier)} ERAs, so its answers reach RemitWatch."], "A/R follow-up biller")
+    filing = st.get("deadline")
+    return (f"Look the claim up on {_poss(grp)} portal or call: no source RemitWatch reads shows its answer."
+            + (f" If it is not on file, it must reach the payer by {day(filing)}." if filing else ""),
+            ["First check the clearinghouse (TriZetto): was it accepted (999) and acknowledged by the payer (277CA)?", facts,
+             "Not on file: send it again now as a new claim and keep the acceptance report. Paid or denied: get the EOB and post or work it."],
+            "A/R follow-up biller")
 
 
 def _work_fallback(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> str | None:
@@ -2155,9 +2457,10 @@ def _work_fallback(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> str
         g, c = new[0]
         f = dict(f, carc=c, rarc=None, carc_group=g)
         if c in AUTH_CARCS:
-            return _decide_step(conn, f, fx, st)[0] + " " + " ".join(_decide_step(conn, f, fx, st)[1])
-    base = dict(st, work_state="work_now", rule="open", answered=None)
-    route = _route_for(conn, f, fx, base)
+            act, steps, _who, _b = _decide_step(conn, f, fx, dict(st, rule="open"))
+            return act + " " + " ".join(steps)
+    base = dict(st, work_state="work_now", rule="open", answered=None, route=None, late_window=None)
+    route = S.route_of(dict(fx, item=f), base, conn)
     if route == "decide":
         return _decide_step(conn, f, fx, base)[0]
     if route == "corrected":
@@ -2195,24 +2498,87 @@ def _cob_step(f: dict, fx: dict, story: dict, expected: int) -> tuple[str, list[
             "Biller; front desk for the patient's update", expected)
 
 
-def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple[str, list[str], str]:
+def _check_first_step(f: dict, fx: dict, st: dict) -> tuple[str, list[str], str]:
+    """'Check first': the one thing to verify and where, then Close as paid or Appeal (orchestrator decision 4)."""
+    grp = f.get("payer_group") or "the payer"
+    hint = S._archive_hint(f) or {}
+    if hint.get("reclass") == "secondary_paid":
+        prior = hint.get("prior_payer_cents")
+        return ("Check first: look up the primary payer's payment of this service" + (f" ({usd(prior)} settled, per the secondary's remittance)"
+                if prior else "") + " on its portal or in EMA before appealing; the secondary's share is not an underpayment.",
+                [S._hint_text(hint) + "."] if S._hint_text(hint) else [], "Biller")
+    pay = next((r for r in hint.get("proof") or [] if r.get("kind") in ("payment", "restatement")), None) or {}
+    who = _grp_of(pay.get("payer")) or grp
+    what = (f"{_poss(who)} payment of {day(pay.get('date'))}" + (f" ({usd(pay.get('amount_cents'))})" if pay.get("amount_cents") else "")
+            if pay else f"{_poss(grp)} earlier payment")
+    return (f"Check first: look up {what} in EMA (the claim's payments) or on {_poss(who)} portal. If it pays this service, close it as Paid "
+            "with $0.00 recovered (the money came before this denial); if not, appeal it.",
+            [S._hint_text(hint) + "." if S._hint_text(hint) else st.get("state_basis") or "",
+             "RemitWatch did not close it because the payment is not on file to prove it."], "Biller")
+
+
+def _grp_of(payer: Any) -> str | None:
+    return S._grp_kind(payer)[0] if payer else None
+
+
+def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple[str, list[str], str, list[str]]:
+    """A decision before any work: what to check, and the choices it leads to. Returns (action, steps, who, buttons)."""
     sig = f.get("signal") or ""
     carc = str(f.get("carc") or "")
     rarcs = {x.strip() for x in str(f.get("rarc") or "").split(",") if x.strip()}
     grp = f.get("payer_group") or "the payer"
     o = fx.get("outcome") or {}
+    rule = st.get("rule") or ""
     hint = str(f.get("hint") or "")
-    if hint.startswith(("Possibly paid", "Processed on claim", "Partly paid")):
+    std = ["copy_instructions", "log_outcome", "let_go"]
+    check = ["open_in_ema", "copy_instructions", "log_outcome"]
+    deadline = st.get("deadline")
+    if rule == "check_first":
+        a, s_, w = _check_first_step(f, fx, st)
+        return a, s_, w, check
+    if rule == "settled_in_ema":
+        se = st.get("settled") or {}
+        return (f"Check first: EMA shows this line settled (insurance paid {usd(se.get('ins'))}, the patient paid {usd(se.get('pat'))}, "
+                f"{usd(se.get('open'))} open). Find which payer paid in the claim's payments in EMA and whether it settles this service; if it "
+                "does, close it as Paid with $0.00 recovered; if not, work the denial.", [], "Biller", check)
+    if rule == "patient_paid_co":
+        se = st.get("settled") or {}
+        return (f"The patient paid {usd(se.get('pat'))} toward a denial {grp} put on the practice ({_carcs(fx)}): appeal it and refund the patient "
+                "if the payer pays, or refund the patient if the denial stands (unless the patient agreed in writing beforehand, an ABN or a "
+                "waiver).", ["The owner signs any refund to the patient; post it in EMA so the line shows it."],
+                "Biller; the owner signs a refund", ["build_packet", "copy_instructions", "log_outcome", "let_go"])
+    if rule == "decided_no_appeal":
+        return (f"{st.get('state_basis')}. If that decision stands, Let go with that reason; if not, appeal"
+                + (f" by {day(deadline)}." if deadline else "."), [], "Biller", std)
+    if rule == "note_unread":
+        base = dict(st, rule="open", route=None)
+        nxt = S.route_of(fx, base, conn)
+        what = {"appeal": "appeal it", "corrected": "send the corrected claim", "rate": "ask the payer to reprocess it",
+                "call": "ask the payer where it stands", "cob": "find the plan that pays first"}.get(nxt, "work it")
+        return (f"Read EMA's billing note on this claim first ({_lower(st.get('state_basis') or '')}): if it records an appeal, a call or a "
+                "resubmission, Log what happened > The payer is working on it, with what the note says; if it records a decision not to appeal, "
+                f"Let go with that reason; otherwise {what}.", [], "Biller", ["open_in_ema", "log_outcome", "let_go", "copy_instructions"])
+    late = st.get("late_window") if rule == "open_late" else None
+    if late and late.get("process") == "reopening":
+        return (f"{_late_words(st)} A reopening fixes a clerical error only (a wrong code, modifier or diagnosis): if that is what went wrong, "
+                "ask the Medicare contractor for it on its portal (myCGS for CGS) or by phone, with the correction; if not, Let go with the "
+                "reason \"window closed\".", ["Write the reopening's reference number in Mark sent."], "Coder, then the biller",
+                ["copy_instructions", "mark_sent", "log_outcome", "let_go"])
+    if o.get("outcome") == "lost_to_timely_filing":
+        return ("Written off for late filing: appeal only with proof the claim reached the payer in time (the clearinghouse acceptance report or "
+                "277CA). Without it, Let go with the reason \"lost to timely filing\" (provider liability: do not bill the patient).",
+                [], "Biller", std)
+    if hint.startswith(S.CHECK_HINTS):
         what = ("a payment on another claim" if hint.startswith("Possibly") else "an answer on another claim" if hint.startswith("Processed")
                 else "fewer units paid than billed")
         return (f"Check first: {hint}. Open that claim and see whether it pays this service; if it does, mark this item Paid with that "
-                "payment; if not, work the denial.", [f"RemitWatch found {what} that does not meet every test for closing it."], "Biller")
+                "payment; if not, work the denial.", [f"RemitWatch found {what} that does not meet every test for closing it."], "Biller", check)
     if o.get("outcome") == "paid_before":
         pb = o.get("paid_before_first") or {}
         return (f"Check first: EMA shows this line paid {usd(o.get('paid_before'))} by {pb.get('payer') or 'insurance'} on {day(pb.get('date'))}, "
                 "before this denial. Find out whether this denial is a duplicate or a second payer's answer before doing anything else.",
                 ["Compare the payer that paid with the one that denied, and the claim numbers.",
-                 "Same payer, same service: a duplicate; nothing owed. Another payer: check which is primary."], "Biller")
+                 "Same payer, same service: a duplicate; nothing owed. Another payer: check which is primary."], "Biller", check)
     if f.get("category") in S.SHORT:
         chk = _short_check(conn, fx)
         if chk and chk["kind"] == "reduced":
@@ -2220,7 +2586,7 @@ def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple
                     f"{f.get('procedure_code')} at its usual rate ({usd(f.get('expected_cents'))}).",
                     ["Compare the payer's allowed amounts for the day's procedures on the remittance: the highest-valued one is paid in full, "
                      "the others at the reduced rate.", "A surgery-center day: compare with what the payer allows for this code at the facility."],
-                    "Biller")
+                    "Biller", std)
     if sig == "DENIED_MISSING_PRIMARY":
         prim = [x for x in fx["r835"]["rows"] if x["claim_key"] == f.get("claim_key") and (x["paid"] or 0) > 0 and x["code"] != f.get("procedure_code")]
         prim = prim or [x for x in S.standing_rows(fx["r835"]["rows"]) if (x["paid"] or 0) > 0 and x["code"] != f.get("procedure_code")]
@@ -2230,22 +2596,23 @@ def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple
                  f"{same[0]['code']} was paid {usd(same[0]['paid'])}")
             return (f"Ask {grp} to reprocess the add-on {f.get('procedure_code')} now: its main procedure was paid on the same claim ({p}), so "
                     "B15 does not apply.", ["File a reconsideration (or call) quoting the paid primary line, with the procedure note.",
-                                            "Going forward, list primary codes before their add-ons."], "A/R follow-up biller")
+                                            "Going forward, list primary codes before their add-ons."], "A/R follow-up biller", std)
     if carc == "B20" or "M86" in rarcs:
         return ("Not a benefit exclusion: B20 with M86 means the payer counts the visit as already paid inside a time frame, usually the global "
                 "package of a recent procedure by the same clinician. Appeal only with a diagnosis unrelated to that procedure; otherwise let it go. "
                 "Do not bill the patient (group PI or CO).", ["Check the patient's procedures in the 10 or 90 days before.",
-                                                             "Read the note: unrelated problem, appeal with modifier 24; same wound, let it go."], "Coder")
+                                                             "Read the note: unrelated problem, appeal with modifier 24; same wound, let it go."],
+                "Coder", std)
     if carc == "B9":
         return ("The patient was in hospice: the plan is not liable while the member is enrolled; Original Medicare pays non-hospice care. "
-                "Bill Original Medicare (with GW where it applies), or let it go if it already answered.", [], "Biller")
+                "Bill Original Medicare (with GW where it applies), or let it go if it already answered.", [], "Biller", std)
     if sig == "DENIED_PROVIDER":
         return ("Fix the clinician's enrollment with the payer (effective date back to the start date), then ask the payer to reprocess every "
                 "claim it denied for it.", ["Credentialing: confirm participation and the effective date.",
-                                            "Then one reprocessing request listing every affected claim."], "Credentialing coordinator")
+                                            "Then one reprocessing request listing every affected claim."], "Credentialing coordinator", std)
     if carc in ("129",) and "N770" in rarcs:
         return ("Nothing to work: CO-129 with N770 says the payer processed the adjustment request on the original claim. Let it go with that "
-                "note.", [], "Biller")
+                "note.", [], "Biller", std)
     if carc == "29" or sig == "DENIED_TIMELY_FILING":
         tp = _timely_proof(conn, f, fx)
         seen = []
@@ -2256,42 +2623,43 @@ def _decide_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict) -> tuple
         lim = f" The first-filing limit was {day(tp['limit'])} ({_short(tp['label'])})." if tp["limit"] else ""
         if tp["in_time"]:
             return (f"A timely-filing denial, but {' and '.join(seen)}, inside the limit.{lim} Appeal with the clearinghouse acceptance report "
-                    "(or 277CA) showing the first submission.", [], "Biller")
+                    "(or 277CA) showing the first submission.", [], "Biller", ["build_packet"] + std)
         return ("A timely-filing denial: appeal only with proof it reached the payer in time (the clearinghouse acceptance report)." +
                 (f" On file: {' and '.join(seen)}, after the limit.{lim} No earlier submission is on file." if seen else lim) +
-                " Without that proof, mark it Lost (provider liability: do not bill the patient).", [], "Biller")
-    if carc in AUTH_CARCS:
+                " Without that proof, Let go with the reason \"lost to timely filing\" (provider liability: do not bill the patient).", [],
+                "Biller", std)
+    if carc in AUTH_CARCS or sig == "DENIED_AUTH":
         what = {"243": "not authorized by the network or the primary care provider", "288": "a referral was absent",
                 "197": "no authorization", "198": "the authorization was exceeded", "15": "the authorization number was missing or invalid",
                 "62": "the authorization was missing or exceeded", "39": "authorization was denied"}.get(carc, "no authorization")
         steps = ["Look in EMA and the payer's portal for an authorization or referral covering the date of service.",
                  "Found: ask the payer to reprocess with its number (a corrected claim with the number, frequency 7, where the payer wants it).",
                  "Not found: ask for a retro-authorization (or a retro referral from the primary care provider's office, which submits it).",
-                 "Neither: let it go with the reason, and tell the front desk which service needs it." +
+                 "Neither: Let go with the reason, and tell the front desk which service needs it." +
                  (" A Medicaid member cannot be billed." if f.get("payer_kind") == "medicaid" else
                   " Do not bill the patient unless the payer's answer is final and the patient agreed in writing beforehand.")]
         words = f"{f['carc_group']}-{carc}" if f.get("carc_group") else _reason_words(fx)
-        return (f"{grp} denied it because {what} ({words}): find the authorization or referral, or get one after the fact.", steps,
-                "Referral coordinator, then the biller")
+        return (f"{grp} denied it because {what} ({words}): find the authorization or referral for {day(f.get('service_date'))}, or get one after "
+                "the fact.", steps, "Referral coordinator, then the biller", std + ["mark_sent"])
     if sig == "DENIED_NONCOVERED":
         steps = ["Check the member's benefits for the service on the date (portal or call).",
                  "Covered after all, or another plan is primary: send it to the right payer, or appeal with the coverage rule.",
                  "Not covered: bill the patient only where allowed (group PR, or a signed advance notice); a CO denial and a Medicare Advantage "
-                 "member without a pre-service determination cannot be billed; otherwise let it go with the reason."]
+                 "member without a pre-service determination cannot be billed; otherwise Let go with the reason."]
         if BENIGN_CODES.match(str(f.get("procedure_code") or "")):
             steps.insert(0, "Read the note against the coverage rule for removing benign lesions: it needs a documented reason (bleeding, "
                             "pain, itching, inflammation, rapid change, a suspicion of cancer, or a lesion that blocks vision or function) and a "
                             "diagnosis code that matches. If the note has it, dispute with the note; if not, let it go.")
-        return ("Check benefits: send it to the right payer, bill the patient only where allowed, or let it go with the reason.", steps, "Biller")
+        return ("Check benefits: send it to the right payer, bill the patient only where allowed, or let it go with the reason.", steps, "Biller", std)
     if sig == "CLAIM_DENIED_UNPAID":
         if carc in ("18", "B13"):
             return ("A whole-claim duplicate denial: find the claim it duplicates (the same bill's other submission) and how that one was "
-                    "answered; nothing more is owed on this copy.", [], "Biller")
+                    "answered; nothing more is owed on this copy.", [], "Biller", std)
     if sig == "CODE_CHANGED":
         return ("Compare the note with both codes: if the code billed was right, appeal; if the payer's code was, let it go and change how it is "
-                "billed.", [], "Coder")
+                "billed.", [], "Coder", std)
     return (f"Read the reason ({_reason_words(fx)}): fix and resubmit if it names an error, appeal if the payer is wrong, let it go with the "
-            "reason if the payer is right.", [], "Biller")
+            "reason if the payer is right.", [], "Biller", std)
 
 
 def _era_request(conn: sqlite3.Connection, fx: dict, proof: dict) -> str | None:
@@ -2320,57 +2688,59 @@ def _era_request(conn: sqlite3.Connection, fx: dict, proof: dict) -> str | None:
     return text
 
 
-def _expected(f: dict, fx: dict) -> int:
-    """What working the item is worth: its expected amount, never more than the charge, and never more than the payer's own
-    allowed amount when its remittance shows one (the charge less its contractual reduction)."""
-    exp = f.get("shortfall_cents") or f.get("expected_cents") or 0
+def _expected(f: dict, fx: dict, story: dict | None = None) -> tuple[int, str | None]:
+    """What working the item is worth, with the basis of the figure (orchestrator decision 5): its shortfall (a $0 shortfall
+    is worth $0), else its expected amount; never more than the charge, never more than the payer's own allowed amount when
+    its remittance shows one (the charge less its contractual reduction), and for a denial only EMA saw, never more than
+    the denial took there (its write-off on the denial's posting day and what is still open)."""
+    sc = f.get("shortfall_cents")
+    exp = sc if sc is not None else (f.get("expected_cents") or 0)
+    code = f.get("procedure_code") or "the code"
+    basis = (f"RemitWatch's estimate: the payer's usual rate for {code} less what it paid" if (f.get("expected_cents") or 0) else
+             "the amount the item lists")
     charge = f.get("charge_cents") or (S._ev(f).get("billed_cents") if f.get("signal") in S.CLAIM_SIGNALS else None)
     if charge and exp > charge:
-        exp = charge
+        exp, basis = charge, "the charge"
     if f.get("category") in ("denial", "bundling"):
         for x in S.own_rows(fx):
             co45 = sum(a for g, c, a in x["adj"] if g == "CO" and c == "45")
             denied = sum(a for g, c, a in x["adj"] if not (g == "CO" and c in ("45", "253")) and g != "PR")
-            if co45 and denied and x.get("charge"):
-                exp = min(exp, (x["charge"] or 0) - co45)
-    return max(0, int(exp or 0))
+            if co45 and denied and x.get("charge") and (x["charge"] or 0) - co45 < exp:
+                exp, basis = (x["charge"] or 0) - co45, "the 835's allowed amount (charge less CO-45)"
+    if f.get("signal") == "EMA_DENIED" and fx["ema"]["lines"]:
+        pay_day = f.get("payment_date")
+        took = sum((z["contr"] or 0) + (z["nonc"] or 0) for z in fx["ema"]["reasons"]
+                   if z["grp"] not in ("", "PR") and z.get("cls") not in ("routine", "patient") and (z["first"] == pay_day or z["last"] == pay_day))
+        open_ = max(0, S._ema_line_totals(fx)["balance"])
+        if took + open_ > 0 and took + open_ < exp:
+            exp, basis = took + open_, "what the denial took in EMA (its write-off and what is still open)"
+    return max(0, int(exp or 0)), basis
 
 
 def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:
-    """Every clock the item runs on: the appeal window and, where it differs, the corrected-claim or first-filing limit, the
-    window counted from the first denial of the same service (some payers count from the original determination), and a
-    Medicare reopening (one year from the remittance)."""
-    from .codes import appeal_rule, corrected_rule, filing_rule
+    """Every clock the item runs on (states.windows, the same windows its state expires by), and the window counted from
+    the first denial of the same service where the payer counts from the original determination (a safe, earlier date)."""
+    from .codes import appeal_rule, filing_rule
     out = []
-    if st.get("deadline"):
-        out.append({"what": "the item's deadline", "date": st["deadline"], "basis": st.get("deadline_basis")})
+    for w in S.windows(f, st.get("deadline"), st.get("deadline_basis"), fx):
+        what = {"the item's deadline": "the item's deadline", "the payer's own limit": "the payer's own limit",
+                "the payer's dispute window": "appeal", "the corrected-claim limit": "corrected claim", "a Medicare reopening": "reopening",
+                "the first-filing limit": "first filing"}.get(w["what"], w["what"])
+        out.append({"what": what, "date": w["date"], "basis": w["basis"], "process": w["process"]})
     grp, kind = f.get("payer_group"), f.get("payer_kind")
     if f.get("payment_date") and f.get("signal") not in S.CLAIM_SIGNALS and f.get("category") in S.MONEY:
         a = appeal_rule(grp, kind)
-        out.append({"what": "appeal", "date": S._add(f["payment_date"], a["days"]), "basis": a["label"]})
-        denials = sorted(x["date"] for x in S.standing_rows(fx["r835"]["rows"]) if x.get("line_key") and (x["paid"] or 0) <= 0
-                         and x["date"] and x["date"] < f["payment_date"] and S._same_payer(S.row_group(x)[0], grp)
-                         and any(c == str(f.get("carc") or "") for _g, c, _a in x["adj"]))
-        if denials and re.search(r"\b(original|initial)\b", a["label"] or "", re.I):
-            # the payer counts its window from the original determination: a later answer of the same claim does not restart it
-            out.append({"what": "first denial of this service", "date": S._add(denials[0], a["days"]),
-                        "basis": f"{_short(a['label'])}, counted from the first denial of this service ({day(denials[0])}) to be safe"})
-        cr = corrected_rule(grp, kind, f.get("rarc"), f.get("signal"), f.get("carc"))
-        if cr:
-            start = f.get("service_date") if cr["clock"] == "dos" else f.get("payment_date")
-            out.append({"what": "corrected claim", "date": S._add(start, cr["days"]), "basis": cr["label"]})
-        if kind == "medicare" and f.get("category") in ("denial", "bundling"):
-            out.append({"what": "reopening", "date": S._add(f["payment_date"], 365),
-                        "basis": "Medicare reopening for a clerical error (a wrong diagnosis code, say): within one year of the remittance "
-                                 "(42 CFR 405.980(b)(1))"})
+        start = S.first_denial(fx, a)
+        if start:
+            out.append({"what": "first denial of this service", "date": S._add(start, a["days"]), "process": "appeal",
+                        "basis": f"{_short(a['label'])}, counted from the first denial of this service ({day(start)}) to be safe"})
     if f.get("signal") in S.CLAIM_SIGNALS and f.get("service_date"):
         r = filing_rule(grp, kind)
-        out.append({"what": "first filing", "date": S._add(f["service_date"], r["days"]), "basis": r["label"]})
         if r.get("earliest"):
-            out.append({"what": "first filing (shortest common limit)", "date": S._add(f["service_date"], r["earliest"]),
+            out.append({"what": "first filing (shortest common limit)", "date": S._add(f["service_date"], r["earliest"]), "process": "first_filing",
                         "basis": "the shortest common first-filing limit for this kind of payer; send it by then where possible"})
     seen, uniq = set(), []
-    for c in out:
+    for c in sorted(out, key=lambda c: c["date"] or ""):
         k = (c["what"], c["date"])
         if c["date"] and k not in seen:
             seen.add(k)
@@ -2380,7 +2750,7 @@ def _clocks(f: dict, fx: dict, st: dict) -> list[dict]:
 
 def _instructions(f: dict, fx: dict, action: str, steps: list[str], needs: list[str], deadline: str | None, basis: str | None) -> str:
     lines = [action]
-    for i, s in enumerate(steps, 1):
+    for i, s in enumerate([s for s in steps if s], 1):
         lines.append(f"{i}. {s}")
     if needs:
         lines.append("It needs: " + "; ".join(needs) + ".")
@@ -2390,9 +2760,9 @@ def _instructions(f: dict, fx: dict, action: str, steps: list[str], needs: list[
 
 
 def next_step(conn: sqlite3.Connection, finding_id: str, *, ledger: Any = None, today: str | None = None) -> dict:
-    """What to do next, who, by when and why, what it is worth, the buttons and the instructions:
-    {'action', 'who', 'deadline', 'basis', 'expected_cents', 'buttons', 'instructions', 'route', 'steps', 'needs', 'clocks',
-    'appeal_ok', 'appeal_block', 'claim_url', 'recovery', 'ranked_cents', 'siblings'}."""
+    """What to do next, who, by when and why, what it is worth and on what basis, the buttons and the instructions:
+    {'action', 'who', 'deadline', 'basis', 'expected_cents', 'expected_basis', 'buttons', 'instructions', 'route', 'steps',
+    'needs', 'clocks', 'appeal_ok', 'appeal_block', 'claim_url', 'recovery', 'ranked_cents', 'siblings', 'pattern'}."""
     return explain(conn, finding_id, ledger=ledger, today=today)["next_step"]
 
 

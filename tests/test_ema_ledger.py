@@ -1172,3 +1172,41 @@ def test_a_serverless_ledger_archives_what_retention_deletes_to_the_state_folder
     assert any(m["name"].startswith("archive/ledger/") for m in state.list("archive"))
     h.discard()
     store.close()
+
+
+# ======================================================================== 11. two exports of the same day (CSV)
+def _same_day_exports(tmp_path):
+    """The morning and afternoon exports of one service year, made the same day: the afternoon one also holds a payment
+    posted that afternoon. Neither says when it was made (CSV)."""
+    day = D(2026, 4, 1)
+    morning = [charge(F.link_no(i), svc=SVC, posted=SVC) for i in range(1, 5)]
+    morning += [payment(F.link_no(i), F.check_no(1), 40, posted=day) for i in range(1, 4)]
+    late = payment(F.link_no(4), F.check_no(2), 55, posted=day)
+    am = prod_file(tmp_path, morning, name="2026 Production am.csv")
+    pm = prod_file(tmp_path, morning + [late], name="2026 Production pm.csv")
+    return am, pm
+
+
+@pytest.mark.parametrize("first", ["morning", "afternoon"])
+def test_the_later_of_two_same_day_exports_wins_whichever_arrives_first(store, ledger, tmp_path, first):
+    am, pm = _same_day_exports(tmp_path)
+    order = [am, pm] if first == "morning" else [pm, am]
+    got = [apply(store, ledger, p) for p in order]
+    assert one(ledger.conn, "SELECT SUM(ins_paid) FROM postings") == (3 * 4000 + 5500,)
+    status = {p: g["status"] for p, g in zip(order, got)}
+    assert status[pm] == "current"
+    assert ledger.file(er.file_id_of(am))["live_rows"] == 0                 # the morning export holds nothing of its own
+    assert one(ledger.conn, "SELECT COUNT(*) FROM postings") == (8,)
+
+
+def test_two_same_day_exports_that_hold_as_much_on_that_day_go_by_arrival(store, ledger, tmp_path, monkeypatch):
+    """Nothing tells them apart: the one that arrives later is the newer, as before."""
+    tick = itertools.count(10)
+    monkeypatch.setattr(el, "_now", lambda: f"2026-11-20T10:00:{next(tick):02d}+00:00")
+    rows_ = [charge(F.link_no(1)), payment(F.link_no(1), F.check_no(1), 40)]
+    a = prod_file(tmp_path, rows_, name="2026 Production a.csv")
+    b = prod_file(tmp_path, rows_ + [F.production_row(link=F.link_no(2), svc=SVC, posted=SVC, charges=90)],
+                  name="2026 Production b.csv")
+    apply(store, ledger, b)
+    apply(store, ledger, a)
+    assert ledger.file(er.file_id_of(a))["live_rows"] == 2 and ledger.file(er.file_id_of(b))["status"] == "replaced"

@@ -1564,3 +1564,224 @@ def test_a_weekly_export_read_through_the_hand_off_says_what_it_held_like_the_up
     assert lines[0].startswith("Claim & Claim Status export (Excel)") and "23 rows" in lines[0], lines
     assert lines[1].startswith("Added 23 rows on") and "Already in RemitWatch: 0." in lines[1], lines
     assert "Read as an EMA export." not in lines
+
+
+# ============================================================== a run stopped at the wrong moment, a read that failed
+def _loaded(root, client, state):
+    write(root / DATA / "Reports" / "AR 2026.xlsx", F.ar_xlsx(ar_rows()))
+    cycle(state, client)                    # a store in the state folder, with its key salt
+
+
+def _stopped_at_store_save(monkeypatch, state, client):
+    """One run that applies a Production file, saves the ledger and is stopped as it saves the store."""
+    real = cloud.save_raw
+
+    def stopped(*a, **k):
+        raise Killed()
+    monkeypatch.setattr(cloud, "save_raw", stopped)
+    with pytest.raises(Killed):
+        cycle(state, client)
+    monkeypatch.setattr(cloud, "save_raw", real)
+
+
+def test_an_upload_applied_by_a_run_stopped_at_the_store_save_is_already_read_and_its_attempts_go(vercel, monkeypatch):
+    """Two runs are stopped while reading a Production upload, the third applies it and is stopped at the store save:
+    the fourth puts the store right from the ledger. The person is told the file was read (never held), and the count
+    of runs that tried it is gone."""
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    _loaded(root, client, state)
+    data = F.production_csv(prod_rows())
+    pair = _pair(root / "RemitWatch-state" / "intake", "2026 Production.csv", data, gz=True)
+    real = el.apply_production_file
+
+    def stopped(*a, **k):
+        raise Killed()
+    monkeypatch.setattr(el, "apply_production_file", stopped)
+    for _ in range(2):
+        with pytest.raises(Killed):
+            cycle(state, client)
+    monkeypatch.setattr(el, "apply_production_file", real)
+    _stopped_at_store_save(monkeypatch, state, client)
+    out = cycle(state, client)
+    assert out["ema_repair"]["repaired"]
+    conn = state_store(state)
+    assert catalog(conn)[sha(data)] == "current"
+    done = json.loads(state.get(f"intake/done/{pair}.json"))["result"]
+    assert done["status"] == "already" and "held" not in json.dumps(done).lower()
+    assert sha(data) not in json.loads(state.get(el.ATTEMPTS_NAME) or b"{}")
+    h = el.LedgerHandle(state, tmp_dir=str(root.parent / "look"))
+    try:
+        assert h.open().conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 12      # applied once
+    finally:
+        h.discard()
+
+
+def test_the_repair_brings_back_the_files_and_sources_rows_and_where_a_dropbox_file_is(vercel, monkeypatch):
+    """After a run that saved the ledger and was stopped at the store save, the file is listed again by the next run:
+    its catalog row, its files and ema_sources rows and its Dropbox origin (a later re-read fetches it from there) are
+    all back, and it is applied once."""
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    _loaded(root, client, state)
+    data = F.production_csv(prod_rows())
+    write(root / DATA / "Reports" / "2026 Production.zip", F.zipped("2026 Production.csv", data))
+    _stopped_at_store_save(monkeypatch, state, client)
+    cycle(state, client)
+    cycle(state, client)
+    conn = state_store(state)
+    assert catalog(conn)[sha(data)] == "current"
+    assert tuple(conn.execute("SELECT kind FROM files WHERE sha256=?", (sha(data),)).fetchone() or ()) == ("ema:production",)
+    assert conn.execute("SELECT family FROM ema_sources WHERE sha256=?", (sha(data),)).fetchone() is not None
+    origin = json.loads(conn.execute("SELECT origin FROM ema_report_files WHERE file_id=?", (sha(data),)).fetchone()[0])
+    assert origin.get("dropbox_id") and origin.get("member") == "2026 Production.csv"
+
+
+def _passed_report(root, client, db):
+    """An older build's Dropbox position is already past a Production report (the live server's state)."""
+    folder = root / DATA / "Trizetto" / "AR and Collections Reports from EMA"
+    prod = write(folder / "2026 Production(Sheet1).csv", F.production_csv(prod_rows()))
+    s = open_store(db)
+    list(client.list_folder(f"/{DATA}", recursive=True))
+    s.conn.execute("INSERT INTO meta (key, value) VALUES ('sync:cursor', ?)", (client.last_cursor,))
+    s.conn.commit()
+    s.close()
+    return prod
+
+
+def test_a_report_the_re_find_brought_in_is_read_by_the_next_cycle_when_one_stops_while_reading_it(server, monkeypatch):
+    root, client, mirror, db = server
+    prod = _passed_report(root, client, db)
+    real = el.apply_production_file
+
+    def stopped(*a, **k):
+        raise Killed()
+    monkeypatch.setattr(el, "apply_production_file", stopped)
+    with pytest.raises(Killed):
+        run(db)
+    monkeypatch.setattr(el, "apply_production_file", real)
+    out = run(db)
+    s = open_store(db)
+    try:
+        assert catalog(s.conn).get(sha(prod)) == "current"
+        assert s.conn.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0] == 0
+    finally:
+        s.close()
+    assert out["ingest"]["ema"] == 1
+
+
+@pytest.mark.parametrize("how", ["re-find", "delta"])
+def test_a_report_whose_read_fails_once_is_read_by_the_next_cycle(how, server, monkeypatch):
+    """A busy database or a full disk while a fetched report is read: the cycle goes on, and the next cycle reads it
+    (the position has moved past it, so nothing else would)."""
+    root, client, mirror, db = server
+    if how == "re-find":
+        prod = _passed_report(root, client, db)
+    else:
+        run(db)                                             # the position set and the re-find done; then a new export
+        prod = write(root / DATA / "Trizetto" / "2026 Production(Sheet1).csv", F.production_csv(prod_rows()))
+    real = el.apply_production_file
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*a, **k)
+    monkeypatch.setattr(el, "apply_production_file", flaky)
+    first = run(db)
+    assert first["ingest"]["errors"] == 1 and first["sync_pending"]["waiting"] == 1
+    run(db)
+    s = open_store(db)
+    try:
+        assert catalog(s.conn).get(sha(prod)) == "current" and calls["n"] == 2
+        assert s.conn.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0] == 0
+    finally:
+        s.close()
+
+
+def test_a_fetched_file_whose_read_fails_every_cycle_is_listed_as_not_read_and_the_cycles_go_on(server, monkeypatch):
+    root, client, mirror, db = server
+    run(db)
+    prod = write(root / DATA / "Trizetto" / "2026 Production(Sheet1).csv", F.production_csv(prod_rows()))
+
+    def broken(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+    monkeypatch.setattr(el, "apply_production_file", broken)
+    for _ in range(dropbox_sync.PENDING_TRIES):
+        assert "error" not in run(db)
+    out = run(db)
+    assert out["sync_pending"]["given_up"] == 1
+    s = open_store(db)
+    try:
+        row = s.conn.execute("SELECT kind, status FROM files WHERE sha256=?", (sha(prod),)).fetchone()
+        assert tuple(row or ()) == ("ema:failed", "not_read")
+        assert s.conn.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0] == 0
+    finally:
+        s.close()
+
+
+def test_a_big_report_whose_first_bytes_could_not_be_fetched_is_looked_at_again(vercel, monkeypatch):
+    """A raw Production CSV too large for this site is recognised from its first 64 KB: when that request fails (a
+    timeout), the file is not remembered as seen, and the next run keeps it waiting with what to do about it."""
+    root, client, state = vercel
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    monkeypatch.setattr(cloud, "MAX_FILE_BYTES", 2000)
+    big = write(root / DATA / "Reports" / "2026 Production(Sheet1).csv", F.production_csv(prod_rows(n=12)))
+    real = client.download_chunks
+    calls = {"n": 0}
+
+    def flaky(path_or_id, chunk=4 << 20, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("download timed out")
+        return real(path_or_id, chunk, timeout)
+    monkeypatch.setattr(client, "download_chunks", flaky)
+    first = cycle(state, client)
+    assert first["ingest"]["download_errors"] == 1 and not first["ingest"]["failed"]
+    cycle(state, client)
+    conn = state_store(state)
+    pid = er.provisional_id(client._entry(big)["content_hash"])
+    assert tuple(conn.execute("SELECT status FROM ema_report_files WHERE file_id=?", (pid,)).fetchone() or ()) == ("waiting",)
+
+
+def _zip_of_remits() -> bytes:
+    from tests.test_remitwatch import CLAIM_DOWNCODE, remit
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("week 47/ERA 001.RMT", remit(CLAIM_DOWNCODE, "77.60", seg_count=20, isa_ctrl="000000301"))
+        zf.writestr("week 47/ERA 002.RMT", remit(CLAIM_DOWNCODE.replace("CB00TEST01C017", "CB00TEST09C017"), "77.60",
+                                                 seg_count=20, isa_ctrl="000000302"))
+        zf.writestr("week 47/readme.pdf", b"%PDF-1.4 not read")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_the_remittances_in_a_zip_dropped_in_the_folder_are_read_once(host, request):
+    """A zip of remittance files (not the first-load archive) has each member read on its own; the same files zipped
+    again add nothing."""
+    from tests.test_remitwatch import CLAIM_DOWNCODE, remit
+    if host == "server":
+        root, client, mirror, db = request.getfixturevalue("server")
+        run(db)
+        write(root / DATA / "Trizetto" / "ERAs week 47.zip", _zip_of_remits())
+        out = run(db)
+        write(root / DATA / "Trizetto" / "ERAs week 47 again.zip", _zip_of_remits())
+        again = run(db)
+        s = open_store(db)
+        try:
+            n = s.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        finally:
+            s.close()
+        assert out["ingest"]["remits"] == 2 and n == 2 and again["ingest"]["remits"] == 0
+    else:
+        root, client, state = request.getfixturevalue("vercel")
+        write(root / DATA / "Trizetto" / "first.RMT", remit(CLAIM_DOWNCODE.replace("CB00TEST01C017", "CB00TEST07C017"),
+                                                              "77.60", seg_count=20, isa_ctrl="000000300"))
+        cycle(state, client)                                  # a first load from a loose file
+        write(root / DATA / "Trizetto" / "ERAs week 47.zip", _zip_of_remits())
+        out = cycle(state, client)
+        write(root / DATA / "Trizetto" / "ERAs week 47 again.zip", _zip_of_remits())
+        again = cycle(state, client)
+        n = state_store(state).execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        assert out["ingest"]["remits"] == 2 and n == 3 and again["ingest"]["remits"] == 0
