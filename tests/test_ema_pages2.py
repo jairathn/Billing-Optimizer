@@ -404,23 +404,33 @@ def test_counts_leave_out_items_the_rules_no_longer_find(server):
 
 
 def test_an_upper_bound_amount_is_counted_and_said_apart(server):
-    """An item EMA wrote off on a line no rate prices is sized at charge less paid (ema_checks C2): an upper bound. The
-    count keeps it (it equals the list) and says how much of the dollars is that bound (needs_B 1.6)."""
+    """An item EMA wrote off on a line no rate prices has no shortfall; what EMA wrote off on it is capped at the charge
+    less what was paid (ema_checks C2, basis charge_less_paid): an upper bound. The count keeps the item (it equals the
+    list), its dollars stay out of every total, and the bound is said apart (needs_B 1.6)."""
     c, db = server.c, server.db
     f = fid(db, "DENIED_AUTH", "auto_written_off")
     conn = sqlite3.connect(db)
     ev = json.loads(conn.execute("SELECT evidence FROM findings WHERE finding_id=?", (f,)).fetchone()[0])
     ev["written_off_basis"] = "charge_less_paid"
-    conn.execute("UPDATE findings SET evidence=? WHERE finding_id=?", (json.dumps(ev), f))
+    # as the run leaves such an item: no price, so no shortfall; the write-off capped at the charge less what was paid
+    conn.execute("UPDATE findings SET evidence=?, shortfall_cents=NULL, written_off_cents=12000 WHERE finding_id=?", (json.dumps(ev), f))
     conn.commit()
     conn.close()
     t = c.get("/api/ema/today").json()
-    assert t["auto_written_off"]["cents"] == 9000 and t["auto_written_off"]["upper_cents"] == 9000
-    assert t["states"]["todo"]["upper_cents"] == 9000
+    a = t["auto_written_off"]
+    assert (a["n"], a["cents"], a["upper_n"], a["upper_cents"]) == (1, 0, 1, 12000)
+    assert _list_total(c, a["go"]) in (None, (1, 0))           # the list still shows the item, with no dollars
+    todo = t["states"]["todo"]
+    assert (todo["upper_n"], todo["upper_cents"]) == (1, 12000)
+    assert (todo["n"], todo["cents"]) == sql_count(db, "status IN ('open','in_progress') AND work_state='work_now' AND appeal_deadline >= ?", TODAY)
     d = c.get("/api/ema/data").json()
-    assert d["upper_bound"] == {"n": 1, "cents": 9000}
-    pat = next(p for p in c.get("/api/ema/policy").json()["patterns"] if p["code"] == "99213")
-    assert pat["upper_cents"] == 9000
+    assert d["upper_bound"] == {"n": 1, "cents": 12000}
+    pats = c.get("/api/ema/policy").json()
+    pat = next(p for p in pats["patterns"] if p["code"] == "99213" and p["upper_n"])
+    assert (pat["upper_n"], pat["upper_cents"]) == (1, 12000)
+    assert pat["cents"] == sum(r["shortfall_cents"] or 0 for r in _all_items(c, pat["pattern"]))
+    item = next(r for r in _all_items(c, pat["pattern"]) if r["finding_id"] == f)
+    assert item["shortfall_cents"] is None and item["written_off_basis"] == "charge_less_paid" and item["written_off_cents"] == 12000
 
 
 def test_a_store_before_the_states_has_no_state_counts_and_no_error(server, monkeypatch):

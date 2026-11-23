@@ -321,6 +321,24 @@ def test_a_person_marking_paid_counts_once_and_only_when_no_payment_record_shows
     assert money_of(store, fid3) is None and money_of(store, auto) is None
 
 
+def test_a_payment_on_a_service_only_a_later_item_covers_counts_from_that_items_own_flag(store):
+    # one claim, two services. C1 (flagged April 1) is about 99213 only; L2 (flagged May 1) is about 11102 only. A
+    # whole-claim row ties them into one group, but a payment on 11102 in April came before L2 was flagged: never counted.
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28",
+               claims=[{"pcn": F.claim_id(1), "status": "4", "lines": [ln("99213", 150, 0, [("CO", "16", 150)]), ln("11102", 120, 0, [("CO", "16", 120)])]}])
+    item(store, finding_id="C1", signal="DENIED_CODING", line_key=f"{tk}-0-0", claim_key=f"{tk}-0", transaction_key=tk,
+         first_seen="2026-04-01T08:00:00+00:00", work_state="work_now")
+    item(store, finding_id="L2", signal="DENIED_CODING", line_key=f"{tk}-0-1", claim_key=f"{tk}-0", transaction_key=tk,
+         procedure_code="11102", billed_code="11102", first_seen="2026-05-01T08:00:00+00:00", work_state="work_now")
+    remit(store, trace=F.check_no(2), paid_on="2026-04-20",
+          claims=[{"pcn": F.claim_id(1, sub=2), "lines": [ln("99213", 150, 90, [("CO", "45", 60)]), ln("11102", 120, 70, [("CO", "45", 50)])]}])
+    remit(store, trace=F.check_no(3), paid_on="2026-05-10", claims=[{"pcn": F.claim_id(1, sub=3), "lines": [ln("11102", 120, 30, [("CO", "45", 90)])]}])
+    run(store)
+    assert money_of(store, "C1")["returned"] == 9000            # its own 99213 payment after its flag
+    assert money_of(store, "L2")["returned"] == 3000            # 11102: only the payment after May 1
+    assert dash(store)["money"]["returned_cents"] == 12000
+
+
 def test_a_line_paid_by_whole_claim_answer_counts_once(store):
     tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28",
                claims=[{"pcn": F.claim_id(1), "status": "4", "lines": [ln("99213", 150, 0, [("CO", "16", 150)]), ln("11102", 120, 0, [("CO", "16", 120)])]}])
