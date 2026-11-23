@@ -171,7 +171,7 @@ def results_page(request: Request, day: Optional[str] = Query(None, max_length=1
         denials = dict(d.get("denials") or {})
         out: dict[str, Any] = {
             "ready": bool(d), "today": t, "day": sd, "host": "serverless" if runtime.serverless() else "server", "as_of": d.get("at"),
-            "detect_run": d.get("detect_run"), "version": results.VERSION, "updating": updating,
+            "detect_run": d.get("detect_run"), "first_run": d.get("first_run"), "version": results.VERSION, "updating": updating,
             "update_error": _BG.get("error") if updating else None,
             "money": d.get("money"), "lift": d.get("lift"), "work": d.get("work"), "outcomes": d.get("outcomes"),
             "lost": d.get("lost"), "credits": d.get("credits"), "denials": denials, "counts": d.get("counts") or {},

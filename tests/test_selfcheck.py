@@ -1160,8 +1160,10 @@ def test_safe_mode_keeps_a_change_a_person_made_while_detection_ran(tmp_path, mo
     assert ev is not None and ev[0] == "appealed"
     row = tuple(c.execute("SELECT status, notes FROM findings WHERE finding_id=?", (person_fid,)).fetchone())
     bug = c.execute("SELECT status FROM findings WHERE finding_id=?", (bug_fid,)).fetchone()[0]
+    text = sc.safe_mode(c)["text"]
     s.close()
     assert row == ("appealed", "Appeal faxed today") and bug == "open"
+    assert "The 1 change a person saved during the run stands." in text, text           # plain English, one change
 
 
 def test_accepting_takes_exactly_the_offenders_a_person_was_shown(store):

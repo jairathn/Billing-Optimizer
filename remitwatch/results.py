@@ -1548,6 +1548,7 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
     money = {fid: gm.get(att["groups"].get(fid, fid), (att["items"].get(fid) or {}).get("returned", 0)) for fid in book}
     closed: dict[str, list] = defaultdict(list)
     cant: dict[str, list] = defaultdict(list)
+    still: dict[str, list] = defaultdict(list)       # the book's items still open now, by state
     waiting_no_money, waited = [], []
     for fid, r in book.items():
         f = cur.get(fid)
@@ -1557,6 +1558,8 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
         elif f and f.get("work_state") == "cant_check":
             basis = str(f.get("state_basis") or "No reason recorded")
             cant[re.split(r"[:.(]", basis, maxsplit=1)[0].strip()[:80] or "No reason recorded"].append(fid)
+        else:
+            still[(f or {}).get("work_state") if (f or {}).get("work_state") in OPEN_STATES else "unknown"].append(fid)
         ws = real_work(att["work"].get(fid))
         # worked and still open with nothing back yet; an item denied again after the work had its answer (counted apart)
         if ws and f and f.get("work_state") in OPEN_STATES and not money.get(fid) and fid not in att["denied_again"]:
@@ -1580,11 +1583,15 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
     lists["closed:any"] = [[f, 0] for f in sorted(fid for v in closed.values() for fid in v)]
     lists.update({f"cant:{k}": [[f, 0] for f in sorted(v)] for k, v in cant.items()})
     lists["cant:any"] = [[f, 0] for f in sorted(fid for v in cant.values() for fid in v)]
+    lists.update({f"book:open:{k}": [[f, 0] for f in sorted(v)] for k, v in still.items()})
     lists["waiting_no_money"] = [[f, 0] for f in sorted(waiting_no_money)]
     lists["denied_again"] = [[f, 0] for f in denied]
     lists["book"] = [[f, 0] for f in sorted(book)]
     n_cant = sum(len(v) for v in cant.values())
     out = {"book": n, "closed": n_closed, "closed_rate": _pct(n_closed, n),
+           "open_by": [{"key": k, "label": STATE_LABELS.get(k, "Still listed, no state yet"), "n": len(v)}
+                       for k, v in sorted(still.items(), key=lambda kv: (kv[0] not in OPEN_STATES, kv[0]))],
+           "still_open": sum(len(v) for v in still.values()),
            "closed_by": [{"key": k, "label": CLOSURE_LABELS.get(k, k), "n": len(v), "rate": _pct(len(v), n)}
                          for k, v in sorted(closed.items(), key=lambda kv: -len(kv[1]))],
            "cant_check": n_cant, "cant_rate": _pct(n_cant, n),
@@ -2147,7 +2154,8 @@ def refresh(conn: sqlite3.Connection, *, today: Any = None, run_id: Any = None, 
     snaps = snapshots(conn, lists=True)
     lists["frozen"] = {sn["week"]: sn.get("lists") or {} for sn in snaps if sn.get("final") and isinstance(sn.get("lists"), dict)}
     payload["snapshots"] = [{k: v for k, v in sn.items() if k != "lists"} for sn in snaps][-120:]
-    payload.update(rev=rev, run_id=run_id, host=host, seconds=round(time.time() - t0, 1), detect_run=detect_run(conn))
+    payload.update(rev=rev, run_id=run_id, host=host, seconds=round(time.time() - t0, 1), detect_run=detect_run(conn),
+                   first_run=(_meta(conn, BASELINE_KEY, None) or {}).get("day") or t)
     _set_meta(conn, DASH_KEY, payload)
     _set_meta(conn, LISTS_KEY, lists)
     b = baseline(conn, live, t)

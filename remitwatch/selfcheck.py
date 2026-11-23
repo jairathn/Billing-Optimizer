@@ -1819,7 +1819,8 @@ def _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_ho
                           + (f"It still lists the {_n(n_new, 'new item')} to work the run found. " if n_new else "")
                           + (f"It held the {_n(int(held_info.get('new_items_held') or 0), 'new item')} the run found as well: "
                              "more than one run usually brings. " if held_info.get("new_items_held") else "")
-                          + (f"The {_n(n_person, 'change')} people saved during the run stand. " if n_person else "")
+                          + ("The 1 change a person saved during the run stands. " if n_person == 1 else
+                             f"The {n_person:,} changes people saved during the run stand. " if n_person else "")
                           + "Nothing was lost: the new results are kept for diagnosis. The next run that passes releases it."),
                  "runs_held": int(prev.get("runs_held") or 0) + 1 if prev.get("on") else 1}
     else:
