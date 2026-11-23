@@ -2020,6 +2020,20 @@ def history(conn: sqlite3.Connection) -> list[dict]:
     return _meta_json(conn, META_HISTORY, [])
 
 
+def budget_state(conn: sqlite3.Connection) -> dict | None:
+    """The last recorded run's memory against its budget ({'peak_mb', 'budget_mb', 'share'}), or None: what run() takes as
+    `budget_state`, so a run after one that came within 20% of its budget archives more on its own."""
+    for h in reversed(history(conn)):
+        if h.get("peak_mb") and h.get("budget_mb"):
+            return {"peak_mb": h["peak_mb"], "budget_mb": h["budget_mb"], "share": h.get("share")}
+    return None
+
+
+def locked_years(conn: sqlite3.Connection) -> list[str]:
+    """The service years the archive took lines of (their baselines and aggregate items are kept as measured whole)."""
+    return sorted(_locked_years(conn))
+
+
 def _mb_text(mb: Any) -> str:
     try:
         v = float(mb)

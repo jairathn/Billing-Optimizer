@@ -348,9 +348,10 @@ def load_archive(conn: sqlite3.Connection, items: Iterable[Mapping], *, standing
             b = bill_of(pcn)
             if b not in wanted:
                 continue                # an id that only shares the bill's first characters
+            grp, kind = payer_group_kind(pname, cfi)
             cl = Claim(claim_key=ck, txn=txn, pcn=pcn, bill=b, status=st, charge=charge or 0, paid=paid or 0, patient_resp=pr, pccn=pccn,
                        freq=freq, crossover=cross, original_ref=oref, payer=_payer_key(pid, pname), payer_name=pname,
-                       group=payer_group_kind(pname, cfi)[0], paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[])
+                       group=grp, kind=kind, paid_on=cpay or tpay or "", trace=trace, adj=[], rem=[], lines=[], restated=False)
             arch.claims[ck] = cl
             arch.by_bill[b].append(cl)
             keep.append((ck,))

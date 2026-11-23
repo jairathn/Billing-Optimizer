@@ -781,6 +781,11 @@ def test_a_run_over_80_percent_of_its_budget_tightens_the_horizon_down_to_the_fl
     assert archive.effective_horizon(conn, env={"REMITWATCH_RETENTION_MONTHS": "6"})["configured"] == 24
     assert archive.effective_horizon(conn, horizon=12, floor=0, env=env)["months"] == 12
     assert archive._months_before(TODAY, 36) == "2023-11-01"
+    # the last run's memory, as recorded, is what the next run tightens on
+    assert archive.budget_state(conn) is None
+    archive.record_run(conn, run_id="a", measured={"peak_mb": 1450, "budget_mb": 1600, "share": 0.906, "mode": "serverless"})
+    archive.record_run(conn, run_id="b", measured={"mode": "serverless"})            # a run that measured nothing
+    assert archive.budget_state(conn) == {"peak_mb": 1450, "budget_mb": 1600, "share": 0.906}
     store.close()
 
 
