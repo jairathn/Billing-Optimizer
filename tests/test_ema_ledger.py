@@ -1228,3 +1228,30 @@ def test_two_same_day_exports_that_hold_as_much_on_that_day_go_by_arrival(store,
     apply(store, ledger, b)
     apply(store, ledger, a)
     assert ledger.file(er.file_id_of(a))["live_rows"] == 2 and ledger.file(er.file_id_of(b))["status"] == "replaced"
+
+
+def test_a_held_file_a_person_applied_that_runs_out_of_attempts_again_asks_again(tmp_path, monkeypatch):
+    """Apply on a held Production file gives it more runs; when those stop too, the decision goes: the Data tab offers
+    Apply and Discard again, and the runs stop fetching a file they cannot read."""
+    from remitwatch import cloud
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.setenv("REMITWATCH_EMA_REPORTS", "all")
+    monkeypatch.setenv("REMITWATCH_TMP", str(tmp_path / "scratch"))
+    store = memory_store()
+    p = prod_file(tmp_path, [charge(F.link_no(301))])
+    fid = er.file_id_of(p)
+    er._catalog_put(store.conn, fid, commit=True, report="production", source_name="p.csv", via="dropbox", status="held",
+                    status_reason=el.ATTEMPT_HOLD_REASON, decision="apply", decided_by="staff",
+                    decided_at="2026-11-20T09:00:00+00:00", origin={})
+    state = LocalState(str(tmp_path / "state"))
+    h = el.LedgerHandle(state, tmp_dir=str(tmp_path / "tmp"))
+    for _ in range(el.MAX_ATTEMPTS):
+        h.note_attempt(fid)
+    assert [w["file_id"] for w in cloud._held_to_apply(store.conn)] == [fid]
+    slot = cloud.ProductionSlot(store, state, deadline=time.time() + 120, log=lambda *a: None)
+    res = slot.apply(p, file_id=fid, origin={}, name="p.csv")
+    row = er._catalog_row(store.conn, fid)
+    assert res["status"] == "held" and row["status"] == "held"
+    assert (row["decision"], row["decided_by"], row["decided_at"]) == (None, None, None)
+    assert cloud._held_to_apply(store.conn) == []
+    store.close()

@@ -3870,6 +3870,8 @@ NEVER_APPEALED = ("paid", "credit", "reprocessed")
 CHECK_FIRST = ("settled_in_ema", "likely_paid")
 # the states in which nothing is appealed: done (paid or settled, with proof), accepted (let go, lost, the owner's policy),
 # expired (past every window)
+# what EMA's postings show (ema_checks.fax_vouch) that holds an item in bulk even after a person's "still unpaid in EMA"
+EMA_SHOWS_PAID = ("paid_after", "no_balance")
 CLOSED_STATES = {"done": "it was found paid or settled", "accepted": "it is accepted (let go, lost, or the owner's write-off policy)",
                  "expired": "every window to appeal it has closed"}
 # why an open item a letter settles is not on the bulk list, in the "Left out" line's words and order
@@ -3900,7 +3902,7 @@ def _left_out_reason(r: dict) -> str:
         return "waiting"
     if r.get("category") == "refund" or r.get("signal") == "CREDIT_BALANCE":
         return "credit"
-    if r.get("work_state") is None and r.get("state_ready", True):
+    if r.get("work_state") is None:
         return "no_state"
     if not r.get("appeal_deadline"):
         return "no_date"
@@ -3985,31 +3987,49 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         fine, why = _appeal_ok_now(fid)
         if not fine:
             return held("left_out", why)
-    if f.get("appeal_block") in BLOCK_WORDS and f.get("status") in ("open", "in_progress"):
-        # one item opened by a person: the same never (amendment 14), said with the reason
-        return held("blocked", f"Not sent: {BLOCK_WORDS[f['appeal_block']]}. Its panel says what to do instead.")
+    # an appeal whose every fax failed (a busy line, a number replaced since) can be sent again, to the number saved now
+    again = f.get("status") == "appealed" and not _faxes_out(fid) and bool(_faxes_out(fid, live=False))
+    # one item a person sends: never a line paid, credited or reprocessed since, whatever its status (an appeal sent again
+    # too); a line EMA shows settled, or the archive shows likely paid, only after the person checked it is unpaid
+    # ("checked"); never an item whose state is done, accepted or expired; and never one that waits on the payer, unless
+    # it waits only because its own failed fax marked it Sent (amendment 14, orchestrator decision 4)
+    block = f.get("appeal_block") or ""
+    live_state = _status_state(f) if (str(f.get("status_changed_at") or "") > (_run_anchor() or "~")) else f.get("work_state")
+    if f.get("status") in ("open", "in_progress") or again:
+        if block in NEVER_APPEALED or (block == "waiting" and not again):
+            return held("blocked", f"Not sent: {BLOCK_WORDS[block]}. Its panel says what to do instead.")
+        if block in CHECK_FIRST and not body.get("checked"):
+            return held("check_first", f"Not sent yet: {BLOCK_WORDS[block]}. If it is still unpaid, press \"Checked: still unpaid, fax it\".",
+                        block=block)
+        if live_state in CLOSED_STATES:
+            return held("blocked", f"Not sent: {CLOSED_STATES[live_state]}. Its panel says what to do instead.")
     if kind not in fax.APPEALABLE:
         return held("not_appealable", {"fix": "This one is corrected in EMA and sent again as a claim, not appealed.",
                                        "auth": "This one needs the authorization record, or a retro-authorization, first.",
                                        "check": "This one needs a person to decide first: another payer, the patient, or let it go."}
                     .get(kind, "This one is not an appeal."))
-    again = f.get("status") == "appealed" and not _faxes_out(fid) and bool(_faxes_out(fid, live=False))
     if f.get("status") not in ("open", "in_progress") and not again:
         return dict(out, status="skipped", reason=f"It is {STATUS_WORDS.get(f.get('status'), f.get('status'))}.")
     # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed. Only a
-    # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
+    # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below). In bulk that
+    # answer covers many items at once, so EMA's own sign of a payment after the denial, or of no balance left, still holds
+    # each one it shows (W5 is asked in bulk whatever the answer)
     behind = _data_behind_days()
     vouched = None
-    if behind is not None and behind > STALE_APPEAL_DAYS and not body.get("stale_ok"):
+    if behind is not None and behind > STALE_APPEAL_DAYS and (not body.get("stale_ok") or body.get("bulk")):
         # W5: EMA's Production report can vouch for the item where the remittances stopped coming (still unpaid, on its EMA
         # claim, nothing posted since); only when neither can is it held
         v = _vouch(f)
-        if not (v and v.get("vouched")):
+        code = (v or {}).get("code") or "no_ema"
+        if not (v and v.get("vouched")) and body.get("stale_ok") and code in EMA_SHOWS_PAID:
+            return held(code, f"{v.get('message') or 'EMA shows this line paid or closed.'} It is not faxed in bulk: open it and check it first.",
+                        vouch=code)
+        if not (v and v.get("vouched")) and not body.get("stale_ok"):
             extra = f" {v['message']}" if v and v.get("message") else ""
             return held("stale", f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since.{extra} "
                                  "Get the remittances current first (Data tab, or the TriZetto feed); \"Still unpaid in EMA: fax it anyway\" in the item sends it now.",
-                        vouch=(v or {}).get("code") or "no_ema")
-        vouched = v.get("message")
+                        vouch=code)
+        vouched = (v or {}).get("message") if v and v.get("vouched") else None
     # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
     # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
@@ -4018,8 +4038,13 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         billed = ev.get("billed_code") or ev.get("charge_implies") or "the higher level"
         return held("check_code", f"The remittance does not say the payer changed the code. Check in EMA that {billed} went out on the claim, "
                                   "then press \"It went out as billed: fax it\" in the item.")
-    if f.get("appeal_deadline") and f["appeal_deadline"] < datetime.now(timezone.utc).date().isoformat():
-        return held("expired", f"Its filing window closed on {f['appeal_deadline']}.")
+    # the safe date (appeal_deadline) is what a bulk send keeps to (BULK_RULE); one item a person sends goes until the last
+    # window closes: the payer's own limit (legal_deadline) when it is later (orchestrator decision 2)
+    today = datetime.now(timezone.utc).date().isoformat()
+    last = max((d for d in ((f.get("appeal_deadline") or "")[:10], "" if body.get("bulk") else (f.get("legal_deadline") or "")[:10]) if d), default="")
+    if last and last < today:
+        which = "the payer's own limit" if last != (f.get("appeal_deadline") or "")[:10] else "its filing window"
+        return held("expired", f"Not sent: {which} closed on {last}.")
     if not f.get("claim_key"):
         return held("no_claim", "It is not tied to one claim.")
     missing = _practice_missing()

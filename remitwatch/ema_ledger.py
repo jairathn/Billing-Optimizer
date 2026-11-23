@@ -2415,6 +2415,10 @@ def hold_slow_file(store: Any, file_id: str, reason: str = ATTEMPT_HOLD_REASON) 
     er.ensure_schema(conn)
     n = conn.execute("UPDATE ema_report_files SET status='held', status_reason=? WHERE file_id=? AND status IN ('waiting','reread')",
                      (reason, file_id)).rowcount
+    # held, a person chose Apply, and the runs ran out of attempts again: the decision goes, so the Data tab asks again
+    # and the runs stop fetching a file they cannot read (cloud._held_to_apply)
+    n += conn.execute("UPDATE ema_report_files SET status_reason=?, decision=NULL, decided_by=NULL, decided_at=NULL "
+                      "WHERE file_id=? AND status='held' AND decision='apply'", (reason, file_id)).rowcount
     conn.commit()
     if n:
         store.ema_changed = True
