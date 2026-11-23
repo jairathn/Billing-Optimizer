@@ -65,7 +65,9 @@ def both(box, tmp_path, monkeypatch):
     denial = next(i for i in items if i["signal"] == "DENIED_MEDICAL_NECESSITY")
     assert tc.post(f"/api/findings/{denial['finding_id']}/status", json={"status": "in_progress", "notes": "called payer"}, headers=auth).status_code == 200
     fifty7 = next(i for i in items if (i["signal"] or "").startswith("EM_BUNDLED_MOD57"))
-    assert tc.post("/api/hide", json={"payer_group": fifty7["payer_group"], "signal": fifty7["signal"], "note": "never pays 57"}, headers=auth).status_code == 200
+    n = tc.get("/api/hide/preview", params={"payer_group": fifty7["payer_group"], "signal": fifty7["signal"]}, headers=auth).json()["n"]
+    assert tc.post("/api/hide", json={"payer_group": fifty7["payer_group"], "signal": fifty7["signal"], "note": "never pays 57", "confirm": n},
+                   headers=auth).status_code == 200
     assert tc.post("/api/faxes/payer", json={"payer_group": denial["payer_group"], "number": "(800) 555-0142"}, headers=auth).status_code == 200
     # the move
     db = str(tmp_path / "server" / "remitwatch.sqlite")

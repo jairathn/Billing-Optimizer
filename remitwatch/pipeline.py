@@ -402,14 +402,16 @@ def status(db_path: str) -> dict:
         newest = c.execute("SELECT MAX(payment_date) FROM transactions WHERE superseded=0").fetchone()[0]
         last_file = c.execute("SELECT MAX(ingested_at) FROM files").fetchone()[0]
         last_remit = c.execute("SELECT MAX(ingested_at) FROM files WHERE kind='835'").fetchone()[0]
-        behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(newest).date()).days if newest else None
+        from .detect import feed_date
+        feed = feed_date(c)         # how far the remittances reach for most payers: one stray newer file does not count
+        behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(feed).date()).days if feed else None
         interval = int(os.environ.get("REMITWATCH_SYNC_INTERVAL_MINUTES", "0") or 0)
         return {
             "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
             "interval_minutes": interval, "scheduler_running": SCHEDULER.is_alive(), "next_run": SCHEDULER.next_run,
             "running": bool(lock), "running_since": json.loads(lock)["started"] if lock else None,
             "last_cycle": json.loads(last) if last else None, "last_sync": _meta_get(c, "sync:last_run"),
-            "newest_payment_date": newest, "days_behind": behind, "last_file_ingested": last_file, "last_remit_ingested": last_remit,
+            "newest_payment_date": newest, "feed_date": feed, "days_behind": behind, "last_file_ingested": last_file, "last_remit_ingested": last_remit,
             "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
             "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY")),
         }

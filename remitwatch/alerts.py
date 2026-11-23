@@ -34,7 +34,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import carc_text, payer_group_kind
-from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema
+from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema, feed_date
 
 RECENT_DAYS = int(os.environ.get("REMITWATCH_ALERT_RECENT_DAYS", "28"))
 BASELINE_DAYS = int(os.environ.get("REMITWATCH_ALERT_BASELINE_DAYS", "182"))
@@ -104,8 +104,9 @@ class AlertEngine:
         self.run_id = run_id
         self.now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.today = today or date.today().isoformat()
-        r = conn.execute("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0").fetchone()
-        self.asof = asof or (r["d"] if r else None) or self.today      # asof can be set to replay history
+        # the day the remittances reach for most payers (detect.feed_date), not the newest payment of any one: one stray file
+        # must not move every window and clear the stale-feed alert. asof can be set to replay history
+        self.asof = asof or feed_date(conn, self.today) or self.today
         self.recent_start = _shift(self.asof, -RECENT_DAYS)
         self.base_start = _shift(self.recent_start, -BASELINE_DAYS)
         self.active: dict[str, dict] = {}
@@ -347,7 +348,7 @@ class AlertEngine:
         behind = (date.fromisoformat(self.today) - date.fromisoformat(self.asof)).days
         since_ingest = (date.fromisoformat(self.today) - date.fromisoformat(last_ingest)).days if last_ingest else None
         if behind > max(STALE_DAYS, 14) or (since_ingest is not None and since_ingest > STALE_DAYS):
-            self._raise("STALE_FEED", "high", f"No new remittances: the newest payment in the store is dated {self.asof} ({behind} days ago) and the last new "
+            self._raise("STALE_FEED", "high", f"No new remittances: the remittances on file reach {self.asof} for most payers ({behind} days ago) and the last new "
                         f"file arrived {last_ingest or 'never'}. Check the TriZetto download and the Dropbox upload.",
                         {"newest_payment": self.asof, "days_behind": behind, "last_file_ingested": last_ingest, "days_since_ingest": since_ingest},
                         None, "feed", None, behind, STALE_DAYS, None, None, key=("feed",))

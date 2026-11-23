@@ -180,11 +180,27 @@ def _count_known(conn: sqlite3.Connection, table: str, col: str, values: set) ->
 
 
 # --------------------------------------------------------------------------- what a file is
+MISNAMED_PDF = (".csv", ".tsv", ".txt", ".xlsx", ".xls", ".xlsm", ".835", ".837", ".rmt", ".x12", ".edi", ".zip")
+
+
+def misnamed_reason(name: str) -> str:
+    ext = os.path.splitext((name or "").lower())[1] or "this kind of file"
+    if ext == ".pdf":
+        return ("This file is named .pdf but it is not a PDF. Save the visit note from EMA as a PDF again, or export the report "
+                "from EMA as Excel or CSV under its own name.")
+    return (f"This file is named {ext} but it is a PDF. A report goes in as EMA exports it (Excel or CSV), and a visit note as "
+            "a PDF under its own name: export it from EMA again.")
+
+
 def sniff(path: str, name: str) -> str:
-    """'ema' (an EMA export: .xlsx, or CSV), 'x12' (a remittance or claim file), 'note', 'zip', 'old_office' or 'unknown'."""
+    """'ema' (an EMA export: .xlsx, or CSV), 'x12' (a remittance or claim file), 'note', 'zip', 'old_office', 'misnamed' (a
+    PDF named as a report or text file, or a file named .pdf that is not one) or 'unknown'."""
     with open(path, "rb") as fh:
         head = fh.read(65536)
     low = name.lower()
+    ext = os.path.splitext(low)[1]
+    if head.startswith(b"%PDF-") != (ext == ".pdf") and (ext == ".pdf" or ext in MISNAMED_PDF):
+        return "misnamed"           # a PDF saved under a report's name, or something else under a PDF's: neither is read
     if head.startswith(b"%PDF-"):
         return "note"
     if head.startswith(b"\xd0\xcf\x11\xe0"):
@@ -364,6 +380,8 @@ def accept(db_path: str, tmp: str, name: str, user: str, sha: str | None = None,
         size = os.path.getsize(tmp)
         kind = sniff(tmp, name)
         base.update(upload_id=sha, size=size, kind=kind)
+        if kind == "misnamed":
+            raise Rejected(misnamed_reason(name))
         if kind == "note" or finding_id:
             if kind != "note":
                 raise Rejected("This is not a visit note RemitWatch reads (PDF, Word, text, RTF or HTML).")
@@ -819,6 +837,70 @@ def note_kind(text: str) -> tuple[str, str]:
     return "", "Visit note"
 
 
+SEVERAL = "This looks like a report listing several patients, not one visit note."
+PATIENT_LABEL = re.compile(r"\bpatient(?:'s)?(?:\s+name)?\s*:", re.I)
+ROW_MONEY = re.compile(r"\$\s?\d{1,3}(?:,\d{3})*\.\d{2}\b")
+ROW_CODE = re.compile(r"(?<![\w.])\d{4}[0-9A-Z](?![\w.])")
+NAME_FILLER = {"NAME", "DOB", "MRN", "ID", "DATE", "OF", "BIRTH", "SEX", "AGE", "PMS", "CHART", "ACCOUNT", "PATIENT", "DOS"}
+
+
+def several_patients(text: str | None) -> bool:
+    """Whether a document names more than one patient, so is not one visit note: two different birth dates after a "DOB"
+    label, two "Patient:" names with no word in common, or a table of rows (five lines or more that each give a date with
+    a procedure code or a dollar amount)."""
+    t = text or ""
+    births = set()
+    for m in BIRTH_LABEL.finditer(t):
+        window = t[m.end(): m.end() + 40]
+        for rx, kind in DATE_RES:
+            d = next((x for x in (_iso(kind, mm) for mm in rx.finditer(window)) if x), None)
+            if d:
+                births.add(d)
+                break
+    if len(births) > 1:
+        return True
+    names: list[set[str]] = []
+    for m in PATIENT_LABEL.finditer(t):
+        got = []
+        for w in _words(t[m.end(): m.end() + 60]).split():
+            if w in NAME_FILLER or any(c.isdigit() for c in w):
+                break
+            if len(w) >= 2:
+                got.append(w)
+            if len(got) == 3:
+                break
+        if got:
+            names.append(set(got))
+    if any(not (a & b) for i, a in enumerate(names) for b in names[i + 1:]):
+        return True
+    rows = sum(1 for line in t.splitlines()
+               if any(rx.search(line) for rx, _k in DATE_RES) and (ROW_MONEY.search(line) or ROW_CODE.search(line)))
+    return rows >= 5
+
+
+def note_identity(text: str | None, last: str | None, first: str | None, dos: str | None, ids) -> dict:
+    """Whether a document's text shows this patient by two identifiers and this visit: the patient's name with their EMA
+    patient ID or record number, and the date of service (the date the note labels as the date of service, when it labels
+    one). A remittance carries no birth date, so a birth date alone is not compared. {"ok": True}, or {"ok": False, "code":
+    "unreadable" | "several" | "mismatch", "why": a plain reason}; the reason never repeats what the note says."""
+    if not (text or "").strip():
+        return {"ok": False, "code": "unreadable", "why": "The note has no text RemitWatch can read (a scanned page), so RemitWatch cannot see whose note it is."}
+    if several_patients(text):
+        return {"ok": False, "code": "several", "why": SEVERAL}
+    words = _words(text)
+    name = bool(last) and bool(first) and _name_in(last, words) and _name_in(first, words, first_word=True)
+    want = {modmed._nid(i) for i in (ids or []) if i} - {""}
+    said = {modmed._nid(x) for x in note_ids(text)} | {modmed._nid(x) for x in stated_ids(text, want)}
+    days, labeled = note_dates(text)
+    day = bool(dos) and (dos in labeled if labeled else dos in days)
+    if name and want & said and day:
+        return {"ok": True}
+    missing = [w for w, ok in (("this patient's name", name), ("their EMA patient ID or record number", bool(want & said)),
+                               ("this visit's date of service", day)) if not ok]
+    return {"ok": False, "code": "mismatch", "why": "Its text does not show " + (", ".join(missing[:-1]) + " or " + missing[-1]
+                                                                                if len(missing) > 1 else missing[0]) + "."}
+
+
 def _visits_on(conn: sqlite3.Connection, days: set[str]) -> list[dict]:
     """The claims RemitWatch holds items for on these dates of service, with the patient's names as the payer gave them."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -907,8 +989,10 @@ def _visit(hs: list[dict], dos: str, ema_id: str) -> dict:
             "findings": len({x["finding_id"] for x in hs})}
 
 
-def match_finding(conn: sqlite3.Connection, finding_id: str) -> dict:
-    """A note a person attached to an item: the item's visit, whatever the note says."""
+def match_finding(conn: sqlite3.Connection, finding_id: str, text: str | None = None) -> dict:
+    """A note a person attached to an item: the item's visit. A person attaching it does not change what its text shows:
+    the identifiers kept as the note's own (ids_stated) are only those of the claim its text states (the appeal checks the
+    text again before any fax, remitwatch.api._packet_identity)."""
     r = conn.execute("""SELECT f.claim_key, f.patient_control_number, f.payer_group,
                                COALESCE(f.service_date, c.statement_from) dos,
                                COALESCE(c.patient_last, c.corrected_patient_last), COALESCE(c.patient_first, c.corrected_patient_first)
@@ -920,10 +1004,11 @@ def match_finding(conn: sqlite3.Connection, finding_id: str) -> dict:
     ids = _ema_ids(conn, [r[1]] if r[1] else [])
     pid = sorted(ids.get(r[1], set()))
     mrn = conn.execute("SELECT medical_record_number FROM claims WHERE claim_key=?", (r[0],)).fetchone()
-    # the person tied the note to this claim: its identifiers are the note's from now on
+    claim_ids = {modmed._nid(x) for x in (pid if len(pid) == 1 else []) + ([mrn[0]] if mrn and mrn[0] else [])} - {""}
+    said = ({modmed._nid(x) for x in note_ids(text)} | {modmed._nid(x) for x in stated_ids(text, claim_ids)}) if text is not None else claim_ids
     return {"status": "matched", "how": "person", "patient_last": r[4], "patient_first": r[5], "service_date": r[3],
             "ema_patient_id": pid[0] if len(pid) == 1 else None, "claims": [r[1]] if r[1] else [], "payers": [r[2]] if r[2] else [],
-            "ids_stated": sorted({modmed._nid(x) for x in (pid if len(pid) == 1 else []) + ([mrn[0]] if mrn and mrn[0] else [])} - {""})}
+            "ids_stated": sorted(claim_ids & said)}
 
 
 def _note_row(conn: sqlite3.Connection, **where) -> dict | None:
@@ -955,7 +1040,7 @@ def _take_note(conn, db_path: str, tmp: str, name: str, sha: str, user: str, fin
     old = _note_row(conn, sha256=sha)
     if old:
         if finding_id:
-            m = match_finding(conn, finding_id)
+            m = match_finding(conn, finding_id, _note_text(old["path"]) or "")
             had = set(json.loads(old.get("claims") or "[]"))
             if not (old["status"] == "matched" and old.get("matched_by") == "person" and old["service_date"] == m["service_date"]
                     and set(m["claims"]) <= had):
@@ -979,7 +1064,9 @@ def _take_note(conn, db_path: str, tmp: str, name: str, sha: str, user: str, fin
         text, kind = extract_text("note" + ext, data)
     except ValueError as exc:
         raise Rejected(f"The note could not be read: {exc}.") from exc
-    m = match_finding(conn, finding_id) if finding_id else None          # an item that cannot take a note refuses it before it is kept
+    if several_patients(text):
+        raise Rejected(SEVERAL)
+    m = match_finding(conn, finding_id, text) if finding_id else None    # an item that cannot take a note refuses it before it is kept
     loinc, ntype = note_kind(text)
     note_id = sha[:24]
     path = _keep(tmp, os.path.join(upload_dir(db_path), "notes"), f"{note_id}{ext}")
@@ -1009,7 +1096,7 @@ def choose(conn: sqlite3.Connection, note_id: str, pick: int | None = None, find
     if not n:
         raise Rejected("No such note.")
     if finding_id:
-        _set_match(conn, note_id, match_finding(conn, finding_id), by="person")
+        _set_match(conn, note_id, match_finding(conn, finding_id, _note_text(n["path"]) or ""), by="person")
     else:
         cands = json.loads(n.get("candidates") or "[]")
         if pick is None or not 0 <= pick < len(cands):

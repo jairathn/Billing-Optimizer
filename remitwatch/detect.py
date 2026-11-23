@@ -69,7 +69,7 @@ from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLO
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_RULES = "2.6"
+DETECT_RULES = "2.7"            # 2.7: the day the remittances reach is the feed's, not the newest payment of any payer (feed_date)
 # whether what EMA has posted as paid closes an item (resolve_elsewhere), or only adds a hint: the billers check EMA, and
 # an item EMA shows paid is not work
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
@@ -230,6 +230,47 @@ def _add_days(iso: str | None, days: int) -> str | None:
         return (date.fromisoformat(iso) + timedelta(days=days)).isoformat()
     except ValueError:
         return None
+
+
+FEED_WINDOW_DAYS = 120          # the remittance lines that weigh each payer group's say in feed_date
+FEED_META = "feed:date"         # the feed date the last analysis used, for a copy that does not hold every line (Vercel's)
+
+
+def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
+    """The day the remittance feed reaches: a payment date after today counts as today; each payer group's newest payment
+    date is how far its remittances reach; and the feed reaches the latest day D such that payer groups holding at least
+    half of the remittance lines of the FEED_WINDOW_DAYS before the newest (clamped) date are current through D. One stray
+    file from one payer (a small one, an adjustment, a file dated in the future) moves it only when that payer carries half
+    the volume. With fewer than three payer groups it is the newest date, clamped to today. None with no remittances."""
+    today = today or datetime.now(timezone.utc).date().isoformat()
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "transactions" not in tables:
+        return None
+    last: dict[str, str] = {}
+    for name, d in conn.execute("""SELECT payer_name, MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0
+                                   AND payment_date IS NOT NULL GROUP BY 1""").fetchall():
+        d = min(str(d)[:10], today)
+        g = normalize_payer(name)[0]
+        if d and d > last.get(g, ""):
+            last[g] = d
+    if not last:
+        return None
+    newest = max(last.values())
+    vol: Counter = Counter()
+    if "lines" in tables:
+        for name, n in conn.execute("""SELECT t.payer_name, COUNT(*) FROM transactions t JOIN lines l ON l.transaction_key = t.transaction_key
+                                       WHERE COALESCE(t.superseded,0)=0 AND t.payment_date > ? GROUP BY 1""",
+                                    (_add_days(newest, -FEED_WINDOW_DAYS),)).fetchall():
+            vol[normalize_payer(name)[0]] += n
+    groups = [g for g in last if vol.get(g)]
+    if len(groups) < 3:
+        return newest
+    total, acc = sum(vol[g] for g in groups), 0
+    for g in sorted(groups, key=lambda x: last[x], reverse=True):
+        acc += vol[g]
+        if 2 * acc >= total:
+            return last[g]
+    return newest
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -2185,6 +2226,9 @@ class Detector:
         newest, oldest = c.execute("SELECT MAX(payment_date), MIN(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
         if not newest:
             return
+        # the day the remittances on file reach, for most of the volume: one stray newer file (or one dated in the future)
+        # from one payer says nothing of the others
+        newest = feed_date(c) or newest
         # as far back as an item can still be open (a claim sent on time runs the longest appeal window, 730 days, past the
         # longest first-filing limit, 365); and nothing sent before the remittances on file begin can be judged unanswered
         since = _add_days(newest, -(365 + NO_ANSWER_DAYS + 730 + 5))
@@ -3048,6 +3092,12 @@ class Detector:
         self.emit_second_rates()
         self.resolve_elsewhere()
         out = self.save()
+        try:        # the feed date this analysis used, for the dashboard's copy (which does not hold every line) and its fax hold
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                              (FEED_META, json.dumps({"date": feed_date(self.conn), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})))
+            self.conn.commit()
+        except sqlite3.Error:
+            self.conn.rollback()        # the analysis is saved; the API works the date out from the store, or the newest payment
         try:        # reasons hidden for a payer (actions.apply_hide_rule) hide the new items they cover
             from .actions import apply_hide_rules
             if apply_hide_rules(self.conn):

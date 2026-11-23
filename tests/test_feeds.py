@@ -245,7 +245,9 @@ def test_a_reason_hidden_for_a_payer_leaves_the_lists_and_stays_off(site):
     assert c.post(f"/api/findings/{worked}/status", json={"status": "in_progress"}, headers=XHR).status_code == 200
     assert c.post("/api/hide", json={"payer_group": payer, "signal": "NOPE"}, headers=XHR).status_code == 404
     assert c.post("/api/hide", json={"payer_group": payer, "signal": hidden_sig}).status_code == 400          # cross-site
-    r = c.post("/api/hide", json={"payer_group": payer, "signal": hidden_sig, "note": f"{payer} never pays modifier 57"}, headers=XHR).json()
+    n = c.get("/api/hide/preview", params={"payer_group": payer, "signal": hidden_sig}).json()["n"]       # shown first (hotfix 2, H7)
+    r = c.post("/api/hide", json={"payer_group": payer, "signal": hidden_sig, "note": f"{payer} never pays modifier 57", "confirm": n},
+               headers=XHR).json()
     assert r == {"ok": True, "hidden": 1}
     st = {i["patient_control_number"]: i["status"] for i in _items(c, hidden_sig)}
     assert st == {"CB0000300C017": "dismissed", "CB0000301C017": "in_progress"}

@@ -18,6 +18,7 @@ function claimHeader(id){
 }
 function claimShell(title, sub, body){
   const d = $('#drawer'); d.classList.add('open'); d.inert = false;
+  state.detailSeq = (state.detailSeq||0) + 1; state.detailId = null;      // the panel shows a claim now, not the item it showed
   d.innerHTML = `<div class="dr-head"><div><h2>${title}</h2>${sub ? `<div class="small muted">${sub}</div>` : ''}</div><button id="closeD" aria-label="Close">✕</button></div>${body}`;
   d.querySelector('#closeD').onclick = closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
@@ -30,7 +31,9 @@ async function findClaim(text){
   claimShell('Find a claim', '', '<div class="muted">Looking…</div>');
   let r; try { r = await api('/api/claims/search', searchHeader(text)); } catch(e){ claimShell('Find a claim', '', `<div class="note">Not found: ${esc(e.message)}</div>`); return; }
   if(r.items.length === 1 || (r.items[0] && r.items[0].exact)) return openClaim(r.items[0].bill);
-  if(!r.items.length){ claimShell('Find a claim', '', `<div class="note">Nothing in the remittance files or the EMA exports matches “${esc(text)}”. Check the claim ID in EMA, or try the payer's claim number from the payer's portal.</div>`); return; }
+  // on the serverless site the copy holds only the claims that have items: it says so rather than "nothing matches"
+  if(!r.items.length){ claimShell('Find a claim', '', r.partial ? `<div class="note">Nothing here matches “${esc(text)}”. ${esc(r.partial)}</div>`
+    : `<div class="note">Nothing in the remittance files or the EMA exports matches “${esc(text)}”. Check the claim ID in EMA, or try the payer's claim number from the payer's portal.</div>`); return; }
   const d = claimShell('Find a claim', r.more ? `More than 25 claims start with “${esc(text)}”: type more of the ID. The 25 most recently paid of those found:` : `${pl(r.items.length, 'claim')} match`,
     `<div class="scroll"><table class="small"><thead><tr><th>Claim</th><th>Patient</th><th>Payer</th><th>Last paid</th><th class="num">Remittances</th><th class="num">Open items</th></tr></thead>
      <tbody>${r.items.map(x=>`<tr class="row" tabindex="0" data-bill="${esc(x.bill)}"><td class="code"><b>${esc(x.bill)}</b>${x.claim_ids.length>1?`<div class="small muted">${pl(x.claim_ids.length,'submission')}</div>`:''}</td><td>${esc(x.patient||'')}</td><td>${esc(x.payers.join(', ') || 'no remittance yet')}</td><td class="day">${x.last_payment ? esc(longDate(x.last_payment)) : '–'}</td><td class="num">${num(x.remits)}</td><td class="num">${x.open_findings ? num(x.open_findings) : '–'}</td></tr>`).join('')}</tbody></table></div>`);
@@ -46,6 +49,7 @@ function claimFacts(r){
 }
 async function openClaim(id, backTo){
   const d = $('#drawer'); d.classList.add('open'); d.inert = false; d.innerHTML = '<div class="muted">loading…</div>';
+  state.detailSeq = (state.detailSeq||0) + 1; state.detailId = null;
   let c; try { c = await api('/api/claims/view', claimHeader(id)); }
   catch(e){ claimShell('Claim', '', `<div class="note">${esc(e.message)}</div>`); return; }
   const b = state.brief || {labels:{}};

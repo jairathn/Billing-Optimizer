@@ -280,9 +280,23 @@ function bindBulk(v){
       if(!confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size) : ''}`)) return;
     }
     if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
+    if(bt.disabled) return;
     bt.disabled = true;
-    try { await post('/api/findings/bulk-status', {ids, status: bt.dataset.bulk}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    // the status each row showed when the list was drawn: an item changed since (another tab, the daily run) is left alone
+    const shown = {}; v.querySelectorAll('.sel:checked').forEach(x => { const tr = x.closest('tr.row'); if(tr && tr.dataset.status) shown[x.value] = tr.dataset.status; });
+    const seen = Object.fromEntries(ids.filter(i => shown[i]).map(i => [i, shown[i]]));
+    let out;
+    try { out = await post('/api/findings/bulk-status', {ids, status: bt.dataset.bulk, seen}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    bulkLeftAlone(out);
     state.brief = null; render(); });
+}
+// what a list's change left as it was, and why: items changed since the list was drawn, and items with a fax going out
+function bulkLeftAlone(out){
+  const ch = ((out && out.changed) || []).length, fl = ((out && out.in_flight) || []).length;
+  if(!ch && !fl) return;
+  alert([ch ? `${pl(ch, 'item')} changed since this list was drawn (another tab, another person or the daily run) and ${ch === 1 ? 'was' : 'were'} left as ${ch === 1 ? 'it is' : 'they are'}.` : '',
+         fl ? `${pl(fl, 'item')} ${fl === 1 ? 'has' : 'have'} a fax going out now and ${fl === 1 ? 'was' : 'were'} left as ${fl === 1 ? 'it is' : 'they are'}.` : '',
+         `${pl((out && out.updated) || 0, 'item')} changed. The list now shows each one as it is.`].filter(Boolean).join('\n\n'));
 }
 async function exportCsv(params, find, key){      // fetched, not linked: the search text travels in a header, never in the address
   let r;
@@ -305,7 +319,7 @@ function rowHtml(b, r, o){
   const wo = r.written_off_cents ? `<div class="small"><span class="chip hint" title="${esc(money2(r.written_off_cents))} of the money in dispute is written off (or moved to the patient) in EMA${r.written_off_on ? ', as of ' + esc(r.written_off_on) : ''}">written off in EMA</span></div>` : '';
   const code = `${esc(r.original_procedure_code?r.original_procedure_code+'→':'')}${esc(r.procedure_code||'')}${r.modifiers?'-'+esc(r.modifiers):''}${r.carc?' · '+esc(r.carc):''}`;
   const shut = live && due && daysUntil(due) < 0;
-  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-kind="${esc(kindFor(b, r))}" data-signal="${esc(r.signal)}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
+  return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-status="${esc(r.status||'open')}" data-kind="${esc(kindFor(b, r))}" data-signal="${esc(r.signal)}" ${shut?'data-closed="1"':''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this item"></td>
     <td class="day">${when}</td>
     <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
     ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}
@@ -446,7 +460,7 @@ async function feesDesk(v){
         <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${['in_progress','appealed','dismissed','open'].map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}</div>
         <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every takeback shown"></th><th>Taken</th><th>Dispute by</th><th>Payer</th><th class="num">Taken back</th></tr></thead>
         <tbody>${tbl.items.map(r=>{ const c = closesText(r.appeal_deadline), live = ['open','in_progress'].includes(r.status);
-          return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" ${live && r.appeal_deadline && daysUntil(r.appeal_deadline) < 0 ? 'data-closed="1"' : ''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this takeback"></td><td>${esc(rwMonth((r.payment_date||'').slice(0,7)))}</td><td class="day">${r.appeal_deadline ? `<span class="${live?c.cls:'muted'}" title="${esc(r.deadline_basis||'')}">${esc(c.text)}</span>` : '<span class="muted">no date</span>'}</td><td class="payer">${esc(r.payer_group)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b>${r.status!=='open'?`<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`:''}</td></tr>`; }).join('')}</tbody></table></div>
+          return `<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-status="${esc(r.status||'open')}" ${live && r.appeal_deadline && daysUntil(r.appeal_deadline) < 0 ? 'data-closed="1"' : ''}><td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" aria-label="Select this takeback"></td><td>${esc(rwMonth((r.payment_date||'').slice(0,7)))}</td><td class="day">${r.appeal_deadline ? `<span class="${live?c.cls:'muted'}" title="${esc(r.deadline_basis||'')}">${esc(c.text)}</span>` : '<span class="muted">no date</span>'}</td><td class="payer">${esc(r.payer_group)}</td><td class="num"><b>${money2(r.shortfall_cents)}</b>${r.status!=='open'?`<div><span class="st st-${esc(r.status)}">${esc(STATUS_WORDS[r.status]||r.status)}</span></div>`:''}</td></tr>`; }).join('')}</tbody></table></div>
         ${tbl.items.length ? '' : `<div class="empty">${on90 ? 'No takebacks in the last 90 days. All takebacks are in the grey box above.' : 'No takebacks.'}</div>`}
         ${tbl.total > tbl.items.length ? `<button class="ghost" id="moreRows">Show ${Math.min(ROWS, tbl.total-tbl.items.length)} more</button>` : ''}`}
     <details class="fold" id="fold" ${foldIsOpen('fees')?'open':''}><summary>Details: money held back by month, MIPS and the 2% reduction</summary><div id="foldBody" class="muted small">Loading…</div></details>`;
@@ -457,7 +471,8 @@ async function feesDesk(v){
   v.querySelectorAll('button.fee-again').forEach(bt=>bt.onclick=()=>openFeeLetter(fp.asked[Number(bt.dataset.a)]));
   v.querySelectorAll('button.fee-undo').forEach(bt=>bt.onclick=async()=>{ const a = fp.asked[Number(bt.dataset.a)]; if(!a) return;
     bt.disabled = true;
-    try { await post('/api/findings/bulk-status', {ids: a.ids, status: 'open'}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    let out; try { out = await post('/api/findings/bulk-status', {ids: a.ids, status: 'open', seen: a.seen || {}}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    bulkLeftAlone(out);
     state.brief = null; render(); });
   v.querySelectorAll('tr.fee-row, button.fee-letter').forEach(el=>{ const fn = e => { if(e) e.stopPropagation(); openFeeLetter(fp.payers[Number(el.dataset.i)]); };
     el.onclick = fn; if(el.tagName === 'TR') el.onkeydown = e => { if((e.key==='Enter'||e.key===' ') && e.target===el){ e.preventDefault(); fn(); } }; });
@@ -494,8 +509,9 @@ async function openFeeLetter(p){
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
   $('#copyL').onclick = () => navigator.clipboard.writeText(L.letter);
   const fa = $('#feeAsked'); if(fa) fa.onclick = async () => { const bt = $('#feeAsked'); bt.disabled = true;
-    try { await post('/api/findings/bulk-status', {ids: p.ids, status: 'appealed'}); }
+    let out; try { out = await post('/api/findings/bulk-status', {ids: p.ids, status: 'appealed', seen: p.seen || {}}); }
     catch(e){ bt.disabled = false; const er = $('#modalBox .st-err'); if(er) er.textContent = 'Not saved: ' + e.message; return; }
+    bulkLeftAlone(out);
     $('#modal').classList.remove('open'); state.brief = null; render(); };
   $('#closeM').focus();
 }
@@ -545,14 +561,38 @@ async function emaBatch(btn, box){
 }
 
 // ---------------------------------------------------------------- reasons hidden for a payer (the biller: "we know which payers don't pay that")
+// Hiding a reason for a payer is a policy decision: first what it lets go (open items, dollars, how many still inside their
+// filing window, and every future one), then a reason typed by the person, the number of items typed back, and the owner's
+// password where the site has one. Nothing is filled in for them.
 async function hideReason(payer, signal, label, after){
-  const note = prompt(`Hide “${label}” for ${payer}?\n\nIts open items go to Let go, and new ones will too; anything someone has worked stays. Undo it under Hidden.\n\nWhy (shown on each item):`, `${payer} does not pay these`);
-  if(note === null) return;
-  let r;
-  try { r = await post('/api/hide', {payer_group: payer, signal, note}); } catch(e){ alert('Not saved: ' + e.message); return; }
-  state.brief = null; state.dirty = true;
-  if(after) after(); else render();
-  setTimeout(() => alert(`${pl(r.hidden, 'item')} hidden. New ones will be hidden too.`), 50);
+  let p;
+  try { p = await api('/api/hide/preview?' + qs({payer_group: payer, signal})); } catch(e){ alert('Could not count them: ' + e.message); return; }
+  const box = typeof faxModal === 'function' ? faxModal(`Hide “${label}” for ${payer}?`, '') : null;
+  if(!box) return;
+  box.insertAdjacentHTML('beforeend', `<div class="small" style="margin:8px 0">It lets go <b>${pl(p.n, 'open item')}</b> now, worth <b>${money2(p.cents)}</b>.
+      <b>${pl(p.in_window_n, 'item')}</b> of them (${money2(p.in_window_cents)}) ${p.in_window_n === 1 ? 'is' : 'are'} still inside ${p.in_window_n === 1 ? 'its' : 'their'} filing window.
+      Every future item of this reason for ${esc(payer)} is let go too. Anything someone has worked stays; Show again under Hidden undoes it.</div>
+    <label class="small" style="display:block;margin:6px 0">Why this payer does not pay these (shown on each item)<br><textarea id="hdNote" rows="2" maxlength="300" style="width:100%"></textarea></label>
+    <label class="small" style="display:block;margin:6px 0">Type the number of items it lets go (${esc(String(p.n))}) to confirm<br><input id="hdCount" inputmode="numeric" autocomplete="off" style="width:120px"></label>
+    <div class="actions"><button class="primary" id="hdGo">Hide them</button><button id="hdNo">Cancel</button></div><div id="hdMsg" class="small"></div>`);
+  const msg = box.querySelector('#hdMsg'), go = box.querySelector('#hdGo');
+  box.querySelector('#hdNo').onclick = () => $('#modal').classList.remove('open');
+  go.onclick = async () => {
+    if(go.disabled) return;
+    const note = box.querySelector('#hdNote').value.trim(), typed = box.querySelector('#hdCount').value.trim();
+    if(!note){ msg.className = 'small sev-high'; msg.textContent = 'Type why this payer does not pay these.'; return; }
+    if(typed !== String(p.n)){ msg.className = 'small sev-high'; msg.textContent = `Type ${p.n}, the number of items it lets go, to confirm.`; return; }
+    go.disabled = true;
+    let r;
+    try { r = await faxOwnerPost('/api/hide', {payer_group: payer, signal, note, confirm: p.n}, msg); }
+    catch(e){ go.disabled = false; msg.className = 'small sev-high';
+      msg.textContent = e.code === 'changed' ? `${e.message} Close this and open it again to see the new numbers.` : e.message; return; }
+    $('#modal').classList.remove('open');
+    state.brief = null; state.dirty = true;
+    if(after) after(); else render();
+    setTimeout(() => alert(`${pl(r.hidden, 'item')} hidden. New ones will be hidden too.`), 50);
+  };
+  box.querySelector('#hdNote').focus();
 }
 async function hiddenLine(el){
   if(!el) return;

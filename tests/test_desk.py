@@ -484,7 +484,8 @@ def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_step
     go leaves these claims out and the bar says so. Let go or Lost in the item's own panel asks why and sends the answer
     as the note; without one nothing changes. Every other item, and every other button, works as before."""
     s = page_steps
-    bulk = lambda ids, status: [{"path": "/api/findings/bulk-status", "body": {"ids": ids, "status": status}}]          # noqa: E731
+    # a list's change carries the status each ticked row showed, and a panel's walk the status it showed (hotfix 2, H3)
+    bulk = lambda ids, status: [{"path": "/api/findings/bulk-status", "body": {"ids": ids, "status": status, "seen": {i: "open" for i in ids}}}]   # noqa: E731
     one = lambda fid, **body: [{"path": f"/api/findings/{fid}/status", "body": body}]                                    # noqa: E731
     left_out = "Let go leaves out 2 claims with no answer from the payer or rejected before the payer. Open each one to let it go, with a note."
     # each row carries its reason; with such claims ticked the bar says what Let go will leave out
@@ -513,20 +514,20 @@ def test_claims_no_payer_answered_are_let_go_one_at_a_time_with_a_note(page_step
     assert s["panel let go, rejected, with a note"]["sent"] == one("c2", status="dismissed", notes="billed to the patient")
     lost = s["panel lost, unanswered, with a note"]
     assert lost["sent"] == one("c1", status="lost", notes="proof of timely filing refused") and lost["asked"][0].startswith("prompt: Mark this claim lost?")
-    assert s["let go and next, unanswered, with a note"]["sent"] == one("c1", status="dismissed", notes="a duplicate of a paid claim")
+    assert s["let go and next, unanswered, with a note"]["sent"] == one("c1", status="dismissed", notes="a duplicate of a paid claim", seen_status="open")
     assert s["panel sent, unanswered"]["sent"] == one("c1", status="appealed") and s["panel sent, unanswered"]["asked"] == []
     # any other item: the plain confirmation, and Lost keeps its optional note
     confirm = ["confirm: Let go of this item? It leaves the list and counts as let go."]
     assert s["panel let go, a denial, confirmed"]["sent"] == one("d2", status="dismissed") and s["panel let go, a denial, confirmed"]["asked"] == confirm
     assert s["panel let go, a denial, not confirmed"]["sent"] == [] and s["panel let go, a denial, not confirmed"]["got"] is False
     assert s["panel lost, a denial, blank note"]["sent"] == one("d2", status="lost")
-    assert s["let go and next, a denial, confirmed"]["sent"] == one("d2", status="dismissed") and s["let go and next, a denial, confirmed"]["asked"] == confirm
+    assert s["let go and next, a denial, confirmed"]["sent"] == one("d2", status="dismissed", seen_status="open") and s["let go and next, a denial, confirmed"]["asked"] == confirm
     # the page draws what the stand-in assumed: the bar holds the line, and the panel's status buttons pass the item's reason
     static = os.path.join(os.path.dirname(insights.__file__), "static")
     desk = open(os.path.join(static, "desk.js"), encoding="utf-8").read()
     page = open(os.path.join(static, "index.html"), encoding="utf-8").read()
     assert '<span id="bulkLeftOut" class="small muted" role="status"></span></div>' in desk
-    assert "await setFindingStatus(id, b.dataset.st, f.shortfall_cents, f.signal)" in page
+    assert "await setFindingStatus(id, b.dataset.st, f.shortfall_cents, f.signal, f.status, f.charge_cents)" in page
 
 
 def test_appeal_by_fax_says_a_payer_to_chase_is_not_settled_by_a_letter(page_steps):

@@ -550,7 +550,7 @@ def test_a_whole_claim_denial_with_an_undated_line_does_not_stop_the_analysis(tm
     assert s.query("SELECT signal FROM findings WHERE patient_control_number='CB0000800C017'")
 
 
-def test_the_work_goes_only_to_the_claims_own_answer_or_its_resend_to_the_same_payer(tmp_path):
+def test_the_work_goes_only_to_the_claims_own_answer_or_its_resend_to_the_same_payer(tmp_path, monkeypatch):
     """A claim sent again under its own id gets its decision back; another payer's claim on the bill, or a reprocessing
     months later, starts with nothing."""
     import pathlib
@@ -578,6 +578,15 @@ def test_the_work_goes_only_to_the_claims_own_answer_or_its_resend_to_the_same_p
     later = pathlib.Path(s.db_path).parent / "later.RMT"                       # the remittances on file reach January
     later.write_bytes(remit(clean_visits(90, 1, "99214", "223.65", "117.60")[0], "117.60", seg_count=99, isa_ctrl="000000080", pay_date="20270105"))
     s.ingest_835_paths([str(later)])
+    # and the calendar is in January too: a payment dated after today counts as today (hotfix 2, H8)
+    import remitwatch.detect as detect_mod
+    from datetime import datetime as _real, timezone as _utc
+
+    class _January(_real):
+        @classmethod
+        def now(cls, tz=None):
+            return _real(2027, 1, 6, 12, 0, tzinfo=tz or _utc)
+    monkeypatch.setattr(detect_mod, "datetime", _January)
     found = chased(s)
     assert "CB0000S31C024" in found and found["CB0000S31C024"]["notes"] is None and found["CB0000S31C024"]["status"] == "open"
     c.execute("UPDATE ema_rows SET claim_submission_date='2026-10-01' WHERE claim_id='CB0000R31C017' AND family='claim_status'")

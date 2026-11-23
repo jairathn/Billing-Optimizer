@@ -224,7 +224,9 @@ def test_hidden_counts_only_what_the_rule_hid_and_show_again_brings_back(server)
     (a, pg, sig), (b, _, _) = rows
     # a person lets one go by hand; then the reason is hidden for the payer, which takes the other
     assert c.post(f"/api/findings/{b}/status", json={"status": "dismissed", "notes": "the patient paid it"}, headers=XHR).status_code == 200
-    assert c.post("/api/hide", json={"payer_group": pg, "signal": sig}, headers=XHR).json()["hidden"] == 1
+    n = c.get("/api/hide/preview", params={"payer_group": pg, "signal": sig}).json()["n"]          # shown first (hotfix 2, H7)
+    assert c.post("/api/hide", json={"payer_group": pg, "signal": sig, "note": "this payer does not pay these", "confirm": n},
+                  headers=XHR).json()["hidden"] == 1
     rule = c.get("/api/hide").json()["rules"]
     assert len(rule) == 1 and rule[0]["n"] == 1                         # the rule's own, not the person's decision
     assert c.post("/api/hide", json={"payer_group": pg, "signal": sig, "remove": True}, headers=XHR).json()["ok"]

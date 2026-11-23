@@ -183,7 +183,7 @@ function whatToDoHtml(f, letter){
       ${more && !waiting && !shut && decide ? `<button id="letGoNext" title="Billed to the patient or another payer, the payer was right, or not worth pursuing">Let go and open the next</button>` : ''}
       ${shut ? '' : (letter||'')}${i>0 ? '<button class="ghost" id="prevItem">‹ Previous</button>' : ''}${more ? '<button class="ghost" id="nextItem">Next ›</button>' : ''}</div></div>`;
 }
-function bindWhatToDo(f, d){
+function bindWhatToDo(f, d, seq){
   // the item's place is read at the moment of the click: the list behind may have been redrawn while the drawer was open
   // (a bulk change, another tile, another tab), and an item no longer on the list on screen ends the walk
   const pos = () => (state.worklist||[]).indexOf(f.finding_id);
@@ -193,19 +193,30 @@ function bindWhatToDo(f, d){
     if(state.wlNext){ try { await state.wlNext(); } catch(e){ return null; } }
     return (state.worklist||[])[i+1] || null;
   };
-  const go = async () => { const id = await next(); if(id) openDetail(id); else closeDetail(); };
+  // the panel still shows this item (not one the person opened since, nor closed): then, and only then, it moves on
+  const here = () => typeof panelShows !== 'function' || panelShows(seq, f.finding_id);
+  const go = async () => { const id = await next(); if(!here()) return; if(id) openDetail(id, {walk: true}); else closeDetail(); };
+  const walk = [...d.querySelectorAll('#sentNext, #letGoNext, #prevItem, #nextItem')];
   const decideAndGo = (bt, status) => async () => {
+    if(bt.disabled || (typeof walkGuarded === 'function' && walkGuarded())) return;      // a second click, or a double click's second half
     const why = letGoNote(f.signal, status);          // a claim no payer answered is let go only with a note (desk.js)
     if(why === null) return;
     if(why === undefined && status === 'dismissed' && !confirm('Let go of this item? It leaves the list and counts as let go.')) return;
-    bt.disabled = true;
-    try { await post('/api/findings/'+f.finding_id+'/status', why === undefined ? {status} : {status, notes: why}); }
-    catch(e){ bt.disabled = false; const er = d.querySelector('#todoErr'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; return; }
-    state.brief = null; state.dirty = true; go(); };
+    walk.forEach(x => x.disabled = true);             // one decision per click: nothing else in the walk until the answer is back
+    const body = why === undefined ? {status} : {status, notes: why};
+    body.seen_status = f.status;                      // the status this panel shows: a change made elsewhere since is not undone
+    try { await post('/api/findings/'+f.finding_id+'/status', body); }
+    catch(e){
+      if(e.code === 'changed' || e.code === 'in_flight') state.dirty = true;
+      if(!here()){ if(typeof notice === 'function') notice('Not saved: ' + (e.message || 'no answer from the site')); return; }
+      walk.forEach(x => x.disabled = false); const er = d.querySelector('#todoErr');
+      if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + (e.code ? '' : ' Try again.'); return; }
+    state.brief = null; state.dirty = true;
+    if(here()) go(); else if(typeof notice === 'function') notice(`Saved: ${f.title || 'the item'} is now ${STATUS_WORDS[status] || status}.`); };
   const sn = d.querySelector('#sentNext'); if(sn) sn.onclick = decideAndGo(sn, sn.dataset.to || 'appealed');
   const lg = d.querySelector('#letGoNext'); if(lg) lg.onclick = decideAndGo(lg, 'dismissed');
-  const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { const i = pos(); if(i > 0) openDetail(state.worklist[i-1]); else closeDetail(); };
-  const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => go();
+  const pv = d.querySelector('#prevItem'); if(pv) pv.onclick = () => { if(pv.disabled) return; pv.disabled = true; const i = pos(); if(i > 0) openDetail(state.worklist[i-1]); else closeDetail(); };
+  const nx = d.querySelector('#nextItem'); if(nx) nx.onclick = () => { if(nx.disabled || (typeof walkGuarded === 'function' && walkGuarded())) return; nx.disabled = true; go(); };
 }
 
 // ---------------------------------------------------------------- Bigger wins

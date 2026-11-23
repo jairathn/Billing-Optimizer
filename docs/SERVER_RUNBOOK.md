@@ -51,6 +51,8 @@ The same as on Vercel, wherever Vercel has them:
   `REMITWATCH_NO_ANSWER_DAYS`
 - `REMITWATCH_BULK_APPEAL`: leave it unset. Faxing many appeals at once stays off until RemitWatch reads EMA's payments;
   one appeal a person opens and checks still goes.
+- `REMITWATCH_SERVER_SITE`: Vercel only, leave it out here. The server's store holds every claim, so Find a claim needs no
+  other site to point to.
 
 Server only (optional): `REMITWATCH_BACKUP_KEEP` (daily copies kept, default 7; 0 turns them off), `REMITWATCH_BACKUP_DIR`
 (default `/data/backups`), `REMITWATCH_UPLOAD_DIR` (default `/data/uploads`: leave it unset).

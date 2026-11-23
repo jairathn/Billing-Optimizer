@@ -444,6 +444,9 @@ def test_on_a_serverless_host_the_appeal_goes_out_and_lasts(box, monkeypatch):
     payer = tc.get(f"/api/findings/{fid}", headers=h).json()["finding"]["payer_group"]
     assert tc.post("/api/faxes/payer", json={"payer_group": payer, "number": PAYER_FAX}, headers=h).status_code == 200
     r = tc.post("/api/appeals/send", json={"finding_id": fid}, headers=h).json()
+    # the pasted text does not show whose visit it is: held until a person opens it and says it is this visit (hotfix 2, H6)
+    assert r["status"] == "held" and r["code"] == "note_check" and r["packet_id"] == built["packet_id"] and line.sent == {}, r
+    r = tc.post("/api/appeals/send", json={"finding_id": fid, "note_checked": True, "packet_id": built["packet_id"]}, headers=h).json()
     assert r["status"] == "sent" and r["packet_id"] == built["packet_id"], (r.get("code"), r.get("reason"))   # the packet already built goes
     assert "two chronic problems not at goal" in pdf_text(line.to(PAYER_FAX)[0]["pdf"])
     # shown at once from this instance's copy, and written to the journal
@@ -451,8 +454,8 @@ def test_on_a_serverless_host_the_appeal_goes_out_and_lasts(box, monkeypatch):
     assert d["finding"]["status"] == "appealed" and d["faxes"][0]["status"] == "queued"
     kinds = sorted(json.loads(state.get(m["name"]))["kind"] for m in state.list(cloud.ACTIONS))
     # the send reserved, then settled with the line's ID (two records of one fax); the packet marked on the item for the
-    # EMA batch; the number; the status
-    assert kinds == ["event", "fax", "fax", "payer_fax", "status"]
+    # EMA batch; the person's note check; the number; the status
+    assert kinds == ["event", "event", "fax", "fax", "payer_fax", "status"]
     assert len(state.list("fax-sends")) == 1          # the marker only one instance can write: one send of this appeal
     line.deliver_all()
     assert tc.post("/api/faxes/refresh", headers=h).json()["sent"] == 1
@@ -643,12 +646,17 @@ def test_two_presses_at_once_fax_one_appeal(site):
     assert _number(c, PAYER_FAX).status_code == 200
     line.delay = 0.6                    # SRFax answering slowly widens the race
     out: list = []
-    ts = [threading.Thread(target=lambda: out.append(_send(c, rate)["status"])) for _ in range(2)]
+
+    def press():
+        r = c.post("/api/appeals/send", json={"finding_id": rate}, headers=XHR)
+        out.append(r.json().get("status") or r.json().get("code"))
+    ts = [threading.Thread(target=press) for _ in range(2)]
     for t in ts:
         t.start()
     for t in ts:
         t.join()
-    assert sorted(out) == ["sent", "skipped"] and len(line.sent) == 1
+    # the second press waits for the first while it goes out (409 in_flight, hotfix 2) or, after it, finds it faxed
+    assert len(out) == 2 and out.count("sent") == 1 and set(out) - {"sent"} <= {"in_flight", "skipped"} and len(line.sent) == 1
 
 
 def test_two_follow_up_runs_at_once_send_one_request(site):
@@ -726,14 +734,18 @@ def test_a_send_cut_off_before_its_record_is_checked_with_the_line(site, monkeyp
     with pytest.raises(RuntimeError):
         _send(c, rate)
     assert len(line.sent) == 1 and _rows(site.db, "SELECT status, provider_id FROM faxes") == [("sending", None)]
-    # pressed again: nothing goes (and the item is marked Sent now, so its follow-ups start)
-    assert _send(c, rate)["status"] == "skipped" and len(line.sent) == 1
-    assert c.get(f"/api/findings/{rate}").json()["finding"]["status"] == "appealed"
+    # pressed again while it may still be going out: nothing goes, and the item is not marked Sent on a guess (hotfix 2)
+    r = c.post("/api/appeals/send", json={"finding_id": rate}, headers=XHR)
+    assert r.status_code == 409 and r.json()["code"] == "in_flight" and len(line.sent) == 1
+    assert c.get(f"/api/findings/{rate}").json()["finding"]["status"] == "open"
     assert c.post("/api/faxes/refresh", headers=XHR).json()["settled"] == 0           # within ten minutes it may still be going
     _age(site.db, minutes=11)
     got = c.post("/api/faxes/refresh", headers=XHR).json()
     assert got["settled"] == 1 and got["retried"] == 0
     assert _rows(site.db, "SELECT status, provider_id FROM faxes") == [("queued", next(iter(line.sent)))] and len(line.sent) == 1
+    # the line took it: the item is marked Sent now, so its follow-ups start, and pressing again sends nothing
+    assert c.get(f"/api/findings/{rate}").json()["finding"]["status"] == "appealed"
+    assert _send(c, rate)["status"] == "skipped" and len(line.sent) == 1
 
 
 def test_a_send_that_never_reached_the_line_goes_again_once(site, monkeypatch):
@@ -746,18 +758,25 @@ def test_a_send_that_never_reached_the_line_goes_again_once(site, monkeypatch):
         _send(c, rate)
     assert _rows(site.db, "SELECT status, provider_id FROM faxes") == [("sending", None)]      # reserved, never settled
     monkeypatch.setattr(line, "send", real_send)
-    assert _send(c, rate)["status"] == "skipped" and line.sent == {}          # not settled: nothing goes yet
+    # the send stopped and nobody knows whether it reached the line: nothing goes, and the item is not marked Sent
+    # (hotfix 2: only a fax the line took marks it); the person is sent to the Faxes page
+    r = _send(c, rate)
+    assert r["status"] == "held" and r["code"] == "unknown_send" and "Faxes page" in r["reason"] and line.sent == {}
+    assert c.get(f"/api/findings/{rate}").json()["finding"]["status"] == "open"
     line.outbox_down = True
     _age(site.db, minutes=11)
+    assert _send(c, rate)["code"] == "unknown_send" and line.sent == {}
     got = c.post("/api/faxes/refresh", headers=XHR).json()
     assert got["settled"] == 0 and any("Could not tell" in e for e in got["errors"]) and line.sent == {}
     unsettled = [s for s in c.get("/api/faxes").json()["sent"] if s["unsettled"]]
     assert len(unsettled) == 1
     line.outbox_down = False
-    # SRFax has no such fax: a failed try, sent again by the line's own retry (the item was marked Sent when it was
-    # pressed again), once
+    # SRFax has no such fax: a failed try. The item was never marked Sent, so it is pressed again by a person: it goes, once
     got = c.post("/api/faxes/refresh", headers=XHR).json()
-    assert got["settled"] == 1 and got["retried"] == 1 and len(line.sent) == 1
+    assert got["settled"] == 1 and got["retried"] == 0 and line.sent == {}
+    assert c.get(f"/api/findings/{rate}").json()["finding"]["status"] == "open"
+    assert _send(c, rate)["status"] == "sent" and len(line.sent) == 1
+    assert _send(c, rate)["status"] == "skipped" and len(line.sent) == 1
     assert _send(c, rate)["status"] == "skipped" and len(line.sent) == 1
     # settled already: a person's answer is refused
     assert c.post("/api/faxes/settle", json={"fax_key": unsettled[0]["fax_key"], "went": True}, headers=XHR).status_code == 409
@@ -1509,8 +1528,8 @@ def test_a_follow_up_never_sends_again_a_note_taken_back(site):
     c, line = site.c, site.line
     note_id, rate = site.ids["DENIED_MEDICAL_NECESSITY"], site.ids["UNDERPAID_VS_OWN_RATE"]
     _number(c, PAYER_FAX)
-    up = c.post(f"/api/uploads?name=visit.txt&finding_id={note_id}", content=b"Changing lesion, enlarging over three months. Biopsy. UPLOADED",
-                headers=XHR).json()
+    up = c.post(f"/api/uploads?name=visit.txt&finding_id={note_id}", content=b"Progress note\nPatient: Pat Q Sample    PMS ID: EMA77\n"
+                b"Date of Service: 11/01/2026\nChanging lesion, enlarging over three months. Biopsy. UPLOADED", headers=XHR).json()
     for fid in (note_id, rate):
         assert _send(c, fid)["status"] == "sent"
     assert "UPLOADED" in pdf_text(line.to(PAYER_FAX)[0]["pdf"])        # the appeal went with the uploaded note

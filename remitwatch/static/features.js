@@ -25,10 +25,12 @@ async function refreshHeader(){
     state.alertsNew = al.items; state.sync = st;
     const n = al.items.length, hi = al.items.filter(a=>a.severity==='high').length;
     $('#bellBtn').innerHTML = `Alerts <b class="${hi?'sev-high':''}">${n}</b>`;
-    const behind = st.days_behind;
+    const behind = st.days_behind;      // from the day the remittances reach for most payers, not one stray newer file
     const cls = behind==null ? 'muted' : (behind>14 ? 'sev-high' : (behind>7 ? 'sev-medium' : 'ok'));
+    const reach = st.feed_date && st.newest_payment_date && st.feed_date < st.newest_payment_date ? ` · remittances reach ${esc(st.feed_date)} for most payers` : '';
     const how = st.running ? 'syncing now' : (st.dropbox_configured ? (st.mode==='serverless' ? 'checks Dropbox daily and when files arrive' : (st.interval_minutes ? `auto-sync every ${st.interval_minutes} min` : 'sync on demand')) : 'Dropbox not connected');
-    $('#feedChip').innerHTML = `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${behind!=null?` (${behind} days ago)`:''} · ${how}`;
+    $('#feedChip').innerHTML = reach ? `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${reach}${behind!=null?` (${behind} days ago)`:''} · ${how}`
+      : `<span class="${cls}">●</span> newest payment ${esc(st.newest_payment_date||'–')}${behind!=null?` (${behind} days ago)`:''} · ${how}`;
   } catch(e){ /* older store without these tables */ }
 }
 
@@ -292,7 +294,7 @@ function drawerExtras(f, r){
 // One line of an item's history (its panel, and Activity on Progress): a status change, from → to, or what happened with
 // no change of status: a fax, the visit note looked up by "Build packets from EMA" (none found, or a person has to choose),
 // or a packet built by it (on a serverless host).
-const EVENT_WORDS = {fax:'Fax', note_lookup:'Note lookup', packet:'Packet built'};
+const EVENT_WORDS = {fax:'Fax', note_lookup:'Note lookup', packet:'Packet built', note_check:'Note checked by a person'};
 function eventWhat(e){
   return EVENT_WORDS[e.kind] ? `<b>${EVENT_WORDS[e.kind]}</b>` : `${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>`;
 }
@@ -316,7 +318,10 @@ function packetHtml(p){
 function showPacket(out, p){
   out.innerHTML = packetHtml(p);
   out.querySelector('#pkCopy').onclick = () => navigator.clipboard.writeText(p.letter);
-  out.querySelector('#pkSend').onclick = async () => { const res = await post('/api/packets/'+p.packet_id+'/email', {to: out.querySelector('#pkTo').value}); out.querySelector('#pkMsg').textContent = res.sent ? 'sent to '+res.to : 'not sent: '+res.reason; };
+  const send = out.querySelector('#pkSend');            // one email per click: a second click waits for the first answer
+  send.onclick = async () => { if(send.disabled) return; send.disabled = true;
+    try { const res = await post('/api/packets/'+p.packet_id+'/email', {to: out.querySelector('#pkTo').value}); out.querySelector('#pkMsg').textContent = res.sent ? 'sent to '+res.to : 'not sent: '+res.reason; }
+    finally { send.disabled = false; } };
 }
 // ---------------------------------------------------------------- the visit note behind an appeal, from EMA or uploaded
 // Words for what ties a note to the claim's patient (modmed.find_note's identified_by: "EMA patient ID", "medical record
@@ -400,21 +405,48 @@ async function noteFromEma(id, d, documentId){
 function bindDrawerExtras(id, d){
   const out = d.querySelector('#noteOut'); if(!out) return;
   const em = d.querySelector('#noteEma'); if(em) em.onclick = () => noteFromEma(id, d);
-  d.querySelector('#noteGo').onclick = async () => {
+  const go = d.querySelector('#noteGo');               // one packet per click: a second click waits for the first answer
+  go.onclick = async () => {
+    if(go.disabled) return;
     const file = d.querySelector('#noteFile').files[0], text = d.querySelector('#noteText').value;
     if(!file && !text.trim()){ out.innerHTML = '<div class="sev-medium small">Attach the note or paste its text first.</div>'; return; }
     const fd = new FormData(); fd.append('finding_id', id); fd.append('text', text); fd.append('use_ai', d.querySelector('#noteAi').checked ? '1' : '0'); if(file) fd.append('file', file);
+    go.disabled = true;
     out.innerHTML = '<div class="muted small">Reading the note and building the packet. A review takes about a minute.</div>';
     try {
       const p = await api('/api/appeals/build', {method:'POST', body: fd});
       showPacket(out, p);
     } catch(e){ out.innerHTML = `<div class="sev-high small">Could not build the packet: ${esc(e.message)}</div>`; }
+    go.disabled = false;
   };
 }
+// The amount a person types for Paid, read the way a remittance or EMA prints it: 1250, 1,250, 1,250.00, $1,250.00, 1250.5.
+// {cents} or {why}: anything else (letters, a minus sign, more than two decimals, 1e9, more than ten times the line's charge
+// or more than $1,000,000) is asked again with the reason.
+const PAID_EMPTY = 'Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is.';
+const PAID_TOP = 100000000;
+function paidCents(typed, charge){
+  const t = String(typed == null ? '' : typed).trim();
+  if(!t) return {why: PAID_EMPTY};
+  if(/^-|^\$\s*-/.test(t)) return {why: 'The amount paid cannot be below zero.'};
+  const m = /^\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?$/.exec(t);
+  if(!m) return {why: 'That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.'};
+  if(m[2] && m[2].length > 2) return {why: 'Use at most two decimals (dollars and cents).'};
+  const cents = Number(m[1].replace(/,/g, '')) * 100 + (m[2] ? Number((m[2] + '0').slice(0, 2)) : 0);
+  const top = charge > 0 ? Math.min(PAID_TOP, 10 * charge) : PAID_TOP;
+  if(!Number.isSafeInteger(cents) || cents > top) return {why: top < PAID_TOP ? `That is more than ten times the charge on this line (${money2(top / 10)}). Check the amount.` : 'That is more than $1,000,000. Check the amount.'};
+  return {cents};
+}
 // A status set from an item's own panel, with the questions it takes. False when the person backed out: nothing is sent.
-async function setFindingStatus(id, status, shortfall, signal){
+// seen: the status the panel showed; the site leaves an item that changed since as it is (and says so).
+async function setFindingStatus(id, status, shortfall, signal, seen, charge){
   const body = {status};
-  if(status==='resolved'){ const x = prompt('Amount recovered, in dollars. Leave blank to use the shortfall.', shortfall!=null ? (shortfall/100).toFixed(2) : ''); if(x===null) return false; if(x.trim()!=='' && !isNaN(parseFloat(x))) body.recovered_cents = Math.round(parseFloat(x)*100); }
+  if(seen) body.seen_status = seen;
+  if(status==='resolved'){
+    const ask = `Amount the payer paid, in dollars (from the remittance or EMA).${shortfall!=null ? ` The amount in dispute is ${money2(shortfall)}.` : ''}`;
+    let msg = ask;
+    for(;;){ const x = prompt(msg, ''); if(x===null) return false; const got = paidCents(x, charge); if(got.cents != null){ body.recovered_cents = got.cents; break; } msg = got.why + '\n\n' + ask; }
+  }
   // a claim no payer answered is let go, or marked lost, only with a note (letGoNote in desk.js): asking for it is the confirmation
   const why = letGoNote(signal, status);
   if(why === null) return false;

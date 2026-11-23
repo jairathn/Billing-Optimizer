@@ -14,6 +14,7 @@ const HOLDS = [
   ['practice', 'The practice\'s details are missing from the letters'], ['no_fax', 'The fax line is not set up'],
   ['stale', 'The remittances are behind: these may have been paid since'], ['check_code', 'Check in EMA which code went out first (open each one)'], ['no_number', 'No fax number saved for the payer'], ['by_hand', 'Fax by hand: the payer group holds many insurers, each with its own fax line'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
   ['ambiguous', 'The visit note needs a person to pick it or attach it: open each item'], ['no_note', 'No visit note yet (from EMA, or uploaded on the Upload page)'],
+  ['note_check', 'A person checks the visit note first: open each item'], ['in_flight', 'A fax for it is going out now'], ['unknown_send', 'A fax for it may have gone out: look on the Faxes page'],
   ['review_no', 'Claude\'s review: the note does not support it (counted in Suggested templates)'], ['review_fix', 'Correct and resubmit instead'],
   ['review_caution', 'Claude\'s review has doubts: a person reads the packet first'], ['quotes', 'Claude quoted words the note does not have: a person checks the packet'],
   ['blanks', 'The letter still has blanks'], ['fax_error', 'The fax line refused it'], ['expired', 'Filing window closed'],
@@ -85,7 +86,7 @@ async function appealByFax(ids, opts){
       const id = ids[next++];
       let r;
       try { r = await post('/api/appeals/send', {finding_id: id, stale_ok: !!opts.staleOk, bulk: true}); }
-      catch(e){ r = {finding_id: id, status: 'held', code: 'failed', reason: e.message}; if([401,403,429].includes(e.status)) stopped = e.message; }
+      catch(e){ r = {finding_id: id, status: 'held', code: e.code || 'failed', reason: e.message}; if([401,403,429].includes(e.status)) stopped = e.message; }
       res.push(r);
       // a hold that every item would hit: say it once instead of running through the rest
       if(r.code === 'practice' || r.code === 'no_fax' || r.code === 'stale' || r.code === 'bulk_paused') stopped = r.reason;
@@ -205,25 +206,42 @@ function faxDrawerHtml(f, r){
     <div id="fxOneMsg" class="small"></div></div>`;
 }
 function fax10(n){ const d = faxDigits(n); return d ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}` : String(n||''); }
-function bindFaxDrawer(id, d){
+function bindFaxDrawer(id, d, seq, what){
   const b = d.querySelector('#fxOne'); if(!b) return;
   // what the person checked in EMA, each answer kept apart: "still unpaid" says nothing about which code went out
   const said = {};
+  // the panel still shows this item: else what comes back is said in a notice, and the panel the person is on is left alone
+  const here = () => typeof panelShows !== 'function' || panelShows(seq, id);
+  const msg = d.querySelector('#fxOneMsg');           // taken now: an answer never writes into another item's panel
+  let busy = false;
   const go = async () => {
-    const msg = d.querySelector('#fxOneMsg');
-    b.disabled = true; msg.className = 'small muted'; msg.textContent = 'Reading the note, writing the letter and faxing it. About a minute.';
+    if(busy) return;                                  // one send at a time from this panel: a second click does nothing
+    busy = true; b.disabled = true; msg.querySelectorAll('button').forEach(x => x.disabled = true);
+    msg.className = 'small muted'; msg.textContent = 'Reading the note, writing the letter and faxing it. About a minute.';
     let r;
     try { r = await post('/api/appeals/send', Object.assign({finding_id: id}, said)); }
-    catch(e){ msg.className = 'small sev-high'; msg.textContent = e.message; b.disabled = false; return; }
-    if(r.status === 'sent'){ state.brief = null; state.dirty = true; openDetail(id); return; }
+    catch(e){ busy = false;
+      if(!here()){ if(typeof notice === 'function') notice(`Appeal by fax (${what || 'an item'}): ${e.message}`); return; }
+      msg.className = e.code === 'in_flight' ? 'small sev-medium' : 'small sev-high'; msg.textContent = e.message; b.disabled = false; return; }
+    busy = false;
+    if(r.status === 'sent'){ state.brief = null; state.dirty = true;
+      if(here()) openDetail(id); else if(typeof notice === 'function') notice(`Faxed: ${what || 'an item'}${r.number ? ' to ' + r.number : ''}. It is marked Sent.`);
+      return; }
+    if(!here()){ if(typeof notice === 'function') notice(`Not faxed (${what || 'an item'}): ${r.reason || 'Not sent.'} Open it again to finish.`); return; }
     msg.className = 'small sev-medium';
     msg.innerHTML = esc(r.reason || 'Not sent.') + (r.code === 'no_number' ? ' <a href="#faxes" id="fxGoNums">Open the Faxes page</a>' : '')
       + ((r.candidates||[]).length ? ' Open "Build the appeal from the visit note" below and pick it there.' : '');
     if(r.code === 'check_code') msg.innerHTML += ' <button id="fxCode">It went out as billed: fax it</button>';
     if(r.code === 'stale') msg.innerHTML += ' <button id="fxStale">Still unpaid in EMA: fax it anyway</button>';
-    const g = d.querySelector('#fxGoNums'); if(g) g.onclick = e => { e.preventDefault(); closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); };
-    const code = d.querySelector('#fxCode'); if(code) code.onclick = () => { said.confirmed = true; go(); };
-    const stale = d.querySelector('#fxStale'); if(stale) stale.onclick = () => { said.stale_ok = true; go(); };
+    if(r.code === 'note_check' && r.packet_id) msg.innerHTML += ` <a href="/api/packets/${encodeURIComponent(r.packet_id)}/pdf" target="_blank" rel="noopener">Open the packet</a>`;
+    if(r.code === 'note_check' && r.confirm) msg.innerHTML += `<div style="margin-top:4px"><label><input type="checkbox" id="fxNoteOk"> I opened this note: it is this patient's visit on ${esc(r.visit_date ? longDate(r.visit_date) : 'the date of service')}</label> <button id="fxNoteGo" disabled>Fax it</button></div>`;
+    // the buttons the answer brings are looked for in this item's own message, and act for this item only
+    const g = msg.querySelector('#fxGoNums'); if(g) g.onclick = e => { e.preventDefault(); closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); };
+    const code = msg.querySelector('#fxCode'); if(code) code.onclick = () => { if(code.disabled) return; said.confirmed = true; go(); };
+    const stale = msg.querySelector('#fxStale'); if(stale) stale.onclick = () => { if(stale.disabled) return; said.stale_ok = true; go(); };
+    const ok = msg.querySelector('#fxNoteOk'), send = msg.querySelector('#fxNoteGo');
+    if(ok && send){ ok.onchange = () => { send.disabled = !ok.checked; };
+      send.onclick = () => { if(send.disabled || !ok.checked) return; said.note_checked = true; said.packet_id = r.packet_id; go(); }; }
     b.disabled = false;
   };
   b.onclick = () => go();
@@ -357,7 +375,7 @@ async function faxesTab(v){
 }
 
 // ---------------------------------------------------------------- tie a fax that came in to the item open in the panel
-async function tieFaxHtml(d, id){
+async function tieFaxHtml(d, id, seq){
   const el = d.querySelector('#fxTie'); if(!el) return;
   el.onclick = async () => {
     const box = d.querySelector('#fxOneMsg');
@@ -372,7 +390,8 @@ async function tieFaxHtml(d, id){
       <select id="fxTieSays"><option value="">What it says (when it was not read)</option>${FAX_SAYS.map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join('')}</select> <button id="fxTieGo">Tie to this item</button>`;
     box.querySelector('#fxTieGo').onclick = async () => {
       const says = box.querySelector('#fxTieSays').value;
-      try { await post('/api/faxes/match', Object.assign({fax_key: box.querySelector('#fxTieSel').value, finding_id: id}, says ? {says} : {})); openDetail(id); }
+      try { await post('/api/faxes/match', Object.assign({fax_key: box.querySelector('#fxTieSel').value, finding_id: id}, says ? {says} : {}));
+        if(typeof panelShows !== 'function' || panelShows(seq, id)) openDetail(id); else if(typeof notice === 'function') notice('The fax was tied to the item.'); }
       catch(e){ box.textContent = e.message; }
     };
   };

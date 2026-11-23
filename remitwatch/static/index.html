@@ -167,6 +167,8 @@ table.calc-fall tr.calc-total td{border-top:2px solid var(--ink)}
 #drawer td.num,#drawer td.day,#drawer td.code{white-space:nowrap}
 #drawer tr.has-item{background:var(--soft)}
 .todo-err:empty,.st-err:empty{display:none}
+#rwNotice{position:fixed;left:16px;bottom:16px;z-index:40;max-width:min(520px,calc(100vw - 32px))}
+#rwNotice div{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:8px 12px;margin-top:6px;box-shadow:0 4px 14px rgba(0,0,0,.15);font-size:13px}
 table.wl input.sel,#selAll{width:20px;height:20px}
 /* category pages: tiles, what to do, the strip, the list head, the Details fold */
 .ph-row{display:flex;flex-wrap:nowrap;justify-content:space-between;align-items:flex-start;gap:12px}.ph-row>div:first-child{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;flex:1;min-width:0}
@@ -328,7 +330,11 @@ const mods = js => { try { const a = JSON.parse(js||'[]'); return Array.isArray(
 async function api(path, opts){ if(opts && opts.method==='POST'){ opts.headers = Object.assign({'X-Requested-With':'remitwatch'}, opts.headers||{}); }
   // what each clinician is doing may be kept for the owner: the password typed into the Providers tab rides along on those calls only
   if(state.ownerKey && /^\/api\/(activity\/|breakdown|lessons)/.test(path)){ opts = Object.assign({}, opts||{}); opts.headers = Object.assign({'X-Owner-Password': state.ownerKey}, opts.headers||{}); }
-  const r = await fetch(path, opts); if(!r.ok){ let m=''; try{ m=(await r.json()).detail||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); const err = new Error(m || ('The server did not answer as expected ('+r.status+').')); err.status = r.status; throw err; } return r.json(); }
+  const r = await fetch(path, opts); if(!r.ok){ let m='', b=null; try{ b=await r.json(); m=(b&&b.detail)||''; }catch(e){} if(Array.isArray(m)) m = m.map(x=>(x&&x.msg)||'').filter(Boolean).join('; '); if(typeof m !== 'string') m = '';
+    const err = new Error(m || ('The server did not answer as expected ('+r.status+').')); err.status = r.status; err.code = b && b.code; err.body = b; throw err; } return r.json(); }
+// a short line at the foot of the page saying what finished, when the panel has moved on to another item since it started
+function notice(text){ let n = document.getElementById('rwNotice'); if(!n){ n = document.createElement('div'); n.id = 'rwNotice'; n.setAttribute('role','status'); n.setAttribute('aria-live','polite'); document.body.appendChild(n); }
+  const line = document.createElement('div'); line.textContent = text; n.appendChild(line); setTimeout(()=>line.remove(), 9000); }
 function qs(o){ return Object.entries(o).filter(([k,v])=>v!==''&&v!=null).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&'); }
 function sweepCharts(){ Object.keys(state.charts).forEach(id=>{ const c=state.charts[id]; if(!c.canvas || !c.canvas.isConnected){ c.destroy(); delete state.charts[id]; } }); }
 function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const el=document.getElementById(id); if(!el) return;
@@ -337,7 +343,8 @@ function chart(id, cfg){ if(state.charts[id]) state.charts[id].destroy(); const 
   state.charts[id]=new Chart(el, cfg); }
 const palette = ['#1f5fbf','#d9534f','#f0ad4e','#5cb85c','#7b5ea7','#2aa198','#8c6d1f','#6c757d'];
 
-function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || k in ALIASES; }
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);       // never a name every object has (constructor, __proto__, toString)
+function tabOpen(k){ return TABS.some(t=>t[0]===k) || CLASSIC.some(t=>t[0]===k) || own(ALIASES, k); }
 function initNav(){
   $('#nav').innerHTML = TABS.map(([k,l])=>`${k==='progress'?'<span class="gap"></span>':''}<a href="#${k}" data-tab="${k}" class="${k===state.tab?'active':''}${REF_TABS.has(k)?' ref':''}">${l}${BADGE_CAT[k]?`<span class="bdg" data-bdg="${k}" hidden></span>`:''}</a>`).join('');
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.onclick=e=>{ e.preventDefault(); if(e.target.closest('.bdg') && typeof badgeOpen === 'function') badgeOpen(a.dataset.tab);
@@ -369,22 +376,24 @@ async function loadSummary(){
 async function render(){
   const run = state.run = (state.run||0) + 1;       // a slower, older run must not draw over a newer one
   if(!state.meta){ try { await loadMeta(); } catch(e){} if(run !== state.run) return; }      // a cold start can fail the first call
-  if(ALIASES[state.tab]){ state.tab = ALIASES[state.tab]; history.replaceState(null, '', '#'+state.tab); }
+  if(own(ALIASES, state.tab)){ state.tab = ALIASES[state.tab]; history.replaceState(null, '', '#'+state.tab); }
+  if(!tabOpen(state.tab)) state.tab = 'today';
   const classic = CLASSIC.some(t=>t[0]===state.tab);
   $('#nav').dataset.cur = state.tab;            // between 641 and 1,359 px More stands for Progress, Data and Providers
   $('#nav').querySelectorAll('a[data-tab]').forEach(a=>a.classList.toggle('active', a.dataset.tab===state.tab || (classic && a.dataset.tab==='more')));
   const act = $('#nav a.active'); if(act && window.innerWidth <= 640 && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'});
   // the year and status pickers belong to the analysis pages; the daily screens carry their own filters
   ['#yearSel','#statusSel'].forEach(q=>{ $(q).parentElement.style.display = NEEDS_SUMMARY.has(state.tab) ? '' : 'none'; });
-  if(!DESKS[state.tab] && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; state.wlKey = null; }   // "item 3 of 50" means something on a list page only
+  if(!own(DESKS, state.tab) && state.tab !== 'fees'){ state.worklist = null; state.wlNext = null; state.wlTotal = null; state.wlKey = null; }   // "item 3 of 50" means something on a list page only
   if(NEEDS_SUMMARY.has(state.tab)) await loadSummary();
   if(run !== state.run) return;
   const old = $('#view'), v = old.cloneNode(false);      // an older run still holds the old node and can only write into that
   old.replaceWith(v);
   v.innerHTML = '<div class="muted">loading…</div>'; v.classList.remove('busy');
-  const fn = {today: todayTab, denials: x=>deskTab(x,'denials'), bundling: x=>deskTab(x,'bundling'), downcoding: x=>deskTab(x,'downcoding'),
+  const pages = {today: todayTab, denials: x=>deskTab(x,'denials'), bundling: x=>deskTab(x,'bundling'), downcoding: x=>deskTab(x,'downcoding'),
     contracts: x=>deskTab(x,'contracts'), fees: feesDesk, worklist: x=>deskTab(x,'worklist'), faxes: faxesTab, wins: winsTab, more: moreTab, overview, payers, data,
-    alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab, calculator: calculatorTab}[state.tab] || todayTab;
+    alerts: alertsTab, explorer: explorerTab, progress: progressTab, providers: providersTab, calculator: calculatorTab};
+  const fn = own(pages, state.tab) ? pages[state.tab] : todayTab;
   try { await fn(v); } catch(e){ if(run === state.run){ v.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; } console.error(e); }
   if(run === state.run) sweepCharts();
 }
@@ -467,7 +476,7 @@ async function findingsTable(v, container, base, opts={}){
       ${opts.bulk?'<button id="bulkAppealed" class="small">Mark selected appealed</button>':''}
     </div>
     <table><thead><tr>${opts.bulk?'<th></th>':''}<th>DOS</th><th>Patient</th><th>Payer</th><th>Provider</th><th>Code</th><th>Finding</th><th class="num">Charge</th><th class="num">Allowed</th><th class="num">Expected</th><th class="num">Shortfall</th><th>CARC/RARC</th><th>Deadline</th><th>Status</th></tr></thead>
-    <tbody>${res.items.map(r=>`<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" onclick="event.stopPropagation()"></td>`:''}
+    <tbody>${res.items.map(r=>`<tr class="row" tabindex="0" data-id="${esc(r.finding_id)}" data-status="${esc(r.status||'open')}">${opts.bulk?`<td><input type="checkbox" class="sel" value="${esc(r.finding_id)}" onclick="event.stopPropagation()"></td>`:''}
       <td class="day">${esc(r.service_date)}</td>
       <td class="who">${showPhi()&&r.patient&&r.claim_key?`<a href="#" class="pt" data-claim="${esc(r.claim_key)}" data-label="${esc(r.patient+(r.member_id?' · '+r.member_id:''))}" title="Everything in this list for this patient (same name and member number)">${esc(r.patient)}</a>`:esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}${r.member_id?'<br>member '+esc(r.member_id):''}</div></td>
       <td>${esc(r.payer_group)}</td><td class="small">${esc((r.rendering_provider_name||'').replace(/\s+/g,' ').trim())}</td>
@@ -494,7 +503,11 @@ async function findingsTable(v, container, base, opts={}){
     if(!r.ok){ alert('The export did not come back ('+r.status+'). Try again in a moment.'); return; }
     const url = URL.createObjectURL(await r.blob()), a = document.createElement('a');
     a.href = url; a.download = 'remitwatch-findings.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 10000); };
-  const b = container.querySelector('#bulkAppealed'); if(b) b.onclick=async()=>{ const ids=[...container.querySelectorAll('.sel:checked')].map(x=>x.value); if(!ids.length) return; await api('/api/findings/bulk-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,status:'appealed'})}); render(); };
+  const b = container.querySelector('#bulkAppealed'); if(b) b.onclick=async()=>{ const ids=[...container.querySelectorAll('.sel:checked')].map(x=>x.value); if(!ids.length || b.disabled) return;
+    const seen = {}; container.querySelectorAll('.sel:checked').forEach(x=>{ const tr = x.closest('tr.row'); if(tr && tr.dataset.status) seen[x.value] = tr.dataset.status; });
+    b.disabled = true;
+    try { const out = await post('/api/findings/bulk-status', {ids, status:'appealed', seen}); bulkLeftAlone(out); } catch(e){ alert('Not saved: ' + e.message); }
+    render(); };
 }
 async function trendChart(id, params, label){
   const rows = await api('/api/trends?'+qs(params));
@@ -562,6 +575,7 @@ async function data(v){
 function closeDetail(){
   const d = $('#drawer'); if(!d.classList.contains('open')) return;
   d.classList.remove('open'); d.inert = true;
+  state.detailSeq = (state.detailSeq||0) + 1; state.detailId = null;
   const back = state.detailFrom; state.detailFrom = null;
   if(state.dirty){ state.dirty = false; if(state.tab==='today' || state.tab==='fees' || DESKS[state.tab]){       // statuses changed: redraw the list behind
     render().then(()=>{ const r = document.querySelector('#view tr.row') || document.querySelector('#view button'); if(r) r.focus(); }); return; } }
@@ -577,11 +591,22 @@ function claimWhoRows(f, cl, phi){
   return `<tr><td>Patient</td><td>${who}</td></tr>`
     + (cl.from_ema ? '' : `<tr><td>Claim</td><td>EMA claim ID <b>${esc(f.patient_control_number)}</b>${cl.payer_claim_control_number ? ' · payer claim # ' + esc(cl.payer_claim_control_number) : ''}</td></tr>`);
 }
-async function openDetail(id){
+// Whether the panel still shows what it showed when `seq` was drawn (and, given, item `id`): code that runs after an answer
+// comes back touches the panel only then; otherwise a notice says what finished and the panel stays where the person is.
+function panelShows(seq, id){ return seq === state.detailSeq && $('#drawer').classList.contains('open') && (id == null || state.detailId === id); }
+// A panel opened by "open the next" ignores clicks on its buttons for a moment: the second click of a double click lands on
+// the next item's button, in the same place, before anyone could have read it.
+const WALK_GUARD_MS = 800;
+const walkGuarded = () => Date.now() < (state.walkUntil || 0);
+async function openDetail(id, opts){
+  const seq = state.detailSeq = (state.detailSeq||0) + 1;     // the newest open wins: an older, slower answer is dropped
+  state.detailId = id;
   const d = $('#drawer'); d.classList.add('open'); d.inert = false; d.innerHTML='<div class="muted">loading…</div>';
   const from = document.activeElement; if(from && from.closest && from.closest('#view')) state.detailFrom = from.closest('tr.row') || from;
-  const r = await api('/api/findings/'+id); const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
+  const r = await api('/api/findings/'+id); if(seq !== state.detailSeq) return;
+  const f=r.finding, cl=r.claim||{}, rem=r.remit||{};
   if(!state.brief){ try { await brief(); } catch(e){} }        // the plain labels and the kinds of work
+  if(seq !== state.detailSeq) return;
   const adjBy = {}; (r.adjustments||[]).forEach(a=>{(adjBy[a.line_key||'claim']=adjBy[a.line_key||'claim']||[]).push(a);});
   const remBy = {}; (r.remarks||[]).forEach(a=>{(remBy[a.line_key||'claim']=remBy[a.line_key||'claim']||[]).push(a);});
   const ex = drawerExtras(f, r), plain = state.brief && state.brief.labels ? labelOf(state.brief, f.signal).label : f.title;
@@ -622,20 +647,38 @@ async function openDetail(id){
     ${ex.builder ? `<details class="dfold" ${noteWork?'open':''}><summary>Build the appeal from the visit note</summary>${ex.builder}</details>` : ''}
     <details class="dfold"><summary>Technical details</summary><div class="small muted">${esc(f.title)} · ${esc(f.signal)} · ${esc(f.severity)} · ${esc(f.actionable)}${f.stale?' · no longer found by the current rules':''}</div>
     <div class="note">${esc(SIGNAL_HELP[f.signal]||'')}</div><pre>${esc(JSON.stringify(f.evidence,null,1))}</pre></details>`;
+  d.dataset.fid = id;
+  state.walkUntil = opts && opts.walk ? Date.now() + WALK_GUARD_MS : 0;
   d.querySelector('#closeD').onclick=closeDetail;
   d.querySelector('#closeD').focus({preventScroll:true});
-  d.querySelectorAll('[data-st]').forEach(b=>b.onclick=async()=>{
-    // setFindingStatus asks what the change takes: to confirm a Let go, and for the note on a claim no payer answered (by its reason)
-    try { if(await setFindingStatus(id, b.dataset.st, f.shortfall_cents, f.signal)){ state.brief = null; state.dirty = true; openDetail(id); } }
-    catch(e){ const er = d.querySelector('.st-err'); if(er) er.textContent = 'Not saved: ' + (e.message || 'no answer from the site') + '. Try again.'; } });
-  bindWhatToDo(f, d);
+  const bar = [...d.querySelectorAll('[data-st]')];
+  const what = `${plain}${f.payer_group ? ' · ' + f.payer_group : ''}${f.shortfall_cents ? ' · ' + money2(f.shortfall_cents) : ''}`;
+  bar.forEach(b=>b.onclick=async()=>{
+    if(b.disabled || walkGuarded()) return;
+    bar.forEach(x=>x.disabled = true);          // one change at a time: a second click does nothing until the answer is back
+    const again = () => bar.forEach(x=>{ x.disabled = x.dataset.st === f.status; });
+    // setFindingStatus asks what the change takes: to confirm a Let go, the note on a claim no payer answered (by its reason),
+    // the amount paid; it sends the status this panel shows, so a change made elsewhere since is not undone
+    try {
+      if(!await setFindingStatus(id, b.dataset.st, f.shortfall_cents, f.signal, f.status, f.charge_cents)){ if(panelShows(seq, id)) again(); return; }
+      state.brief = null; state.dirty = true;
+      if(panelShows(seq, id)) openDetail(id); else notice(`Saved: ${what} is now ${STATUS_WORDS[b.dataset.st] || b.dataset.st}.`);
+    } catch(e){
+      const why = (e.message || 'no answer from the site');
+      if(e.code === 'changed' || e.code === 'in_flight') state.dirty = true;
+      if(!panelShows(seq, id)){ notice(`Not saved (${what}): ${why}`); return; }
+      const er = d.querySelector('.st-err'); if(er) er.textContent = 'Not saved: ' + why + (e.code ? '' : ' Try again.');
+      again();
+    } });
+  bindWhatToDo(f, d, seq);
   const oc = d.querySelector('#openClaim'); if(oc) oc.onclick = e => { e.preventDefault(); openClaim(r.bill, id); };
   d.querySelectorAll('a.claim-link').forEach(a => a.onclick = e => { e.preventDefault(); openClaim(a.dataset.claim, id); });
   bindDrawerExtras(id, d);
-  if(typeof bindFaxDrawer === 'function'){ bindFaxDrawer(id, d); tieFaxHtml(d, id); }
+  if(typeof bindFaxDrawer === 'function'){ bindFaxDrawer(id, d, seq, what); tieFaxHtml(d, id, seq); }
   if(typeof bindHideDrawer === 'function') bindHideDrawer(f, d);
   if(d.querySelector('#btnAppeal')) d.querySelector('#btnAppeal').onclick=async()=>{
     const p = await api('/api/appeal/'+id);
+    if(!panelShows(seq, id)) return;            // the panel moved on: the letter of an item no longer shown is not opened
     $('#modalBox').innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">${esc(p.subject)}</h2><button id="closeM">✕</button></div>
       ${p.corrected_claim_instructions?`<div class="panel"><b>Correction instructions</b><div>${esc(p.corrected_claim_instructions)}</div></div>`:''}
       <div class="actions" style="margin-top:8px"><button class="primary" id="copyL">Copy letter</button><button id="copyE">Copy evidence</button><span class="small muted">file by ${esc(p.deadline||'–')} · payer ${esc(p.payer_contact.phone)} ${esc(p.payer_contact.url)}</span></div>

@@ -71,8 +71,11 @@ class FaxError(Exception):
 
 
 def digits(number: str | None) -> str:
-    """A US fax number as its ten digits, or '' when it is not one."""
-    d = re.sub(r"\D", "", number or "")
+    """A US fax number as its ten digits, or '' when it is not one. Only 0 to 9 count: a number written with other digit
+    characters (full-width, Arabic-Indic) is not one, because SRFax would be handed characters it cannot dial."""
+    if any(ch.isdigit() and ch not in "0123456789" for ch in (number or "")):
+        return ""
+    d = re.sub(r"[^0-9]", "", number or "")
     if len(d) == 11 and d.startswith("1"):
         d = d[1:]
     return d if len(d) == 10 and d[0] not in "01" else ""

@@ -117,6 +117,20 @@ async def protective_headers(request: Request, call_next):
     return resp
 
 
+class Refused(Exception):
+    """A refusal the page acts on by its code (in_flight, changed, amount, note_check...): the answer carries the plain
+    message as `detail`, as every other refusal does, and the code beside it."""
+
+    def __init__(self, http_status: int, code: str, message: str, **extra):
+        super().__init__(message)
+        self.http_status, self.code, self.message, self.extra = http_status, code, message, extra
+
+
+@app.exception_handler(Refused)
+async def _refused(_request: Request, exc: Refused):
+    return JSONResponse(status_code=exc.http_status, content=dict(exc.extra, detail=exc.message, code=exc.code))
+
+
 def require_xhr(request: Request) -> None:
     """State-changing calls must carry a header a cross-site form cannot set."""
     if request.headers.get("x-requested-with") != "remitwatch":
@@ -1082,34 +1096,205 @@ def _one_at_a_time(ids: list) -> list[str]:
         conn.close()
 
 
+# What a person's status change is checked against before anything is written or journaled (the hotfix of chaos round 0):
+# the body is what it says it is; the item still has the status the person's page showed (seen_status); no fax for it is
+# going out; a Paid has the amount the payer paid.
+STATUS_LABELS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
+MAX_NOTES = 5000
+MAX_PAID_CENTS = 100_000_000            # $1,000,000: no single item is paid more
+PAID_TIMES_CHARGE = 10                  # nor more than ten times its line's charge
+IN_FLIGHT = "A fax for this item is going out now. Wait a minute and look at the item again."
+NO_AMOUNT = "Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is."
+
+
+async def _body_object(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "The change could not be read. Reload the page and try again.")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "The change could not be read: it must say the status, and for Paid the amount.")
+    return body
+
+
+def _whole_cents(v: Any) -> int | None:
+    """A whole number of cents as sent (a JSON number), or None when it is not one."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if isinstance(v, float) and not (v == v and abs(v) != float("inf") and v.is_integer()):
+        return None
+    return int(v)
+
+
+def _status_fields(body: dict) -> tuple[str, str | None, int | None]:
+    """The status, the note and a recovered amount, each checked for what it must be."""
+    status = body.get("status")
+    if not isinstance(status, str) or status not in STATUSES:
+        raise HTTPException(400, "Say which status: To do, Started, Sent, Paid, Lost or Let go.")
+    notes = body.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        raise HTTPException(400, "The note must be text.")
+    if notes and len(notes) > MAX_NOTES:
+        raise HTTPException(400, f"A note can be at most {MAX_NOTES:,} characters.")
+    if notes:
+        try:
+            notes.encode("utf-8")
+        except UnicodeEncodeError:
+            raise HTTPException(400, "The note has characters that cannot be kept. Type it again.")
+    rec = body.get("recovered_cents")
+    if rec is not None:
+        rec = _whole_cents(rec)
+        if rec is None:
+            raise Refused(400, "amount", "The amount paid must be a number of whole cents.")
+    return status, notes, rec if status == "resolved" else None
+
+
+def _seen_ok(v: Any) -> bool:
+    return v is None or (isinstance(v, str) and v in STATUSES)
+
+
+def _status_now(conn: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
+    """Each item's status on this copy, whether the daily run set it by itself (a payment it found, a reason hidden for a
+    payer), and its charge (the bound on a Paid amount)."""
+    from .actions import LAST_DECISION
+    events = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_events'").fetchone())
+    out: dict[str, dict] = {}
+    for k in range(0, len(ids), 500):
+        part = ids[k:k + 500]
+        for r in conn.execute(f"""SELECT f.finding_id, f.status, f.auto_note, f.charge_cents, {LAST_DECISION if events else "NULL"} last
+                                  FROM findings f WHERE f.finding_id IN ({','.join('?' * len(part))})""", part):
+            out[r[0]] = {"status": r[1], "charge_cents": r[3],
+                         "by_run": (r[1] == "resolved" and bool(r[2])) or (r[1] == "dismissed" and r[4] == "hidden")}
+    return out
+
+
+def _sending_now(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
+    """Items with a fax going out now: reserved, not yet taken by the line, not settled as failed or unknown, and younger
+    than a send can take; or an appeal being prepared for it (the note looked up and reviewed)."""
+    if not ids or not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='faxes'").fetchone():
+        out: set[str] = set()
+    else:
+        cut = (datetime.now(timezone.utc) - timedelta(seconds=IN_FLIGHT_S)).isoformat(timespec="microseconds")
+        out = set()
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            out |= {r[0] for r in conn.execute(f"""SELECT DISTINCT finding_id FROM faxes WHERE finding_id IN ({','.join('?' * len(part))})
+                                                   AND direction='out' AND status='sending' AND provider_id IS NULL AND error IS NULL
+                                                   AND created_at > ?""", (*part, cut))}
+    return out | _preparing(conn, ids)
+
+
+def _person_status(ids: list[str], status: str, notes: str | None, rec: int | None, actor: str, seen: dict, single: bool) -> dict:
+    """A person's status change, checked and applied in one step: on a server inside one transaction on the store, on a
+    serverless host against the copy it serves, then journaled. single: one item's change, refused as a whole (Refused)
+    when it must not be made; else the items that must not be changed are left as they are and named."""
+    out: dict = {"n": 0, "changed": [], "in_flight": []}
+
+    def sort(conn) -> list[str]:
+        now = _status_now(conn, ids)
+        flying = _sending_now(conn, [i for i in ids if i in now])
+        keep: list[str] = []
+        for i in ids:
+            cur = now.get(i)
+            if cur is None:
+                continue
+            if i in flying:
+                if single:
+                    raise Refused(409, "in_flight", IN_FLIGHT)
+                out["in_flight"].append(i)
+                continue
+            saw = seen.get(i)
+            if (saw is not None and saw != cur["status"]) or (saw is None and cur["by_run"]):
+                if single:
+                    raise Refused(409, "changed", f"This item changed since your page loaded: it is now "
+                                                  f"{STATUS_LABELS.get(cur['status'], cur['status'])}. It was not changed.", status=cur["status"])
+                out["changed"].append(i)
+                continue
+            if single and status == "resolved":
+                charge = cur.get("charge_cents") or 0
+                top = min(MAX_PAID_CENTS, PAID_TIMES_CHARGE * charge) if charge > 0 else MAX_PAID_CENTS
+                if rec is None:
+                    raise Refused(400, "amount", NO_AMOUNT)
+                if rec < 0:
+                    raise Refused(400, "amount", "The amount paid cannot be below zero.")
+                if rec > top:
+                    raise Refused(400, "amount", f"That is more than {'ten times the charge on this line' if top < MAX_PAID_CENTS else '$1,000,000'}"
+                                                 f" (${top / 100:,.2f}). Check the amount on the remittance or in EMA.")
+            keep.append(i)
+        if single and not keep:
+            raise HTTPException(404, "finding not found")
+        return keep
+
+    if runtime.serverless():
+        from .cloud import SERVING_COPY
+        conn = db()
+        try:
+            keep = sort(conn)
+            was = {i: s["status"] for i, s in _status_now(conn, keep).items()}
+        finally:
+            conn.close()
+        if keep:
+            # the status each finding had on the copy the person was looking at: logged as what they changed it from
+            if single:
+                SERVING_COPY.record({"kind": "status", "finding_id": keep[0], "status": status, "notes": notes, "recovered_cents": rec,
+                                     "actor": actor, "seen": was.get(keep[0])})
+            else:
+                SERVING_COPY.record({"kind": "bulk_status", "ids": keep, "status": status, "notes": notes, "actor": actor,
+                                     "seen": {i: was.get(i) for i in keep}})
+        out["n"] = len(keep)
+        return out
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            keep = sort(conn)
+            out["n"] = sum(1 for i in keep if apply_status(conn, i, status, notes, rec if single else None, actor))
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    return out
+
+
 @app.post("/api/findings/{finding_id}/status", dependencies=[Depends(require_xhr)])
 async def set_status(finding_id: str, request: Request, user: str = Depends(require_auth)):
-    body = await request.json()
-    status = body.get("status")
-    if status not in STATUSES:
-        raise HTTPException(400, "bad status")
-    if status in LET_GO and not str(body.get("notes") or "").strip() and await asyncio.to_thread(_one_at_a_time, [finding_id]):
+    """A person's status for one item. seen_status: the status the item had on their page when it was drawn; an item that
+    changed since is left as it is (409 changed), and so is one with a fax going out (409 in_flight). A page from before
+    seen_status existed is refused for an item the daily run closed by itself. Paid takes the amount the payer paid."""
+    body = await _body_object(request)
+    status, notes, rec = _status_fields(body)
+    seen = body.get("seen_status")
+    if not _seen_ok(seen):
+        raise HTTPException(400, "The status your page showed could not be read. Reload the page.")
+    if status in LET_GO and not (notes or "").strip() and await asyncio.to_thread(_one_at_a_time, [finding_id]):
         raise HTTPException(400, "A claim the payer never answered, or one rejected before it reached the payer, is let go "
                                  "only with a note. Say why.")
-    rec = body.get("recovered_cents")
-    n = await asyncio.to_thread(_record_status, [finding_id], status, body.get("notes"), int(rec) if rec not in (None, "") else None, user)
-    if not n:
-        raise HTTPException(404, "finding not found")
+    await asyncio.to_thread(_person_status, [finding_id], status, notes, rec, user, {finding_id: seen} if seen else {}, True)
     return {"ok": True}
 
 
 @app.post("/api/findings/bulk-status", dependencies=[Depends(require_xhr)])
 async def bulk_status(request: Request, user: str = Depends(require_auth)):
-    body = await request.json()
-    ids = body.get("ids") or []
-    status = body.get("status")
-    if status not in STATUSES or not ids or not isinstance(ids, list) or len(ids) > 5000:
-        raise HTTPException(400, "bad request")
+    """A status for the items ticked on a list. seen (or seen_status): {finding_id: the status its row showed}; items that
+    changed since, or that have a fax going out, are left as they are and named in `changed` and `in_flight`. An id sent
+    twice counts once."""
+    body = await _body_object(request)
+    status, notes, _rec = _status_fields(body)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids or len(ids) > 5000 or not all(isinstance(i, str) and 0 < len(i) <= 200 for i in ids):
+        raise HTTPException(400, "Say which items: a list of item ids.")
+    ids = list(dict.fromkeys(ids))
+    seen = body.get("seen_status") if isinstance(body.get("seen_status"), dict) else body.get("seen")
+    if seen is not None and not (isinstance(seen, dict) and all(isinstance(k, str) and _seen_ok(v) for k, v in seen.items())):
+        raise HTTPException(400, "The statuses your page showed could not be read. Reload the page.")
     if status in LET_GO and await asyncio.to_thread(_one_at_a_time, ids):
         raise HTTPException(400, "Claims the payer never answered, or rejected before reaching it, are let go one at a time, "
                                  "with a note. Open each one.")
-    n = await asyncio.to_thread(_record_status, list(ids), status, body.get("notes"), None, user)
-    return {"ok": True, "updated": n}
+    out = await asyncio.to_thread(_person_status, ids, status, notes, None, user, {k: v for k, v in (seen or {}).items() if v}, False)
+    return {"ok": True, "updated": out["n"], "changed": out["changed"], "in_flight": out["in_flight"]}
 
 
 # --------------------------------------------------------------------------- rates and references
@@ -1328,9 +1513,13 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
     if len(text) < 3:
         return {"items": [], "more": False}
     up = re.sub(r"\s+", "", text).upper()
-    found = rows("SELECT patient_control_number pcn FROM claims WHERE patient_control_number >= ? AND patient_control_number < ? LIMIT 500",
-                 (up, up + "\uffff"))
-    found += [{"pcn": b} for b in (bill_of(up), up)]                      # any submission of a bill, answered or not
+    # a claim ID typed the way it looks elsewhere: dashes, a leading '#', a trailing period or comma do not matter
+    bare = re.sub(r"[-#]+", "", up).rstrip(".,;:")
+    found = []
+    for key in dict.fromkeys(k for k in (up, bare) if len(k) >= 3):
+        found += rows("SELECT patient_control_number pcn FROM claims WHERE patient_control_number >= ? AND patient_control_number < ? LIMIT 500",
+                      (key, key + "\uffff"))
+        found += [{"pcn": b} for b in (bill_of(key), key)]                # any submission of a bill, answered or not
     # the payer's claim number however it is typed: case, spaces, dashes and slashes do not matter; a start of 6 or more
     # characters, or any 8 in a row, also finds it
     norm = re.sub(r"[\s\-/]+", "", text).upper()
@@ -1359,7 +1548,8 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
         found += rows(f"SELECT c.patient_control_number pcn FROM claims c WHERE {clause} LIMIT 500", tuple(params))
     # and claims EMA holds that no payer has answered yet
     if has_table("ema_rows"):
-        found += rows("SELECT DISTINCT claim_id pcn FROM ema_rows WHERE claim_id >= ? AND claim_id < ? LIMIT 200", (up, up + "\uffff"))
+        for key in dict.fromkeys(k for k in (up, bare) if len(k) >= 3):
+            found += rows("SELECT DISTINCT claim_id pcn FROM ema_rows WHERE claim_id >= ? AND claim_id < ? LIMIT 200", (key, key + "\uffff"))
     bills: list[str] = []
     for r in found:
         b = bill_of(r["pcn"]) if r["pcn"] else None
@@ -1391,7 +1581,13 @@ def claims_search(q: Optional[str] = None, request: Request = None, _: str = Dep
                           charge_cents=max(((x["charge_cents"] or 0) for x in rem), default=0), paid_cents=sum((x["paid_cents"] or 0) for x in rem),
                           open_findings=len(open_ids), exact=(b == up)))
     items.sort(key=lambda x: (not x["exact"], -(int((x["last_payment"] or "0000-00-00").replace("-", "")))))
-    return {"items": items, "more": len(bills) > len(items) and len(items) >= 25}
+    out = {"items": items, "more": len(bills) > len(items) and len(items) >= 25}
+    if not items and runtime.serverless():
+        # this host's copy holds the claims of bills with items only: "nothing matches" would be a guess
+        site = (os.environ.get("REMITWATCH_SERVER_SITE") or "").strip()
+        out["partial"] = ("The copy of the data on this site holds only the claims that have items, so a paid claim with no item "
+                          "does not show here. Look it up " + (f"on the practice's server site ({site}) or " if site else "") + "in EMA.")
+    return out
 
 
 @app.get("/api/claims/view")
@@ -1483,11 +1679,12 @@ def _fee_payers(statuses: tuple = ("open", "in_progress"), payer_name: str | Non
         params += (payer_name,)
     by: dict[str, dict] = {}
     for r in rows(f"""SELECT finding_id, COALESCE(payer_name,'') pn, payer_group, month, COALESCE(shortfall_cents,0) c, evidence,
-                             COALESCE(appealed_at, status_changed_at) asked FROM findings WHERE {where} ORDER BY month""", params):
+                             COALESCE(appealed_at, status_changed_at) asked, status FROM findings WHERE {where} ORDER BY month""", params):
         p = by.setdefault(r["pn"], {"payer_name": r["pn"], "payer_group": r["payer_group"], "cents": 0, "cents12": 0, "months": set(),
-                                    "ids": [], "evidence": [], "asked": None})
+                                    "ids": [], "evidence": [], "asked": None, "seen": {}})
         p["cents"] += r["c"]
         p["ids"].append(r["finding_id"])
+        p["seen"][r["finding_id"]] = r["status"]         # what the page shows each one as: a change sent back with it (seen_status)
         p["evidence"].append(r["evidence"])
         if r["month"]:
             p["months"].add(r["month"])
@@ -2299,12 +2496,13 @@ def _cloud_sync_status() -> dict:
     lc = st.get("last_cycle") or {}
     newest = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d") if has_table("transactions") else None
     files = (one("SELECT MAX(ingested_at) last, MAX(CASE WHEN kind='835' THEN ingested_at END) last835 FROM files") or {}) if has_table("files") else {}
-    behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(newest).date()).days if newest else None
+    feed = _feed_day()
+    behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(feed).date()).days if feed else None
     return {"mode": "serverless", "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
             "interval_minutes": 0, "scheduler_running": False, "next_run": None, "cron_ready": bool(os.environ.get("CRON_SECRET")),
             "running": bool(st.get("running")), "running_since": (st.get("running") or {}).get("since"), "last_cycle": lc or None,
             "stalled_since": (st.get("stalled") or {}).get("since"), "memory_mb": lc.get("memory_mb"),
-            "last_sync": lc.get("finished"), "newest_payment_date": newest, "days_behind": behind, "has_data": st.get("has_data"),
+            "last_sync": lc.get("finished"), "newest_payment_date": newest, "feed_date": feed, "days_behind": behind, "has_data": st.get("has_data"),
             "last_file_ingested": files.get("last"), "last_remit_ingested": files.get("last835"), "storage_error": st.get("error"),
             "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
             "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
@@ -2556,7 +2754,10 @@ def appeals_build(finding_id: str = Form(...), text: str = Form(""), use_ai: str
     detail = finding_detail(finding_id, "ok")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (detail["finding"].get("claim_key"),)) if detail["finding"].get("claim_key") else None
     name = file.filename if (file is not None and data) else ""
-    packet = _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1")
+    if _note_identity(detail, raw_claim, name, data, text or None).get("code") == "several":
+        from .uploads import SEVERAL
+        raise HTTPException(400, SEVERAL)           # a report listing several patients is not this visit's note
+    packet = _store_packet(detail, raw_claim, name, data, text or None, use_ai == "1", source="person")
     if data and not runtime.serverless() and detail["finding"].get("claim_key"):
         # kept as a note uploaded for this item's visit too (remitwatch.uploads): a rebuild, and the visit's other items, find it
         try:
@@ -2599,12 +2800,56 @@ def _keep_packet(build) -> dict:
         conn.close()
 
 
-def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes | None, text: str | None, use_ai: bool) -> dict:
+def _visit_day(detail: dict, raw_claim: dict | None) -> str:
+    f, c = detail.get("finding") or {}, raw_claim or {}
+    return str(f.get("service_date") or c.get("service_date_start") or c.get("statement_from") or "")[:10]
+
+
+def _note_identity(detail: dict, raw_claim: dict | None, name: str | None, data: bytes | None, text: str | None) -> dict:
+    """What a note's own text shows about whose visit it is (uploads.note_identity), against the item's claim: the
+    patient's name, their EMA patient ID or record number, and the date of service."""
+    from . import uploads
+    from .notes import MAX_TEXT_CHARS, extract_text
+    try:
+        body = text[:MAX_TEXT_CHARS] if (text and not name) else extract_text(name or "note", data or (text or "").encode("utf-8"))[0]
+    except ValueError:
+        body = ""
+    c, f = raw_claim or {}, detail.get("finding") or {}
+    ids = _ema_patient_ids(f.get("patient_control_number")) + ([c["medical_record_number"]] if c.get("medical_record_number") else [])
+    return uploads.note_identity(body, c.get("patient_last") or c.get("corrected_patient_last"),
+                                 c.get("patient_first") or c.get("corrected_patient_first"), _visit_day(detail, raw_claim), ids)
+
+
+def _packet_identity(packet_id: str, p: dict, detail: dict, raw_claim: dict | None) -> dict:
+    """The note check kept with a packet when it was built; for a packet built before the check, the note read again where
+    the store keeps it (a server). A packet whose note cannot be read again waits for a person."""
+    got = (p.get("analysis") or {}).get("note_identity")
+    if isinstance(got, dict) and "ok" in got:
+        return got
+    if not runtime.serverless() and has_table("appeal_packets"):
+        r = one("SELECT note_name, note_blob FROM appeal_packets WHERE packet_id=?", (packet_id,))
+        if r and r.get("note_blob") is not None:
+            return _note_identity(detail, raw_claim, r.get("note_name") or "note", r["note_blob"], None)
+    return {"ok": False, "code": "unknown", "why": "The note this packet was built from cannot be read again to see whose note it is."}
+
+
+def _store_packet(detail: dict, raw_claim: dict | None, name: str, data: bytes | None, text: str | None, use_ai: bool,
+                  source: str = "person") -> dict:
     """Build the packet from a note (uploaded, pasted or read from EMA) and keep it. A review that found the note short is
     also kept as a lesson, for the suggested templates. The PDF goes to the payer and carries the real identifiers; the
-    letter text in the answer does only when names are switched on."""
+    letter text in the answer does only when names are switched on. What the note's text shows about whose visit it is
+    is kept with it (analysis.note_identity): a note read from the patient's own chart in EMA ('ema') is theirs by EMA's
+    two identifiers; one uploaded or attached by a person ('upload', 'person') only by what its text shows."""
     from .notes import build_from_note, lesson
-    packet = _keep_packet(lambda conn: build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai))
+    ident = {"ok": True} if source == "ema" else _note_identity(detail, raw_claim, name, data, text)
+
+    def build(conn):
+        out = build_from_note(conn, detail, raw_claim, name, data, pasted_text=text, reveal=SHOW_PHI, use_ai=use_ai)
+        out.setdefault("analysis", {})["note_identity"] = ident
+        conn.execute("UPDATE appeal_packets SET analysis=? WHERE packet_id=?", (json.dumps(out["analysis"]), out["packet_id"]))
+        conn.commit()
+        return out
+    packet = _keep_packet(build)
     les = lesson(packet, detail)
     if les:
         try:
@@ -2746,7 +2991,8 @@ def appeals_from_ema(body: dict = Body(default={}), _: str = Depends(require_aut
                 "more than one note fits, a person picks one in the item" if res["status"] == "ambiguous" else "no signed note found")))
         return out
     note = res["note"]
-    packet = _store_packet(detail, raw_claim, note["filename"], note["data"], None, body.get("use_ai", True) not in (False, 0, "0"))
+    packet = _store_packet(detail, raw_claim, note["filename"], note["data"], None, _yes_ai(body.get("use_ai", True)),
+                           source="upload" if res.get("source") == "upload" else "ema")
     out.update(status="built", packet=packet, note={k: v for k, v in note.items() if k != "data"})
     return out
 
@@ -3047,12 +3293,35 @@ def _now_iso() -> str:
 STALE_APPEAL_DAYS = int(os.environ.get("REMITWATCH_STALE_APPEAL_DAYS", "14"))
 
 
-def _data_behind_days() -> int | None:
-    """Days since the newest payment in the store (None without remittances): past two weeks or so, a claim on the lists
-    may have been paid since and nobody here can see it."""
+def _feed_day() -> str | None:
+    """The day the remittance feed reaches for most payers (detect.feed_date): worked out from the store on a server. A
+    serverless host's copy holds only the lines behind items, so it reads the date the last analysis worked out on the
+    full store, else the newest payment, never after today."""
     if not has_table("transactions"):
         return None
-    d = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d")
+    from .detect import FEED_META, feed_date
+    today = datetime.now(timezone.utc).date().isoformat()
+    conn = db()
+    try:
+        if not runtime.serverless():
+            return feed_date(conn, today)
+        r = conn.execute("SELECT value FROM meta WHERE key=?", (FEED_META,)).fetchone() if \
+            conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() else None
+        try:
+            d = json.loads(r[0]).get("date") if r else None
+        except (TypeError, ValueError, AttributeError):
+            d = None
+        if not d:
+            d = conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+        return min(str(d)[:10], today) if d else None
+    finally:
+        conn.close()
+
+
+def _data_behind_days() -> int | None:
+    """Days since the day the remittances reach for most payers (None without remittances): past two weeks or so, a claim
+    on the lists may have been paid since and nobody here can see it. One stray newer file from one payer does not lift it."""
+    d = _feed_day()
     try:
         return (datetime.now(timezone.utc).date() - datetime.fromisoformat(d[:10]).date()).days if d else None
     except ValueError:
@@ -3242,6 +3511,120 @@ def _mark_sent_appeal(r: dict, actor: str) -> bool:
     _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(r.get('number'))} "
                                       f"(fax {r.get('provider_id') or 'not settled yet'}).", None, actor)
     return True
+
+
+# ---- an appeal being prepared and sent: in flight from the first step (the note looked up, Claude's review) to the end of
+# the send, so a person's status change and a second press wait for it instead of undoing it. A row in the store's meta
+# table on a server; on a serverless host that sends, a marker file in the state folder that every instance can see.
+IN_FLIGHT_S = RESERVE_STALE_S           # longer than any send takes: a marker or a reservation older than this is not in flight
+PREP_KEY = "fax:prep:"
+PREP_DIR = "fax-prep"
+
+
+def _prep_name(fid: str) -> str:
+    return f"{PREP_DIR}/{hashlib.sha256(str(fid).encode()).hexdigest()[:24]}.json"
+
+
+def _young(at: str | None) -> bool:
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(at)).total_seconds() < IN_FLIGHT_S
+    except (TypeError, ValueError):
+        return False
+
+
+def _prep_take(fid: str) -> str | None:
+    """Mark an appeal for this item as being prepared; None when one already is (and is not older than a send takes)."""
+    token = secrets.token_hex(8)
+    body = json.dumps({"token": token, "at": _now_iso()})
+    if runtime.serverless():
+        from .state import Conflict
+        cloud, st = _cloud_state()
+        name = _prep_name(fid)
+        for _ in range(2):
+            try:
+                st.put(name, body.encode(), mode="add")
+                return token
+            except Conflict:
+                m = st.meta(name)
+                if m is None:
+                    continue
+                if cloud._age_seconds(m.get("modified")) < IN_FLIGHT_S:
+                    return None
+                try:
+                    st.put(name, body.encode(), mode="update", rev=m["rev"])
+                    return token
+                except Conflict:
+                    return None
+        return None
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            r = conn.execute("SELECT value FROM meta WHERE key=?", (PREP_KEY + fid,)).fetchone()
+            try:
+                held = json.loads(r[0]) if r else {}
+            except ValueError:
+                held = {}
+            if held and _young(held.get("at")):
+                conn.execute("ROLLBACK")
+                return None
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (PREP_KEY + fid, body))
+            conn.execute("COMMIT")
+            return token
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def _prep_release(fid: str, token: str) -> None:
+    try:
+        if runtime.serverless():
+            cloud, st = _cloud_state()
+            raw = st.get(_prep_name(fid))
+            if raw and json.loads(raw).get("token") == token:
+                st.delete(_prep_name(fid))
+            return
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        try:
+            conn.execute("DELETE FROM meta WHERE key=? AND value LIKE ?", (PREP_KEY + fid, f'%"token": "{token}"%'))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass            # a marker left behind is not in flight once it is older than a send takes
+
+
+def _preparing(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
+    """Which of these items have an appeal being prepared now (_prep_take)."""
+    if not ids:
+        return set()
+    if runtime.serverless():
+        from . import fax
+        if fax.provider() is None:
+            return set()            # this host sends nothing: nothing of it can be in flight here
+        cloud, st = _cloud_state()
+        want = {_prep_name(i): i for i in ids}
+        try:
+            listed = st.list(PREP_DIR)
+        except Exception:
+            return set()
+        return {want[m["name"]] for m in listed if m.get("name") in want and cloud._age_seconds(m.get("modified")) < IN_FLIGHT_S}
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
+        return set()
+    out: set[str] = set()
+    for k in range(0, len(ids), 500):
+        part = [PREP_KEY + i for i in ids[k:k + 500]]
+        for key, value in conn.execute(f"SELECT key, value FROM meta WHERE key IN ({','.join('?' * len(part))})", part):
+            try:
+                if _young(json.loads(value).get("at")):
+                    out.add(key[len(PREP_KEY):])
+            except (TypeError, ValueError, AttributeError):
+                pass
+    return out
 
 
 def _fax_doc(prov, f: dict, number: str, packet_pdf: bytes, subject: str | None, front: bytes | None = None,
@@ -3533,7 +3916,8 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
 
     def held(code: str, reason: str, **kw) -> dict:
         return dict(out, status="held", code=code, reason=reason, **kw)
-    if body.get("bulk") and not bulk_appeals_on():
+    # a yes that skips a hold counts only as JSON true: "false", "no" or "0" sent as text is not a yes
+    if body.get("bulk") is True and not bulk_appeals_on():
         return held("bulk_paused", BULK_PAUSED)
     if kind not in fax.APPEALABLE:
         return held("not_appealable", {"fix": "This one is corrected in EMA and sent again as a claim, not appealed.",
@@ -3546,14 +3930,14 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed. Only a
     # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
     behind = _data_behind_days()
-    if behind is not None and behind > STALE_APPEAL_DAYS and not body.get("stale_ok"):
+    if behind is not None and behind > STALE_APPEAL_DAYS and body.get("stale_ok") is not True:
         return held("stale", f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since. "
                              "Get the remittances current first (Data tab, or the TriZetto feed); \"Still unpaid in EMA: fax it anyway\" in the item sends it now.")
     # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
     # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
     if (f.get("signal") == "DOWNCODE_CHARGE" or (f.get("signal") == "DOWNCODE_VS_BILLED" and ev.get("billed_source") != "837 claim file")) \
-            and not body.get("confirmed"):
+            and body.get("confirmed") is not True:
         billed = ev.get("billed_code") or ev.get("charge_implies") or "the higher level"
         return held("check_code", f"The remittance does not say the payer changed the code. Check in EMA that {billed} went out on the claim, "
                                   "then press \"It went out as billed: fax it\" in the item.")
@@ -3572,15 +3956,39 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         return held("by_hand", fax.shared_why(f.get("payer_group")))
     if not number:
         return held("no_number", f"No appeal fax number is saved for {f.get('payer_group') or 'this payer'}. Add it on the Faxes page.")
+    # from here to the end of the send the appeal is in flight: a second press, and a person's status change, wait for it
+    token = _prep_take(fid)
+    if token is None:
+        raise Refused(409, "in_flight", IN_FLIGHT)
+    try:
+        return _appeal_after_holds(body, user, fid, detail, f, kind, out, held, again, prov, number)
+    finally:
+        _prep_release(fid, token)
+
+
+def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, kind: str, out: dict, held, again: bool, prov, number: str) -> dict:
+    """appeals_send from the moment the appeal is in flight: what went out for it before, the note and the packet, the
+    holds on the packet, the fax."""
+    from . import fax
     live = _faxes_out(fid)
-    if live:
-        # its appeal went out but the item was never marked Sent (the run stopped between the two), and nobody changed it
-        # since: marked now, so its follow-ups start
-        _mark_sent_appeal(live[-1], user)
+    took = [x for x in live if x.get("provider_id")]
+    if took:
+        # its appeal went out (the line took it) but the item was never marked Sent (the run stopped between the two), and
+        # nobody changed it since: marked now, so its follow-ups start
+        _mark_sent_appeal(took[-1], user)
         return dict(out, status="skipped", reason="Its appeal was already faxed.")
+    if live:
+        # reserved and never taken by the line: going out now while it can still be; else nobody knows whether it went,
+        # and it is never counted as sent (the hourly fax run asks SRFax, and the Faxes page lets a person say)
+        x = live[-1]
+        if x.get("status") == "sending" and not x.get("error") and _young(x.get("created_at")):
+            raise Refused(409, "in_flight", IN_FLIGHT)
+        when = str(x.get("created_at") or "")[:16].replace("T", " ")
+        return held("unknown_send", f"A fax for this item was started at {when} UTC and RemitWatch does not know whether it went out. "
+                                    "Look on the Faxes page before sending it again.")
     raw_claim = one("SELECT * FROM claims WHERE claim_key=?", (f["claim_key"],))
-    use_ai = body.get("use_ai", True) not in (False, 0, "0")
-    pk = None if body.get("rebuild") else next(iter(_packets_for(fid)), None)
+    use_ai = _yes_ai(body.get("use_ai", True))
+    pk = None if body.get("rebuild") is True else next(iter(_packets_for(fid)), None)
     if pk and pk.get("mode") == "template" and use_ai and os.environ.get("ANTHROPIC_API_KEY") and kind != "rate":
         pk = None           # built before the review could run: now it can
     if pk and _packet_problem(pk["packet_id"], f, first=True):
@@ -3609,7 +4017,8 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
             return held("no_note", res["reason"] if res.get("source") == "upload" else
                         "EMA has no signed note for this visit: sign it in EMA, or upload the note on the Upload page or in the item.")
         note = {k: v for k, v in res["note"].items() if k != "data"}
-        packet_id = _store_packet(detail, raw_claim, res["note"]["filename"], res["note"]["data"], None, use_ai)["packet_id"]
+        packet_id = _store_packet(detail, raw_claim, res["note"]["filename"], res["note"]["data"], None, use_ai,
+                                  source="upload" if res.get("source") == "upload" else "ema")["packet_id"]
     out["packet_id"] = packet_id
     p = _stored_packet(packet_id)
     if not p or not p.get("pdf"):
@@ -3617,6 +4026,20 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     why = _packet_problem(packet_id, f, first=True)
     if why and "quotations" not in why:
         return held("no_packet", f"The packet cannot go: {why} Build it again in the item.")
+    # the note is this patient's and this visit's, by what its text shows; else a person opened it and said so
+    checked = None
+    if p.get("mode") != "letter":
+        ident = _packet_identity(packet_id, p, detail, raw_claim)
+        if not ident.get("ok"):
+            dos = _visit_day(detail, raw_claim)
+            same = body.get("packet_id") in (None, packet_id)
+            if ident.get("code") == "several" or body.get("note_checked") is not True or not same:
+                return held("note_check", f"Check the visit note before it goes: {ident.get('why')} "
+                            + ("Build the packet again from this visit's own note." if ident.get("code") == "several" else
+                               f"Open the packet, and if the note is this patient's visit on {dos}, tick \"I opened this note: it is this "
+                               f"patient's visit on {dos}\" and send it."),
+                            confirm=ident.get("code") != "several", visit_date=dos)
+            checked = dos
     a = p.get("analysis") or {}
     if a.get("recommendation") == "do_not_appeal":
         return held("review_no", "Claude's review says the note does not support it: " + (a.get("recommendation_reason") or "")
@@ -3638,6 +4061,9 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         doc, pages = _fax_doc(prov, f, number, p["pdf"], p.get("subject"))
     except Exception as exc:
         return held("no_packet", f"The fax could not be put together ({type(exc).__name__}). Build the packet again in the item.")
+    if checked:
+        _record_action({"kind": "event", "event": "note_check", "finding_id": fid, "actor": user, "at": _fax_now(),
+                        "note": f"{user} opened the note and said it is this patient's visit on {checked}."})
 
     def still_ok(conn) -> str | None:
         # checked again in the step that reserves the send: nothing went out for it meanwhile, it is still open, and the
@@ -3659,6 +4085,13 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         return held("fax_error", str(exc))
     _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages).", None, user)
     return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), pages=pages, note=note)
+
+
+def _yes_ai(v: Any) -> bool:
+    """Claude's review is asked for unless the caller said no, in any of the ways a no is written."""
+    if v is False or (isinstance(v, (int, float)) and not isinstance(v, bool) and v == 0):
+        return False
+    return not (isinstance(v, str) and v.strip().lower() in ("0", "false", "no", "off"))
 
 
 @app.get("/api/appeals/appealable")
@@ -3805,6 +4238,8 @@ def fax_payer_save(body: dict = Body(default={}), user: str = Depends(require_ow
     number = str(body.get("number") or "").strip()
     if not pg or len(pg) > 200 or purpose not in FAX_PURPOSES:
         raise HTTPException(400, "payer_group and purpose ('appeal' or 'level_2') are required")
+    if number and any(ch.isdigit() and ch not in "0123456789" for ch in number):
+        raise HTTPException(400, "Type the fax number with the ordinary digits 0 to 9.")
     if number and not fax.digits(number):
         raise HTTPException(400, "That is not a US fax number (ten digits).")
     if number and fax.shared_group(pg):
@@ -4346,14 +4781,48 @@ def _rules_in_force() -> str:
         conn.close()
 
 
+def _hide_size(pg: str, sig: str) -> dict:
+    """What hiding one reason for one payer lets go now, from the copy the dashboard serves: the open items, their dollars,
+    and how many of them are still inside their filing window."""
+    from .actions import hide_candidates
+    conn = db()
+    try:
+        ids = hide_candidates(conn, pg, sig, _now_iso())
+        n = cents = live_n = live_cents = 0
+        today = datetime.now(timezone.utc).date().isoformat()
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            for c, dl in conn.execute(f"SELECT COALESCE(shortfall_cents,0), appeal_deadline FROM findings WHERE finding_id IN ({','.join('?' * len(part))})", part):
+                n, cents = n + 1, cents + c
+                if dl and dl >= today:
+                    live_n, live_cents = live_n + 1, live_cents + c
+        return {"n": n, "cents": cents, "in_window_n": live_n, "in_window_cents": live_cents}
+    finally:
+        conn.close()
+
+
+@app.get("/api/hide/preview")
+def hide_preview(payer_group: str = Query(..., max_length=200), signal: str = Query(..., max_length=60), _: str = Depends(require_auth)):
+    """Before a reason is hidden for a payer: how many open items it lets go now, their dollars, how many of them are still
+    inside their filing window, and that every future item of that reason for that payer will be let go too."""
+    from .actions import NEVER_HIDDEN
+    if not re.fullmatch(r"[A-Z0-9_]{2,60}", signal or "") or signal in NEVER_HIDDEN:
+        raise HTTPException(400, "That reason is not hidden for a payer.")
+    return dict(_hide_size(payer_group.strip(), signal), future=True, owner=bool(OWNER_PASSWORD))
+
+
 @app.post("/api/hide", dependencies=[Depends(require_xhr)])
-def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
+def hide_add(request: Request, body: dict = Body(default={}), user: str = Depends(require_auth)):
     """Hide one reason for one payer: its open items go to Let go with the note, and so do new ones; nothing a person
-    has worked is touched. remove: true takes the rule away and reopens what it hid."""
+    has worked is touched. It takes the owner's password where one is set (as the Providers tab does), a typed reason,
+    and `confirm`: the number of items the person was shown, which must be what it lets go now (409 changed when not).
+    remove: true (JSON true) takes the rule away and reopens what it hid."""
     pg, sig = str(body.get("payer_group") or "").strip(), str(body.get("signal") or "").strip()
     if not pg or not sig or len(pg) > 200 or not re.fullmatch(r"[A-Z0-9_]{2,60}", sig):
         raise HTTPException(400, "payer_group and signal are required")
-    if body.get("remove"):
+    if body.get("remove") is not None and body.get("remove") is not True:
+        raise HTTPException(400, "remove must be true or left out.")
+    if body.get("remove") is True:
         if not (has_table("hide_rules") and one(f"SELECT 1 FROM hide_rules WHERE payer_group=? AND signal=? AND {_rules_in_force()}", (pg, sig))):
             raise HTTPException(404, "No such rule.")
         _record_action({"kind": "hide_rule", "op": "remove", "payer_group": pg, "signal": sig, "actor": user})
@@ -4364,9 +4833,27 @@ def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
                                  "asked for yet. Let them go one at a time, with a note.")
     if not one("SELECT 1 FROM findings WHERE payer_group=? AND signal=? LIMIT 1", (pg, sig)):
         raise HTTPException(404, "Nothing of that kind for that payer.")
+    # a policy decision for a payer: the owner's, as the Providers tab asks for it (wrong tries counted the same way)
+    st = owner_state(request)
+    if st == "unusable":
+        raise HTTPException(503, "Hiding is switched off: the owner's password cannot be used as it is set. The setup page says why.")
+    if st == "blocked":
+        raise HTTPException(429, "Too many wrong tries at the owner's password from this address. Wait ten minutes.")
+    if st != "open":
+        raise HTTPException(403, "That is not the owner's password." if st == "wrong" else "Hiding a reason for a payer needs the owner's password.")
+    note = body.get("note")
+    if not isinstance(note, str) or not note.strip():
+        raise HTTPException(400, "Type why this payer does not pay these (shown on each item).")
+    if len(note) > 300:
+        raise HTTPException(400, "Keep the reason to 300 characters.")
+    confirm = _whole_cents(body.get("confirm"))
+    if confirm is None:
+        raise HTTPException(400, "Type the number of items it lets go, to confirm.")
+    size = _hide_size(pg, sig)
+    if confirm != size["n"]:
+        raise Refused(409, "changed", f"The count changed: it lets go {size['n']} items now, not {confirm}. Look at the numbers again.", **size)
     before = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
-    _record_action({"kind": "hide_rule", "op": "add", "payer_group": pg, "signal": sig, "actor": user,
-                    "note": str(body.get("note") or "")[:300]})
+    _record_action({"kind": "hide_rule", "op": "add", "payer_group": pg, "signal": sig, "actor": _owner_actor(user), "note": note.strip()})
     after = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
     return {"ok": True, "hidden": before - after}
 

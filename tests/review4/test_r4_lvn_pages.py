@@ -64,7 +64,8 @@ def test_every_route_answers_on_a_store_the_live_release_left(tmp_path, monkeypa
         if r.get("claim_key") or r["signal"] in ("TAKEBACK", "FEE_SKIM"):
             get(f"/api/appeal/{r['finding_id']}")
     one = next(r for r in rows if r["signal"] == "DENIED_AUTH" or r["category"] == "denial")
-    p = c.post(f"/api/findings/{one['finding_id']}/status", json={"status": "in_progress"}, headers=XHR)
+    # a page sends the status it showed (hotfix 2): without it, an item the run closed by itself is left as it is
+    p = c.post(f"/api/findings/{one['finding_id']}/status", json={"status": "in_progress", "seen_status": one["status"]}, headers=XHR)
     if p.status_code != 200:
         failures.append(("status", p.status_code, p.text[:300]))
     report = run_tree(REL, db, """

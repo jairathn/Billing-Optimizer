@@ -214,7 +214,9 @@ def save_raw(state, store) -> dict:
 # --------------------------------------------------------------------------- the journal
 
 def record_action(state, action: dict) -> str:
-    action = dict(action, at=action.get("at") or _now())
+    # each entry carries its own id: replays tell entries apart by it, not by their second, status and person (three
+    # changes by one person within one second are three changes)
+    action = dict(action, at=action.get("at") or _now(), entry=action.get("entry") or secrets.token_hex(8))
     name = f"{ACTIONS}/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}-{secrets.token_hex(3)}.json"
     state.put(name, json.dumps(action).encode())
     return name
@@ -249,7 +251,7 @@ def apply_actions(conn: sqlite3.Connection, entries: list[tuple[str, dict]]) -> 
         try:
             if a.get("kind") == "bulk_status":
                 found = [actions_mod.apply_status(conn, fid, a["status"], a.get("notes"), None, a.get("actor") or "", a.get("at"),
-                                                  (a.get("seen") or {}).get(fid))
+                                                  (a.get("seen") or {}).get(fid), a.get("entry"))
                          for fid in a.get("ids") or []]
                 ok = all(found)
             else:
@@ -746,7 +748,7 @@ class ServingCopy:
         st = self.state()
         if st is None:
             raise RuntimeError("storage is not configured")
-        action = dict(action, at=action.get("at") or _now())
+        action = dict(action, at=action.get("at") or _now(), entry=action.get("entry") or secrets.token_hex(8))
         name = record_action(st, action)
         self.ensure()
         with self._lock:

@@ -179,18 +179,24 @@ def rules_in_force(conn: sqlite3.Connection) -> str:
     return "removed_at IS NULL" if "removed_at" in have else "1=1"
 
 
-def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str) -> int:
-    """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands) and any
-    whose status was decided after `at` (an entry applied again must not undo what came after it)."""
+def hide_candidates(conn: sqlite3.Connection, payer_group: str, signal: str, at: str) -> list[str]:
+    """The open items one rule lets go now: what the hide preview counts and what _hide_matching moves."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "findings" not in have or signal in NEVER_HIDDEN:
-        return 0
+        return []
     touched, params = "", [payer_group, signal]
     if "finding_events" in have:
         touched = f"AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='manual' OR (kind IN {DECIDING_KINDS} AND at > ?))"
         params.append(at)
-    ids = [r[0] for r in conn.execute(f"""SELECT finding_id FROM findings WHERE payer_group=? AND signal=? AND status='open'
-                                          AND COALESCE(stale,0)=0 {touched}""", tuple(params))]
+    return [r[0] for r in conn.execute(f"""SELECT finding_id FROM findings WHERE payer_group=? AND signal=? AND status='open'
+                                           AND COALESCE(stale,0)=0 {touched}""", tuple(params))]
+
+
+def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str) -> int:
+    """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands) and any
+    whose status was decided after `at` (an entry applied again must not undo what came after it)."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    ids = hide_candidates(conn, payer_group, signal, at)
     for fid in ids:
         conn.execute("UPDATE findings SET status='dismissed', status_changed_at=? WHERE finding_id=?", (at, fid))
         if "finding_events" in have:
@@ -249,11 +255,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+JOURNAL_RUN = "journal:"        # a manual event's run_id: the journal entry it came from, so a replay applies it once
+
+
 def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: str | None = None, recovered_cents: int | None = None,
-                 actor: str = "", at: str | None = None, seen: str | None = None) -> bool:
+                 actor: str = "", at: str | None = None, seen: str | None = None, entry: str | None = None) -> bool:
     """Set a finding's status and log the change. Returns False when the finding does not exist. `seen` is the status the
     person was looking at when they made the change (recorded in the journal on a serverless host): it is logged as the
-    status they changed from, because the copy this is replayed on may have moved since."""
+    status they changed from, because the copy this is replayed on may have moved since. `entry`: the journal entry's own
+    id; an entry is applied once by that id. An entry written before entries had one is recognised as before."""
     if status not in STATUSES:
         raise ValueError("bad status")
     conn.row_factory = sqlite3.Row
@@ -261,8 +271,12 @@ def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: 
     if not r:
         return False
     now = at or _now()
-    if at and conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND at=? AND kind='manual' AND to_status=? AND COALESCE(actor,'')=?",
-                           (finding_id, at, status, actor or "")).fetchone():
+    if entry:
+        if conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND kind='manual' AND run_id=?",
+                        (finding_id, JOURNAL_RUN + entry)).fetchone():
+            return True     # a journal entry being replayed: it is already in this copy
+    elif at and conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND at=? AND kind='manual' AND to_status=? AND COALESCE(actor,'')=?",
+                             (finding_id, at, status, actor or "")).fetchone():
         return True     # a journal entry being replayed: it is already in this copy
     recovered = (recovered_cents if recovered_cents is not None else r["shortfall_cents"]) if status == "resolved" else None
     # A person's status replaces whatever the automatic resolution recorded: its note no longer describes the finding, and
@@ -271,8 +285,9 @@ def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: 
                     appealed_at=CASE WHEN ?='appealed' AND appealed_at IS NULL THEN ? ELSE appealed_at END, auto_note=NULL, prev_status=NULL
                     WHERE finding_id=?""",
                  (status, notes, now, recovered, now[:10] if status == "resolved" else None, status, now, finding_id))
-    conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) VALUES (?,?,?,?,?,?,?,?)",
-                 (finding_id, now, "manual", seen or r["status"], status, recovered if status == "resolved" else r["shortfall_cents"], actor, notes))
+    conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note, run_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (finding_id, now, "manual", seen or r["status"], status, recovered if status == "resolved" else r["shortfall_cents"], actor, notes,
+                  JOURNAL_RUN + entry if entry else None))
     return True
 
 
@@ -285,7 +300,7 @@ def apply(conn: sqlite3.Connection, action: dict) -> bool:
     kind = action.get("kind")
     if kind == "status":
         return apply_status(conn, action["finding_id"], action["status"], action.get("notes"), action.get("recovered_cents"),
-                            action.get("actor") or "", action.get("at"), action.get("seen"))
+                            action.get("actor") or "", action.get("at"), action.get("seen"), action.get("entry"))
     if kind == "alert_ack":
         apply_alert_ack(conn, action["alert_id"], action.get("at"))
         return True
