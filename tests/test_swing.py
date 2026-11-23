@@ -270,7 +270,8 @@ def test_each_alarm_level_is_exact(kind, tmp_path, what, moves, step):
             bump = extra if i == 0 else 0
             after[cat] = (base[cat][0] + n + bump * step[0], base[cat][1] + cents + bump * step[1])
         for rid, at, snap in (("r1", RUN1, base), ("r2", RUN2, after)):
-            c.execute("INSERT INTO detection_runs (run_id, started_at, finished_at, version) VALUES (?,?,?,'same')", (rid, at, at))
+            # two runs under this code's own rules: a pair whose later run ran under other rules is history (CH-3)
+            c.execute("INSERT INTO detection_runs (run_id, started_at, finished_at, version) VALUES (?,?,?,?)", (rid, at, at, detect.DETECT_VERSION))
             c.executemany("INSERT INTO progress_snapshots (run_id, at, category, status, n, cents) VALUES (?,?,?,?,?,?)",
                           [(rid, at, cat, "open", n, cents) for cat, (n, cents) in snap.items()])
         c.commit()
@@ -316,6 +317,68 @@ def test_a_release_that_changed_the_rules_gives_info_not_high(kind, tmp_path, mo
     assert a["severity"] == "info" and a["detail"]["rules_changed"] is True
     assert "release" in a["title"]
     assert any("The rules changed between the two runs" in x and "9.9-invented" in x for x in a["detail"]["lines"])
+    store.close()
+
+
+def _flood_under_old_rules(store: Store, tmp_path, monkeypatch) -> str:
+    """Runs r1 (a normal list) and r2 (a flood of 1,600 items) under rules older than this code's, as the live release
+    left its store: that release had no alarm, so nothing was raised then. Returns this code's own rules version."""
+    new = detect.DETECT_VERSION
+    monkeypatch.setattr(detect, "DETECT_VERSION", "2.6-invented")
+    world(store, tmp_path)
+    read(store, write(tmp_path / "in", denials(10000, 1600), "flood"), READ2)
+    detect_at(store, "r2", RUN2)
+    monkeypatch.setattr(detect, "DETECT_VERSION", new)
+    return new
+
+
+def test_after_a_release_two_runs_under_the_old_rules_are_history(kind, tmp_path, monkeypatch):
+    """Misuse check CH-3: the release's first run analyses again under its new rules. A pair of runs that both ran under
+    the old rules is history: the old code's own flood is not raised now as a high alert, on every page for a week, beside
+    the release's info alert. A run under the new rules is compared with the run before it as always."""
+    store = new_store(kind, tmp_path)
+    _flood_under_old_rules(store, tmp_path, monkeypatch)
+    # the release's first run: its rules no longer read the flood's files (taken out here), so 1,600 items leave the list
+    store.conn.execute("UPDATE transactions SET superseded=1 WHERE transaction_key IN (SELECT DISTINCT transaction_key FROM claims "
+                       "WHERE patient_control_number >= 'CB0010000' AND patient_control_number < 'CB0012000')")
+    store.conn.commit()
+    detect_at(store, "r3", RUN3)
+    run_alerts(store.conn, today=DAY3)
+    got = swings(store.conn, "new")
+    assert [(x["scope"], x["severity"]) for x in got] == [("r3", "info")], [(x["scope"], x["severity"], x["title"]) for x in got]
+    [a] = got
+    assert a["detail"]["rules_changed"] is True and a["detail"]["rules"] == ["2.6-invented", detect.DETECT_VERSION]
+    assert a["detail"]["change"]["n"] == -1600 and "under new rules from a release" in a["title"]
+    # a flood under the new rules is raised high, as before
+    read(store, write(tmp_path / "in", denials(30000, 1600), "flood-later"), "2026-11-23T09:00:00+00:00")
+    detect_at(store, "r4", "2026-11-23T10:17:00+00:00")
+    run_alerts(store.conn, today="2026-11-23")
+    got = {x["scope"]: x for x in swings(store.conn, "new")}
+    assert sorted(got) == ["r3", "r4"] and got["r4"]["severity"] == "high" and got["r4"]["detail"]["rules_changed"] is False
+    store.close()
+
+
+def test_an_alert_raised_before_a_release_keeps_its_week(kind, tmp_path, monkeypatch):
+    """CH-3's other half: an alert raised while the old rules were this code's own (two runs under the rules of the day)
+    stays on the pages for its week after a release, with the numbers it was raised with, and clears seven days after the
+    run that moved."""
+    store = new_store(kind, tmp_path)
+    new = detect.DETECT_VERSION
+    monkeypatch.setattr(detect, "DETECT_VERSION", "2.8-invented")
+    world(store, tmp_path)
+    read(store, write(tmp_path / "in", denials(10000, 1600), "flood"), READ2)
+    detect_at(store, "r2", RUN2)
+    run_alerts(store.conn, today=DAY2)
+    [a] = swings(store.conn, "new")
+    assert a["severity"] == "high" and a["scope"] == "r2"
+    monkeypatch.setattr(detect, "DETECT_VERSION", new)          # the release: this code's own rules
+    detect_at(store, "r3", RUN3)                                # the same files under the new rules: nothing moves
+    for day in (DAY3, "2026-11-27"):
+        run_alerts(store.conn, today=day)
+        [b] = swings(store.conn, "new")
+        assert (b["alert_id"], b["title"], b["severity"]) == (a["alert_id"], a["title"], "high"), day
+    run_alerts(store.conn, today="2026-11-28")                  # seven days after the run that moved
+    assert swings(store.conn, "new") == [] and [x["alert_id"] for x in swings(store.conn, "cleared")] == [a["alert_id"]]
     store.close()
 
 

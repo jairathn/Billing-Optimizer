@@ -441,10 +441,13 @@ class AlertEngine:
     def swing_rule(self) -> None:
         """SWING: one detection run added or removed far more open items or dollars than a run normally does (the levels,
         and how they were set, are above SWING_RISE_ITEMS). Every pair of consecutive runs whose later run is less than
-        SWING_DAYS old is compared, so the alert is raised again by every run for seven days after the run that moved and
-        never clears itself at the next quiet run; one a person acknowledged keeps that status (run() never resets it).
+        SWING_DAYS old and ran under this code's rules (DETECT_VERSION) is compared, so the alert is raised again by every
+        run for seven days after the run that moved and never clears itself at the next quiet run; one a person
+        acknowledged keeps that status (run() never resets it). A pair whose later run ran under other rules is history
+        (misuse check CH-3): after a release, the old rules' own runs are not raised again as a big change.
         When the rules version changed between the two runs (a release re-analyses every claim once) the alert says so
         and is info, not high."""
+        from .detect import DETECT_VERSION      # read when the rule runs: the rules of the code that runs it
         have = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if not {"detection_runs", "progress_snapshots"} <= have:
             return
@@ -458,7 +461,7 @@ class AlertEngine:
         runs = [dict(r) for r in self.conn.execute("""SELECT run_id, started_at, version FROM detection_runs WHERE started_at IS NOT NULL
                                                      ORDER BY finished_at, started_at, run_id""")]
         for before, after in zip(runs, runs[1:]):
-            if recent(after["started_at"]):
+            if recent(after["started_at"]) and after.get("version") == DETECT_VERSION:
                 m = swing_between(self.conn, before, after)
                 if m and m["over"]:
                     self._raise_swing(m)
