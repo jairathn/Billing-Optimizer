@@ -163,9 +163,69 @@ class AuthenticationException(SSHException):
     (FaxError("SRFax did not answer (ReadTimeout).", maybe_sent=False), True),
     (ValueError("invalid literal for int()"), False),               # a code bug is never retried
     (KeyError("work_state"), False),
+    # a code bug whose message happens to hold a network word or a status number is still a code bug
+    (TypeError("pull() got an unexpected keyword argument 'timeout'"), False),     # a library changed its signature
+    (KeyError("timeout"), False),                                                   # a settings dict without the key
+    (AttributeError("'NoneType' object has no attribute 'timeout'"), False),
+    (ValueError("row 5021: the amount is not a number"), False),                   # " 502" inside a row number
+    (ValueError("expected 39 columns, found 429"), False),                         # " 429" inside a count
+    (sqlite3.OperationalError("database is locked: timeout"), False),
+    (RecursionError("maximum recursion depth exceeded while timing out"), False),
+    (RuntimeError("download /x.RMT failed 409: path/not_found"), False),         # a client's error that is not the network's
+    (RuntimeError("found 5021 rows, 429 of them empty"), False),                   # a status number only after its word
+    (OSError(28, "No space left on device"), False),
+    # the network's trouble inside a client's own error: by its cause or its words
+    (caused(TriZettoError("Could not reach the server (ConnectionRefusedError)."), ConnectionRefusedError(111, "refused")), True),
+    (TriZettoError("The server did not complete the SSH handshake within 30 s; nothing was sent."), True),
+    (TriZettoError("The time for TriZetto ran out before the sign-in; nothing was sent."), False),
+    (FaxError("SRFax answered 503 without a readable reply."), True),
+    (FaxError("SRFax refused Get_FaxStatus: Invalid Access"), False),
+    (socket.gaierror(-3, "Temporary failure in name resolution"), True),
+    (OSError(101, "Network is unreachable"), True),
+    (SSHException("Error reading SSH protocol banner"), True),
+    (AuthenticationException("Authentication failed."), False),                    # a refused sign-in is never tried again
 ])
 def test_what_counts_as_a_transient_failure(exc, transient):
     assert repair.is_transient(exc) is transient
+
+
+def test_a_pulls_own_ingest_is_never_repeated_but_its_connection_is(tmp_path):
+    """needs_H P4 hands trizetto.pull to retry_call; the pull calls back into the ingest (its `handle`). A failure
+    inside the ingest is the ingest's own: never a reason to repeat the whole pull, whatever its message says."""
+    store, reg = server_registry(tmp_path)
+    calls = []
+
+    def fake_pull(conn, handle, deadline, log=print):          # the shape of trizetto.pull: signs in, lists, hands over
+        calls.append(1)
+        return handle(["remit-0001.835"])
+
+    def ingest_bug(items):
+        raise ValueError(f"row 5021 of {items[0]} has no service date")
+    with pytest.raises(ValueError):
+        repair.retry_call(fake_pull, store.conn, ingest_bug, deadline=10 ** 10, log=print, target="trizetto", registry=reg,
+                          sleep=Waits(), until=10 ** 10)
+    assert calls == [1] and reg.entry("network", "trizetto")["attempts"] == 0
+
+    def ingest_talks_to_a_service(items):                      # reads like network trouble, but it is the ingest's
+        raise RuntimeError("download /x.RMT failed 503: Service Unavailable")
+    calls.clear()
+    waits = Waits()
+    with pytest.raises(RuntimeError, match="failed 503"):
+        repair.retry_call(fake_pull, store.conn, repair.not_retried(ingest_talks_to_a_service), deadline=10 ** 10, log=print,
+                          target="trizetto", registry=reg, sleep=waits, until=10 ** 10)
+    assert calls == [1] and waits == [] and reg.open_problems() == []
+    # the sign-in failing on the network is still tried again, and the wrapped ingest then works
+    tries = []
+
+    def flaky_pull(conn, handle, deadline, log=print):
+        tries.append(1)
+        if len(tries) == 1:
+            raise caused(TriZettoError("Could not reach the server (ConnectionResetError)."), ConnectionResetError(104, "reset"))
+        return handle(["remit-0002.835"])
+    got = repair.retry_call(flaky_pull, store.conn, repair.not_retried(lambda items: {"remits": len(items)}), deadline=10 ** 10,
+                            log=print, target="trizetto", registry=reg, sleep=Waits(), until=10 ** 10)
+    assert got == {"remits": 1} and len(tries) == 2
+    store.close()
 
 
 # =========================================================================================================== network
@@ -208,7 +268,7 @@ def test_a_step_that_keeps_failing_is_held_the_run_goes_on_and_three_runs_raise_
             (a,) = alerts
             assert a["kind"] == "SELF_REPAIR_FAILED" and a["severity"] == "high" and a["key"] == ["repair", "network", "dropbox"]
             assert "a connection to Dropbox, TriZetto or SRFax" in a["title"] and "(dropbox)" in a["title"]
-            assert "Tried: 3 attempt(s) over 3 run(s)" in a["title"] and "give it to Claude Code with the repository" in a["title"]
+            assert "Tried: 12 attempt(s) over 3 run(s)" in a["title"] and "give it to Claude Code with the repository" in a["title"]
             assert "Data tab" in a["title"] and "—" not in a["title"]
         rl.finish()
         store.close()
