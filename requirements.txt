@@ -3,6 +3,8 @@ uvicorn>=0.30
 openpyxl>=3.1
 requests>=2.32
 python-multipart>=0.0.9
+# the practice's time zone (REMITWATCH_TZ) on a host with no time zone data of its own, such as Vercel's
+tzdata>=2024.1
 # clinical-note appeal builder
 anthropic>=2.8
 pypdf>=5.0

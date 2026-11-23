@@ -124,7 +124,8 @@ MEDICARE_NEXT = {
     "new_claim": "Medicare returned the claim as unprocessable (MA130), so it has no appeal rights. Fix what the remark codes name and send "
                  "it as a new claim, not a corrected claim, within a year of the date of service.",
     "redetermination": "Send Medicare a redetermination request with the records or information the remark asks for, within 120 days "
-                       "of the remittance. A reopening takes no documents, and Medicare Part B takes no corrected claims.",
+                       "of receiving the remittance (Medicare presumes it arrived 5 days after its date). A reopening takes no documents, "
+                       "and Medicare Part B takes no corrected claims.",
 }
 
 
@@ -189,8 +190,9 @@ def _header(d: dict, subject: str, show_phi: bool = False) -> str:
     if show_phi and (claim.get("patient_last") or claim.get("patient_id")):
         # only a number the payer labelled a member number: a Social Security number or tax ID is left for the biller to replace
         patient = f"{claim.get('patient_first') or ''} {claim.get('patient_last') or ''}".strip() + f"    Member ID: {member_number(claim) or '[member ID]'}"
+    from .runtime import practice_today
     return "\n".join([
-        f"{date.today().isoformat()}",
+        f"{practice_today()}",          # the practice's date: a letter written at 8 PM Eastern carries that day's
         "",
         f"To: {remit.get('payer_name') or f.get('payer_name')}, {_desk(f)}",
         f"From: {PRACTICE['name']}, {PRACTICE['address']}, TIN {PRACTICE['tin']}, Group NPI {PRACTICE['npi']}",
@@ -265,8 +267,9 @@ def fee_request_letter(s: dict) -> dict[str, Any]:
     else:
         amounts = (f"{money(s.get('cents'))} between {since} and {_month_words(s.get('last_month'))} "
                    f"({months} {'month' if months == 1 else 'months'} with a fee)")
+    from .runtime import practice_today
     letter = "\n".join([
-        f"{date.today().isoformat()}",
+        f"{practice_today()}",
         "",
         f"To: {payer}, Provider Services (electronic funds transfer enrollment)",
         f"From: {PRACTICE['name']}, {PRACTICE['address']}, TIN {PRACTICE['tin']}, Group NPI {PRACTICE['npi']}",

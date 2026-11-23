@@ -65,11 +65,15 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, MPPR_CODES, appeal_rule,
-                    carc_text, code_category, corrected_rule, filing_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
+                    carc_text, code_category, corrected_rule, filing_rule, normalize_payer, payer_group_kind, pos_class, rarc_text,
+                    window_end)
 from .fees import FeeTable, family_of, is_downcode
 from .store import Store
 
-DETECT_RULES = "2.7"            # 2.7: the day the remittances reach is the feed's, not the newest payment of any payer (feed_date)
+DETECT_RULES = "2.9"            # 2.9: the live hotfixes of 2026-11 together: the day the remittances reach is the feed's,
+                                #      not the newest payment of any payer (feed_date); windows stated in months or years are
+                                #      calendar months; Medicare counts from presumed receipt; only overlapping copies of one
+                                #      remittance supersede each other
 # whether what EMA has posted as paid closes an item (resolve_elsewhere), or only adds a hint: the billers check EMA, and
 # an item EMA shows paid is not work
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
@@ -1255,7 +1259,7 @@ class Detector:
         deadlines, due, by_due = [], {}, defaultdict(lambda: [0, 0])
         for l in lines:
             rule = appeal_rule(grp, l.get("payer_kind"), (l.get("contract_class") or "").strip() or None)
-            d = _add_days(l.get("payment_date") or l.get("txn_payment_date"), rule["days"])
+            d = window_end(l.get("payment_date") or l.get("txn_payment_date"), rule)
             if d:
                 deadlines.append((d, rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")))
                 due[l["line_key"]] = d
@@ -1600,11 +1604,11 @@ class Detector:
         if fix:
             # a corrected claim (a reopening for Medicare Part B) runs on its own clock, from the remittance or the date of service
             start = pay_date if fix["clock"] == "remit" else (self._first_service_day(base) or pay_date)
-            deadline = _add_days(start, fix["days"])
+            deadline = window_end(start, fix)
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
         elif actionable in ("appeal", "correct_and_resubmit") or signal == "TAKEBACK":
             # a takeback is disputed inside the payer's appeal window from the remittance that took the money back
-            deadline = _add_days(pay_date, rule["days"])
+            deadline = window_end(pay_date, rule)
             deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
             if signal == "TAKEBACK":
                 deadline_basis += (". Counted from the remittance that took the money back; the payer's overpayment letter, which the "
@@ -2516,7 +2520,7 @@ class Detector:
         else:
             grp, kind = votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
         rule = filing_rule(grp, kind)
-        file_by = _add_days(days[0], rule["days"])
+        file_by = window_end(days[0], rule)
         # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
         early_by = _add_days(days[0], rule["earliest"]) if rule.get("earliest") else None
         billed = sum(x[2] for x in items)
@@ -2558,7 +2562,7 @@ class Detector:
         limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
         if timely:
             ap = appeal_rule(grp, kind)
-            deadline = _add_days(max(file_by, due), ap["days"])
+            deadline = window_end(max(file_by, due), ap)
             by = f"by {early_by} where you can, and by {file_by} at the latest" if early_by else f"by {file_by}"
             dbasis = (f"Sent on time ({sent}). If the payer has no record of it, send it again {by}, the first-filing "
                       f"limit ({limit}); after that, most payers take proof of timely filing (EMA's submission date, or the "

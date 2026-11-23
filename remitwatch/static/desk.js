@@ -162,6 +162,7 @@ async function deskTab(v, key){
   v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">${esc(D.title)}</h1> <span class="muted">${esc(D.intro)}</span></div>
       ${startLbl || !(closed || waiting) ? `<div class="ph-go">${closed || waiting ? '' : '<button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax">Appeal everything appealable</button>'}${startLbl ? `<button class="primary" id="startFirst">${startLbl}</button>` : ''}</div>` : ''}</div>
     ${dataLine(b)}
+    ${f.deadline === 'followup' && (b.follow_ups||{}).note ? `<div class="note sev-medium">${esc(b.follow_ups.note)}</div>` : ''}
     <div class="tiles">${tiles}</div>
     ${key==='worklist' ? (only ? `<div class="small muted allopen">Counting ${esc(only)} only.</div>` : '') : `<div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}<a href="#" class="see-all" title="${esc(allTip)}">Everything open, any window: ${num(all.n)} · ${money(all.cents)}</a></div>`}
     <div class="todo-chips" aria-label="What to do">${kinds.map(k=>`<button class="seg ${f.kind===k.key?'on':''}" data-kind="${k.key}"><span>${esc(kindOf(b,k.key).label)} <span class="cnt">${num(k.n)}</span></span><span class="seg-sub">${money(k.cents)}</span></button>`).join('')}</div>

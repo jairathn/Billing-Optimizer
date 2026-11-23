@@ -37,8 +37,10 @@ def test_the_home_screen_and_the_appeals_tab_count_the_same_day(tmp_path):
         out = subprocess.run([sys.executable, "-B", "-I", "-c", code], capture_output=True, text=True, env=dict(os.environ, TZ=tz))
         assert out.returncode == 0, out.stderr[-2000:]
         days[tz] = out.stdout.strip()
-    utc = datetime.now(timezone.utc).date().isoformat()
-    assert set(days.values()) == {utc}, f"the brief's today follows the server's clock ({days}); the dashboard's SQL uses UTC ({utc})"
+    # the practice's day (hotfix 2c): the brief, the lists and the fax check all count by REMITWATCH_TZ, never the host's clock
+    from remitwatch.runtime import practice_today
+    day = practice_today()
+    assert set(days.values()) == {day}, f"the brief's today follows the server's clock ({days}); the dashboard counts by the practice's day ({day})"
 
 
 def test_fee_levers_say_which_years_they_cover():

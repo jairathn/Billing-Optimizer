@@ -88,7 +88,8 @@ def test_medicare_documentation_denial_is_not_a_clerical_reopening(tmp_path):
     Detector(store, run_id="r6").run()
     (f,) = findings(store, "DENIED_MISSING_INFO")
     assert f["actionable"] == "correct_and_resubmit" and f["carc"] == "250"
-    assert f["appeal_deadline"] <= "2026-06-10", (
+    # 120 days from receipt of the remittance, presumed 5 days after its date (42 CFR 405.942(a)(1)): 125 days, not a year
+    assert f["appeal_deadline"] <= "2026-06-15", (
         f"documentation denial dated {f['appeal_deadline']} as: {f['deadline_basis'][:110]}")
     store.close()
 

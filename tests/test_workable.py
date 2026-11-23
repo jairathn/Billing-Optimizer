@@ -186,8 +186,8 @@ def test_claims_the_payer_never_answered_are_listed_and_nothing_else(open_claims
     a = rows["CB0000501C017"]
     assert a["signal"] == "NO_ANSWER" and a["payer_group"] == "Anthem / BCBS" and a["status"] == "open"
     # sent on time: "send it again by" the first-filing limit (90 days from the date of service, not confirmed for Anthem), and
-    # the date shown runs Anthem's 730-day appeal window past it, so it never expires on that limit
-    assert a["appeal_deadline"] == "2028-12-12" and "send it again by 2026-12-13" in a["deadline_basis"] and "not confirmed" in a["deadline_basis"]
+    # the date shown runs Anthem's two-year appeal window past it (two calendar years), so it never expires on that limit
+    assert a["appeal_deadline"] == "2028-12-13" and "send it again by 2026-12-13" in a["deadline_basis"] and "not confirmed" in a["deadline_basis"]
     assert a["title"].startswith("Sent 2026-09-15, no answer from Anthem / BCBS in 56 days") and a["charge_cents"] == 22365
     assert a["shortfall_cents"] == 11760                                                           # the payer's usual rate, not the charge
     rej = rows["CB0000505C017"]
@@ -235,7 +235,7 @@ def test_the_page_counts_them_and_today_points_at_them(open_claims, monkeypatch)
     assert {i["patient_control_number"] for i in items} == {"CB0000501C017", "CB0000601C017", "CB0000506C024"}
     assert c.get("/api/findings?kind=chase&status=open,in_progress&deadline=expired&live=1&limit=50").json()["items"] == []
     late = next(i for i in items if i["patient_control_number"] == "CB0000506C024")
-    assert late["appeal_deadline"] == "2028-10-31" and "proof of timely filing" in late["deadline_basis"]   # Nov 1 limit + Anthem's 730
+    assert late["appeal_deadline"] == "2028-11-01" and "proof of timely filing" in late["deadline_basis"]   # Nov 1 limit + Anthem's two years
     d = c.get(f"/api/findings/{items[0]['finding_id']}").json()["finding"]
     assert d["evidence"]["sent"] and d["evidence"]["answer_due"] and d["evidence"]["lines"]
     # never hidden wholesale for a payer: each unanswered claim is let go one at a time, by a person
@@ -461,7 +461,7 @@ def test_a_claim_sent_on_time_never_expires_on_its_first_filing_date(tmp_path):
     ema(s.conn, "CB0000T01C017", service_date="2026-08-17", bill_created="2026-08-19")
     ema(s.conn, "CB0000T01C017", family="claim_status", service_date="2026-08-17", claim_status="Submitted", claim_submission_date="2026-08-19")
     f = chased(s)["CB0000T01C017"]
-    assert f["appeal_deadline"] == "2028-11-14" and "send it again by 2026-11-15" in f["deadline_basis"]
+    assert f["appeal_deadline"] == "2028-11-15" and "send it again by 2026-11-15" in f["deadline_basis"]      # two calendar years
 
 
 def test_the_payers_answer_starts_to_do_with_the_notes_and_never_inherits_sent_or_paid(tmp_path):
@@ -726,7 +726,7 @@ def test_the_claim_status_words_emas_exports_use(tmp_path):
     assert set(found) == {"CB0000E01C017", "CB0000E02C017", "CB0000E08C017", "CB0000E10C017"}
     sent = found["CB0000E01C017"]
     assert sent["signal"] == "NO_ANSWER" and sent["title"] == "Sent 2026-09-16, no answer from Anthem / BCBS in 55 days: 99214"
-    assert json.loads(sent["evidence"])["ema_status"] == "Payment Pending" and sent["appeal_deadline"] == "2028-12-12"
+    assert json.loads(sent["evidence"])["ema_status"] == "Payment Pending" and sent["appeal_deadline"] == "2028-12-13"   # two calendar years
     # never sent: listed to be sent (Fix and resubmit), by the first-filing limit (Anthem's 90 days from the visit)
     batch = found["CB0000E02C017"]
     assert batch["signal"] == "REJECTED_PRE_PAYER" and batch["actionable"] == "correct_and_resubmit"

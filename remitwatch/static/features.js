@@ -255,8 +255,9 @@ function drawerExtras(f, r){
     ['Modifier', f.modifier_class], ['Recovered', f.recovered_cents!=null ? money2(f.recovered_cents)+' on '+(f.recovered_date||'') : null], ['Appealed', f.appealed_at ? String(f.appealed_at).slice(0,10) : null]].filter(x=>x[1]!=null && x[1]!=='');
   const ev = f.evidence || {};
   const why = f.signal==='SECOND_RATE' && ev.note ? `<div class="note"><b>Likely reason.</b> ${esc(ev.note)}</div>` : '';
-  // today in the reader's own time zone: a window open until the end of its last day is still open that evening
-  const now = new Date(), today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  // today as the lists count it (siteDay: the practice's day, from the brief), else the reader's own: a window open until
+  // the end of its last day is still open that evening
+  const now = new Date(), today = typeof siteDay === 'function' ? siteDay() : `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
   const dl = f.signal==='SECOND_RATE' && Array.isArray(ev.deadlines) ? ev.deadlines.filter(x=>Array.isArray(x)) : [];
   const dated = dl.filter(x=>x[0]).sort((a,b)=>a[0]<b[0]?-1:1), live = dated.filter(x=>x[0]>=today);
   const listed = dl.reduce((a,x)=>a+(x[1]||0),0), unknown = dl.filter(x=>!x[0]).reduce((a,x)=>a+(x[1]||0),0) + Math.max((ev.lines||0) - listed, 0);

@@ -21,8 +21,10 @@ async function brief(force){
 }
 function kindOf(b, k){ return (b.work_types||[]).find(t=>t.key===k) || {key:k, label:k, how:'', needs:''}; }
 function labelOf(b, sig){ return (b.labels||{})[sig] || {label: sig, next: '', work: null}; }
-// today as the site counts it (the brief's date): the page then agrees with the lists on which windows are still open
-function siteDay(){ return (state.brief && state.brief.today) || new Date().toISOString().slice(0,10); }
+// today as the site counts it: the brief's date, the practice's day (a window stays open until midnight where the practice
+// is), so the page agrees with the lists on which windows are still open. Before the brief is read: the reader's own day.
+function localDay(){ const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; }
+function siteDay(){ return (state.brief && state.brief.today) || localDay(); }
 function daysUntil(d){ if(!d) return null; const t = new Date(d+'T00:00:00Z'), n = new Date(siteDay()+'T00:00:00Z'); return Math.round((t-n)/86400000); }
 function closesText(d){
   const n = daysUntil(d);
@@ -78,7 +80,8 @@ async function todayTab(v){
   if(!b.ready){ v.innerHTML = '<div class="panel"><h2>Nothing analysed yet</h2><div class="note">The first analysis run has not finished. Open Data and press Sync and analyse now.</div></div>'; return; }
   const w = b.work.total, bad = (b.health||[]).filter(h=>!h.ok);
   const top = b.batches[0], dec = b.decide, fu = b.follow_ups, done = b.done || {};
-  const day = new Date().toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric'});
+  // the day the lists count by (the brief's), not the browser's: the header and "closes today" agree
+  const day = new Date(siteDay()+'T12:00:00Z').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric', timeZone:'UTC'});
   const byKind7 = (b.work.types||[]).filter(t=>t.due7_n).sort((x,y)=>y.due7_cents-x.due7_cents);
   const steps = [];
   steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${Number(w.due7_n).toLocaleString()} items worth ${money(w.due7_cents)} have a filing window that closes within 7 days.`,
@@ -92,11 +95,11 @@ async function todayTab(v){
   const na = (b.no_answer || {}).chase || {}, rj = (b.no_answer || {}).rejected || {};
   if(na.n) steps.push({n:steps.length+1, title:'Chase claims the payer never answered', line:`${pl(na.n, 'claim')} worth ${money(na.cents)} ${na.n===1?'was':'were'} sent and never answered: look ${na.n===1?'it':'them'} up on the payer's portal or call${na.first_deadline ? `; the first one's date is ${esc(longDate(na.first_deadline))}` : ''}.${rj.n ? ` ${Number(rj.n).toLocaleString()} more never reached the payer: rejected, or still in EMA's print batch (under Fix and resubmit).` : ''}`,
       chips: kindBadge(b, 'chase'), btn:`Chase them (${na.n})`, go:{kind:'chase', sort:'deadline'}});
-  if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`${fu.n} items sent to the payer more than ${fu.days} days ago are still unpaid (${money(fu.cents)}). Check the portal or call.`, btn:`Follow up (${fu.n})`, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
+  if(fu && fu.n) steps.push({n:steps.length+1, title:'Follow up on what you sent', line:`${fu.n} items sent to the payer more than ${fu.days} days ago are still unpaid (${money(fu.cents)}). Check the portal or call.${fu.note ? ' <b>' + esc(fu.note) + '</b>' : ''}`, btn:`Follow up (${fu.n})`, go:{status:'appealed', deadline:'followup', sort:'deadline'}});
   if(top) steps.push({n:steps.length+1, title:'Clear the biggest batch', line:`${esc(kindOf(b,top.kind).label)}, ${esc(top.payer_group)}: ${top.n} items on ${top.claims} claims, ${money(top.cents)}${top.top_code?`, mostly ${esc(top.top_code)}`:''}. The first window ${closesText(top.first_deadline).text === 'closes today' ? 'closes today' : 'closes '+closesText(top.first_deadline).text}.`,
       chips: kindBadge(b, top.kind), btn:'Open the batch', go:{kind: top.kind, payer: top.payer_group, sort:'deadline'}});
   const older_n = Math.max(0, (b.work.undated_n||0) - (dec ? dec.n : 0)), older_c = Math.max(0, (b.work.undated_cents||0) - (dec ? dec.cents : 0));
-  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`${dec.n} items worth ${money(dec.cents)} paid in the last ${dec.days||120} days need a person to say what they are (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${pl(older_n, 'older one')} (${money(older_c)})</a> ${older_n===1?'has':'have'} no filing date either.`:''}`, btn:`Look at them (${dec.n})`, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
+  if(dec && dec.n){ const g = dec.groups[0]; steps.push({n:steps.length+1, title:'Decide on new items with no filing date', line:`${dec.n} items worth ${money(dec.cents)} paid in the last ${dec.days||120} days${dec.since ? ` (since ${esc(longDate(dec.since))})` : ''} need a person to say what they are (bill another payer or the patient, appeal, or let go).${g?` Biggest: ${esc(labelOf(b,g.signal).label.toLowerCase())}, ${esc(g.payer_group)} (${g.n}, ${money(g.cents)}).`:''}${older_n?` <a href="#" class="see-undated">${pl(older_n, 'older one')} (${money(older_c)})</a> ${older_n===1?'has':'have'} no filing date either.`:''}`, btn:`Look at them (${dec.n})`, go:{deadline:'decide', status:'open,in_progress', sort:'shortfall'}}); }
   else if(older_n) steps.push({n:steps.length+1, title:'Items with no filing date', line:`${pl(older_n, 'item')} worth ${money(older_c)} ${older_n===1?'has':'have'} no filing date: a person has to say what they are.`, btn:'Look at them', go:{deadline:'older', status:'open,in_progress', sort:'shortfall'}});
   const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED','SWING'].includes(a.kind) && a.severity!=='info').slice(0,3);   // a big change in one run has the banner above every page
   const missed = b.missed || {};

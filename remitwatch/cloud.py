@@ -1025,7 +1025,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         marks = _read_json(state, MARKS) if settled else {}
         marks.setdefault("alerts", {})
         if settled:
-            out["alerts"] = run_alerts(conn)
+            out["alerts"] = run_alerts(conn, today=runtime.practice_today())   # deadlines close at midnight where the practice is
             # What was mailed is recorded outside the store (the store is not saved on an idle run): put it back. The
             # record names the alert as it was raised then; one that cleared and has been raised again is a new alert.
             conn.executemany("UPDATE alerts SET notified_at=? WHERE alert_id=? AND first_seen=? AND notified_at IS NULL",

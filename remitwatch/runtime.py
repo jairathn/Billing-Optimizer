@@ -10,7 +10,106 @@ The store is held in memory for the length of one cycle and saved to a private D
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+from datetime import date, datetime, timedelta, timezone, tzinfo
+
+# The practice's own day. A filing window stays open until midnight where the practice is (Kentucky and Indiana: US
+# Eastern), so every "today" the site compares a deadline, a follow-up or an expiry with is that zone's date, never the
+# host's (UTC on both hosts, where the date turns over at 7 PM Eastern).
+TZ_SETTING = "REMITWATCH_TZ"
+DEFAULT_TZ = "America/New_York"
+_TZ_WARNED: set = set()
+
+
+def _utc_now() -> datetime:
+    """The clock, read in one place so a test can move it."""
+    return datetime.now(timezone.utc)
+
+
+class _UsEastern(tzinfo):
+    """US Eastern time by the federal rule since 2007 (daylight time from 2 AM on the second Sunday of March to 2 AM on the
+    first Sunday of November), for a host with no time zone data at all. requirements.txt installs tzdata, so this is
+    only a last resort."""
+
+    @staticmethod
+    def _summer(year: int) -> tuple[datetime, datetime]:
+        march, november = datetime(year, 3, 8), datetime(year, 11, 1)
+        start = march + timedelta(days=(6 - march.weekday()) % 7, hours=7)          # 2 AM EST is 07:00 UTC
+        end = november + timedelta(days=(6 - november.weekday()) % 7, hours=6)      # 2 AM EDT is 06:00 UTC
+        return start, end
+
+    def fromutc(self, dt: datetime) -> datetime:
+        naive = dt.replace(tzinfo=None)
+        start, end = self._summer(naive.year)
+        return (naive + timedelta(hours=-4 if start <= naive < end else -5)).replace(tzinfo=self)
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        if dt is None:
+            return timedelta(hours=-5)
+        start, end = self._summer(dt.year)
+        naive = dt.replace(tzinfo=None) + timedelta(hours=5)       # as if standard time; the repeated hour reads as standard
+        return timedelta(hours=-4 if start <= naive < end else -5)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return self.utcoffset(dt) - timedelta(hours=-5)
+
+    def tzname(self, dt: datetime | None) -> str:
+        return "EDT" if self.dst(dt) else "EST"
+
+
+def _warn_tz(name: str, why: str) -> None:
+    if name in _TZ_WARNED:
+        return
+    _TZ_WARNED.add(name)
+    print(f"RemitWatch WARNING: {TZ_SETTING} {why}; {DEFAULT_TZ} is used for the practice's day.", file=sys.stderr, flush=True)
+
+
+def practice_zone() -> tzinfo:
+    """The practice's time zone: REMITWATCH_TZ, an IANA name such as America/Chicago (default America/New_York). A name
+    this host does not know falls back to the default, with one warning in the log."""
+    from zoneinfo import ZoneInfo
+    name = (os.environ.get(TZ_SETTING) or "").strip() or DEFAULT_TZ
+    try:
+        return ZoneInfo(name)
+    except Exception:          # unknown name, a path, or no time zone data on this host: never stop a page for it
+        if name != DEFAULT_TZ:
+            _warn_tz(name, f"is {name[:60]!r}, which is not a time zone this host knows")
+    try:
+        return ZoneInfo(DEFAULT_TZ)
+    except Exception:
+        _warn_tz("", "could not be read from this host's time zone data")
+        return _UsEastern()
+
+
+def practice_today(offset: int = 0) -> str:
+    """Today where the practice is, plus `offset` days, as YYYY-MM-DD: the day every list, count, expiry check and follow-up
+    compares with. A window whose last day this is stays open until midnight there."""
+    return (_utc_now().astimezone(practice_zone()).date() + timedelta(days=offset)).isoformat()
+
+
+def practice_date(stamp: str | None) -> str:
+    """The practice's date of a moment the store keeps (an ISO time with its zone, as every record is written: a fax sent
+    at 8:30 PM Eastern was sent that day, not the next). A plain date, or a time with no zone, is taken as written."""
+    s = (stamp or "").strip()
+    if len(s) <= 10:
+        return s[:10]
+    try:
+        t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return s[:10]
+    if t.tzinfo is None:
+        return s[:10]
+    return t.astimezone(practice_zone()).date().isoformat()
+
+
+def practice_day_start(day: str) -> str:
+    """The moment (UTC, ISO, as the store writes them) the practice's day `day` began: what a stored time is compared with
+    to ask "before that day, where the practice is"."""
+    d = date.fromisoformat(day[:10])
+    local = datetime(d.year, d.month, d.day, tzinfo=practice_zone())
+    # a zone's own rules give the midnight's offset; the last-resort zone does through utcoffset
+    return local.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def serverless() -> bool:

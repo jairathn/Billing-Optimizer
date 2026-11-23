@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 OPEN = ("open", "in_progress", "appealed")
 TODO = ("open", "in_progress")          # still to do: an item sent to the payer waits on the payer, not on a person
@@ -178,8 +178,10 @@ def kind_sql(kind: str) -> tuple[str, list]:
 
 
 def utc_today() -> str:
-    """Today as the rest of the dashboard and SQL date('now') see it."""
-    return datetime.now(timezone.utc).date().isoformat()
+    """Today as the rest of the dashboard sees it: the practice's day (runtime.practice_today, REMITWATCH_TZ), so a window
+    whose last day this is stays open until midnight where the practice is. The name is older than that rule."""
+    from . import runtime
+    return runtime.practice_today()
 
 
 def claim_windows(conn: sqlite3.Connection, statuses: tuple) -> dict[str, list[tuple]]:
@@ -648,12 +650,13 @@ def batches(conn: sqlite3.Connection, today: str, limit: int = 200) -> list[dict
     return rows[:limit]
 
 
-def to_decide(conn: sqlite3.Connection, newest: str | None, days: int = 120) -> dict:
+def to_decide(conn: sqlite3.Connection, newest: str | None, days: int = 120, today: str | None = None) -> dict:
     """Items with no filing date because a person has to decide what they are (a code the payer changed, a service
-    called not covered, a duplicate, a payer's takeback): those paid in the last `days` days, by kind and payer."""
+    called not covered, a duplicate, a payer's takeback): those paid in the last `days` days to today, where the practice
+    is (not to the newest payment: a feed that stopped must not freeze the count), by kind and payer."""
     if not newest:
         return {"n": 0, "cents": 0, "groups": []}
-    since = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
+    since = (date.fromisoformat(today or utc_today()) - timedelta(days=days)).isoformat()
     groups = _rows(conn, f"""SELECT signal, COALESCE(payer_group,'Unknown') payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents,
                                     MAX(payment_date) last_paid
                              FROM findings WHERE status IN ({','.join('?' * len(TODO))}) AND COALESCE(stale,0)=0 AND appeal_deadline IS NULL
@@ -682,27 +685,34 @@ def missed(conn: sqlite3.Connection, today: str, days: int = 30) -> dict:
 
 def done(conn: sqlite3.Connection, today: str) -> dict:
     """What people moved today and this week (Monday on): items, and the dollars of those sent or recorded paid."""
+    from .runtime import practice_date
     week = (date.fromisoformat(today) - timedelta(days=date.fromisoformat(today).weekday())).isoformat()
     if "finding_events" not in _tables(conn):
         return {"today_n": 0, "week_n": 0, "week_cents": 0}
     last: dict[str, tuple] = {}          # each item's last change by a person this week: an undo leaves nothing done
+    # each change counts on the practice's day it was made (the history keeps UTC times, a day ahead from 7 PM Eastern)
+    since = (date.fromisoformat(week) - timedelta(days=1)).isoformat()
     for fid, at, to, cents, sig, payer in conn.execute("""SELECT e.finding_id, e.at, e.to_status, COALESCE(e.amount_cents,0), f.signal, f.payer_name
                                                          FROM finding_events e LEFT JOIN findings f ON f.finding_id = e.finding_id
-                                                         WHERE e.kind='manual' AND substr(e.at,1,10) >= ? ORDER BY e.at, e.id""", (week,)):
+                                                         WHERE e.kind='manual' AND substr(e.at,1,10) >= ? ORDER BY e.at, e.id""", (since,)):
+        day = practice_date(at)
+        if day < week:
+            continue
         # asking a payer to stop its payment fees moves all its fee months at once: that is one request, and fees are not
         # money sent or paid
         key = ("fee", payer) if sig == "FEE_SKIM" else fid
-        last[key] = (at[:10], to, 0 if sig == "FEE_SKIM" else cents)
+        last[key] = (day, to, 0 if sig == "FEE_SKIM" else cents)
     moved = [v for v in last.values() if v[1] != "open"]
     return {"today_n": sum(1 for v in moved if v[0] == today), "week_n": len(moved),
             "week_cents": sum(v[2] for v in moved if v[1] in ("appealed", "resolved")), "week_start": week}
 
 
-def follow_ups(conn: sqlite3.Connection, newest: str | None, days: int = 30) -> dict:
-    """Items marked sent to the payer more than `days` days before the newest payment and still not paid."""
-    if not newest:
-        return {"n": 0, "cents": 0}
-    cut = (date.fromisoformat(newest[:10]) - timedelta(days=days)).isoformat()
+def follow_ups(conn: sqlite3.Connection, newest: str | None, days: int = 30, today: str | None = None) -> dict:
+    """Items marked sent to the payer more than `days` days ago and still not paid: sent before the practice's day
+    `days` days before today. Counted to today, not to the newest payment, so they keep coming while the remittances
+    are behind (api.brief then says so: EMA or the payer's portal is checked first). `newest` is no longer used."""
+    from . import runtime
+    cut = runtime.practice_day_start((date.fromisoformat(today or utc_today()) - timedelta(days=days)).isoformat())
     r = conn.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE status='appealed' AND COALESCE(stale,0)=0
                          AND COALESCE(appealed_at, status_changed_at) < ? AND category IN ({','.join('?' * len(MONEY_CATEGORIES))})""",
                      (cut,) + MONEY_CATEGORIES).fetchone()
@@ -717,8 +727,8 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
         return {"ready": False}
     newest = newest_payment(conn)
     return {"ready": True, "today": today, "newest_payment": newest, "work": work(conn, today), "recovered": recovered(conn, today),
-            "batches": batches(conn, today), "decide": to_decide(conn, newest), "missed": missed(conn, today), "done": done(conn, today),
-            "follow_ups": follow_ups(conn, newest), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn, newest),
+            "batches": batches(conn, today), "decide": to_decide(conn, newest, today=today), "missed": missed(conn, today), "done": done(conn, today),
+            "follow_ups": follow_ups(conn, newest, today=today), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn, newest),
             "causes": denial_causes(conn, newest), "health": data_health(conn, newest, today), "work_types": WORK_TYPES,
             "labels": {k: {"label": v[0], "next": v[1], "work": SIGNAL_WORK.get(k), "short": SHORT_LABELS.get(k, v[0])} for k, v in SIGNAL_LABELS.items()},
             "statuses": STATUS_LABELS,
