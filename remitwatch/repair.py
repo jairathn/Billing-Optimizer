@@ -399,8 +399,14 @@ class Registry:
 
 
 def registry_for(rl: Any = None, *, conn: sqlite3.Connection | None = None, now: datetime | None = None) -> Registry:
-    """The registry of a run: state kept beside the run's logs (rl.sink) and in the store's meta (conn)."""
-    return Registry(conn=conn, sink=getattr(rl, "sink", None), run=rl, now=now)
+    """The registry of a run: state kept beside the run's logs (rl.sink) and in the store's meta (conn). Killed-run
+    counts that a later finished run has cleared (it passed the step) are cleared here, from the run index."""
+    reg = Registry(conn=conn, sink=getattr(rl, "sink", None), run=rl, now=now)
+    try:
+        clear_killed_by_index(reg)
+    except Exception as exc:        # noqa: BLE001  (the counts stay as they were; the next run tries again)
+        runlog.caught(exc, "repair", level="warning")
+    return reg
 
 
 # ------------------------------------------------------------------------------------------------------------ remedies
