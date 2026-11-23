@@ -3064,7 +3064,10 @@ class Detector:
         if (f.get("carc") or "") in OTHER_PAYER_CARCS:
             return True
         payer_now = moved.get(tuple(o["lines"][0])) if o.get("lines") else None
-        paying = next((p.get("group") for p in o.get("payments") or [] if p.get("kind") == "ema" and not p.get("same")), None)
+        # the paying payer's payment came after the denial's day: on an EMA-only denial, a payment posted the same day is the
+        # first payer's own, already taken off the second payer's share (C5)
+        late = (lambda p: (p.get("posted") or "") > (o.get("anchor") or "")) if f.get("signal") == "EMA_DENIED" else (lambda p: True)
+        paying = next((p.get("group") for p in o.get("payments") or [] if p.get("kind") == "ema" and not p.get("same") and late(p)), None)
         return bool(payer_now and paying and ec._same_payer(payer_now, paying) and not ec._same_payer(payer_now, f.get("payer_group")))
 
     def run_ema_unposted(self) -> None:
@@ -3132,7 +3135,9 @@ class Detector:
         claim): {key: {link, secondary_payer, primary_payer, payer_group, balance, pat_paid, charges, other_paid}}, where
         other_paid is what payers other than the line's primary posted on it."""
         from . import ema_checks as ec
+        from . import ema_reports as er
         out: dict[tuple, dict] = {}
+        groups_of: dict[str, str | None] = {}
         keys = sorted(set(keys))
         for i in range(0, len(keys), 400):
             part = keys[i:i + 400]
@@ -3148,14 +3153,21 @@ class Detector:
                                         WHERE (COALESCE(l.flags,0) & 17) = 0 AND COALESCE(l.facility,0) = 0""").fetchall()
             pays: dict[tuple, list] = defaultdict(list)
             elsewhere: dict[tuple, list] = defaultdict(list)     # (patient key, date, code) -> payments on the patient's other EMA claims
+            reasons: dict[tuple, list] = defaultdict(list)       # the payers' own reasons (not PR) on the line, with who and when
             if rows:
                 self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
                 self.conn.execute("CREATE TEMP TABLE dt_links (link INTEGER, svc TEXT, cpt TEXT)")
                 self.conn.executemany("INSERT INTO temp.dt_links VALUES (?,?,?)", {(r[3], r[1], r[2]) for r in rows})
-                for lk, svc, cpt, grp, cents in self.conn.execute(
-                        """SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0) FROM temp.dt_links d
+                for lk, svc, cpt, grp, cents, posted in self.conn.execute(
+                        """SELECT y.link, y.svc, y.cpt, y.payer_group, COALESCE(y.ins_paid,0), y.posted FROM temp.dt_links d
                            JOIN ema_line_payments y ON y.link = d.link AND y.svc = d.svc AND y.cpt = d.cpt"""):
-                    pays[(lk, svc, cpt)].append((grp, cents))
+                    pays[(lk, svc, cpt)].append((grp, cents, posted))
+                for lk, svc, cpt, zg, code, payer, first, cents in self.conn.execute(
+                        """SELECT z.link, z.svc, z.cpt, z.grp, z.code, z.payer, z.first_posted,
+                                  COALESCE(z.contractual,0) + COALESCE(z.noncontractual,0) FROM temp.dt_links d
+                           JOIN ema_line_reasons z ON z.link = d.link AND z.svc = d.svc AND z.cpt = d.cpt
+                           WHERE COALESCE(z.grp, '') NOT IN ('', 'PR')"""):
+                    reasons[(lk, svc, cpt)].append((zg, code, payer, first, cents))
                 self.conn.execute("DROP TABLE IF EXISTS temp.dt_links")
                 nks = sorted({(r[10], r[1], r[2]) for r in rows if r[10] is not None})
                 if nks:
@@ -3170,33 +3182,48 @@ class Detector:
                         elsewhere[(nk, svc, cpt)].append((lk, grp, cents))
                     self.conn.execute("DROP TABLE IF EXISTS temp.dt_nk")
             for b, svc, cpt, lk, sec, prim, grp, bal, pat, chg, nk in rows:
-                other = sum(c for g, c in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
+                other = sum(c for g, c, _p in pays.get((lk, svc, cpt), []) if c > 0 and g and grp and not ec._same_payer(g, grp))
                 other += sum(c for olk, g, c in elsewhere.get((nk, svc, cpt), []) if olk != lk and c > 0 and g and grp
                              and not ec._same_payer(g, grp))
+                # every answer on the line from a payer other than the primary: a payment row ($0 included) or its own reason
+                answers = [(p or "", g, c, "payment") for g, c, p in pays.get((lk, svc, cpt), []) if g and grp and not ec._same_payer(g, grp)]
+                for zg, code, payer, first, cents in reasons.get((lk, svc, cpt), []):
+                    if payer not in groups_of:
+                        groups_of[payer] = er.payer_group_of(self.conn, payer)[0] if payer else None
+                    g = groups_of[payer]
+                    if g and grp and not ec._same_payer(g, grp):
+                        answers.append((first or "", g, cents, f"{zg}-{code}"))
                 out.setdefault((b, svc, cpt), {"link": lk, "secondary_payer": sec, "primary_payer": prim, "payer_group": grp,
-                                               "balance": bal or 0, "pat_paid": pat or 0, "charges": chg or 0, "other_paid": other})
+                                               "balance": bal or 0, "pat_paid": pat or 0, "charges": chg or 0, "other_paid": other,
+                                               "answers": sorted(answers)})
             self.conn.execute("DROP TABLE IF EXISTS temp.dt_keys")
         return out
 
     def run_secondary_not_billed(self) -> None:
         """The primary paid and left the patient's share (deductible, coinsurance, copay), a second insurer is on file in
-        EMA, and nothing came from it: no remittance as second payer, no payment by another payer in EMA, the patient has
-        not paid the share, and EMA still shows a balance. One item per line, sized at the share left (at most EMA's
-        balance), dated by the second payer's filing limit counted from the first payer's remittance. A claim the first
-        payer forwarded itself (claim status 19, or a carrier named) is listed only once that second payer's usual time
-        has passed, to be chased rather than billed."""
+        EMA, and the second payer never answered: no remittance from it as second payer (at any amount, $0 included), no
+        posting or reason of its own on EMA's line after the first payer's payment, no payment by another payer in EMA,
+        the patient has not paid the share, and EMA still shows a balance. One item per line, sized at the share left (at
+        most EMA's balance), dated by the second payer's filing limit counted from the first payer's remittance. A claim
+        the first payer forwarded itself (claim status 19, or a carrier named) is listed only once that second payer's
+        usual time has passed, to be chased rather than billed; one whose EMA line the store does not hold is listed from
+        the remittance alone (the carrier it names). Medicaid as the second payer is never listed: it pays the share only
+        up to its own rate and the member cannot be billed (the answer key's R3). Every line left out is counted (meta
+        ema:wiring)."""
         from . import ema_reports as er
         from . import ema_checks as ec
         cands: dict[tuple, Line] = {}
         other_paid: set[tuple] = set()
+        second_835: dict[tuple, list] = defaultdict(list)       # (bill, date, code) -> second payers' remittances: (date, payer)
         for l in self.lines:
             code, dos = l.get("procedure_code"), l.get("service_date")
             if not code or not dos or code in ("99024", "G2211"):
                 continue
             key = (er.bill_of_claim(l["patient_control_number"]), dos, code)
             st = l.get("claim_status_code")
-            if st in ("2", "3", "20", "21") and (self.standing.get(l["line_key"]) or 0) > 0:
-                other_paid.add(key)         # a second payer's remittance paid it
+            if st in ("2", "3", "20", "21", "22"):
+                # processed as a second (or third) payer, or reversed: an answer from a second payer, whatever it paid
+                second_835[key].append((l.get("payment_date") or l.get("txn_payment_date") or "", l.get("payer_id") or l.get("payer_name")))
                 continue
             if st not in ("1", "19") or not (self.standing.get(l["line_key"]) or 0) or l.get("payer_kind") == "supplement":
                 continue
@@ -3206,13 +3233,25 @@ class Detector:
             was = cands.get(key)
             if was is None or (l.get("payment_date") or "") > (was.get("payment_date") or ""):
                 cands[key] = l
-        # a second line of the code on the bill and date paid by another payer: something came from another payer
+        for key, c in cands.items():
+            who = c.get("payer_id") or c.get("payer_name")
+            if any(p != who for _d, p in second_835.get(key, [])):
+                other_paid.add(key)
+                self.ema_counts["snb_second_answered_835"] += 1
+        # a second line of the code on the bill and date from another payer: paid by it, or answered by another payer group
+        # after the first payer's remittance (a supplement's own $0 answer as if primary, a deductible it does not cover)
         for l in self.lines:
             key = (er.bill_of_claim(l["patient_control_number"]), l.get("service_date"), l.get("procedure_code"))
             c = cands.get(key)
-            if c is not None and (self.standing.get(l["line_key"]) or 0) > 0 and l["line_key"] != c["line_key"] \
-                    and (l.get("payer_id") or l.get("payer_name")) != (c.get("payer_id") or c.get("payer_name")):
+            if c is None or l["line_key"] == c["line_key"] or key in other_paid \
+                    or (l.get("payer_id") or l.get("payer_name")) == (c.get("payer_id") or c.get("payer_name")):
+                continue
+            if (self.standing.get(l["line_key"]) or 0) > 0:
                 other_paid.add(key)
+            elif l.get("payer_group") != c.get("payer_group") \
+                    and (l.get("payment_date") or l.get("txn_payment_date") or "") >= (c.get("payment_date") or c.get("txn_payment_date") or ""):
+                other_paid.add(key)
+                self.ema_counts["snb_second_answered_835"] += 1
         keys = [k for k in cands if k not in other_paid]
         if not keys:
             return
@@ -3221,26 +3260,49 @@ class Detector:
         for key in keys:
             e = ema.get(key)
             l = cands[key]
-            if not e or not (e["secondary_payer"] or "").strip() or e["other_paid"] > 0:
-                continue
-            sec = " ".join(str(e["secondary_payer"]).split())
+            paid_on = l.get("payment_date") or l.get("txn_payment_date") or ""
+            crossed = l.get("claim_status_code") == "19" or bool(self.crossover_carrier(l["claim_key"]))
+            pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
+            if not e:
+                # EMA's line is not in the store (its summary keeps the lines of bills with an item): a claim the first payer
+                # crossed over is still a second payer to chase, named by the remittance; the item makes the next summary
+                # keep the line, and EMA then shows any answer
+                carrier = self.crossover_carrier(l["claim_key"]) if crossed else None
+                if not carrier:
+                    continue
+                sec, owed, bal, pat, link, wrote_off = carrier, pr, None, None, None, False
+            else:
+                if not (e["secondary_payer"] or "").strip() or e["other_paid"] > 0:
+                    continue
+                # the second payer answered in EMA after the first payer's payment: a $0 payment row or a reason of its own
+                ans = [a for a in e.get("answers") or [] if (a[0] or "") >= paid_on[:10]]
+                if ans:
+                    self.ema_counts["snb_second_answered_ema"] += 1
+                    continue
+                sec = " ".join(str(e["secondary_payer"]).split())
+                owed = pr - max(0, e["pat_paid"])
+                bal, pat, link = e["balance"], e["pat_paid"], e["link"]
+                wrote_off = False
             if SELF_PAY.search(sec):
                 continue
             if sec not in groups:
                 groups[sec] = er.payer_group_of(self.conn, sec)
             sgrp, skind = groups[sec]
-            if not sgrp or ec._same_payer(sgrp, l["payer_group"]) or ec._same_payer(sgrp, e["payer_group"]):
+            if not sgrp or ec._same_payer(sgrp, l["payer_group"]) or (e and ec._same_payer(sgrp, e["payer_group"])):
                 continue                    # the second payer on file is the first payer itself
-            pr = sum(a for g, rc, a in self.adj.get(l["line_key"], []) if g == "PR" and rc in ("1", "2", "3"))
-            owed = pr - max(0, e["pat_paid"])
+            if skind == "medicaid":
+                # Medicaid pays the share only up to its own rate (normally nothing after a Medicare or commercial payment)
+                # and the member cannot be billed: no money to chase (the answer key's R3)
+                self.ema_counts["snb_medicaid_second"] += 1
+                self.ema_counts["snb_medicaid_second_cents"] += max(0, owed)
+                continue
             if owed <= 100:
                 continue                    # the patient paid the share
-            # EMA's balance closed with nothing from the patient or a second payer: the share was written off, not billed
-            wrote_off = e["balance"] <= 100
-            if not wrote_off:
-                owed = min(owed, e["balance"])
-            paid_on = l.get("payment_date") or l.get("txn_payment_date") or ""
-            crossed = l.get("claim_status_code") == "19" or bool(self.crossover_carrier(l["claim_key"]))
+            if e:
+                # EMA's balance closed with nothing from the patient or a second payer: the share was written off, not billed
+                wrote_off = bal <= 100
+                if not wrote_off:
+                    owed = min(owed, bal)
             if crossed and (_days_between(paid_on, self.today) or 0) < 45:
                 continue                    # forwarded by the first payer: its usual time has not passed yet
             rule = filing_rule(sgrp, skind)
@@ -3253,9 +3315,11 @@ class Detector:
                      f"{code}: {l['payer_group']} paid and left {_usd(owed)} ({share}); {sgrp} is on file and was never billed"
                      + ("; EMA wrote the share off" if wrote_off else ""))
             ev = {"first_payer": l["payer_group"], "first_paid_cents": self.standing.get(l["line_key"]), "patient_share_cents": pr,
-                  "share": share, "second_payer": sgrp, "second_payer_kind": skind, "ema_balance_cents": e["balance"],
-                  "ema_patient_paid_cents": e["pat_paid"], "crossover": crossed, "ema_link": e["link"], "ema_wrote_off_share": wrote_off,
-                  "basis": "the patient's share the first payer left, less what the patient paid, at most EMA's balance"}
+                  "share": share, "second_payer": sgrp, "second_payer_kind": skind, "ema_balance_cents": bal,
+                  "ema_patient_paid_cents": pat, "crossover": crossed, "ema_link": link, "ema_wrote_off_share": wrote_off,
+                  "ema_line_on_file": bool(e),
+                  "basis": ("the patient's share the first payer left, less what the patient paid, at most EMA's balance" if e else
+                            "the patient's share the first payer left (EMA's line is not on file yet: what the patient paid is not known)")}
             self._emit("SECONDARY_NOT_BILLED", "denial", "medium" if owed >= 5000 else "low", "review", title, l, owed, owed, None, None, ev)
             f = self.findings.get(_fid("SECONDARY_NOT_BILLED", l["line_key"]))
             if f is None:
@@ -3263,10 +3327,14 @@ class Detector:
             f["appeal_deadline"], f["legal_deadline"] = deadline, None
             f["deadline_basis"] = (f"{sgrp}'s filing limit, counted from {l['payer_group']}'s remittance ({paid_on}): {rule['label']}"
                                    + ("" if rule["verified"] else ", not confirmed against the payer's current manual"))
-            f["ema_link"], f["source"] = e["link"], "835"
+            if link is not None:
+                f["ema_link"] = link
+            f["source"] = "835"
             f["hint"] = (f"Ask {sgrp} for its payment: the first payer forwarded the claim" if crossed else
                          f"Bill {sgrp} with {l['payer_group']}'s remittance")
             self.ema_counts["SECONDARY_NOT_BILLED"] += 1
+            if not e:
+                self.ema_counts["snb_from_remittance_only"] += 1
 
     def run_credit_balances(self) -> None:
         """Credit balances (C8 as items): an EMA claim whose lines hold more than they were owed after every payment and

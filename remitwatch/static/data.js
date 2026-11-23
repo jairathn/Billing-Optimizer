@@ -195,10 +195,10 @@ function dtArHtml(e){
 
 function dtPolicyHtml(e){
   const p = e.policy || {}, ub = e.upper_bound || {};
-  if(p.error) return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>What EMA writes off by itself</h2></div><div class="note sev-high">These figures did not come back (${esc(p.error)}).</div></div>`;
+  if(p.error) return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>Denials written off in EMA</h2></div><div class="note sev-high">These figures did not come back (${esc(p.error)}).</div></div>`;
   if(!p.patterns && !ub.n) return '';
-  return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>What EMA writes off by itself</h2></div>
-    ${p.patterns ? `<div class="small">EMA's posting rules wrote off denials in <b>${esc(pl(p.patterns, 'pattern'))}</b> (payer, code, reason), ${money(p.cents)} in all, ${money(p.appealable_cents)} still inside a window. ${p.accepted ? esc(pl(p.accepted, 'pattern')) + ' accepted so far. ' : ''}<a href="#policy" class="dtGo" data-tab="policy">Decide them on the write-off policy page</a>.</div>` : ''}
+  return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>Denials written off in EMA</h2></div>
+    ${p.patterns ? `<div class="small">The denials written off in EMA, by its posting rules or later by a person, fall in <b>${esc(pl(p.patterns, 'pattern'))}</b> (payer, code, reason): ${money(p.cents)} in all, ${money(p.appealable_cents)} still inside a window. ${p.accepted ? esc(pl(p.accepted, 'pattern')) + ' accepted so far. ' : ''}<a href="#policy" class="dtGo" data-tab="policy">Decide them on the write-off policy page</a>.</div>` : ''}
     ${ub.n ? `<div class="small muted" style="margin-top:4px">${esc(pl(ub.n, 'open item'))} ${ub.n===1?'has':'have'} no price, because no rate covers the line. EMA wrote off up to ${money(ub.cents)} on them (the charge less what was paid): an upper bound, left out of every total.</div>` : ''}</div>`;
 }
 

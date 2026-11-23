@@ -40,6 +40,16 @@ STATE_INTAKE = "intake"
 SIDECAR_KEYS = ("name", "origin", "user", "sha256", "size", "gz", "received_at", "report_hint")
 BLOCK = 4 * 1024 * 1024             # Dropbox's content hash works in blocks of 4 MiB
 MAX_LINES = 12
+# One file must never stop every cycle: each pair's reading is noted before it starts (server: the store's meta; serverless:
+# a small file in the state folder, written before the run reads a byte) and the note goes once the reading returns. A
+# pair whose reading started PAIR_TRIES times and never returned (the cycle died in it: the memory limit, the time limit)
+# is set aside without being read: held on the Data tab with what happened, Apply or Discard there.
+PAIR_TRIES = 2
+ATTEMPTS_META = "intake:attempts"           # server
+STATE_ATTEMPTS = "intake_attempts.json"     # serverless (beside the state folder's other files, not in intake/)
+SET_ASIDE = ("Set aside without being read: reading it stopped the cycle {n} times (a damaged file, or one far larger "
+             "than it looks once unpacked), so the rest of the work went on without it. Export it again from EMA and upload "
+             "it again, or choose Apply on the Data tab to try it once more.")
 
 
 def _now() -> str:
@@ -78,15 +88,22 @@ class Hashes:
         return hashlib.sha256(b"".join(blocks)).hexdigest()
 
 
-def hash_file(path: str, gz: bool) -> Hashes:
-    """The hashes of a file's original bytes: a .gz is unpacked as it is read (never whole). Raises ValueError for a
-    file that says it is gzip and is not."""
+def hash_file(path: str, gz: bool, *, expect: int | None = None) -> Hashes:
+    """The hashes of a file's original bytes: a .gz is unpacked as it is read (never whole), never to more than
+    ema_reports.unpack_limit of its size (a gzip bomb raises the unpacks_too_large refusal, a ReportRefused), and no
+    further than one byte past `expect` (the sidecar's size: a file that unpacks to more is not the one that was sent;
+    the caller sees the size differ). Raises ValueError for a file that says it is gzip and is not."""
+    from . import ema_reports as er
     h = Hashes()
     try:
         if gz:
+            packed = os.path.getsize(path)
             with gzip.open(path, "rb") as fh:
-                for piece in iter(lambda: fh.read(1 << 20), b""):
+                src = er.Capped(fh, er.unpack_limit(packed), packed=packed)
+                for piece in iter(lambda: src.read(1 << 20), b""):
                     h.update(piece)
+                    if expect is not None and h.size > expect:
+                        break
         else:
             with open(path, "rb") as fh:
                 for piece in iter(lambda: fh.read(1 << 20), b""):
@@ -258,14 +275,20 @@ def read_file(store, path: str, *, name: str, origin: dict, file_id: str, ledger
     gz = path.lower().endswith(".gz") or _gzip_head(path)
     target = os.path.join(folder, name[:-3] if gz and name.lower().endswith(".gz") else name)
     if gz:
-        from .dropbox_sync import MAX_EXPORT_BYTES
+        # what is no report is unpacked to be read under its own name, never past what such a file can be (a weekly
+        # export, remittances): one that unpacks to more is set aside whole, never read cut short
         n = 0
-        with gzip.open(path, "rb") as src, open(target, "wb") as dst:
-            for piece in iter(lambda: src.read(1 << 20), b""):
-                n += len(piece)
-                if n > max(MAX_EXPORT_BYTES, 400 << 20):
-                    break
-                dst.write(piece)
+        limit = min(er.unpack_limit(os.path.getsize(path)), NOT_REPORT_UNPACK_MAX())
+        try:
+            with gzip.open(path, "rb") as src, open(target, "wb") as dst:
+                for piece in iter(lambda: src.read(1 << 20), b""):
+                    n += len(piece)
+                    if n > limit:
+                        raise er.unpack_refusal(limit, os.path.getsize(path))
+                    dst.write(piece)
+        except er.ReportRefused:
+            _remove_quietly(target)
+            raise
     else:
         try:
             os.link(path, target)
@@ -282,6 +305,20 @@ def _gzip_head(path: str) -> bool:
             return fh.read(2) == b"\x1f\x8b"
     except OSError:
         return False
+
+
+def NOT_REPORT_UNPACK_MAX() -> int:      # noqa: N802  (a limit that depends on the host)
+    """The most a gzipped upload that is none of EMA's reports may unpack to: a server reads what such files can be
+    (weekly exports, remittances, a zip of them); a serverless host's scratch space is 512 MB and holds the ledger too."""
+    from . import runtime
+    return (100 << 20) if runtime.serverless() else (400 << 20)
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _takes_name() -> bool:
@@ -380,11 +417,70 @@ def pending(data_dir: str) -> list[dict]:
     return sorted(out, key=lambda s: (str(s.get("received_at") or ""), s["pair"]))
 
 
+def _meta_attempts(conn) -> dict:
+    try:
+        r = conn.execute("SELECT value FROM meta WHERE key=?", (ATTEMPTS_META,)).fetchone()
+        d = json.loads(r[0]) if r and r[0] else {}
+    except (ValueError, TypeError, Exception):      # noqa: BLE001  (no meta table yet: nothing noted)
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+def note_server_attempt(conn, pair: str) -> int:
+    """Note on the server (the store's meta, committed at once) that a pair's reading starts; returns how many times it
+    has started, this one included."""
+    d = _meta_attempts(conn)
+    n = int((d.get(pair) or {}).get("n") or 0) + 1
+    d[pair] = {"n": n, "at": _now()}
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ATTEMPTS_META, json.dumps(d, sort_keys=True)))
+    conn.commit()
+    return n
+
+
+def clear_server_attempt(conn, pair: str) -> None:
+    d = _meta_attempts(conn)
+    if d.pop(pair, None) is None:
+        return
+    if d:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (ATTEMPTS_META, json.dumps(d, sort_keys=True)))
+    else:
+        conn.execute("DELETE FROM meta WHERE key=?", (ATTEMPTS_META,))
+    conn.commit()
+
+
+def _set_aside(store, sc: dict, pair: str, n: int, origin: dict) -> dict:
+    """A pair whose reading stopped the cycle PAIR_TRIES times: held in the report catalog under its SHA-256 (the same
+    file from Dropbox is then not read either), with what happened and Apply / Discard on the Data tab. A file the catalog
+    already knows (applied by a run that died at its saves, refused, held) keeps that answer."""
+    from . import ema_reports as er
+    fid = sc.get("sha256") or ""
+    try:
+        row = er._catalog_row(store.conn, fid) if fid else None
+    except Exception:       # noqa: BLE001  (no catalog yet)
+        row = None
+    if row and row.get("status") in er.DONE_STATUSES + ("refused", "discarded", "held"):
+        st = row["status"]
+        return _result("already" if st in er.DONE_STATUSES else st,
+                       [f"Already read on an earlier run ({st})."] if st in er.DONE_STATUSES
+                       else [str(row.get("status_reason") or "Not read.")], file_id=fid, report=row.get("report"))
+    msg = SET_ASIDE.format(n=n - 1)
+    if fid:
+        try:
+            er.ensure_schema(store.conn)
+            er._catalog_put(store.conn, fid, commit=True, report=None, source_name=_plain_name(sc, pair), via="upload",
+                            origin=origin, source_kind="upload", status="held", status_reason=msg, received_at=_now())
+            store.ema_changed = True
+        except Exception:       # noqa: BLE001  (the done sidecar still says what happened)
+            pass
+    return _result("held", [msg], file_id=fid)
+
+
 def process_ready(store, data_dir: str | None = None, *, ledger=None, deadline: float | None = None, log=print) -> dict:
     """Read every complete pair in <data_dir>/incoming/ready/ (a server), oldest first: check its bytes against the
     sidecar, move the file to done/, read it from there (its kept copy) with origin 'upload', and write the sidecar to
-    done/ with the result. `ledger` is the cycle's ledger opener (a Production report is applied with it). Returns
-    counts: pairs, read, refused, changed (whether anything new reached the store), and per pair its result."""
+    done/ with the result. `ledger` is the cycle's ledger opener (a Production report is applied with it). Each pair's
+    reading is noted before it starts; one whose reading stopped the cycle PAIR_TRIES times is set aside unread (held).
+    Returns counts: pairs, read, refused, changed (whether anything new reached the store), and per pair its result."""
     data_dir = data_dir or os.path.dirname(os.path.abspath(store.db_path))
     out: dict = {"pairs": 0, "read": 0, "refused": 0, "changed": False, "results": []}
     _finish_orphans(store, data_dir, ledger=ledger, log=log, out=out)
@@ -399,8 +495,17 @@ def process_ready(store, data_dir: str | None = None, *, ledger=None, deadline: 
         pair = sc["pair"]
         src = os.path.join(ready_dir(data_dir), pair)
         out["pairs"] += 1
-        res = _server_pair(store, src, os.path.join(done, pair), sc, ledger=ledger, deadline=deadline, log=log)
+        n = note_server_attempt(store.conn, pair)        # before a byte of it is read
+        if n > PAIR_TRIES:
+            dest = os.path.join(done, pair)
+            os.replace(src, dest)
+            res = _set_aside(store, sc, pair, n, {"path": dest, "upload_id": upload_id_of(pair), "pair": pair,
+                                                  "user": sc.get("user") or "", "name": sc.get("name") or "", "size": sc.get("size")})
+            log(f"  upload {upload_id_of(pair) or 'file'}: set aside after {n - 1} cycles that stopped while reading it")
+        else:
+            res = _server_pair(store, src, os.path.join(done, pair), sc, ledger=ledger, deadline=deadline, log=log)
         _close_pair(data_dir, pair, sc, res)
+        clear_server_attempt(store.conn, pair)
         out["results"].append({"pair": pair, **{k: res.get(k) for k in ("status", "report", "file_id")}})
         if res["status"] in ("refused", "not_read", "failed"):
             out["refused"] += 1
@@ -426,12 +531,32 @@ def _no_names(log, sc: dict, pair: str):
     return say
 
 
+def _bomb_result(store, exc, sc: dict, pair: str, origin: dict) -> dict:
+    """A pair that unpacks to far more than any export (or holds a line longer than any export has): refused in the report
+    catalog under its SHA-256 (the same file from Dropbox is not read either), and listed on the Data tab with why."""
+    from . import ema_reports as er
+    fid = sc.get("sha256") or ""
+    if fid:
+        try:
+            er._record_refusal(store, fid, exc, path=_plain_name(sc, pair), rec=None, via="upload", origin=origin,
+                               log=lambda *a: None)
+        except Exception:       # noqa: BLE001  (the done sidecar still says what happened)
+            pass
+    return _result("refused", [f"Not read: {exc.message}"], file_id=fid or None)
+
+
 def _server_pair(store, src: str, dest: str, sc: dict, *, ledger, deadline, log) -> dict:
+    from . import ema_reports as er
     pair = os.path.basename(src)
     log = _no_names(log, sc, pair)
     gz = bool(sc.get("gz"))
     try:
-        h = hash_file(src, gz)
+        h = hash_file(src, gz, expect=int(sc["size"]) if sc.get("size") is not None else None)
+    except er.ReportRefused as exc:     # a gzip bomb: never unpacked past the limit
+        os.replace(src, dest)
+        log(f"  upload {upload_id_of(pair) or 'file'}: set aside ({exc.code})")
+        return _bomb_result(store, exc, sc, pair, {"path": dest, "upload_id": upload_id_of(pair), "pair": pair,
+                                                   "user": sc.get("user") or "", "name": sc.get("name") or ""})
     except ValueError as exc:
         os.replace(src, dest)
         return _result("refused", [f"Not read: {exc} Upload it again."])
@@ -446,6 +571,9 @@ def _server_pair(store, src: str, dest: str, sc: dict, *, ledger, deadline, log)
     try:
         res = read_file(store, dest, name=_plain_name(sc, pair), origin=origin, file_id=h.sha256(), ledger=ledger,
                         deadline=deadline, work_dir=work, log=log)
+    except er.ReportRefused as exc:     # it unpacks to more than such a file can be: set aside whole, never read cut short
+        log(f"  upload {upload_id_of(pair)}: set aside ({exc.code})")
+        return _bomb_result(store, exc, sc, pair, origin)
     except Exception as exc:       # noqa: BLE001  (never the message: a converter's message can hold a cell)
         log(f"  upload {upload_id_of(pair)}: not read ({type(exc).__name__})")
         return _result("refused", [f"Not read: the file could not be read ({type(exc).__name__}). Upload it again, or "
@@ -491,12 +619,20 @@ def _finish_orphans(store, data_dir: str, *, ledger, log, out: dict) -> None:
             continue
         origin = {"path": kept, "upload_id": upload_id_of(pair), "pair": pair, "user": sc.get("user") or "", "name": sc.get("name") or "",
                   "size": sc.get("size")}
-        try:
-            res = _summarise(read_file(store, kept, name=_plain_name(sc, pair), origin=origin, file_id=sc["sha256"], ledger=ledger,
-                                       work_dir=done_dir(data_dir), log=log))
-        except Exception as exc:       # noqa: BLE001
-            res = _result("refused", [f"Not read ({type(exc).__name__})."])
+        n = note_server_attempt(store.conn, pair)
+        if n > PAIR_TRIES:
+            res = _set_aside(store, sc, pair, n, origin)
+        else:
+            from . import ema_reports as er
+            try:
+                res = _summarise(read_file(store, kept, name=_plain_name(sc, pair), origin=origin, file_id=sc["sha256"], ledger=ledger,
+                                           work_dir=done_dir(data_dir), log=_no_names(log, sc, pair)))
+            except er.ReportRefused as exc:
+                res = _bomb_result(store, exc, sc, pair, origin)
+            except Exception as exc:       # noqa: BLE001
+                res = _result("refused", [f"Not read ({type(exc).__name__})."])
         _close_pair(data_dir, pair, sc, res)
+        clear_server_attempt(store.conn, pair)
         out["pairs"] += 1
         out["read"] += 1
 
@@ -565,14 +701,35 @@ def process_state(store, state, *, production: Production | None = None, ledger=
             continue
         pair = sc["pair"]
         out["pairs"] += 1
-        work = os.path.join(base, upload_id_of(pair) or "pair")
-        shutil.rmtree(work, ignore_errors=True)
-        os.makedirs(work, exist_ok=True)
-        try:
-            res = _state_pair(store, state, pair, sc, work, production=production, ledger=ledger, deadline=deadline,
-                              max_bytes=max_bytes, log=log)
-        finally:
+        # the reading is noted in the state folder before a byte is read: a run the platform stops in it (its memory or
+        # time limit) still counts, and after PAIR_TRIES such runs the pair is set aside unread
+        n = note_state_attempt(state, pair)
+        if n > PAIR_TRIES:
+            res = _set_aside(store, sc, pair, n, {"state_path": f"{STATE_INTAKE}/{DONE}/{pair}", "upload_id": upload_id_of(pair),
+                                                  "pair": pair, "user": sc.get("user") or "", "name": sc.get("name") or "",
+                                                  "size": sc.get("size"), "stored": sc.get("stored")})
+            log(f"  upload {upload_id_of(pair) or 'file'}: set aside after {n - 1} runs that stopped while reading it")
+        else:
+            work = os.path.join(base, upload_id_of(pair) or "pair")
             shutil.rmtree(work, ignore_errors=True)
+            os.makedirs(work, exist_ok=True)
+            handed: list = []
+
+            def slot(*a, _pair=pair, _handed=handed, **kw):
+                # the run's Production slot counts its own attempts from here (three, then the file is held): the pair's
+                # note goes, so the two never count one stopped run twice
+                if not _handed:
+                    clear_state_attempt(state, _pair)
+                    _handed.append(True)
+                return production(*a, **kw)
+            try:
+                res = _state_pair(store, state, pair, sc, work, production=slot if production is not None else None,
+                                  ledger=ledger, deadline=deadline, max_bytes=max_bytes, log=log)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+        if n <= PAIR_TRIES:
+            clear_state_attempt(state, pair)        # the reading returned: whatever comes after is not this file's doing
+        # (a pair set aside keeps its note until it is moved to intake/done/: close_state_pairs clears it)
         if res.get("status") == "later":            # the run's time or its Production slot ran out: next run
             out["pairs"] -= 1
             out["remaining"] = out.get("remaining", 0) + 1
@@ -581,6 +738,7 @@ def process_state(store, state, *, production: Production | None = None, ledger=
             out.setdefault("to_close", []).append((pair, sc, res))
         else:
             _close_state_pair(state, pair, sc, res)
+            clear_state_attempt(state, pair)
         out["results"].append({"pair": pair, **{k: res.get(k) for k in ("status", "report", "file_id")}})
         if res["status"] in ("refused", "not_read", "failed"):
             out["refused"] += 1
@@ -591,7 +749,68 @@ def process_state(store, state, *, production: Production | None = None, ledger=
     return out
 
 
+def _state_attempts(state) -> dict:
+    try:
+        d = json.loads(state.get(STATE_ATTEMPTS) or b"{}")
+    except (ValueError, TypeError):
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+def note_state_attempt(state, pair: str) -> int:
+    """Note in the state folder (written at once) that a pair's reading starts; returns how many times it has started,
+    this one included. A state folder that cannot be written reads the pair all the same (returns 1)."""
+    d = _state_attempts(state)
+    n = int((d.get(pair) or {}).get("n") or 0) + 1
+    d[pair] = {"n": n, "at": _now()}
+    try:
+        state.put(STATE_ATTEMPTS, json.dumps(d, sort_keys=True).encode())
+    except Exception:       # noqa: BLE001  (the note is a safeguard; the reading goes on)
+        return 1
+    return n
+
+
+def clear_state_attempt(state, *pairs: str) -> None:
+    d = _state_attempts(state)
+    if not any(p in d for p in pairs):
+        return
+    for p in pairs:
+        d.pop(p, None)
+    try:
+        if d:
+            state.put(STATE_ATTEMPTS, json.dumps(d, sort_keys=True).encode())
+        else:
+            state.delete(STATE_ATTEMPTS)
+    except Exception:       # noqa: BLE001  (an old note only lets a later run count one stop too many)
+        pass
+
+
+def _unpacked_into(chunks: Iterable[bytes], fh, h: Hashes, gz: bool, *, expect: int | None, packed: int | None) -> None:
+    """Write the stored bytes to `fh` and feed the original bytes to `h`: a .gz is unpacked 8 MB at a time, never past
+    ema_reports.unpack_limit of its stored size (a gzip bomb raises the unpacks_too_large refusal) and no further than one
+    byte past `expect` (the sidecar's size: the size then differs and the pair is refused)."""
+    from . import ema_reports as er
+    unpack = zlib.decompressobj(31) if gz else None
+    limit = er.unpack_limit(packed)
+    for c in chunks:
+        fh.write(c)
+        if unpack is None:
+            h.update(c)
+            continue
+        buf = c
+        while buf and not unpack.eof:
+            h.update(unpack.decompress(buf, 8 << 20))
+            if h.size > limit:
+                raise er.unpack_refusal(limit, packed)
+            if expect is not None and h.size > expect:
+                return
+            buf = unpack.unconsumed_tail
+    if unpack is not None and not unpack.eof:
+        h.update(unpack.flush())
+
+
 def _state_pair(store, state, pair: str, sc: dict, work: str, *, production, ledger, deadline, max_bytes, log) -> dict:
+    from . import ema_reports as er
     log = _no_names(log, sc, pair)
     gz = bool(sc.get("gz"))
     stored = sc.get("stored")
@@ -603,24 +822,28 @@ def _state_pair(store, state, pair: str, sc: dict, work: str, *, production, led
     if chunks is None:
         return _result("refused", ["Not read: the file is gone from the intake folder. Upload it again."])
     h = Hashes()
-    unpack = zlib.decompressobj(31) if gz else None
+    origin = {"state_path": f"{STATE_INTAKE}/{DONE}/{pair}", "upload_id": upload_id_of(pair), "pair": pair, "user": sc.get("user") or "",
+              "name": sc.get("name") or ""}
     try:
         with open(local, "wb") as fh:
-            for c in chunks:
-                fh.write(c)
-                h.update(unpack.decompress(c) if unpack is not None else c)
-            if unpack is not None:
-                h.update(unpack.flush())
+            _unpacked_into(chunks, fh, h, gz, expect=int(sc["size"]) if sc.get("size") is not None else None,
+                           packed=int(stored) if stored is not None else None)
     except zlib.error:
         return _result("refused", ["Not read: the file could not be unpacked. Upload it again."])
+    except er.ReportRefused as exc:     # a gzip bomb: never unpacked past the limit
+        log(f"  upload {upload_id_of(pair) or 'file'}: set aside ({exc.code})")
+        return _bomb_result(store, exc, sc, pair, dict(origin, size=sc.get("size")))
     if h.sha256() != sc["sha256"] or (sc.get("size") is not None and int(sc["size"]) != h.size):
         return _result("refused", ["Not read: the file changed on the way (it does not match what the page sent). Upload it "
                                    "again."])
-    origin = {"state_path": f"{STATE_INTAKE}/{DONE}/{pair}", "upload_id": upload_id_of(pair), "pair": pair, "user": sc.get("user") or "",
-              "name": sc.get("name") or "", "size": h.size, "content_hash": h.content_hash()}
+    # the size kept with the origin is what the run fetches again (the stored bytes: a .gz is smaller than its original)
+    origin.update(size=h.size, stored=os.path.getsize(local), content_hash=h.content_hash())
     try:
         res = read_file(store, local, name=_plain_name(sc, pair), origin=origin, file_id=h.sha256(), ledger=ledger,
                         production=production, deadline=deadline, work_dir=work, log=log)
+    except er.ReportRefused as exc:     # it unpacks to more than such a file can be: set aside whole, never read cut short
+        log(f"  upload {upload_id_of(pair) or 'file'}: set aside ({exc.code})")
+        return _bomb_result(store, exc, sc, pair, origin)
     except Exception as exc:       # noqa: BLE001  (never the message: a converter's message can hold a cell)
         log(f"  upload {upload_id_of(pair)}: not read ({type(exc).__name__})")
         return _result("refused", [f"Not read: the file could not be read ({type(exc).__name__}). Upload it again, or "
@@ -644,11 +867,16 @@ def _close_state_pair(state, pair: str, sc: dict, result: dict) -> None:
 
 
 def close_state_pairs(state, to_close: Iterable[tuple]) -> int:
-    """Move the pairs a run read to intake/done/ with their results (after the run saved its store image)."""
+    """Move the pairs a run read to intake/done/ with their results (after the run saved its store image), and drop
+    their attempt notes."""
     n = 0
+    closed = []
     for pair, sc, res in to_close or []:
         _close_state_pair(state, pair, sc, res)
+        closed.append(pair)
         n += 1
+    if closed:
+        clear_state_attempt(state, *closed)
     return n
 
 

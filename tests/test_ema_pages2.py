@@ -673,6 +673,35 @@ def test_the_csvs_are_downloads_with_no_patient_names(server):
     assert c.get("/api/ema/checks.csv", params={"from": "yesterday"}).status_code == 400
 
 
+def test_the_unposted_file_lists_what_the_data_tab_counts(server):
+    """The Data tab counts the payments EMA never posted from what the run stored; the file lists those very rows, on
+    either host, even when the code that finds them changed since the run. A run that kept no rows: the live list."""
+    c, db = server.c, server.db
+    stored = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:unposted'")[0][0])
+    assert len(stored["rows"]) == stored["n"] + stored["short_n"] == 1
+    live = c.get("/api/ema/unposted.csv").text
+    # a run that found one more (as the run writes it: the list, and the same figures in its reconcile summary)
+    stored["rows"].append(["9999", iso(30), "Other Payer", "Other Payer", 1, "12.00", "short"])
+    stored["short_n"] += 1
+    rec = json.loads(rows(db, "SELECT value FROM meta WHERE key='ema:reconcile'")[0][0])
+    rec["c4"] = {k: v for k, v in stored.items() if k != "rows"}
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE meta SET value=? WHERE key='ema:unposted'", (json.dumps(stored),))
+    conn.execute("UPDATE meta SET value=? WHERE key='ema:reconcile'", (json.dumps(rec),))
+    conn.commit()
+    conn.close()
+    lines = c.get("/api/ema/unposted.csv").text.strip().splitlines()
+    assert len(lines) - 1 == stored["n"] + stored["short_n"] == 2 and lines[-1] == f"9999,{iso(30)},Other Payer,Other Payer,1,12.00,short"
+    c4 = c.get("/api/ema/data").json()["reconcile"]["c4"]                # what the Data tab counts
+    assert c4["n"] + c4["short_n"] == len(lines) - 1
+    del stored["rows"]
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE meta SET value=? WHERE key='ema:unposted'", (json.dumps(stored),))
+    conn.commit()
+    conn.close()
+    assert c.get("/api/ema/unposted.csv").text == live
+
+
 def test_a_csv_cell_that_could_start_a_formula_is_quoted(server):
     c, db = server.c, server.db
     conn = sqlite3.connect(db)
@@ -1029,7 +1058,7 @@ def test_the_data_tab_draws_each_panel_and_its_lists(page_run):
     out, ans = page_run()
     h = out["data_html"]
     for title in ("EMA's reports", "Payments with no remittance", "835 payments EMA never posted", "Credits", "The A/R accounted for",
-                  "What EMA writes off by itself"):
+                  "Denials written off in EMA"):
         assert title in h, title
     assert '<section id="ops-panels"></section>' in h
     assert out["decide_button"] == "heldfile1" and "This A/R lists far fewer lines" in h

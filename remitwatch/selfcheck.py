@@ -637,6 +637,8 @@ CHECKS: dict[str, tuple] = {
                      "A posting missing from the Production export or an A/R pulled before the postings: compare the lines."),
 }
 CRITICAL = tuple(k for k, v in CHECKS.items() if v[0] == "critical")
+# offenders' keys a result carries (the baseline and the items kept): more than the whole worklist
+KEYS_MAX = 50000
 
 
 def _result(check_id: str, offenders: list | None = None, *, status: str | None = None, info: dict | None = None,
@@ -650,7 +652,7 @@ def _result(check_id: str, offenders: list | None = None, *, status: str | None 
     st = status or ("ok" if n == 0 else "fail")
     return {"id": check_id, "severity": sev, "contain": contain, "tolerance": tol, "title": title, "sentence": sentence,
             "what_to_check": what, "status": st, "n": n, "cents": cents, "examples": ex[:EXAMPLES],
-            "keys": [(str(k), int(c or 0)) for k, c, _f in offs][:5000], "info": info or {},
+            "keys": [(str(k), int(c or 0)) for k, c, _f in offs][:KEYS_MAX], "info": info or {},
             "text": text or (f"{title}: yes" if st == "ok" else
                              f"{title}: no. {_n(n, 'item')} ({usd0(cents)})" if st == "fail" else f"{title}: not checked")}
 
@@ -1994,7 +1996,7 @@ def given_up(conn: sqlite3.Connection, *, today: Any = None, save: bool = True) 
     money = meta_get(conn, K_MONEY, {}) or {}
     ledger_wo = (money.get("conservation") or {}).get("totals_since", {}).get("wo_at_posting")
     out = {"at": now_of(), "today": t, "week": _week_of(t), "cents": tot["recoverable"] + tot["lost"],
-           "recoverable_cents": tot["recoverable"], "lost_cents": tot["lost"], "items": tot["items"],
+           "recoverable_cents": tot["recoverable"], "lost_cents": tot["lost"], "items": tot["items"], "n": tot["items"],
            "by_payer": _top(rows, "payer_group"), "by_reason": _top(rows, "reason"), "by_month": _top(rows, "month"),
            "rows": rows[:200], "ledger_written_off_at_posting_cents": ledger_wo,
            "with_no_item_cents": (int(ledger_wo) - (tot["recoverable"] + tot["lost"])) if isinstance(ledger_wo, int) else None}
@@ -2026,12 +2028,15 @@ def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True)
     paid in EMA' check rests on a report older than its limit. One banner sentence for every page; never 'all clear'
     while blind."""
     t = today_of(today)
-    sources = []
+    sources, feeds = [], []
     newest = None
     if _has_table(conn, "transactions"):
         newest = conn.execute("SELECT MAX(payment_date) FROM transactions WHERE COALESCE(superseded, 0) = 0").fetchone()[0]
     days = _days(newest, t) if newest else None
     limit = _int_setting("REMITWATCH_STALE_DAYS", STALE_835_DAYS)
+    if newest:
+        feeds.append({"feed": "835", "label": "Remittances (835)", "since": str(newest)[:10], "days": days,
+                      "stale": days is not None and days > limit})
     if newest and days is not None and days > limit:
         cents, about = _charges_since(conn, newest, t)
         sources.append({"source": "835", "since": newest, "days": days, "cents": cents, "about": about,
@@ -2044,10 +2049,14 @@ def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True)
         except Exception:          # noqa: BLE001  (no freshness: say nothing rather than guess)
             fr = {}
         stale = []
-        if fr.get("production_days") is not None and fr["production_days"] > STALE_PRODUCTION_DAYS:
-            stale.append(("production", "Production report", fr.get("production_as_of"), fr["production_days"]))
-        if fr.get("ar_days") is not None and fr["ar_days"] > STALE_AR_DAYS:
-            stale.append(("ar", "A/R report", fr.get("ar_as_of"), fr["ar_days"]))
+        for key, label, lim in (("production", "Production report", STALE_PRODUCTION_DAYS), ("ar", "A/R report", STALE_AR_DAYS)):
+            d = fr.get(f"{key}_days")
+            if d is None:
+                continue
+            feeds.append({"feed": key, "label": f"EMA's {label}", "since": str(fr.get(f"{key}_as_of") or "")[:10] or None,
+                          "days": d, "stale": d > lim})
+            if d > lim:
+                stale.append((key, label, fr.get(f"{key}_as_of"), d))
         if stale:
             cols = set(_cols(conn, "findings"))
             ws = "work_state = 'work_now'" if "work_state" in cols else "status = 'open'"
@@ -2058,8 +2067,14 @@ def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True)
                 sources.append({"source": key, "since": as_of, "days": d, "cents": cents, "items": n, "about": False,
                                 "text": f"EMA's {label} is {d} days old (as of {as_of}): for {_n(n, 'item')} to work ({usd0(cents)}) "
                                         "RemitWatch cannot see whether someone worked or posted them in EMA since."})
-    out = {"at": now_of(), "today": t, "blind": bool(sources), "sources": sources,
-           "banner": " ".join(s["text"] for s in sources) if sources else None}
+    # the dollars the site cannot check: the charges with no payer answer, plus the items to work once (both EMA reports
+    # being old concerns the same items)
+    cents = sum(int(x["cents"] or 0) for x in sources if x["source"] == "835") + \
+        max([int(x["cents"] or 0) for x in sources if x["source"] != "835"], default=0)
+    banner_text = " ".join(x["text"] for x in sources) if sources else None
+    out = {"at": now_of(), "today": t, "blind": bool(sources), "sources": sources, "banner": banner_text,
+           "feeds": feeds, "cents": cents, "lines": [x["text"] for x in sources], "basis": banner_text,
+           "since": min((str(x["since"])[:10] for x in sources if x.get("since")), default=None)}
     if save:
         meta_set(conn, K_BLIND, out)
     return out
@@ -2419,7 +2434,15 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
     gap_alert = _int_setting("REMITWATCH_AUDIT_GAP_CENTS", AUDIT_GAP_ALERT_CENTS)
     wasted_alert = _int_setting("REMITWATCH_AUDIT_WASTED_ITEMS", AUDIT_WASTED_ALERT)
     big_new = [g for g in new_gaps if g["cents"] > gap_alert]
+    # coverage: of the lines that needed work (and had no reason to be left), the share the worklist listed; precision: of
+    # the items in Work now, the share the audit found no sign of being already paid or settled
+    coverage = {"lines": len(uniq), "listed": len(listed), "held_by_reason": len(reasons), "missed": len(gaps),
+                "missed_cents": sum(int(x["cents"]) for x in gaps),
+                "share": round(len(listed) / (len(listed) + len(gaps)), 4) if (listed or gaps) else None}
+    precision = {"work_now": wn_n, "possible_waste": w_n, "possible_waste_cents": w_cents,
+                 "share": round(1 - w_n / wn_n, 4) if wn_n else None}
     summary = {"audit_id": audit_id, "at": now_of(), "today": t, "why": why, "seconds": round(time.time() - t0, 1),
+               "coverage": coverage, "precision": precision,
                "gaps_n": len(gaps), "gaps_cents": sum(int(x["cents"]) for x in gaps),
                "gaps_by_category": _by(gaps, "category"), "gaps_by_payer": _by(gaps, "payer_group")[:12],
                "wasted_n": w_n, "wasted_cents": w_cents, "wasted_by_reason": _by(wasted, "reason"),
@@ -2441,7 +2464,8 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
         x = _ev(s)
         weeks.append({"today": tdy, "gaps_n": x.get("gaps_n"), "gaps_cents": x.get("gaps_cents"), "wasted_n": x.get("wasted_n"),
                       "wasted_cents": x.get("wasted_cents"), "matrix": x.get("matrix")})
-    meta_set(conn, K_AUDIT, {"latest": summary, "weeks": list(reversed(weeks))})
+    meta_set(conn, K_AUDIT, {"latest": summary, "weeks": list(reversed(weeks)), "at": summary["at"], "coverage": coverage,
+                             "precision": precision, "matrix": matrix})
     conn.commit()
     return summary
 
@@ -3332,13 +3356,14 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
 # 6. Housekeeping
 # =====================================================================================================================
 def housekeeping(*, mode: str, db_path: str | None = None, state: Any = None, conn: sqlite3.Connection | None = None,
-                 now: float | None = None, keep_days: int = 30) -> dict:
+                 now: float | None = None, keep_days: int = 30, archive_result: dict | None = None) -> dict:
     """The clean-ups of units A1, A2 and E, called from the cycle with what each did: upload pieces left unfinished for a
     day (uploads.sweep), the ledger's and refreshes' work files (ema_ledger.clean_work_files), kept upload copies the
     reports' catalog no longer needs after `keep_days` (only a file whose report was applied and later replaced or
     superseded, or read as 'already'; the sidecar, the record of what happened, stays; never a held or waiting file's, and
-    never the newest of a report), and the archive's compaction when unit E provides one. Each step reports or records
-    its error; nothing waits for a person."""
+    never the newest of a report). It does not compact the archive (VACUUM needs the store's size again; unit E runs
+    archive.compact before detection): the cycle passes that result as `archive_result` to record it with the rest. Each
+    step reports or records its error; nothing waits for a person."""
     now = now or time.time()
     out: dict = {"at": now_of(), "mode": mode}
     try:
@@ -3361,15 +3386,8 @@ def housekeeping(*, mode: str, db_path: str | None = None, state: Any = None, co
         out["kept_copies"] = _old_copies(mode, db_path, state, conn, now, keep_days)
     except Exception as exc:       # noqa: BLE001
         out["kept_copies"] = {"error": type(exc).__name__}
-    try:
-        from . import archive          # unit E's module (phase 3a): its compaction, when it has one
-        fn = getattr(archive, "compact", None)
-        if fn is not None and conn is not None:
-            out["archive"] = fn(conn)
-    except ImportError:
-        out["archive"] = {"skipped": "no archive module"}
-    except Exception as exc:       # noqa: BLE001
-        out["archive"] = {"error": type(exc).__name__}
+    if archive_result is not None:
+        out["archive"] = archive_result
     if conn is not None:
         try:
             meta_set(conn, K_HOUSE, out)

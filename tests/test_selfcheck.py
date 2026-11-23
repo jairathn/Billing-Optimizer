@@ -655,6 +655,8 @@ def test_given_up_counts_write_offs_at_posting_with_no_decision_or_policy(store)
     sc.meta_set(c, "ema:writeoff_policy", {"Policy Payer|17000||CO-197": {"decision": "accept", "by": "owner"}})
     g = sc.given_up(c, today=TODAY)
     assert (g["items"], g["recoverable_cents"], g["lost_cents"]) == (2, 5000, 5000)
+    stored = sc.meta_get(c, sc.K_GIVEN_UP)                     # the fields unit R's scoreboard reads (needs_R section 6)
+    assert (stored["cents"], stored["n"], stored["recoverable_cents"]) == (10000, 2, 5000) and stored["at"]
     assert g["by_reason"][0]["reason"] == "197" and g["weeks"][-1]["cents"] == 10000
     add_item(c, "F-more", written_off_cents=60000, written_off_when="at_posting", service_date="2026-03-02")
     sc.meta_set(c, sc.K_GIVEN_UP, dict(sc.meta_get(c, sc.K_GIVEN_UP), weeks=[{"week": "2026-W46", "cents": 10000}]))
@@ -671,6 +673,10 @@ def test_blindness_says_what_the_app_cannot_see_in_dollars(store):
     b = sc.blindness(c, today=TODAY)
     assert b["blind"] and b["sources"][0]["source"] == "835" and b["sources"][0]["days"] == 44
     assert b["sources"][0]["cents"] == 310000 * 22 // 31 + 100000 and "never" not in b["banner"]
+    stored = sc.meta_get(c, sc.K_BLIND)                        # the fields the pages' banner reads (needs_C2 section 4)
+    assert stored["blind"] and stored["cents"] == b["sources"][0]["cents"] and stored["lines"] == [b["sources"][0]["text"]]
+    assert stored["feeds"] == [{"feed": "835", "label": "Remittances (835)", "since": "2026-10-09", "days": 44, "stale": True}]
+    assert stored["basis"] == b["banner"] and stored["since"] == "2026-10-09"
     assert sc.data_health(c, TODAY)[0]["key"] == "selfcheck_blind"
     assert not sc.blindness(c, today="2026-10-15")["blind"]
 
@@ -767,7 +773,11 @@ def test_the_self_audit_lists_gaps_covered_lines_and_possible_wasted_work(kind):
     assert [(w["finding_id"], w["reason"]) for w in wasted] == [("F-paid", "paid_after")]
     m = a["matrix"]
     assert m["needs_work_missed"] == {"n": 1, "cents": 9000} and m["no_work_listed"]["n"] == 1
-    assert sc.meta_get(c, sc.K_AUDIT)["latest"]["gaps_n"] == 1
+    au = sc.meta_get(c, sc.K_AUDIT)
+    assert au["latest"]["gaps_n"] == 1
+    # what unit R freezes in its "before" (needs_R section 6): coverage, precision, the matrix and when
+    assert (au["coverage"]["listed"], au["coverage"]["missed"], au["coverage"]["share"]) == (1, 1, 0.5)
+    assert au["precision"]["possible_waste"] == 1 and au["precision"]["work_now"] >= 1 and au["matrix"] == m and au["at"]
     assert gap  # the 835 line exists
     assert sc.self_audit(c, today=TODAY)["skipped"] == "done this week"
 
@@ -852,12 +862,21 @@ def test_housekeeping_runs_each_cleanup_and_keeps_what_a_person_may_need(tmp_pat
                        [("f-replaced", "replaced", "2026-01-01"), ("f-current", "current", "2026-02-01"),
                         ("f-same", "current", "2026-01-15"), ("f-held", "held", "2026-01-20")])
     s.conn.commit()
+    try:                              # the archive's compaction (VACUUM) is unit E's step before detection, never here
+        import importlib
+        monkeypatch.setattr(importlib.import_module("remitwatch.archive"), "compact",
+                            lambda *a, **k: pytest.fail("housekeeping compacted the store"), raising=False)
+    except ImportError:
+        pass
     out = sc.housekeeping(mode="server", db_path=db, conn=s.conn)
     assert out["kept_copies"]["removed"] == 1 or out["kept_copies"]["removed"] == 2
     left = sorted(p.name for p in done.iterdir())
     assert "a__ar.xlsx" not in left and "c__x.csv" not in left
     assert {"b__ar.xlsx", "d__h.csv", "a__ar.xlsx.json", "c__x.csv.json"} <= set(left)
     assert "uploads" in out and "work_files" in out and sc.meta_get(s.conn, sc.K_HOUSE)["mode"] == "server"
+    assert "archive" not in out
+    out = sc.housekeeping(mode="server", db_path=db, conn=s.conn, archive_result={"skipped": True, "free_share": 0.01})
+    assert sc.meta_get(s.conn, sc.K_HOUSE)["archive"] == {"skipped": True, "free_share": 0.01}   # E's result, recorded
     s.close()
 
 
@@ -918,11 +937,15 @@ def test_stale_ema_reports_make_the_app_say_what_it_cannot_see(store):
     c.execute("""INSERT INTO ema_report_files (file_id, report, status, as_of, received_at, svc_lo, svc_hi, scope)
                  VALUES ('p1', 'production', 'current', '2026-10-01', '2026-10-02', '2025-01-01', '2026-09-30', 'service'),
                         ('a1', 'ar_report', 'current', '2026-10-01', '2026-10-02', '2026-01-01', '2026-09-30', 'service')""")
+    c.execute("INSERT INTO ema_ar (file_id, row_no, as_of, svc_year, balance_cents) VALUES ('a1', 1, '2026-10-01', '2026', 5000)")
     c.commit()
     add_item(c, "F-1", shortfall_cents=7000)
     b = sc.blindness(c, today=TODAY)
     srcs = {s["source"]: s for s in b["sources"]}
-    assert set(srcs) >= {"production"} and srcs["production"]["cents"] == 7000 and "cannot see" in srcs["production"]["text"]
+    assert set(srcs) == {"production", "ar"} and srcs["production"]["cents"] == 7000 and "cannot see" in srcs["production"]["text"]
+    feeds = {f["feed"]: f for f in b["feeds"]}
+    assert feeds["835"]["stale"] is False and feeds["production"]["stale"] and feeds["production"]["since"] == "2026-10-01"
+    assert b["cents"] == 7000                                  # the items to work counted once, however many reports are old
     assert sc.check_feed_ema(c, TODAY)["status"] == "fail"
 
 

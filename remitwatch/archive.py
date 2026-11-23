@@ -671,6 +671,7 @@ def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
             part = need_claims[i:i + 500]
             for (b,) in conn.execute(f"SELECT bill FROM temp.arc_cb WHERE claim_key IN ({','.join('?' * len(part))})", part):
                 held.setdefault(b, "open item")
+        _named_bills(conn, held)
         if remits:
             conn.execute("DROP TABLE IF EXISTS temp.arc_tx")
             conn.execute("CREATE TEMP TABLE arc_tx (transaction_key TEXT PRIMARY KEY)")
@@ -692,6 +693,65 @@ def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
     for (b,) in conn.execute("SELECT DISTINCT bill FROM archive_requests"):
         held.setdefault(b, "reopen asked")
     return held
+
+
+_TOKEN = re.compile(r"[A-Z0-9]{6,40}")
+_KEY_FIELDS = ("claim_key", "line_key", "claim_keys", "line_keys")
+
+
+def _named_bills(conn: sqlite3.Connection, held: dict[str, str]) -> None:
+    """Bills another item's proof names: an item that stays may rest on a claim of another bill (a duplicate denial
+    "already paid under claim ...", a payment the payer made on a corrected claim, an archive rule's proof row). The claim
+    ids in its automatic note, its state, its hint, a person's note and its evidence, and the claim and line keys its
+    evidence holds, keep their bills in the store, so the proof never leaves before the item. A routine-rate pattern's
+    claim list is not a proof (the pattern itself is kept as it was, carry_locked_aggregates)."""
+    fcols = set(_cols(conn, "findings"))
+    texts = [c for c in ("auto_note", "state_basis", "hint", "notes", "evidence") if c in fcols]
+    if not texts:
+        return
+    known = {b for (b,) in conn.execute("SELECT bill FROM temp.arc_bd")}
+    want_claims: set[str] = set()
+    want_lines: set[str] = set()
+    for row in conn.execute(f"SELECT patient_control_number, {', '.join(texts)} FROM findings WHERE patient_control_number IS NOT NULL"):
+        own = _bill_of(row[0])
+        for t in row[1:]:
+            if not t:
+                continue
+            for tok in _TOKEN.findall(str(t).upper()):
+                b = _bill_of(tok)
+                if b != own and b in known:
+                    held.setdefault(b, "named by another item")
+        ev = row[-1] if texts[-1] == "evidence" else None
+        if ev and any(k in ev for k in _KEY_FIELDS):
+            try:
+                obj = json.loads(ev)
+            except ValueError:
+                continue
+            stack = [obj]
+            while stack:
+                x = stack.pop()
+                if isinstance(x, dict):
+                    for k, v in x.items():
+                        if k in _KEY_FIELDS:
+                            for y in (v if isinstance(v, list) else [v]):
+                                if isinstance(y, str) and y:
+                                    (want_claims if k.startswith("claim") else want_lines).add(y)
+                        elif isinstance(v, (dict, list)):
+                            stack.append(v)
+                elif isinstance(x, list):
+                    stack.extend(y for y in x if isinstance(y, (dict, list)))
+    if want_claims or want_lines:
+        conn.execute("DROP TABLE IF EXISTS temp.arc_nk")
+        conn.execute("CREATE TEMP TABLE arc_nk (k TEXT PRIMARY KEY)")
+        conn.executemany("INSERT OR IGNORE INTO temp.arc_nk VALUES (?)", [(x,) for x in want_claims])
+        for (b,) in conn.execute("SELECT DISTINCT k.bill FROM temp.arc_nk n JOIN temp.arc_cb k ON k.claim_key = n.k"):
+            held.setdefault(b, "named by another item")
+        conn.execute("DELETE FROM temp.arc_nk")
+        conn.executemany("INSERT OR IGNORE INTO temp.arc_nk VALUES (?)", [(x,) for x in want_lines])
+        for (b,) in conn.execute("""SELECT DISTINCT k.bill FROM temp.arc_nk n JOIN lines l ON l.line_key = n.k
+                                    JOIN temp.arc_cb k ON k.claim_key = l.claim_key"""):
+            held.setdefault(b, "named by another item")
+        conn.execute("DROP TABLE IF EXISTS temp.arc_nk")
 
 
 def plan(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: dict | None = None, today: Any = None,

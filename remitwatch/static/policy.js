@@ -1,4 +1,4 @@
-// RemitWatch write-off policy page (#policy): the denials EMA's posting rules write off by themselves, by payer, code,
+// RemitWatch write-off policy page (#policy): the denials written off in EMA (by its posting rules, or later by a person), by payer, code,
 // modifier and reason, with the owner's decision on each: Pursue (the default: they stay in the work queue) or Accept
 // (the next run takes them off the queue as written off by the owner's policy; they stay findable, and Pursue brings them
 // back). Any signed-in person may decide, as with the hide rules; the name typed and the date are kept. Loaded after
@@ -26,7 +26,7 @@ function polWhen(p){
 async function policyTab(v){
   const t = await api('/api/ema/policy');
   const pats = t.patterns || [], tot = t.totals || {};
-  v.innerHTML = `<div class="page-head"><h1 class="page-title">Write-off policy</h1><span class="muted small">Denials EMA's posting rules write off by themselves, grouped by payer, code and reason. Pursue keeps them in the work queue. Accept takes them off at the next run; they stay findable.</span></div>
+  v.innerHTML = `<div class="page-head"><h1 class="page-title">Write-off policy</h1><span class="muted small">Denials written off in EMA, by its posting rules or later by a person, grouped by payer, code and reason. Pursue keeps them in the work queue. Accept takes them off at the next run; they stay findable.</span></div>
     ${pats.length ? `<div class="panel" style="margin-top:0">
       <div class="wl-bar"><span class="small"><b>${esc(pl(pats.length, 'pattern'))}</b> · ${money(tot.cents)} written off · <b>${money(tot.appealable_cents)}</b> still inside a window (${esc(pl(tot.appealable, 'item'))}) · ${esc(pl(tot.accepted||0, 'pattern'))} accepted</span>
         <input id="polFind" type="search" maxlength="80" placeholder="Filter by payer, code or reason" aria-label="Filter the patterns by payer, code or reason" style="min-width:14rem"></div>
@@ -36,7 +36,7 @@ async function policyTab(v){
       ${pats.length > POL_SHOW ? `<button class="ghost" id="polAll">Show all ${pats.length.toLocaleString()} patterns</button>` : ''}
       <div class="small muted" style="margin-top:6px">"By EMA's rule": items EMA wrote off the day the payer's answer posted, with nothing paid after. "Paid later before": how often this payer paid such a denial later, from the remittance archive.${t.run_at ? ` Counts as of the run on ${esc(longDate(String(t.run_at).slice(0,10)))}; a decision takes effect at the next run.` : ''}</div>
       <div class="todo-err sev-high small" id="polErr" role="alert"></div></div>`
-    : `<div class="panel"><div class="empty">No denial written off by EMA's posting rules is on file${t.run_at ? '' : ' yet: the run that reads EMA\'s Production report fills this page'}.</div></div>`}`;
+    : `<div class="panel"><div class="empty">No denial written off in EMA is on file${t.run_at ? '' : ' yet: the run that reads EMA\'s Production report fills this page'}.</div></div>`}`;
   polBind(v, pats);
 }
 

@@ -144,10 +144,13 @@ def _is_open(f: Mapping) -> bool:
 
 # ----------------------------------------------------------------------------------------------------- the archive view
 class Ans:
-    """One 835 service line on one of the items' bills: one payer's answer to one line of one submission."""
+    """One 835 service line on one of the items' bills: one payer's answer to one line of one submission. `kind` is the
+    payer's kind as the claim filing indicator refines it (medicare, medicare_advantage, medicaid, commercial, ...);
+    `restated` marks a paid line whose claim pays less than its lines say (_restated_claims): its money is its share of
+    what the claim paid, not the amount the line lists."""
     __slots__ = ("line_key", "claim_key", "txn", "pcn", "bill", "code", "orig", "mods", "charge", "paid", "allowed", "units",
-                 "orig_units", "dos", "status", "payer", "payer_name", "group", "paid_on", "trace", "lcn", "adj", "rem",
-                 "standing", "claim")
+                 "orig_units", "dos", "status", "payer", "payer_name", "group", "kind", "paid_on", "trace", "lcn", "adj", "rem",
+                 "standing", "claim", "restated")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -204,18 +207,32 @@ class Ans:
         return sorted(out, key=lambda x: (-x[2], x[0], x[1]))
 
     def to_patient_only(self) -> bool:
-        """Processed with nothing paid and the allowed amount on the patient: a cost share and no denial reason."""
-        return not (self.paid or 0) and self.pr_cents(COST_SHARE_CARCS) > 0 and not self.denial_reasons()
+        """Processed with nothing paid and the allowed amount on the patient: a cost share and no denial reason. A payer
+        that puts the whole allowed amount on the patient sometimes codes its cut above the allowed amount with another
+        reason (CO-16 where CO-45 belongs): one reason taking exactly the charge less the allowed amount is that cut."""
+        if (self.paid or 0) or self.status == REVERSAL_STATUS:
+            return False
+        share = self.pr_cents(COST_SHARE_CARCS)
+        if share <= 0:
+            return False
+        rs = self.denial_reasons()
+        if not rs:
+            return True
+        allowed = self.allowed or 0
+        return (allowed > 0 and abs(share - allowed) <= 1 and len(rs) == 1
+                and abs(rs[0][2] - ((self.charge or 0) - allowed)) <= 1)
 
 
 class Claim:
     """One 835 claim (CLP) on an item's bill, with its remittance's date, trace and payer. `halves` are the claims the payer
     split the same submission into on the same remittance (MA15: the same claim id and trace); `same_id` are the payer's
     other answers to the same claim id (another remittance, the same kind of submission, the same role); `reanswer` says
-    the remittance also reverses an earlier answer to the claim id (this claim is the payer's new answer)."""
+    the remittance also reverses an earlier answer to the claim id (this claim is the payer's new answer). `restated`:
+    the claim pays less than its lines list, the gap taken by claim-level adjustments (_restated_claims); `net` is then
+    what it paid (CLP04)."""
     __slots__ = ("claim_key", "txn", "pcn", "bill", "status", "charge", "paid", "patient_resp", "pccn", "freq", "crossover",
-                 "payer", "payer_name", "group", "paid_on", "trace", "adj", "rem", "lines", "original_ref", "halves", "same_id",
-                 "reanswer")
+                 "payer", "payer_name", "group", "kind", "paid_on", "trace", "adj", "rem", "lines", "original_ref", "halves",
+                 "same_id", "reanswer", "restated", "net")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -223,17 +240,39 @@ class Claim:
         self.halves = self.halves or []
         self.same_id = self.same_id or []
 
+    def adj_text(self) -> str:
+        """The claim-level adjustments, as the remittance gives them ('OA-23 $81.08, CO-B13 $5.00')."""
+        return ", ".join(f"{g}-{r} {_usd(c)}" for g, r, c in self.adj if c) or "no claim-level reason"
+
 
 class Archive:
     """Every 835 answer on the bills of a set of items, keyed for the rules: by line, by claim, by bill, and by service
-    (bill, code, date of service; an answer whose payer changed the code is filed under the billed code too)."""
+    (bill, code, date of service; an answer whose payer changed the code is filed under the billed code too).
+    `adj_requests` holds, per claim id, the payer's answers that say the practice's adjustment request was processed
+    (CO-129 with N770): the claim id's later answers are the practice's corrected claim, whatever its frequency code."""
 
     def __init__(self):
         self.lines: dict[str, Ans] = {}
         self.claims: dict[str, Claim] = {}
         self.by_service: dict[tuple, list[Ans]] = defaultdict(list)
         self.by_bill: dict[str, list[Claim]] = defaultdict(list)
+        self.adj_requests: dict[str, list[Claim]] = defaultdict(list)
         self._cancelled: dict[str, Ans] | None = None
+
+    def release(self) -> None:
+        """Drop every answer and claim. The two refer to each other (a claim's lines, a line's claim, a claim's halves),
+        so without this they wait for the cycle collector; the Detector's run goes on holding its own large heap, and
+        the hooks must not add the archive to its peak."""
+        for cl in self.claims.values():
+            cl.lines, cl.halves, cl.same_id = [], [], []
+        for a in self.lines.values():
+            a.claim = None
+        self.lines.clear()
+        self.claims.clear()
+        self.by_service.clear()
+        self.by_bill.clear()
+        self.adj_requests.clear()
+        self._cancelled = None
 
     def service(self, bill: str, code: str | None, dos: str | None) -> list[Ans]:
         return self.by_service.get((bill, code, dos), []) if code and dos else []

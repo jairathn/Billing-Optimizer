@@ -358,7 +358,7 @@ const MORE_PAGES = [
   ['alerts','Alerts','Payers behaving differently from their own past, new and acknowledged.'],
   ['progress','Progress','What came back after a fix or appeal, and what is being worked.', 'mid-only'],
   ['data','Data','Whether the numbers can be trusted, and who fixes what.', 'mid-only'],
-  ['policy','Write-off policy','Denials EMA writes off by itself, by payer, code and reason: pursue or accept each pattern.'],
+  ['policy','Write-off policy','Denials written off in EMA, by payer, code and reason: pursue or accept each pattern.'],
   ['providers','Providers','What each clinician is doing, behind the owner\'s password where one is set.', 'mid-only'],
 ];
 async function moreTab(v){

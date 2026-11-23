@@ -527,7 +527,12 @@ class ProductionSlot:
             if leave:
                 return later(PRODUCTION_LATER)
             return self._wait(path, rec, via=via, origin=origin, name=name, reason=PRODUCTION_LATER, log=say)
-        fids = production_ids(path, name) or ([file_id] if file_id else [])
+        try:
+            fids = production_ids(path, name) or ([file_id] if file_id else [])
+        except er.ReportRefused as exc:
+            # it unpacks to far more than any export (a gzip or zip bomb): set aside under its own bytes, never read
+            return er._record_refusal(self.store, er.file_id_of(path), exc, path=path, rec=None, via=via, origin=origin,
+                                      log=say)
         self.handle = self.handle or ema_ledger.LedgerHandle(self.state)
         h = self.handle
         if any(h.attempts(f) >= ema_ledger.MAX_ATTEMPTS for f in fids):
@@ -752,7 +757,7 @@ def reread_waiting(store, client, state, slot: ProductionSlot | None, *, deadlin
         if not er.reads(w.get("report") or ""):
             continue
         o = w.get("origin") or {}
-        if (o.get("size") or 0) > MAX_FILE_BYTES:
+        if (_stored_size(state, o) or 0) > MAX_FILE_BYTES:
             continue                        # a raw CSV too large for this site: a zipped copy or an upload closes it
         prod = w.get("report") == "production"
         if prod and slot is not None and slot.used:
@@ -820,6 +825,21 @@ def reread_waiting(store, client, state, slot: ProductionSlot | None, *, deadlin
         out["changed"] = True
     shutil.rmtree(d, ignore_errors=True)
     return out
+
+
+def _stored_size(state, origin: dict) -> int | None:
+    """What fetching a waiting report again costs this site: the bytes as they are kept. An upload's kept copy is stored
+    compressed (a 206 MB CSV is a 15 MB gzip), so its origin's original size never decides it: the size its intake
+    recorded ('stored'), else the kept copy's own size in the state folder. A Dropbox file is fetched as it is (its size)."""
+    if origin.get("state_path"):
+        if origin.get("stored") is not None:
+            return int(origin["stored"])
+        try:
+            m = state.meta(origin["state_path"]) if state is not None else None
+        except Exception:       # noqa: BLE001  (the state folder did not answer: the fetch says so)
+            m = None
+        return int(m["size"]) if m and m.get("size") is not None else None
+    return origin.get("size")
 
 
 def report_kind_path(path: str, name: str) -> str | None:

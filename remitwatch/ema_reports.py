@@ -70,6 +70,14 @@ H1_BREAK_SHARE = 0.005              #   ... or rows breaking EMA's own money tot
 H7_DAMAGED_MIN, H7_DAMAGED_SHARE = 10, 0.005     # Production H7: check numbers a spreadsheet changed
 DEADLINE_EVERY = 10_000             # a reader checks its deadline this often (rows)
 XLSX_MEMBER_MAX = 64 * 1024 * 1024  # an .xlsx inside a zip is read into memory; larger ones are refused
+# What a packed file (a gzip, a zip member, a workbook's parts) may unpack to: EMA's text compresses about 14 to 1 and its
+# workbooks about 10 to 1, so a file that unpacks to far more is a damaged or hostile file (a gzip or zip bomb), refused as
+# it is read and never held whole. A small file may always unpack to the floor; no file unpacks to more than the cap
+# (MAX_ROWS rows of a report are well under it).
+UNPACK_RATIO_MAX = 200
+UNPACK_FLOOR = 64 * 1024 * 1024
+UNPACK_MAX = 2 * 1024 * 1024 * 1024
+LINE_MAX = 1024 * 1024              # one line of a report or export: about 400 bytes, 621 at most in the real files
 TEXT_MEMBERS = (".csv", ".tsv", ".txt")
 REPORT_MEMBERS = TEXT_MEMBERS + (".xlsx",)
 AR_HISTORY_DAYS = 120               # A/R items absent this long are dropped from the history
@@ -98,7 +106,8 @@ _NA = NA_TEXT
 class ReportRefused(ValueError):
     """A report RemitWatch will not read, with a code and a message in plain words. The message never holds a cell value.
 
-    Codes: missing_columns, duplicate_column, two_hosts, two_date_orders, too_many_rows, zip_in_zip, unreadable, empty."""
+    Codes: missing_columns, duplicate_column, two_hosts, two_date_orders, too_many_rows, zip_in_zip, unreadable, empty,
+    unpacks_too_large (a gzip or zip that unpacks to far more than any export), long_line (one line over LINE_MAX)."""
 
     def __init__(self, code: str, message: str, report: str | None = None):
         super().__init__(message)
@@ -109,6 +118,106 @@ class ReportRefused(ValueError):
 
 class ReadTimeout(RuntimeError):
     """A reader passed its deadline (checked every DEADLINE_EVERY rows)."""
+
+
+SIZE_CODES = ("unpacks_too_large", "long_line")      # refusals for a file's size or shape: the file is set aside, never re-read
+
+
+def unpack_limit(packed: int | None) -> int:
+    """The most a packed file of `packed` bytes may unpack to (UNPACK_RATIO_MAX to one, at least UNPACK_FLOOR, never more
+    than UNPACK_MAX); UNPACK_MAX when its size is not known."""
+    if packed is None or packed < 0:
+        return UNPACK_MAX
+    return min(UNPACK_MAX, max(UNPACK_FLOOR, UNPACK_RATIO_MAX * int(packed)))
+
+
+def _mb(n: int) -> str:
+    return f"{max(1, round(n / 1048576)):,} MB"
+
+
+def unpack_refusal(limit: int, packed: int | None = None, report: str | None = None) -> ReportRefused:
+    """The refusal of a file that unpacks to more than `limit`: in plain words, what was seen and what to do."""
+    what = f"from a file of {_mb(packed)} " if packed else ""
+    return ReportRefused("unpacks_too_large", f"It unpacks to more than {_mb(limit)} {what}, far beyond any export EMA makes, so it "
+                         "was set aside without being read. Export it again from EMA (a damaged or wrongly saved file does "
+                         "this).", report)
+
+
+def long_line_refusal(line_no: int, report: str | None = None) -> ReportRefused:
+    return ReportRefused("long_line", f"Line {line_no:,} is longer than {LINE_MAX // 1048576} MB, which no export EMA makes "
+                         "has, so the file was set aside without being read. Export it again from EMA.", report)
+
+
+class Capped(io.RawIOBase):
+    """A read-only stream over another that gives at most `limit` bytes: one more raises the unpacks_too_large refusal
+    (a gzip or zip bomb is stopped as it is read; nothing is held but the piece being read)."""
+
+    def __init__(self, raw: Any, limit: int, *, packed: int | None = None, report: str | None = None):
+        super().__init__()
+        self.raw, self.limit, self.packed, self.report = raw, int(limit), packed, report
+        self.n = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        want = len(b)
+        data = self.raw.read(want) if not hasattr(self.raw, "readinto") else None
+        if data is None:
+            n = self.raw.readinto(b)
+            n = n or 0
+        else:
+            n = len(data)
+            b[:n] = data
+        self.n += n
+        if self.n > self.limit:
+            raise unpack_refusal(self.limit, self.packed, self.report)
+        return n
+
+
+def capped(raw: Any, limit: int, **kw: Any) -> io.BufferedReader:
+    """`raw` behind Capped, buffered (what a TextIOWrapper or a reader wants)."""
+    return io.BufferedReader(Capped(raw, limit, **kw), 1 << 20)
+
+
+def zip_refusal(src: Any, packed: int | None = None, report: str | None = None) -> ReportRefused | None:
+    """A zip (a workbook is one) whose members say they unpack to far more than any export: the refusal, else None. Read
+    from the zip's own directory, before a member is opened (Python's zip reader never gives more than a member's stated
+    size, so the stated sizes bound what reading it costs)."""
+    try:
+        with zipfile.ZipFile(_zip_source(src)) as zf:
+            infos = zf.infolist()
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return None                     # not a zip this reader can open: the readers say so in their own words
+    if packed is None:
+        packed = _source_size(src)
+    total = 0
+    for i in infos:
+        total += i.file_size
+        if i.file_size > unpack_limit(i.compress_size):
+            return unpack_refusal(unpack_limit(i.compress_size), i.compress_size, report)
+    limit = unpack_limit(packed)
+    if total > limit:
+        return unpack_refusal(limit, packed, report)
+    return None
+
+
+def _source_size(src: Any) -> int | None:
+    src = _path(src)
+    if isinstance(src, (bytes, bytearray, memoryview)):
+        return len(src)
+    if isinstance(src, str):
+        try:
+            return os.path.getsize(src)
+        except OSError:
+            return None
+    try:
+        pos = src.tell()
+        end = src.seek(0, io.SEEK_END)
+        src.seek(pos)
+        return end
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 class Account(dict):
@@ -397,8 +506,13 @@ def _zip_source(src: str | bytes | BinaryIO) -> Any:
 
 
 def _recognize_xlsx(src: str | bytes | BinaryIO, member: str | None = None) -> Recognized | None:
+    """A workbook's report, from its first rows. One whose parts say they unpack to far more than any export (openpyxl
+    holds a workbook's shared strings whole) raises the unpacks_too_large refusal before it is opened."""
     import openpyxl
 
+    bad = zip_refusal(src)
+    if bad is not None:
+        raise bad
     try:
         wb = openpyxl.load_workbook(_zip_source(src), read_only=True, data_only=True)
     except Exception:           # noqa: BLE001  (not a workbook openpyxl can open: not a report this module reads)
@@ -484,6 +598,9 @@ def recognize_zip(src: str | bytes, name: str) -> list[Recognized]:
         names = zf.namelist()
         if "xl/workbook.xml" in names:
             return []
+        bad = zip_refusal(src)
+        if bad is not None:
+            raise bad                       # a zip whose members unpack to far more than any export: set aside, not opened
         for info in zf.infolist():
             fn = info.filename
             base = os.path.basename(fn.rstrip("/"))
@@ -527,24 +644,33 @@ def _open(src: str | bytes | BinaryIO, rec: Recognized) -> Iterator[BinaryIO]:
     if rec.member:
         zf = zipfile.ZipFile(_zip_source(src))
         try:
+            info = zf.getinfo(rec.member)
+            limit = unpack_limit(info.compress_size)
+            if info.file_size > limit:
+                raise unpack_refusal(limit, info.compress_size, rec.report)
             with zf.open(rec.member) as m:
                 if rec.fmt == "xlsx":
                     data = m.read(XLSX_MEMBER_MAX + 1)
                     if len(data) > XLSX_MEMBER_MAX:
                         raise ReportRefused("unreadable", "The workbook inside the zip is too large. Save the report as CSV.",
                                             rec.report)
+                    bad = zip_refusal(data, report=rec.report)
+                    if bad is not None:
+                        raise bad
                     yield io.BytesIO(data)
                 else:
-                    yield m
+                    yield capped(m, limit, packed=info.compress_size, report=rec.report)
         finally:
             zf.close()
     elif rec.gz:
-        # a gzipped report: unpacked as it is read, never whole (a 300 MB CSV is about 25 MB gzipped)
+        # a gzipped report: unpacked as it is read, never whole (a 300 MB CSV is about 25 MB gzipped), and never to more
+        # than unpack_limit of its size (a gzip bomb is refused as it is read)
         raw = open(src, "rb") if isinstance(src, str) else (io.BytesIO(bytes(src)) if isinstance(src, (bytes, bytearray, memoryview))
                                                               else src)
+        packed = _source_size(src)
         try:
             with gzip.GzipFile(fileobj=raw, mode="rb") as fh:
-                yield fh
+                yield capped(fh, unpack_limit(packed), packed=packed, report=rec.report)
         finally:
             if raw is not src:
                 raw.close()
@@ -593,6 +719,13 @@ def _rows(fh: BinaryIO, rec: Recognized, state: dict | None = None) -> Iterator[
     if rec.fmt == "xlsx":
         import openpyxl
 
+        bad = zip_refusal(fh, report=rec.report)
+        if bad is not None:
+            raise bad
+        try:
+            fh.seek(0)
+        except (AttributeError, OSError, ValueError):
+            pass
         try:
             wb = openpyxl.load_workbook(fh, read_only=True, data_only=True)
         except Exception as exc:        # noqa: BLE001
@@ -620,9 +753,19 @@ def _rows(fh: BinaryIO, rec: Recognized, state: dict | None = None) -> Iterator[
         return
     text = io.TextIOWrapper(fh, encoding="utf-8-sig", errors=_ERRORS, newline="")
     last = [""]
+    cap = LINE_MAX + 2                  # room for the line's own CR LF
 
     def lines() -> Iterator[str]:
-        for line in text:
+        # one line at a time, and never more than LINE_MAX of it: a file that is one giant line (or holds one) is refused
+        # as soon as the line passes the cap, not held whole first
+        n = 0
+        while True:
+            line = text.readline(cap)
+            if not line:
+                return
+            n += 1
+            if len(line) >= cap and not line.endswith(("\n", "\r")):
+                raise long_line_refusal(n, rec.report)
             last[0] = line
             yield line
     try:
@@ -2136,8 +2279,13 @@ def _result(status: str, report: str | None = None, file_id: str | None = None, 
 
 
 def _member_id(path: str, member: str) -> str:
-    with zipfile.ZipFile(path) as zf, zf.open(member) as m:
-        return file_id_of(m)
+    with zipfile.ZipFile(path) as zf:
+        info = zf.getinfo(member)
+        limit = unpack_limit(info.compress_size)
+        if info.file_size > limit:
+            raise unpack_refusal(limit, info.compress_size)
+        with zf.open(member) as m:
+            return file_id_of(m)
 
 
 def _member_size(path: str, member: str) -> int | None:
@@ -2168,19 +2316,22 @@ def report_id(path: str, rec: Recognized | None = None) -> str:
         return _member_id(path, rec.member)
     gz = rec.gz if rec is not None else _is_gzip_head(_head_of(path, 2)[0])
     if gz:
+        packed = _source_size(path)
         with gzip.open(path, "rb") as fh:
-            return file_id_of(fh)
+            return file_id_of(Capped(fh, unpack_limit(packed), packed=packed, report=rec.report if rec is not None else None))
     return file_id_of(path)
 
 
 def _unpacked_size(path: str) -> int | None:
     try:
         n = 0
+        packed = _source_size(path)
         with gzip.open(path, "rb") as fh:
-            for piece in iter(lambda: fh.read(1 << 20), b""):
+            src = Capped(fh, unpack_limit(packed), packed=packed)
+            for piece in iter(lambda: src.read(1 << 20), b""):
                 n += len(piece)
         return n
-    except (OSError, EOFError, zlib.error):
+    except (OSError, EOFError, zlib.error, ReportRefused):
         return None
 
 
@@ -2271,12 +2422,30 @@ def ingest_file(store: Any, path: str, rec: Recognized | None = None, *, via: st
         try:
             rec = recognize(path, name or os.path.basename(path))
         except ReportRefused as exc:
-            return _record_refusal(store, report_id(path), exc, path=path, rec=None, via=via, origin=origin, log=log)
+            try:
+                fid = report_id(path)
+            except ReportRefused:
+                fid = file_id_of(path)          # a file that unpacks to far more than any export: its own bytes name it
+            return _record_refusal(store, fid, exc, path=path, rec=None, via=via, origin=origin, log=log)
         if rec is None:
             return _result("not_report")
     if name and not rec.member:
         rec = replace(rec, name=os.path.basename(name))
-    file_id = report_id(path, rec)
+    if rec.gz:
+        # a gzip set aside before (it unpacked to far more than any export) is known by its packed bytes: not unpacked again
+        packed_id = file_id_of(path)
+        row = _catalog_row(conn, packed_id)
+        if row and row.get("status") == "refused":
+            return _result("refused", rec.report, packed_id, reason=row.get("status_reason"))
+        try:
+            file_id = report_id(path, rec)
+        except ReportRefused as exc:
+            return _record_refusal(store, packed_id, exc, path=path, rec=rec, via=via, origin=origin, log=log)
+    else:
+        try:
+            file_id = report_id(path, rec)
+        except ReportRefused as exc:        # a zip member that says it unpacks to far more than any export
+            return _record_refusal(store, file_id_of(path), exc, path=path, rec=rec, via=via, origin=origin, log=log)
     res = _ingest_one(store, path, rec, file_id, via=via, origin=origin, force=force, ledger=ledger, deadline=deadline, log=log,
                       wait_reason=wait_reason)
     if rec.gz and rec.report == "production" and res.get("status") in ("current", "superseded"):
@@ -2291,8 +2460,11 @@ def _ingest_zip(store: Any, path: str, *, via: str, origin: dict | None, force: 
     try:
         recs = recognize_zip(path, name)
     except ReportRefused as exc:
-        log(f"  EMA reports in {name}: refused ({exc.code})")
-        return {"status": "refused", "code": exc.code, "reason": exc.message, "members": [], "ignored": []}
+        # a zip holding a zip, or one that unpacks to far more than any export: set aside under its own bytes, and listed
+        # on the Data tab with the reason (never skipped in silence)
+        fid = file_id_of(path)
+        _record_refusal(store, fid, exc, path=path, rec=None, via=via, origin=origin, log=log)
+        return {"status": "refused", "code": exc.code, "reason": exc.message, "members": [], "ignored": [], "file_id": fid}
     members = []
     for rec in recs:
         fid = _member_id(path, rec.member)

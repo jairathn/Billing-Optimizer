@@ -645,7 +645,7 @@ def test_an_informational_835_whose_money_ema_posted_under_another_835s_check_is
     """The plan paid the claim under its resubmission's number (another claim id, so no twin by claim id), and EMA posted
     that check on the claim: EMA holds the informational 835's money under a check an 835 carries."""
     remit(store, trace="777000115", paid_on="2026-04-02", payer="TESTCARE HEALTH",
-          claims=[{"pcn": F.claim_id(20) + "C2", "last": "SAMPLE", "first": "HOTEL", "lines": [(S, "99214", 200, 120)]}])
+          claims=[{"pcn": F.claim_id(20, sub=2), "last": "SAMPLE", "first": "HOTEL", "lines": [(S, "99214", 200, 120)]}])
     info = remit(store, trace="888000115", paid_on="2026-04-01", payer="TEST BENEFIT ADMINISTRATORS",
                  claims=[{"pcn": F.claim_id(20), "last": "SAMPLE", "first": "HOTEL", "lines": [(S, "99214", 200, 120)]}])
     _informational(store, info)
@@ -655,3 +655,153 @@ def test_an_informational_835_whose_money_ema_posted_under_another_835s_check_is
                                                                   current=0, aging=D(2026, 4, 4), svc=SVC, patient=1)])
     run(store)
     assert items(store, "signal='REMIT_NOT_POSTED' AND transaction_key=?", info) == []
+
+
+MA_T, MCD_T = "UHC Medicare Advantage Test", "Medicaid Test State"
+
+
+def test_a_medicaid_second_payers_denial_is_not_an_appealable_primary_denial(store, ledger, tmp_path):
+    """EMA's line: primary a Medicare Advantage plan, Medicaid the second payer on file; Medicaid posts $0 and CO-B7. A
+    Medicaid second payer pays the share only up to its own rate and the member cannot be billed (the answer key excludes
+    all 64 such work-now items): no EMA-only denial, and the line is counted where the Data tab can show it."""
+    kw = dict(patient=2, primary=MA_T, secondary=MCD_T, status="Denied")
+    rows = [charge(F.link_no(21), payer=MA_T, **kw),
+            pay(F.link_no(21), "MA-21", 90, posted=D(2026, 4, 3), payer=MA_T, **kw),
+            pay(F.link_no(21), "MCD-21", 0, posted=D(2026, 4, 10), payer=MCD_T, **kw),
+            adj(F.link_no(21), "CO-B7", 40, posted=D(2026, 4, 10), payer=MCD_T, **kw)]
+    denial_world(store, ledger, tmp_path, rows)
+    run(store)
+    assert items(store, "signal='EMA_DENIED' AND ema_link=?", F.link_no(21)) == []
+    lo = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:c5_left_out'").fetchone()[0])
+    assert lo["second_payer_medicaid"]["n"] == 1 and lo["second_payer_medicaid"]["by_reason"] == {"CO-B7": 1}
+
+
+def test_a_second_payers_denial_before_the_first_payer_paid_is_not_this_lines_money(store, ledger, tmp_path):
+    """A commercial second payer on file denies before the first payer has paid anything: the order of the payers, not a
+    denial of money the second payer owes."""
+    kw = dict(patient=2, primary=P["bcbs"], secondary=P["commercial"], status="Denied")
+    rows = [charge(F.link_no(22), **kw),
+            adj(F.link_no(22), "CO-22", 150, posted=D(2026, 4, 10), payer=P["commercial"], **kw)]
+    denial_world(store, ledger, tmp_path, rows)
+    run(store)
+    assert items(store, "signal='EMA_DENIED' AND ema_link=?", F.link_no(22)) == []
+
+
+def test_a_commercial_second_payers_denial_after_the_first_paid_is_still_an_item_at_the_share_left(store, ledger, tmp_path):
+    """A commercial second payer that denies the share the first payer left (after that payment) can owe it: still an
+    EMA-only denial, sized at the balance left."""
+    kw = dict(patient=2, primary=P["bcbs"], secondary=P["commercial"])
+    rows = [charge(F.link_no(23), **kw),
+            pay(F.link_no(23), "PAPER-23", 90, posted=D(2026, 4, 3), **kw),
+            adj(F.link_no(23), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw),
+            adj(F.link_no(23), "CO-27", 30, posted=D(2026, 4, 12), payer=P["commercial"], **kw)]
+    denial_world(store, ledger, tmp_path, rows)
+    run(store)
+    e = one(store, "signal='EMA_DENIED' AND ema_link=?", F.link_no(23))
+    assert e["shortfall_cents"] == 3000 and e["payer_group"] != BCBS
+
+
+def _primary_with_share(store, n, trace, *, status="1", crossover=None, payer="BLUE CROSS TEST", paid_on="2026-04-01"):
+    """The first payer paid $90 of a $150 visit, CO-45 $30 and the patient's $30 coinsurance (PR-2)."""
+    return remit(store, trace=trace, paid_on=paid_on, payer=payer, status=status,
+                 claims=[{"pcn": F.claim_id(n), "last": "SAMPLE", "first": "DELTA", "crossover": crossover,
+                          "lines": [(S, "99213", 150, 90, [("CO", "45", 30), ("PR", "2", 30)], {"allowed_cents": 12000})]}])
+
+
+def test_a_second_payer_that_answered_with_nothing_on_its_835_was_billed(store, ledger, tmp_path):
+    """The second payer's remittance processed the claim as secondary (claim status 2) and paid $0: it was billed and
+    answered, so this is not 'never billed' (243 of 339 work-now items on real data were like this)."""
+    _primary_with_share(store, 8, "777000222")
+    remit(store, trace="777000333", paid_on="2026-04-15", payer="TESTCARE HEALTH", status="2",
+          claims=[{"pcn": F.claim_id(8), "last": "SAMPLE", "first": "DELTA", "lines": [(S, "99213", 150, 0, [("PR", "2", 30)])]}])
+    kw = dict(patient=2, secondary=P["commercial"])
+    rows = [charge(F.link_no(8), **kw), pay(F.link_no(8), "777000222", 90, posted=D(2026, 4, 3), **kw),
+            adj(F.link_no(8), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw)]
+    ar = [F.ar_row(claim=F.claim_id(8), link=F.link_no(8), status="Payment Pending", current=30, aging=D(2026, 4, 3), svc=SVC,
+                   patient=2, secondary=P["commercial"])]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    det = run(store)
+    assert items(store, "signal='SECONDARY_NOT_BILLED' AND COALESCE(stale,0)=0") == []
+    assert det.ema_counts["snb_second_answered_835"] == 1
+
+
+def test_a_second_payer_whose_only_answer_is_in_ema_was_billed(store, ledger, tmp_path):
+    """No 835 from the second payer, but EMA posted its $0 check row, and on another line its own reason (CO-27, coverage
+    ended), after the first payer's payment: each was billed and answered."""
+    _primary_with_share(store, 8, "777000222")
+    _primary_with_share(store, 9, "777000223")
+    kw8, kw9 = dict(patient=2, secondary=P["commercial"]), dict(patient=1, secondary=P["commercial"])
+    rows = [charge(F.link_no(8), **kw8), pay(F.link_no(8), "777000222", 90, posted=D(2026, 4, 3), **kw8),
+            adj(F.link_no(8), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw8),
+            pay(F.link_no(8), "PAPER-81", 0, posted=D(2026, 4, 17), payer=P["commercial"], **kw8),
+            charge(F.link_no(9), **kw9), pay(F.link_no(9), "777000223", 90, posted=D(2026, 4, 3), **kw9),
+            adj(F.link_no(9), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw9),
+            adj(F.link_no(9), "CO-27", 30, posted=D(2026, 4, 18), payer=P["commercial"], **kw9)]
+    ar = [F.ar_row(claim=F.claim_id(n), link=F.link_no(n), status="Payment Pending", current=30, aging=D(2026, 4, 3), svc=SVC,
+                   patient=pt, secondary=P["commercial"]) for n, pt in ((8, 2), (9, 1))]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    det = run(store)
+    assert items(store, "signal='SECONDARY_NOT_BILLED' AND COALESCE(stale,0)=0") == []
+    assert det.ema_counts["snb_second_answered_ema"] == 2
+
+
+def test_a_medicaid_second_payer_is_never_a_bill_it_item(store, ledger, tmp_path):
+    """Medicaid as second payer pays the share only up to its own rate and the member cannot be billed (on real data it
+    paid on 98 of 895 secondary postings since 2025): not a 'bill it' item, counted instead."""
+    _primary_with_share(store, 8, "777000222")
+    kw = dict(patient=2, secondary=MCD_T)
+    rows = [charge(F.link_no(8), **kw), pay(F.link_no(8), "777000222", 90, posted=D(2026, 4, 3), **kw),
+            adj(F.link_no(8), "CO-45", 30, posted=D(2026, 4, 3), contractual=True, **kw)]
+    ar = [F.ar_row(claim=F.claim_id(8), link=F.link_no(8), status="Payment Pending", current=30, aging=D(2026, 4, 3), svc=SVC,
+                   patient=2, secondary=MCD_T)]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    det = run(store)
+    assert items(store, "signal='SECONDARY_NOT_BILLED'") == []
+    assert det.ema_counts["snb_medicaid_second"] == 1 and det.ema_counts["snb_medicaid_second_cents"] == 3000
+
+
+def test_a_crossover_whose_ema_line_is_not_on_file_is_chased_from_the_remittance(store, ledger, tmp_path):
+    """Medicare crossed the claim over to a Medigap carrier (claim status 19, the carrier named) and nothing came from it in
+    45 days. EMA's line is not in the store (its summary keeps only the lines of bills with an item), so the remittance
+    alone lists it, to chase the carrier; a Medicaid carrier is never listed."""
+    _primary_with_share(store, 10, "777000224", status="19", crossover="TEST MEDIGAP LIFE", payer="MEDICARE OF KENTUCKY TEST",
+                        paid_on="2026-03-28")
+    _primary_with_share(store, 11, "777000225", status="19", crossover="KENTUCKY MEDICAID TEST", payer="MEDICARE OF KENTUCKY TEST",
+                        paid_on="2026-03-28")
+    denial_world(store, ledger, tmp_path)
+    run(store, today="2026-06-01")
+    f = one(store, "signal='SECONDARY_NOT_BILLED'")
+    assert f["patient_control_number"] == F.claim_id(10) and f["shortfall_cents"] == 3000 and "crossed over" in f["title"]
+    ev = json.loads(f["evidence"])
+    assert ev["crossover"] is True and ev["ema_line_on_file"] is False and ev["second_payer_kind"] == "supplement"
+    assert f["appeal_deadline"] == "2027-03-28" and "Ask" in f["hint"]
+
+
+def test_a_second_payers_ema_denial_is_not_closed_by_the_first_payers_same_day_payment(store, ledger, tmp_path):
+    """No 835: the first payer (Medicare) pays $80 and EMA posts its CO-45 $50; the same day the second payer denies the
+    $20 left (CO-183). C5 lists that $20; the first payer's own payment never pays it: no 'Rebilled to <first payer>,
+    paid' closure, and no 'paid before' proof that would call it done."""
+    kw = dict(patient=1, primary=P["medicare"], secondary=P["commercial"])
+    rows = [charge(F.link_no(5), payer=P["medicare"], **kw),
+            pay(F.link_no(5), "PAPER-51", 80, posted=D(2026, 4, 10), payer=P["medicare"], **kw),
+            adj(F.link_no(5), "CO-45", 50, posted=D(2026, 4, 10), contractual=True, payer=P["medicare"], **kw),
+            adj(F.link_no(5), "CO-183", 20, posted=D(2026, 4, 10), payer=P["commercial"], **kw)]
+    denial_world(store, ledger, tmp_path, rows)
+    det = run(store)
+    e = one(store, "signal='EMA_DENIED'")
+    assert e["shortfall_cents"] == 2000 and e["status"] == "open", e["auto_note"]
+    assert det.ema_counts["c6_rebilled"] == 0 and e["work_state"] == "work_now", e["state_basis"]
+    o = det.ema_outcomes[e["finding_id"]]
+    assert o["paid_before"] == 0 and o["first_payer_paid"] == 8000 and o["paid_after_other"] == 0
+
+
+def test_a_supplements_own_zero_answer_as_if_primary_after_the_first_payer_means_it_was_billed(store, ledger, tmp_path):
+    """The Medigap carrier answered the crossover on its own remittance as if primary (claim status 1), paying $0 (a
+    deductible its plan does not cover), after Medicare paid: it was billed and answered, nothing to chase."""
+    _primary_with_share(store, 10, "777000224", status="19", crossover="TEST MEDIGAP LIFE", payer="MEDICARE OF KENTUCKY TEST",
+                        paid_on="2026-03-28")
+    remit(store, trace="777000226", paid_on="2026-04-20", payer="TEST MEDIGAP LIFE",
+          claims=[{"pcn": F.claim_id(10), "last": "SAMPLE", "first": "DELTA", "lines": [(S, "99213", 150, 0, [("PR", "1", 30)])]}])
+    denial_world(store, ledger, tmp_path)
+    run(store, today="2026-06-01")
+    assert items(store, "signal='SECONDARY_NOT_BILLED'") == []

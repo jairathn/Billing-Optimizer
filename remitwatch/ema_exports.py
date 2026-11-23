@@ -294,6 +294,10 @@ def _raw_rows(path: str, data: bytes) -> list[list]:
         unpacked = 0                    # openpyxl says what is wrong with it
     if unpacked > MAX_SHEET_XML:
         raise TooLarge("The workbook is too large to read in one piece once unpacked. Export a shorter date range.")
+    from .ema_reports import zip_refusal      # here: ema_reports imports this module
+    bad = zip_refusal(data)             # any part (the shared strings too: openpyxl holds them whole) far past an export's size
+    if bad is not None:
+        raise TooLarge(bad.message)
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     try:
         ws = wb.worksheets[0]

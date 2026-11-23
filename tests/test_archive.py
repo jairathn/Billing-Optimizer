@@ -299,6 +299,28 @@ def test_an_old_service_paid_inside_the_horizon_stays_and_an_open_remittance_ite
     store.close()
 
 
+def test_a_bill_another_items_proof_names_stays_until_the_item_goes(tmp_path):
+    """A duplicate denial on a newer bill was closed as "already paid under claim ..." of an older bill: the older bill is
+    the proof and stays while the item does. So does a bill whose line an archive rule's proof row names."""
+    store = crafted("file", tmp_path)
+    put_claim(store, "KA01AAAAA", "2021-03-01")                                 # the paid original: the proof
+    keys = put_claim(store, "KB01AAAAA", "2021-03-01")                          # a line another item's evidence names
+    store.conn.execute("UPDATE lines SET line_key='LK-OPAQUE-1' WHERE line_key=?", (keys[0],))   # keys name no claim id
+    store.conn.execute("UPDATE adjustments SET line_key='LK-OPAQUE-1' WHERE line_key=?", (keys[0],))
+    keys = ["LK-OPAQUE-1"]
+    put_claim(store, "KC01AAAAA", "2021-03-01")                                 # nothing names it
+    put_claim(store, "KD01AAAAA", "2026-02-01")                                 # the newer duplicate, still in the store
+    put_item(store, "dup", bill="KD01AAAAA", work_state="done", status="resolved")
+    store.conn.execute("UPDATE findings SET auto_note=?, evidence=? WHERE finding_id='dup'",
+                       ("Already paid under claim KA01AAAAAC017 (paid in full): this denial is of a duplicate",
+                        json.dumps({"archive_rule": {"proof": [{"line_key": keys[0], "source": "835"}]}})))
+    store.conn.commit()
+    freeze_all(store)
+    p = archive.plan(store.conn, today=TODAY)
+    assert [b for b, *_ in p["bills"]] == ["KC01AAAAA"] and p["held"] == {"named by another item": 2}
+    store.close()
+
+
 def test_nothing_moves_while_the_analysis_is_behind_or_has_never_run(tmp_path):
     store = crafted("file", tmp_path)
     put_claim(store, "KA01AAAAA", "2021-03-01")

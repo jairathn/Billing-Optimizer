@@ -38,6 +38,7 @@ WANTED_EXT = (".rmt", ".835", ".era", ".edi", ".xlsx", ".txt", ".x12", ".dat", "
 REPORT_TIMEOUT = (10, 30)           # (connect, read) seconds for every Dropbox read of an EMA report: a stalled stream fails
                                     # in 30 s instead of outliving a serverless run
 MAX_EXPORT_BYTES = 60 * 1024 * 1024     # one of the three weekly exports is read whole in memory: a larger one is refused
+MAX_X12_BYTES = 64 * 1024 * 1024        # a remittance or claim file is read whole: the real ones are under 200 KB
 REPORT_EXTS = (".xlsx", ".csv", ".tsv", ".txt", ".zip", ".gz")     # endings the router asks the report reader about first
 
 
@@ -542,6 +543,15 @@ def _route_report(store, path: str, name: str, *, via: str, origin: dict | None,
                           deadline=deadline, log=log, **extra)
 
 
+def _not_read(store, path: str, kind: str) -> None:
+    """A file the router does not read (too large, or none of the files RemitWatch reads): a files row with status
+    'not_read', so the Data tab lists it and it is not fetched or read again until it changes."""
+    try:
+        store.record_file(file_sha256(path), path, kind=kind, status="not_read", lines=0)
+    except Exception:       # noqa: BLE001  (the cycle's output still names it)
+        pass
+
+
 def _gunzip_to(path: str, folder: str, limit: int) -> str | None:
     """A gzipped file that is not a report, unpacked under its own name (less .gz) into `folder`; None when it unpacks to
     more than `limit` bytes (nothing but a report is that large) or is not gzip at all."""
@@ -581,7 +591,7 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
     import shutil
     import tempfile
 
-    from .ema_exports import TEXT_EXPORTS, IsReport, export_created, iter_rows
+    from .ema_exports import TEXT_EXPORTS, IsReport, TooLarge, export_created, iter_rows
     from .x12_835 import looks_like_x12
 
     out = {"remits": 0, "ema": 0, "claims_837": 0, "skipped": 0, "errors": 0, "failed": []}
@@ -615,8 +625,10 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                     scratch.append(d)
                     inner = _gunzip_to(p, d, MAX_EXPORT_BYTES)
                     if inner is None:
+                        # listed on the Data tab (not read), never skipped in silence; not fetched again until it changes
                         out["errors"] += 1
                         out["failed"].append(f"{n} (not read: not a report, and too large or not gzip)")
+                        _not_read(store, p, "ema:too_large")
                         continue
                     if p in origins:
                         origins[inner] = origins[p]
@@ -661,11 +673,25 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                     out["errors"] += 1
                     out["failed"].append(n)
                     log(f"  EMA ERROR {n}: {exc}")
+                except TooLarge as exc:
+                    # a workbook that unpacks to far more than any export (or holds more than is read at once): listed on
+                    # the Data tab as not read, and not fetched again until it changes
+                    out["errors"] += 1
+                    out["failed"].append(f"{n} (too large)")
+                    _not_read(store, p, "ema:too_large")
+                    log(f"  EMA ERROR {n}: {exc}")
                 except Exception as exc:
                     out["errors"] += 1
                     out["failed"].append(n)
                     log(f"  EMA ERROR {n}: {exc}")
             elif looks_like_x12(p):
+                if os.path.getsize(p) > MAX_X12_BYTES:
+                    out["errors"] += 1
+                    out["failed"].append(f"{n} (too large)")
+                    _not_read(store, p, "ema:too_large")
+                    log(f"  ERROR {n}: Not read: a remittance or claim file over {MAX_X12_BYTES >> 20} MB is no file a payer "
+                        "sends.")
+                    continue
                 with open(p, "rb") as fh:
                     head = fh.read(400)
                 if b"*837*" in head or b"GS*HC*" in head:

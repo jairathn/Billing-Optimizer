@@ -589,13 +589,30 @@ def checks_csv(cause: Optional[str] = Query(None, max_length=40), date_from: Opt
     return _csv("remitwatch-checks-without-remittance.csv", _stream(ec.checks_csv, cause=cause or None, date_from=date_from, date_to=date_to))
 
 
+def _unposted_rows(conn: sqlite3.Connection) -> Iterator[list]:
+    """The 835 payments EMA never posted, as the run listed them (meta ema:unposted rows), on either host: the Data tab's
+    count is that same meta, so the file lists exactly what the page counts, even when the code that finds them changed
+    since the run. A store whose run kept no rows gets the live list (ema_checks.unposted_csv)."""
+    from . import ema_checks as ec
+    live = ec.unposted_csv(conn)
+    header = next(live)                 # the column names: the live rows are worked out only if they are read
+    stored = _meta(conn, ec.UNPOSTED_KEY, {}) or {}
+    rows = stored.get("rows") if isinstance(stored, dict) else None
+    yield header
+    if isinstance(rows, list):
+        live.close()
+        for r in rows:
+            yield list(r)
+        return
+    yield from live
+
+
 @router.get("/api/ema/unposted.csv")
 def unposted_csv(user: str = Depends(_user)):
-    from . import ema_checks as ec
     with _conn() as c:
         if not _table(c, "ema_checks"):
             raise HTTPException(404, "No EMA Production report has been read yet.")
-    return _csv("remitwatch-payments-not-posted.csv", _stream(ec.unposted_csv))
+    return _csv("remitwatch-payments-not-posted.csv", _stream(_unposted_rows))
 
 
 @router.get("/api/ema/credits.csv")

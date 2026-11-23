@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -797,3 +798,107 @@ def test_the_panel_lists_runs_repairs_and_the_bundle(tmp_path):
     assert p["bundle"]["route"] == "/api/ops/diagnostic-bundle" and "—" not in json.dumps(p)
     assert runlog.panel(None)["sentence"] == "No run has been logged yet."
     store.close()
+
+
+# ============================================================================================ edge cases and randomized
+def _random_identifiers(rng) -> list[tuple[str, str]]:
+    """(kind, value) pairs of invented identifiers in the shapes real ones take, leap days and year ends included."""
+    syl = ["qua", "zor", "vel", "mib", "tharn", "oop", "quil", "yxb", "dree", "vosk", "ulm", "prax"]
+    out = []
+    for _ in range(60):
+        name = "".join(rng.choice(syl) for _ in range(3))
+        out.append(("name", name.title() + " " + "".join(rng.choice(syl) for _ in range(3)).title()))
+        out.append(("name", (name + "ston").upper() + ", " + "".join(rng.choice(syl) for _ in range(2)).upper()))
+        out.append(("member", "".join(rng.choice("ABCDEFGHJKLMNPQRSTUVWXYZ") for _ in range(3)) + str(rng.randrange(10 ** 8, 10 ** 9))))
+        out.append(("digits", str(rng.randrange(10 ** 5, 10 ** 12))))
+        y = rng.choice([1944, 1960, 1988, 2000, 2024])
+        m, d = rng.choice([(2, 29), (12, 31), (1, 1), (7, 4), (11, 30)])
+        out.append(("date", rng.choice([f"{y}-{m:02d}-{d:02d}", f"{m}/{d}/{y}", f"{m:02d}/{d:02d}/{y}", f"{y}{m:02d}{d:02d}",
+                                        f"{d} {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m - 1]} {y}",
+                                        f"{['January', 'February', 'December'][min(m, 3) - 1]} {d}, {y}"])))
+        out.append(("email", f"{name}@{rng.choice(['example.com', 'mail.test'])}"))
+        out.append(("phone", f"({rng.randrange(200, 999)}) {rng.randrange(200, 999)}-{rng.randrange(1000, 9999)}"))
+    return out
+
+
+def test_randomized_identifiers_never_survive_the_scrubber():
+    import random
+    rng = random.Random(20261122)
+    templates = ["could not read {v} in row 4", "{v}: invalid literal for int() with base 10: '{v}'", "patient {v} owes $12.50",
+                 "KeyError: '{v}'", "EMA ERROR /uploads/{v}/AR.xlsx: bad", "member id: {v}", "DOB={v}", "{v}", "Anthem paid {v} late",
+                 "found {v} and 16,165 lines", "ValueError({v!r})"]
+    for kind, v in _random_identifiers(rng):
+        t = rng.choice(templates)
+        text = t.format(v=v)
+        out = runlog.scrub_text(text)
+        parts = [v] if kind != "name" else [w for w in re.split(r"[ ,]+", v) if w]
+        for p in parts:
+            assert p not in out, (kind, t, out)
+        assert runlog.scrub_text(out) == out                  # stable once scrubbed
+
+
+def test_a_run_across_year_end_keeps_its_events_and_manifest_together(tmp_path):
+    db = str(tmp_path / "data" / "s.sqlite")
+    t0 = datetime(2026, 12, 31, 23, 59, 50, tzinfo=timezone.utc)
+    runlog.set_clock(t0)
+    rl = runlog.start_run("cycle", db_path=db, host="server", now=t0)
+    runlog.set_clock(t0 + timedelta(seconds=30))             # midnight passes during the run
+    rl.event("detect", "items_raised", counts={"raised": 3})
+    rl.finish(now=t0 + timedelta(seconds=40))
+    logs = runlog.logs_dir_for(db)
+    assert sorted(f for f in os.listdir(logs) if f.startswith("events-")) == ["events-2026-12-31.jsonl", "events-2027-01-01.jsonl"]
+    m, events = runlog.read_run(runlog.DirSink(logs), rl.run_id)
+    assert m["run_id"] == rl.run_id and [e["event"] for e in events] == ["run_start", "items_raised"]
+    runlog.set_clock(datetime(2027, 1, 1, 10, 0, tzinfo=timezone.utc))
+    rl2 = runlog.start_run("cycle", db_path=db, host="server")          # the next day's first run packs the old day
+    rl2.finish()
+    assert "events-2026-12-31.jsonl.gz" in os.listdir(logs) and "runs-2026-12-31.jsonl.gz" in os.listdir(logs)
+    m, events = runlog.read_run(runlog.DirSink(logs), rl.run_id)
+    assert m["run_id"] == rl.run_id and len(events) == 2
+
+
+def test_malformed_logs_and_state_never_stop_a_run_or_a_bundle(tmp_path):
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    logs = runlog.logs_dir_for(db)
+    os.makedirs(logs)
+    with open(os.path.join(logs, "index.json"), "w") as fh:
+        fh.write("{not json")
+    with open(os.path.join(logs, "repair_state.json"), "w") as fh:
+        fh.write("[1, 2")
+    with open(os.path.join(logs, "events-2026-11-01.jsonl.gz"), "wb") as fh:
+        fh.write(b"\x1f\x8bnot really gzip")
+    with open(os.path.join(logs, "runs-2026-11-01.jsonl"), "w") as fh:
+        fh.write('{"run_id": "run-20261101T000000Z-aaaa", "outcome": "ok"\n')          # cut short
+    store = file_store(tmp_path)
+    rl = runlog.start_run("cycle", db_path=db, conn=store.conn, host="server")
+    from remitwatch import repair
+    reg = repair.registry_for(rl, conn=store.conn)
+    assert reg.state["entries"] == {}
+    reg.failed("network", "dropbox", ValueError("x"))
+    reg.save()
+    assert rl.finish(conn=store.conn).endswith("s)")
+    assert runlog.read_index(runlog.DirSink(logs))[-1]["run_id"] == rl.run_id
+    assert runlog.DirSink(logs).read_lines("events-2026-11-01.jsonl.gz") == []
+    res = diagnose.build_bundle(db_path=db, days=60)
+    assert "runs/" + rl.run_id + ".json" in diagnose.unpack(res["bytes"])
+    store.close()
+
+
+def test_two_runs_writing_one_days_file_at_once_leave_whole_lines(tmp_path):
+    import threading
+    db = str(tmp_path / "data" / "s.sqlite")
+    runs = [runlog.RunLog("cycle", host="server", sink=runlog.sink_for(db_path=db)) for _ in range(2)]
+
+    def work(rl):
+        for i in range(300):
+            rl.event("ingest", "file_read", counts={"i": i}, detail={"text": "x" * (i % 50)})
+    threads = [threading.Thread(target=work, args=(rl,)) for rl in runs]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    lines = [ln for f in os.listdir(runlog.logs_dir_for(db)) if f.startswith("events-")
+             for ln in open(os.path.join(runlog.logs_dir_for(db), f), encoding="utf-8").read().splitlines()]
+    parsed = [json.loads(ln) for ln in lines]
+    for rl in runs:
+        assert sorted(e["counts"]["i"] for e in parsed if e["run_id"] == rl.run_id) == list(range(300))

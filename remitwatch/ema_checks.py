@@ -63,6 +63,7 @@ POLICY_KEY = "ema:writeoff_policy"          # owner decision O11: {pattern: {dec
 UNWORKED_KEY = "ema:unworked"
 UNPOSTED_KEY = "ema:unposted"
 C7_KEY = "ema:denial_as_contractual"
+C5_LEFT_OUT_KEY = "ema:c5_left_out"      # EMA-only denials a rule left out, by rule: counts, dollars, reasons
 
 # An item's EMA outcome, from the postings on its own line. Precedence (amendment 8.1, strict reading): paid after >
 # patient > paid before > lost to timely filing > written off while pending > auto written off > the other write-offs >
@@ -2070,9 +2071,13 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
                 after = bool(when) and bool(remit_day) and when > remit_day
             else:
                 after = bool(anchor) and (p["posted"] or "") >= anchor
+                if ema_item and after and (p["posted"] or "") == anchor and not same(p["group"], f):
+                    # another payer's payment posted the day of an EMA-only denial came before it (C5's own rule): the first
+                    # payer's payment on the posting that also carried the second payer's denial never pays that denial
+                    after = False
             row = {"check": p["check"], "posted": p["posted"], "payer": p["payer"], "group": p["group"], "cents": p["cents"],
                    "kind": "835" if via835 else "ema", "same": same(p["group"], f),
-                   "link": ln["link"], "date_835": p["date_835"] if via835 else None}
+                   "link": ln["link"], "date_835": p["date_835"] if via835 else None, "svc": ln["svc"], "cpt": ln["cpt"]}
             pool = "835" if via835 else ("same" if row["same"] else "other")
             cents = p["cents"]
             if after and cents < 0:
@@ -2119,6 +2124,11 @@ def _outcome_of(f, ts, cand, mapped, own, pays, reasons, handled, code_once, fr,
     # what was paid before the item and still stands: takebacks (by the item's own remittance, or later) net it out
     res["taken_back"] = takeback
     res["paid_before"] = max(0, res["paid_before"] - takeback)
+    if ema_item and any("balance left" in str(b) for b in _ev(f).get("expected_basis") or []):
+        # an EMA-only denial valued at the balance the first payer left (C5, E17): that payer's payment is already taken
+        # off the item's value, so it is the share the second payer was asked for, never a payment "before" this denial
+        res["first_payer_paid"] = res["paid_before"]
+        res["paid_before"] = 0
     if not res["paid_before"]:
         paid_before_rows = []
     after_ema.sort(key=lambda r: (r["posted"] or "", r["check"] or ""))
@@ -2499,11 +2509,12 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     fr = freshness(conn, today)
     t = fr["today"]
     lags = _lags(conn)
-    rows = conn.execute(f"""SELECT {', '.join(_LINE_COLS)}, nonroutine, name_key, map_method FROM ema_lines
+    more = ("nonroutine", "name_key", "map_method", "secondary_payer", "primary_payer")
+    rows = conn.execute(f"""SELECT {', '.join(_LINE_COLS + more)} FROM ema_lines
                             WHERE COALESCE(nonroutine, 0) >= ? AND (COALESCE(flags, 0) & 17) = 0
                               AND COALESCE(status_class, '') <> 'void' AND COALESCE(charges, 0) > 100
                               AND cpt NOT IN ('G2211', '99024')""", (DENIAL_MIN,)).fetchall()
-    lines = [dict(zip(_LINE_COLS + ("nonroutine", "name_key", "map_method"), r)) for r in rows]
+    lines = [dict(zip(_LINE_COLS + more, r)) for r in rows]
     # A/R Denied rows with a denial amount and no reason posted
     ar_only = conn.execute("""SELECT a.link, a.svc, a.cpt, a.denial_cents, a.aging_date, a.payer_group, a.payer_kind, a.primary_payer,
                                      a.claim_id, a.as_of, a.facility
@@ -2514,15 +2525,16 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     ar_info = {(r[0], r[1], r[2]): r for r in ar_only}
     if extra_keys:
         _temp(conn, "ec_ax", ["link INTEGER", "svc TEXT", "cpt TEXT"], extra_keys, ["link, svc, cpt"])
-        for r in conn.execute(f"""SELECT {', '.join('l.' + c for c in _LINE_COLS)}, l.nonroutine, l.name_key, l.map_method
+        for r in conn.execute(f"""SELECT {', '.join('l.' + c for c in _LINE_COLS + more)}
                                   FROM temp.ec_ax x JOIN ema_lines l ON l.link = x.link AND l.svc = x.svc AND l.cpt = x.cpt"""):
-            ln = dict(zip(_LINE_COLS + ("nonroutine", "name_key", "map_method"), r))
+            ln = dict(zip(_LINE_COLS + more, r))
             no_adjustment = (ln["contractual"] or 0) == 0 and (ln["noncontractual"] or 0) == 0
             if no_adjustment and (ln["flags"] or 0) & 17 == 0 and ln["status_class"] != "void" and (ln["charges"] or 0) > 100:
                 ln["ar_denied"] = ar_info[(ln["link"], ln["svc"], ln["cpt"])]
                 lines.append(ln)
         _drop(conn, "ec_ax")
     if not lines:
+        _set_meta(conn, C5_LEFT_OUT_KEY, {"at": t})
         return []
     keys = sorted({(ln["link"], ln["svc"], ln["cpt"]) for ln in lines})
     reasons: dict[tuple, list] = defaultdict(list)
@@ -2552,6 +2564,8 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
     paid_elsewhere = _paid_on_other_links(conn, nk_keys)
     claim_ids = _claim_id_of_links(conn, {ln["link"] for ln in lines})
     items: dict[tuple, dict] = {}
+    sec_groups: dict[str, tuple] = {}
+    left_out: dict[str, dict] = {}          # lines a rule leaves out, counted (meta ema:c5_left_out): never a silent drop
     for ln in lines:
         key = (ln["link"], ln["svc"], ln["cpt"])
         rs = [r for r in reasons.get(key, []) if r[0] not in ("", "PR") and r[2] not in ROUTINE_CLASSES and r[1] not in C5_SKIP_CODES]
@@ -2625,6 +2639,25 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
                 expected, basis = int(round(charge * FALLBACK_SHARE)), "45% of the charge"
         expected = min(expected, charge) if charge > 0 else expected
         other_first = [p for p in paid_before if not _same_payer(p[3], dgrp)]
+        # the second payer on file denied it, not the line's primary: a second payer owes only the share the first payer
+        # left, once that payer has paid. Medicaid as the second payer pays that share only up to its own rate and the member
+        # cannot be billed for it: never money to recoup (the answer key's R3; a CO-B7 there is at most an enrollment
+        # question). Its denial before the first payer paid is the order of the payers, not this line's money.
+        sec = (ln.get("secondary_payer") or "").strip()
+        if sec and dgrp and not _same_payer(dgrp, ln["payer_group"]):
+            if sec not in sec_groups:
+                sec_groups[sec] = er.payer_group_of(conn, sec)
+            sgrp, skind = sec_groups[sec]
+            if sgrp and _same_payer(dgrp, sgrp):
+                why = ("second_payer_medicaid" if "medicaid" in (skind, dkind) else
+                       None if other_first else "second_payer_before_first")
+                if why:
+                    lo = left_out.setdefault(why, {"n": 0, "cents": 0, "by_reason": {}})
+                    lo["n"] += 1
+                    lo["cents"] += expected or 0
+                    rk = f"{top[0]}-{top[1]}" if top[0] else "A/R Denied"
+                    lo["by_reason"][rk] = lo["by_reason"].get(rk, 0) + 1
+                    continue
         if other_first:
             routine_contr = (ln["contractual"] or 0) - sum(r[4] for r in rs)
             left = charge - sum(p[4] for p in paid_before) - max(0, routine_contr)
@@ -2687,6 +2720,7 @@ def ema_denials(conn: sqlite3.Connection, *, today: str | None = None, rate: Cal
                       "ema_status": it["status"], "facility": bool(it["facility"]), "source": "ema"},
             hint="No remittance on file: get the EOB from the payer's portal before appealing",
             link=lk, heir_keys=heirs, ema_heir_keys=[(it["bill"], x[1], x[0]) for x in ls if it["bill"]]))
+    _set_meta(conn, C5_LEFT_OUT_KEY, {"at": t, **left_out})
     return out
 
 

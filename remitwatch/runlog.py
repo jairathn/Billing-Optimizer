@@ -252,11 +252,11 @@ class Scrubber:
         s = _PROTECT.sub(protect, s)
         s = _URL.sub("<url>", s)
         s = _EMAIL.sub("<email>", s)
+        for rx in _DATES:               # dates first: a label rule taking two words must never leave a birth year behind
+            s = rx.sub("<date>", s)
         s = _QUOTED.sub(self._quoted, s)
         s = _LABELED.sub(lambda m: m.group(0)[:m.start(2) - m.start(0)] + "<redacted>", s)
         s = _PATIENT_WORDS.sub(lambda m: m.group(1) + " <name>", s)
-        for rx in _DATES:
-            s = rx.sub("<date>", s)
         s = _FILENAME.sub(lambda m: "<file>." + m.group(1).lower(), s)
         s = _PATH.sub(self._path, s)
         s = _SSN.sub("<id>", s)
