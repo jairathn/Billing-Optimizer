@@ -850,13 +850,35 @@ def check_open_and_closed(conn: sqlite3.Connection, today: str) -> dict:
     return _result("open_and_closed", [(f, c, f) for f, c, _k in rows], info={"by_kind": dict(kinds)})
 
 
+NO_MONEY_KINDS = frozenset({"denial", "to_patient", "baseline"})    # proof rows that show an answer, never a payment
+TAKEBACK_KINDS = frozenset({"reversal", "takeback"})                 # money taken back, whatever the sign it is written with
+
+
+def proof_money(rows: Iterable[Any]) -> int:
+    """The money a closure's proof rows show was paid: dated rows of payments (a row with no kind is one) net of the
+    takebacks among them, 0 unless at least one payment is above $0. A $0 payment, a denial row or a takeback is no
+    payment."""
+    pos = net = 0
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("date"):
+            continue
+        kind = str(r.get("kind") or "payment")
+        amt = r.get("amount_cents")
+        if kind in NO_MONEY_KINDS or not isinstance(amt, (int, float)):
+            continue
+        amt = -abs(int(amt)) if kind in TAKEBACK_KINDS else int(amt)
+        net += amt
+        pos += max(amt, 0)
+    return net if pos > 0 and net > 0 else 0
+
+
 def has_proof(ev: dict) -> bool:
-    """An automatic closure names the payment that closed it: proof rows, or a payment with its date and amount and the
-    trace or claim it came on."""
+    """An automatic closure names the payment that closed it: proof rows that show money paid (proof_money), or a payment
+    above $0 with its date and the trace or claim it came on."""
     pl = ev.get("paid_later") if isinstance(ev.get("paid_later"), dict) else {}
     ar = ev.get("archive_rule") if isinstance(ev.get("archive_rule"), dict) else {}
     rows = list(pl.get("proof") or []) + (list(ar.get("proof") or []) if ar.get("action") == "close_with_proof" else [])
-    if any(isinstance(r, dict) and (r.get("date") or r.get("amount_cents") is not None) for r in rows):
+    if proof_money(rows) > 0:
         return True
     paid = pl.get("paid_cents")
     return bool(pl.get("payment_date")) and isinstance(paid, (int, float)) and paid > 0 and bool(pl.get("trace") or pl.get("claim"))
@@ -1015,7 +1037,12 @@ def check_precision_guard(conn: sqlite3.Connection, today: str) -> dict:
     for key, members in groups.items():
         first = min(members, key=lambda x: (str(x.get("payment_date") or ""), x["finding_id"]))
         got = later.get("group:" + first["finding_id"])
-        short = sum(int(m.get("shortfall_cents") or 0) for m in members)
+        # lines of one code on one claim are separate units (their shortfalls add up); the same service sent again on a
+        # new claim is the same money (the largest claim's total counts once)
+        per_claim: dict[str, int] = defaultdict(int)
+        for m in members:
+            per_claim[str(m.get("patient_control_number") or m.get("claim_key") or m["finding_id"])] += int(m.get("shortfall_cents") or 0)
+        short = max(per_claim.values())
         if not got or got["total"] <= 0 or short <= 0:
             continue
         if got["total"] >= max(short - 100, int(short * LATER_PAID_SHARE)):
@@ -1482,6 +1509,9 @@ def _set_baseline(conn: sqlite3.Connection, results: list[dict], at: str) -> Non
 
 
 MONEY_CHECKS = ("money_conservation", "ledger_store", "posted_money")
+# a held run still lists the new items to work it found, up to this many or this share of the items listed before it
+# (more is a flood: held with the run until it is released or a person looks)
+NEW_WORK_FLOOD = (20, 0.10)
 
 
 def _new_keys(r: dict, base: dict[str, dict[str, int]]) -> list[tuple[str, int]]:
@@ -1525,10 +1555,11 @@ def _unpack(parts: list[bytes]) -> list:
     return json.loads(zlib.decompress(b"".join(parts)).decode())
 
 
-def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict]) -> list[str]:
+def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict]) -> tuple[list[str], int]:
     """The run's new items to work that a held worklist must still show: not on the worklist before, open and listed, no
     status of their own from this run (an item that inherits a person's work or closes at once is the run's to hold), named
-    by no failing critical check, and on no line (or claim-level service) an item of the held worklist already covers."""
+    by no failing critical check, and on no line (or claim-level service) an item of the held worklist already covers.
+    Returns (their ids, how many were held back as a flood: more than NEW_WORK_FLOOD allows)."""
     before = _before_rows(conn)
     after = _after_rows(conn)
     blocked = {str(k) for r in results if r["severity"] == "critical" and r["status"] == "fail" for k, _c in r.get("keys") or []}
@@ -1548,7 +1579,10 @@ def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict]) -> lis
         elif (bill_of(r.get("patient_control_number")), str(r.get("service_date") or "")[:10], r.get("procedure_code")) in services:
             continue
         out.append(fid)
-    return out
+    listed_before = sum(1 for r in before.values() if _is_listed(r, states_kept))
+    if len(out) > NEW_WORK_FLOOD[0] and len(out) > NEW_WORK_FLOOD[1] * listed_before:
+        return [], len(out)     # more new work than one run brings: a held run holds it too (the swing guard's to judge)
+    return out, 0
 
 
 def _reapply_person_changes(conn: sqlite3.Connection, since_id: int | None) -> int:
@@ -1604,7 +1638,7 @@ def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: li
     for kind, payload in (("findings", {"cols": cols, "rows": held_rows}), ("events", {"cols": ev_cols, "rows": events})):
         for i, part in enumerate(_pack(payload)):
             conn.execute("INSERT INTO selfcheck_held (run_id, kind, part, data) VALUES (?,?,?,?)", (run_id, kind, i, part))
-    new_ids = _new_work(conn, run_id, results)
+    new_ids, flood = _new_work(conn, run_id, results)
     for tb in ("sc_new", "sc_new_rows"):
         conn.execute(f"DROP TABLE IF EXISTS temp.{tb}")
     conn.execute("CREATE TEMP TABLE sc_new (finding_id TEXT PRIMARY KEY)")
@@ -1629,7 +1663,7 @@ def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: li
                         WHERE COALESCE(stale, 0) = 0 GROUP BY category, status""", (run_id, at))
     return {"held_items": len(held_rows), "held_events": len(events), "held_closures": closures,
             "kept_items": conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0], "new_items": len(new_ids),
-            "person_changes": person}
+            "new_items_held": flood, "person_changes": person}
 
 
 KEPT_HINT = ("Kept by RemitWatch's self-check: the newest analysis no longer lists this item and nothing explains why "
@@ -1760,6 +1794,8 @@ def _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_ho
                  "text": ("RemitWatch kept the worklist as it was before this run and held the run's automatic closures, "
                           f"because {', '.join(r['title'].lower() for r in why)} failed. "
                           + (f"It still lists the {_n(n_new, 'new item')} to work the run found. " if n_new else "")
+                          + (f"It held the {_n(int(held_info.get('new_items_held') or 0), 'new item')} the run found as well: "
+                             "more than one run usually brings. " if held_info.get("new_items_held") else "")
                           + (f"The {_n(n_person, 'change')} people saved during the run stand. " if n_person else "")
                           + "Nothing was lost: the new results are kept for diagnosis. The next run that passes releases it."),
                  "runs_held": int(prev.get("runs_held") or 0) + 1 if prev.get("on") else 1}
@@ -2135,7 +2171,7 @@ def _reason_class_fn() -> Callable:
 ROUTINE_CLASSES = ("none", "routine", "patient", "ema_kind")
 
 
-def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) -> dict:
+def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str, *, ar: dict | None = None) -> dict:
     """Money conservation per service month and payer group, from every posting of the ledger. Each line (EMA claim number,
     date of service, code) belongs to the cell of its service month and the group of its newest primary payer; each
     posting's money goes to one piece by its own column and reason:
@@ -2143,12 +2179,15 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
       later, timely filing) + patient adjustments + open (lines with a balance) - credits (lines paid past their charge)
     The pieces are summed by separate rules (a reason class the rules do not know lands in no piece) and the open and
     credit pieces come from each line's own balance, so a posting counted twice or in no piece shows as a cell whose pieces
-    do not add up (critical past $1). Postings that belong to no line (patient money with no claim number that matches no
-    single line, insurance money with no claim number) are a visible gap of their own, by cell. One service month at a
-    time (the ledger's service-date index), so neither memory nor the temporary folder holds more than a month's lines.
-    Stored in selfcheck_money."""
+    do not add up (critical past $1); a posting that left the ledger is posted_money's and line_balance's to see. Postings
+    that belong to no line (patient money with no claim number that matches no single line, insurance money with no claim
+    number) are a visible gap of their own, by cell. In the same pass, with `ar` (_ar_lines: EMA's newest A/R by line),
+    each line inside the A/R's service dates is compared with what its postings up to the A/R's day leave (line_balance,
+    both ways, below). One service month at a time (the ledger's service-date index), so neither memory nor the temporary
+    folder holds more than a month's lines. Stored in selfcheck_money."""
     if not _has_table(lc, "postings"):
-        return {"check": _skip("money_conservation", "no posting ledger"), "cells": 0}
+        return {"check": _skip("money_conservation", "no posting ledger"), "cells": 0,
+                "ar_balance": {"check": _skip("line_balance", "no posting ledger")}}
     from . import ema_reports as er
     rc = _reason_class_fn()
     names = {i: n for i, n in lc.execute("SELECT id, name FROM names")}
@@ -2172,12 +2211,18 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
         return group_cache[name_id]
     routine = ",".join(f"'{c}'" for c in ROUTINE_CLASSES)
     money = "COALESCE(p.contractual, 0) + COALESCE(p.noncontractual, 0)"
+    left_expr = ("COALESCE(p.charges, 0) - COALESCE(p.ins_paid, 0) - COALESCE(p.pat_paid, 0) - COALESCE(p.contractual, 0) "
+                 "- COALESCE(p.noncontractual, 0) - COALESCE(p.pat_adj, 0)")
+    moneyed_expr = ("COALESCE(ins_paid, 0) + COALESCE(pat_paid, 0) + COALESCE(contractual, 0) + COALESCE(noncontractual, 0) "
+                    "+ COALESCE(pat_adj, 0)")
     months = [m for (m,) in lc.execute("SELECT DISTINCT substr(svc, 1, 7) FROM postings ORDER BY 1") if m]
     cells: dict[tuple, Counter] = defaultdict(Counter)
     line_rows = 0
     joined_total = 0
+    cmp = _ArCompare(ar, _facility_links(conn)) if ar else None
     for m in months:
         lo, hi = m + "-01", m + "-32"
+        asof = cmp.as_of(m) if cmp else None
         for tb in ("sc_ans", "sc_prim"):
             lc.execute(f"DROP TABLE IF EXISTS temp.{tb}")
         lc.execute("""CREATE TEMP TABLE sc_ans AS SELECT DISTINCT link, svc, COALESCE(cpt, '') AS cpt, posted FROM postings
@@ -2189,38 +2234,40 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
                       GROUP BY link, svc, COALESCE(cpt, '')""", (lo, hi))
         lc.execute("CREATE UNIQUE INDEX temp.ix_sc_prim ON sc_prim(link, svc, cpt)")
         lines: dict[tuple, list] = {}
-        for (link, svc, cpt, person, prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal) in lc.execute(
+        for (link, svc, cpt, person, prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal, bal_ar) in lc.execute(
                 f"""SELECT p.link, p.svc, COALESCE(p.cpt, ''), MAX(p.person), pr.prim, SUM(COALESCE(p.charges, 0)),
                            SUM(COALESCE(p.ins_paid, 0)), SUM(COALESCE(p.pat_paid, 0)),
                            SUM(CASE WHEN x.cls IN ({routine}) THEN {money} ELSE 0 END),
                            SUM(CASE WHEN x.cls NOT IN ({routine}, 'timely') AND a.posted IS NOT NULL THEN {money} ELSE 0 END),
                            SUM(CASE WHEN x.cls NOT IN ({routine}, 'timely') AND a.posted IS NULL THEN {money} ELSE 0 END),
                            SUM(CASE WHEN x.cls = 'timely' THEN {money} ELSE 0 END),
-                           SUM(COALESCE(p.pat_adj, 0)),
-                           SUM(COALESCE(p.charges, 0) - COALESCE(p.ins_paid, 0) - COALESCE(p.pat_paid, 0) - COALESCE(p.contractual, 0)
-                               - COALESCE(p.noncontractual, 0) - COALESCE(p.pat_adj, 0))
+                           SUM(COALESCE(p.pat_adj, 0)), SUM({left_expr}),
+                           SUM(CASE WHEN p.posted <= ? THEN {left_expr} ELSE 0 END)
                     FROM postings p
                     LEFT JOIN temp.sc_cls x ON x.grp = COALESCE(p.grp, '') AND x.code = COALESCE(p.code, '')
                          AND x.kind = COALESCE(p.kind, -1)
                     LEFT JOIN temp.sc_ans a ON a.link = p.link AND a.svc = p.svc AND a.cpt = COALESCE(p.cpt, '') AND a.posted = p.posted
                     LEFT JOIN temp.sc_prim pr ON pr.link = p.link AND pr.svc = p.svc AND pr.cpt = COALESCE(p.cpt, '')
                     WHERE p.svc >= ? AND p.svc < ? AND p.link IS NOT NULL
-                    GROUP BY p.link, p.svc, COALESCE(p.cpt, '')""", (lo, hi)):
+                    GROUP BY p.link, p.svc, COALESCE(p.cpt, '')""", (asof or "0000", lo, hi)):
             lines[(link, svc, cpt)] = [person, prim, chg or 0, ins or 0, pat or 0, contr_r or 0, wo_post or 0, wo_later or 0,
-                                       timely or 0, padj or 0, bal or 0]
+                                       timely or 0, padj or 0, bal or 0, bal_ar or 0]
         by_pd: dict[tuple, list] = defaultdict(list)
         for k, v in lines.items():
             if v[0] is not None:
                 by_pd[(v[0], k[1], k[2])].append(k)
         # money with no claim number, by patient, day and code: joined to the one line with the same keys (the ledger's
         # own rule for the patient's payments); a patient-side service of its own when it carries charges (a self-pay
-        # visit, a product); otherwise a visible gap
+        # visit, a product); otherwise a visible gap (and, for the A/R comparison, money of that patient and day)
         own_lines: list[list] = []
-        for (person, svc, cpt, payer, prim, chg, ins, pat, contr, nonc, padj, n_rows) in lc.execute(
-                """SELECT person, svc, COALESCE(cpt, ''), MAX(payer), MAX(primary_payer), SUM(COALESCE(charges, 0)),
-                          SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)), SUM(COALESCE(contractual, 0)),
-                          SUM(COALESCE(noncontractual, 0)), SUM(COALESCE(pat_adj, 0)), COUNT(*)
-                   FROM postings WHERE svc >= ? AND svc < ? AND link IS NULL GROUP BY person, svc, COALESCE(cpt, '')""", (lo, hi)):
+        unlinked_pd: dict[tuple, int] = defaultdict(int)
+        for (person, svc, cpt, payer, prim, chg, ins, pat, contr, nonc, padj, n_rows, moneyed_ar) in lc.execute(
+                f"""SELECT person, svc, COALESCE(cpt, ''), MAX(payer), MAX(primary_payer), SUM(COALESCE(charges, 0)),
+                           SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)), SUM(COALESCE(contractual, 0)),
+                           SUM(COALESCE(noncontractual, 0)), SUM(COALESCE(pat_adj, 0)), COUNT(*),
+                           SUM(CASE WHEN posted <= ? THEN {moneyed_expr} ELSE 0 END)
+                    FROM postings WHERE svc >= ? AND svc < ? AND link IS NULL GROUP BY person, svc, COALESCE(cpt, '')""",
+                (asof or "0000", lo, hi)):
             cands = by_pd.get((person, svc, cpt)) if person is not None else None
             moneyed = (ins or 0) + (pat or 0) + (contr or 0) + (nonc or 0) + (padj or 0)
             if not chg and cands and len(cands) == 1:
@@ -2230,17 +2277,22 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
                 v[5] += (contr or 0) + (nonc or 0)          # adjustments on the patient's side: routine (they carry no payer reason)
                 v[9] += padj or 0
                 v[10] -= moneyed
+                v[11] -= moneyed_ar or 0
                 joined_total += moneyed
             elif chg:
                 own_lines.append([None, prim if prim is not None else payer, chg or 0, ins or 0, pat or 0, (contr or 0) + (nonc or 0),
-                                  0, 0, 0, padj or 0, (chg or 0) - moneyed])
+                                  0, 0, 0, padj or 0, (chg or 0) - moneyed, 0])
             else:
                 c = cells[(m, group(prim if prim is not None else payer))]
                 c["unlinked_money"] += moneyed
                 c["unlinked_rows"] += n_rows or 0
+                if person is not None:
+                    unlinked_pd[(person, svc)] += int(moneyed_ar or 0)
+        if cmp is not None and asof:
+            cmp.month(lines, unlinked_pd)
         for v in list(lines.values()) + own_lines:
             line_rows += 1
-            person, prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal = v
+            person, prim, chg, ins, pat, contr_r, wo_post, wo_later, timely, padj, bal, _bal_ar = v
             c = cells[(m, group(prim))]
             c["charges"] += chg
             c["ins_paid"] += ins
@@ -2288,59 +2340,222 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) 
     summary["check"] = _result("money_conservation", offs, info={"cells": len(cells), "lines": line_rows,
                                                                  "unlinked_since_cents": summary["unlinked_since_cents"]},
                                examples=[], text=text)
+    summary["ar_balance"] = cmp.result() if cmp is not None else {"check": _skip("line_balance", "no A/R on file")}
     return summary
 
 
-def _ar_balance(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str) -> dict:
-    """EMA's newest A/R against its own postings: each insurance line on the A/R (claim number, date of service, code)
-    carries what insurance still owes; the postings up to the A/R's day leave the line's whole balance (insurance and
-    patient). A line whose A/R insurance balance is more than $1 above everything its postings leave, or that has no
-    posting at all, does not reconcile: it is counted with its dollars (a warning: a posting missing from the Production
-    export, or an A/R pulled before the postings). A balance the postings leave above the A/R's is the patient's share
-    or patient money that sits on no line: counted beside it, not as a gap."""
-    if not _has_table(conn, "ema_ar") or not _has_table(lc, "postings"):
-        return {"check": _skip("line_balance", "no A/R or no posting ledger")}
-    row = conn.execute("SELECT MAX(as_of) FROM ema_ar").fetchone()
-    as_of = row[0] if row else None
-    if not as_of:
-        return {"check": _skip("line_balance", "no A/R on file")}
-    ar: dict[tuple, int] = defaultdict(int)
-    for link, svc, cpt, bal in conn.execute("""SELECT link, svc, cpt, SUM(COALESCE(balance_cents, 0)) FROM ema_ar
-                                               WHERE as_of = ? AND link IS NOT NULL AND COALESCE(facility, 0) = 0
-                                                 AND party = 'Insurance' GROUP BY link, svc, cpt""", (as_of,)):
-        ar[(int(link), svc, cpt or "")] += int(bal or 0)
-    links = sorted({k[0] for k in ar})
-    led: dict[tuple, int] = {}
-    for i in range(0, len(links), 400):
-        part = links[i:i + 400]
-        for link, svc, cpt, bal in lc.execute(
-                f"""SELECT link, svc, COALESCE(cpt, ''), SUM(COALESCE(charges, 0) - COALESCE(ins_paid, 0) - COALESCE(pat_paid, 0)
-                           - COALESCE(contractual, 0) - COALESCE(noncontractual, 0) - COALESCE(pat_adj, 0))
-                    FROM postings WHERE link IN ({','.join('?' * len(part))}) AND posted <= ? GROUP BY link, svc, COALESCE(cpt, '')""",
-                (*part, as_of)):
-            led[(int(link), svc, cpt)] = int(bal or 0)
-    offs = []
-    above, above_cents, equal = 0, 0, 0
-    for k, bal in ar.items():
-        got = led.get(k)
-        if got is None:
-            if abs(bal) > 100:
-                offs.append((f"{k[0]}|{k[1]}|{k[2]}", abs(bal), None))
-        elif bal - got > 100:
-            offs.append((f"{k[0]}|{k[1]}|{k[2]}", bal - got, None))
-        elif got - bal > 100:
-            above += 1
-            above_cents += got - bal
-        else:
-            equal += 1
-    info = {"as_of": as_of, "lines": len(ar), "equal": equal, "not_in_postings": sum(1 for k in ar if k not in led),
-            "postings_leave_more": above, "postings_leave_more_cents": above_cents}
-    return {"check": _result("line_balance", offs, info=info, examples=[],
-                             text=f"{_n(len(ar), 'insurance line')} on the A/R of {as_of}: {equal:,} agree with the postings to the "
-                                  f"dollar; on {_n(len(offs), 'line')} the A/R holds more than the postings leave "
-                                  f"({usd0(sum(o[1] for o in offs))})"),
-            "as_of": as_of, "lines": len(ar), "off": len(offs), "off_cents": sum(o[1] for o in offs), "equal": equal,
-            "postings_leave_more": above, "postings_leave_more_cents": above_cents}
+def _ar_lines(conn: sqlite3.Connection) -> dict | None:
+    """EMA's newest A/R by line (EMA claim number, date of service, code), the insurance and the patient rows together:
+    {'lines': {(link, svc, cpt): cents}, 'spans': [(first service date, last service date, as-of day)], 'as_of'}, from
+    each current A/R file of the catalog on its own day, or the newest day's rows when the catalog lists none. The span a
+    file covers is its catalog's service dates, else the service dates of its rows. None when there is no A/R."""
+    if not _has_table(conn, "ema_ar") or not conn.execute("SELECT 1 FROM ema_ar LIMIT 1").fetchone():
+        return None
+    files = []
+    if _has_table(conn, "ema_report_files"):
+        files = [f for f in conn.execute("""SELECT file_id, svc_lo, svc_hi, as_of FROM ema_report_files
+                                            WHERE report = 'ar_report' AND status = 'current'""").fetchall()
+                 if conn.execute("SELECT 1 FROM ema_ar WHERE file_id = ? LIMIT 1", (f[0],)).fetchone()]
+    lines: dict[tuple, int] = defaultdict(int)
+    spans = []
+
+    def take(where: str, args: tuple, lo: Any, hi: Any, as_of: Any) -> None:
+        svc_lo, svc_hi, row_as_of = conn.execute(f"SELECT MIN(svc), MAX(svc), MAX(as_of) FROM ema_ar WHERE {where}", args).fetchone()
+        for link, svc, cpt, bal in conn.execute(f"""SELECT link, svc, cpt, SUM(COALESCE(balance_cents, 0)) FROM ema_ar
+                                                    WHERE {where} AND link IS NOT NULL AND COALESCE(facility, 0) = 0
+                                                    GROUP BY link, svc, cpt""", args):
+            lines[(int(link), str(svc)[:10], cpt or "")] += int(bal or 0)
+        a = str(as_of or row_as_of or "")[:10]
+        if a and (lo or svc_lo):
+            spans.append((str(lo or svc_lo)[:10], str(hi or svc_hi or a)[:10], a))
+    if files:
+        for fid, lo, hi, as_of in files:
+            take("file_id = ?", (fid,), lo, hi, as_of)
+    else:
+        newest = conn.execute("SELECT MAX(as_of) FROM ema_ar").fetchone()[0]
+        take("as_of = ?", (newest,), None, None, newest)
+    if not spans:
+        return None
+    return {"lines": dict(lines), "spans": spans, "as_of": max(s[2] for s in spans)}
+
+
+class _ArCompare:
+    """EMA's newest A/R against what each line's postings leave up to the A/R's day, inside the service dates the A/R
+    covers: both ways (the A/R holds more: a posting missing from Production, or an A/R pulled before the postings; the
+    postings leave more: a payment or adjustment missing from Production), a line the A/R no longer lists while its
+    postings leave money open (settled in EMA), and an A/R line with no posting at all. A difference that patient money
+    paid on no claim number, by the same patient on the same day, can account for is counted beside, not as a gap."""
+
+    def __init__(self, ar: dict, facility: set[int]):
+        self.ar = ar["lines"]
+        self.spans = ar["spans"]
+        self.as_of_day = ar["as_of"]
+        self.fac = facility
+        self.seen: set[tuple] = set()
+        self.offs: list[tuple] = []
+        self.n = Counter()
+        self.cents = Counter()
+
+    def as_of(self, month: str) -> str | None:
+        hits = [a for lo, hi, a in self.spans if lo[:7] <= month <= hi[:7]]
+        return min(hits) if hits else None
+
+    def covered(self, svc: str) -> bool:
+        return any(lo <= svc <= hi for lo, hi, _a in self.spans)
+
+    def _off(self, kind: str, key: tuple, cents: int) -> None:
+        self.n[kind] += 1
+        self.cents[kind] += cents
+        self.offs.append((f"{kind}:{key[0]}|{key[1]}|{key[2]}", cents, None))
+
+    def month(self, lines: dict[tuple, list], unlinked_pd: dict[tuple, int]) -> None:
+        for (link, svc, cpt), v in lines.items():
+            key = (int(link), str(svc)[:10], cpt or "")
+            if key[0] in self.fac or not self.covered(key[1]):
+                continue
+            led = int(v[11] or 0)
+            a = self.ar.get(key)
+            if a is not None:
+                self.seen.add(key)
+                if a - led > 100:
+                    self._off("ar_above", key, a - led)
+                    continue
+                excess = led - a
+            else:
+                excess = led
+            if excess <= 100:
+                self.n["equal" if a is not None else "settled"] += 1
+                continue
+            u = unlinked_pd.get((v[0], key[1]), 0) if v[0] is not None else 0
+            if u > 0 and excess <= u + 100:
+                self.n["explained"] += 1
+                self.cents["explained"] += excess
+                continue
+            self._off("postings_above" if a is not None else "left_ar", key, excess)
+
+    def result(self) -> dict:
+        for key, bal in self.ar.items():
+            if key not in self.seen and key[0] not in self.fac and abs(bal) > 100:
+                self._off("not_in_postings", key, abs(bal))
+        info = {"as_of": self.as_of_day, "lines": len(self.ar), "equal": self.n["equal"], "settled": self.n["settled"],
+                "explained": self.n["explained"], "explained_cents": self.cents["explained"]}
+        for kind in ("ar_above", "postings_above", "left_ar", "not_in_postings"):
+            info[kind] = self.n[kind]
+            info[kind + "_cents"] = self.cents[kind]
+        off_cents = sum(o[1] for o in self.offs)
+        text = (f"{_n(len(self.ar), 'line')} on the A/R of {self.as_of_day}: {self.n['equal']:,} agree with the postings to the "
+                f"dollar; {_n(len(self.offs), 'line')} do not ({usd0(off_cents)}): the A/R holds more on {self.n['ar_above']:,}, "
+                f"the postings leave more on {self.n['postings_above']:,}, {self.n['left_ar']:,} left the A/R while their postings "
+                f"leave money open, {self.n['not_in_postings']:,} have no posting")
+        return dict(info, check=_result("line_balance", self.offs, info=dict(info), examples=[], text=text),
+                    off=len(self.offs), off_cents=off_cents)
+
+
+def _retain_floor(lc: sqlite3.Connection, newest: str) -> str:
+    """The first service day whose postings the ledger's own retention (ema_ledger.Ledger.retain: service more than
+    retain_days() before the newest posting) will not drop for a while: the first day of the second month after its
+    cutoff, or after the cutoff it last applied, whichever is later."""
+    cut = None
+    try:
+        from .ema_ledger import retain_days
+        cut = _add(newest, -int(retain_days()))
+    except Exception as exc:       # noqa: BLE001  (the ledger module's default, as a server keeps it)
+        _caught(exc, "retain_days")
+        cut = _add(newest, -1100)
+    try:
+        row = lc.execute("SELECT value FROM ledger_meta WHERE key = 'retained_before'").fetchone()
+        if row and row[0] and str(row[0])[:10] > str(cut or ""):
+            cut = str(row[0])[:10]
+    except sqlite3.Error:
+        pass
+    d = _d(cut)
+    if not d:
+        return "0000-00-00"
+    y, mo = d.year, d.month + 2
+    y, mo = y + (mo - 1) // 12, (mo - 1) % 12 + 1
+    return f"{y:04d}-{mo:02d}-01"
+
+
+def check_posted(conn: sqlite3.Connection, ledger: Any, *, today: Any = None) -> dict:
+    """Money EMA posted in a closed month never disappears (NON-NEGOTIABLE 1: an unreconciled dollar is a visible gap).
+    For every service month, closed posting month (before the month of the ledger's newest posting) and payer group, the
+    insurer's payments, the patient's payments, the adjustments and the patient adjustments, against the most this check
+    has ever seen for them (their high-water mark, selfcheck_posted). Corrections and takebacks are new postings in their
+    own month, so a closed month's money can only fall when postings left the ledger: a newer export of the same dates that
+    lacks some (a filtered or partial export replacing a complete one), or EMA deleting them. Each fall over $1 is an
+    offender with its dollars until a person accepts it (accept_findings moves the mark) or the missing postings are read
+    again. Service months the ledger's retention is about to drop are left out, and nothing is judged while the catalog
+    has a Production file waiting to be read again. Cheap (one grouped pass); called by check_ledger and, on a serverless
+    host, right after each Production file is applied. Saved in meta selfcheck:posted, which after_detection counts."""
+    ensure_tables(conn)
+    lc = ledger.conn if hasattr(ledger, "conn") else ledger
+    at = now_of()
+
+    def done(r: dict, **extra: Any) -> dict:
+        meta_set(conn, K_POSTED, {"at": at, "today": today_of(today), "check": r, **extra})
+        conn.commit()
+        return r
+    if lc is None or not _has_table(lc, "postings"):
+        return done(_skip("posted_money", "no posting ledger"))
+    if _has_table(conn, "ema_report_files") and conn.execute(
+            "SELECT 1 FROM ema_report_files WHERE report = 'production' AND status = 'reread' LIMIT 1").fetchone():
+        return done(_skip("posted_money", "the posting ledger is reading a Production file again: checked once it holds every file"))
+    newest = lc.execute("SELECT MAX(posted) FROM postings").fetchone()[0]
+    if not newest:
+        return done(_skip("posted_money", "the posting ledger holds no posting yet"))
+    open_month = str(newest)[:7]
+    floor = _retain_floor(lc, str(newest)[:10])
+    from . import ema_reports as er
+    names = {i: n for i, n in lc.execute("SELECT id, name FROM names")}
+    groups: dict[Any, str] = {}
+
+    def group(pid: Any) -> str:
+        if pid not in groups:
+            nm = names.get(pid)
+            try:
+                groups[pid] = er.payer_group_of(conn, nm)[0] if nm else "No payer named"
+            except Exception as exc:          # noqa: BLE001
+                _caught(exc, "payer_group")
+                groups[pid] = str(nm or "No payer named")
+        return groups[pid]
+    cur: dict[tuple, int] = defaultdict(int)
+    for svc_m, post_m, payer, ins, pat, adj, padj in lc.execute(
+            """SELECT substr(svc, 1, 7), substr(posted, 1, 7), payer, SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(pat_paid, 0)),
+                      SUM(COALESCE(contractual, 0) + COALESCE(noncontractual, 0)), SUM(COALESCE(pat_adj, 0))
+               FROM postings WHERE svc >= ? AND posted < ? GROUP BY 1, 2, 3""", (floor, open_month + "-01")):
+        g = group(payer)
+        for measure, v in (("ins_paid", ins), ("pat_paid", pat), ("adjustments", adj), ("pat_adj", padj)):
+            if v:
+                cur[(svc_m, post_m, g, measure)] += int(v)
+    marks = {(s, p, g, m): h for s, p, g, m, h in conn.execute(
+        "SELECT svc_month, posted_month, payer_group, measure, high_cents FROM selfcheck_posted")}
+    floor_m = floor[:7]
+    offs, rows = [], []
+    for k in sorted(set(cur) | set(marks)):
+        if k[0] < floor_m or k[1] >= open_month:
+            continue
+        now_c = int(cur.get(k, 0))
+        high = marks.get(k)
+        if high is None or now_c > high:
+            high = now_c
+        elif high - now_c > 100:
+            offs.append(("|".join(k), high - now_c, None))
+        rows.append((*k, high, now_c, at))
+    conn.execute("DELETE FROM selfcheck_posted WHERE svc_month < ? OR posted_month >= ?", (floor_m, open_month))
+    conn.executemany("""INSERT OR REPLACE INTO selfcheck_posted (svc_month, posted_month, payer_group, measure, high_cents, last_cents, at)
+                        VALUES (?,?,?,?,?,?,?)""", rows)
+    drop = sum(o[1] for o in offs)
+    info = {"cells": len(rows), "closed_before": open_month, "service_from": floor_m, "first": not marks,
+            "by_measure": dict(Counter(o[0].rsplit("|", 1)[-1] for o in offs))}
+    text = (f"{_n(len(rows), 'closed month cell')} checked: the money EMA posted stayed in the posting ledger" if not offs else
+            f"Money EMA posted left the posting ledger: {usd0(drop)} across {_n(len(offs), 'month cell')} (a newer export of the "
+            "same dates lacks postings the one before had)")
+    seq = None
+    try:
+        seq = int(ledger.seq()) if hasattr(ledger, "seq") else None
+    except Exception:          # noqa: BLE001
+        seq = None
+    return done(_result("posted_money", offs, info=info, examples=[], text=text), ledger_seq=seq)
 
 
 def check_serving(conn: sqlite3.Connection, serving: sqlite3.Connection) -> dict:
@@ -2386,9 +2601,12 @@ def _pattern_key(row: dict) -> list[str]:
 def given_up(conn: sqlite3.Connection, *, today: Any = None, save: bool = True) -> dict:
     """Money given up without a decision: the dollars EMA wrote off on 2025+ service, at the remittance's posting (EMA's
     posting rule: no person decided) on items no person let go and no owner policy accepts, by payer group, reason and
-    service month, split into the part still inside its window (recoverable) and the part already lost. When the posting
-    ledger's money check has run, the dollars written off at posting with no RemitWatch item at all are given beside it.
-    Kept week by week in meta selfcheck:given_up; Today, Progress and the weekly email read it."""
+    service month, split into the part still inside its window (recoverable) and the part already lost. The window is the
+    item's own deadlines; an item with none on file is judged by its payer's appeal window from the day the payer answered
+    (codes.py's windows: never 'lost' by default), and one with no date at all counts as recoverable. When the posting
+    ledger's money check has run, the dollars written off at posting with no RemitWatch item at all (whatever the item's
+    status: one a person let go is an item) are given beside it. Kept week by week in meta selfcheck:given_up; Today,
+    Progress and the weekly email read it."""
     t = today_of(today)
     cols = set(_cols(conn, "findings"))
     if not {"written_off_cents", "written_off_when"} <= cols:
@@ -2396,20 +2614,29 @@ def given_up(conn: sqlite3.Connection, *, today: Any = None, save: bool = True) 
     accept = _policy_accepts(conn)
     legal = "legal_deadline" if "legal_deadline" in cols else "NULL"
     outcome = "ema_outcome" if "ema_outcome" in cols else "NULL"
+    kind = "payer_kind" if "payer_kind" in cols else "NULL"
     by: dict[tuple, Counter] = defaultdict(Counter)
     tot = Counter()
     for row in conn.execute(f"""SELECT finding_id, payer_group, procedure_code, modifiers, carc, service_date, written_off_cents,
-                                       appeal_deadline, {legal}, status, {outcome}, signal
+                                       appeal_deadline, {legal}, status, {outcome}, signal, {kind}, payment_date
                                 FROM findings WHERE COALESCE(stale, 0) = 0 AND COALESCE(written_off_cents, 0) > 0
                                   AND written_off_when = 'at_posting' AND service_date >= ?
                                   AND status NOT IN ('dismissed', 'lost')""", (SERVICE_FROM,)):
-        fid, grp, code, mods, carc, svc, cents, ad, ld, status, oc, sig = row
+        fid, grp, code, mods, carc, svc, cents, ad, ld, status, oc, sig, pkind, paid_on = row
         if sig == "EMA_DENIAL_AS_CONTRACTUAL":
             continue
         if any(k in accept for k in _pattern_key({"payer_group": grp, "procedure_code": code, "modifiers": mods, "carc": carc})):
             continue
         last = max([str(x)[:10] for x in (ad, ld) if x] or [""])
-        part = "recoverable" if last and last >= t else "lost"
+        if not last:
+            # no deadline on file (677 items to work had none on the real archive): the payer's own appeal window from
+            # its answer decides, never 'lost' by default
+            days, _f = _windows(grp, pkind)
+            last = _add(paid_on or svc, days) or ""
+            tot["window_from_payer"] += int(cents)
+        part = "recoverable" if not last or last >= t else "lost"
+        if not last:
+            tot["window_unknown"] += int(cents)
         key = (grp or "Unknown", str(carc or "?"), str(svc or "")[:7])
         by[key][part] += int(cents)
         by[key]["items"] += 1
@@ -2420,11 +2647,13 @@ def given_up(conn: sqlite3.Connection, *, today: Any = None, save: bool = True) 
                   key=lambda r: -(r["recoverable_cents"] + r["lost_cents"]))
     money = meta_get(conn, K_MONEY, {}) or {}
     ledger_wo = (money.get("conservation") or {}).get("totals_since", {}).get("wo_at_posting")
+    on_items = _written_off_on_items(conn)
     out = {"at": now_of(), "today": t, "week": _week_of(t), "cents": tot["recoverable"] + tot["lost"],
            "recoverable_cents": tot["recoverable"], "lost_cents": tot["lost"], "items": tot["items"], "n": tot["items"],
+           "window_from_payer_cents": tot["window_from_payer"], "window_unknown_cents": tot["window_unknown"],
            "by_payer": _top(rows, "payer_group"), "by_reason": _top(rows, "reason"), "by_month": _top(rows, "month"),
-           "rows": rows[:200], "ledger_written_off_at_posting_cents": ledger_wo,
-           "with_no_item_cents": (int(ledger_wo) - (tot["recoverable"] + tot["lost"])) if isinstance(ledger_wo, int) else None}
+           "rows": rows[:200], "ledger_written_off_at_posting_cents": ledger_wo, "items_written_off_cents": on_items,
+           "with_no_item_cents": max(0, int(ledger_wo) - on_items) if isinstance(ledger_wo, int) else None}
     if save:
         prev = meta_get(conn, K_GIVEN_UP, {}) or {}
         weeks = [w for w in (prev.get("weeks") or []) if w.get("week") != out["week"]]
@@ -2433,6 +2662,22 @@ def given_up(conn: sqlite3.Connection, *, today: Any = None, save: bool = True) 
         out["weeks"] = sorted(weeks, key=lambda w: w["week"])[-26:]
         meta_set(conn, K_GIVEN_UP, out)
     return out
+
+
+def _written_off_on_items(conn: sqlite3.Connection) -> int:
+    """The dollars written off at posting on 2025+ service that RemitWatch has an item for, whatever the item's status or
+    whether it is listed (a person let it go, a policy accepts it, it is kept stale): each service (bill, date, code) once,
+    at its largest write-off, so two items on one line are not counted twice."""
+    cols = set(_cols(conn, "findings"))
+    if not {"written_off_cents", "written_off_when"} <= cols:
+        return 0
+    per: dict[tuple, int] = {}
+    for fid, pcn, svc, code, cents in conn.execute(
+            """SELECT finding_id, patient_control_number, service_date, procedure_code, written_off_cents FROM findings
+               WHERE COALESCE(written_off_cents, 0) > 0 AND written_off_when = 'at_posting' AND service_date >= ?""", (SERVICE_FROM,)):
+        k = (bill_of(pcn), str(svc or "")[:10], code) if pcn else (fid,)
+        per[k] = max(per.get(k, 0), int(cents or 0))
+    return sum(per.values())
 
 
 def _top(rows: list[dict], key: str, k: int = 15) -> list[dict]:
@@ -2447,11 +2692,11 @@ def _top(rows: list[dict], key: str, k: int = 15) -> list[dict]:
 
 
 def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True) -> dict:
-    """What the app cannot see, since when, and the dollars of claims it cannot check. The 835 feed: claims billed since the
-    newest remittance have no payer answer on file (their charges, from EMA's Production when the ledger's money check
-    has run, else EMA's monthly totals, prorated, marked 'about'). EMA's reports: the items to work whose 'already worked or
-    paid in EMA' check rests on a report older than its limit. One banner sentence for every page; never 'all clear'
-    while blind."""
+    """What the app cannot see, since when, and the dollars of claims it cannot check. The 835 feed: claims billed to
+    insurance since the newest remittance with no payer's answer on file (their charges, line by line from the store's
+    EMA lines, leaving out each line whose answer EMA posted; else EMA's monthly totals, prorated, marked 'about'). EMA's
+    reports: the items to work whose 'already worked or paid in EMA' check rests on a report older than its limit. One
+    banner sentence for every page; never 'all clear' while blind."""
     t = today_of(today)
     sources, feeds = [], []
     newest = None
@@ -2466,7 +2711,8 @@ def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True)
         cents, about = _charges_since(conn, newest, t)
         sources.append({"source": "835", "since": newest, "days": days, "cents": cents, "about": about,
                         "text": f"No remittance since {newest} ({days} days): {'about ' if about else ''}{usd0(cents)} billed since "
-                                "then has no payer's answer on file. RemitWatch sees only what EMA posted for it."})
+                                "then has no payer's answer on file (no 835, and none posted in EMA). RemitWatch sees only what "
+                                "EMA posted for it."})
     if _has_table(conn, "ema_report_files") and conn.execute("SELECT 1 FROM ema_report_files LIMIT 1").fetchone():
         try:
             from .ema_checks import freshness
@@ -2506,9 +2752,19 @@ def blindness(conn: sqlite3.Connection, *, today: Any = None, save: bool = True)
 
 
 def _charges_since(conn: sqlite3.Connection, newest: str, today: str) -> tuple[int, bool]:
-    """Charges EMA billed for services after the newest remittance: exact from the ledger's cells when the money check has
-    run (selfcheck_money, by service month: the newest remittance's month prorated by days), else from EMA's posted
-    monthly charges (ema_months), prorated the same way: 'about'."""
+    """Charges billed to insurance for services after the newest remittance that have no payer's answer on file: from the
+    store's EMA lines, line by line (a line whose insurer's answer EMA posted, a payment or a denial, is not blind; the
+    lean keep rule keeps every line with no answer), exact; else EMA's monthly charges (the ledger's cells when the money
+    check has run, else ema_months), the newest remittance's month prorated by days: 'about', and they cannot tell an
+    answered claim from one with none."""
+    if _has_table(conn, "ema_lines") and conn.execute("SELECT 1 FROM ema_lines LIMIT 1").fetchone():
+        cols = set(_cols(conn, "ema_lines"))
+        if {"svc", "charges"} <= cols:
+            no_answer = "COALESCE(ins_answer_rows, 0) = 0" if "ins_answer_rows" in cols else "1"
+            to_ins = "COALESCE(ins_charges, 0) > 0" if "ins_charges" in cols else "1"
+            n = conn.execute(f"""SELECT COALESCE(SUM(charges), 0) FROM ema_lines WHERE svc > ? AND {to_ins} AND {no_answer}""",
+                             (str(newest)[:10],)).fetchone()[0]
+            return int(n or 0), False
     month = newest[:7]
     try:
         d = _d(newest)
@@ -2759,20 +3015,22 @@ def _windows(group: str | None, kind: str | None) -> tuple[int, int]:
 
 
 def _item_index(conn: sqlite3.Connection) -> dict:
-    """Which services RemitWatch lists, and how: {(bill, svc, code): [(finding_id, work_state, status, reason)]}, with the
-    finding's EMA claim number too, so a line can be found by either."""
+    """Which services RemitWatch lists, and how: {(bill, svc, code): [(finding_id, work_state, status, signal, automatic)]}
+    (automatic: closed by RemitWatch itself, with its note), with the finding's EMA claim number too, so a line can be
+    found by either."""
     cols = set(_cols(conn, "findings"))
     ws = "work_state" if "work_state" in cols else "NULL"
     link = "ema_link" if "ema_link" in cols else "NULL"
+    auto = "auto_note IS NOT NULL" if "auto_note" in cols else "0"
     by_service: dict[tuple, list] = defaultdict(list)
     by_link: dict[tuple, list] = defaultdict(list)
     by_bill: dict[str, list] = defaultdict(list)
-    for fid, pcn, svc, pc, opc, bc, wk, st, lk, sig in conn.execute(
+    for fid, pcn, svc, pc, opc, bc, wk, st, lk, sig, is_auto in conn.execute(
             f"""SELECT finding_id, patient_control_number, service_date, procedure_code, original_procedure_code,
-                       {'billed_code' if 'billed_code' in cols else 'NULL'}, {ws}, status, {link}, signal FROM findings
+                       {'billed_code' if 'billed_code' in cols else 'NULL'}, {ws}, status, {link}, signal, {auto} FROM findings
                 WHERE COALESCE(stale, 0) = 0"""):
         b = bill_of(pcn)
-        entry = (fid, wk, st, sig)
+        entry = (fid, wk, st, sig, bool(is_auto))
         for code in {pc, opc, bc} - {None}:
             by_service[(b, str(svc or "")[:10], code)].append(entry)
             if lk is not None:
@@ -2782,14 +3040,34 @@ def _item_index(conn: sqlite3.Connection) -> dict:
     return {"service": by_service, "link": by_link, "bill": by_bill}
 
 
+def _decided(entry: tuple) -> bool:
+    """A person's or the owner's decision holds the line: let go or lost, a pattern the owner's policy accepts, or marked
+    paid by a person (resolved with no automatic note)."""
+    _f, wk, st, _sig, is_auto = entry
+    return st in ("dismissed", "lost") or wk == "accepted" or (st == "resolved" and not is_auto)
+
+
 def _covered(entries: list) -> str | None:
-    """How RemitWatch holds a line: 'listed' (Work now or Waiting), 'reason' (accepted, let go, lost, a person's status, or
-    done), None (no item at all)."""
+    """How RemitWatch holds a line: 'listed' (Work now or Waiting), 'reason' (a person's or the owner's decision:
+    _decided), None (no item, or only items RemitWatch set aside by itself: closed automatically, done, expired, can't be
+    checked; those are the disagreements the audit exists to show)."""
     if not entries:
         return None
-    if any(wk in LISTED for _f, wk, _s, _g in entries):
+    if any(e[1] in LISTED and e[2] in OPEN_STATUSES for e in entries):
         return "listed"
-    return "reason"
+    if any(_decided(e) for e in entries):
+        return "reason"
+    return None
+
+
+def _held_as(entries: list) -> tuple[str, str | None]:
+    """For a gap: how RemitWatch holds the line ('no_item', or the automatic state of its item) and that item's id."""
+    if not entries:
+        return "no_item", None
+    e = sorted(entries, key=lambda x: x[0])[0]
+    if e[2] == "resolved" and e[4]:
+        return "closed_by_remitwatch", e[0]
+    return (str(e[1]) if e[1] else "not_listed"), e[0]
 
 
 def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = False, why: str = "weekly",

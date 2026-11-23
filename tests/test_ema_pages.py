@@ -911,6 +911,13 @@ const out = {
   ema_nolink: ctx.xpBoxHtml(Object.assign({}, f, { ema_link: 'CB0000300C017' }), Object.assign(x('call', ['copy_instructions']), { ema_block: { claim_url: 'https://ema.example.test/claims/{claim}' } }), { packets: [] }),
   todo_link: (ctx.state.filt.worklist = { status: 'open,in_progress', deadline: 'week' }, ctx.deskFilter('worklist')),
   closed_link: (ctx.state.filt.worklist = { status: 'open', deadline: 'missed' }, ctx.deskFilter('worklist')),
+  // review C1: a packet built in the panel joins its packets and the box is drawn again (features.js xpPacketBuilt)
+  packet_built: (() => { const redrawn = []; ctx.xpRedrawBox = id => redrawn.push(id);
+    ctx.state.detailId = 'b'; ctx.state.detailR = { packets: [{ packet_id: 'old' }] };
+    ctx.xpPacketBuilt('b', {}, { packet_id: 'p1', note_name: 'visit note' });
+    ctx.xpPacketBuilt('other', {}, { packet_id: 'p2' });                       // a panel since closed or moved on: nothing
+    return { packets: ctx.state.detailR.packets.map(p => p.packet_id), redrawn,
+             main: primary('appeal', ['build_packet', 'fax_payer', 'mark_sent'], ctx.state.detailR.packets) }; })(),
   // review C1: every Let go and Lost asks why, and nothing changes without an answer (desk.js letGoNote)
   let_go: (() => { const said = []; ctx.alert = m => said.push(m);
     const ask = (answer, signal, status) => { ctx.prompt = () => answer; const r = ctx.letGoNote(signal, status); return r === undefined ? 'no question' : r; };
@@ -1013,6 +1020,14 @@ def test_items_let_go_one_at_a_time_mirror_the_server_and_say_so(page):
     assert page["left_claims"] == ("Let go leaves out 2 claims with no answer from the payer or rejected before the payer. "
                                    "Open each one to let it go, with a note.")
     assert page["left_mixed"].startswith("Let go leaves out 2 items that are let go one at a time")
+
+
+def test_a_packet_built_in_the_panel_moves_its_main_button_on_to_the_fax(page):
+    """Review C1 (high): after the packet was built in the panel, both fax buttons still said "Build the packet first" and
+    the main button stayed "Build the appeal packet" until the panel was closed and opened again."""
+    got = page["packet_built"]
+    assert got["packets"] == ["p1", "old"] and got["redrawn"] == ["b"]
+    assert got["main"] == "Fax it to the payer"
 
 
 def test_every_let_go_on_the_page_asks_why_and_show_again_sends_the_rules_own_grain(page):
