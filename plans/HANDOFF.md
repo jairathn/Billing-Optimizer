@@ -4,7 +4,7 @@ Keep this file current. Whoever works on RemitWatch next (any Claude session, on
 `wip/plans:plans/README.md` (the original plan, briefs and research) and `CLAUDE.md`. This file supersedes the "Next, in
 order" section of the README on `wip/plans`.
 
-Last updated: 2026-11-23, about 19:00 UTC.
+Last updated: 2026-11-23, about 20:00 UTC.
 
 ## 1. Where things are
 
@@ -37,9 +37,18 @@ Last updated: 2026-11-23, about 19:00 UTC.
   take that as the feed date), 186 items closed as paid ($21,046), 71 left the findings without a payment ($12,981; being
   accounted for, see 4), 1,140 new open items ($206,976). The swing alarm fires (high) on the catch-up, as it should.
 
+- Catch-up hand-trace done (`plans/catchup_trace_2026-11-23.md`): ingest exact, old and new code agree on every shared item,
+  184 of 186 closures right, every departure explained except 12 whose primary remittance is missing. It also found that
+  the detection logic live today (older than the hotfix) lists the same service more than once, keeps items on payer
+  decisions the payer reversed, lists voided claims and services already paid, and never reads the 837s, so 1,986 claims
+  sent and never answered ($927k billed, 713 of them VA Community Care) have no item. Those are the next phase's work
+  (step 5), with that file as its acceptance cases; the hotfix does not change them.
+
 ## 3. Next steps, in order
 
-1. Merge the round-1 review fixes (merge review findings mr-1 to mr-12, below) into this branch.
+1. Round-1 review fixes: merged here from fix/feed-and-day (mr-1, mr-2, mr-8, mr-10) and fix/faxes-heirs-image (mr-3, mr-4
+   in-flight case, mr-5, mr-9). Still to merge: fix/notes-bodies-cli (mr-7, mr-11 done; mr-12 in progress). Those branches
+   live only in the session's container: if they are gone, redo mr-7, mr-11 and mr-12 from the descriptions below.
 2. Round 2: the misuse check's CH-1, CH-2, CH-3, CH-4, CH-8, CH-10 (server side: refuse a $0 Paid), CH-14, CH-6 (the alert
    and the fax hold name the missing dates), and whatever the catch-up hand-trace finds. Every fix: a failing test with
    invented data first, both store kinds, break and restore.
@@ -49,7 +58,10 @@ Last updated: 2026-11-23, about 19:00 UTC.
 4. Push this branch's tip to `main` (fast-forward; pushing to main is authorized after review). Check the server's
    `/api/health` shows the commit; watch Vercel's next run (`status.json`: errors, `memory_mb.peak` with the 837s; the limit
    is 2,278 MB, the last peak 1,529 MB).
-5. Full visibility (the owner's goal, 2026-11-23): with 837s, 835s, EMA's A/R and Production reports and the weekly exports
+5. Detection accuracy, then full visibility. First the findings in `plans/catchup_trace_2026-11-23.md` (one item per unit
+   of service across resubmissions and reversals; void claims; services already paid; secondary processing settles a COB
+   denial; take-backs whose reference embeds the claim id; the 26/TC split; an 837-based never-answered pass), each with a
+   failing test built from the traced pattern (invented data). Then full visibility (the owner's goal, 2026-11-23): with 837s, 835s, EMA's A/R and Production reports and the weekly exports
    now covering the same dates, every charge can be followed from claim sent (837) to payer's answer (835) to EMA posting to
    open balance, reconciled to the cent, every gap a named, ranked item. Plan: profile and join the sources over 2024 to now
    (the full 837 set is easiest to take from Vercel's store image once Vercel has read it: one file); hand-trace every kind
