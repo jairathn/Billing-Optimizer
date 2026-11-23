@@ -34,7 +34,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterator, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
