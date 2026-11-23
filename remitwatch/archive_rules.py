@@ -1068,7 +1068,8 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
     rest: 'done', the rest is the patient's; but where it asks for information, records or an attachment (CO-16,
     CO-226, CO-252) it has not declined the rest, which stays to work.
     Two Medicare contractors (one paid, the other denied) are no primary and secondary: one of them should pay the
-    service, so the item keeps its size, 'likely', with the jurisdiction to check while the window is open. A payment
+    service, so the item keeps its size, 'likely', with the jurisdiction to check while the window is open; unless the
+    one that denied says the claim is not in its jurisdiction (CO-109, N104): the other's payment is then the answer. A payment
     another payer made only as secondary says nothing here: a crossover secondary pays on the primary's answer, and when
     the primary has since reversed its payment and denied the line (Medicare's takebacks) the denial is real."""
     items = list(items)
@@ -1083,8 +1084,11 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
         p = prim[0]
         proof = [_proof(x, "payment", True) for x in prim]
         who = a.payer_name or "the payer"
-        if a.kind == "medicare" and all(x.kind == "medicare" for x in prim):
+        own_rem = set(a.rem or []) | set(a.claim.rem or [])
+        elsewhere = "109" in {r for _g, r, _c in a.denial_reasons()} or "N104" in own_rem
+        if a.kind == "medicare" and all(x.kind == "medicare" for x in prim) and not elsewhere:
             # two Medicare contractors: whichever jurisdiction is right pays; the other's payment may be taken back later
+            # (a contractor that says the claim is not in its jurisdiction, CO-109 or N104, has answered that: read below)
             hint = (f"{p.payer_name}, another Medicare contractor, paid this service on {p.paid_on} ({_usd(sum(x.standing for x in prim))}); "
                     f"{who} denied it ({_reasons_text(a)}). One contractor pays a service: check which jurisdiction is right for it (where "
                     f"the service was done) while the window to dispute {who}'s answer is open. If {p.payer_name} is right, nothing is owed by "
