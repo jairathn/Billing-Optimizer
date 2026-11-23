@@ -791,6 +791,25 @@ def _show_again(c, rule):
                                      "modifier": rule.get("modifier"), "reason": rule.get("reason"), "remove": True}, headers=XHR)
 
 
+def test_the_red_number_on_a_tab_counts_the_work_closing_this_week_never_an_item_that_only_waits(server):
+    """Review C1 (medium): the red number on a category tab counted every to-do item closing within 7 days whatever its
+    state, so an item that only waits on the payer (its follow-up not due yet) was counted, and the list the tab opens
+    (Work now and the follow-ups due, closing within 7 days) does not hold it."""
+    conn = _store(server)
+    wid = conn.execute("SELECT finding_id FROM findings WHERE category='denial' AND status='open' ORDER BY finding_id LIMIT 1").fetchone()[0]
+    today = D.fromisoformat(server.api._day(0))
+    conn.execute("UPDATE findings SET work_state='waiting', appeal_deadline=?, follow_up_on=? WHERE finding_id=?",
+                 ((today + dt.timedelta(days=3)).isoformat(), (today + dt.timedelta(days=20)).isoformat(), wid))
+    conn.commit()
+    conn.close()
+    badge = server.c.get("/api/brief").json()["badges"]["denial"]
+    opened = _items(server, category="denial", live=1, status="open,in_progress", deadline="week", state="todo")
+    assert wid not in {i["finding_id"] for i in opened["items"]}
+    assert (badge["n"], badge["cents"]) == (opened["total"], opened["shortfall_cents"])
+    window = _items(server, category="denial", live=1, status="open,in_progress", deadline="week")
+    assert wid in {i["finding_id"] for i in window["items"]}            # the window alone would have counted it
+
+
 def test_show_again_removes_the_rule_it_lists_at_any_grain_on_both_hosts(site):
     """Review C1 (medium, both reviews): Show again posted payer and reason only, so a rule by code, modifier or the payer's
     reason code answered 404, and a rule for any reason by a code hit the whole-payer refusal (400). Its items stayed let go
@@ -1076,7 +1095,7 @@ vm.runInContext(read('faxes.js'), ctx);
   // a batch: the stale hold no longer stops it, and "Fax them anyway" goes again only for the items EMA could not vouch for
   answers = { a: { status: 'held', code: 'stale', vouch: 'paid_after', reason: 'behind' }, b: { status: 'held', code: 'stale', vouch: 'no_ema', reason: 'behind' },
               c: { status: 'sent' } };
-  await ctx.appealByFax(['a', 'b', 'c'], {});
+  await ctx.appealByFax(['a', 'b', 'c', 'd', 'e'], {});                      // more items than the three senders at once
   out.tried = sent.map(x => x.finding_id).sort();
   const anyway = el('fxOut').kids[0];
   out.anyway = anyway ? anyway.innerHTML : null;
@@ -1117,7 +1136,7 @@ def test_a_bulk_send_names_every_item_it_held_and_faxes_anyway_only_what_ema_cou
     for fid, why in (("held1", "next step is not an appeal"), ("held2", "paid or settled"), ("held3", "no group for"), ("held4", "check it first")):
         assert fid in out["summary"], fid
         assert why in out["summary"], why
-    assert out["tried"] == ["a", "b", "c"]                              # the stale hold did not stop the batch
+    assert out["tried"] == ["a", "b", "c", "d", "e"]                    # the stale hold did not stop the batch
     assert out["anyway"] and ">Fax it anyway<" in out["anyway"] and "1 item" in out["anyway"]
     assert out["again"] == [["b", True, True]]                          # only the item EMA could not vouch for, in bulk
     assert "sending in bulk is paused on this site" in out["paused"] and "fix what is below" not in out["paused"]
