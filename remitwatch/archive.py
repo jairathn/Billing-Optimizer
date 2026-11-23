@@ -2405,7 +2405,7 @@ def _plb_touched(conn: sqlite3.Connection) -> set[str]:
                 bills.update(b for (b,) in conn.execute("SELECT bill FROM archive_ids WHERE id = ? AND kind = 'payer_ref'", (norm,)))
         for b in bills:
             seen = conn.execute("SELECT COALESCE(plb_seen, 0) FROM archive_bills WHERE bill = ?", (b,)).fetchone()
-            if seen is not None:
+            if seen is not None and pid > seen[0]:
                 out.add(b)
     return out
 

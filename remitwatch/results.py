@@ -188,6 +188,12 @@ def _add(iso: Any, n: int) -> str | None:
     return (x + timedelta(days=n)).isoformat() if x else None
 
 
+def _near(a: Any, b: Any, days: int) -> bool:
+    """Whether two dates are at most `days` apart (the same day included); False when either is missing."""
+    g = _days(a, b)
+    return g is not None and abs(g) <= days
+
+
 def week_of(iso: Any) -> str | None:
     """The Monday of an ISO date's week."""
     x = _d(iso)
@@ -484,32 +490,65 @@ def load_registry(conn: sqlite3.Connection) -> dict[str, dict]:
 
 
 # --------------------------------------------------------------------------------------------- the work on items
-def _work_kind(kind: Any, to_status: Any, actor: Any) -> str | None:
+# A person's status Sent says what went by its note, as the app writes it: the fax send marks the item Sent "Faxed to
+# ...", Mark billed writes "Billed: ..." beside its own 'billed' line, Log what happened writes "Call or portal check: ...".
+STATUS_NOTE_KINDS = (("Faxed to", "fax"), ("Billed:", "billed"), ("Call or portal check:", "call"))
+FOLD_DAYS = 3               # a status line within this many days of the fax or 'billed' line it repeats is that same work
+BOOKKEEPING_KINDS = frozenset({"posted"})   # done after the money came (a payment marked posted): never what makes an item
+                                            # "worked" in the comparison with similar unworked items
+
+
+def _work_kind(kind: Any, to_status: Any, actor: Any, note: Any = None) -> str | None:
     """The kind of a person's work an item history line records, or None (an automatic line, a note, a packet)."""
     if kind == "manual":
-        return "sent" if to_status == "appealed" else None
+        if to_status != "appealed":
+            return None
+        text = str(note or "")
+        return next((k for prefix, k in STATUS_NOTE_KINDS if text.startswith(prefix)), "sent")
     if str(actor or "").strip().lower() in SYSTEM_ACTORS or not str(actor or "").strip():
         return None
     return EVENT_WORK.get(str(kind or ""))
 
 
+def _fold_work(ws: list[dict]) -> list[dict]:
+    """One piece of work counted once: the status line the app writes beside a fax that went out ("Faxed to ...") or
+    beside Mark billed's own 'billed' line ("Billed: ...") is that same work, not a second one (a status line with no such
+    twin, a fax whose own record never settled say, still counts, as the work it says)."""
+    keep = []
+    for w in ws:
+        if w.get("src") == "status" and w["kind"] in ("fax", "billed"):
+            twin = "fax" if w["kind"] == "fax" else "event"
+            if any(o.get("src") == twin and o["kind"] == w["kind"] and _near(o["date"], w["date"], FOLD_DAYS) for o in ws):
+                continue
+        keep.append(w)
+    return keep
+
+
+def real_work(ws: list[dict] | None) -> list[dict]:
+    """The work that can bring money (everything but bookkeeping such as a payment marked posted)."""
+    return [w for w in ws or [] if w["kind"] not in BOOKKEEPING_KINDS]
+
+
 def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dict]]:
-    """Each item's work in RemitWatch, oldest first: {'date', 'at', 'kind', 'who', 'pages'}. A person's status Sent, the
-    work lines the item's buttons record (sent, call, posted, billed, fix) and every fax sent through RemitWatch (a fax
-    counts once it went out: status 'sent')."""
+    """Each item's work in RemitWatch, oldest first: {'date', 'at', 'kind', 'who', 'pages', 'src'}. A person's status Sent
+    (as the work its note names), the work lines the item's buttons record (sent, call, posted, billed, fix) and every fax
+    sent through RemitWatch (a fax counts once it went out: status 'sent'); the status line that only repeats a fax or a
+    'billed' line is folded into it."""
     ids = sorted(set(fids))
     out: dict[str, list[dict]] = {fid: [] for fid in ids}
     if not ids:
         return out
     if _table(conn, "finding_events"):
+        note = "e.note" if "note" in _cols(conn, "finding_events") else "NULL"
         for part in _chunks(ids):
             _temp_ids(conn, "rs_w", part)
-            for fid, at, kind, to, actor in conn.execute("""SELECT e.finding_id, e.at, e.kind, e.to_status, e.actor FROM finding_events e
-                                                            WHERE e.finding_id IN (SELECT id FROM temp.rs_w) ORDER BY e.at, e.id"""):
-                k = _work_kind(kind, to, actor)
+            for fid, at, kind, to, actor, text in conn.execute(f"""SELECT e.finding_id, e.at, e.kind, e.to_status, e.actor, {note}
+                                                                  FROM finding_events e WHERE e.finding_id IN (SELECT id FROM temp.rs_w)
+                                                                  ORDER BY e.at, e.id"""):
+                k = _work_kind(kind, to, actor, text)
                 if k and at:
                     out[fid].append({"date": str(at)[:10], "at": str(at), "kind": k, "who": str(actor or "").strip()[:80] or "a person",
-                                     "pages": 0})
+                                     "pages": 0, "src": "status" if kind == "manual" else "event"})
         _drop(conn, "rs_w")
     if _table(conn, "faxes") and {"finding_id", "direction", "status"} <= _cols(conn, "faxes"):
         for part in _chunks(ids):
@@ -521,10 +560,11 @@ def work_of(conn: sqlite3.Connection, fids: Iterable[str]) -> dict[str, list[dic
                 if status != "sent" or not when:
                     continue
                 who = str(_json(doc).get("actor") or "").strip()[:80] or "RemitWatch"
-                out[fid].append({"date": when[:10], "at": when, "kind": "fax", "who": who, "pages": int(pages or 0)})
+                out[fid].append({"date": when[:10], "at": when, "kind": "fax", "who": who, "pages": int(pages or 0), "src": "fax"})
         _drop(conn, "rs_fx")
-    for v in out.values():
+    for fid, v in out.items():
         v.sort(key=lambda w: (w["at"], w["kind"]))
+        out[fid] = _fold_work(v)
     return out
 
 
