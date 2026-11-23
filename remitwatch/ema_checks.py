@@ -2473,6 +2473,16 @@ def paid_in_ema(conn: sqlite3.Connection, findings: Iterable[dict], outcomes: di
                         "payer": payer, "note": note,
                         "hint": f"EMA shows {_usd(same)} paid by {payer} on {first['posted']} (no 835): check before marking it paid",
                         "used": _used(first)}
+            b = o.get("paid_before_first") or {}
+            if (f.get("category") in ("denial", "bundling") and not (f.get("paid_cents") or 0) and b
+                    and (o.get("paid_before") or 0) >= thr and (o.get("balance") or 0) < -CREDIT_MIN):
+                # the line was paid before this denial and the later payment left it in credit: a duplicate payment the payer
+                # may take back (the credit item lists it), not money recovered by working this item
+                dup = (f"Already paid: EMA shows this line paid {_usd(o['paid_before'])} by {b.get('payer') or 'insurance'} on "
+                       f"{b.get('date')}, before this denial. The {_usd(same)} posted on {first['posted']} (check ending "
+                       f"{_tail(first['check'])}) left the line in credit: it looks like a duplicate payment the payer may take "
+                       "back, so nothing is counted as recovered here")
+                out[fid].update(recover_cents=0, duplicate=True, note=dup, hint=dup)
             if not closes:
                 out[fid]["note"] = out[fid]["hint"]
         elif other > 0 and other >= thr:

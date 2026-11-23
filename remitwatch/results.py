@@ -4,9 +4,10 @@ items behind it (unit R).
 
 THE TOP LINE: "Money returned on claims RemitWatch flagged or worked"
   Every dollar a payer paid on an item's line (or claim, for a claim-level item) after RemitWatch first flagged that item,
-  plus the money RemitWatch found. Never money paid before the item was first flagged. One payment counts once: items that
-  share a payment (the same line seen by two checks, a claim-level item and a line of the same claim) form one group, and
-  the group's money goes to its earliest-raised item. Beneath it, the split, strongest first:
+  plus the money RemitWatch found. Never money paid before the item was first flagged. One payment counts once: each
+  payment record goes to the earliest-raised item that covers it and was flagged before it (items that share a record, the
+  same line seen by two checks or a claim-level item and a line of the same claim, form one group for the lift and the
+  outcomes). Beneath it, the split, strongest first:
     (a) after RemitWatch work: paid after a person's work on the item in RemitWatch (a fax or appeal sent through
         RemitWatch, a corrected claim or appeal marked Sent, a call or portal check logged, a payment marked posted, a
         patient or second payer billed) and inside that payer's answer time after the work (the 90th percentile from the
@@ -15,9 +16,11 @@ THE TOP LINE: "Money returned on claims RemitWatch flagged or worked"
         an 835 payment EMA never posted, then posted; a claim that never left EMA, then sent and paid);
     (c) flagged, no recorded work: paid with no work recorded in RemitWatch (or after the payer's answer time had passed).
         Labelled on the page as money that may have come back anyway, with the measured rate.
-  A payment the payer later took back is no longer counted (a reversal pairs with the payment it reverses), and money the
-  payer had paid before the flag and took back after it is subtracted (newest money first). What is left over after that
-  is shown as "taken back", never hidden.
+  A payment the payer later took back is no longer counted (a reversal pairs with the payment it reverses, by the bill's
+  rules read again over the group, the same payer by name included), and money the payer had paid before the flag and
+  took back after it is subtracted (newest money first). A reversal of money no 835 here shows paid takes back EMA's
+  posting of that check when EMA posted it after the flag (the check then counts), and is otherwise taken as money paid
+  before the flag. What is left over after that is shown as "taken back", never hidden.
 
 THE QUALIFIER (the owner's decision of 2026-11-22): "About $Y of this may have come back anyway: similar items with no work
 were paid at Z% (n items)." Z is the share of unworked items, in the patterns and age bands of the worked ones, that were

@@ -3181,8 +3181,9 @@ class Detector:
             o = oc.get(fid) or {}
             act = r.get("action")
             if act == "close" and EMA_CLOSES:
-                self._close_from_ema(f, r, o, "EMA shows it paid", r.get("note") or "")
-                self.ema_counts["c6_closed"] += 1
+                self._close_from_ema(f, r, o, "already paid before this denial; the later payment looks like a duplicate"
+                                     if r.get("duplicate") else "EMA shows it paid", r.get("note") or "")
+                self.ema_counts["c6_closed_duplicate" if r.get("duplicate") else "c6_closed"] += 1
             elif act == "hint_other_payer" and EMA_CLOSES and self._rebilled(f, o, moved):
                 payer = r.get("payer") or "another payer"
                 note = (f"Rebilled to {payer}, paid: EMA shows {_usd(r.get('paid_cents'))} paid by {payer} on {r.get('date')} "
@@ -3203,7 +3204,8 @@ class Detector:
                              "codes": [], "text": f"EMA posted {_usd(cents)} from {payer} on a check ending {r.get('check_tail') or ''} "
                                                   "that no 835 carries", "decisive": True}]}
         used = ("ema",) + tuple(r.get("used") or (when, r.get("check_tail"), o.get("link")))
-        self._mark_paid(f, when, cents, note, detail, used=used)
+        self._mark_paid(f, when, cents if r.get("recover_cents") is None else max(0, min(cents, r["recover_cents"])), note, detail,
+                        used=used)
         f["hint"] = None
 
     def _ema_line_payers(self, keys: list[tuple]) -> dict[tuple, str | None]:
