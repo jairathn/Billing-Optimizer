@@ -427,6 +427,7 @@ function bindDrawerExtras(id, d){
 // {cents} or {why}: anything else (letters, a minus sign, more than two decimals, 1e9, more than ten times the line's charge
 // or more than $1,000,000) is asked again with the reason.
 const PAID_EMPTY = 'Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is.';
+const PAID_ZERO = 'Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead.';
 const PAID_TOP = 100000000;
 function paidCents(typed, charge){
   const t = String(typed == null ? '' : typed).trim();
@@ -436,6 +437,7 @@ function paidCents(typed, charge){
   if(!m) return {why: 'That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.'};
   if(m[2] && m[2].length > 2) return {why: 'Use at most two decimals (dollars and cents).'};
   const cents = Number(m[1].replace(/,/g, '')) * 100 + (m[2] ? Number((m[2] + '0').slice(0, 2)) : 0);
+  if(cents === 0) return {why: PAID_ZERO};          // nothing recovered is not a Paid: Lost or Let go says what happened
   const top = charge > 0 ? Math.min(PAID_TOP, 10 * charge) : PAID_TOP;
   if(!Number.isSafeInteger(cents) || cents > top) return {why: top < PAID_TOP ? `That is more than ten times the charge on this line (${money2(top / 10)}). Check the amount.` : 'That is more than $1,000,000. Check the amount.'};
   return {cents};

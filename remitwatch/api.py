@@ -1143,6 +1143,7 @@ MAX_PAID_CENTS = 100_000_000            # $1,000,000: no single item is paid mor
 PAID_TIMES_CHARGE = 10                  # nor more than ten times its line's charge
 IN_FLIGHT = "A fax for this item is going out now. Wait a minute and look at the item again."
 NO_AMOUNT = "Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is."
+PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead."
 
 
 async def _body_object(request: Request) -> dict:
@@ -1255,6 +1256,8 @@ def _person_status(ids: list[str], status: str, notes: str | None, rec: int | No
                     raise Refused(400, "amount", NO_AMOUNT)
                 if rec < 0:
                     raise Refused(400, "amount", "The amount paid cannot be below zero.")
+                if rec == 0:                # a Paid with nothing recovered: the item was not paid, it was lost or let go
+                    raise Refused(400, "amount", PAID_ZERO)
                 if rec > top:
                     raise Refused(400, "amount", f"That is more than {'ten times the charge on this line' if top < MAX_PAID_CENTS else '$1,000,000'}"
                                                  f" (${top / 100:,.2f}). Check the amount on the remittance or in EMA.")

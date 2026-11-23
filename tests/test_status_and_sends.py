@@ -412,3 +412,33 @@ def test_ch4_serverless_a_reason_hidden_while_an_appeal_goes_out_leaves_that_ite
     assert "error" not in out and not out.get("actions_waiting"), out
     conn = raw_conn(s.state)
     assert [conn.execute("SELECT status FROM findings WHERE finding_id=?", (i,)).fetchone()[0] for i in (going, other)] == ["appealed", "dismissed"]
+
+
+# =========================================================================== CH-10: Paid takes an amount above $0
+PAID_ZERO = "Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead."
+
+
+def test_ch10_paid_with_nothing_paid_is_refused_with_where_to_go_instead(tmp_path, monkeypatch):
+    """'0' closed an item as Paid with nothing recovered. Refused, with the plain reason; a cent and up to ten times the
+    line's charge still go (the hard stop stays)."""
+    s = _server(tmp_path, monkeypatch)
+    fid = s.ids[0]                                    # its line's charge: $223.65
+    for zero in (0, 0.0):
+        r = s.c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "seen_status": "open", "recovered_cents": zero}, headers=XHR)
+        assert r.status_code == 400 and r.json()["code"] == "amount" and r.json()["detail"] == PAID_ZERO, r.json()
+    assert s.c.get(f"/api/findings/{fid}").json()["finding"]["status"] == "open"
+    r = s.c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "seen_status": "open", "recovered_cents": 223651}, headers=XHR)
+    assert r.status_code == 400 and "ten times the charge" in r.json()["detail"]
+    assert s.c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "seen_status": "open", "recovered_cents": 1}, headers=XHR).status_code == 200
+    assert s.c.get(f"/api/findings/{fid}").json()["finding"]["recovered_cents"] == 1
+
+
+def test_ch10_serverless_refuses_paid_with_nothing_paid_before_the_journal(box, monkeypatch):
+    s = _serverless(box, monkeypatch)
+    fid = s.ids[0]
+    n = len(_journal(s.state))
+    r = s.c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "seen_status": "open", "recovered_cents": 0}, headers=s.h)
+    assert r.status_code == 400 and r.json()["code"] == "amount" and r.json()["detail"] == PAID_ZERO, r.json()
+    assert len(_journal(s.state)) == n
+    assert s.c.post(f"/api/findings/{fid}/status", json={"status": "resolved", "seen_status": "open", "recovered_cents": 760},
+                    headers=s.h).status_code == 200

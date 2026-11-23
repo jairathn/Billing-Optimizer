@@ -139,7 +139,7 @@ const sleep = ms => new Promise(ok => setTimeout(ok, ms));
   // ---------------------------------------------------------------- H4: the Paid amount
   await open(); ids = await rows();
   const paid = [];
-  for (const [k, typed] of [[5, ['1,250.00']], [6, ['', '-50', '1e9', '12.345', 'abc', '$1,250.00']], [7, ['1250.5']], [8, ['$95']], [9, ['99999']]]) {
+  for (const [k, typed] of [[5, ['1,250.00']], [6, ['', '-50', '1e9', '12.345', 'abc', '0', '$0.00', '$1,250.00']], [7, ['1250.5']], [8, ['$95']], [9, ['99999']]]) {
     await page.click(`tr.row[data-id="${ids[k]}"] td.day`); await settle(ids[k]); await sleep(300);
     dialogs.length = 0; answers.length = 0; answers.push(...typed, null);
     const before = posts.length;

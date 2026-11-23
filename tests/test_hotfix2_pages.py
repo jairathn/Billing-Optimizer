@@ -135,9 +135,11 @@ def test_the_pages_act_on_the_item_they_show_once_and_say_what_they_saw(tmp_path
     assert all(a["value"] == "" for x in p for a in x["asked"]) and "The amount in dispute is" in p[0]["asked"][0]["message"]
     assert p[0]["sent"]["recovered_cents"] == 125000 and p[0]["sent"]["seen_status"] == "open"
     whys = [a["message"].split("\n\n")[0] for a in p[1]["asked"][1:]]
+    zero = "Paid needs an amount above $0. If the payer paid nothing, mark it Lost or Let go instead."         # CH-10: '0' is no payment
     assert whys == ["Type the amount the payer paid, from the remittance or EMA. If you do not know it yet, leave the item as it is.",
                     "The amount paid cannot be below zero.", "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.",
-                    "Use at most two decimals (dollars and cents).", "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00."], whys
+                    "Use at most two decimals (dollars and cents).", "That is not an amount. Type it as the remittance or EMA shows it, for example 1,250.00.",
+                    zero, zero], whys
     assert p[1]["sent"]["recovered_cents"] == 125000 and p[2]["sent"]["recovered_cents"] == 125050 and p[3]["sent"]["recovered_cents"] == 9500
     assert p[4]["sent"] is None and "ten times the charge" in p[4]["asked"][1]["message"]
     # H3: a bulk change carries the status each row showed
