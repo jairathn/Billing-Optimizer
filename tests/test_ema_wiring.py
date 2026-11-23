@@ -239,6 +239,19 @@ def test_a_payment_ema_posted_with_no_835_closes_the_item_with_its_proof_and_a_n
     assert kinds == ["paid_on_later_remit", "reopened"]
 
 
+def test_a_denial_paid_before_it_and_again_into_credit_closes_with_no_recovery(store, ledger, tmp_path):
+    """The line was paid $90 before the denial and $90 again after it, so EMA shows it in credit: the denial closes as
+    already paid, and the duplicate payment is not counted as recovered (the credit item is where it is worked)."""
+    denial_world(store, ledger, tmp_path, [pay(F.link_no(1), "PRIM-0", 90, posted=D(2026, 3, 10)),
+                                           pay(F.link_no(1), "PAPER-1", 90, posted=D(2026, 4, 20))])
+    det = run(store)
+    assert det.ema_counts["c6_closed_duplicate"] == 1 and not det.ema_counts.get("c6_closed")
+    f = one(store, "signal='DENIED_AUTH'")
+    assert f["status"] == "resolved" and f["recovered_cents"] == 0, (f["status"], f["recovered_cents"])
+    assert f["auto_note"].startswith("Already paid: EMA shows this line paid $90.00")
+    assert json.loads(f["evidence"])["paid_later"]["proof"][0]["amount_cents"] == 9000
+
+
 def test_a_persons_status_is_never_replaced_by_an_ema_closure(store, ledger, tmp_path):
     from remitwatch.actions import apply_status
     denial_world(store, ledger, tmp_path, [pay(F.link_no(1), "PAPER-1", 90, posted=D(2026, 4, 20))])

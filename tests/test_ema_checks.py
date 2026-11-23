@@ -581,6 +581,22 @@ def test_the_ascs_separate_payee_money_never_closes_a_professional_item(store, l
     assert outcomes(store, [f])["F1"]["outcome"] == "not_found"
 
 
+def test_a_denial_paid_before_it_and_paid_again_into_credit_counts_no_recovery(store, ledger, tmp_path):
+    """EMA shows the line paid $90 by the same payer before the denial, and $90 again after it, which left the line in
+    credit. The later payment is a duplicate the payer may take back (the credit item lists it): closing the denial must
+    not also count it as recovered (12 closures, $322, on real data). A line not in credit is an ordinary closure."""
+    tk = denial_world(store, ledger, tmp_path, [pay(F.link_no(1), "PRIM-0", 90, posted=D(2026, 3, 10)),
+                                                pay(F.link_no(1), "PAPER-1", 90, posted=D(2026, 4, 20))])
+    f = finding(tk)
+    o = outcomes(store, [f])["F1"]
+    assert o["paid_before"] == 9000 and o["paid_after_same"] == 9000 and o["balance"] < -100, (o["paid_before"], o["balance"])
+    got = ec.paid_in_ema(store.conn, [f], {"F1": o})["F1"]
+    assert got["action"] == "close" and got["duplicate"] and got["recover_cents"] == 0
+    assert got["note"].startswith("Already paid: EMA shows this line paid $90.00 by ") and "duplicate" in got["note"]
+    plain = ec.paid_in_ema(store.conn, [f], {"F1": dict(o, balance=0)})["F1"]
+    assert plain["action"] == "close" and not plain.get("duplicate") and plain.get("recover_cents") is None
+
+
 def test_a_status_alone_never_closes_and_a_payment_before_is_a_hint(store, ledger, tmp_path):
     tk = denial_world(store, ledger, tmp_path, [pay(F.link_no(1), "PRIM-1", 90, posted=D(2026, 3, 20), payer=P["medicare"])])
     f = finding(tk)

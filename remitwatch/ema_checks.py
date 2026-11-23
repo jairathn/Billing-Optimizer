@@ -133,6 +133,7 @@ HIGH_DAYS, HIGH_EXPECTED = 30, 10_000
 # C6
 CLOSE_SHARE, SHORT_SHARE = 0.50, 0.95
 PAID_OUTCOMES = ("paid_after", "paid_after_other", "paid_after_partial", "paid_before")
+CREDIT_MIN = 100                # a line more than $1 in credit
 
 # C7
 AS_CONTRACTUAL_MIN, AS_CONTRACTUAL_LINES, AS_CONTRACTUAL_HIGH = 100_000, 10, 2_500_000
