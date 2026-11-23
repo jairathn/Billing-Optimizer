@@ -1396,10 +1396,11 @@ def archive_ar(conn: sqlite3.Connection, sink: Any, *, today: Any = None, months
     keep_bills, keep_links = _open_item_keys(conn) if olds else (set(), set())
     for file_id, as_of, _n in olds:
         cols, every = _fetch(conn, "SELECT * FROM ema_ar WHERE file_id = ? ORDER BY row_no", (file_id,))
-        ci, li, ri = cols.index("claim_id"), cols.index("link"), cols.index("row_no")
+        ci, li, ri = (cols.index(c) if c in cols else None for c in ("claim_id", "link", "row_no"))
 
         def stays(r: tuple) -> bool:
-            return bool((r[ci] and _bill_of(r[ci]) in keep_bills) or (r[li] is not None and r[li] in keep_links))
+            return bool((ci is not None and r[ci] and _bill_of(r[ci]) in keep_bills)
+                        or (li is not None and r[li] is not None and r[li] in keep_links))
         rows = [r for r in every if not stays(r)]
         kept = len(every) - len(rows)
         if not rows:
@@ -1422,7 +1423,7 @@ def archive_ar(conn: sqlite3.Connection, sink: Any, *, today: Any = None, months
         conn.execute("BEGIN IMMEDIATE")
         try:
             before = conn.total_changes
-            if kept:
+            if kept and ri is not None:
                 conn.executemany("DELETE FROM ema_ar WHERE file_id = ? AND row_no = ?", [(file_id, r[ri]) for r in rows])
             else:
                 conn.execute("DELETE FROM ema_ar WHERE file_id = ?", (file_id,))
@@ -1686,7 +1687,8 @@ def apply_frozen_rates(det: Any, *, today: Any = None) -> dict:
     figures and the payer_rates rows of those years itself). For a service year the archive took lines of (locked), the
     rates, the counts behind them, the cross-payer and Medicare figures are the ones measured on the whole year before
     the archive took anything; for every other year old enough to be archived (before today less the floor), a fresh
-    snapshot is kept. Returns {'locked', 'overridden', 'snapshot'}."""
+    snapshot is kept. A key of a locked year the snapshot does not have stays only when lines read into the store after
+    the year was locked (a late remittance) count toward it. Returns {'locked', 'overridden', 'snapshot', 'late_keys'}."""
     conn = det.conn
     ensure_schema(conn)
     today = _today(today or getattr(det, "today", None))
@@ -1862,8 +1864,9 @@ def _late_pattern(det: Any, fresh: dict, keys: list[str], *, taken_ids: set[str]
         fid = _fid("SECOND_RATE", *kp)
     note = (str(ev.get("note") or "").strip() + " These claims were paid after the year's older claims moved to the archive"
             + ("; the year's earlier finding at this amount lists the rest." if cont else ".")).strip()
-    emit(kp, lines, ev.get("usual_cents"), note, None, at_amount=ev.get("payer_lines_at_this_amount"),
-         for_code=ev.get("payer_lines_for_code"))
+    # detection's own continuation of a worked finding keeps its link (and its title); one of ours gets it below
+    emit(kp, lines, ev.get("usual_cents"), note, None if cont else ev.get("continues"),
+         at_amount=ev.get("payer_lines_at_this_amount"), for_code=ev.get("payer_lines_for_code"))
     f = det.findings.get(fid)
     if f is None:
         return None

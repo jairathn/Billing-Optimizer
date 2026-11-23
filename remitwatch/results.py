@@ -2390,26 +2390,41 @@ def list_rows(conn: sqlite3.Connection, key: str, *, today: Any = None, page: in
     return {"key": key, "total": total, "page": page, "per": per, "items": rows}
 
 
-CSV_COLUMNS = ("finding_id", "label", "signal", "payer_group", "procedure_code", "service_date", "first_flagged", "work_state", "status",
-               "cents", "a", "b", "c", "taken_back", "expected_value_cents", "recovery_basis", "rule")
+CSV_COLUMNS = (("finding_id", "Finding ID"), ("label", "What it is"), ("payer_group", "Payer group"), ("procedure_code", "Code"),
+               ("service_date", "Service date"), ("first_flagged", "First flagged"), ("work_state", "State"), ("status", "Status"),
+               ("cents", "Dollars"), ("a", "After RemitWatch work"), ("b", "Found by RemitWatch"), ("c", "No recorded work"),
+               ("taken_back", "Taken back"), ("expected_value_cents", "Likely worth"), ("recovery_basis", "How likely worth is worked out"),
+               ("rule", "Why it counts"))
+CSV_MONEY = frozenset({"cents", "a", "b", "c", "taken_back", "expected_value_cents"})
+STATUS_WORDS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
+
+
+def _dollars(cents: Any) -> str:
+    """Cents as dollars with two decimals (the app's other exports write money this way); blank for none."""
+    if cents is None or cents == "":
+        return ""
+    c = int(cents)
+    return f"{'-' if c < 0 else ''}{abs(c) // 100}.{abs(c) % 100:02d}"
 
 
 def list_csv(conn: sqlite3.Connection, key: str, *, today: Any = None, show_phi: bool = False) -> str:
-    """Every item behind a figure as CSV (no patient details; the claim id only when the names switch is on)."""
+    """Every item behind a figure as CSV, dollars with two decimals under plain headers (no patient details; the claim ID
+    only when the names switch is on)."""
     import csv
     import io
     buf = io.StringIO()
-    cols = list(CSV_COLUMNS) + (["claim_id"] if show_phi else [])
+    cols = list(CSV_COLUMNS) + ([("claim_id", "Claim ID")] if show_phi else [])
     w = csv.writer(buf)
-    w.writerow(cols)
+    w.writerow([h for _k, h in cols])
     got = list_rows(conn, key, today=today, page=0, per=500, show_phi=show_phi)
     pages = (got["total"] + 499) // 500
     for pg in range(max(pages, 1)):
         part = got if pg == 0 else list_rows(conn, key, today=today, page=pg, per=500, show_phi=show_phi)
         for r in part["items"]:
             rule = "; ".join(e.get("rule") or "" for e in (r.get("events") or [])[:3])
-            vals = dict(r, rule=rule)
-            w.writerow([_csv_safe(vals.get(c)) for c in cols])
+            vals = dict(r, rule=rule, work_state=STATE_LABELS.get(r.get("work_state") or "", r.get("work_state")),
+                        status=STATUS_WORDS.get(r.get("status") or "", r.get("status")))
+            w.writerow([_dollars(vals.get(k)) if k in CSV_MONEY else _csv_safe(vals.get(k)) for k, _h in cols])
     return buf.getvalue()
 
 
