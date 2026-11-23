@@ -49,9 +49,11 @@ Last updated: 2026-11-23, about 20:00 UTC.
 1. Round-1 review fixes: merged here from fix/feed-and-day (mr-1, mr-2, mr-8, mr-10) and fix/faxes-heirs-image (mr-3, mr-4
    in-flight case, mr-5, mr-9). Still to merge: fix/notes-bodies-cli (mr-7, mr-11 done; mr-12 in progress). Those branches
    live only in the session's container: if they are gone, redo mr-7, mr-11 and mr-12 from the descriptions below.
-2. Round 2: the misuse check's CH-1, CH-2, CH-3, CH-4, CH-8, CH-10 (server side: refuse a $0 Paid), CH-14, CH-6 (the alert
-   and the fax hold name the missing dates), and whatever the catch-up hand-trace finds. Every fix: a failing test with
-   invented data first, both store kinds, break and restore.
+2. Round 2 (started 2026-11-23 about 20:00 UTC from 58d836b, three fixers on local branches fix2/status-and-sends,
+   fix2/alarms-and-gaps, fix2/money-falls-off): the misuse check's CH-1, CH-2, CH-4, CH-10, CH-14; CH-3, CH-6; CH-8; and the
+   trace's T-C1 (a TC payment closing a 26 denial), T-C2 (a claim answered only by a secondary vanishes), T-N5 (items from
+   answers to voided claims). If those branches are gone, redo them from the descriptions in section 4 and the trace file.
+   Every fix: a failing test with invented data first, both store kinds, break and restore.
 3. Run the four environments and the node checks (`plans/tools/four_envs.sh`), and the catch-up harness on a fresh copy of
    the live store (`plans/tools/catchup.py`). Every item that closes or leaves must be explained by a payment, a newer copy
    of its remittance, or an heir.
