@@ -263,6 +263,49 @@ def test_follow_ups_keep_coming_while_the_remittances_are_behind(host):
 
 
 @pytest.mark.parametrize("host", HOSTS, indirect=True)
+def test_a_request_the_line_did_not_take_waits_while_the_remittances_are_behind(host, monkeypatch):
+    """Review mr-3: a second request a person sent after checking EMA, that the payer's line did not take (busy). While the
+    remittances are behind, the fax run does not try it again by itself (it says the claim is unpaid, and the claim may
+    have been paid since): it is listed for a person with why, and a person who checks EMA again sends it. Once the
+    remittances are current, the run tries it again by itself, as the follow-ups go again then."""
+    from remitwatch import api
+    today = date.fromisoformat(runtime.practice_today())
+    c, h, line, (a, b), write = host(today - timedelta(days=106))      # the newest payment is 106 days old
+    hx = dict(XHR, **h)
+    assert c.post("/api/faxes/payer", json={"payer_group": "Anthem / BCBS", "number": PAYER_FAX}, headers=hx).status_code == 200
+    for fid in (a, b):
+        assert c.post("/api/appeals/send", json={"finding_id": fid, "stale_ok": True}, headers=hx).json()["status"] == "sent"
+    line.deliver_all()
+    c.post("/api/faxes/refresh", headers=hx)
+    _sent_back(write, [a, b], today - timedelta(days=61))
+    number = {d["finding_id"]: d["number"] for d in c.get("/api/faxes", headers=h).json()["due"]}
+    assert set(number) == {a, b}, number
+
+    def person(fid):
+        return c.post("/api/faxes/follow_up", json={"finding_ids": [fid], "number": number[fid], "stale_ok": True}, headers=hx).json()["results"][0]
+    for fid in (a, b):                                           # checked in EMA: still unpaid, sent
+        assert person(fid)["status"] == "sent"
+    line.busy.add(fax.digits(PAYER_FAX))                         # the payer's line is busy: neither request gets through
+    n0 = len(line.sent)
+    for _ in range(2):                                           # the hourly fax run, twice
+        got = c.post("/api/faxes/refresh", headers=hx).json()
+        assert got["retried"] == 0, got
+    assert len(line.sent) == n0, "a request saying the claim is unpaid was faxed again by itself while the remittances are behind"
+    due = {d["finding_id"]: d for d in c.get("/api/faxes", headers=h).json()["due"]}
+    for fid in (a, b):
+        d = due[fid]
+        assert d["action"] == "person" and d["resend"] == "second_request" and d["stale"] and "days old" in d["why"], d
+    # a person checks EMA again and sends b; a stays for the run
+    line.busy.clear()
+    assert person(b)["status"] == "sent" and len(line.sent) == n0 + 1
+    # the remittances are current again: the run tries a again by itself, once
+    monkeypatch.setattr(api, "_data_behind_days", lambda: 0)
+    got = c.post("/api/faxes/refresh", headers=hx).json()
+    assert got["retried"] == 1 and len(line.sent) == n0 + 2, got
+    assert c.post("/api/faxes/refresh", headers=hx).json()["retried"] == 0
+
+
+@pytest.mark.parametrize("host", HOSTS, indirect=True)
 def test_to_decide_counts_the_last_120_days_to_today(host):
     """While the feed is behind, To decide still counts what was paid in the 120 days to today (it said so; it counted to the
     newest payment); older ones go to the items with no filing date, paid before that."""

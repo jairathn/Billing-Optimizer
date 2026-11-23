@@ -768,3 +768,96 @@ def test_serverless_the_follow_up_run_holds_a_paid_claim_and_says_so_once(tmp_pa
     assert line.sent == {}
     journal = [json.loads(state.get(m["name"])) for m in state.list(cloud.ACTIONS)]
     assert sum(1 for a in journal if a.get("kind") == "event" and a.get("note") == PAID_WHY) == 1
+
+
+# --------------------------------------------------------------------------- D4 in the fax run's retry (review mr-3)
+
+BUSY_KEY = "out:fake:9"
+
+
+def _busy_fax(fid: str, purpose: str) -> dict:
+    """A fax for the item that the payer's line did not take (busy), an hour ago, tried once: what the hourly fax run tries
+    again (api._fax_refresh, api._retry)."""
+    from datetime import datetime, timedelta, timezone
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="microseconds")
+    return dict(_fax_record(fid, key=BUSY_KEY, purpose=purpose, at=at), level=2 if purpose == "next_level" else 1, provider_id="F9",
+                status="failed", error="Busy", doc=json.dumps({"attempts": 1, "subject": "Second request", "front": ["Second request", ["It is unpaid."]]}))
+
+
+def _packets_on_hand(api, monkeypatch) -> None:
+    """The packet that was faxed is there and has nothing wrong with it, so only the rule under test can stop the retry."""
+    from tests.fake_fax import pdf_of
+    monkeypatch.setattr(api, "_stored_packet", lambda pid: {"packet_id": pid, "pdf": pdf_of("Invented appeal packet"), "subject": "Appeal"})
+    monkeypatch.setattr(api, "_packet_problem", lambda *a, **k: None)
+
+
+@pytest.mark.parametrize("purpose", ["second_request", "next_level", "payment", "records", "appeal"])
+def test_a_fax_the_line_did_not_take_is_not_tried_again_for_a_claim_the_store_shows_paid(tmp_path, monkeypatch, purpose):
+    """Review mr-3: a person set Sent again over the payment the run found (0c-2), and a fax for the item did not get through
+    (a busy line). The hourly fax run must not send it again: like the follow-ups, a fax of any kind for money the store
+    shows paid is a person's call. It is held with why, listed for a person, and the item's history says so once."""
+    from remitwatch import actions, fax
+    s, fid = _denial_world(tmp_path, "file")
+    actions.apply_payer_fax(s.conn, {"payer_group": "Anthem / BCBS", "number": "8005550142", "actor": "owner", "at": "2026-09-01T00:00:00+00:00"})
+    actions.apply_fax(s.conn, _busy_fax(fid, purpose))
+    s.conn.commit()
+    s.close()
+    _client, line, api = _site(tmp_path, monkeypatch, str(tmp_path / "s.sqlite"))
+    _packets_on_hand(api, monkeypatch)
+    for _ in range(2):          # the hourly run, twice
+        out = api._fax_refresh(line, use_ai=False)
+        assert out["retried"] == 0 and out["errors"] == [], out
+    assert line.sent == {}, "a fax went to the payer for a claim the store shows paid"
+    s = Store(str(tmp_path / "s.sqlite"))
+    c = s.conn
+    assert json.loads(c.execute("SELECT doc FROM faxes WHERE fax_key=?", (BUSY_KEY,)).fetchone()[0]).get("held") == PAID_WHY
+    assert c.execute("SELECT COUNT(*) FROM finding_events WHERE finding_id=? AND note=?", (fid, PAID_WHY)).fetchone()[0] == 1
+    due = [d for d in fax.followups(c) if d["finding_id"] == fid]
+    assert [(d["action"], d.get("paid"), d.get("resend"), d["why"]) for d in due] == [("person", True, None, PAID_WHY)]
+    s.close()
+
+
+def test_serverless_a_fax_the_line_did_not_take_is_not_tried_again_for_a_claim_the_store_shows_paid(tmp_path, monkeypatch):
+    """The same on the serverless host: the world comes through the runs and the journal, the fax run reads the dashboard's
+    copy, and what it decides (the hold on the fax, one line for the item's history) goes into the journal."""
+    from remitwatch import api, fax
+    from tests.fake_fax import FakeLine
+    from tests.test_features import clean_visits
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    folder = root / "Trizetto Data"
+    folder.mkdir(parents=True)
+    first = clean_visits(1, 25, "99214", "223.65", "117.60") + [claim(210, svc("99214", "223.65", "0.00", None, "CAS*CO*50*223.65~"))]
+    for n, i in enumerate(range(0, len(first), 20)):
+        (folder / f"r{n:03d}.RMT").write_bytes(remit("".join(first[i:i + 20]), "100.00", seg_count=99, isa_ctrl=f"{800 + n:09d}",
+                                                     pay_date="20261010"))
+    assert "error" not in _cycle(state, client)
+    store, _ = cloud.load_raw(state)
+    fid = store.conn.execute("SELECT finding_id FROM findings WHERE signal='DENIED_MEDICAL_NECESSITY'").fetchone()[0]
+    store.close()
+    for a in ({"kind": "status", "finding_id": fid, "status": "appealed", "notes": "Faxed", "actor": "biller", "at": "2026-10-12T10:00:00+00:00"},
+              {"kind": "fax", "record": dict(_fax_record(fid, at="2026-10-12T10:00:00+00:00"), packet_id=None)},
+              {"kind": "payer_fax", "payer_group": "Anthem / BCBS", "number": "8005550142", "actor": "owner", "at": "2026-09-01T00:00:00+00:00"}):
+        cloud.record_action(state, a)
+    assert "error" not in _cycle(state, client)
+    (folder / "later.RMT").write_bytes(remit(claim(210, svc("99214", "223.65", "117.60", "117.60", "CAS*CO*45*106.05~")), "117.60",
+                                             seg_count=30, isa_ctrl="000000777", pay_date="20261019"))
+    assert "error" not in _cycle(state, client)
+    cloud.record_action(state, {"kind": "status", "finding_id": fid, "status": "open", "notes": "not in EMA yet", "actor": "biller"})
+    cloud.record_action(state, {"kind": "status", "finding_id": fid, "status": "appealed", "actor": "biller"})
+    assert "error" not in _cycle(state, client, force_detect=True)
+    cloud.record_action(state, {"kind": "fax", "record": _busy_fax(fid, "second_request")})
+    monkeypatch.setenv("REMITWATCH_MODE", "serverless")
+    monkeypatch.setenv("REMITWATCH_STATE_DIR", str(root / "RemitWatch-state"))
+    monkeypatch.setattr(cloud, "SERVING_COPY", cloud.ServingCopy())
+    line = FakeLine()
+    monkeypatch.setattr(fax, "provider", lambda env=None: line)
+    monkeypatch.setattr(fax, "configured", lambda env=None: True)
+    _packets_on_hand(api, monkeypatch)
+    for _ in range(2):          # the fax run, twice
+        out = api._fax_refresh(line, use_ai=False)
+        assert out["retried"] == 0 and out["errors"] == [], out
+    assert line.sent == {}, "a fax went to the payer for a claim the store shows paid"
+    journal = [json.loads(state.get(m["name"])) for m in state.list(cloud.ACTIONS)]
+    assert sum(1 for a in journal if a.get("kind") == "event" and a.get("note") == PAID_WHY) == 1
+    held = [a["record"]["doc"] for a in journal if a.get("kind") == "fax" and a["record"].get("fax_key") == BUSY_KEY and "held" in str(a["record"].get("doc"))]
+    assert held and all((d if isinstance(d, dict) else json.loads(d)).get("held") == PAID_WHY for d in held), held

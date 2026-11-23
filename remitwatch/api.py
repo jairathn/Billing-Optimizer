@@ -4339,13 +4339,33 @@ def _mark_held(r: dict, doc: dict, why: str) -> None:
         _record_action({"kind": "fax", "record": {"fax_key": r["fax_key"], "doc": dict(doc, held=why), "updated_at": _fax_now()}})
 
 
+HELD_BEHIND = "held_while_behind"       # a fax's hold that lasts only while the remittances are behind (_retry, _fax_refresh)
+
+
 def _retry(prov, r: dict, doc: dict) -> str:
     """Another try for a fax the payer's line did not take: to the number saved for it now, and only if that is the number
-    it went to (a number replaced or removed since sends nothing: a person decides). Returns 'sent', 'held' or 'skip'."""
+    it went to (a number replaced or removed since sends nothing: a person decides). Never for money the store shows paid
+    (fax.paid_on_file: a person's call, as the follow-ups hold it), and a request that says the claim is unpaid not while
+    the remittances are behind (it waits for them, as the follow-ups do). Returns 'sent', 'held' or 'skip'."""
     from . import fax
     f = one("SELECT * FROM findings WHERE finding_id=?", (r["finding_id"],))
     if not f or f.get("status") != "appealed":
         return "skip"
+    doc = {k: v for k, v in doc.items() if k != HELD_BEHIND}        # a hold for the remittances alone is decided again here
+    paid = fax.paid_on_file(f.get("evidence"))
+    if paid:
+        # whatever the item's status says, nothing goes again by itself for money the store shows paid (fax.followups lists
+        # it for a person): the item's history says why, once, in the follow-up run's words
+        if not (has_table("finding_events") and one("SELECT 1 FROM finding_events WHERE finding_id=? AND note=? LIMIT 1", (f["finding_id"], paid))):
+            _record_action({"kind": "event", "event": "chase_held", "finding_id": f["finding_id"], "note": paid, "actor": "retry"})
+        _mark_held(r, doc, paid)
+        return "held"
+    behind = _data_behind_days() if r["purpose"] in ("second_request", "payment") else None
+    if behind is not None and behind > STALE_APPEAL_DAYS:
+        # the claim may have been paid since: listed for a person (who checks EMA and sends it), and tried again by itself
+        # once the remittances are current (_fax_refresh)
+        _mark_held(r, dict(doc, **{HELD_BEHIND: True}), stale_followup_why(behind))
+        return "held"
     level = int(r["level"] or 1)
     conn = db()
     try:
@@ -4450,12 +4470,15 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
         if s.get("pages"):
             rec["pages"] = s["pages"]
         _record_action({"kind": "fax", "record": rec})
-    # another try for a fax that did not go through, unless a later fax already carried the same thing
+    # another try for a fax that did not go through, unless a later fax already carried the same thing; one held only while
+    # the remittances were behind (_retry) is tried again once they are current
+    behind = _data_behind_days()
+    current = behind is None or behind <= STALE_APPEAL_DAYS
     for r in rows("""SELECT * FROM faxes x WHERE direction='out' AND status='failed' AND provider=? AND NOT EXISTS (
                          SELECT 1 FROM faxes y WHERE y.direction='out' AND y.finding_id = x.finding_id AND y.purpose = x.purpose
                            AND COALESCE(y.level,1) = COALESCE(x.level,1) AND y.created_at > x.created_at)""", (prov.name,)):
         doc = json.loads(r["doc"] or "{}")
-        if int(doc.get("attempts") or 1) >= fax.MAX_ATTEMPTS or not r["finding_id"] or doc.get("held"):
+        if int(doc.get("attempts") or 1) >= fax.MAX_ATTEMPTS or not r["finding_id"] or (doc.get("held") and not (current and doc.get(HELD_BEHIND))):
             continue
         if late():
             out["more"] = True
