@@ -1497,3 +1497,25 @@ def test_an_ema_follow_up_date_waits_until_that_day_then_asks_to_follow_up_once(
     assert n["action"] == ("Read the claim's notes in EMA, then follow up with Anthem / BCBS: EMA has a follow-up date of May 20, 2026 on it; "
                            "that day passed with no answer from the payer on file.")
     assert n["action"].count("read the claim's notes") + n["action"].count("Read the claim's notes") == 1
+
+
+@pytest.mark.parametrize("reason,later_pr,words", [
+    (("OA", "18"), False, "this denial (OA-18) repeats a claim the payer already answered"),
+    (("OA", "109"), False, "the payer's answer (OA-109) put nothing on the practice"),
+    (("CO", "96"), True, "the payer's later answer of Apr 20, 2026 put this service on the patient (PR-1)"),
+])
+def test_a_patients_payment_settles_a_line_the_payer_never_put_on_the_practice(store, ledger, tmp_path, reason, later_pr, words):
+    """Money review 7, measured on the real world: of the lines EMA shows settled by the patient, a duplicate denial, an
+    OA answer and a denial the payer later reprocessed to the deductible are the patient's share, done; only a CO or PI
+    denial with nothing later is the practice's to appeal or refund (the test above)."""
+    tk = denied(store, reason=reason)
+    if later_pr:
+        remit(store, trace=F.check_no(2), paid_on="2026-04-20", claims=[{"pcn": F.claim_id(1, sub=2), "pccn": "PCN-B", "received": "2026-04-05",
+              "lines": [ln("99213", 150, 0, [("CO", "45", 60), ("PR", "1", 90)], lcn="1")]}])
+    item(store, signal="DENIED_NONCOVERED", carc=reason[1], line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Resolved/Paid"), pay(F.link_no(1), F.check_no(1), 0, status="Resolved/Paid"),
+                                   patient_pay(150, posted=D(2026, 4, 25)), later()])
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert (out["verdict"]["state"], out["state"]["rule"]) == ("done", "moved_to_patient"), out["verdict"]["sentence"]
+    assert out["state"]["state_basis"].startswith("Settled by the patient:") and words in out["state"]["state_basis"], out["state"]["state_basis"]
+    assert out["next_step"]["route"] == "nothing" and not out["next_step"]["appeal_ok"]

@@ -1147,6 +1147,77 @@ def test_a_bulk_send_names_every_item_it_held_and_faxes_anyway_only_what_ema_cou
     assert out["bulk_off"] is False and out["bulk_on"] is True
 
 
+INDEX_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/].map(re => grab(html, re)).join('\n');
+const escKey = grab(html, /document\.addEventListener\('keydown', e=>\{ if\(e\.key!=='Escape'\) return;[\s\S]*?\}\);\n/);
+const keys = grab(html, /document\.addEventListener\('keydown', e=>\{\n  if\(e\.ctrlKey[\s\S]*?\n\}\);\n/);
+const redraw = grab(html, /function xpRedrawBox\(id, d\)\{[\s\S]*?\n\}\n/);
+const cls = open => { const s = new Set(open ? ['open'] : []); return { add: k => s.add(k), remove: k => s.delete(k), contains: k => s.has(k) }; };
+const mk = extra => Object.assign({ hidden: false, innerHTML: '', textContent: '', clicked: 0, disabled: false, click() { this.clicked++; } }, extra || {});
+const modal = mk({ classList: cls(true) }), inDrawer = {};
+const drawer = mk({ classList: cls(true), querySelector: q => inDrawer[q] || null, querySelectorAll: () => [] });
+const handlers = [];
+let closed = 0;
+const ctx = { console, state: { brief: { today: '2026-05-03', labels: {}, work_types: [] }, worklist: ['b'], filt: {} },
+  document: { addEventListener: (t, fn) => handlers.push(fn), querySelectorAll: () => [], activeElement: null },
+  $: q => q === '#modal' ? modal : q === '#drawer' ? drawer : null };
+vm.createContext(ctx);
+for (const src of [helpers, read('features.js'), read('today.js'), read('desk.js')]) vm.runInContext(src, ctx);
+ctx.closeDetail = () => { closed++; drawer.classList.remove('open'); };
+vm.runInContext(escKey + keys + redraw, ctx);
+const key = k => { const e = { key: k, target: null, preventDefault() {} }; handlers.forEach(h => h(e)); };
+const out = {};
+// Escape: the window on top first (the shortcuts, a fax preview, a letter), then the item's panel
+key('Escape'); out.esc1 = { modal: modal.classList.contains('open'), drawer: drawer.classList.contains('open'), closed };
+key('Escape'); out.esc2 = { drawer: drawer.classList.contains('open'), closed };
+// l and s: the next step's own button, else the status bar's, else a line that says why nothing happened
+drawer.classList.add('open');
+inDrawer['[data-st="dismissed"]'] = mk(); inDrawer['.st-err'] = mk();
+key('l'); out.l_bar = inDrawer['[data-st="dismissed"]'].clicked;
+key('s'); out.s_hint = inDrawer['.st-err'].textContent;
+inDrawer['[data-xp="let_go"]'] = mk();
+key('l'); out.l_box = [inDrawer['[data-xp="let_go"]'].clicked, inDrawer['[data-st="dismissed"]'].clicked];
+// the next step's box drawn again: where it offers the appeal itself, the letter row and the fax row step aside
+ctx.xpBind = () => {};
+const box = mk(), chips = mk(), letter = mk(), fxRow = mk();
+const d2 = { querySelector: q => ({ '#xpSlot': box, '#xpChips': chips, '#letterRow': letter, '#fxOneRow': fxRow })[q] || null };
+const ex = (route, buttons) => ({ explain: { verdict: { state: 'work_now', sentence: 'Denied; nobody worked it.', rows: [] },
+  next_step: { route, buttons, action: 'Do it.' }, state: { work_state: 'work_now' }, story: { rows: [] } } });
+Object.assign(ctx.state, { detailId: 'b', detailF: { finding_id: 'b', payer_group: 'Plan A', signal: 'DENIED_AUTH', status: 'open', work_state: 'work_now' },
+  detailR: { packets: [] }, detailX: ex('appeal', ['build_packet', 'fax_payer', 'let_go']) });
+ctx.xpRedrawBox('b', d2);
+out.appeal = { letter: letter.hidden, fax: fxRow.hidden, main: (box.innerHTML.match(/id="xpMain"[^>]*>([^<]*)</) || [])[1] || null };
+ctx.state.detailX = ex('call', ['copy_instructions', 'log_outcome', 'let_go']);
+ctx.xpRedrawBox('b', d2); out.call = { letter: letter.hidden, fax: fxRow.hidden };
+ctx.state.detailId = 'other'; box.innerHTML = 'kept'; ctx.xpRedrawBox('b', d2); out.moved = box.innerHTML;
+console.log(JSON.stringify(out));
+"""
+
+
+def test_escape_closes_the_window_on_top_and_l_and_s_always_answer_and_the_panel_keeps_one_way_to_appeal(tmp_path):
+    """Review C1 (medium and low): Escape closed the item's panel under an open window (the shortcuts, a fax preview, a
+    letter) and never the window; l and s did nothing at all when the next step had no such button; and an appeal item's
+    panel showed the letter button and the fax box's own button beside the next step's main button, so there were several
+    ways to start the same appeal."""
+    if not NODE:
+        pytest.skip("node is not installed")
+    script = tmp_path / "index.js"
+    script.write_text(INDEX_JS, encoding="utf-8")
+    res = subprocess.run([NODE, str(script), STATIC], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["esc1"] == {"modal": False, "drawer": True, "closed": 0}
+    assert out["esc2"] == {"drawer": False, "closed": 1}
+    assert out["l_bar"] == 1 and out["s_hint"] == "Nothing to mark sent here." and out["l_box"] == [1, 1]
+    assert out["appeal"] == {"letter": True, "fax": True, "main": "Build the appeal packet"}
+    assert out["call"] == {"letter": False, "fax": False}
+    assert out["moved"] == "kept"                                       # a panel since moved on is not drawn over
+
+
 BLIND_JS = r"""
 const fs = require('fs'), vm = require('vm'), path = require('path');
 const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');

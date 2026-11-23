@@ -1539,3 +1539,98 @@ def test_any_new_coverage_gap_and_any_rise_in_money_given_up_raise_their_alerts(
     sc.given_up(c, today=TODAY)
     kinds = {x["kind"] for x in sc.alert_candidates(c, today=TODAY)}
     assert {"AUDIT_GAPS", "GIVEN_UP_RISING"} <= kinds
+
+
+def test_a_line_that_left_the_ar_while_its_postings_leave_money_open_is_a_gap(tmp_path):
+    """EMA's A/R lists only lines with a balance: a line inside the dates the A/R covers that it no longer lists, while
+    its postings leave $150 open, is a gap (left_ar); a line whose postings leave nothing is settled (finding 10)."""
+    s = _new("file", tmp_path)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        rows = prod_rows() + [F.production_row(posted=F.D(2026, 3, 6), svc=F.D(2026, 3, 5), cpt="99212", link=F.link_no(4),
+                                               charges=150.0, payer=F.PAYERS["bcbs"])]      # billed, never answered
+        er.ingest_file(s, F.write(str(tmp_path / "p.csv"), F.production_csv(rows)), via="test", ledger=lg, log=lambda *a: None)
+        el.refresh(s, lg, log=lambda *a: None)
+        s.conn.executemany("""INSERT INTO ema_ar (file_id, row_no, as_of, link, svc, cpt, party, balance_cents, facility)
+                              VALUES ('ar1', ?, '2026-11-20', ?, ?, ?, 'Insurance', 0, 0)""",
+                           [(1, F.link_no(1), "2026-03-02", "99213"), (2, F.link_no(9), "2026-03-09", "99212")])
+        s.conn.commit()
+        bal = sc.check_ledger(s.conn, lg, today=TODAY)["ar_balance"]
+        assert (bal["left_ar"], bal["left_ar_cents"]) == (1, 15000), bal
+        assert bal["settled"] == 1 and bal["equal"] == 1          # the CO-197 line (written off: nothing open) and line 1
+    finally:
+        lg.close()
+        s.close()
+
+
+def test_a_held_run_holds_a_flood_of_new_items_with_it(store):
+    """A held run lists the new work it found, but not a flood (more than one run brings): that is held with the run."""
+    c = store.conn
+    add_item(c, "F-1")
+    add_item(c, "F-2")
+    run(c, None, "r1")
+
+    def save(cn):
+        bad_closure(cn)
+        for i in range(30):
+            add_item(cn, f"F-new{i:02d}", line_key=f"Lnew{i}")
+    out = run(c, save, "r2")
+    assert out["held"] and not any(f.startswith("F-new") for f in _listed(c))
+    safe = sc.safe_mode(c)
+    assert safe["new_items"] == 0 and safe["new_items_held"] == 30 and "held the 30 new items" in safe["text"]
+
+
+def test_an_item_whose_own_claim_got_new_facts_may_leave_without_being_kept(store):
+    """Between two runs new answers arrived on the item's own bill: the rules' answer may rightly change, so an item that
+    then leaves is not kept. An item whose claim shows the same facts as the run before is kept (a rule changed)."""
+    c = store.conn
+    remit(c, "2026-03-20", "ZZ00T0001C001", [("99213", 150, 0, [("CO", "197", 150)])])
+    remit(c, "2026-03-20", "ZZ00T0002C001", [("99213", 150, 0, [("CO", "197", 150)])])
+    add_item(c, "F-new-facts", line_key="La", patient_control_number="ZZ00T0001C001")
+    add_item(c, "F-same-facts", line_key="Lb", patient_control_number="ZZ00T0002C001")
+    run(c, None, "r1")                                                       # stores each listed item's facts
+
+    def save(cn):
+        cn.execute("DELETE FROM findings")
+        remit(cn, "2026-11-15", "ZZ00T0001C002", [("99213", 150, 90, [("CO", "45", 60)])])   # its claim was paid since
+    out = run(c, save, "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert van["examples"] == ["F-same-facts"] and van["info"]["routes"] == {"facts_changed": 1} and out["kept"] == 1
+
+
+def test_a_claim_level_item_whose_claim_was_answered_may_leave(store):
+    """An item about a whole claim (no answer from the payer) leaves when the payer's 835 answer arrives, even on the
+    first run (no facts stored yet): not kept."""
+    c = store.conn
+    add_item(c, "F-noanswer", signal="NO_ANSWER", category="denial", line_key=None, patient_control_number="ZZ00T0007C001",
+             first_seen="2026-10-01T00:00:00+00:00")
+
+    def save(cn):
+        cn.execute("DELETE FROM findings")
+        remit(cn, "2026-11-01", "ZZ00T0007C001", [("99213", 150, 90, [("CO", "45", 60)])])
+    out = run(c, save, "r1")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert out["kept"] == 0 and van["info"]["routes"] == {"claim_answered": 1}, van
+
+
+def test_a_person_letting_an_item_go_while_the_run_ran_is_not_a_vanished_item(store):
+    """detect.save keeps an item a person worked as a stale row; one a person let go during the run left the list by
+    that person's decision: not kept."""
+    c = store.conn
+    add_item(c, "F-go")
+    run(c, None, "r1")
+    out = run(c, lambda cn: cn.execute("UPDATE findings SET status='dismissed', stale=1 WHERE finding_id='F-go'"), "r2")
+    van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
+    assert out["kept"] == 0 and van["info"]["routes"] == {"decided": 1}
+    assert c.execute("SELECT stale FROM findings WHERE finding_id='F-go'").fetchone()[0] == 1
+
+
+def test_a_known_money_gap_that_grows_is_new():
+    """A money check's known offender (a month cell) is new again when its gap grows by more than $1; an item check's
+    known offender is not (its key is the item)."""
+    base = {"posted_money": {"2026-03|2026-03|X|ins_paid": 1000}, "closure_proof": {"F-1": 1000}}
+    grown = {"id": "posted_money", "keys": [("2026-03|2026-03|X|ins_paid", 5000)]}
+    same = {"id": "posted_money", "keys": [("2026-03|2026-03|X|ins_paid", 1050)]}
+    item = {"id": "closure_proof", "keys": [("F-1", 9000)]}
+    assert sc._new_keys(grown, base) == [("2026-03|2026-03|X|ins_paid", 5000)]
+    assert sc._new_keys(same, base) == [] and sc._new_keys(item, base) == []
