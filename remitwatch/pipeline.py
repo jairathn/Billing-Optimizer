@@ -352,7 +352,8 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
                     out["notes_matched"] = matched
             except Exception as exc:
                 out["notes_matched"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
-        out["alerts"] = run_alerts(store.conn)
+        from .runtime import practice_today
+        out["alerts"] = run_alerts(store.conn, today=practice_today())          # deadlines close at midnight where the practice is
         out["notified"] = notify(store.conn, log=log) if email else {"sent": 0, "skipped": True}
         every = int(os.environ.get("REMITWATCH_REPORT_EVERY_DAYS", "7"))
         last_report = _meta_get(store.conn, REPORT_KEY)

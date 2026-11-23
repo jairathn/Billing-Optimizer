@@ -335,8 +335,9 @@ def cmd_alerts(args: argparse.Namespace) -> int:
     from .alerts import notify, run_alerts
     from .store import Store
 
+    from .runtime import practice_today
     store = Store(args.db)
-    out = run_alerts(store.conn)
+    out = run_alerts(store.conn, today=practice_today())
     if args.notify:
         out["notified"] = notify(store.conn)
     rows = store.query("SELECT kind, severity, title FROM alerts WHERE status != 'cleared' ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END")

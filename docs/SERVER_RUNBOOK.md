@@ -43,6 +43,8 @@ The same as on Vercel, wherever Vercel has them:
   entered) and `TRIZETTO_SFTP_PASSWORD_DAYS` (how long TriZetto lets it last, in days), for the reminder before it expires.
   `TRIZETTO_SFTP_SERVERLESS` stays unset here (the server always reads TriZetto), and on Vercel too unless Vercel is the
   only site reading TriZetto.
+- `REMITWATCH_TZ`: the practice's time zone, only if Vercel sets it (default `America/New_York`). A filing window stays
+  open until midnight there, so every "today" the site counts by is that zone's date, on both sites alike.
 - `CRON_SECRET`: configure.sh makes one. The server does not need it: its own cycles do what `/api/cron/` does on Vercel
   ("What runs by itself")
 - Tuning, only if Vercel sets them: `REMITWATCH_REPORT_EVERY_DAYS`, `REMITWATCH_STALE_DAYS`, `REMITWATCH_ALERT_RECENT_DAYS`,

@@ -65,13 +65,15 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     else:
         lines.append("No new findings.")
     lines.append("")
+    # the practice's day (runtime.practice_today): a window is open until midnight where the practice is
+    from . import runtime
+    today, horizon = runtime.practice_today(), runtime.practice_today(45)
     due = q("""SELECT signal, payer_group, patient_control_number, service_date, procedure_code, shortfall_cents, appeal_deadline
-               FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')
-               ORDER BY appeal_deadline, shortfall_cents DESC LIMIT 40""")
+               FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit') AND appeal_deadline BETWEEN ? AND ?
+               ORDER BY appeal_deadline, shortfall_cents DESC LIMIT 40""", (today, horizon))
     # a payer's routine lower rate: one row with the claims whose own windows close in the period
     from .detect import pattern_windows
     soon: dict[str, dict] = {}
-    today, horizon = tuple(q("SELECT date('now') a, date('now','+45 days') b")[0])
     for fid, grp, code, d, n, cents in pattern_windows(store.conn):
         if d and today <= d <= horizon:
             r = soon.setdefault(fid, {"signal": "SECOND_RATE", "payer_group": grp, "patient_control_number": "", "service_date": "",
@@ -82,7 +84,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     for r in soon.values():
         r["patient_control_number"] = f"{r['n']} claim{'s' if r['n'] != 1 else ''} at the payer's routine lower rate"
     due_n = q("""SELECT COUNT(*) n FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable IN ('appeal','correct_and_resubmit')
-                  AND appeal_deadline BETWEEN date('now') AND date('now','+45 days')""")[0]["n"] + len(soon)
+                  AND appeal_deadline BETWEEN ? AND ?""", (today, horizon))[0]["n"] + len(soon)
     due = sorted([dict(r) for r in due] + list(soon.values()), key=lambda r: (r["appeal_deadline"], -(r["shortfall_cents"] or 0)))
     lines.append("## Appeals due in the next 45 days")
     if due and not detail:
@@ -96,8 +98,8 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
         lines.append("Nothing due.")
     lines.append("")
     top = [dict(r) for r in q("""SELECT payer_group, COUNT(*) n, SUM(shortfall_cents) cents FROM findings
-               WHERE status='open' AND COALESCE(stale,0)=0 AND category IN ('downcoding','bundling','denial','underpayment') AND appeal_deadline >= date('now')
-                 AND signal != 'SECOND_RATE' GROUP BY 1""")]
+               WHERE status='open' AND COALESCE(stale,0)=0 AND category IN ('downcoding','bundling','denial','underpayment') AND appeal_deadline >= ?
+                 AND signal != 'SECOND_RATE' GROUP BY 1""", (today,))]
     # a payer's routine lower rate: the claims whose own windows are still open
     by_payer = {r["payer_group"]: r for r in top}
     counted: set = set()
@@ -115,7 +117,7 @@ def build_report(store: Store, run_id: str | None = None, sync_stats: dict | Non
     for r in top:
         lines.append(f"| {r['payer_group']} | {r['n']} | {money(r['cents'])} |")
     lines.append("")
-    fix = q("""SELECT signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable='correct_and_resubmit' AND appeal_deadline >= date('now') GROUP BY 1 ORDER BY cents DESC""")
+    fix = q("""SELECT signal, COUNT(*) n, SUM(shortfall_cents) cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND actionable='correct_and_resubmit' AND appeal_deadline >= ? GROUP BY 1 ORDER BY cents DESC""", (today,))
     lines.append("## Correctable billing errors (resubmit, no appeal needed)")
     for r in fix:
         lines.append(f"- {r['signal']}: {r['n']} lines, {money(r['cents'])}")

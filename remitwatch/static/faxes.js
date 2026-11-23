@@ -249,7 +249,8 @@ async function faxesTab(v){
   const personDo = x => {
     if(x.settle) return `<button data-settle="${esc(x.settle)}" data-went="1">It went out</button> <button data-settle="${esc(x.settle)}" data-went="0">It did not go out</button>`;
     const act = x.action === 'person' ? x.resend : x.action;
-    if(sends && x.number && FAX_RESEND.has(act)) return `<button data-send="${esc(x.finding_id)}" data-number="${esc(x.number)}">Send it to ${esc(x.number)}</button>`;
+    // a request that says the claim is unpaid while the remittances are behind: sent only after a person checked EMA
+    if(sends && x.number && FAX_RESEND.has(act)) return `<button data-send="${esc(x.finding_id)}" data-number="${esc(x.number)}"${x.stale ? ' data-stale="1"' : ''}>${x.stale ? 'Still unpaid in EMA: send it to ' : 'Send it to '}${esc(x.number)}</button>`;
     if(x.resend === 'appeal') return '<span class="muted">Open the item: Send the appeal again</span>';
     return '';
   };
@@ -316,9 +317,11 @@ async function faxesTab(v){
   // one item, by a person, to the number in front of them
   v.querySelectorAll('[data-send]').forEach(b => b.onclick = async () => {
     const msg = v.querySelector('#fxPersonMsg');
-    if(!confirm(`Fax this item's follow-up to ${b.dataset.number}?`)) return;
+    const stale = b.dataset.stale === '1';
+    if(!confirm(stale ? `You checked EMA or the payer's portal and this claim is still unpaid? Fax its follow-up to ${b.dataset.number}.`
+                      : `Fax this item's follow-up to ${b.dataset.number}?`)) return;
     b.disabled = true;
-    try { const r = await post('/api/faxes/follow_up', {finding_ids: [b.dataset.send], number: b.dataset.number});
+    try { const r = await post('/api/faxes/follow_up', Object.assign({finding_ids: [b.dataset.send], number: b.dataset.number}, stale ? {stale_ok: true} : {}));
       const one = (r.results||[])[0] || {};
       msg.className = one.status === 'sent' ? 'small ok' : 'small sev-medium';
       msg.textContent = one.status === 'sent' ? `Faxed to ${one.number}.` : (one.reason || 'Not sent.');

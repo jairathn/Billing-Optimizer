@@ -1356,10 +1356,10 @@ def test_one_follow_up_that_breaks_does_not_stop_the_others(site, monkeypatch):
     first = c.get("/api/faxes").json()["due"][0]["finding_id"]
     real = api._send_followup
 
-    def flaky(prov, d, actor, person_number=None):
+    def flaky(prov, d, actor, person_number=None, **kw):
         if d["finding_id"] == first:
             raise ValueError("a damaged PDF")
-        return real(prov, d, actor, person_number=person_number)
+        return real(prov, d, actor, person_number=person_number, **kw)
     monkeypatch.setattr(api, "_send_followup", flaky)
     r = c.post("/api/faxes/follow_up", json={}, headers=XHR).json()
     assert r["sent"] == 1 and r["held"] == 1 and "ValueError" in next(x["reason"] for x in r["results"] if x["finding_id"] == first)

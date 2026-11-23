@@ -327,7 +327,8 @@ def page_count(pdf: bytes) -> int:
 def cover_sheet(to: str, to_number: str, practice: dict, pages: int, subject: str | None) -> bytes:
     """The fax's first page: who it is for and from, how many pages, where to answer, and the privacy notice. No patient
     is named on it: whoever takes it off the machine sees only this page."""
-    rows = [f"Date: {date.today().isoformat()}", f"To: {to}", f"Fax: {pretty(to_number)}",
+    from .runtime import practice_today
+    rows = [f"Date: {practice_today()}", f"To: {to}", f"Fax: {pretty(to_number)}",
             f"From: {practice.get('name') or ''}, Billing Department", f"Phone: {practice.get('phone') or ''}",
             f"Answer by fax to: {practice.get('fax') or ''}", f"Pages: {pages}, this one included"]
     if subject:
@@ -340,9 +341,10 @@ def cover_sheet(to: str, to_number: str, practice: dict, pages: int, subject: st
 def follow_up_letter(action: str, finding: dict, sent: list[dict], decision: dict | None, practice: dict, n: int = 1) -> tuple[str, list[str]]:
     """The letter on top of a follow-up: what was sent and when, what is asked now. action: 'second_request',
     'next_level', 'records', 'payment'; n: which request of its kind this is (a third request says so)."""
-    today = date.today().isoformat()
-    first = min((s.get("created_at") or "")[:10] for s in sent) if sent else ""
-    hist = "; ".join(f"{(s.get('created_at') or '')[:10]} to {pretty(s.get('number'))}" + (f" (fax {s['provider_id']})" if s.get("provider_id") else "")
+    from .runtime import practice_today
+    today = practice_today()        # the practice's day, as the payer reads it: a fax sent at 8 PM Eastern is that day's
+    first = min(_day(s.get("created_at")) for s in sent) if sent else ""
+    hist = "; ".join(f"{_day(s.get('created_at'))} to {pretty(s.get('number'))}" + (f" (fax {s['provider_id']})" if s.get("provider_id") else "")
                      for s in sorted(sent, key=lambda x: x.get("created_at") or ""))
     who = practice.get("name") or "[practice name]"
     claim = finding.get("patient_control_number") or ""
@@ -372,7 +374,9 @@ def follow_up_letter(action: str, finding: dict, sent: list[dict], decision: dic
 
 # --------------------------------------------------------------------------- follow-ups
 def _day(v: str | None) -> str:
-    return (v or "")[:10]
+    """The practice's date of a fax's time (the records keep UTC): the day it was sent where the practice is."""
+    from .runtime import practice_date
+    return practice_date(v)
 
 
 def _decision(doc: str | None) -> dict:
@@ -478,7 +482,9 @@ def followups(conn: sqlite3.Connection, today: str | None = None, ids: list[str]
     'next_level', 'records', 'payment'; or 'person' when it is past what is faxed without one (resend: what a person can
     send again with one click). hold: why a send nobody pressed a button for must wait for a person (the number).
     ids: only these items."""
-    today = today or datetime.now(timezone.utc).date().isoformat()
+    if not today:
+        from .runtime import practice_today
+        today = practice_today()            # the payer's days are counted to today where the practice is
     t = date.fromisoformat(today)
     now = datetime.now(timezone.utc)
     conn.row_factory = sqlite3.Row

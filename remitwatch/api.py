@@ -439,7 +439,8 @@ def summary(year: Optional[str] = None, status: str = "open", _: str = Depends(r
     out["by_handling"] = rows(f"SELECT COALESCE(ema_handling,'unknown') ema_handling, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE {w} GROUP BY 1 ORDER BY shortfall_cents DESC", tuple(params))
     out["resolved_by_later_remit"] = one("SELECT COUNT(*) n, SUM(recovered_cents) shortfall_cents FROM findings WHERE status='resolved' AND auto_note IS NOT NULL")
     # an item the rules no longer find (stale: kept only for its notes and history) is in no total, so not in these either
-    out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < date('now') THEN 'expired' WHEN appeal_deadline < date('now','+30 days') THEN 'due_30d' WHEN appeal_deadline < date('now','+90 days') THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') GROUP BY 1")
+    out["deadlines"] = rows("SELECT CASE WHEN appeal_deadline < ? THEN 'expired' WHEN appeal_deadline < ? THEN 'due_30d' WHEN appeal_deadline < ? THEN 'due_90d' ELSE 'later' END bucket, COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings WHERE status='open' AND COALESCE(stale,0)=0 AND appeal_deadline IS NOT NULL AND actionable IN ('appeal','correct_and_resubmit') GROUP BY 1",
+                            (_day(0), _day(30), _day(90)))
     # a routine-rate finding counts by its claims' own deadlines, each finding once per bucket it touches
     buckets = {r["bucket"]: r for r in out["deadlines"]}
     seen: dict[str, set] = {}
@@ -465,11 +466,15 @@ FINDING_COLS = ("finding_id, signal, category, severity, actionable, title, pati
 
 
 def _day(offset: int) -> str:
-    """Today plus `offset` days, as the SQL date('now') sees it (UTC)."""
-    return (datetime.now(timezone.utc).date() + timedelta(days=offset)).isoformat()
+    """Today where the practice is (runtime.practice_today, REMITWATCH_TZ) plus `offset` days: the day every list, count and
+    check here compares a deadline with, passed to SQL as a parameter (SQL's date('now') is UTC, a day ahead from 7 PM
+    Eastern)."""
+    return runtime.practice_today(offset)
 
 
 DEADLINE_RANGES = {"valid": None, "week": 7, "month": 30, "missed": -30}   # filters that count a routine-rate finding's claims by their own dates
+FOLLOW_UP_DAYS = 30         # an item sent this many days ago and still unpaid is followed up (insights.follow_ups)
+DECIDE_DAYS = 120           # no filing date, paid in this many days to today: a person decides (insights.to_decide)
 
 
 def _range(deadline: str) -> tuple[str, str | None]:
@@ -628,34 +633,37 @@ def _filters(signal, category, payer, year, status, severity, actionable, q, pro
     if deadline == "due":
         # a routine-rate finding is due when any of its claims is (its row shows the last of their dates)
         ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and _day(0) <= d < _day(45)})
-        where.append("(appeal_deadline >= date('now') AND appeal_deadline < date('now','+45 days')"
+        where.append("(appeal_deadline >= ? AND appeal_deadline < ?"
                      + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
-        params.extend(ids)
+        params.extend([_day(0), _day(45)] + ids)
     elif deadline == "expired":
-        where.append("appeal_deadline < date('now')")
+        where.append("appeal_deadline < ?")
+        params.append(_day(0))
     elif deadline in DEADLINE_RANGES:
         # a routine-rate finding is in range when one of its claims is, by that claim's own date
         lo, hi = _range(deadline)
         ids = sorted({fid for fid, _g, _c, d, _n, _x in _windows(STATUSES) if d and d >= lo and (hi is None or d < hi)})
-        days = DEADLINE_RANGES[deadline]
-        dated = ("appeal_deadline >= date('now')" + ("" if hi is None else f" AND appeal_deadline < date('now','+{days} days')")) if not (days and days < 0) \
-            else f"appeal_deadline >= date('now','{days} days') AND appeal_deadline < date('now')"
+        # the same day range as the claims above: from lo up to (not including) hi, the practice's days
+        dated = "appeal_deadline >= ?" + ("" if hi is None else " AND appeal_deadline < ?")
         where.append(f"((COALESCE(signal,'') != 'SECOND_RATE' AND {dated})" + (f" OR finding_id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
-        params.extend(ids)
+        params.extend([lo] + ([] if hi is None else [hi]) + ids)
     elif deadline == "none":
         where.append("appeal_deadline IS NULL")
     elif deadline == "followup":
-        # the home screen's follow-ups: sent more than 30 days before the newest payment and still not paid
-        where.append("status='appealed' AND COALESCE(appealed_at, status_changed_at) < "
-                     "(SELECT date(MAX(payment_date),'-30 days') FROM transactions WHERE COALESCE(superseded,0)=0)")
+        # the home screen's follow-ups: sent more than FOLLOW_UP_DAYS days ago, where the practice is, and still not paid.
+        # Counted to today, not to the newest payment: a feed that stopped must not stop the follow-ups (the list says
+        # when the remittances are behind)
+        where.append("status='appealed' AND COALESCE(appealed_at, status_changed_at) < ?")
+        params.append(runtime.practice_day_start(_day(-FOLLOW_UP_DAYS)))
     elif deadline == "older":
         # Today's "older ones": no filing date, and not among the items to decide
-        where.append("appeal_deadline IS NULL AND NOT (COALESCE(actionable,'')='review' AND COALESCE(payment_date,'') >= "
-                     "(SELECT date(MAX(payment_date),'-120 days') FROM transactions WHERE COALESCE(superseded,0)=0))")
+        where.append("appeal_deadline IS NULL AND NOT (COALESCE(actionable,'')='review' AND COALESCE(payment_date,'') >= ?)")
+        params.append(_day(-DECIDE_DAYS))
     elif deadline == "decide":
-        # the home screen's "decide": no filing date until a person says what the item is, paid in the 120 days to the newest payment
-        where.append("appeal_deadline IS NULL AND actionable='review' AND payment_date >= "
-                     "(SELECT date(MAX(payment_date),'-120 days') FROM transactions WHERE COALESCE(superseded,0)=0)")
+        # the home screen's "decide": no filing date until a person says what the item is, paid in the last DECIDE_DAYS days
+        # (to today, where the practice is)
+        where.append("appeal_deadline IS NULL AND actionable='review' AND payment_date >= ?")
+        params.append(_day(-DECIDE_DAYS))
     q = (q or "").strip()[:200]
     if q:
         clause = "patient_control_number LIKE ? OR title LIKE ? OR payer_name LIKE ? OR procedure_code LIKE ? OR carc LIKE ? OR rarc LIKE ?"
@@ -808,13 +816,13 @@ def findings(signal: Optional[str] = None, category: Optional[str] = None, payer
         nxt = [(fid, d) for fid, (_c, d, _n) in each.items() if d]
         if nxt:
             due = "COALESCE(CASE finding_id " + " ".join("WHEN ? THEN ?" for _ in nxt) + " END, appeal_deadline)"
-            order_params = [x for pair in nxt for x in pair] * 3
-    by_due = f"({due}) IS NULL, ({due}) < date('now'), {due} ASC"
+            order_params = [x for pair in nxt for x in pair]
+    by_due = f"({due}) IS NULL, ({due}) < ?, {due} ASC"
     order = {"shortfall": "shortfall_cents DESC", "date": "service_date DESC", "deadline": f"{by_due}, shortfall_cents DESC",
              "payer": f"payer_group, {by_due}, shortfall_cents DESC", "paid": "payment_date DESC, shortfall_cents DESC",
              "sent": "COALESCE(appealed_at, status_changed_at) ASC, shortfall_cents DESC"}.get(sort, "shortfall_cents DESC")
-    if sort not in ("deadline", "payer"):
-        order_params = []
+    # by_due names `due` three times, the practice's day between the second and the third
+    order_params = order_params * 2 + [_day(0)] + order_params if sort in ("deadline", "payer") else []
     total = one(f"SELECT COUNT(*) n, SUM(shortfall_cents) shortfall_cents FROM findings{w}", tuple(params))
     data = _with_patient(rows(f"SELECT {_finding_cols()} FROM findings{w} ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?",
                               tuple(params) + tuple(order_params) + (limit, offset)))
@@ -1612,9 +1620,9 @@ def breakdown(dim: str = "payer", dim2: Optional[str] = None, family: str = "dow
                            SUM(status IN ('open','in_progress','appealed')) open_n,
                            COALESCE(SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END),0) open_cents,
                            SUM(status='resolved') resolved_n, COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
-                           SUM(status='lost') lost_n, SUM(status IN ('open','in_progress') AND appeal_deadline >= date('now') AND signal != 'SECOND_RATE') live_n,
-                           COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= date('now') AND signal != 'SECOND_RATE' THEN shortfall_cents END),0) live_cents
-                    FROM findings WHERE {' AND '.join(fwhere)} GROUP BY {grp} ORDER BY cents DESC LIMIT ?""", tuple(fparams) + (limit,))
+                           SUM(status='lost') lost_n, SUM(status IN ('open','in_progress') AND appeal_deadline >= ? AND signal != 'SECOND_RATE') live_n,
+                           COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= ? AND signal != 'SECOND_RATE' THEN shortfall_cents END),0) live_cents
+                    FROM findings WHERE {' AND '.join(fwhere)} GROUP BY {grp} ORDER BY cents DESC LIMIT ?""", (_day(0), _day(0)) + tuple(fparams) + (limit,))
     # denominators: for both dimensions when the exposure table carries them, otherwise for the first only
     exp_dims = [d for d in dims if DIMS[d][1]]
     exposure: dict[tuple, dict] = {}
@@ -1787,6 +1795,13 @@ def brief(_: str = Depends(require_auth)):
     if out.get("ready"):
         out["written_off"] = _written_off_summary()
         out["no_answer"] = _no_answer_summary()
+        fu = out.get("follow_ups") or {}
+        behind = _data_behind_days()
+        if fu.get("n") and behind is not None and behind > STALE_APPEAL_DAYS:
+            # the same measure the fax hold uses: the items stay listed, and the person checks before asking the payer again
+            fu["behind_days"] = behind
+            fu["note"] = (f"The newest remittance RemitWatch has is {behind} days old, so some of these may have been paid since. "
+                          "Check each one in EMA or on the payer's portal before you follow up.")
         # the red number on each category tab: what closes within 7 days, counted as that page's first tile and its list
         token = _WINDOWS_MEMO.set({})
         try:
@@ -2244,10 +2259,10 @@ def progress(_: str = Depends(require_auth)):
                                       COALESCE(SUM(CASE WHEN status='resolved' THEN recovered_cents END),0) recovered_cents,
                                       SUM(status='lost') lost_n, SUM(status IN ('appealed','in_progress')) working_n,
                                       COALESCE(SUM(CASE WHEN status IN ('open','in_progress','appealed') THEN shortfall_cents END),0) open_cents,
-                                      COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= date('now') THEN shortfall_cents END),0) live_cents,
+                                      COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= ? THEN shortfall_cents END),0) live_cents,
                                       ROUND(AVG(CASE WHEN status='resolved' AND recovered_date IS NOT NULL THEN julianday(recovered_date) - julianday(payment_date) END)) avg_days
                                FROM findings WHERE {MONEY} AND status != 'dismissed' AND line_key IS NOT NULL
-                               GROUP BY 1 HAVING n >= 25 ORDER BY cents DESC LIMIT 30""")
+                               GROUP BY 1 HAVING n >= 25 ORDER BY cents DESC LIMIT 30""", (_day(0),))
     out["downcode_trend"] = rows(f"SELECT month, payer_group, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings WHERE {FAMILY['downcoding'][0]} AND status != 'dismissed' AND COALESCE(stale,0)=0 AND month >= '2024-01' GROUP BY 1,2 ORDER BY 1")
     out["visit_lines"] = rows(f"SELECT month, payer_group, SUM(lines) lines FROM exposure WHERE code IN ({EM_LIST}) AND month >= '2024-01' GROUP BY 1,2") if has_table("exposure") else []
     out["family_trend"] = rows(f"""SELECT month, category, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents, SUM(status='resolved') resolved_n
@@ -2669,7 +2684,7 @@ def _note_batch_since() -> str | None:
     from .insights import kind_sql
     cond, params = kind_sql("note")
     r = one(f"""SELECT MIN(service_date) d FROM findings WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0
-                AND claim_key IS NOT NULL AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""", tuple(params))
+                AND claim_key IS NOT NULL AND (appeal_deadline IS NULL OR appeal_deadline >= ?)""", tuple(params) + (_day(0),))
     d = (r or {}).get("d")
     return str(d)[:10] if d and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(d)[:10]) else None
 
@@ -2766,11 +2781,11 @@ def appeals_ema_queue(limit: int = Query(20, ge=1, le=200), ready: int = Query(0
     since = (datetime.now(timezone.utc) - timedelta(days=QUEUE_RETRY_DAYS)).isoformat(timespec="seconds")
     sql = f"""SELECT finding_id, service_date, appeal_deadline, payer_group, shortfall_cents{", claim_key, patient_control_number" if ready else ""} FROM findings
               WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
-                AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))
+                AND (appeal_deadline IS NULL OR appeal_deadline >= ?)
                 {"AND finding_id NOT IN (SELECT finding_id FROM appeal_packets WHERE finding_id IS NOT NULL)" if skip_built else ""}
                 {"AND finding_id NOT IN (SELECT finding_id FROM finding_events WHERE kind='packet' OR (kind='note_lookup' AND at >= ?))" if marks else ""}
               ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id {"" if ready else "LIMIT ?"}"""
-    args = (*params, *((since,) if marks else ()))
+    args = (*params, _day(0), *((since,) if marks else ()))
     items = rows(sql, args if ready else (*args, limit))
     if ready:
         got = _note_ready(items)
@@ -2872,8 +2887,8 @@ def uploads_needed(limit: int = Query(100, ge=1, le=500), _: str = Depends(requi
     items = rows(f"""SELECT finding_id, claim_key, patient_control_number, service_date, appeal_deadline, payer_group, shortfall_cents,
                             procedure_code, title FROM findings
                      WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
-                       AND (appeal_deadline IS NULL OR appeal_deadline >= date('now')) {built}
-                     ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id""", tuple(params))
+                       AND (appeal_deadline IS NULL OR appeal_deadline >= ?) {built}
+                     ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id""", tuple(params) + (_day(0),))
     got = _note_ready(items)
     names = {}
     if SHOW_PHI and items:
@@ -3557,7 +3572,7 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
         billed = ev.get("billed_code") or ev.get("charge_implies") or "the higher level"
         return held("check_code", f"The remittance does not say the payer changed the code. Check in EMA that {billed} went out on the claim, "
                                   "then press \"It went out as billed: fax it\" in the item.")
-    if f.get("appeal_deadline") and f["appeal_deadline"] < datetime.now(timezone.utc).date().isoformat():
+    if f.get("appeal_deadline") and f["appeal_deadline"] < _day(0):       # open until midnight where the practice is
         return held("expired", f"Its filing window closed on {f['appeal_deadline']}.")
     if not f.get("claim_key"):
         return held("no_claim", "It is not tied to one claim.")
@@ -3673,10 +3688,10 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
                 "practice_missing": [], "modmed": False, "review": False}
     cond, params = _appealable_cond()
     where = f"""{cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
-                AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""" + (" AND payer_group=?" if payer else "")
+                AND (appeal_deadline IS NULL OR appeal_deadline >= ?)""" + (" AND payer_group=?" if payer else "")
     items = rows(f"""SELECT finding_id, payer_group, signal, actionable, carc, shortfall_cents, appeal_deadline FROM findings WHERE {where}
                      ORDER BY COALESCE(appeal_deadline, '9999-12-31'), COALESCE(shortfall_cents, 0) DESC, finding_id LIMIT ?""",
-                  (*params, *([payer] if payer else []), limit))
+                  (*params, _day(0), *([payer] if payer else []), limit))
     numbers = {r["payer_group"]: fax.digits(r["number"]) for r in rows("SELECT payer_group, number FROM payer_fax WHERE purpose='appeal'")
                if not fax.shared_group(r["payer_group"])} if has_table("payer_fax") else {}
     sent = {r["finding_id"] for r in rows("SELECT DISTINCT finding_id FROM faxes WHERE direction='out' AND COALESCE(status,'')!='failed'")} if has_table("faxes") else set()
@@ -3741,9 +3756,17 @@ def faxes_list(_: str = Depends(require_auth)):
         due = fax.followups(conn)
     finally:
         conn.close()
+    behind = _data_behind_days()
     for d in due:
         if d.get("number"):
             d["number"] = fax.pretty(d["number"])
+        # a request that says the claim is unpaid, while the remittances are behind: listed for a person, not sent by the
+        # daily run; the person checks EMA first and sends it ("Still unpaid in EMA: send it", stale_ok)
+        act = d.get("resend") if d.get("action") == "person" else d.get("action")
+        if act in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS:
+            d["stale"] = True
+            if not d.get("hold") and d.get("action") != "person":
+                d["hold"] = stale_followup_why(behind)
     prov = fax.provider()
     return {"configured": prov is not None or fax.line() is not None, "sends": prov is not None, "not_here": fax.not_here(),
             "line": fax.pretty(os.environ.get("SRFAX_CALLER_ID")), "practice_missing": _practice_missing(),
@@ -3759,8 +3782,8 @@ def fax_payers(_: str = Depends(require_auth)):
     cond, params = _appealable_cond()
     open_ = {r["payer_group"]: r for r in rows(f"""SELECT payer_group, payer_kind, COUNT(*) n, COALESCE(SUM(shortfall_cents),0) cents FROM findings
                                                  WHERE {cond} AND status IN ('open','in_progress') AND COALESCE(stale,0)=0 AND claim_key IS NOT NULL
-                                                   AND (appeal_deadline IS NULL OR appeal_deadline >= date('now')) AND payer_group IS NOT NULL
-                                                 GROUP BY payer_group""", tuple(params))}
+                                                   AND (appeal_deadline IS NULL OR appeal_deadline >= ?) AND payer_group IS NOT NULL
+                                                 GROUP BY payer_group""", tuple(params) + (_day(0),))}
     contact: dict[str, dict] = {}
     for r in rows("""SELECT f.payer_group, t.payer_contact_phone phone, t.payer_contact_url url, COUNT(*) n FROM findings f
                      JOIN transactions t ON t.transaction_key = f.transaction_key
@@ -4033,11 +4056,13 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
     return out
 
 
-def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) -> dict:
+def _send_followup(prov, d: dict, actor: str, person_number: str | None = None, stale_ok: bool = False) -> dict:
     """One follow-up from fax.followups: the letter on top, the original packet behind it (and, for the next level, the
     payer's decision), to the number saved now for that level. A send nobody pressed a button for waits for a person when
     the number is not one it may use (fax.number_hold), and so does a request that says the claim is unpaid while the
-    remittances are behind. person_number: a person pressed send for this one item, with this number in front of them."""
+    remittances are behind. person_number: a person pressed send for this one item, with this number in front of them;
+    stale_ok: that person checked in EMA that the claim is still unpaid, which lets such a request go while the remittances
+    are behind (as "Still unpaid in EMA" does for the first appeal). The daily run never sends one then."""
     from . import fax
     from .appeals import PRACTICE
     fid = d["finding_id"]
@@ -4069,9 +4094,9 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) 
     elif hold:
         return held(hold)
     behind = _data_behind_days()
-    if d["action"] in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS:
-        return held(f"The newest remittance RemitWatch has is {behind} days old, so the claim may have been paid since. "
-                    "A request that says it is unpaid waits until the remittances are current.")
+    if d["action"] in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS \
+            and not (person_number is not None and stale_ok is True):
+        return held(stale_followup_why(behind))
     missing = _practice_missing()
     if missing:
         return held("The letters still lack the practice's details: set " + ", ".join(missing) + " in the host's settings.")
@@ -4132,8 +4157,15 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) 
     return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), title=title)
 
 
+def stale_followup_why(behind: int) -> str:
+    """Why a request that says the claim is unpaid waits while the remittances are behind, and how a person sends it."""
+    return (f"The newest remittance RemitWatch has is {behind} days old, so the claim may have been paid since. A request that says "
+            "it is unpaid is not sent by itself until the remittances are current. Check EMA or the payer's portal: if it is still "
+            "unpaid, press \"Still unpaid in EMA: send it\" on the Faxes page.")
+
+
 def _send_followups(prov, actor: str, ids: list[str] | None = None, budget_s: float = 240.0, person_number: str | None = None,
-                    lock: str | None = None) -> dict:
+                    lock: str | None = None, stale_ok: bool = False) -> dict:
     import time as _time
     from . import fax
     t0 = _time.monotonic()
@@ -4149,7 +4181,7 @@ def _send_followups(prov, actor: str, ids: list[str] | None = None, budget_s: fl
             break
         _fax_lock_beat(lock)
         try:
-            results.append(_send_followup(prov, d, actor, person_number=person_number))
+            results.append(_send_followup(prov, d, actor, person_number=person_number, stale_ok=stale_ok))
         except Exception as exc:        # one item that cannot go must not stop the ones after it, run after run
             results.append({"finding_id": d["finding_id"], "action": d["action"], "payer_group": d.get("payer_group"), "status": "held",
                             "reason": f"It stopped on an error ({type(exc).__name__}: {str(exc)[:160]}). The others went on."})
@@ -4178,14 +4210,17 @@ def faxes_refresh(user: str = Depends(require_auth)):
 def faxes_follow_up(body: dict = Body(default={}), user: str = Depends(require_auth)):
     """Send the follow-ups that are due (all of them, or the items named). number, with one item named: a person sends that
     one to the number the page showed them, also where a send nobody pressed a button for would wait (a number changed
-    since its last fax; a line that never took it, tried again)."""
+    since its last fax; a line that never took it, tried again). stale_ok (JSON true only, with that one item and its
+    number): the person checked in EMA that the claim is still unpaid, so a second request or a payment request goes
+    although the remittances are behind."""
     prov = _line_or_503()
     ids = body.get("finding_ids")
     ids = [str(i) for i in ids][:500] if isinstance(ids, list) else None
     person = str(body.get("number") or "") if ids and len(ids) == 1 and body.get("number") else None
+    stale_ok = person is not None and body.get("stale_ok") is True
     try:
         with fax_run(user) as lock:
-            return _send_followups(prov, user, ids, person_number=person, lock=lock)
+            return _send_followups(prov, user, ids, person_number=person, lock=lock, stale_ok=stale_ok)
     except FaxBusy as exc:
         raise HTTPException(409, str(exc))
 
