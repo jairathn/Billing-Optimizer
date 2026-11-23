@@ -779,8 +779,9 @@ def test_removing_a_rule_reopens_what_it_hid_when_another_rule_of_the_payer_name
         actions.apply(conn, {"kind": "hide_rule", "op": "remove", "payer_group": "Plan A", "signal": "DENIED_AUTH", "actor": "b",
                              "at": "2099-01-02T00:00:00+00:00"})
         got = dict(conn.execute("SELECT finding_id, status FROM findings"))
-        assert got["a3"] == "open", (other, got)                         # nothing hides it any more
-        assert got["a2"] == ("dismissed" if "code" in other else "open"), (other, got)      # still under the code rule
+        # a3: nothing hides it any more; a2 (code 99213, reason 96) and a1 (reason 96) stay under the rule that names them
+        want = {"a1": "open" if "code" in other else "dismissed", "a2": "dismissed", "a3": "open", "a4": "open"}
+        assert got == want, (other, got)
         conn.close()
 
 
@@ -795,16 +796,21 @@ def test_show_again_removes_the_rule_it_lists_at_any_grain_on_both_hosts(site):
     reason code answered 404, and a rule for any reason by a code hit the whole-payer refusal (400). Its items stayed let go
     with no way back from the page."""
     c = site.c
-    item = next(i for i in _items(site)["items"] if i["signal"] == "DENIED_AUTH")
+    item = next(i for i in _items(site)["items"] if i["signal"] == "EMA_DENIED")         # an open denial at its payer
     pg, code = item["payer_group"], item["procedure_code"]
-    for made in ({"signal": "DENIED_AUTH", "code": code, "reason": "CO-197"}, {"code": code}, {"signal": "DENIED_AUTH", "modifier": "none"}):
-        assert c.post("/api/hide", json=dict(made, payer_group=pg, note="never pays"), headers=XHR).status_code == 200, made
+    was = {i["finding_id"]: i["status"] for i in _items(site)["items"]}
+    hid = 0
+    for made in ({"signal": "EMA_DENIED", "code": code, "reason": f"CO-{item['carc']}"}, {"code": code}, {"signal": "EMA_DENIED", "modifier": "none"}):
+        r = c.post("/api/hide", json=dict(made, payer_group=pg, note="never pays"), headers=XHR)
+        assert r.status_code == 200, (made, r.text)
+        hid += r.json()["hidden"]
         rules = c.get("/api/hide").json()["rules"]
         assert len(rules) == 1, rules
         got = _show_again(c, rules[0])
         assert got.status_code == 200, (made, got.status_code, got.text)
         assert c.get("/api/hide").json()["rules"] == [], made
-        assert next(i for i in _items(site)["items"] if i["finding_id"] == item["finding_id"])["status"] == "open", made
+        assert {i["finding_id"]: i["status"] for i in _items(site)["items"]} == was, made        # what it hid is back
+    assert hid == 3                                                    # each rule hid the open denial, and Show again brought it back
     assert _show_again(c, {"payer_group": pg, "signal": "DENIED_AUTH", "code": code}).status_code == 404        # gone: nothing to remove
 
 

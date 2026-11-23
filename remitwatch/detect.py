@@ -134,6 +134,7 @@ TIMELY_CARCS = {"29"}
 PROVIDER_CARCS = {"B7", "170", "171", "185", "208", "242", "54", "147"}
 DUP_CARCS = {"18", "B13"}
 CONTRACT_REMARKS = {"N381"}         # "consult our contractual agreement": a CO-45 the contract explains, not a denial
+PAIR_ORDER_MIN, PAIR_ORDER_SHARE = 5, 0.8   # a payer's own ranking of two procedures: claims needed, share ranked first
 IGNORE_CARCS = {"45", "253", "144", "23", "94", "187", "59", "131", "237", "A2", "P1", "W1", "3", "2", "1"}
 MODIFIER_RARCS = {"N822", "N823", "N519", "M78", "N793"}
 CODING_RARCS = {"M20", "M51", "N56", "M53"}
@@ -2137,19 +2138,48 @@ class Detector:
                        resolved_by=self.later_payment(l, expected=exp))
 
     def _outranked(self, l: dict, rate: int) -> bool:
-        """Whether another reducible procedure on the line's claim is worth at least 95% of this one at the same payer's
-        usual rates (the same code counts as worth as much): then this one is rightly the second procedure. A procedure
-        whose usual rate is not known counts as outranking it (no item on a guess)."""
-        for o in self.lines_by_claim.get(l["claim_key"]) or []:
-            c2 = o.get("procedure_code")
-            if o["line_key"] == l["line_key"] or not is_surgical(c2) or (o.get("allowed_cents") or 0) <= 0:
-                continue
-            if c2 == l.get("procedure_code"):
+        """Whether a reducible procedure the payer cut as a second one (ranked below another on its claim by what was
+        allowed) rightly was the second one. The payer's own ranking decides: it was the payer's error only when the same
+        payer, on its other claims that billed this code with each code it paid ahead of it here, ranked this code first on
+        at least 80% of at least 5 of them (Anthem paid 17313 in full beside the repair on 39 of 40 other dates: PM case
+        C28). The same code twice, or too few claims to tell, counts as rightly second (no item on a guess)."""
+        order = self._pair_order()
+        above = [o for o in self.lines_by_claim.get(l["claim_key"]) or []
+                 if o["line_key"] != l["line_key"] and is_surgical(o.get("procedure_code")) and (o.get("allowed_cents") or 0) > 0
+                 and 0 < (o.get("surg_rank") or 0) < (l.get("surg_rank") or 0)]
+        if not above:
+            return True
+        for o in above:
+            if o.get("procedure_code") == l.get("procedure_code"):
                 return True
-            r2 = self.usual_rate(o, c2)[0]
-            if not r2 or r2 >= 0.95 * rate:
+            n, first = order.get((l.get("payer_group"), l.get("procedure_code"), o.get("procedure_code")), (0, 0))
+            if n < PAIR_ORDER_MIN or first < PAIR_ORDER_SHARE * n:
                 return True
         return False
+
+    def _pair_order(self) -> dict[tuple, tuple[int, int]]:
+        """{(payer group, code A, code B): (claims that billed both, claims on which the payer allowed A more than B)}, over
+        the claims with both reducible procedures allowed (its ranking of the two)."""
+        got = self.__dict__.get("_pair_order_cache")
+        if got is not None:
+            return got
+        cnt: dict[tuple, list] = defaultdict(lambda: [0, 0])
+        for claim_lines in self.lines_by_claim.values():
+            surg = [x for x in claim_lines if is_surgical(x.get("procedure_code")) and (x.get("allowed_cents") or 0) > 0]
+            if len(surg) < 2:
+                continue
+            best: dict[str, int] = {}
+            for x in surg:
+                best[x["procedure_code"]] = max(best.get(x["procedure_code"], 0), x.get("allowed_cents") or 0)
+            grp = surg[0].get("payer_group")
+            for a, va in best.items():
+                for b, vb in best.items():
+                    if a != b:
+                        k = cnt[(grp, a, b)]
+                        k[0] += 1
+                        k[1] += 1 if va > vb else 0
+        self._pair_order_cache = got = {k: (v[0], v[1]) for k, v in cnt.items()}
+        return got
 
     def _emit_underpaid(self, l, allowed: int, r: dict, one_off: tuple) -> None:
         """A one-off underpayment, or a line of a payer's routine lower amount (grouped by emit_second_rates)."""

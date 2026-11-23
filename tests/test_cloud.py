@@ -372,7 +372,8 @@ def test_dashboard_reads_the_copy_and_changes_go_through_the_journal(site):
     assert len(state.list(cloud.ACTIONS)) == 1
     assert tc.post("/api/findings/nope/status", json={"status": "appealed"}, headers=xhr).status_code == 404
     others = [i["finding_id"] for i in listing["items"][1:]]
-    assert tc.post("/api/findings/bulk-status", json={"ids": others + ["nope"], "status": "dismissed"}, headers=xhr).json()["updated"] == 2
+    assert tc.post("/api/findings/bulk-status", json={"ids": others + ["nope"], "status": "dismissed", "notes": "below the cost to chase"},
+                   headers=xhr).json()["updated"] == 2           # letting items go needs a reason (C1)
     assert tc.get("/api/findings?signal=DOWNCODE_LEVEL_REDUCED&status=dismissed", headers=auth).json()["total"] == 2
     csv_text = tc.get("/api/findings.csv?status=all", headers=auth).text
     assert csv_text.splitlines()[0].startswith("finding_id,") and len(csv_text.splitlines()) > 3

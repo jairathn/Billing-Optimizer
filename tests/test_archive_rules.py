@@ -840,6 +840,30 @@ def test_rule2_a_line_that_billed_fewer_units_gets_its_part_of_the_share(store):
     assert a["shortfall_cents"] == 764
 
 
+def test_rule2_a_denied_line_with_no_units_takes_the_units_of_the_primary_line_it_matches(store):
+    """The primary paid two lines of 97110: two units (line 1, $40.00 coinsurance) and one unit (line 2, $20.00). The
+    secondary denies line 1 and reports no units on it: the line billed the two units of the primary line it matches, so
+    its part of the $60.00 left is two thirds, $40.00, not one third."""
+    remit(store, "2026-03-02", [cl("CB0002508C017", [ln("97110", 200.00, 160.00, 200.00, [("PR", "2", 40.00)], units=2, lcn="1"),
+                                                     ln("97110", 100.00, 80.00, 100.00, [("PR", "2", 20.00)], units=1, lcn="2")],
+                                   status="19", cfi="MB")], payer="STATE MEDICARE", payer_id="MCR01")
+    lk = remit(store, "2026-03-20", [cl("CB0002508C017", [ln("97110", 200.00, 0, None, [("CO", "16", 200.00)], units=0, lcn="1")],
+                                        status="2", cfi="15")], payer="TEST MEDIGAP CO", payer_id="GAP01")[0]
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_MISSING_INFO", expected=20000)]))
+    assert a["patient_share_left_cents"] == 4000
+
+
+def test_rule2_a_denied_line_that_lists_fewer_units_for_the_whole_charge_keeps_the_whole_share(store):
+    """The primary paid one line of two units ($40.00 coinsurance). The secondary's denial lists the line as one unit but
+    for the whole charge: it is the same line, so the whole $40.00 is left, not half of it."""
+    remit(store, "2026-03-02", [cl("CB0002509C017", [ln("97110", 200.00, 160.00, 200.00, [("PR", "2", 40.00)], units=2, lcn="1")],
+                                   status="19", cfi="MB")], payer="STATE MEDICARE", payer_id="MCR01")
+    lk = remit(store, "2026-03-20", [cl("CB0002509C017", [ln("97110", 200.00, 0, None, [("CO", "16", 200.00)], units=1, lcn="1")],
+                                        status="2", cfi="15")], payer="TEST MEDIGAP CO", payer_id="GAP01")[0]
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_MISSING_INFO", expected=20000)]))
+    assert a["patient_share_left_cents"] == 4000
+
+
 def test_rule2_not_its_to_pay_with_no_other_plan_leaves_the_share_to_the_patient(store):
     """The plan's delegated payer paid and left a $55 copay; the plan itself answered B11/N418 (not its to process). No
     other plan answered: no payer owes the copay; 'done', size 0, the share kept as information. Once another plan has
@@ -1184,6 +1208,27 @@ def test_rule10_values_one_listing_of_a_billed_line(store):
     a2 = remit(store, "2026-04-05", [cl("CB0003104C018", [ln("J7345", 358.00, 0, None, [("CO", "50", 358.00)], units=200, lcn="1")])])[0]
     f1, f2 = item(store, a1, "DENIED_MISSING_INFO"), item(store, a2, "DENIED_MEDICAL_NECESSITY")
     assert {a["finding_id"] for a in ar.drug_expected(store.conn, [f1, f2])} == {f2["finding_id"]}
+
+
+def test_rule10_a_copys_denial_after_the_line_was_paid_gets_no_amount(store):
+    """The drug line was paid and its payment stands; a later copy of the claim is denied as a duplicate (OA-18) and is the
+    only listing: the copy's denial carries no amount (the service was paid)."""
+    _paid_j7345(store, 3, 1.79)
+    remit(store, "2026-03-20", [cl("CB0003107C017", [ln("J7345", 358.00, 358.00, 358.00, units=200, lcn="1")])])
+    dup = remit(store, "2026-04-10", [cl("CB0003107C017", [ln("J7345", 358.00, 0, None, [("OA", "18", 358.00)], units=200, lcn="1")])])[0]
+    assert ar.drug_expected(store.conn, [item(store, dup, "DENIED_DUPLICATE_UNPAID")]) == []
+
+
+def test_rule10_a_wrong_payers_newer_denial_leaves_the_value_on_the_right_payers_listing(store):
+    """BETA, the right payer, denied the drug line for missing information; ACME's later answer says the claim is not its
+    (OA-109). ACME's listing is the newer one but carries no value; BETA's listing is valued."""
+    _paid_j7345(store, 3, 1.79)
+    for i in range(3):
+        remit(store, "2026-02-21", [cl(f"CB00031{70 + i}C017", [ln("J7345", 358.00, 350.00, 350.00, [("CO", "45", 8.00)], units=200)])], **BETA)
+    right = remit(store, "2026-03-05", [cl("CB0003108C017", [ln("J7345", 358.00, 0, None, [("CO", "16", 358.00)], units=200)])], **BETA)[0]
+    wrong = remit(store, "2026-03-20", [cl("CB0003108C017", [ln("J7345", 358.00, 0, None, [("OA", "109", 358.00)], units=200)])])[0]
+    f_right, f_wrong = item(store, right, "DENIED_MISSING_INFO"), item(store, wrong, "DENIED_COB")
+    assert {a["finding_id"] for a in ar.drug_expected(store.conn, [f_wrong, f_right])} == {f_right["finding_id"]}
 
 
 def test_rule10_two_answers_of_one_billed_line_on_one_remittance_value_the_fuller_one(store):

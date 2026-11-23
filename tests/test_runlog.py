@@ -512,8 +512,9 @@ def test_a_cycle_that_dies_before_its_run_log_starts_leaves_a_failed_run(tmp_pat
     bundle show it instead of the last good run."""
     db = str(tmp_path / "data" / "remitwatch.sqlite")
     store = Store(db)
-    rl = runlog.start_run("cycle", trigger="schedule", db_path=db, conn=store.conn, host="server")
-    rl.finish(conn=store.conn)                                  # yesterday's good run
+    yesterday = runlog.utcnow() - timedelta(days=1)
+    rl = runlog.start_run("cycle", trigger="schedule", db_path=db, conn=store.conn, host="server", now=yesterday)
+    rl.finish(conn=store.conn, now=yesterday + timedelta(minutes=2))         # yesterday's good run
     store.close()
     try:
         raise sqlite3.OperationalError(f"duplicate column name: work_state ({LAST})")
@@ -592,7 +593,7 @@ def test_log_lines_become_events_with_a_level_and_the_cap_keeps_errors(tmp_path,
     rl.finish()
     levels = [e["level"] for e in rl.events]
     assert len(rl.events) == 8 and levels[-2:] == ["error", "warning"] and rl.dropped == 5
-    assert rl.manifest["events"] == {"kept": 8, "dropped": 5, "errors": 1, "warnings": 1}
+    assert rl.manifest["events"] == {"kept": 8, "dropped": 5, "errors": 1, "warnings": 1, "logged_errors": 1}
     assert_clean({"e": json.dumps(rl.events, ensure_ascii=False).encode()})
 
 
@@ -1011,7 +1012,7 @@ def test_the_panel_lists_runs_repairs_and_the_bundle(tmp_path):
     p = runlog.panel(store.conn, logs)
     assert p["title"] == "Logs and diagnostics" and p["last_run"]["run_id"] == rl.run_id and p["last_run"]["outcome"] == "partial"
     assert p["last_run"]["first_error"]["type"] == "ValueError"
-    assert "1 step(s) failed" in p["sentence"] and "could not be repaired automatically" in p["sentence"]
+    assert "1 error(s) logged" in p["sentence"] and "could not be repaired automatically" in p["sentence"]
     assert p["open_problems"][0]["target"] == "production:abcdef0123456789" and "Data tab" in p["open_problems"][0]["next_step"]
     assert p["bundle"]["route"] == "/api/ops/diagnostic-bundle" and "—" not in json.dumps(p)
     assert runlog.panel(None)["sentence"] == "No run has been logged yet."

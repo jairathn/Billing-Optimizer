@@ -2458,18 +2458,38 @@ def drug_expected(conn: sqlite3.Connection, items: Iterable[Mapping], *, archive
 def _drug_actions(conn: sqlite3.Connection, want: list, arch: Archive, rates: Mapping[tuple, list] | None, min_lines: int) -> list[dict]:
     codes = {c for f in want for c in _item_codes(f)} | {p[0] for f in want for p in _ev(f).get("unpaid") or [] if isinstance(p, (list, tuple)) and p}
     table = rates if rates is not None else drug_rates(conn, [c for c in codes if code_category(c) in DRUG_FAMILIES])
-    # one valued item per billed line of a service: the payer's newest answer of it (two answers of the line on one
-    # remittance, two submissions the payer answered together: the one billing more units, the fuller version)
-    newest: dict[tuple, tuple] = {}
     listed: Counter = Counter()             # the open listings of each service among these items
     for f in want:
         a = arch.lines.get(f.get("line_key")) if f.get("line_key") else None
         if a is not None and a.dos:
+            listed[(a.bill, a.billed_code, a.dos)] += 1
+
+    def passed_over(a: Ans | None) -> bool:
+        """A listing that carries no value of its own: a restatement piece (rule 1); a duplicate copy's denial while
+        another listing or a standing answer carries the service (a copy that is the service's only live answer, its
+        payment taken back, is valued); a wrong payer's 'not our claim' once another payer has answered the service."""
+        if a is None:
+            return False
+        if a.piece() or a.restated_cents():
+            return True
+        if _copy_denial(a) and (listed[(a.bill, a.billed_code, a.dos)] > 1 or any(
+                x.line_key != a.line_key and x.standing > 0 for x in arch.answers_of(a))):
+            return True
+        rs = a.denial_reasons()
+        return bool(a.dos and rs and all(r in WRONG_PAYER_CARCS for _g, r, _c in rs) and any(
+            x.line_key != a.line_key and x.status != REVERSAL_STATUS and not _same_payer_loose(x, a) for x in arch.answers_of(a)))
+
+    # one valued item per billed line of a service, among the listings that carry a value: the payer's newest answer of
+    # it (two answers of the line on one remittance, two submissions the payer answered together: the one billing more
+    # units, the fuller version)
+    newest: dict[tuple, tuple] = {}
+    for f in want:
+        a = arch.lines.get(f.get("line_key")) if f.get("line_key") else None
+        if a is not None and a.dos and not passed_over(a):
             k = (a.bill, a.billed_code, a.dos, _line_identity(a, arch))
             rank = (a.paid_on or "", a.trace or "", a.billed_units, f.get("finding_id") or "")
             if k not in newest or rank > newest[k][0]:
                 newest[k] = (rank, f.get("finding_id"))
-            listed[(a.bill, a.billed_code, a.dos)] += 1
     out = []
     for f in want:
         grp = f.get("payer_group") or ""
@@ -2477,17 +2497,9 @@ def _drug_actions(conn: sqlite3.Connection, want: list, arch: Archive, rates: Ma
         own = None
         if f.get("line_key"):
             a = arch.lines.get(f["line_key"])
-            if a is not None and (a.piece() or a.restated_cents()):
-                continue                    # a restatement, not a billed line: rule 1
-            if a is not None and _copy_denial(a) and (listed[(a.bill, a.billed_code, a.dos)] > 1 or any(
-                    x.line_key != a.line_key and x.standing > 0 for x in arch.answers_of(a))):
-                continue                    # a duplicate copy's denial: the service is valued on its own answer (a copy
-                #                             that is the service's only live answer, its payment taken back, is valued)
+            if passed_over(a):
+                continue                    # valued on the service's own answer, or a restatement (rule 1)
             if a is not None and a.dos:
-                rs = a.denial_reasons()
-                if rs and all(r in WRONG_PAYER_CARCS for _g, r, _c in rs) and any(
-                        x.line_key != a.line_key and x.status != REVERSAL_STATUS and not _same_payer_loose(x, a) for x in arch.answers_of(a)):
-                    continue                # 'not our claim', and another payer has answered the service: valued there
                 if newest.get((a.bill, a.billed_code, a.dos, _line_identity(a, arch)), (None, f.get("finding_id")))[1] != f.get("finding_id"):
                     continue                # an older listing of the same billed line: the newest one carries its value
             code = next((c for c in (f.get("billed_code"), f.get("original_procedure_code"), f.get("procedure_code"))

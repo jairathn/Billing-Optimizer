@@ -1183,39 +1183,51 @@ def test_a_second_procedure_cut_deeper_than_the_payers_share_is_mppr_excess(stor
     assert f["signal"] == "MPPR_EXCESS" and f["shortfall_cents"] == 29256 - 14628
 
 
-def _two_procedures(store, flap_rate: float):
-    """Humana's usual 17311 is $585.12 and its usual 14040 `flap_rate` (22 clean claims of each). On one claim it paid the
-    14040 in full and cut the 17311 to half, as if the 17311 were the second procedure."""
+def _two_procedures(store, history: str | None, n_history: int = 6):
+    """Humana's usual 17311 is $585.12 and its usual 14040 $450 (22 clean claims of each). On `n_history` other claims that
+    billed both, it paid one in full and cut the other to half (`history` names the one it paid in full). On the claim
+    looked at, it paid the 14040 in full and cut the 17311 to half."""
     for n in range(22):
         remit(store, trace=f"7776{n:05d}", paid_on="2026-02-10", payer="HUMANA CARE PLAN",
               claims=[{"pcn": F.claim_id(600 + n), "last": f"MOHS{n}", "first": "INDIA", "member": f"I{n:011d}",
                        "lines": [("2026-02-02", "17311", 900, 585.12, [("CO", "45", 314.88)], {"allowed_cents": 58512})]}])
         remit(store, trace=f"7777{n:05d}", paid_on="2026-02-10", payer="HUMANA CARE PLAN",
               claims=[{"pcn": F.claim_id(700 + n), "last": f"FLAP{n}", "first": "JULIET", "member": f"J{n:011d}",
-                       "lines": [("2026-02-02", "14040", 1500, flap_rate, [("CO", "45", 1500 - flap_rate)],
-                                  {"allowed_cents": round(flap_rate * 100)})]}])
+                       "lines": [("2026-02-02", "14040", 1500, 450, [("CO", "45", 1050)], {"allowed_cents": 45000})]}])
+    for n in range(n_history if history else 0):
+        mohs, flap = (585.12, 225) if history == "17311" else (292.56, 450)
+        remit(store, trace=f"7778{n:05d}", paid_on="2026-02-12", payer="HUMANA CARE PLAN",
+              claims=[{"pcn": F.claim_id(800 + n), "last": f"BOTH{n}", "first": "KILO", "member": f"K{n:011d}",
+                       "lines": [("2026-02-03", "17311", 900, mohs, [("CO", "45", 900 - mohs)], {"allowed_cents": round(mohs * 100)}),
+                                 ("2026-02-03", "14040", 1500, flap, [("CO", "45", 1500 - flap)], {"allowed_cents": round(flap * 100)})]}])
     remit(store, trace=F.check_no(53), paid_on="2026-03-28", payer="HUMANA CARE PLAN",
           claims=[{"pcn": F.claim_id(53), "lines": [(S, "17311", 900, 292.56, [("CO", "59", 292.56), ("CO", "45", 314.88)],
                                                      {"allowed_cents": 29256}),
-                                                    (S, "14040", 1500, flap_rate, [("CO", "45", 1500 - flap_rate)],
-                                                     {"allowed_cents": round(flap_rate * 100)})]}])
+                                                    (S, "14040", 1500, 450, [("CO", "45", 1050)], {"allowed_cents": 45000})]}])
     return run(store)
 
 
 def test_the_highest_valued_procedure_cut_as_the_second_one_is_an_underpayment(store):
-    """PM case C28: the payer cut the 17311 ($585.12 usual) to half and paid the 14040 ($450 usual) in full. Ranked by what
-    was allowed, the 17311 looked like the second procedure, so its cut read as the multiple-procedure rule (23 lines,
-    $6,190 missed on real data). It is the highest-valued procedure on the claim: the full rate was due."""
-    det = _two_procedures(store, flap_rate=450)
+    """PM case C28: the payer cut the 17311 to half and paid the 14040 in full, although on its other claims billing both it
+    paid the 17311 in full and cut the 14040. Ranked by what was allowed, the 17311 looked like the second procedure, so its
+    cut read as the multiple-procedure rule (23 truth-listed lines, $6,190 missed on real data). The payer's own ranking
+    says the full rate was due."""
+    det = _two_procedures(store, history="17311")
     f = one(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(53))
     assert f["signal"] == "UNDERPAID_VS_OWN_RATE" and f["shortfall_cents"] == 29256, (f["signal"], f["shortfall_cents"])
     assert json.loads(f["evidence"])["highest_valued"] is True and "highest-valued" in f["title"]
     assert det.ema_counts["mppr_highest_cut"] == 1
 
 
-def test_a_cut_on_a_procedure_another_one_outranks_stays_the_payers_rule(store):
-    """The 14040 is worth more than 95% of the 17311 at this payer's rates: the 17311 is rightly the second procedure."""
-    _two_procedures(store, flap_rate=600)
+def test_a_cut_the_payer_makes_on_that_procedure_as_a_rule_stays_its_multiple_procedure_rule(store):
+    """The payer usually ranks the 14040 first beside the 17311 (the way one payer ranks 17110 before 11102: 188 false items
+    on real data when the rank came from rates): the 17311 is rightly the second procedure."""
+    _two_procedures(store, history="14040")
+    assert items(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(53)) == []
+
+
+def test_a_cut_with_too_few_claims_of_the_pair_stays_the_multiple_procedure_rule(store):
+    _two_procedures(store, history="17311", n_history=3)
     assert items(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(53)) == []
 
 

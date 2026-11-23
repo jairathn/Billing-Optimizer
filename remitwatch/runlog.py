@@ -291,7 +291,8 @@ class Scrubber:
         code = self.code_words()
 
         def known(w: str) -> bool:
-            return w.lower().strip("'-") in code
+            lw = w.lower().strip("'-")
+            return lw in code or lw in _TWO_LETTER_KEEP      # "Denied CO-45": the group code is the code's own
 
         def cap(w: str) -> bool:
             return w[:1].isupper()
