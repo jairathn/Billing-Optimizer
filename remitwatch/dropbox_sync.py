@@ -556,6 +556,158 @@ def _not_read(store, path: str, kind: str) -> None:
         pass
 
 
+# ------------------------------------------------------------------------------- files fetched and not yet read
+# The server's Dropbox position moves on as soon as a listing is complete, before the readers take the files it fetched:
+# a cycle stopped in between (a deploy restart, the out-of-memory killer) or a read that failed (a busy database, a full
+# disk) would leave a file in the mirror that no later listing names again. Each fetched file (and each the one-time
+# re-find brought in) is therefore kept in sync_pending until a cycle has offered it to the readers; one whose read raised
+# stays, and after PENDING_TRIES cycles it is listed as not read (files kind 'ema:failed') until it changes in Dropbox.
+PENDING_DDL = ("CREATE TABLE IF NOT EXISTS sync_pending (path TEXT PRIMARY KEY, added_at TEXT, tries INTEGER NOT NULL "
+               "DEFAULT 0)")
+
+
+def add_pending(conn, paths: Iterable[str], *, commit: bool = True) -> None:
+    """These fetched files wait for the readers (a new copy of a file starts its count again)."""
+    paths = list(paths)
+    if not paths:
+        return
+    conn.execute(PENDING_DDL)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn.executemany("INSERT OR REPLACE INTO sync_pending (path, added_at, tries) VALUES (?, ?, 0)", [(p, now) for p in paths])
+    if commit:
+        conn.commit()
+
+
+def take_pending(store, log=print) -> dict:
+    """The fetched files a cycle offers the readers again, each counted before it is read (a cycle stopped while reading
+    one counts too): {'paths', 'gone', 'given_up'}. A file no longer in the mirror is dropped; one offered PENDING_TRIES
+    times is listed as not read."""
+    conn = store.conn
+    conn.execute(PENDING_DDL)
+    take, gone, give_up = [], [], []
+    for path, tries in conn.execute("SELECT path, tries FROM sync_pending ORDER BY added_at, path").fetchall():
+        if not os.path.isfile(path):
+            gone.append(path)
+        elif int(tries or 0) >= PENDING_TRIES:
+            give_up.append(path)
+        else:
+            take.append(path)
+    for path in give_up:
+        _not_read(store, path, "ema:failed")
+        log(f"  ERROR {os.path.basename(path)}: not read after {PENDING_TRIES} cycles; it is read again when it changes in "
+            "Dropbox")
+    conn.executemany("DELETE FROM sync_pending WHERE path=?", [(p,) for p in gone + give_up])
+    conn.executemany("UPDATE sync_pending SET tries = tries + 1 WHERE path=?", [(p,) for p in take])
+    conn.commit()
+    return {"paths": take, "gone": len(gone), "given_up": len(give_up)}
+
+
+def settle_pending(store, offered: Iterable[str], retry: Iterable[str] = ()) -> int:
+    """After the readers: the offered files are done with, save those whose read raised (they are offered again).
+    Returns how many still wait."""
+    conn = store.conn
+    conn.execute(PENDING_DDL)
+    keep = set(retry)
+    conn.executemany("DELETE FROM sync_pending WHERE path=?", [(p,) for p in set(offered) if p not in keep])
+    conn.commit()
+    return conn.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0]
+
+
+def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, origin: dict | None, ledger, via: str,
+                      deadline: float | None, wait_reason: str | None, again) -> None:
+    """The files in a zip that are not EMA's reports (those were read already): unpacked a piece at a time (at most
+    ZIP_CHUNK_BYTES, never past what the zip says each member holds) and each read by the router on its own, under its
+    own name and date, so the same bytes are never read twice. A zip inside the zip, or a member larger than any file a
+    payer or EMA sends, is listed as not read."""
+    import shutil
+    import tempfile
+    import zipfile
+
+    from . import ema_reports as er
+
+    n = os.path.basename(path)
+    try:
+        bad = er.zip_refusal(path)
+    except Exception:       # noqa: BLE001  (a zip that cannot be opened: below)
+        bad = None
+    if bad is not None:
+        out["errors"] += 1
+        out["failed"].append(f"{n} (not read: {bad.message})")
+        _not_read(store, path, "ema:too_large")
+        return
+    try:
+        zf = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile):
+        out["errors"] += 1
+        out["failed"].append(f"{n} (not read: not a zip that opens)")
+        _not_read(store, path, "ema:unknown")
+        return
+    want = set(names)
+    d = tempfile.mkdtemp(prefix="unzip-", dir=_scratch_dir())
+    chunk: list[str] = []
+    member_of: dict[str, str] = {}
+    size = 0
+    read = 0
+
+    def flush() -> None:
+        nonlocal size
+        if not chunk:
+            return
+        origins = {q: dict(origin or {}, member=member_of[q]) for q in chunk}
+        part = ingest_new_files(store, list(chunk), log=log, origins=origins, ledger=ledger, via=via, deadline=deadline,
+                                wait_reason=wait_reason, _in_zip=True)
+        for k in ("remits", "ema", "claims_837", "skipped", "errors"):
+            out[k] = out.get(k, 0) + int(part.get(k) or 0)
+        out["failed"] += [f"{n}: {f}" for f in part.get("failed") or []]
+        for k in ("ema_reports", "ema_files"):
+            if part.get(k):
+                out.setdefault(k, []).extend(part[k])
+        if part.get("ema_changed"):
+            out["ema_changed"] = True
+        if part.get("retry"):
+            again(path)                     # a member's read raised: the whole zip is offered again (read members are skipped)
+        for q in chunk:
+            shutil.rmtree(os.path.dirname(q), ignore_errors=True)
+        chunk.clear()
+        size = 0
+    try:
+        for k, info in enumerate(i for i in zf.infolist() if i.filename in want):
+            base = os.path.basename(info.filename.rstrip("/")) or "file"
+            low = base.lower()
+            if low.endswith(".zip"):
+                out["errors"] += 1
+                out["failed"].append(f"{n}: {base} (a zip inside a zip is not read)")
+                continue
+            if not low.endswith(WANTED_EXT):
+                out["skipped"] += 1
+                continue
+            if info.file_size > max(MAX_X12_BYTES, MAX_EXPORT_BYTES):
+                out["errors"] += 1
+                out["failed"].append(f"{n}: {base} (too large)")
+                continue
+            sub = os.path.join(d, f"{k:05d}")
+            os.makedirs(sub, exist_ok=True)
+            q = os.path.join(sub, base)
+            with zf.open(info) as src, open(q, "wb") as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
+            try:
+                when = time.mktime(tuple(info.date_time) + (0, 0, -1))
+                os.utime(q, (when, when))       # the member's own date: the newest copy of a payment twice sent wins
+            except (OverflowError, ValueError, OSError):
+                pass
+            chunk.append(q)
+            member_of[q] = info.filename
+            size += info.file_size
+            read += 1
+            if size >= ZIP_CHUNK_BYTES:
+                flush()
+        flush()
+    finally:
+        zf.close()
+        shutil.rmtree(d, ignore_errors=True)
+    log(f"  {n}: a zip of {read} file{'s' if read != 1 else ''}, each read on its own")
+
+
 def _gunzip_to(path: str, folder: str, limit: int) -> str | None:
     """A gzipped file that is not a report, unpacked under its own name (less .gz) into `folder`; None when it unpacks to
     more than `limit` bytes (nothing but a report is that large) or is not gzip at all."""
@@ -738,7 +890,7 @@ def ingest_new_files(store, paths: list[str], log=print, unread: list[str] | Non
                 out["skipped"] += 1
         if remits:
             st = store.ingest_835_paths(remits)
-            out["remits"] = st["ingested"]
+            out["remits"] += st["ingested"]
             out["remit_stats"] = st
             if st.get("transactions"):
                 mark_map_dirty(store.conn)      # committed with the next write below
