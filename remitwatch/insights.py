@@ -554,6 +554,37 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> lis
                       "who": ("Billing lead, with TriZetto: ask whether newer remittances exist and why they are not in the downloads." if recent
                               else "Billing lead: put the latest TriZetto downloads in the Dropbox folder.")})
     items += trizetto_health(conn, today)
+    # versions of one remittance that differ (remitwatch.store.mark_superseded): no rule can say which stands, so both are
+    # counted until a person checks
+    from .store import DIFFER_META
+    found = [v for v in _meta(conn, DIFFER_META) or [] if isinstance(v, dict)]
+
+    def listed(vs: list[dict]) -> str:
+        return "; ".join(f"{v.get('payer') or 'a payer'}, trace {v.get('trace')}, paid {v.get('payment_date')}: versions of "
+                         + " and ".join(f"${c / 100:,.2f}" for c in v.get("payments_cents") or []) for v in vs[:3]) + ("; and more." if len(vs) > 3 else ".")
+    versions = [v for v in found if v.get("kind") != "lost"]
+    if versions:
+        n = len(versions)
+        claims = sum(int(v.get("claims_on_both") or 0) for v in versions)
+        twice = sum(int(v.get("cents_counted_twice") or 0) for v in versions)
+        items.append({"key": "remit_versions", "ok": False, "n": n, "claims": claims, "cents": twice,
+                      "title": "Two versions of one remittance differ" + (f" ({n} remittances)" if n > 1 else ""),
+                      "detail": (f"Both versions are counted, so {claims} {'claim that is' if claims == 1 else 'claims that are'} on both "
+                                 f"{'counts' if claims == 1 else 'count'} twice (${twice / 100:,.2f}). {listed(versions)}"),
+                      "who": "Billing lead: look the payment up on the payer's portal, or ask TriZetto, which version stands, and tell "
+                             "whoever looks after RemitWatch which file is wrong."})
+    lost = [v for v in found if v.get("kind") == "lost"]
+    if lost:
+        n = len(lost)
+        claims = sum(int(v.get("claims_not_counted") or 0) for v in lost)
+        cents = sum(int(v.get("cents_not_counted") or 0) for v in lost)
+        items.append({"key": "remit_copy_lost", "ok": False, "n": n, "claims": claims, "cents": cents,
+                      "title": "A broken copy of a remittance holds claims the complete one does not" + (f" ({n} remittances)" if n > 1 else ""),
+                      "detail": (f"RemitWatch counts the complete version and leaves out the copy that is cut short or does not add up, "
+                                 f"so {claims} {'claim' if claims == 1 else 'claims'} only on that copy {'is' if claims == 1 else 'are'} not "
+                                 f"counted (${cents / 100:,.2f} paid). {listed(lost)}"),
+                      "who": "Billing lead: ask TriZetto for the whole remittance again, or look it up on the payer's portal, and check "
+                             "those claims before anyone chases them."})
     info = _meta(conn, "activity:info") or {}
     gaps = info.get("gaps") or []
     if gaps:

@@ -49,8 +49,25 @@ def ensure_fax_tables(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE payer_fax ADD COLUMN {col} {typ}")
 
 
+def heir_of(conn: sqlite3.Connection, finding_id):
+    """The item a record written for `finding_id` belongs to now: the item itself while it exists; once detection gave its
+    money a new id (detect.carry_to_heirs keeps the pair), its heir. A copy without these tables keeps the id as written."""
+    if not finding_id:
+        return finding_id
+    try:
+        if conn.execute("SELECT 1 FROM findings WHERE finding_id=?", (finding_id,)).fetchone():
+            return finding_id
+        r = conn.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (finding_id,)).fetchone()
+    except sqlite3.OperationalError:            # no findings or finding_heirs table in this copy
+        return finding_id
+    return r[0] if r else finding_id
+
+
 def upsert_fax(conn: sqlite3.Connection, rec: dict) -> None:
-    """apply_fax for a store whose tables exist: it runs inside a transaction a caller holds (making the tables would end it)."""
+    """apply_fax for a store whose tables exist: it runs inside a transaction a caller holds (making the tables would end it).
+    A fax recorded for an item whose money has a new id since is filed under the heir (heir_of)."""
+    if rec.get("finding_id"):
+        rec = dict(rec, finding_id=heir_of(conn, rec["finding_id"]))
     key = rec["fax_key"]
     vals = {k: (json.dumps(rec[k], default=str) if k == "doc" and not isinstance(rec[k], (str, type(None))) else rec[k])
             for k in FAX_COLS if k in rec}
@@ -134,15 +151,17 @@ def apply_payer_fax_check(conn: sqlite3.Connection, a: dict) -> None:
 
 def apply_event(conn: sqlite3.Connection, a: dict) -> bool:
     """A line in an item's history that changes no status: a follow-up faxed, the payer's answer received
-    (remitwatch.fax). False when the item is not in this copy, so the journal keeps the entry and tries it again."""
-    r = conn.execute("SELECT status FROM findings WHERE finding_id=?", (a["finding_id"],)).fetchone()
+    (remitwatch.fax). False when the item is not in this copy, so the journal keeps the entry and tries it again. A line for
+    an item whose money has a new id since goes into the heir's history (heir_of)."""
+    fid = heir_of(conn, a["finding_id"])
+    r = conn.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()
     if not r:
         return False
     at, kind, note = a.get("at") or _now(), a.get("event") or "fax", a.get("note") or ""
     if not conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND at=? AND kind=? AND COALESCE(note,'')=?",
-                        (a["finding_id"], at, kind, note)).fetchone():
+                        (fid, at, kind, note)).fetchone():
         conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note) VALUES (?,?,?,?,?,?,?,?)",
-                     (a["finding_id"], at, kind, r[0], r[0], a.get("amount_cents"), a.get("actor") or "", note))
+                     (fid, at, kind, r[0], r[0], a.get("amount_cents"), a.get("actor") or "", note))
     return True
 
 

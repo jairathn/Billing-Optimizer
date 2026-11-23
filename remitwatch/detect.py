@@ -2932,6 +2932,7 @@ class Detector:
             m = _SUBMISSION.search(pcn or "")
             return int(m.group(1)) if m else 0
         inherited: set[str] = set()
+        moved: list[tuple[str, str]] = []          # (old id, heir): what was recorded on the old id goes to the heir
         rows, events = [], []
         for fid, f in self.findings.items():
             prev = existing.get(fid)
@@ -2959,6 +2960,7 @@ class Detector:
                 if heir["finding_id"] not in inherited:
                     prev = heir
                     inherited.add(heir["finding_id"])
+                    moved.append((heir["finding_id"], fid))
                     events.append((fid, self.now, "signal_changed", heir["status"], heir["status"], f.get("shortfall_cents"), "system",
                                    f"was {heir['signal']}, now {f['signal']}", self.run_id))
                     for mark, kind in ((overridden, "override_carried"), (confirmed, "confirmed_carried")):
@@ -3017,6 +3019,7 @@ class Detector:
         c.executemany(f"INSERT INTO findings ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", rows)
         if events:
             c.executemany("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note, run_id) VALUES (?,?,?,?,?,?,?,?,?)", events)
+        carry_to_heirs(c, moved, self.now, self.run_id)
         c.execute("DELETE FROM progress_snapshots WHERE run_id=?", (self.run_id,))
         c.execute("""INSERT INTO progress_snapshots (run_id, at, category, status, n, cents)
                      SELECT ?, ?, category, status, COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings
@@ -3109,6 +3112,47 @@ class Detector:
         except Exception:
             self.conn.rollback()        # the analysis is saved; the rules run again after the next one
         return out
+
+
+HEIRS_DDL = "CREATE TABLE IF NOT EXISTS finding_heirs (old_id TEXT PRIMARY KEY, new_id TEXT, at TEXT, run_id TEXT)"
+
+
+def carry_to_heirs(c: sqlite3.Connection, moved: list[tuple[str, str]], at: str, run_id: str | None) -> None:
+    """When new information changes a line's signal, its money gets a new id and inherits the old item's status (save). What
+    was recorded on the old id goes with it, in the same save: its faxes (so the follow-ups chase the heir and a second
+    appeal is refused as for the same id), its packets, its history, and the items a payer's fax was tied to. Each pair is
+    kept in finding_heirs, so that a record written for the old id later (a page opened before the run, a journal entry
+    folded after it) is moved at every save and as it is applied (actions.heir_of). Chains (an heir that changes again)
+    point at the newest heir; an id that is an item again is nobody's heir. Rows are moved, not looked up by claim: every
+    reader (the follow-ups, the panel, the Faxes page, the send's guard) keeps reading by item id."""
+    c.execute(HEIRS_DDL)
+    if moved:
+        c.executemany("INSERT OR REPLACE INTO finding_heirs (old_id, new_id, at, run_id) VALUES (?,?,?,?)", [(o, n, at, run_id) for o, n in moved])
+        c.executemany("UPDATE finding_heirs SET new_id=? WHERE new_id=?", [(n, o) for o, n in moved])
+    c.execute("DELETE FROM finding_heirs WHERE old_id = new_id OR old_id IN (SELECT finding_id FROM findings)")
+    pairs = {o: n for o, n in c.execute("SELECT old_id, new_id FROM finding_heirs")}
+    if not pairs:
+        return
+    have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in ("faxes", "appeal_packets", "finding_events"):
+        if table in have:
+            c.executemany(f"UPDATE {table} SET finding_id=? WHERE finding_id=?", [(n, o) for o, n in pairs.items()])
+    if "faxes" in have:         # a payer's letter tied to several items (or offered to some) names them in its record
+        for key, doc in c.execute("SELECT fax_key, doc FROM faxes WHERE direction='in' AND doc IS NOT NULL").fetchall():
+            try:
+                d = json.loads(doc)
+            except ValueError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            changed = False
+            for field in ("tied", "suggested"):
+                ids = d.get(field)
+                if isinstance(ids, list) and any(i in pairs for i in ids):
+                    d[field] = list(dict.fromkeys(pairs.get(i, i) for i in ids))
+                    changed = True
+            if changed:
+                c.execute("UPDATE faxes SET doc=? WHERE fax_key=?", (json.dumps(d, default=str), key))
 
 
 def run_detection(db_path: str, run_id: str | None = None) -> dict:

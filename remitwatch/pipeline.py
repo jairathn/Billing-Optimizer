@@ -262,8 +262,17 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
     from .detect import run_detection
     from .dropbox_sync import ingest_new_files
     from .dropbox_sync import sync as dropbox_sync
+    from .store import mark_store, store_problem
 
+    # a store that was made here and is missing now (a volume not mounted, a file moved) stops the run before anything
+    # opens the path: opening it would make a new empty store and this run would save it as the practice's
+    why = store_problem(db_path)
+    if why:
+        log(f"RemitWatch: {why}")
+        _store_alert(db_path, why, log)
+        return {"started": _now(), "trigger": os.environ.get("REMITWATCH_TRIGGER", "manual"), "skipped": why, "error": why, "finished": _now()}
     store = Store(db_path)
+    mark_store(db_path)
     out: dict = {"started": _now(), "trigger": os.environ.get("REMITWATCH_TRIGGER", "manual")}
     token = acquire_lock(store.conn)
     if not token:
@@ -327,6 +336,10 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             heartbeat(store.conn, token)
         out["ingest"] = ingested
         changed = (ingested.get("remits", 0) + ingested.get("ema", 0) + ingested.get("claims_837", 0)) > 0
+        # a release that changed which copies of a remittance stand decides them again once, new files or not, and the
+        # analysis follows
+        if store.recheck_supersession():
+            changed = True
         has_run = bool(store.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='detection_runs'").fetchone()) and \
             bool(store.conn.execute("SELECT 1 FROM detection_runs LIMIT 1").fetchone())
         rules_changed = False
@@ -367,6 +380,7 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             _meta_set(store.conn, REPORT_KEY, _now())
         if isinstance(out.get("sync"), dict) and out["sync"].get("error"):
             out["error"] = "Dropbox: " + out["sync"]["error"]          # the rest ran; the feed's failure still shows
+        mark_store(db_path)             # notes, once, that the store holds the practice's remittances
         out["finished"] = _now()
         return out
     except Exception as exc:
@@ -393,8 +407,37 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             store.close()
 
 
+def _store_alert(db_path: str, why: str, log=print) -> None:
+    """Mail the stop to the report address, at most once a day (the day is kept in the store's marker): every page that
+    needs the store fails while it is missing, and the hourly run says why in the log."""
+    from .store import _marker, _read_marker, _write_marker
+    marker = _read_marker(db_path) or {}
+    today = datetime.now(timezone.utc).date().isoformat()
+    if marker.get("alerted_on") == today:
+        return
+    try:
+        from .report import email_report
+        sent = email_report(f"RemitWatch stopped before changing anything.\n\n{why}\n\nThis message contains no patient information.",
+                            subject="RemitWatch alert: the store is missing")
+    except Exception as exc:        # a mail failure must never hide the stop itself
+        log(f"store alert email failed: {type(exc).__name__}")
+        return
+    if sent and os.path.exists(_marker(db_path)):
+        _write_marker(db_path, dict(marker, alerted_on=today))
+
+
 def status(db_path: str) -> dict:
     """What the dashboard shows about the feed: is it configured, when it last ran, how current the data is."""
+    from .store import store_problem
+    why = store_problem(db_path)
+    if why:             # opening the path would make a new empty store: say why the runs stop instead
+        return {"dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
+                "interval_minutes": int(os.environ.get("REMITWATCH_SYNC_INTERVAL_MINUTES", "0") or 0),
+                "scheduler_running": SCHEDULER.is_alive(), "next_run": SCHEDULER.next_run, "running": False, "running_since": None,
+                "last_cycle": {"started": _now(), "finished": _now(), "trigger": "store check", "error": why}, "store_problem": why,
+                "newest_payment_date": None, "days_behind": None, "last_file_ingested": None, "last_remit_ingested": None,
+                "smtp_configured": bool(os.environ.get("SMTP_HOST") and os.environ.get("REPORT_TO")),
+                "alert_webhook": bool(os.environ.get("ALERT_WEBHOOK_URL")), "note_review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
     store = Store(db_path)
     c = store.conn
     try:

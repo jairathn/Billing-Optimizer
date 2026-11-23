@@ -239,6 +239,208 @@ def table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
 
 
+# The server's store file has a marker beside it (<store>.marker), written when the store is first made. While the marker
+# is there, a store file that is missing (a volume not mounted, a file moved or renamed), or one that holds no remittance
+# where the store did, stops every run: nothing makes a new empty store and saves it as the practice's. The marker shares
+# the store's folder, so a whole new empty volume is a first start again (the disk's snapshots cover that: SERVER_RUNBOOK).
+STORE_MISSING = ("The store file is missing. Nothing was changed. Put it back (the backups folder beside it keeps a copy a day), "
+                 "or mount the data volume again: docs/OPERATIONS.md, Recovering the store.")
+STORE_EMPTIED = ("The store file holds no remittance, but the store here did. Nothing was changed. Put the store back from the "
+                 "backups folder beside it: docs/OPERATIONS.md, Recovering the store.")
+
+
+def _marker(db_path: str) -> str:
+    return os.path.abspath(db_path) + ".marker"
+
+
+def _read_marker(db_path: str) -> dict | None:
+    """The marker's content; None when there is no marker. One that cannot be read is a marker all the same."""
+    try:
+        with open(_marker(db_path), encoding="utf-8") as fh:
+            m = json.load(fh)
+        return m if isinstance(m, dict) else {}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}
+
+
+def _holds_remittances(db_path: str) -> bool:
+    """Whether the file at db_path is a store holding at least one remittance. Opened read-only: asking never makes a file."""
+    from urllib.request import pathname2url
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{pathname2url(os.path.abspath(db_path))}?mode=ro", uri=True, timeout=30)
+        try:
+            return conn.execute("SELECT 1 FROM transactions LIMIT 1").fetchone() is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
+def store_problem(db_path: str) -> str | None:
+    """Why the server's store must not be opened now, in words for a person, or None when it may be: its marker says a
+    store was made here, and the file is missing or empty, or holds no remittance though the store did. Opening it would
+    make a new empty store, which the next run would fill from the feeds' current position and save as the practice's."""
+    if not db_path or db_path == ":memory:":
+        return None
+    marker = _read_marker(db_path)
+    if marker is None:
+        return None
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+        return STORE_MISSING
+    if marker.get("held_data") and not _holds_remittances(db_path):
+        return STORE_EMPTIED
+    return None
+
+
+def _write_marker(db_path: str, body: dict) -> None:
+    tmp = _marker(db_path) + ".part"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(body, fh)
+    os.replace(tmp, _marker(db_path))
+
+
+def mark_store(db_path: str) -> None:
+    """Write the marker beside the server's store where there is none (the store's first making, or a store from before
+    the marker), and note it once the store holds a remittance."""
+    if not db_path or db_path == ":memory:" or not os.path.exists(db_path):
+        return
+    marker = _read_marker(db_path)
+    held = bool((marker or {}).get("held_data")) or _holds_remittances(db_path)
+    if marker is not None and bool(marker.get("held_data")) == held:
+        return
+    _write_marker(db_path, {"store": os.path.basename(db_path), "created": (marker or {}).get("created") or utcnow(), "held_data": held})
+
+
+def accept_store(db_path: str) -> str:
+    """A person's decision after a stop (docs/OPERATIONS.md, Recovering the store): the store file in place now is the
+    store from here on, or, where there is none (or it holds nothing), the next run starts a new, empty store. Returns
+    what was done, in words."""
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0 or not _holds_remittances(db_path):
+        if os.path.exists(_marker(db_path)):
+            os.remove(_marker(db_path))
+        return ("The store holds no remittance: the next run starts a new, empty store, reads every file the feeds still hold, "
+                "and analyses them. People's statuses and notes are not in it.")
+    _write_marker(db_path, {"store": os.path.basename(db_path), "created": utcnow(), "held_data": True, "accepted": utcnow()})
+    return "The store file in place is the store from now on."
+
+
+# Which copies of a remittance stand (Store.mark_superseded). The rule's version is kept in the store: a release that
+# changes the rule decides every store again once (Store.recheck_supersession), whether or not a new file arrives.
+SUPERSEDE_RULE = "2"            # 2: only versions of one remittance compete; a complete, balanced one always stands
+SUPERSEDE_META = "supersede:rule"
+# versions of one remittance that differ (both counted), and broken copies holding claims no standing version holds (not
+# counted, kind "lost"): shown on the Data tab's checks
+DIFFER_META = "supersede:differ"
+
+
+def _versions(members: list[dict], held: dict) -> list[list[dict]]:
+    """The transactions of one payer, trace number and payment date, sorted into the remittances they are versions of
+    (only groups of two or more come back). Two are versions of one remittance when their content fingerprints match,
+    when they hold a claim in common (the same claim id, the practice's or the payer's, with the same charge), or when
+    one is a copy cut short or that does not add up, holds no claim, and carries the other's payment amount."""
+    parent = {m["transaction_key"]: m["transaction_key"] for m in members}
+
+    def root(k: str) -> str:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+    own = {m["transaction_key"]: _ids(held[m["transaction_key"]]["claims"]) for m in members}
+    for i, a in enumerate(members):
+        for b in members[i + 1:]:
+            ka, kb = a["transaction_key"], b["transaction_key"]
+            same = (a["content_fingerprint"] and a["content_fingerprint"] == b["content_fingerprint"]) or bool(own[ka] & own[kb])
+            for x, y in ((a, b), (b, a)):
+                if not held[x["transaction_key"]]["claims"] and not _whole(x) and x["payment_amount_cents"] is not None \
+                        and x["payment_amount_cents"] == y["payment_amount_cents"]:
+                    same = True
+            if same:
+                parent[root(ka)] = root(kb)
+    out: dict[str, list[dict]] = {}
+    for m in members:
+        out.setdefault(root(m["transaction_key"]), []).append(m)
+    return [v for v in out.values() if len(v) > 1]
+
+
+def _ids(claims: list[tuple]) -> set:
+    """The ids the claims are known by (the practice's and the payer's), each with the claim's charge."""
+    out = set()
+    for pcn, icn, _st, charge, *_rest in claims:
+        if pcn:
+            out.add(("ours", pcn, charge))
+        if icn:
+            out.add(("payer", icn, charge))
+    return out
+
+
+def _whole(m: dict) -> bool:
+    """A complete transaction (the parser saw its SE: only then is there a fingerprint) whose payment adds up."""
+    return bool(m["content_fingerprint"]) and m["balanced"] == 1
+
+
+def _standing(versions: list[dict], held: dict) -> tuple[list[dict], set[str]]:
+    """Of the versions of one remittance, those that stand and the keys of those hidden. A complete, balanced version is
+    never hidden by one that is cut short or does not add up; one whose every claim and provider adjustment another
+    complete, balanced version also holds (with the same amounts) is hidden by it, the newest standing among identical
+    ones. With no complete, balanced version, the complete one holding the most claims stands, then the newest."""
+    from collections import Counter
+    # the last key makes the choice the same whatever order the files were read in
+    newest = lambda m: ((m["isa_date"] or ""), (m["isa_time"] or ""), (m["mtime"] or ""), m["transaction_key"])   # noqa: E731
+    whole = [m for m in versions if _whole(m)]
+    if not whole:
+        best = max(versions, key=lambda m: (bool(m["content_fingerprint"]), len(held[m["transaction_key"]]["claims"]), newest(m)))
+        return [best], {m["transaction_key"] for m in versions if m is not best}
+    has = {m["transaction_key"]: (Counter(held[m["transaction_key"]]["claims"]), Counter(held[m["transaction_key"]]["plb"])) for m in whole}
+
+    def covers(a: dict, b: dict) -> bool:
+        (ca, pa), (cb, pb) = has[a["transaction_key"]], has[b["transaction_key"]]
+        return not (cb - ca) and not (pb - pa)
+
+    def hides(a: dict, b: dict) -> bool:
+        return covers(a, b) and (not covers(b, a) or newest(a) > newest(b))
+    kept = [m for m in whole if not any(o is not m and hides(o, m) for o in whole)]
+    keep = {m["transaction_key"] for m in kept}
+    return kept, {m["transaction_key"] for m in versions if m["transaction_key"] not in keep}
+
+
+def _differ_entry(kept: list[dict], held: dict) -> dict:
+    """What a person needs to find two versions of one remittance that differ (both counted): the payer, the trace number,
+    the payment date, each version's payment, and the claims on more than one version with the dollars counted more than
+    once (what each such claim paid beyond the largest of its versions)."""
+    paid: dict[tuple, list[int]] = {}
+    for m in kept:
+        for pcn, _icn, _st, charge, p, *_rest in held[m["transaction_key"]]["claims"]:
+            paid.setdefault((pcn, charge), []).append(p or 0)
+    twice = [v for v in paid.values() if len(v) > 1]
+    first = max(kept, key=lambda m: m["transaction_key"])
+    return {"payer": first["payer_name"], "trace": first["trace_number"], "payment_date": first["payment_date"],
+            "payments_cents": sorted(m["payment_amount_cents"] or 0 for m in kept), "claims_on_both": len(twice),
+            "cents_counted_twice": sum(sum(v) - max(v) for v in twice)}
+
+
+def _lost_entry(kept: list[dict], dropped: list[dict], held: dict) -> dict | None:
+    """A copy hidden because it is cut short or does not add up can hold claims no standing version holds (a later version
+    with a claim added, broken in transfer). Those claims are not counted, so a person is told, with what they paid; None
+    when every claim of the hidden copies is on a version that stands."""
+    on = _ids([c for m in kept for c in held[m["transaction_key"]]["claims"]])
+    lost: dict = {}
+    for m in dropped:
+        for c in held[m["transaction_key"]]["claims"]:
+            ids = _ids([c])
+            if not ids & on:
+                lost[frozenset(ids) or c] = max(lost.get(frozenset(ids) or c, 0), c[4] or 0)
+    if not lost:
+        return None
+    first = max(kept, key=lambda m: m["transaction_key"])
+    return {"kind": "lost", "payer": first["payer_name"], "trace": first["trace_number"], "payment_date": first["payment_date"],
+            "payments_cents": sorted(m["payment_amount_cents"] or 0 for m in kept + dropped), "claims_not_counted": len(lost),
+            "cents_not_counted": sum(lost.values())}
+
+
 class Store:
     def __init__(self, db_path: str, compact: bool = False):
         self.db_path = db_path
@@ -379,30 +581,68 @@ class Store:
 
     # ------------------------------------------------------------------ supersession
     def mark_superseded(self) -> int:
-        """When the same payer trace number was delivered with different content, keep the
-        latest file (by ISA date, then mtime) as authoritative and flag the rest."""
+        """A payer can deliver one remittance more than once: a file sent again, a copy cut short in transfer, a version
+        with a claim added. Of the transactions that share a payer, a trace number and a payment date, only versions of
+        one remittance compete (_versions): two that hold no claim in common are two payments, and both are counted.
+        Among versions of one remittance (_standing), a complete one (it ends with its SE) whose payment equals its claims
+        paid less its provider adjustments stands over any copy cut short or that does not add up; a version whose every
+        claim and adjustment is on another complete, balanced version is hidden by it (among identical ones the newest,
+        by ISA date, ISA time and file time, stands). Two complete, balanced versions that each hold something the other
+        does not are both counted, and the store records it for a person (DIFFER_META, on the Data tab's checks), as it
+        does a hidden broken copy that holds claims no standing version holds (_lost_entry). Returns how many
+        transactions are hidden."""
         c = self.conn
-        c.execute("UPDATE transactions SET superseded=0")
         rows = c.execute("""
             SELECT t.transaction_key, COALESCE(t.trace_payer_id, t.payer_id, t.payer_name) AS pid, t.trace_number, t.payment_date,
-                   t.isa_date, t.isa_time, f.mtime
+                   t.isa_date, t.isa_time, f.mtime, t.content_fingerprint, t.balanced, t.payment_amount_cents, t.payer_name
             FROM transactions t LEFT JOIN files f ON f.sha256 = t.file_sha256
             WHERE t.trace_number IS NOT NULL AND t.trace_number <> ''
         """).fetchall()
         groups: dict[tuple, list] = {}
         for r in rows:
-            groups.setdefault((r["pid"], r["trace_number"], r["payment_date"]), []).append(r)
-        flagged = 0
-        for key, members in groups.items():
-            if len(members) < 2:
-                continue
-            # the last key makes the choice the same whatever order the files were read in
-            members.sort(key=lambda r: ((r["isa_date"] or ""), (r["isa_time"] or ""), (r["mtime"] or ""), r["transaction_key"]))
-            for r in members[:-1]:
-                c.execute("UPDATE transactions SET superseded=1 WHERE transaction_key=?", (r["transaction_key"],))
-                flagged += 1
+            groups.setdefault((r["pid"], r["trace_number"], r["payment_date"]), []).append(dict(r))
+        multi = [m for m in groups.values() if len(m) > 1]
+        keys = [r["transaction_key"] for m in multi for r in m]
+        held: dict[str, dict] = {k: {"claims": [], "plb": []} for k in keys}
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            marks = ",".join("?" * len(part))
+            for r in c.execute(f"""SELECT transaction_key, patient_control_number, payer_claim_control_number, claim_status_code, charge_cents,
+                                          paid_cents, patient_responsibility_cents FROM claims WHERE transaction_key IN ({marks})""", part):
+                held[r[0]]["claims"].append(tuple(r)[1:])
+            for r in c.execute(f"SELECT transaction_key, reason_code, reference, amount_cents FROM plb WHERE transaction_key IN ({marks})", part):
+                held[r[0]]["plb"].append(tuple(r)[1:])
+        hidden: set[str] = set()
+        differ: list[dict] = []
+        for members in multi:
+            for one in _versions(members, held):
+                kept, drop = _standing(one, held)
+                hidden |= drop
+                if len(kept) > 1:
+                    differ.append(_differ_entry(kept, held))
+                lost = _lost_entry(kept, [m for m in one if m["transaction_key"] in drop], held)
+                if lost:
+                    differ.append(lost)
+        c.execute("UPDATE transactions SET superseded=0")
+        c.executemany("UPDATE transactions SET superseded=1 WHERE transaction_key=?", [(k,) for k in sorted(hidden)])
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (SUPERSEDE_META, SUPERSEDE_RULE))
+        if differ:
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (DIFFER_META, json.dumps(differ[:50], default=str)))
+        else:
+            c.execute("DELETE FROM meta WHERE key=?", (DIFFER_META,))
         c.commit()
-        return flagged
+        return len(hidden)
+
+    def recheck_supersession(self) -> bool:
+        """Decide again which copies of a remittance stand when the rule that decided them has changed since (a release), new
+        files or not: the next run after a deploy puts right what the old rule hid. True when a transaction's flag changed."""
+        r = self.conn.execute("SELECT value FROM meta WHERE key=?", (SUPERSEDE_META,)).fetchone()
+        if r and r[0] == SUPERSEDE_RULE:
+            return False
+        flags = "SELECT transaction_key FROM transactions WHERE COALESCE(superseded, 0) = 1"
+        before = {k for (k,) in self.conn.execute(flags)}
+        self.mark_superseded()
+        return before != {k for (k,) in self.conn.execute(flags)}
 
     # ------------------------------------------------------------------ EMA ingest
     def ingest_ema_rows(self, rows: Iterable[dict]) -> dict:

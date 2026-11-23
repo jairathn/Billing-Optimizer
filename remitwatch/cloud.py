@@ -29,6 +29,7 @@ cycle records its peak in status.json.
 from __future__ import annotations
 
 import gc
+import hashlib
 import io
 import json
 import os
@@ -185,30 +186,108 @@ def running(state) -> dict | None:
 
 # --------------------------------------------------------------------------- the store, in memory
 
-def load_raw(state):
+# The store image a run saved, by the gzip file's size and sha256, is recorded in status.json at once (IMAGE_KEY). A run
+# loads only that image: a missing one where earlier runs left status.json or cursor.json, or another one (an older copy
+# put back, a copy cut short), stops the run before anything changes. Starting from it would save it as the practice's.
+IMAGE_KEY = "image"
+IMAGE_MISSING = ("The store image is missing from the state folder. Nothing was changed. Put it back, or restore it from "
+                 "Dropbox's version history.")
+IMAGE_OTHER = ("The store image in the state folder is not the one the last run saved. Nothing was changed. Restore the newest "
+               "version from Dropbox's version history, or, if this copy was put back on purpose, accept it: docs/OPERATIONS.md, "
+               "Recovering the store.")
+IMAGE_UNREADABLE = ("The store image in the state folder cannot be read (it may be cut short). Nothing was changed. Restore "
+                    "another version from Dropbox's version history.")
+
+
+class StoreImageProblem(RuntimeError):
+    """The state folder's store image cannot be taken as the practice's store: the run stops before changing anything."""
+
+
+def _counted(chunks: Iterable[bytes], h, size: list) -> Iterator[bytes]:
+    """The chunks as they pass, added to a sha256 and a byte count (size[0])."""
+    for c in chunks:
+        h.update(c)
+        size[0] += len(c)
+        yield c
+
+
+def load_raw(state, check: bool = True):
+    """The store from the state folder, and whether there was one. check (every run does): with no image while
+    status.json or cursor.json show earlier runs, or with an image other than the one the last save recorded, this
+    raises StoreImageProblem. A first load needs both files absent."""
     from .store import Store
     chunks = state.get_chunks(RAW)
     if chunks is None:
+        if check and (state.meta(STATUS) is not None or state.meta(CURSOR) is not None):
+            raise StoreImageProblem(IMAGE_MISSING)
         # Start from a serialized image even when it is empty. SQLite keeps such a database in one block of memory and
         # can hand that block out when the store is saved; a plain in-memory database has to be copied twice instead.
         blank = Store(":memory:", compact=True)
         image = blank.to_bytes()
         blank.close()
         return Store.from_bytes(image), False
-    data = gunzip_chunks(chunks)
+    h, size = hashlib.sha256(), [0]
+    data = gunzip_chunks(_counted(chunks, h, size))
+    want = (_read_json(state, STATUS).get(IMAGE_KEY) or {}) if check else {}
+    if isinstance(want, dict) and want.get("sha256") and (want["sha256"] != h.hexdigest() or want.get("size") != size[0]):
+        del data
+        gc.collect()
+        raise StoreImageProblem(IMAGE_OTHER)
     store = Store.from_bytes(data)
     del data
     gc.collect()
     return store, True
 
 
-def save_raw(state, store) -> dict:
+def save_raw(state, store, log=print) -> dict:
+    """Save the store image, and record it at once (record_image). The result carries IMAGE_KEY: the saved file's size and
+    sha256."""
     data = store.to_bytes()
+    h, size = hashlib.sha256(), [0]
     try:
-        return state.put_chunks(RAW, gzip_chunks(data))
+        meta = dict(state.put_chunks(RAW, _counted(gzip_chunks(data), h, size)) or {})
     finally:
         del data
         gc.collect()
+    meta[IMAGE_KEY] = {"size": size[0], "sha256": h.hexdigest(), "saved": _now()}
+    record_image(state, meta[IMAGE_KEY], log)
+    return meta
+
+
+def record_image(state, image: dict | None, log=print) -> None:
+    """The image just saved, written into status.json at once: a run stopped after its save (out of time or memory) must
+    not leave the record behind the image, or the next run would refuse a good store. The run's own status, written at
+    its end, carries it as well."""
+    if not image:
+        return
+    try:
+        cur = _read_json(state, STATUS)
+        cur[IMAGE_KEY] = image
+        _write_json(state, STATUS, cur)
+    except Exception as exc:
+        log(f"the saved store image could not be recorded in the status yet ({type(exc).__name__}); the run's status records it")
+
+
+def accept_image(state) -> str:
+    """A person's decision after a stop (docs/OPERATIONS.md, Recovering the store): the store image now in the state folder
+    is the store, and the next run loads it. It must open as a store. Returns what was done, in words."""
+    from .store import Store
+    chunks = state.get_chunks(RAW)
+    if chunks is None:
+        raise StoreImageProblem(IMAGE_MISSING)
+    h, size = hashlib.sha256(), [0]
+    try:
+        data = gunzip_chunks(_counted(chunks, h, size))
+        store = Store.from_bytes(data)
+        del data
+        n = store.conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        store.close()
+    except (zlib.error, sqlite3.Error) as exc:
+        raise StoreImageProblem(IMAGE_UNREADABLE) from exc
+    cur = _read_json(state, STATUS)
+    cur[IMAGE_KEY] = {"size": size[0], "sha256": h.hexdigest(), "saved": None, "accepted": _now()}
+    _write_json(state, STATUS, cur)
+    return f"The store image in the state folder is the store from now on: it holds {n:,} remittances. The next run loads it."
 
 
 # --------------------------------------------------------------------------- the journal
@@ -894,6 +973,24 @@ class deadline_guard:
         return False
 
 
+def _image_alert(prev: dict, out: dict, email: bool, log=print) -> None:
+    """Mail a stop over the store image to the report address, at most once a day (the day is kept in status.json): the
+    dashboard keeps showing the last good copy, so without this nobody may notice the daily runs stopped."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    if prev.get("image_alerted") == today:
+        out["image_alerted"] = today
+        return
+    if not email:
+        return
+    try:
+        from .report import email_report
+        if email_report(f"RemitWatch stopped before changing anything.\n\n{out.get('error')}\n\nThis message contains no patient information.",
+                        subject="RemitWatch alert: the store image"):
+            out["image_alerted"] = today
+    except Exception as exc:        # a mail failure must never hide the stop itself
+        log(f"store image alert email failed: {type(exc).__name__}")
+
+
 def write_status(state, out: dict) -> None:
     try:
         state.put(STATUS, json.dumps(out, default=str).encode())
@@ -919,7 +1016,18 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if delay_s:
             time.sleep(delay_s)
             t0 = time.time()
-        store, existed = load_raw(state)
+        prev_status = _read_json(state, STATUS)
+        if prev_status.get(IMAGE_KEY):
+            out[IMAGE_KEY] = prev_status[IMAGE_KEY]        # the record of the last save, kept by a run that saves nothing
+        try:
+            store, existed = load_raw(state)
+        except StoreImageProblem as exc:
+            # the store is missing or is not the one last saved: stop before anything is read, folded or saved
+            out["error"] = str(exc)
+            _image_alert(prev_status, out, email, log)
+            out["finished"] = _now()
+            out["seconds"] = round(time.time() - t0, 1)
+            return out
         conn = store.conn
         ensure_schema(conn)
         conn.executescript(ALERTS_DDL + CLOUD_DDL)
@@ -956,6 +1064,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         ingested = n_ingested > 0
         remaining = (ingest.get("remaining") or 0) > 0 or (tz.get("remaining") or 0) > 0
         mem["ingest"] = peak_mb()
+        # a release that changed which copies of a remittance stand decides them again once, new files or not: the store is
+        # then saved and analysed as after new files
+        if store.recheck_supersession():
+            ingested = True
 
         # exports read by a release that did not yet keep their pull time: fetch that once (see backfill_export_times)
         if client is not None and not remaining:
@@ -1046,8 +1158,9 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             conn.commit()
         if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed"):
             t2 = time.time()
-            meta = save_raw(state, store)
+            meta = save_raw(state, store, log)
             out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
+            out[IMAGE_KEY] = meta.get(IMAGE_KEY)        # recorded in status.json at the save; the run's status keeps it
         if shown_changed or serving_stale:
             out["serving"] = save_serving(state, conn)
             state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "build": SERVING_BUILD, "at": _now()}).encode())

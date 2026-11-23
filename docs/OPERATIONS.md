@@ -461,3 +461,20 @@ The AWS server updates itself: a merge to main is deployed within about 5 minute
 - Unbalanced transactions in `stats`: a few payers send remittances that do not balance; the lines are still loaded and flagged.
 - A payer name that lands in "Self-funded plan TPAs" or under its raw name: add a rule to `PAYER_RULES` in `remitwatch/codes.py` and run a cycle with `--force-detect`.
 - Commands (on the server, each after `sudo docker compose exec app`): `python -m remitwatch.cli cycle [--full] [--skip-sync] [--force-detect] [--report] [--no-email]`, `alerts [--notify]`, `detect`, `activity`, `stats`, `backup`, `fax-cycle`, `send-appeals`, `prepare-appeals`, `modmed-check`, `serve`. `README.md` lists them all. `import-cloud` and `compare-cloud` run with the app stopped, as `docs/SERVER_RUNBOOK.md` shows.
+
+### Recovering the store
+
+A run never starts from an empty store where a store was. When the store is missing, or is not the one the last run saved, the run stops before it reads, changes or saves anything, says why on the Data tab (Feed, Last cycle), and mails the report address (`REPORT_TO`) once a day. The dashboard keeps showing what it showed before, and what people record waits until the store is back.
+
+On Vercel the store is `store.sqlite.gz` in the state folder (`/RemitWatch-state` in the practice's Dropbox, or `REMITWATCH_STATE_PATH`). Each run that saves it records its size and sha256 in `status.json` in the same folder, and the next run loads only that image.
+
+- "The store image is missing from the state folder": it was moved, renamed or deleted. Put it back where it was, under the same name, or restore it with Dropbox's version history (on dropbox.com: the file's Version history, or Deleted files when it was deleted). The next run goes on by itself.
+- "The store image in the state folder is not the one the last run saved": an older copy was put back, or the file was replaced or cut short. Restore the newest version from Dropbox's version history. If an older copy was put back on purpose (everything recorded since that copy is lost), accept it on any computer with the code and the site's Dropbox settings (`DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`, and `REMITWATCH_STATE_PATH` if the site sets it): `python -m remitwatch.cli accept-store --state-folder`. It checks that the image opens as a store and records it; the next run loads it.
+- A first load (a new site) happens only when the state folder holds neither `status.json` nor `cursor.json`.
+
+On the server the store is `/data/remitwatch.sqlite` (`REMITWATCH_DB`). The file `remitwatch.sqlite.marker` beside it, written when the store was first made, says that a store was made there.
+
+- "The store file is missing": the file was moved or deleted, or the data volume is not the one the app had. Put the file back, restore the newest copy from `/data/backups` as `docs/SERVER_RUNBOOK.md` (Backups) shows, or attach the volume again. The next cycle goes on by itself.
+- "The store file holds no remittance, but the store here did": something made a new file in its place. Restore a copy as above.
+- To start again from an empty store on purpose (every file the feeds still hold is read again; people's statuses and notes are not in it), or to keep a copy with no remittances that was restored on purpose: `sudo docker compose exec app python -m remitwatch.cli accept-store`.
+- The marker sits on the same volume as the store, so a whole new, empty volume (the compose project renamed, the volume deleted) looks like a first start. The daily snapshot of the server's disk (`docs/SERVER_RUNBOOK.md`, Backups) is the way back from that.

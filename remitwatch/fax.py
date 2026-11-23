@@ -403,6 +403,25 @@ def _age_hours(iso: str | None, now: datetime) -> float:
 
 PURPOSE_WORDS = {"appeal": "appeal", "second_request": "second request", "next_level": "request for the next level",
                  "records": "records", "payment": "payment request"}
+PAID_WHY = "You marked this Sent, but {what} shows it paid{on}. Check it before RemitWatch chases it."
+
+
+def paid_on_file(evidence: str | dict | None) -> str | None:
+    """Why the store shows an item's money paid, for a person (fax.PAID_WHY), or None: detection found a later payment
+    that pays it (a remittance, or what EMA posted where that closes items: evidence.paid_later), whatever the item's
+    status says. A person's Sent over that payment is kept (detect.py), so the follow-ups must not chase it."""
+    try:
+        ev = json.loads(evidence) if isinstance(evidence, str) else (evidence or {})
+    except ValueError:
+        return None
+    paid = ev.get("paid_later") if isinstance(ev, dict) else None
+    if not isinstance(paid, dict):
+        return None
+    day = str(paid.get("payment_date") or "")[:10]
+    what = "EMA" if str(paid.get("trace") or "").startswith("EMA") else "a remittance"
+    return PAID_WHY.format(what=what, on=f" on {day}" if day else "")
+
+
 SENDING_STUCK_HOURS = 24    # a send not settled for this long (SRFax could not say whether it went out): a person checks
 
 
@@ -504,14 +523,17 @@ def followups(conn: sqlite3.Connection, today: str | None = None, ids: list[str]
     for r in conn.execute(sql + " ORDER BY created_at, fax_key", params):
         out_by.setdefault(r["finding_id"], []).append(dict(r))
     in_by = _ties(conn)
+    # what the store says was paid (paid_on_file), where this copy of the findings carries it
+    ev_col = ", evidence" if "evidence" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else ""
     days = lambda d: (t - date.fromisoformat(d)).days       # noqa: E731
     due = []
     for fid, outs in out_by.items():
-        f = conn.execute("""SELECT finding_id, status, payer_group, payer_kind, signal, title, service_date, shortfall_cents
-                            FROM findings WHERE finding_id=?""", (fid,)).fetchone()
+        f = conn.execute(f"""SELECT finding_id, status, payer_group, payer_kind, signal, title, service_date, shortfall_cents{ev_col}
+                             FROM findings WHERE finding_id=?""", (fid,)).fetchone()
         if not f or f["status"] != "appealed":
             continue
         f = dict(f)
+        paid = paid_on_file(f.pop("evidence", None))
         sent = [o for o in outs if o["status"] != "failed"]
         base = {"finding_id": fid, "payer_group": f["payer_group"], "payer_kind": f["payer_kind"], "title": f["title"],
                 "service_date": f["service_date"], "shortfall_cents": f["shortfall_cents"], "first_sent": _day(outs[0]["created_at"]),
@@ -524,6 +546,10 @@ def followups(conn: sqlite3.Connection, today: str | None = None, ids: list[str]
                 due.append(dict(base, action="person", level=lvl, settle=newest["fax_key"],
                                 why="a fax for it may have gone out without being recorded (the run stopped while sending, or SRFax did not "
                                     "answer): check SRFax's sent faxes, then say on the Faxes page whether it went out"))
+            continue
+        if newest["status"] == "failed" and paid:
+            # the store shows it paid: nothing goes again by one click either
+            due.append(dict(base, action="person", level=lvl, why=paid, paid=True))
             continue
         if newest["status"] == "failed":
             # the last fax did not get through: the busy line is tried again (api._fax_refresh); after the last try, or when the
@@ -589,6 +615,11 @@ def followups(conn: sqlite3.Connection, today: str | None = None, ids: list[str]
                     action, why, n = "payment", f"approved {latest['received']}, no payment in {days(latest['received'])} days", len(asked) + 1
         else:
             action, why, n = chase(first_at, "the appeal")
+        if action in ("second_request", "next_level", "records", "payment") and paid:
+            # whatever the item's status says, a fax telling the payer it is unpaid (or asking again) is a person's call
+            # once the store shows the money paid: listed for a person, and a line in the item's history (api._send_followup)
+            due.append(dict(base, action="person", why=paid, level=level, faxes=len(sent), paid=True))
+            continue
         if action:
             to_level = level + (1 if action == "next_level" else 0)
             entry = dict(base, action=action, why=why, n=n, level=to_level, faxes=len(sent),

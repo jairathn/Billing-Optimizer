@@ -66,8 +66,13 @@ def ensure_server_schema(path: str) -> None:
     from .alerts import ALERTS_DDL
     from .link import DDL as LINK_DDL
     from .notes import ensure_packets
-    from .store import connect
+    from .store import connect, mark_store, store_problem
     from .uploads import ensure_schema as ensure_uploads
+    why = store_problem(path)
+    if why:             # a store was made here and is missing: making the tables would make a new empty store in its place
+        import sys
+        print(f"RemitWatch: {why}", file=sys.stderr, flush=True)
+        return
     conn = connect(path)
     try:
         ensure_schema(conn)
@@ -80,6 +85,7 @@ def ensure_server_schema(path: str) -> None:
         conn.commit()
     finally:
         conn.close()
+    mark_store(path)                    # the marker beside it: from now on a missing store is a stop, not a new one
 
 
 @asynccontextmanager
@@ -388,7 +394,8 @@ def health():
     if serverless:
         return {"ok": True, "mode": "serverless", "version": __version__, "commit": commit,
                 "runtime": runtime.describe(), "selftest": runtime.selftest(), "time": datetime.now(timezone.utc).isoformat()}
-    return {"ok": os.path.exists(DB_PATH), "mode": "server", "version": __version__, "commit": commit,
+    from .store import store_problem
+    return {"ok": os.path.exists(DB_PATH) and not store_problem(DB_PATH), "mode": "server", "version": __version__, "commit": commit,
             "time": datetime.now(timezone.utc).isoformat()}
 
 
@@ -955,7 +962,17 @@ def _packets_for(finding_id: str) -> list[dict]:
         from . import cloud
         st = cloud.SERVING_COPY.state(fast=True)        # part of opening a finding: must not wait on a slow Dropbox
         try:
-            return [_shown_note_name(p) for p in cloud.list_packets(st, finding_id)] if st is not None else []
+            got = [_shown_note_name(p) for p in cloud.list_packets(st, finding_id)] if st is not None else []
+            # a packet stays in the folder of the item it was built for: once detection gave the item's money a new id
+            # (detect.carry_to_heirs), the faxes it went out with name it
+            named = [r["packet_id"] for r in rows("SELECT DISTINCT packet_id FROM faxes WHERE finding_id=? AND packet_id IS NOT NULL",
+                                                    (finding_id,))] if (st is not None and has_table("faxes")) else []
+            for pid in [p for p in named if p not in {g.get("packet_id") for g in got}]:
+                p = cloud.get_packet(st, pid)
+                if p:
+                    got.append(_shown_note_name({k: p.get(k) for k in ("packet_id", "finding_id", "created_at", "mode", "model", "subject",
+                                                                       "note_name", "emailed_to", "emailed_at")}))
+            return got
         except Exception:
             return []
     return [_shown_note_name(p) for p in rows("SELECT packet_id, created_at, mode, subject, note_name, emailed_to, emailed_at FROM appeal_packets "
@@ -3784,6 +3801,29 @@ def _reservation_key(prov, fid: str, purpose: str, level: int, conn) -> str:
     return f"out:{prov.name}:{hashlib.sha256(str(fid).encode()).hexdigest()[:16]}:{purpose}:{level}:{n}"
 
 
+def _appeal_on_file(conn, f: dict, level: int) -> str | None:
+    """Why an appeal must not be faxed because one for the same claim line (for an item about a whole claim, the same
+    claim) at the same level already went out from another item, or None. Detection moves an item's faxes to its heir when
+    its signal changes (detect.carry_to_heirs), so this catches what the item's own faxes cannot: two items on one line.
+    Read in the step that reserves the send."""
+    fid = f.get("finding_id")
+    if f.get("line_key"):
+        cond, key = "g.line_key = ?", f["line_key"]
+    elif f.get("claim_key"):
+        cond, key = "g.line_key IS NULL AND g.claim_key = ?", f["claim_key"]
+    else:
+        return None
+    try:
+        r = conn.execute(f"""SELECT x.created_at FROM faxes x JOIN findings g ON g.finding_id = x.finding_id
+                             WHERE x.direction='out' AND x.purpose='appeal' AND COALESCE(x.level,1)=? AND COALESCE(x.status,'')!='failed'
+                               AND x.finding_id != ? AND {cond} ORDER BY x.created_at LIMIT 1""", (int(level or 1), fid, key)).fetchone()
+    except sqlite3.OperationalError:        # no faxes table yet: nothing went out
+        return None
+    if not r:
+        return None
+    return "An appeal for this claim line was already faxed, from another item on the same line. Follow that item's appeal; a second one is not faxed."
+
+
 def _adopt_marker(st, marker: str, key: str) -> None:
     """A serverless send's marker with no record of its own, older than any send takes: the run stopped between the two.
     Its record is written now, as not settled, so the next run asks the fax service whether it went out."""
@@ -3830,6 +3870,8 @@ def _reserve(prov, f: dict, number: str, *, packet_id: str | None, purpose: str,
         conn = db()
         try:
             why = still_ok(conn) if still_ok else None
+            if not why and purpose == "appeal":
+                why = _appeal_on_file(conn, f, level)
             if why:
                 raise SendBlocked(why)
             key = _reservation_key(prov, fid, purpose, level, conn)
@@ -3853,6 +3895,8 @@ def _reserve(prov, f: dict, number: str, *, packet_id: str | None, purpose: str,
         conn.execute("BEGIN IMMEDIATE")
         try:
             why = still_ok(conn) if still_ok else None
+            if not why and purpose == "appeal":
+                why = _appeal_on_file(conn, f, level)
             if why:
                 raise SendBlocked(why)
             key = _reservation_key(prov, fid, purpose, level, conn)
@@ -4506,6 +4550,10 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None, 
     def held(reason: str) -> dict:
         return dict(out, status="held", reason=reason)
     if d["action"] == "person":
+        if d.get("paid"):
+            # the store shows the money paid (fax.paid_on_file): the item's history says why its follow-ups stopped, once
+            if not (has_table("finding_events") and one("SELECT 1 FROM finding_events WHERE finding_id=? AND note=? LIMIT 1", (fid, d["why"]))):
+                _record_action({"kind": "event", "event": "chase_held", "finding_id": fid, "note": d["why"], "actor": actor})
         if not (person_number and d.get("resend") in RESEND):
             return held(d["why"])
         d = dict(d, action=d["resend"])         # a person sends it again
