@@ -1102,3 +1102,408 @@ def test_the_page_script_is_plain_and_the_module_mirrors_the_apps_categories():
     import re as _re
     names = _re.findall(r"^(?:async\s+)?function\s+(\w+)|^const\s+(\w+)", js, _re.M)
     assert all((a or b).startswith(("rs", "RS_")) or (a or b) == "resultsTab" for a, b in names)
+
+
+# ================================================================================================ review fixes (both reviews)
+def _m(s, fid):
+    return money_of(s, fid) or {"returned": 0, "taken_back": 0, "a": 0, "b": 0, "c": 0, "events": []}
+
+
+def test_money_paid_before_the_flag_taken_back_then_paid_again_later_counts_only_the_new_money(store):
+    # the same reprocessing as the one-remittance case above (50 before the flag reversed, 90 paid), a week apart: 40
+    fid, _ = denial(store, 1, flagged="2026-04-10")
+    paid(store, 1, on="2026-04-01", amount=50)
+    remit(store, trace=F.check_no(160), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "22", "received": "2026-04-02", "lines": [ln("99213", -150, -50, [("CO", "45", -100)])]}])
+    remit(store, trace=F.check_no(161), paid_on="2026-05-27",
+          claims=[{"pcn": F.claim_id(1, sub=3), "status": "1", "received": "2026-05-10", "lines": [ln("99213", 150, 90, [("CO", "45", 60)])]}])
+    # the same 50 paid again: nothing new
+    fid2, _ = denial(store, 2, flagged="2026-04-10")
+    paid(store, 2, on="2026-04-01", amount=50)
+    remit(store, trace=F.check_no(260), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(2, sub=2), "status": "22", "received": "2026-04-02", "lines": [ln("99213", -150, -50, [("CO", "45", -100)])]}])
+    remit(store, trace=F.check_no(261), paid_on="2026-05-27",
+          claims=[{"pcn": F.claim_id(2, sub=3), "status": "1", "received": "2026-05-10", "lines": [ln("99213", 150, 50, [("CO", "45", 100)])]}])
+    run(store)
+    got = {f: (_m(store, f)["returned"], _m(store, f)["taken_back"]) for f in (fid, fid2)}
+    assert got == {fid: (4000, 0), fid2: (0, 0)}
+    assert dash(store)["money"]["returned_cents"] == 4000
+    ev = next(e for e in money_of(store, fid)["events"] if e["cents"] > 0)
+    assert ev["counted_cents"] == 4000 and "$50.00 of it only paid back money the payer had paid before the flag" in ev["rule"]
+
+
+def test_a_reprocessing_that_nets_to_zero_never_raises_the_top_line(store):
+    def case(n, with_second):
+        fid, _ = denial(store, n, flagged="2026-04-10")
+        remit(store, trace=F.check_no(n * 100 + 70), paid_on="2026-04-01",
+              claims=[{"pcn": F.claim_id(n, sub=2), "received": "2026-03-05", "lines": [ln("99213", 150, 50, [("CO", "45", 100)])]}])
+        remit(store, trace=F.check_no(n * 100 + 71), paid_on="2026-05-20",
+              claims=[{"pcn": F.claim_id(n, sub=2), "status": "22", "cfi": "16", "received": "2026-03-05", "lines": [ln("99213", -150, -50, [("CO", "45", -100)])]},
+                      {"pcn": F.claim_id(n, sub=3), "status": "1", "cfi": "16", "received": "2026-03-05", "lines": [ln("99213", 150, 60, [("CO", "45", 90)])]}])
+        if with_second:
+            remit(store, trace=F.check_no(n * 100 + 72), paid_on="2026-06-10",
+                  claims=[{"pcn": F.claim_id(n, sub=3), "status": "22", "cfi": "16", "received": "2026-03-05", "lines": [ln("99213", -150, -60, [("CO", "45", -90)])]},
+                          {"pcn": F.claim_id(n, sub=4), "status": "1", "cfi": "16", "received": "2026-06-01", "lines": [ln("99213", 150, 60, [("CO", "45", 90)])]}])
+        return fid
+    one, two = case(1, False), case(2, True)
+    run(store)
+    assert {"without": _m(store, one)["returned"], "with": _m(store, two)["returned"]} == {"without": 1000, "with": 1000}
+
+
+@pytest.mark.parametrize("signal,category", [("CREDIT_BALANCE", "refund"), ("FEE_SKIM", "fees"), ("TAKEBACK", "fees"),
+                                             ("REMIT_NOT_POSTED", "fees")])
+def test_a_refund_fee_or_unposted_item_marked_paid_is_never_money_returned(store, signal, category):
+    # a credit refunded to the payer is money going out; a fee or takeback a person closes is not a payer's payment; an
+    # unposted payment's money is found by EMA's posting of it, never by a mark
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "lines": [ln("99213", 150, 200, [])]}])
+    item(store, finding_id="X1", signal=signal, category=category, line_key=f"{tk}-0-0", claim_key=f"{tk}-0", transaction_key=tk,
+         first_seen="2026-04-01T08:00:00+00:00", work_state="work_now", shortfall_cents=5000)
+    run(store, today="2026-04-02")
+    actions.apply_status(store.conn, "X1", "resolved", notes="Refund sent to the payer", actor="Biller One", at="2026-04-20T10:00:00+00:00")
+    store.conn.commit()
+    run(store)
+    assert dash(store)["money"]["returned_cents"] == 0 and money_of(store, "X1") is None
+
+
+def test_emas_posting_of_an_835_payment_under_a_misread_number_on_the_same_day_counts_once(store):
+    fid, _ = denial(store, 1, ema_link=F.link_no(1))
+    ema_line(store, F.link_no(1), bill=F.bill_id(1))
+    paid(store, 1, on="2026-04-20", amount=90)
+    ema_pay(store, F.link_no(1), posted="2026-04-20", cents=9000, check="MISREAD", in_835=0)
+    run(store)
+    assert _m(store, fid)["returned"] == 9000 and len(_m(store, fid)["events"]) == 1
+
+
+def test_emas_copy_of_an_835_payment_the_payer_then_reversed_is_not_counted(store):
+    fid, _ = denial(store, 1, ema_link=F.link_no(1))
+    ema_line(store, F.link_no(1), bill=F.bill_id(1))
+    paid(store, 1, on="2026-04-20", amount=90)
+    ema_pay(store, F.link_no(1), posted="2026-04-23", cents=9000, check="MISREAD", in_835=0)
+    remit(store, trace=F.check_no(150), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "22", "received": "2026-04-02", "lines": [ln("99213", -150, -90, [("CO", "45", -60)])]}])
+    run(store)
+    assert _m(store, fid)["returned"] == 0
+
+
+@pytest.mark.parametrize("match,cause,damaged", [("loose", None, 0), ("exact", None, 0), (None, "misnumbered", 0), (None, None, 1)])
+def test_a_check_the_check_match_ties_to_an_835_is_that_835s_payment(store, match, cause, damaged):
+    # ema_checks' own rule (line_outcomes): matched exactly or loosely, misnumbered, or a number a spreadsheet damaged
+    fid, _ = denial(store, 1, ema_link=F.link_no(1))
+    ema_line(store, F.link_no(1), bill=F.bill_id(1))
+    tk = paid(store, 1, on="2026-04-20", amount=90)
+    ema_pay(store, F.link_no(1), posted="2026-06-10", cents=9000, check="LOOSE10", in_835=0)      # 51 days after the 835
+    store.conn.execute("""INSERT INTO ema_checks (check_no, payer, ins_paid, match, cause, damaged, trace_key, first_posted, last_posted)
+                          VALUES ('LOOSE10', 'Anthem', 9000, ?, ?, ?, ?, '2026-06-10', '2026-06-10')""", (match, cause, damaged, tk))
+    store.conn.commit()
+    run(store)
+    assert _m(store, fid)["returned"] == 9000 and {e["source"] for e in _m(store, fid)["events"]} == {"835"}
+
+
+def test_emas_late_posting_of_the_items_own_remittance_is_money_paid_before_the_flag(store):
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "lines": [ln("99213", 150, 50, [("CO", "45", 100)])]}])
+    item(store, finding_id="U1", signal="UNDERPAID_VS_OWN_RATE", category="underpayment", line_key=f"{tk}-0-0", claim_key=f"{tk}-0",
+         transaction_key=tk, first_seen="2026-04-01T08:00:00+00:00", work_state="work_now", shortfall_cents=4000, ema_link=F.link_no(1))
+    item(store, finding_id="P1", signal="REMIT_NOT_POSTED", category="fees", transaction_key=tk, patient_control_number=None,
+         line_key=None, claim_key=None, first_seen="2026-04-01T08:00:00+00:00", work_state="work_now", shortfall_cents=5000,
+         evidence={"ema_posted_cents": 0, "claim_paid_cents": 5000})
+    ema_line(store, F.link_no(1), bill=F.bill_id(1))
+    run(store, today="2026-04-02")
+    ema_pay(store, F.link_no(1), posted="2026-05-25", cents=5000, check="LOOSE10", in_835=0)
+    store.conn.execute("""INSERT INTO ema_checks (check_no, payer, ins_paid, match, trace_key, first_posted, last_posted)
+                          VALUES ('LOOSE10', 'Anthem', 5000, 'loose', ?, '2026-05-25', '2026-05-25')""", (tk,))
+    store.conn.commit()
+    run(store)
+    assert {f: _m(store, f)["returned"] for f in ("U1", "P1")} == {"U1": 0, "P1": 5000}
+
+
+def test_an_unposted_payment_posted_under_another_number_is_money_found(store):
+    # EMA keyed the 835's check under another number (the check match paired them: misnumbered)
+    tk = remit(store, trace=F.check_no(7), paid_on="2026-03-20", claims=[{"pcn": F.claim_id(1), "lines": [ln("99213", 150, 120, [("CO", "45", 30)])]}])
+    item(store, finding_id="P1", signal="REMIT_NOT_POSTED", category="fees", transaction_key=tk, patient_control_number=None,
+         line_key=None, claim_key=None, first_seen="2026-04-01T08:00:00+00:00", work_state="work_now", shortfall_cents=12000,
+         evidence={"ema_posted_cents": 0, "claim_paid_cents": 12000})
+    run(store, today="2026-04-02")
+    store.conn.execute("""INSERT INTO ema_checks (check_no, payer, ins_paid, cause, pair_trace, first_posted, last_posted)
+                          VALUES ('TYPO7', 'Anthem', 12000, 'misnumbered', ?, '2026-04-20', '2026-04-20')""", (tk,))
+    store.conn.commit()
+    run(store)
+    assert (_m(store, "P1")["b"], dash(store)["money"]["returned_cents"]) == (12000, 12000)
+
+
+def test_a_paid_mark_never_brings_back_a_payment_the_payer_took_back(store):
+    fid, _ = denial(store, 1)
+    paid(store, 1, on="2026-04-20", amount=90)
+    actions.apply_status(store.conn, fid, "resolved", actor="Biller One", at="2026-04-22T10:00:00+00:00")
+    store.conn.commit()
+    remit(store, trace=F.check_no(150), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "22", "received": "2026-04-02", "lines": [ln("99213", -150, -90, [("CO", "45", -60)])]}])
+    run(store)
+    m = dash(store)["money"]
+    assert m["returned_cents"] == 0 and m["mark_taken_back_items"] == 1
+    assert results.list_entries(store.conn, "mark_taken_back", TODAY) == [[fid, 0]]
+
+
+def _two_services_one_group(s):
+    tk = remit(s, trace=F.check_no(1), paid_on="2026-03-28",
+               claims=[{"pcn": F.claim_id(1), "status": "4", "lines": [ln("99213", 150, 0, [("CO", "16", 150)]), ln("11102", 120, 0, [("CO", "16", 120)])]}])
+    item(s, finding_id="C1", signal="DENIED_CODING", line_key=f"{tk}-0-0", claim_key=f"{tk}-0", transaction_key=tk,
+         first_seen="2026-04-01T08:00:00+00:00", work_state="work_now")
+    item(s, finding_id="L2", signal="DENIED_CODING", line_key=f"{tk}-0-1", claim_key=f"{tk}-0", transaction_key=tk,
+         procedure_code="11102", billed_code="11102", first_seen="2026-04-02T08:00:00+00:00", work_state="work_now")
+    s.conn.execute("INSERT INTO transactions (transaction_key, trace_number, payment_date, payer_name, superseded) VALUES ('TXW', 'W1', '2026-03-30', 'BLUE CROSS TEST', 0)")
+    s.conn.execute("""INSERT INTO claims (claim_key, transaction_key, patient_control_number, payment_date, statement_from, claim_status_code,
+                      charge_cents, paid_cents, payer_name, claim_filing_indicator) VALUES ('TXW-0', 'TXW', ?, '2026-03-30', '2026-03-02', '4',
+                      27000, 0, 'BLUE CROSS TEST', '12')""", (F.claim_id(1, sub=4),))
+    s.conn.commit()
+
+
+def test_work_on_one_service_is_not_work_on_another_service_of_the_claim(store):
+    _two_services_one_group(store)
+    fax(store, "L2", "2026-04-05")
+    remit(store, trace=F.check_no(2), paid_on="2026-04-20", claims=[{"pcn": F.claim_id(1, sub=2), "lines": [ln("99213", 150, 90, [("CO", "45", 60)])]}])
+    run(store)
+    assert money_of(store, "C1")["members"] == ["C1", "L2"]
+    ev = money_of(store, "C1")["events"][0]
+    assert (ev["bucket"], ev["work_kind"]) == ("c", None)
+
+
+def test_a_second_payer_item_on_another_service_never_makes_the_primarys_payment_found_money(store):
+    _two_services_one_group(store)
+    store.conn.execute("UPDATE findings SET signal='SECONDARY_NOT_BILLED' WHERE finding_id='L2'")
+    store.conn.commit()
+    remit(store, trace=F.check_no(2), paid_on="2026-04-20", claims=[{"pcn": F.claim_id(1, sub=2), "lines": [ln("99213", 150, 90, [("CO", "45", 60)])]}])
+    run(store)
+    assert money_of(store, "C1")["events"][0]["bucket"] == "c"
+
+
+def test_on_a_second_payer_item_only_the_other_payers_money_is_found(store):
+    # the primary pays more on the same line (a reprocessing): not money from the second payer nobody had billed
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "lines": [ln("99213", 150, 80, [("PR", "2", 20), ("CO", "45", 50)])]}])
+    item(store, finding_id="S1", signal="SECONDARY_NOT_BILLED", category="denial", line_key=f"{tk}-0-0", claim_key=f"{tk}-0",
+         transaction_key=tk, first_seen="2026-04-01T08:00:00+00:00", work_state="work_now", shortfall_cents=2000)
+    remit(store, trace=F.check_no(2), paid_on="2026-05-02", claims=[{"pcn": F.claim_id(1, sub=2), "lines": [ln("99213", 150, 90, [("CO", "45", 60)])]}])
+    run(store)
+    assert {(e["bucket"], e["cents"]) for e in money_of(store, "S1")["events"] if e["cents"] > 0} == {("c", 9000)}
+
+
+def test_work_recorded_after_the_money_came_is_not_worked_in_the_lift(store):
+    n = _population(store, 0, 0, 3, 3)          # 6 unworked items, 3 paid on 2026-04-20
+    for k in range(3):
+        fid, _ = denial(store, n + k)
+        paid(store, n + k, on="2026-04-20", amount=100)
+        event(store, fid, "mark_posted", at="2026-04-25T10:00:00+00:00", actor="Biller One")     # posted after the money
+    # a call logged after the money came is not what brought it either
+    fid, _ = denial(store, n + 3)
+    paid(store, n + 3, on="2026-04-20", amount=100)
+    event(store, fid, "call", at="2026-04-22T10:00:00+00:00", actor="Biller One")
+    run(store)
+    lf = dash(store)["lift"]
+    assert lf["worked"]["n"] == 0 and lf["incremental_cents"] == 0 and lf["unworked"]["n"] == 10
+    # posting a payment is bookkeeping: on an item with no money yet it does not make it worked either
+    fid2, _ = denial(store, n + 4)
+    event(store, fid2, "posted", at="2026-04-25T10:00:00+00:00", actor="Biller One")
+    run(store)
+    assert dash(store)["lift"]["worked"]["n"] == 0
+
+
+def test_with_fewer_than_20_cases_the_email_and_the_lift_adjusted_roi_state_no_measured_rate(store):
+    _population(store, 2, 1, 1, 2)
+    run(store)
+    joined = " ".join(results.email_lines(store.conn, TODAY))
+    rec = results.save_settings({"costs": {"hosting_month": 40}}, who="o", base_version="", conn=store.conn)
+    r = results.roi(dash(store), rec, TODAY)
+    assert dash(store)["lift"]["enough"] is False
+    assert "% (3 items)" not in joined and "not enough similar items yet" in joined
+    assert r["roi_conservative"] is None and r["roi"] is not None
+
+
+def _frozen_week_with_late_money(s):
+    denial(s, 1)
+    paid(s, 1, on="2026-04-20")
+    run(s, today="2026-04-22")
+    run(s, today="2026-05-11")              # the week of 2026-04-20 is frozen at $90
+    denial(s, 2)
+    paid(s, 2, on="2026-04-21", amount=50)  # money dated in that week, seen later
+    run(s, today="2026-05-20")
+
+
+def test_a_frozen_weeks_figure_opens_the_list_frozen_with_it_and_todays_reading_beside_it(store):
+    _frozen_week_with_late_money(store)
+    week = next(w for w in results.scoreboard(store.conn, "2026-05-20")["weeks"] if w["week"] == "2026-04-20")
+    listed = results.list_entries(store.conn, "returned:week:2026-04-20", "2026-05-20")
+    assert week["frozen"] and week["recovered_cents"] == 9000 == sum(c for _f, c in listed) and listed == [["F1", 9000]]
+    assert week["now_cents"] == 14000 and week["frozen_at"]
+    now = results.list_entries(store.conn, "returned:week_now:2026-04-20", "2026-05-20")
+    assert sum(c for _f, c in now) == 14000
+
+
+def test_a_frozen_week_whose_payment_was_taken_back_still_opens_its_list(store):
+    denial(store, 1)
+    paid(store, 1, on="2026-04-20")
+    run(store, today="2026-05-11")
+    remit(store, trace=F.check_no(150), paid_on="2026-05-25",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "22", "received": "2026-04-02", "lines": [ln("99213", -150, -90, [("CO", "45", -60)])]}])
+    run(store, today="2026-06-30")
+    week = next(w for w in results.scoreboard(store.conn, "2026-06-30")["weeks"] if w["week"] == "2026-04-20")
+    assert week["recovered_cents"] == 9000 and week["now_cents"] == 0
+    assert results.list_entries(store.conn, "returned:week:2026-04-20", "2026-06-30") == [["F1", 9000]]
+
+
+def test_each_hours_saved_figure_opens_a_list_of_the_items_it_counts(store):
+    fid, _ = denial(store, 1)
+    fax(store, fid, "2026-04-05")
+    fax(store, fid, "2026-05-05")
+    event(store, fid, "packet", at="2026-04-04T10:00:00+00:00", actor="packets")
+    event(store, fid, "packet", at="2026-04-06T10:00:00+00:00", actor="packets")
+    item(store, finding_id="CARRIER", evidence={"folded": [{"finding_id": "x1"}, {"finding_id": "x2"}, {"finding_id": "x3"}]})
+    run(store)
+    rows = {r["key"]: r for r in results.hours_saved(dash(store)["hours_counts"], results.read_settings(store.conn))["rows"]}
+    assert {k: (r["n"], r["items"]) for k, r in rows.items()} == {"investigate": (0, 0), "packet": (2, 1), "fax": (2, 1), "duplicate": (3, 1)}
+    for k, r in rows.items():
+        assert results.list_rows(store.conn, f"hours:{k}", today=TODAY, per=500)["total"] == r["items"], k
+
+
+def test_the_hours_count_and_its_list_come_from_one_run(store):
+    denial(store, 1, work_state="done")
+    denial(store, 2, work_state="done")
+    run(store)
+    # a biller closes one of them as paid by hand: the figure and its list stay the run's until the next one
+    store.conn.execute("UPDATE findings SET status='resolved', recovered_cents=9000, recovered_date=? WHERE finding_id='F1'", (TODAY,))
+    store.conn.commit()
+    shown = results.hours_saved(dash(store)["hours_counts"], results.read_settings(store.conn))["rows"][0]
+    assert shown["items"] == len(results.list_entries(store.conn, "hours:investigate", TODAY)) == 2
+
+
+def test_a_frozen_week_keeps_its_hours_at_the_minutes_then_in_force(store):
+    fid, _ = denial(store, 1)
+    fax(store, fid, "2026-04-21")
+    paid(store, 1, on="2026-04-20")
+    run(store, today="2026-04-22")
+    run(store, today="2026-05-11")
+    snap = {s["week"]: s for s in results.snapshots(store.conn)}["2026-04-20"]
+    assert snap["final"] and snap["hours"]["hours"] == round(10 / 60, 1)
+    assert {r["key"]: r["n"] for r in snap["hours"]["rows"]}["fax"] == 1
+
+
+def test_a_serverless_scoreboard_shows_the_frozen_weeks_the_server_shows(cloud_api):
+    tc, st, s, publish = cloud_api
+    publish(True)
+    from remitwatch import cloud
+    cloud.SERVING_COPY.ensure(force=True)
+    server_weeks = {w["week"]: w for w in results.scoreboard(s.conn, TODAY)["weeks"]}
+    frozen = sorted(w for w, v in server_weeks.items() if v.get("frozen"))
+    assert frozen
+    sls_weeks = {w["week"]: w for w in tc.get("/api/results/scoreboard").json()["weeks"]}
+    assert [w for w in frozen if sls_weeks.get(w, {}).get("frozen")] == frozen
+    for w in frozen:
+        listed = tc.get("/api/results/list", params={"key": f"returned:week:{w}", "per": 500}).json()
+        assert sum(r["cents"] for r in listed["items"]) == sls_weeks[w]["recovered_cents"]
+    assert [x["week"] for x in tc.get("/api/results").json()["snapshots"] if x.get("final")] == frozen
+
+
+def test_money_returned_to_date_survives_the_archive_taking_the_settled_bill(store, tmp_path):
+    from remitwatch import archive
+    fid, _ = denial(store, 1)
+    fax(store, fid, "2026-04-05")
+    paid(store, 1, on="2026-04-20")
+    run(store)
+    assert (dash(store)["money"]["returned_cents"], dash(store)["money"]["a_cents"]) == (9000, 9000)
+    store.conn.execute("UPDATE findings SET status='resolved', auto_note='Paid on a later remittance', work_state='done' WHERE finding_id=?", (fid,))
+    store.conn.execute("INSERT INTO detection_runs (run_id, started_at, finished_at, version) VALUES ('rX', '2029-06-30', '2029-06-30', 'test')")
+    archive.ensure_schema(store.conn)
+    archive._meta_put(store.conn, archive.META_FROZEN, {"2026": {"at": "2029-06-30", "digest": "x", "rates": 0}})
+    store.conn.commit()
+    res = archive.run(store.conn, sink=archive.DirSink(str(tmp_path / "archive")), today="2029-06-30", run_id="a1")
+    assert res.get("bills", 0) >= 1
+    run(store, today="2029-06-30")
+    d = dash(store)
+    assert (d["money"]["returned_cents"], d["money"]["a_cents"]) == (9000, 9000)
+    assert d["work"]["faxes_sent"] == 1 and {k["key"] for k in d["work"]["kinds"]} == {"fax"}
+    assert money_of(store, fid)["events"][0]["rule"].startswith("BLUE CROSS TEST paid $90.00")
+
+
+def test_a_fax_appeal_counts_once_as_a_fax_and_is_credited_as_a_fax(store):
+    fid, _ = denial(store)
+    fax(store, fid, "2026-04-05")
+    # what the app's fax send does right after it goes out: it marks the item Sent in the sender's name
+    event(store, fid, "manual", at="2026-04-05T12:00:05+00:00", frm="open", to="appealed", actor="Biller One",
+          note="Faxed to Anthem / BCBS at (555) 010-0000 (fax F1, 3 pages).")
+    paid(store, on="2026-04-20")
+    run(store)
+    w = dash(store)["work"]
+    assert {k["key"]: (k["items"], k["n"]) for k in w["kinds"]} == {"fax": (1, 1)}
+    assert {p["key"]: p["n"] for p in w["people"]} == {"Biller One": 1}
+    assert money_of(store, fid)["events"][0]["work_kind"] == "fax"
+
+
+def test_mark_billed_counts_once_and_a_logged_call_counts_as_a_call(store):
+    billed, _ = denial(store, 1)
+    # Mark billed: its own 'billed' line and the status Sent it sets ("Billed: ...")
+    event(store, billed, "billed", at="2026-04-05T10:00:00+00:00", actor="Biller One", note="Billed: the second payer")
+    event(store, billed, "manual", at="2026-04-05T10:00:01+00:00", frm="open", to="appealed", actor="Biller One", note="Billed: the second payer")
+    called, _ = denial(store, 2)
+    # Log what happened, the payer is working on it: a status Sent whose note says it was a call or portal check
+    event(store, called, "manual", at="2026-04-05T10:00:00+00:00", frm="open", to="appealed", actor="Biller Two",
+          note="Call or portal check: reprocessing, reference 12")
+    # a fax line that never settled, marked Sent by the app later: still one fax of work
+    unsettled, _ = denial(store, 3)
+    fax(store, unsettled, "2026-04-05", status="sending")
+    event(store, unsettled, "manual", at="2026-04-06T10:00:00+00:00", frm="open", to="appealed", actor="Biller One",
+          note="Faxed to Anthem / BCBS at (555) 010-0000 (fax not settled yet).")
+    run(store)
+    kinds = {k["key"]: (k["items"], k["n"]) for k in dash(store)["work"]["kinds"]}
+    assert kinds == {"billed": (1, 1), "call": (1, 1), "fax": (1, 1)}
+
+
+def test_the_spot_checks_follow_the_practices_own_day(server_api):
+    tc, api, _path = server_api
+    # the page sends its own date: a browser in the practice's time zone a day behind the server keeps its day's picks
+    got = tc.get("/api/results", params={"day": "2026-06-29"}).json()
+    assert got["day"] == "2026-06-29" and {p["day"] for p in got["spot"]["today"]} == {"2026-06-29"}
+    assert tc.get("/api/results/spot", params={"day": "2026-06-29"}).json()["items"] == got["spot"]["today"]
+    # a date far from the server's is not a time zone: the server's own day is used
+    assert tc.get("/api/results", params={"day": "2026-01-01"}).json()["day"] == TODAY
+    sb = tc.get("/api/results/scoreboard", params={"day": "2026-06-29"}).json()
+    assert sb["spot"] == {"picked": 5, "answered": 0, "due": 5}
+
+
+def test_hours_saved_before_the_first_run_on_a_serverless_host_shows_no_count(cloud_api):
+    tc, st, s, publish = cloud_api
+    denial(s, 60, work_state="done")
+    publish(False)
+    row = tc.get("/api/results").json()["hours"]["rows"][0]
+    assert row["n"] is None and row["hours"] is None
+
+
+class _Counting:
+    def __init__(self, inner):
+        self.inner, self.calls = inner, []
+
+    def __getattr__(self, name):
+        fn = getattr(self.inner, name)
+        if name in ("get", "meta", "put", "list", "get_chunks"):
+            def wrapped(*a, **kw):
+                self.calls.append((name, a[0] if a else ""))
+                return fn(*a, **kw)
+            return wrapped
+        return fn
+
+
+def test_a_serverless_results_page_load_reads_the_state_folder_a_few_times_at_most(cloud_api, monkeypatch):
+    from remitwatch import api_results
+    tc, st, s, publish = cloud_api
+    publish(True)
+    counting = _Counting(st)
+    monkeypatch.setattr(api_results, "_state", lambda: counting)
+    tc.get("/api/results")                      # the first visit of the day picks the day's spot checks
+    counting.calls.clear()
+    tc.get("/api/results")                      # every later visit: one read each of the owner's figures and this year's checks
+    assert len(counting.calls) <= 3, counting.calls
+
+
+def test_a_spot_answer_returns_the_agreement_rates_so_the_page_never_reloads(server_api):
+    tc, api, _path = server_api
+    fid = tc.get("/api/results/spot").json()["items"][0]["finding_id"]
+    r = tc.post("/api/results/spot", json={"day": TODAY, "finding_id": fid, "answer": "agree", "name": "Ana"},
+                headers={"X-Requested-With": "remitwatch"}).json()
+    assert r["ok"] and r["summary"]["answered"] == 1 and r["summary"]["agree"] == 1 and r["who"] == "Ana"
