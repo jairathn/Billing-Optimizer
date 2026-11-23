@@ -23,6 +23,7 @@ async function refreshHeader(){
   try {
     const [al, st] = await Promise.all([api('/api/alerts?status=new'), api('/api/sync/status')]);
     state.alertsNew = al.items; state.sync = st;
+    if(typeof swingShow === 'function') swingShow($('#swingBar'), al.items);     // a big change in one run: top of every page (swing.js)
     const n = al.items.length, hi = al.items.filter(a=>a.severity==='high').length;
     $('#bellBtn').innerHTML = `Alerts <b class="${hi?'sev-high':''}">${n}</b>`;
     const behind = st.days_behind;      // from the day the remittances reach for most payers, not one stray newer file
@@ -36,7 +37,7 @@ async function refreshHeader(){
 
 // ---------------------------------------------------------------- alerts
 const ALERT_KIND = {RAMP:'Ramping up', RISING:'Climbing', RESUMED:'Started again', NEW_BEHAVIOR:'New behavior', PROVIDER_TARGETED:'One provider singled out', RATE_CUT:'Rate cut',
-  NEW_REASON_CODE:'New reason code', DEADLINE:'Deadlines', STALE_FEED:'Feed stopped'};
+  NEW_REASON_CODE:'New reason code', DEADLINE:'Deadlines', STALE_FEED:'Feed stopped', SWING:'Big change in one run'};
 async function alertsTab(v){
   const show = state.filt.alertShow || 'active';
   const res = await api('/api/alerts?status='+show);
@@ -60,7 +61,8 @@ function alertCard(a){
   if(d.codes) facts.push(d.codes.map(c=>`${c.code} ${money2(c.old_cents)} → ${money2(c.new_cents)} (${pct(c.pct)}) since ${c.since}`).join('; '));
   if(d.by_payer) facts.push(d.by_payer.slice(0,8).map(p=>`${esc(p.payer_group)} ${p.n} / ${money(p.cents)}`).join('; '));
   if(d.note) facts.push(d.note);
-  const can = a.family && a.family!=='feed' && a.family!=='rate' && a.family!=='reason_code';
+  if(a.kind==='SWING'){ if(d.action) facts.push(d.action); if(Array.isArray(d.lines)) facts.push(...d.lines); }
+  const can = a.family && a.family!=='feed' && a.family!=='rate' && a.family!=='reason_code' && a.family!=='swing';
   return `<div class="alert ${a.status}"><div class="row1"><span class="chip sev-${a.severity}">${a.severity}</span><span class="chip">${ALERT_KIND[a.kind]||a.kind}</span>
     <span class="muted small">first seen ${String(a.first_seen).slice(0,10)} · last checked ${String(a.last_seen).slice(0,10)}${a.status==='acknowledged'?' · acknowledged':''}${a.status==='cleared'?' · cleared':''}</span></div>
     <div class="ttl">${esc(a.title)}</div>${facts.length?`<div class="small muted">${facts.map(esc).join(' · ')}</div>`:''}

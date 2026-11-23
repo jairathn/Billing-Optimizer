@@ -20,6 +20,7 @@ nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 16px;border-bottom:1px solid
 nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;cursor:pointer}
 nav a.active{background:var(--chip);color:var(--ink);font-weight:600}
 main{padding:16px;max-width:1500px;margin:0 auto}
+#swingBar{max-width:1500px;margin:0 auto;padding:0 16px}
 .grid{display:grid;gap:12px}
 .kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;cursor:pointer}
@@ -249,10 +250,12 @@ details.dfold{border-top:1px solid var(--line);padding:6px 0}details.dfold > sum
   <button id="themeBtn" title="theme">◐</button>
 </header>
 <nav id="nav"></nav>
+<div id="swingBar" hidden></div>
 <main id="view"></main>
 <div id="drawer"></div>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="/static/swing.js"></script>
 <script src="/static/features.js"></script>
 <script src="/static/providers.js"></script>
 <script src="/static/today.js"></script>

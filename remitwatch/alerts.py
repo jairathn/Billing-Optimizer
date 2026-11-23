@@ -22,6 +22,11 @@ An alert keeps one row for as long as the condition holds. When the condition
 ends it is marked cleared, and if it comes back it is raised again as new.
 Notifications (email and an optional webhook) contain payer names, counts and
 dollars only.
+
+SWING (one analysis run added or removed far more open items or dollars than a
+run normally does) is the one kind that does not clear when its condition ends:
+it stays at the top of every page, and leads every alert mail, for seven days
+after the run that moved, unless a person acknowledges it. See swing_rule.
 """
 from __future__ import annotations
 
@@ -93,6 +98,151 @@ def poisson_sf(k: int, lam: float) -> float:
 
 def money(c) -> str:
     return f"${(c or 0) / 100:,.0f}"
+
+
+# --------------------------------------------------------------------------- SWING: one run moved the worklist far more than runs do
+# An interim guard, alert only: it holds nothing and changes no item. Whatever the reason (one stray remittance, a file
+# dated in the future, a release, something nobody has thought of yet), a detection run that adds or removes far more open
+# items or dollars than a run normally does is put at the top of every page and in the alert mail, with its numbers,
+# before anyone works the new list. Each run is compared with the run before it from what the store keeps per run:
+# progress_snapshots (items and dollars by category and status) and detection_runs (when, and under which rules). What
+# people changed between the two runs (a Paid, a Let go, a reason hidden for a payer) is their work, not the run's, and is
+# taken out first.
+#
+# The levels come from data, not guesses: the live store (copy of 2026-11-22). Its own history holds four runs, all of them
+# release re-analyses with no new remittance in between: -948, -3 and +170 open items (-$18,358, -$238, +$47,361), at most
+# -681 items in one category. It holds no ordinary day, so a day of remittances was measured from the archive: the open
+# items each payment date created, minus the items that date's payments closed, over the last twelve months (330 payment
+# days, 53 weeks), all categories but the context rows. A day: -77 to +290 items (99th percentile -45 and +63), -$32,209
+# to +$103,563; in one category -97 to +179 items (denials both), dollars down to -$33,273 and up to +$102,721 (fees: one
+# takeback). A week: -74 to +421 items, -$25,471 to +$154,871; in one category -88 to +190 items, -$34,801 (denials) to
+# +$162,083 (fees). Normal falls are far smaller than normal rises (items close a few at a time, new remittances come in
+# batches), so each direction has its own level, set above the largest normal change in that direction. A catch-up of
+# several weeks of remittances in one run can pass the rise levels; that is meant: a list that grew by a month at once
+# deserves a look before it is worked.
+SWING_RISE_ITEMS = 500                  # open items one run adds, all categories (largest normal: +421, a week)
+SWING_RISE_CENTS = 25_000_000           # $250,000 of open items added, all categories (largest normal: +$154,871, a week)
+SWING_RISE_ITEMS_CATEGORY = 300         # open items added in one category (largest normal: +190, a week)
+SWING_RISE_CENTS_CATEGORY = 20_000_000  # $200,000 added in one category (largest normal: +$162,083 of fees, a week)
+SWING_FALL_ITEMS = 200                  # open items one run removes, all categories (largest normal: -77, a day)
+SWING_FALL_CENTS = 10_000_000           # $100,000 removed, all categories (largest normal: -$32,209, a day)
+SWING_FALL_ITEMS_CATEGORY = 150         # open items removed in one category (largest normal: -97, a day)
+SWING_FALL_CENTS_CATEGORY = 7_500_000   # $75,000 removed in one category (largest normal: -$34,801, a week)
+SWING_DAYS = 7                          # on every page for seven days, counting the day of the run, unless acknowledged
+SWING_OPEN = ("open", "in_progress", "appealed")       # To do, Started, Sent: an item someone can still work
+SWING_CONTACT = "the practice owner"    # who the setup page says to tell when something is wrong
+SWING_CATEGORY_LABELS = {"denial": "Denials", "bundling": "Bundling and modifiers", "downcoding": "Downcoding",
+                         "underpayment": "Underpayment", "contract": "Contract rates", "fees": "Fees and takebacks"}
+# File kinds in plain words. Only these words are used: no text read from a file (its name, its folder) reaches an alert.
+SWING_FILE_KINDS = {"835": ("remittance (835) file", "remittance (835) files"), "837": ("claim (837) file", "claim (837) files"),
+                    "ema:charge_lines": ("EMA Encounter & Charge Lines export", "EMA Encounter & Charge Lines exports"),
+                    "ema:claim_status": ("EMA Claim & Claim Status export", "EMA Claim & Claim Status exports"),
+                    "ema:era_lines": ("EMA ERA & Payment Line Adjustments export", "EMA ERA & Payment Line Adjustments exports"),
+                    "ema": ("other EMA export", "other EMA exports"), "other": ("other file", "other files")}
+
+
+def _signed(n: int) -> str:
+    return f"{n:+,}"
+
+
+def _signed_money(c) -> str:
+    return ("-" if (c or 0) < 0 else "+") + money(abs(c or 0))
+
+
+def _utc(iso: str | None) -> str:
+    """A run's time as people read it: '2026-11-22T10:17:55+00:00' is '2026-11-22 10:17 UTC'."""
+    return f"{iso[:10]} {iso[11:16]} UTC" if iso and len(iso) >= 16 else "an unknown time"
+
+
+def _and(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _swing_over(n: int, cents: int, rise_n: int, rise_c: int, fall_n: int, fall_c: int) -> list[str]:
+    return [w for w, hit in (("items", n > rise_n or -n > fall_n), ("dollars", cents > rise_c or -cents > fall_c)) if hit]
+
+
+def swing_between(conn: sqlite3.Connection, before: dict, after: dict) -> dict | None:
+    """What one detection run (`after`) did to the open worklist against the run before it (`before`): the open items and
+    dollars each run saw, by category; people's own status changes between the two (every change in finding_events the
+    analysis did not make); and what is left once those are taken out, the run's own change. `over` names the alarm levels
+    the change passes (empty for an ordinary run); `files` counts the files read between the two runs, by kind. None when a
+    run's snapshot cannot be known: no row for it and none from any run before it (a store older than progress_snapshots,
+    or a first run on an empty store, whose next run is the first load and not a swing). A run with no row while earlier runs
+    have rows left no open item at all: that is everything gone, the largest fall there is, and it counts as zero."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    seen = []
+    for run in (before, after):
+        rows = conn.execute("SELECT category, status, n, cents FROM progress_snapshots WHERE run_id=?", (run["run_id"],)).fetchall()
+        if not rows and conn.execute("SELECT 1 FROM progress_snapshots WHERE at < ? LIMIT 1", (run["started_at"],)).fetchone() is None:
+            return None
+        got: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        for cat, status, n, cents in rows:
+            if cat != "info" and status in SWING_OPEN:         # the context rows are not work
+                got[cat][0] += n or 0
+                got[cat][1] += cents or 0
+        seen.append(got)
+    t0, t1 = before["started_at"], after["started_at"]
+    people: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    if {"finding_events", "findings"} <= have:
+        for cat, was, now, cents in conn.execute("""SELECT f.category, e.from_status, e.to_status, COALESCE(f.shortfall_cents, 0)
+                                                    FROM finding_events e JOIN findings f ON f.finding_id = e.finding_id
+                                                    WHERE e.at > ? AND e.at <= ? AND COALESCE(e.actor, '') != 'system'""", (t0, t1)):
+            step = (now in SWING_OPEN) - (was in SWING_OPEN)      # +1 back onto the open list, -1 off it
+            if step and cat != "info":
+                people[cat][0] += step
+                people[cat][1] += step * cents
+    cats = []
+    for cat in sorted(set(seen[0]) | set(seen[1]) | set(people)):
+        (bn, bc), (an, ac), (pn, pc) = seen[0].get(cat, (0, 0)), seen[1].get(cat, (0, 0)), people.get(cat, (0, 0))
+        c = {"category": cat, "label": SWING_CATEGORY_LABELS.get(cat, str(cat).replace("_", " ").capitalize()),
+             "before_n": bn, "after_n": an, "before_cents": bc, "after_cents": ac, "people_n": pn, "people_cents": pc,
+             "change_n": an - bn - pn, "change_cents": ac - bc - pc}
+        c["over"] = _swing_over(c["change_n"], c["change_cents"], SWING_RISE_ITEMS_CATEGORY, SWING_RISE_CENTS_CATEGORY,
+                                SWING_FALL_ITEMS_CATEGORY, SWING_FALL_CENTS_CATEGORY)
+        cats.append(c)
+    total = {k: sum(c[k] for c in cats) for k in ("before_n", "after_n", "before_cents", "after_cents", "people_n", "people_cents",
+                                                    "change_n", "change_cents")}
+    over = [f"all {w}" for w in _swing_over(total["change_n"], total["change_cents"], SWING_RISE_ITEMS, SWING_RISE_CENTS,
+                                            SWING_FALL_ITEMS, SWING_FALL_CENTS)]
+    over += [f"{c['label']} {w}" for c in cats for w in c["over"]]
+    files: Counter = Counter()
+    if "files" in have:
+        for k, n in conn.execute("SELECT kind, COUNT(*) FROM files WHERE ingested_at > ? AND ingested_at <= ? GROUP BY kind", (t0, t1)):
+            files[k if k in SWING_FILE_KINDS else ("ema" if str(k).startswith("ema:") else "other")] += n
+    return {"before": before, "after": after, "by_category": cats, "total": total, "over": over, "files": dict(files)}
+
+
+def _swing_lead(m: dict) -> str:
+    """The first words of the alert: the change that passed an alarm level, all categories first."""
+    t = m["total"]
+    verb = lambda x: "added" if x > 0 else "removed"       # noqa: E731
+    if "all items" in m["over"]:
+        return f"One analysis run {verb(t['change_n'])} {abs(t['change_n']):,} open items ({_signed_money(t['change_cents'])})"
+    if "all dollars" in m["over"]:
+        return f"One analysis run {verb(t['change_cents'])} {money(abs(t['change_cents']))} of open items ({_signed(t['change_n'])} items)"
+    c = max((c for c in m["by_category"] if c["over"]), key=lambda c: (abs(c["change_n"]), abs(c["change_cents"])))
+    if "items" in c["over"]:
+        return f"One analysis run {verb(c['change_n'])} {abs(c['change_n']):,} open items in {c['label']} ({_signed_money(c['change_cents'])})"
+    return f"One analysis run {verb(c['change_cents'])} {money(abs(c['change_cents']))} of open items in {c['label']} ({_signed(c['change_n'])} items)"
+
+
+def _swing_files(files: dict, since: str) -> str:
+    if not files:
+        return "No files were read between the two runs."
+    parts = []
+    for k in sorted(files, key=lambda k: (k != "835", k)):
+        one, many = SWING_FILE_KINDS[k]
+        parts.append(f"{files[k]:,} {one if files[k] == 1 else many}")
+    return f"Read since the run before ({since}): {_and(parts)}."
+
+
+def _swing_levels() -> str:
+    return (f"Alarm levels for one run: more than {SWING_RISE_ITEMS:,} open items or {money(SWING_RISE_CENTS)} added, or more than "
+            f"{SWING_FALL_ITEMS:,} items or {money(SWING_FALL_CENTS)} removed, in all; in one category, more than "
+            f"{SWING_RISE_ITEMS_CATEGORY:,} items or {money(SWING_RISE_CENTS_CATEGORY)} added, or more than "
+            f"{SWING_FALL_ITEMS_CATEGORY:,} items or {money(SWING_FALL_CENTS_CATEGORY)} removed. Changes people made themselves "
+            "between the two runs do not count.")
 
 
 class AlertEngine:
@@ -243,6 +393,77 @@ class AlertEngine:
                                                                             "window": [start, self.asof]},
                             payer, "downcoding", npi, rate, rate_other, k, cents[(payer, npi)])
 
+    def swing_rule(self) -> None:
+        """SWING: one detection run added or removed far more open items or dollars than a run normally does (the levels,
+        and how they were set, are above SWING_RISE_ITEMS). Every pair of consecutive runs whose later run is less than
+        SWING_DAYS old is compared, so the alert is raised again by every run for seven days after the run that moved and
+        never clears itself at the next quiet run; one a person acknowledged keeps that status (run() never resets it).
+        When the rules version changed between the two runs (a release re-analyses every claim once) the alert says so
+        and is info, not high."""
+        have = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"detection_runs", "progress_snapshots"} <= have:
+            return
+        today = date.fromisoformat(self.today)
+
+        def recent(iso) -> bool:
+            try:
+                return (today - date.fromisoformat(str(iso)[:10])).days < SWING_DAYS
+            except ValueError:
+                return False
+        runs = [dict(r) for r in self.conn.execute("""SELECT run_id, started_at, version FROM detection_runs WHERE started_at IS NOT NULL
+                                                     ORDER BY finished_at, started_at, run_id""")]
+        for before, after in zip(runs, runs[1:]):
+            if recent(after["started_at"]):
+                m = swing_between(self.conn, before, after)
+                if m and m["over"]:
+                    self._raise_swing(m)
+        # One raised already stays raised all week with the numbers it was raised with, even when its two runs can no
+        # longer be compared the same way (a journal entry folded late, a snapshot that is gone).
+        for r in self.conn.execute("SELECT * FROM alerts WHERE kind='SWING' AND status != 'cleared'").fetchall():
+            if r["alert_id"] not in self.active and recent(r["window_end"]):
+                self.active[r["alert_id"]] = {k: r[k] for k in ("alert_id", "kind", "severity", "title", "detail", "payer_group", "family",
+                                                               "scope", "metric", "baseline", "n_recent", "cents_recent",
+                                                               "window_start", "window_end")}
+
+    def _raise_swing(self, m: dict) -> None:
+        before, after, t = m["before"], m["after"], m["total"]
+        changed = (before.get("version") or "") != (after.get("version") or "")
+        since, at = _utc(before["started_at"]), _utc(after["started_at"])
+        lead = _swing_lead(m)
+        title = f"{lead} under new rules from a release" if changed else f"{lead}, far more than a run normally does"
+        lines = [f"Open items in all categories (To do, Started and Sent): {t['before_n']:,} at the run before ({since}), "
+                 f"{t['after_n']:,} after this run ({at}); {money(t['before_cents'])} before, {money(t['after_cents'])} after."]
+        if t["people_n"] or t["people_cents"]:
+            moved = (f"took {abs(t['people_n']):,} items ({money(abs(t['people_cents']))}) off the open list" if t["people_n"] < 0 else
+                     f"put {t['people_n']:,} items ({money(abs(t['people_cents']))}) back on the open list" if t["people_n"] > 0 else
+                     f"changed the open dollars by {_signed_money(t['people_cents'])}")
+            lines.append(f"People's own status changes between the two runs {moved}; that is left out of what this run did.")
+        lines.append(f"What this run did: {_signed(t['change_n'])} open items, {_signed_money(t['change_cents'])}.")
+        for c in sorted(m["by_category"], key=lambda c: (-abs(c["change_n"]), -abs(c["change_cents"]), c["category"])):
+            if c["change_n"] or c["change_cents"]:
+                lines.append(f"{c['label']}: {c['before_n']:,} to {c['after_n']:,} open items, this run {_signed(c['change_n'])} "
+                             f"({_signed_money(c['change_cents'])}).")
+        lines.append(_swing_files(m["files"], since))
+        if changed:
+            lines.append(f"The rules changed between the two runs (version {before.get('version') or 'unknown'} to "
+                         f"{after.get('version') or 'unknown'}): a release re-checks every claim once, so part or all of this "
+                         "change can come from the release.")
+        lines.append(f"This alert stays at the top of every page for {SWING_DAYS} days after the run, unless someone acknowledges it "
+                     "once the files are checked.")
+        lines.append(_swing_levels())
+        action = (f"Before working new items, open the Data tab and check the files read since {since}. "
+                  f"If one is wrong, tell {SWING_CONTACT} and do not work the new items yet.")
+        detail = {"run": after["run_id"], "run_before": before["run_id"], "at": after["started_at"], "since": before["started_at"],
+                  "rules": [before.get("version"), after.get("version")], "rules_changed": changed,
+                  "before": {"n": t["before_n"], "cents": t["before_cents"]}, "after": {"n": t["after_n"], "cents": t["after_cents"]},
+                  "people": {"n": t["people_n"], "cents": t["people_cents"]}, "change": {"n": t["change_n"], "cents": t["change_cents"]},
+                  "by_category": m["by_category"], "over": m["over"], "files": m["files"], "headline": lead, "lines": lines,
+                  "action": action}
+        self._raise("SWING", "info" if changed else "high", title, detail, None, "swing", after["run_id"], t["change_n"], None,
+                    abs(t["change_n"]), abs(t["change_cents"]), key=("swing", after["run_id"]))
+        a = self.active[_aid("SWING", "swing", after["run_id"])]
+        a["window_start"], a["window_end"] = before["started_at"], after["started_at"]       # the two runs, not a payment window
+
     def rate_cut_rule(self) -> None:
         recent_start = _shift(self.asof, -60)
         base_start = _shift(recent_start, -180)
@@ -364,6 +585,7 @@ class AlertEngine:
             self.rate_cut_rule()
             self.new_code_rule()
             self.deadline_rule()
+            self.swing_rule()
         self.stale_rule()
         return self.active
 
@@ -401,28 +623,53 @@ SEV_ORDER = {"high": 0, "medium": 1, "info": 2}
 
 def pending_notifications(conn: sqlite3.Connection) -> list[dict]:
     conn.row_factory = sqlite3.Row
-    rows = [dict(r) for r in conn.execute("SELECT * FROM alerts WHERE status='new' AND notified_at IS NULL AND severity IN ('high','medium')")]
+    # a big change in one run is mailed whatever its severity: a release's is info, and it still moves the list people work
+    rows = [dict(r) for r in conn.execute("""SELECT * FROM alerts WHERE status='new' AND notified_at IS NULL
+                                             AND (severity IN ('high','medium') OR kind='SWING')""")]
     return sorted(rows, key=lambda a: (SEV_ORDER.get(a["severity"], 9), -(a["cents_recent"] or 0)))
 
 
-def digest(alerts: list[dict]) -> str:
+def _swing_detail(a: dict) -> dict:
+    d = a.get("detail")
+    try:
+        d = json.loads(d) if isinstance(d, str) else d
+    except ValueError:
+        d = None
+    return d if isinstance(d, dict) else {}
+
+
+def digest(alerts: list[dict], swings: list[dict] | None = None) -> str:
+    """The alert mail. A big change in one run (`swings`: every one nobody has acknowledged, mailed before or not) leads it
+    with its numbers and what to do; the other alerts follow, one line each."""
+    lead = list(swings or [])
+    known = {a.get("alert_id") for a in lead}
+    lead += [a for a in alerts if a.get("kind") == "SWING" and a.get("alert_id") not in known]
     lines = [f"RemitWatch: {len(alerts)} new alert{'s' if len(alerts) != 1 else ''}", ""]
-    for a in alerts:
+    for a in lead:
+        d = _swing_detail(a)
         lines.append(f"[{a['severity'].upper()}] {a['title']}")
+        lines += [f"  - {x}" for x in d.get("lines") or []]
+        lines += [f"  What to do: {d['action']}", ""] if d.get("action") else [""]
+    for a in alerts:
+        if a.get("kind") != "SWING":
+            lines.append(f"[{a['severity'].upper()}] {a['title']}")
     lines += ["", "Open the dashboard, Alerts tab, for the lines behind each alert. This message contains no patient information."]
     return "\n".join(lines)
 
 
 def notify(conn: sqlite3.Connection, log=print) -> dict:
-    """Send new alerts by email (SMTP settings of the weekly report) and to ALERT_WEBHOOK_URL when set. Each alert is sent once."""
+    """Send new alerts by email (SMTP settings of the weekly report) and to ALERT_WEBHOOK_URL when set. Each alert is sent once;
+    a big change in one run that nobody has acknowledged also leads every later alert mail while it lasts."""
     alerts = pending_notifications(conn)
     if not alerts:
         return {"sent": 0}
-    text = digest(alerts)
+    swings = [dict(r) for r in conn.execute("SELECT * FROM alerts WHERE kind='SWING' AND status='new' ORDER BY window_end DESC")]
+    text = digest(alerts, swings)
+    head = swings[0] if swings else alerts[0]
     sent_email = sent_hook = False
     try:
         from .report import email_report
-        sent_email = email_report(text, subject=f"RemitWatch alert: {alerts[0]['title'][:90]}")
+        sent_email = email_report(text, subject=f"RemitWatch alert: {(_swing_detail(head).get('headline') or head['title'])[:90]}")
     except Exception as e:        # a mail failure must never stop the pipeline
         log(f"alert email failed: {e}")
     url = os.environ.get("ALERT_WEBHOOK_URL")
