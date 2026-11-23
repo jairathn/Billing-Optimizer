@@ -227,6 +227,8 @@ def test_a_sentence_ends_at_its_period_never_inside_an_abbreviation_or_a_number(
     assert t[:states.sentence_end(t)] == "Medicare Part B: redetermination within 120 days (42 CFR 405.942)"
     assert t[:states.sentence_end(t, semicolon=False)] == "Medicare Part B: redetermination within 120 days (42 CFR 405.942); a reopening takes no documents"
     assert states.sentence_end("One sentence with no end") is None
+    t = "Billed under version 2. lower-case words after a period go on. Then the end."
+    assert t[:states.sentence_end(t)] == "Billed under version 2. lower-case words after a period go on"
     assert states._short_label("Commercial plans: 180 days is the common default. Check the contract.") == "Commercial plans: 180 days is the common default"
 
 
