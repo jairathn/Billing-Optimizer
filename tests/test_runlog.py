@@ -258,6 +258,42 @@ def test_a_two_letter_word_beside_a_masked_name_goes_with_it(tmp_path):
     store.close()
 
 
+def test_a_word_of_the_codes_own_in_a_name_the_store_holds_is_masked_in_every_form(tmp_path):
+    """Many names are words RemitWatch's own code uses too (Mark, Will, Rose, Price, Lane), and the scrubber keeps the
+    code's words readable. The store's names teach it two things more: a word of the code's own beside a name it holds
+    goes with it even in capitals (the 835 writes "ZORVATHIQ, MARK", its segments "ZORVATHIQ*MARK"), and a name made
+    only of the code's words (PRICE, WILL ROSE) is masked wherever its words stand together. Elsewhere they stay."""
+    store = file_store(tmp_path)
+    feed = tmp_path / "feed"
+    os.makedirs(feed)
+    claims = clean_visits(1, 3, "99214", "223.65", "127.80", cfi="16")
+    claims.append(named_claim(300, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="ZORVATHIQ", first="MARK"))
+    claims.append(named_claim(301, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="PRICE", first="WILL ROSE"))
+    p = feed / "r001.RMT"
+    p.write_bytes(remit("".join(claims), "100.00", seg_count=99, isa_ctrl="000000001", pay_date="20260415"))
+    store.ingest_835_paths([str(p)])
+    code = runlog.SCRUB.code_words()
+    assert {"mark", "will", "rose", "price"} <= code and "zorvathiq" not in code        # what the test is about
+    runlog.SCRUB.names.clear()
+    runlog.SCRUB.learn(store.conn)
+    for text, planted in (("row for ZORVATHIQ, MARK was held", ("ZORVATHIQ", "MARK")),
+                          ("row for Mark Zorvathiq was held", ("Mark", "Zorvathiq")),
+                          ("bad segment NM1*QC*1*ZORVATHIQ*MARK****MI was held", ("ZORVATHIQ", "MARK")),
+                          ("row for PRICE, WILL ROSE was held", ("PRICE", "WILL", "ROSE")),
+                          ("row for Will Rose Price was held", ("Will", "Rose", "Price")),
+                          ("row for WILL ROSE PRICE was held", ("WILL", "ROSE", "PRICE"))):
+        out = runlog.scrub_text(text)
+        assert out.endswith(" was held"), out
+        for word in planted:
+            assert not re.search(rf"(?<![\w'\-]){word}(?![\w'\-])", out), (word, out)
+    # the code's words stay as they are where no name of the store stands with them; the level word stays beside one
+    out = runlog.scrub_text("ERROR Zorvathiq held. The price will change; Mark the row. PRICE list. EMA BILLING row. Will retry.")
+    for kept in ("ERROR <name> held", "The price will change", "Mark the row", "PRICE list", "EMA BILLING row", "Will retry"):
+        assert kept in out, (kept, out)
+    assert all(" " not in w for w in runlog.SCRUB.names if w.isalpha()) and runlog.SCRUB.learn(store.conn) > 0
+    store.close()
+
+
 def test_a_structured_value_under_a_word_key_loses_names_dates_and_ids():
     """A key that says what its value is (status, result, source, how, action, rule...) does not make free text safe:
     a value is kept as it is only where the scrubber would keep it anyway, or where its key has a strict shape (a
