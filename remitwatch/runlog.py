@@ -159,7 +159,10 @@ _NAME_WORD = re.compile(r"[^\W\d_](?:[^\W\d_]|['\-])+")    # a word of a name as
 # two-letter words a store's name never adds to the names masked: English words every message starts with, and
 # RemitWatch's own codes (claim adjustment groups, A/R): masking them would leave the logs unreadable
 _TWO_LETTER_KEEP = frozenset("of to in is it on at by or as an be we he me my no so up us if go am ok id co pr oa pi cr ar".split())
-_NAME_GAPS = (" ", ", ", ",", "  ")     # what stands between the words of one name ("Last, First", "First Last")
+# what stands between the words of one name: "Last, First", "First Last", and the 835's own "LAST*FIRST"
+_NAME_GAPS = (" ", ", ", ",", "  ", "*")
+# the level words of the logs' own lines: the only words of the code's own kept beside a name the store holds
+_LOG_WORDS = frozenset("error warning warn info debug critical".split())
 _ALNUM_OK = frozenset({"sha256", "x86-64", "utf-16", "utf-32", "base64", "py313", "py312", "py311"})
 _ID_QUOTED = re.compile(r"^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+|"
                         r"%[-A-Za-z%/ :.]*|[A-Z][a-z]+(?:[A-Z][a-z]+)+(?:Error|Exception|Warning))$")
@@ -216,8 +219,9 @@ class Scrubber:
 
     def learn(self, conn: sqlite3.Connection, limit: int = 400_000) -> int:
         """Add the patient and subscriber names the store holds (the 835's names): words of three letters or more that
-        are not RemitWatch's own words, and words of two letters (Le, Ng, Wu) but the few in _TWO_LETTER_KEEP. Returns
-        how many words it knows."""
+        are not RemitWatch's own words, and words of two letters (Le, Ng, Wu) but the few in _TWO_LETTER_KEEP. A name
+        none of whose words that leaves (PRICE, WILL ROSE: words the code uses too) is kept as its pairs of words side
+        by side ("will rose", "rose price"; a pair holds a space, a word never does). Returns how many it knows."""
         cols = ("patient_last", "patient_first", "insured_last", "insured_first", "corrected_patient_last", "corrected_patient_first")
         try:
             have = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
@@ -227,6 +231,7 @@ class Scrubber:
         if not use:
             return len(self.names)
         sql = " UNION ".join(f"SELECT DISTINCT {c} FROM claims WHERE {c} IS NOT NULL" for c in use) + f" LIMIT {int(limit)}"
+        both = [(a, b) for a, b in zip(cols[0::2], cols[1::2]) if a in have and b in have]
         stop = self.code_words() | _NAME_STOP
         cur = conn.cursor()
         cur.row_factory = None
@@ -236,6 +241,15 @@ class Scrubber:
                     w = w.lower().strip("'-")
                     if (len(w) >= 3 and w not in stop) or (len(w) == 2 and w.isalpha() and w not in _TWO_LETTER_KEEP):
                         self.names.add(w)
+            for last_col, first_col in both:
+                for last, first in cur.execute(f"SELECT DISTINCT {last_col}, {first_col} FROM claims WHERE {last_col} IS NOT NULL "
+                                               f"AND {first_col} IS NOT NULL LIMIT {int(limit)}"):
+                    lw = [w.lower().strip("'-") for w in _NAME_WORD.findall(str(last))]
+                    fw = [w.lower().strip("'-") for w in _NAME_WORD.findall(str(first))]
+                    for seq in (lw + fw, fw + lw):          # "LAST, FIRST" as the 835 writes it, "First Last" as people do
+                        for x, y in zip(seq, seq[1:]):
+                            if len(x) >= 2 and len(y) >= 2 and x not in self.names and y not in self.names:
+                                self.names.add(f"{x} {y}")
         except sqlite3.Error as exc:
             _note_internal("learn", exc)
         return len(self.names)
@@ -283,16 +297,21 @@ class Scrubber:
         """Names that reached the text unquoted: a word the store's patients carry (learn; one of two letters only when
         it is written with a capital, so "to do" stays), an ALL-CAPS word of four letters or more (an 835 name), or two
         capitalized words side by side ("Last, First" or "First Last"), unless the word is one of RemitWatch's own
-        (code_words); and a capitalized word of two letters beside any of those ("NGUYEN, AN")."""
+        (code_words); a name the store holds made only of the code's words (its pairs: learn); and a capitalized word
+        of two letters beside any of those ("NGUYEN, AN")."""
         toks = list(_WORD.finditer(s))
         names = self.names
-        short = [m for m in _WORD2.finditer(s) if not m.group(0).islower() and m.group(0).lower() in names] if names else []
-        if not toks and not short:
+        words2 = list(_WORD2.finditer(s)) if names else []
+        short = [m for m in words2 if not m.group(0).islower() and m.group(0).lower() in names]
+        if not toks and not short and len(words2) < 2:
             return s
         code = self.code_words()
 
+        def low(w: str) -> str:
+            return w.lower().strip("'-")
+
         def known(w: str) -> bool:
-            lw = w.lower().strip("'-")
+            lw = low(w)
             return lw in code or lw in _TWO_LETTER_KEEP      # "Denied CO-45": the group code is the code's own
 
         def cap(w: str) -> bool:
@@ -300,7 +319,7 @@ class Scrubber:
         mask = [False] * len(toks)
         for i, m in enumerate(toks):
             w = m.group(0)
-            lw = w.lower().strip("'-")
+            lw = low(w)
             if names and lw in names:
                 mask[i] = True
             elif len(w) >= 4 and w.isupper() and not known(w):
@@ -310,11 +329,21 @@ class Scrubber:
                 gap = s[m.end():toks[i + 1].start()]
                 if cap(nxt) and gap in _NAME_GAPS and not (known(w) and known(nxt)):
                     # the unknown word goes; a known one beside it goes too unless it is an ALL-CAPS word of the code's
-                    # own (ERROR, EMA): "John Smith" loses both, "ERROR Smith" keeps ERROR
+                    # own (ERROR, EMA): "John Smith" loses both, "ERROR Smith" keeps ERROR. Beside a name the store
+                    # holds only the level word stays: the 835 writes "SMITH, MARK", and MARK is a word of the code's
+                    held = bool(names) and (lw in names or low(nxt) in names)
                     for j, x in ((i, w), (i + 1, nxt)):
-                        if not known(x) or not x.isupper():
+                        if not known(x) or not x.isupper() or (held and low(x) not in _LOG_WORDS):
                             mask[j] = True
         spans = {(m.start(), m.end()) for m, hide in zip(toks, mask) if hide} | {(m.start(), m.end()) for m in short}
+        if names:
+            # a name the store holds made only of words the code uses too (learn keeps its pairs): its words go where
+            # they stand together with capitals ("PRICE, WILL ROSE", "Will Rose Price")
+            seq = sorted(toks + words2, key=lambda m: m.start())
+            for a, b in zip(seq, seq[1:]):
+                wa, wb = a.group(0), b.group(0)
+                if cap(wa) and cap(wb) and s[a.end():b.start()] in _NAME_GAPS and f"{low(wa)} {low(wb)}" in names:
+                    spans.update(((a.start(), a.end()), (b.start(), b.end())))
         if not spans:
             return s
         # a capitalized word of two letters beside a masked name is part of it ("ZORVATHIQ, AN", "My He Quillbrandt"):
