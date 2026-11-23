@@ -662,6 +662,8 @@ def _facts(conn: sqlite3.Connection, items: list[dict], today: str, errors: list
         try:
             got = states.facts_of(conn, part, outcomes={}, today=today, context=ctx)
         except Exception as exc:        # recorded on the figures (errors), and the items stay without money: never a guess
+            from . import runlog
+            runlog.caught(exc, "results.facts_of")
             errors.append(f"facts_of: {type(exc).__name__}: {str(exc)[:200]}")
             continue
         for fid, fx in got.items():
@@ -699,11 +701,11 @@ def _own(item: dict, x: dict) -> bool:
 
 def _row_payer(x: dict) -> Any:
     from . import states
-    try:
-        return states.row_group(x)[0]
-    except Exception:       # an older states module: the payer's group by name
+    group = getattr(states, "row_group", None)
+    if group is None:       # an older states module: the payer's group by name
         from .codes import normalize_payer
         return normalize_payer(x.get("payer") or "")[0]
+    return group(x)[0]
 
 
 def _same_payer(a: Any, b: Any) -> bool:
@@ -2030,6 +2032,8 @@ def compute(conn: sqlite3.Connection, today: Any = None, *, errors: list | None 
         denials, dl = _denials(conn, t, errors)
         lists.update(dl)
     except sqlite3.Error as exc:     # recorded on the figures; the rest of the page stands
+        from . import runlog
+        runlog.caught(exc, "results.denials")
         errors.append(f"denials: {type(exc).__name__}: {str(exc)[:200]}")
         denials = {"months": [], "by_group": [], "by_family": [], "markers": [], "reasons": {}}
     gone = {}

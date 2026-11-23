@@ -1658,3 +1658,32 @@ def test_a_second_payer_item_whose_own_payer_is_unknown_never_counts_a_payment_a
           claims=[{"pcn": F.claim_id(1, sub=2), "status": "2", "lines": [ln("99213", 150, 20, [("CO", "45", 130)])]}])
     run(store)
     assert {e["bucket"] for e in money_of(store, "S1")["events"] if e["cents"] > 0} == {"c"}
+
+
+def test_a_part_of_the_figures_that_could_not_be_worked_out_is_in_the_runs_log_with_its_stack(store, monkeypatch, tmp_path):
+    """A failure the figures contain (an item's facts, the denials chart) is never swallowed: it is on the figures and
+    in the run's log with its stack, its message scrubbed."""
+    from remitwatch import runlog
+    denial(store)
+    paid(store, on="2026-04-20")
+
+    def broken_facts(*a, **kw):
+        raise RuntimeError("could not read the claim of Pat Invented 1234567")
+
+    def broken_denials(*a, **kw):
+        raise sqlite3.OperationalError("disk I/O error near Pat Invented")
+    monkeypatch.setattr(states, "facts_of", broken_facts)
+    monkeypatch.setattr(results, "_denials", broken_denials)
+    rl = runlog.start_run("cycle", logs_dir=str(tmp_path / "logs"), host="server")
+    try:
+        out = run(store)
+    finally:
+        rl.finish()
+    assert len(out["errors"]) == 2
+    got = [(e["step"], e["type"]) for e in rl.manifest["errors"]]
+    assert ("results.facts_of", "RuntimeError") in got and ("results.denials", "OperationalError") in got
+    assert all(e["stack"] for e in rl.manifest["errors"])
+    logged = json.dumps(rl.manifest) + "".join(p.read_text(errors="replace") for p in (tmp_path / "logs").rglob("*")
+                                               if p.is_file() and not p.name.endswith(".gz"))
+    for piece in ("Pat Invented", "1234567"):
+        assert piece not in logged

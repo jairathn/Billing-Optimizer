@@ -107,8 +107,9 @@ PIN_DAYS = 90                       # a reopened bill stays hot this long
 HISTORY_KEPT = 120                  # runs kept in meta archive:history
 COMPACT_FREE_SHARE = 0.10           # compact() vacuums when this share of the pages is free
 COMPACT_MARGIN_MB = 64              # ... and the budget leaves room for what VACUUM holds plus this much
-COMPACT_GROWTH = 1.75               # what VACUUM holds beside an in-memory store, in compacted sizes: the copy, and while it
-                                    # writes it back the journal of the pages it replaces (1.66 on Vercel's real image)
+COMPACT_GROWTH = 1.6                # what VACUUM holds beside an in-memory store, per MB of pages in use: the compacted copy,
+                                    # and while it writes it back the journal of the pages it replaces (Vercel's real image,
+                                    # 463 MB in use: 730 and 790 MB in two runs; the margin covers the spread)
 OPEN_STATES = ("work_now", "waiting", "cant_check")
 CLOSED_STATES = ("done", "accepted", "expired")
 ACTIVE_STATUSES = ("open", "in_progress", "appealed")
@@ -2904,7 +2905,7 @@ def compact(conn: sqlite3.Connection, *, min_free_share: float = COMPACT_FREE_SH
     VACUUM builds the compacted copy beside the store. It is built in memory (temp_store=MEMORY while it runs): with
     SQLite's default it is written to a file of that size in the temporary folder, which on a serverless host is small
     and shared with the dashboard's copy and the ledger. Writing it back into an in-memory store keeps a journal of the
-    pages it replaces, so VACUUM holds about COMPACT_GROWTH times the compacted size. It runs only when the memory budget
+    pages it replaces, so VACUUM holds about COMPACT_GROWTH times the pages in use. It runs only when the memory budget
     (`budget`, else budget_mb(mode)) less what the process holds now (`rss`, else its resident set) leaves room for that
     and `margin_mb`. It never raises: a skip or a failure is returned with its reason ({'skipped': why, ...}), and the
     store is then as it was."""
