@@ -1730,6 +1730,28 @@ def test_the_blind_spot_gives_each_part_its_dollars_and_basis(page_run):
     assert banner.index("What to do") < banner.index("No remittance after")
 
 
+def test_on_a_phone_step_one_names_the_three_biggest_kinds_and_how_many_more(page_run):
+    """Real data: five kinds of work closing this week wrapped step 1's labels over five lines on a phone, and its Start
+    button fell under the first screen. On a phone step 1 names the three kinds worth most and says how many more; at
+    full width it names them all."""
+    out, ans = page_run()
+    brief = json.loads(json.dumps(ans["/api/brief"]))
+    types = brief["work_types"][:5]
+    assert len(types) == 5
+    cents = [500, 900, 700, 600, 800]                       # the three worth most: the 2nd, the 5th and the 3rd
+    brief["work"]["total"].update(due7_n=15, due7_cents=sum(cents) * 100)
+    brief["work"]["types"] = [{"key": t["key"], "due7_n": 3, "due7_cents": c * 100} for t, c in zip(types, cents)]
+    step1 = lambda h: h.split('id="tdPlan"')[1].split('class="step')[1]
+    wide, _ = page_run({"/api/brief": brief})
+    assert all(f">{t['label']}</span>" in step1(wide["today_html"]) for t in types)
+    narrow, _ = page_run({"/api/brief": brief, "__narrow": True})
+    s1 = step1(narrow["today_html"])
+    shown = [t["label"] for t in types if f">{t['label']}</span>" in s1]
+    assert shown == [types[i]["label"] for i in (1, 2, 4)], shown
+    assert s1.index(f">{types[1]['label']}</span>") < s1.index(f">{types[4]['label']}</span>") < s1.index(f">{types[2]['label']}</span>")
+    assert "and 2 more" in s1 and "Start (15)" in s1
+
+
 def test_the_data_tab_lands_on_what_a_link_names_says_remittance_and_shows_an_ar_rows_item(page_run):
     """Review 2: Today's links name where they land on the Data tab; the Data tab says "remittance", not "835", in its
     headings; an A/R row in a bucket with an item opens it, and at phone width its actions come first."""
