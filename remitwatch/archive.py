@@ -566,6 +566,27 @@ def _pday_fn(pid: Any, last: Any, first: Any, day: Any) -> str | None:
     return hashlib.sha256(f"{k}#{str(day or '')[:10]}".encode("utf-8")).hexdigest()[:24]
 
 
+# the date detection gives a line (detect.Detector.load): its own date, else its one-day service period, else its claim's
+# one-day statement; a line with none of these is undated (detection then matches it with the patient's other undated
+# lines). `l` is the line, `cl` its claim.
+LINE_DAY_SQL = """COALESCE(l.service_date,
+    CASE WHEN l.service_period_start = COALESCE(l.service_period_end, l.service_period_start) THEN l.service_period_start END,
+    CASE WHEN cl.statement_from = COALESCE(cl.statement_to, cl.statement_from) THEN cl.statement_from END)"""
+
+
+def _line_day(line: dict, claim: dict) -> Any:
+    """LINE_DAY_SQL for a line and its claim as dicts (an archived record's rows)."""
+    if line.get("service_date") is not None:
+        return line["service_date"]
+    s, e = line.get("service_period_start"), line.get("service_period_end")
+    if s is not None and s == (e if e is not None else s):
+        return s
+    f, t = claim.get("statement_from"), claim.get("statement_to")
+    if f is not None and f == (t if t is not None else f):
+        return f
+    return None
+
+
 def _register(conn: sqlite3.Connection) -> None:
     for name, n, fn in (("rw_arc_bill", 2, _bill_fn), ("rw_arc_ebill", 1, _ebill_fn), ("rw_arc_pday", 4, _pday_fn)):
         try:
@@ -860,7 +881,7 @@ def _named_bills(conn: sqlite3.Connection, skip: set[str] | frozenset = frozense
 
 def _day_groups(conn: sqlite3.Connection) -> dict[str, str]:
     """{bill: its group} for the store's bills that share one patient's service day with another bill, directly or
-    through a third (a group is named by its smallest bill). Detection weighs such claims together: a reducible
+    through a third (a group is named by its smallest bill). The day is the date detection gives the line (LINE_DAY_SQL). Detection weighs such claims together: a reducible
     procedure is the payer's second one when another claim of the patient that day was allowed more (detect's
     _settle_mppr_candidates), a CO-45 line is no denial when another claim of the day answered it, a denial closes on a
     payment on another claim. A bill that left without the others of its day would change what the analysis says about
@@ -868,11 +889,12 @@ def _day_groups(conn: sqlite3.Connection) -> dict[str, str]:
     _register(conn)
     conn.execute("DROP TABLE IF EXISTS temp.arc_pd")
     conn.execute("CREATE TEMP TABLE arc_pd (k TEXT, bill TEXT, PRIMARY KEY (k, bill)) WITHOUT ROWID")
-    conn.execute("""INSERT OR IGNORE INTO temp.arc_pd SELECT k, bill FROM (
-                        SELECT rw_arc_pday(c.patient_id, c.patient_last, c.patient_first, d.service_date) AS k, cb.bill AS bill
-                        FROM (SELECT DISTINCT claim_key, service_date FROM lines) d
-                        JOIN claims c ON c.claim_key = d.claim_key JOIN temp.arc_cb cb ON cb.claim_key = d.claim_key)
-                    WHERE k IS NOT NULL AND bill IS NOT NULL""")
+    conn.execute(f"""INSERT OR IGNORE INTO temp.arc_pd SELECT k, bill FROM (
+                         SELECT rw_arc_pday(d.patient_id, d.patient_last, d.patient_first, d.day) AS k, cb.bill AS bill
+                         FROM (SELECT DISTINCT l.claim_key, cl.patient_id, cl.patient_last, cl.patient_first, {LINE_DAY_SQL} AS day
+                               FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key) d
+                         JOIN temp.arc_cb cb ON cb.claim_key = d.claim_key)
+                     WHERE k IS NOT NULL AND bill IS NOT NULL""")
     parent: dict[str, str] = {}
 
     def root(x: str) -> str:
@@ -1248,13 +1270,13 @@ def _day_rows(rec: dict) -> list[tuple]:
     li = {c: i for i, c in enumerate(ln["cols"])}
     if "claim_key" not in ci or "claim_key" not in li:
         return []
-    who = {r[ci["claim_key"]]: tuple(r[ci[c]] if c in ci else None for c in ("patient_id", "patient_last", "patient_first"))
-           for r in cl["rows"]}
+    claims = {r[ci["claim_key"]]: dict(zip(cl["cols"], r)) for r in cl["rows"]}
     keys = set()
     for r in ln["rows"]:
-        p = who.get(r[li["claim_key"]])
-        if p is not None:
-            k = _pday_fn(*p, r[li["service_date"]] if "service_date" in li else None)
+        claim = claims.get(r[li["claim_key"]])
+        if claim is not None:
+            k = _pday_fn(claim.get("patient_id"), claim.get("patient_last"), claim.get("patient_first"),
+                         _line_day(dict(zip(ln["cols"], r)), claim))
             if k:
                 keys.add(k)
     return [(k, rec["bill"]) for k in sorted(keys)]
@@ -2620,10 +2642,11 @@ def _day_touched(conn: sqlite3.Connection) -> set[str]:
     _register(conn)
     hi = str(conn.execute("SELECT MAX(svc_hi) FROM archive_bills").fetchone()[0] or "")[:10]
     return {b for (b,) in conn.execute(
-        """SELECT DISTINCT a.bill FROM (SELECT DISTINCT rw_arc_pday(c.patient_id, c.patient_last, c.patient_first, d.service_date) AS k
-               FROM (SELECT DISTINCT claim_key, service_date FROM lines WHERE service_date IS NULL OR service_date <= ?) d
-               JOIN claims c ON c.claim_key = d.claim_key) h
-           JOIN archive_days a ON a.k = h.k""", (hi,))}
+        f"""SELECT DISTINCT a.bill FROM (SELECT DISTINCT rw_arc_pday(d.patient_id, d.patient_last, d.patient_first, d.day) AS k
+                FROM (SELECT DISTINCT cl.patient_id, cl.patient_last, cl.patient_first, {LINE_DAY_SQL} AS day
+                      FROM lines l JOIN claims cl ON cl.claim_key = l.claim_key) d
+                WHERE d.day IS NULL OR d.day <= ?) h
+            JOIN archive_days a ON a.k = h.k""", (hi,))}
 
 
 def restore_touched(conn: sqlite3.Connection, *, sink: Any, today: Any = None, run_id: str | None = None, limit: int = 500,
