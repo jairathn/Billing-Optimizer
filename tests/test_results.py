@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import random
+import re
 import sqlite3
 
 import pytest
@@ -1507,3 +1508,107 @@ def test_a_spot_answer_returns_the_agreement_rates_so_the_page_never_reloads(ser
     r = tc.post("/api/results/spot", json={"day": TODAY, "finding_id": fid, "answer": "agree", "name": "Ana"},
                 headers={"X-Requested-With": "remitwatch"}).json()
     assert r["ok"] and r["summary"]["answered"] == 1 and r["summary"]["agree"] == 1 and r["who"] == "Ana"
+
+
+# ================================================================================================ the page's own code, in node
+RS_PAGE_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const money2 = [^\n]*\n/, /const esc = [^\n]*\n/, /function qs\([^\n]*\n/].map(re => grab(html, re)).join('\n');
+const calls = [];
+const ctx = { console, state: {}, $: () => null, document: { querySelector: () => null }, api: async (p, o) => { calls.push([p, o]); return {}; } };
+vm.createContext(ctx);
+for (const src of [helpers, read('results.js')]) vm.runInContext(src, ctx);
+ctx.state.rsData = { labels: { states: { work_now: 'Work now', waiting: 'Waiting', cant_check: "Can't be checked" },
+  closures: { paid: 'Paid', let_go: 'Let go by a person' }, work: { fax: 'Fax or appeal sent through RemitWatch', let_go: 'x' },
+  signals: { DENIED_AUTH: 'Denied: no authorization' }, minutes: { fax: 'The minutes saved per fax' } } };
+const out = {};
+(async () => {
+  ctx.state.ownerKey = ''; await ctx.rsLoad();
+  ctx.state.ownerKey = 'owner-key'; await ctx.rsLoad();
+  out.headers = calls.map(([p, o]) => [p.split('?')[0], ((o || {}).headers || {})['X-Owner-Password'] || null]);
+  out.day = /^\d{4}-\d{2}-\d{2}$/.test(ctx.rsDay());
+  const spot = ctx.rsSpotHtml({ spot: { today: [{ finding_id: 'f1', signal: 'DENIED_AUTH', stratum: 'work_now', cents: 4000, day: '2026-06-30' }],
+    reasons: { already_worked: 'Already worked', other: 'Other' }, summary: {} }, labels: ctx.state.rsData.labels, today: '2026-06-30' });
+  out.first_reason = (spot.match(/<select class="rs-reason"[^>]*>\s*<option value="([^"]*)"/) || [])[1];
+  out.save_disabled = /<button class="rs-send" disabled>/.test(spot);
+  out.titles = ['state:work_now', 'state:cant_check', 'lift:worked:paid', 'lift:unworked:paid', 'work:let_go', 'work:person:Biller Two',
+                'cant:Separate payee', 'hours:investigate', 'denial_fix:0', 'returned:week:2026-10-26', 'returned:month:2026-10',
+                'closed:let_go', 'book:open:work_now', 'mark_taken_back', 'returned:action:fax', 'work:fax'].map(k => ctx.rsTitle(k));
+  out.dash_tile = ctx.rsTile('Recovered', '–', 'after the first run', 'returned');
+  out.full_tile = ctx.rsTile('Recovered', '$90.00', '1 item', 'returned', '', '', 9000);
+  out.cents = [ctx.rsM(40), ctx.rsM(149), ctx.rsM(-250), ctx.rsBig(4000), ctx.rsBig(1234567)];
+  out.hours = ctx.rsHoursHtml({ hours: { hours: 0.7, rows: [{ key: 'fax', label: 'Faxes sent', n: 2, items: 1, minutes: 10, hours: 0.3 },
+                                                       { key: 'packet', label: 'Packets', n: 1, items: 1, minutes: 20, hours: 0.3 }] },
+                               owner_open: false, owner_locked: true, labels: ctx.state.rsData.labels });
+  out.hours_none = ctx.rsHoursHtml({ hours: { hours: null, rows: [{ key: 'fax', label: 'Faxes sent', n: null, items: null, minutes: 10, hours: null }] }, owner_open: true });
+  out.score = ctx.rsScoreHtml({ recovered_cents: 9000, lost_cents: 0, at_risk_cents: 0, given_up_cents: 4000, counts: { recovered: 1, lost: 0, at_risk: 0, given_up: 1 },
+    given_up_source: 'results', given_up_check: { cents: 5000, n: 2 }, basis: {},
+    weeks: [{ week: '2026-04-20', recovered_cents: 9000, now_cents: 14000, lost_cents: 0, at_risk_cents: null, given_up_cents: 0, frozen: true, frozen_at: '2026-05-11' }] });
+  out.money = ctx.rsMoneyHtml({ money: { returned_cents: 9000, a_cents: 0, b_cents: 0, c_cents: 9000, items: 1, a_items: 0, b_items: 0, c_items: 1,
+    taken_back_cents: 0, mark_taken_back_items: 2, first_flag: '2026-04-01', anyway: { cents: 3000, rate: 0.33, n: 24, paid: 8 } } });
+  out.book = ctx.rsOutcomesHtml({ outcomes: { book: 4, closed: 1, closed_rate: 0.25, closed_by: [{ key: 'paid', label: 'Paid', n: 1, rate: 0.25 }],
+    open_by: [{ key: 'work_now', label: 'Work now', n: 2 }], still_open: 2, cant_check: 1, cant_rate: 0.25, cant_by: [{ key: 'Separate payee', n: 1 }],
+    worked: 0, waiting_no_money: 0, denied_again: 0, win_by_kind: [] }, live: { states: { work_now: { n: 9, cents: 100 } } }, labels: ctx.state.rsData.labels, first_run: '2026-04-10' });
+  out.book_live = ctx.rsOutcomesHtml({ outcomes: null, live: { states: { work_now: { n: 9, cents: 100 } } }, labels: ctx.state.rsData.labels });
+  out.roi = ctx.rsRoiHtml({ roi: { costs_set: true, enough: false, roi: 2.5, roi_conservative: null, returned_cents: 10000, cost_cents: 4000, months: [], basis: 'b' } });
+  const send = (read('results.js').match(/const send = async \(answer, reason, note\) => \{([\s\S]*?)\n    \};/) || [])[1] || '';
+  out.send_found = send.length > 0;
+  out.send_renders = /\brender\(\)/.test(send);
+  const save = (read('results.js').match(/const saveVals = async \(group, sel, msgId\) => \{([\s\S]*?)\n  \};/) || [])[1] || '';
+  out.save_renders = /\brender\(\)/.test(save);
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+@pytest.fixture(scope="module")
+def rs_page(tmp_path_factory):
+    import os
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    script = tmp_path_factory.mktemp("rs") / "results_page.js"
+    script.write_text(RS_PAGE_JS, encoding="utf-8")
+    res = subprocess.run([node, str(script), os.path.join(os.path.dirname(results.__file__), "static")], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr[-3000:]
+    return json.loads(res.stdout)
+
+
+def test_the_page_sends_the_owners_password_it_holds_so_the_owner_can_set_costs_and_minutes(rs_page):
+    assert rs_page["headers"] == [["/api/results", None], ["/api/results", "owner-key"]] and rs_page["day"]
+    # without the password the panels offer the owner a place to type it, instead of sending them to another tab
+    assert 'class="rs-unlock' in rs_page["hours"] and "Providers tab" not in rs_page["hours"]
+
+
+def test_a_disagreement_starts_with_no_reason_and_an_answer_or_a_save_never_redraws_the_page(rs_page):
+    assert rs_page["first_reason"] == "" and rs_page["save_disabled"] is True
+    assert rs_page["send_found"] and rs_page["send_renders"] is False and rs_page["save_renders"] is False
+
+
+def test_every_list_title_is_plain_words(rs_page):
+    for t in rs_page["titles"]:
+        assert t != "Items" and "_" not in t and not re.search(r"\b(work_now|cant_check|let_go|hours|lift|denial_fix)\b", t), t
+    assert "Oct 26, 2026" in rs_page["titles"][9] and "October 2026" in rs_page["titles"][10]
+
+
+def test_money_shows_to_the_cent_and_a_dash_opens_nothing(rs_page):
+    assert rs_page["cents"] == ["$0.40", "$1.49", "-$2.50", "$40.00", "$12,346"]
+    assert "data-key" not in rs_page["dash_tile"] and "first one after this update" in rs_page["dash_tile"]
+    assert 'data-key="returned"' in rs_page["full_tile"] and "Exactly $90.00" in rs_page["full_tile"]
+
+
+def test_counts_name_their_items_frozen_weeks_say_so_and_the_open_book_adds_up(rs_page):
+    assert ">2 on <a" in rs_page["hours"] and "1 item</a>" in rs_page["hours"]
+    assert "Hours saved: 0.7" in rs_page["hours"] and "rs-wide" in rs_page["hours"] and "rs-narrow" in rs_page["hours"]
+    assert "–" in rs_page["hours_none"] and "first one after this update" in rs_page["hours_none"]
+    assert 'data-key="returned:week:2026-04-20"' in rs_page["score"] and 'data-key="returned:week_now:2026-04-20"' in rs_page["score"]
+    assert "The self-check counts $50.00 on 2 items" in rs_page["score"] and 'data-key="given_up"' in rs_page["score"]
+    assert 'data-key="mark_taken_back"' in rs_page["money"] and 'data-key="lift:z"' in rs_page["money"] and 'data-key="lift:z:paid"' in rs_page["money"]
+    assert 'data-key="book:open:work_now"' in rs_page["book"] and "since the first run on Apr 10, 2026" in rs_page["book"]
+    assert 'data-key="state:work_now"' in rs_page["book_live"]
+    assert "not enough cases yet" in rs_page["roi"] and "Lift-adjusted" not in rs_page["roi"]
