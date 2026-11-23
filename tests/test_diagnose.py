@@ -169,7 +169,7 @@ def test_a_part_another_unit_registers_is_scrubbed_and_a_failing_one_is_named(se
 
 def test_a_planted_word_that_slips_past_the_scrubber_stops_the_bundle(server_world, monkeypatch):
     diagnose.register_part("leak", lambda conn: {"x": 1})
-    monkeypatch.setattr(diagnose, "_dump", lambda v: json.dumps(v) + f" {UNI}")
+    monkeypatch.setattr(diagnose, "_dump", lambda v, **_kw: json.dumps(v) + f" {UNI}")
     with pytest.raises(RuntimeError, match="planted word"):
         diagnose.build_bundle(db_path=server_world["db"], days=2, known=[UNI])
 

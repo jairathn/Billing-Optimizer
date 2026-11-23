@@ -269,7 +269,8 @@ of single items are cut to their month.
 Read it in this order:
 1. bundle.json: which runs it covers, the code commit and the versions, and the scan of this bundle.
 2. errors.json: every error of these runs, newest last, each with `where` (file:line in function) and its stack. Start
-   with the first error of the first failing run: later errors are often its consequences.
+   with the first error of the first failing run: later errors are often its consequences. (Past {kept} errors the
+   bundle keeps each run's first error and the newest ones; `left_out` says how many it left out.)
 3. runs/<run_id>.json: one run's manifest. `steps` gives each step's time and memory (a step that stops a run shows as
    the last one; a killed run has outcome "killed" and its last step in the index). `inputs` lists the files by hash,
    kind, origin and result. `outputs` counts items by state and signal. `sections.decisions` counts what the run
@@ -390,7 +391,7 @@ def build_bundle(*, conn: sqlite3.Connection | None = None, db_path: str | None 
                 "runs": [{"run_id": m.get("run_id"), "outcome": m.get("outcome"), "started_at": m.get("started_at")} for m in manifests],
                 "versions": {"bundle_built_with": here, "last_run": latest.get("versions")}, "code": code,
                 "parts": sorted(parts) + ["README.md", "REPRODUCE.md", "bundle.json"]}
-        texts = {"README.md": README.format(built=info["built"], source=info["source"]),
+        texts = {"README.md": README.format(built=info["built"], source=info["source"], kept=ERRORS_KEPT),
                  "REPRODUCE.md": REPRODUCE.format(commit=code.get("commit") or "<the commit on /api/health>",
                                                   rules=code.get("rules_version") or "unknown")}
         # the second pass: anything a part still holds that the scrubber would mask is masked now, and counted (nothing
