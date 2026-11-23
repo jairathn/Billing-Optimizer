@@ -2262,7 +2262,10 @@ def _refund_step(f: dict, fx: dict, st: dict, bal: dict, deadline: str | None, b
         if tb and tb.get("cents"):
             steps.insert(0, f"First post {S._takeback_words(tb)} in EMA: that part of EMA's credit is a takeback EMA never posted, not money "
                             "owed back.")
-    if not (f.get("signal") == "CREDIT_BALANCE" and deadline):
+    if f.get("signal") == "CREDIT_BALANCE" and f.get("appeal_deadline"):
+        # only the refund date detection set (Medicare's 60 days from finding it), never an appeal window
+        deadline, basis = f["appeal_deadline"], f.get("deadline_basis") or basis
+    else:
         deadline = None
         basis = "Commercial plans usually ask for an identified overpayment back within 30 days; Medicare within 60 days of finding it"
     return action, steps, "Billing lead; owner decides", deadline, basis
