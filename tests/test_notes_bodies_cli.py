@@ -4,6 +4,8 @@ mr-7   one patient's note with a table of rows (a procedure list, a pathology hi
        table that shows two or more different patients is refused as a report
 mr-11  a body that is not a JSON object, or not JSON, is refused with 400 and a plain sentence on every route that reads
        one (appeals/send and hide among them), on both hosts; other checks of an address keep their 422
+mr-12  the send-appeals command prints each item's id, what happened and its code, never a reason (a held item's reason
+       names the visit's date)
 
 Invented data only: names, record numbers, accession numbers, claim ids and amounts are made up."""
 from __future__ import annotations
@@ -18,7 +20,7 @@ from remitwatch import cloud, fax, uploads
 from tests.fake_fax import FakeLine
 from tests.test_cloud import DATA, PW, box, cycle, visits_with_downcodes  # noqa: F401  (box is a fixture)
 from tests.test_fax import GOOD_REVIEW, PAYER_FAX, XHR, _number, _rows, _send, site  # noqa: F401  (site is a fixture)
-from tests.test_hotfix2 import REPORT, _build, _events, _journal, sl  # noqa: F401  (sl is a fixture)
+from tests.test_hotfix2 import OTHER_NOTE, REPORT, _build, _events, _journal, sl  # noqa: F401  (sl is a fixture)
 from tests.test_remitwatch import remit
 
 SEVERAL = "This looks like a report listing several patients, not one visit note."
@@ -266,3 +268,37 @@ def test_mr11_serverless_appeals_send_and_hide_refuse_a_body_that_is_not_an_obje
             assert code == 400 and detail == UNREADABLE, (url, raw, code, detail)
     assert len(_journal(sl.state)) == n
     assert c.get("/api/hide/preview", headers=h).status_code == 422
+
+
+# =========================================================================== mr-12: what the send-appeals command prints
+def test_mr12_send_appeals_prints_no_date_from_a_held_items_reason(site, capsys):
+    """A held item's reason can name the visit's date (note_check: "if the note is this patient's visit on <date>") or
+    repeat what Claude's review said about the note. The command's output is a log; it carries the item's id, what
+    happened and the code, and the item's panel gives the reason."""
+    import json
+
+    from remitwatch import cli
+    c = site.c
+    fid, rate = site.ids["DENIED_MEDICAL_NECESSITY"], site.ids["UNDERPAID_VS_OWN_RATE"]
+    assert _number(c, PAYER_FAX).status_code == 200
+    assert _build(c, fid, OTHER_NOTE).status_code == 200            # another patient's note: it waits for a person's look
+    capsys.readouterr()
+    assert cli.main(["--db", site.db, "send-appeals"]) == 0
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    assert [ln.split() for ln in lines if ln.startswith(fid)] == [[fid, "held", "note_check"]], out
+    assert [ln.split() for ln in lines if ln.startswith(rate)] == [[rate, "sent"]], out
+    assert json.loads(lines[-1]) == {"appealable": 2, "held": 1, "sent": 1}
+    # no date of the visit, nor any other date, in what the command prints
+    assert "2026-11-01" not in out and not any(rx.search(out) for rx, _k in uploads.DATE_RES), out
+    # a send that fails with a message: its HTTP status, not the message
+    import remitwatch.api as api
+    from fastapi import HTTPException
+
+    def fails(body, user):
+        raise HTTPException(400, "The note of the visit on 11/01/2026 could not be read.")
+    site.monkeypatch.setattr(api, "appeals_send", fails)
+    assert cli.main(["--db", site.db, "send-appeals"]) == 1
+    out = capsys.readouterr().out
+    assert out.strip().splitlines()[0].split() == [fid, "failed", "400"], out
+    assert not any(rx.search(out) for rx, _k in uploads.DATE_RES), out

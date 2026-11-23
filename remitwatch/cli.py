@@ -468,9 +468,11 @@ def cmd_send_appeals(args: argparse.Namespace) -> int:
         try:
             r = api.appeals_send({"finding_id": it["finding_id"]}, "cli")
         except HTTPException as exc:
-            r = {"status": "failed", "reason": exc.detail}
+            r = {"status": "failed", "code": str(exc.status_code)}
         n[r["status"]] += 1
-        print(it["finding_id"], r["status"], r.get("code") or "", r.get("reason") or "", flush=True)
+        # the item's id, what happened and its code only: a reason can name the visit's date or repeat what the review said
+        # about the note, and this output is a log. The item's panel shows the reason
+        print(it["finding_id"], r["status"], r.get("code") or "", flush=True)
         if r.get("code") in ("practice", "no_fax"):        # every other item would stop on the same thing
             break
     print(json.dumps({"appealable": len(q["items"]), **n}))
