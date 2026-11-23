@@ -1231,7 +1231,7 @@ def run(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: d
     only measures what it would do. `deadline` (time.time()) stops it between batches; what is left waits for the next
     run. Idempotent: a second run with nothing new archives nothing. On a serverless host the run's temporary tables stay
     in memory (temp_store=MEMORY while it runs): its temporary folder is small and shared."""
-    old = None
+    old = _temp_store(conn, "MEMORY") if (mode or ("serverless" if serverless(env) else "server")) == "serverless" else None
     try:
         return _run(conn, horizon=horizon, budget_state=budget_state, sink=sink, run_id=run_id, today=today, mode=mode,
                     deadline=deadline, env=env, floor=floor, require_frozen=require_frozen, max_bills=max_bills,
@@ -1388,7 +1388,7 @@ def archive_ar(conn: sqlite3.Connection, sink: Any, *, today: Any = None, months
         ci, li, ri = cols.index("claim_id"), cols.index("link"), cols.index("row_no")
 
         def stays(r: tuple) -> bool:
-            return bool((r[ci] and _bill_of(r[ci]) in keep_bills) or (r[li] is not None and r[li] in keep_links))
+            return bool(r[ci] and _bill_of(r[ci]) in keep_bills)
         rows = [r for r in every if not stays(r)]
         kept = len(every) - len(rows)
         if not rows:
