@@ -809,7 +809,8 @@ def _payer_policies(c: sqlite3.Connection, stored: dict) -> dict:
         out.update({k: v for k, v in pats.items() if isinstance(v, dict)})
     for row in stored.get("patterns") or []:
         if isinstance(row, dict) and row.get("kind") == "payer_policy" and row.get("pattern") and row["pattern"] not in out:
-            out[row["pattern"]] = {"n": row.get("items"), "cents": row.get("cents"), "paid": row.get("paid"), "answered": row.get("answered")}
+            out[row["pattern"]] = {"n": row.get("items"), "cents": row.get("cents"), "paid": row.get("paid"), "answered": row.get("answered"),
+                                   "decision": row.get("decision"), "default": row.get("default")}
     return out
 
 
@@ -875,7 +876,8 @@ def policy_table(c: sqlite3.Connection) -> dict:
                              auto=auto or 0, at_posting=at_posting or 0, rule_proven=proven or 0, by_policy=by_policy or 0,
                              open=open_n or 0, upper_n=upper_n or 0, upper_cents=upper or 0)
     # the codes a payer almost never pays, as the run folded them
-    for key, pp in _payer_policies(c, stored).items():
+    folded = _payer_policies(c, stored)
+    for key, pp in folded.items():
         n, cents = int(pp.get("n") or 0), int(pp.get("cents") or 0)
         pats[key] = dict(_blank(key), kind="payer_policy", items=n, cents=cents, appealable=None, appealable_cents=None,
                          legal_only=None, legal_only_cents=None, auto=None, at_posting=None, rule_proven=None, by_policy=None,
@@ -921,8 +923,16 @@ def policy_table(c: sqlite3.Connection) -> dict:
         # for the other two (nothing is accepted by default, PLAN decision 14)
         p["decision"] = d.get("decision") or ("pursue" if kind == "write_off" else "decide")
         p["decided_by"], p["decided_at"] = d.get("by"), d.get("at")
-        # saved at or after the start of the newest run (the same second included): the next run applies it
-        p["pending"] = bool(d.get("at")) and (not run_at or not _after(run_at, d.get("at")))
+        # a decision the newest run has not applied yet: the run stored the decision it applied for most patterns (a
+        # code a payer almost never pays: none while it was the default), so pending is a difference from that; for the
+        # rest, a decision saved after the run began
+        ran = folded.get(key) if kind == "payer_policy" else (s if "decision" in s else None)
+        if not d.get("decision"):
+            p["pending"] = False
+        elif ran is not None:
+            p["pending"] = (None if ran.get("default") else ran.get("decision")) != p["decision"]
+        else:
+            p["pending"] = not run_at or _after(d.get("at"), run_at)
         p["basis"] = BASIS["policy" if kind == "write_off" else kind]
         out.append(p)
     first = {"decide": 0}
