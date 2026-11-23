@@ -657,6 +657,23 @@ def test_rebilled_to_the_right_payer_whose_denial_window_closed_is_expired(store
     assert "Rebilled to Medicare (other)" in st["state_basis"] and st["closed_on"] == "2026-06-04"
 
 
+def test_an_answer_a_corrected_claim_can_fix_keeps_the_corrected_claims_clock_after_its_dispute_window(store):
+    """C14: the refiled claim came back from the plan's other product name with PR-288 (referral absent). Its 120-day dispute
+    window closed, but a corrected claim with the referral number can still go until the plan's 365 days from the date of
+    service: never expired before that day, and expired the day after."""
+    tk = denied(store, reason=("CO", "16"), paid_on="2026-03-15", received="2026-03-05", payer="HUMANA TEST", cfi="MC")
+    remit(store, trace="T2", paid_on="2026-09-18", payer="HUMANA CARE PLAN TEST", claims=[
+        {"pcn": F.claim_id(1, sub=2), "cfi": "MC", "received": "2026-09-10", "lines": [ln("99214", 205.80, 0, [("PR", "288", 205.80)], lcn="1")]}])
+    item(store, signal="DENIED_MISSING_INFO", carc="16", procedure_code="99214", billed_code="99214", payer_name="HUMANA TEST",
+         payer_group="Humana Medicaid", payer_kind="medicaid", payment_date="2026-03-15", appeal_deadline="2026-07-13",
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    st = state(store, today="2027-01-20")
+    assert (st["work_state"], st["rule"]) == ("work_now", "work_answered"), st["state_basis"]
+    assert st["answer_window"]["date"] == "2027-03-02" and st["answer_window"]["what"].startswith("the window to send")
+    after = state(store, today="2027-03-03")
+    assert (after["work_state"], after["rule"]) == ("expired", "expired") and after["closed_on"] == "2027-03-02"
+
+
 def test_an_unanswered_claim_no_source_can_show_is_cant_check(store):
     item(store, signal="NO_ANSWER", category="denial", carc=None, line_key=None, claim_key=None, payment_date=None,
          evidence={"sent": "2026-03-03", "answer_due": "2026-04-02", "lines": [["99213", S]]})

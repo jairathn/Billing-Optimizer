@@ -1042,6 +1042,8 @@ class RunLog:
         a serverless host (each write is a Dropbox call) rewritten within one step at most every
         CHECKPOINT_SECONDS_REMOTE seconds unless forced. Never after the run finished: a marker written then would make
         the next run record a run that ended well as killed."""
+        if self._finished is not None:
+            return
         now = time.monotonic()
         if (getattr(self.sink, "remote", False) and not force and step == self._marker_step
                 and now - self._last_checkpoint < CHECKPOINT_SECONDS_REMOTE):
