@@ -467,18 +467,17 @@ def _restated_claims(arch: Archive) -> None:
 
 
 def _line_increases(cl: Claim, paid_lines: Sequence[Ans], net: int, arch: Archive) -> dict[str, int] | None:
-    """{line_key: the new money} of a restating claim's paid lines: each line's listed payment less the payer's latest
-    earlier answer of the same line (the same claim id and payer, the same line number, else the same charge), never below
-    0. None when a line has no earlier answer, or the raises do not add up to the claim's own payment within $1."""
+    """{line_key: the new money} of a restating claim's paid lines: each line's listed payment less what the payer's
+    latest earlier answer of the same line paid (the same claim id and payer, the same line number, else the same charge;
+    a line it never answered before is all new), never below 0. None when the raises do not add up to the claim's own
+    payment within $1: the claim's payment is then shared in proportion to what the lines list."""
     out: dict[str, int] = {}
     for x in paid_lines:
         prev = [y for y in arch.answers_of(x) if y.claim is not None and y.claim is not cl and y.claim.pcn == cl.pcn
-                and y.status != REVERSAL_STATUS and (y.paid or 0) > 0 and _before(y, x) and _same_payer_loose(y, x)
+                and y.status != REVERSAL_STATUS and _before(y, x) and _same_payer_loose(y, x)
                 and ((x.lcn and y.lcn == x.lcn) or abs((y.charge or 0) - (x.charge or 0)) <= 100)]
-        if not prev:
-            return None
-        last = max(prev, key=lambda y: (y.paid_on or "", y.trace or "", y.line_key))
-        out[x.line_key] = max((x.paid or 0) - (last.paid or 0), 0)
+        last = max(prev, key=lambda y: (y.paid_on or "", y.trace or "", y.line_key)) if prev else None
+        out[x.line_key] = max((x.paid or 0) - ((last.paid or 0) if last is not None else 0), 0)
     return out if abs(sum(out.values()) - net) <= 100 else None
 
 
