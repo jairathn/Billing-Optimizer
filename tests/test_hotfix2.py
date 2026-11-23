@@ -552,6 +552,56 @@ def test_h8_the_fax_hold_goes_by_the_day_the_feed_reaches(tmp_path, monkeypatch)
     assert st["feed_date"] == "2026-09-01" and st["days_behind"] == api._data_behind_days()
 
 
+def _steady_feed(tmp_path, until: str, hole_from: str | None = None, hole_to: str | None = None, kind: str = "file"):
+    """Three payers paying every other day from June 1, 2026 to `until`, with nothing at all between hole_from and hole_to
+    (exclusive): the weeks a person forgot to put in the folder."""
+    from remitwatch.store import Store
+    files, day, k = [], date(2026, 6, 1), 0
+    while day.isoformat() <= until:
+        iso = day.isoformat()
+        if not (hole_from and hole_from < iso < hole_to):
+            for j, payer in enumerate(("ANTHEM", "KY MEDICARE", "HUMANA")):
+                k += 1
+                p = tmp_path / f"f{k:04d}.RMT"
+                p.write_bytes(remit("".join(clean_visits(10 * k + j, 1, "99214", "223.65", "117.60")), "100.00", payer=payer,
+                                    seg_count=99, isa_ctrl=f"{k:09d}", pay_date=iso.replace("-", "")))
+                files.append(str(p))
+        day += timedelta(days=2)
+    s = Store(str(tmp_path / "s.sqlite")) if kind == "file" else Store(":memory:", compact=True)
+    s.ingest_835_paths(files)
+    return s
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_h8_a_missing_stretch_of_weeks_keeps_the_feed_at_the_day_before_it(tmp_path, kind):
+    """Weeks of remittances missing, then the newest week put in: every payer looks current, but nobody can see what the
+    payers paid in the missing weeks. The feed reaches only the last day before the hole, so the open-claim pass, the
+    stale-feed alert and the fax hold keep saying so until the missing weeks are read."""
+    from remitwatch.alerts import run_alerts
+    from remitwatch.detect import Detector, feed_date
+    s = _steady_feed(tmp_path, "2026-11-20", hole_from="2026-10-09", hole_to="2026-11-16", kind=kind)
+    assert feed_date(s.conn, today="2026-11-23") == "2026-10-09"
+    Detector(s, run_id="t").run()
+    assert json.loads(s.conn.execute("SELECT value FROM meta WHERE key='feed:date'").fetchone()[0])["date"] == "2026-10-09"
+    out = run_alerts(s.conn, today="2026-11-23")
+    s.conn.commit()
+    assert out["asof"] == "2026-10-09"
+    assert s.conn.execute("SELECT COUNT(*) FROM alerts WHERE kind='STALE_FEED' AND status!='cleared'").fetchone()[0] == 1
+    s.close()
+
+
+def test_h8_a_steady_feed_and_a_long_weekend_are_not_a_hole(tmp_path):
+    from remitwatch.detect import feed_date
+    s = _steady_feed(tmp_path, "2026-11-20")
+    assert feed_date(s.conn, today="2026-11-23") == "2026-11-20"          # every other day from June 1 reaches the 20th
+    s.close()
+    t = tmp_path / "b"
+    t.mkdir()
+    s = _steady_feed(t, "2026-11-20", hole_from="2026-10-31", hole_to="2026-11-06")      # six days without a payment
+    assert feed_date(s.conn, today="2026-11-23") == "2026-11-20"
+    s.close()
+
+
 # =========================================================================== H9: fax numbers in ASCII digits
 def test_h9_a_fax_number_in_other_digits_is_refused(site):
     assert fax.digits("８００-５５５-０１４２") == "" and fax.digits("٨٠٠٥٥٥٠١٤٢") == "" and fax.digits("1-800-555-0142٣") == ""

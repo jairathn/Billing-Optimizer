@@ -242,6 +242,12 @@ def _add_days(iso: str | None, days: int) -> str | None:
 
 FEED_WINDOW_DAYS = 120          # the remittance lines that weigh each payer group's say in feed_date
 FEED_META = "feed:date"         # the feed date the last analysis used, for a copy that does not hold every line (Vercel's)
+# A hole in the feed: more than FEED_GAP_DAYS in a row with no remittance from any payer, followed by newer ones (weeks a
+# person forgot to put in the folder, then the newest week). Nobody can see what the payers paid in the hole, so the feed
+# reaches only the last day before it. The live archive's longest stretch without a payment from mid-2024 to its end was
+# 4 days (weekends and holidays). The rule needs a real feed to judge: FEED_GAP_MIN_DAYS payment days in the window.
+FEED_GAP_DAYS = 7
+FEED_GAP_MIN_DAYS = 20
 
 
 def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
@@ -249,7 +255,9 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
     date is how far its remittances reach; and the feed reaches the latest day D such that payer groups holding at least
     half of the remittance lines of the FEED_WINDOW_DAYS before the newest (clamped) date are current through D. One stray
     file from one payer (a small one, an adjustment, a file dated in the future) moves it only when that payer carries half
-    the volume. With fewer than three payer groups it is the newest date, clamped to today. None with no remittances."""
+    the volume. Nor does the newest week put in after weeks that are missing: when no payer paid for more than
+    FEED_GAP_DAYS in a row, the feed reaches only the last day before that hole. With fewer than three payer groups it is
+    the newest date, clamped to today. None with no remittances."""
     today = today or datetime.now(timezone.utc).date().isoformat()
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "transactions" not in tables:
@@ -273,12 +281,21 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
     groups = [g for g in last if vol.get(g)]
     if len(groups) < 3:
         return newest
-    total, acc = sum(vol[g] for g in groups), 0
+    total, acc, reach = sum(vol[g] for g in groups), 0, newest
     for g in sorted(groups, key=lambda x: last[x], reverse=True):
         acc += vol[g]
         if 2 * acc >= total:
-            return last[g]
-    return newest
+            reach = last[g]
+            break
+    # a hole: the feed reaches only the last day before the first one in the window
+    days = sorted({min(str(d)[:10], today) for (d,) in conn.execute(
+        """SELECT DISTINCT payment_date FROM transactions WHERE COALESCE(superseded,0)=0 AND payment_date IS NOT NULL
+           AND payment_date > ?""", (_add_days(newest, -FEED_WINDOW_DAYS),))})
+    if len(days) >= FEED_GAP_MIN_DAYS:
+        for a, b in zip(days, days[1:]):
+            if (date.fromisoformat(b) - date.fromisoformat(a)).days > FEED_GAP_DAYS:
+                return min(reach, a)
+    return reach
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
