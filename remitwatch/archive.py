@@ -1613,15 +1613,98 @@ def _aggregate(f: dict) -> bool:
         and f.get("signal") not in CARRY_SKIP and str(f.get("source") or "") != "ema"
 
 
+ONE_OFF = "UNDERPAID_VS_OWN_RATE"   # a line paid below its payer's usual rate, on its own (a routine rate's lines group instead)
+
+
+def _evidence(f: dict) -> dict:
+    ev = f.get("evidence")
+    if isinstance(ev, dict):
+        return ev
+    try:
+        got = json.loads(ev or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
+def _line_keys(f: dict) -> list[str]:
+    return [str(x) for x in (_evidence(f).get("line_keys") or []) if x]
+
+
+def _late_pattern(det: Any, fresh: dict, keys: list[str], *, taken_ids: set[str]) -> str | None:
+    """A routine-rate finding for lines of a locked year that no item covers (paid after the year was locked: a late
+    remittance), built by detection's own _emit_pattern from the fresh finding's measure (its usual rate and its reason).
+    Under the fresh finding's own id when that id is free, else as a continuation of the year's kept finding at the same
+    amount. Returns the new finding's id, or None when it cannot be built."""
+    ev = _evidence(fresh)
+    kp = ev.get("key_parts")
+    emit = getattr(det, "_emit_pattern", None)
+    if fresh.get("signal") != "SECOND_RATE" or not isinstance(kp, list) or len(kp) < 7 or emit is None:
+        return None
+    want = set(keys)
+    lines = [l for l in (getattr(det, "lines", None) or []) if l.get("line_key") in want]
+    if not lines:
+        return None
+    from .detect import _fid
+    kp = tuple(kp)
+    fid = _fid("SECOND_RATE", *kp)
+    cont = None
+    if fid in taken_ids:
+        cont, n = fid, 1
+        kp = tuple(kp[:7]) + ("continuation", n)
+        while _fid("SECOND_RATE", *kp) in taken_ids or _fid("SECOND_RATE", *kp) in det.findings:
+            n += 1
+            kp = tuple(kp[:7]) + ("continuation", n)
+        fid = _fid("SECOND_RATE", *kp)
+    note = (str(ev.get("note") or "").strip() + " These claims were paid after the year's older claims moved to the archive"
+            + ("; the year's earlier finding at this amount lists the rest." if cont else ".")).strip()
+    emit(kp, lines, ev.get("usual_cents"), note, None, at_amount=ev.get("payer_lines_at_this_amount"),
+         for_code=ev.get("payer_lines_for_code"))
+    f = det.findings.get(fid)
+    if f is None:
+        return None
+    if cont:
+        ev2 = _evidence(f)
+        ev2["continues"] = cont
+        f["evidence"] = json.dumps(ev2, default=str)
+    return fid
+
+
+def _one_offs(det: Any, keys: set[str]) -> int:
+    """The one-off underpayments detection measured for these lines (Detector.second_rates keeps each line's own
+    finding beside it), emitted as one-offs. Returns how many."""
+    emit = getattr(det, "_emit", None)
+    n = 0
+    for group in (getattr(det, "second_rates", None) or {}).values():
+        for pair in group:
+            try:
+                l, one = pair
+            except (TypeError, ValueError):
+                continue
+            if isinstance(l, dict) and l.get("line_key") in keys and emit is not None:
+                emit(*one)
+                keys.discard(l["line_key"])
+                n += 1
+    return n
+
+
 def carry_locked_aggregates(det: Any) -> dict:
     """The hook right before Detector.save: the aggregate items of a locked year (a year the archive took lines of: the
     payer's yearly totals, its routine second rates, the contract figures) were measured on the whole year. Measured
     again on what the archive left they would shrink, vanish or appear from nothing, so the stored ones are kept as they
-    were (a person's status and notes stay theirs: save carries them as for any item), a new one is dropped, and an
-    item on a line such a new one took is put back as it was. Pooled items with no year (a payer's multiple-procedure
-    practice) are measured afresh. Returns {'kept', 'dropped', 'put_back'}."""
+    were (a person's status and notes stay theirs: save carries them as for any item), and a new one is dropped. Pooled
+    items with no year (a payer's multiple-procedure practice) are measured afresh.
+
+    No line is counted twice and none is lost:
+    - a one-off underpayment detection lists for a line a kept routine-rate finding already lists is left out (the
+      reason that grouped the lines may no longer be visible on what the archive left: the finding speaks for them);
+    - a line a dropped or replaced finding took gets back the item it had (a one-off underpayment);
+    - a line no item covers then (a late remittance paid it after the year was locked) is listed: in a routine-rate
+      finding of its own, measured as detection measured it (its own id when free, else a continuation of the year's
+      finding at that amount), else as the one-off underpayment detection measured for it.
+    Returns {'kept', 'dropped', 'put_back', 'folded', 'late_lines', 'late_items', 'uncovered'}."""
     conn = det.conn
-    out = {"kept": 0, "dropped": 0, "put_back": 0}
+    out = {"kept": 0, "dropped": 0, "put_back": 0, "folded": 0, "late_lines": 0, "late_items": 0, "uncovered": 0}
     locked = _locked_years(conn)
     findings = getattr(det, "findings", None)
     if not locked or findings is None or not _have(conn, "findings"):
@@ -1633,28 +1716,56 @@ def carry_locked_aggregates(det: Any) -> dict:
         d = dict(zip(cols, r))
         if _aggregate(d):
             stored[d["finding_id"]] = d
-    taken: set[str] = set()
-    for fid, f in list(findings.items()):
-        if str(f.get("year") or "") in locked and _aggregate(f) and fid not in stored:
-            try:
-                ev = json.loads(f.get("evidence") or "{}") if isinstance(f.get("evidence"), str) else (f.get("evidence") or {})
-            except ValueError:
-                ev = {}
-            taken.update(str(x) for x in (ev.get("line_keys") or []) if x)
-            del findings[fid]
+    fresh = {fid: f for fid, f in findings.items() if str(f.get("year") or "") in locked and _aggregate(f)}
+    for fid in fresh:
+        del findings[fid]
+        if fid not in stored:
             out["dropped"] += 1
     for fid, d in stored.items():
         findings[fid] = dict(d)
         out["kept"] += 1
-    if taken:
-        lk = sorted(taken)
-        for i in range(0, len(lk), 500):
-            part = lk[i:i + 500]
-            for r in conn.execute(f"SELECT * FROM findings WHERE line_key IN ({','.join('?' * len(part))}) AND COALESCE(stale,0) = 0", part):
-                d = dict(zip(cols, r))
-                if d["finding_id"] not in findings:
-                    findings[d["finding_id"]] = d
-                    out["put_back"] += 1
+    covered = {lk for d in stored.values() for lk in _line_keys(d)}
+    if covered:
+        for fid, f in list(findings.items()):
+            if f.get("signal") == ONE_OFF and f.get("line_key") in covered and fid not in stored:
+                del findings[fid]
+                out["folded"] += 1
+    taken: dict[str, str] = {}
+    for fid, f in fresh.items():
+        for lk in _line_keys(f):
+            if lk not in covered:
+                taken.setdefault(lk, fid)
+    if not taken:
+        return out
+    lk = sorted(taken)
+    for i in range(0, len(lk), 500):
+        part = lk[i:i + 500]
+        for r in conn.execute(f"SELECT * FROM findings WHERE line_key IN ({','.join('?' * len(part))}) AND COALESCE(stale,0) = 0", part):
+            d = dict(zip(cols, r))
+            if d["finding_id"] not in findings:
+                findings[d["finding_id"]] = d
+                out["put_back"] += 1
+    listed = {f.get("line_key") for f in findings.values() if f.get("signal") == ONE_OFF and f.get("line_key")}
+    listed |= {x for f in findings.values() if f.get("signal") == "SECOND_RATE" for x in _line_keys(f)}
+    late: dict[str, list[str]] = defaultdict(list)
+    for k, fid in taken.items():
+        if k not in listed:
+            late[fid].append(k)
+    taken_ids = set(stored) | set(findings)
+    left: set[str] = set()
+    for fid, keys in late.items():
+        got = _late_pattern(det, fresh[fid], sorted(keys), taken_ids=taken_ids)
+        if got:
+            taken_ids.add(got)
+            out["late_items"] += 1
+            out["late_lines"] += len(keys)
+        else:
+            left.update(keys)
+    if left:
+        n = _one_offs(det, left)
+        out["late_items"] += n
+        out["late_lines"] += n
+        out["uncovered"] = len(left)
     return out
 
 

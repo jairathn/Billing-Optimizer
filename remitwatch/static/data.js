@@ -192,9 +192,11 @@ function dtAskRow(x, i){
 
 function dtUnpostedHtml(e){
   const c4 = (e.reconcile || {}).c4 || {}, it = (e.items || {}).post || {}, bs = e.basis || {};
-  if(!(c4.n || c4.short_n || it.n)) return '';
+  // the run's list also holds payments a remittance reported whose money never arrived (ask the payer for them): every row
+  // of the file it links is counted here
+  if(!(c4.n || c4.short_n || c4.unfunded_n || it.n)) return '';
   return `<div class="panel" id="dtUnposted"><div class="panel-head"><h2>Payments the payer sent that EMA never posted</h2><span class="small muted">The payer paid and sent the remittance, and EMA has no posting for it: the money is not on the patient's account.</span></div>
-    ${c4.n || c4.short_n ? `<div class="small" title="${esc(bs.c4 || '')}"><b>${esc(pl(c4.n, 'payment'))}</b> not posted, ${money(c4.cents)}${c4.short_n ? ` · <b>${esc(pl(c4.short_n, 'payment'))}</b> posted short, ${money(c4.short_cents)}` : ''}${c4.as_of ? ` · Production through ${dtDay(c4.as_of)}` : ''}. <a href="/api/ema/unposted.csv" download>Download the list (CSV)</a></div>` : ''}
+    ${c4.n || c4.short_n || c4.unfunded_n ? `<div class="small" title="${esc(bs.c4 || '')}"><b>${esc(pl(c4.n, 'payment'))}</b> not posted, ${money(c4.cents)}${c4.short_n ? ` · <b>${esc(pl(c4.short_n, 'payment'))}</b> posted short, ${money(c4.short_cents)}` : ''}${c4.unfunded_n ? ` · <b>${esc(pl(c4.unfunded_n, 'payment'))}</b> the payer reported but never sent, ${money(c4.unfunded_cents)} (ask the payer for ${c4.unfunded_n === 1 ? 'it' : 'them'})` : ''}${c4.as_of ? ` · Production through ${dtDay(c4.as_of)}` : ''}. <a href="/api/ema/unposted.csv" download>Download the list (CSV)</a></div>` : ''}
     ${dtItemsHtml('post', it)}</div>`;
 }
 

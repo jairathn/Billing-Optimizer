@@ -695,7 +695,7 @@ def test_the_unposted_file_lists_what_the_data_tab_counts(server):
     lines = c.get("/api/ema/unposted.csv").text.strip().splitlines()
     assert len(lines) - 1 == stored["n"] + stored["short_n"] == 2 and lines[-1] == f"9999,{iso(30)},Other Payer,Other Payer,1,12.00,short"
     c4 = c.get("/api/ema/data").json()["reconcile"]["c4"]                # what the Data tab counts
-    assert c4["n"] + c4["short_n"] == len(lines) - 1
+    assert c4["n"] + c4["short_n"] + (c4.get("unfunded_n") or 0) == len(lines) - 1
     del stored["rows"]
     conn = sqlite3.connect(db)
     conn.execute("UPDATE meta SET value=? WHERE key='ema:unposted'", (json.dumps(stored),))
@@ -1767,3 +1767,15 @@ def test_the_guides_first_item_opens_work_now():
     Work now, never one that waits on the payer or a question for the owner."""
     src = open(os.path.join(os.path.dirname(cloud.__file__), "static", "today.js"), encoding="utf-8").read()
     assert "goWork({state:'todo', deadline:'valid', sort:'deadline', first:'1'})" in src
+
+
+def test_the_unposted_line_counts_every_row_of_its_file(page_run):
+    """Real-data acceptance (C2 fixer): the run's list of payments EMA never posted also holds payments a remittance
+    reported but whose money never arrived (kind never_arrived, counted as unfunded_n); the Data tab's line counts them
+    too, so its numbers add up to the rows of the file it links (and to Today's count of items to post)."""
+    out, ans = page_run()
+    data = json.loads(json.dumps(ans["/api/ema/data"]))
+    data["reconcile"]["c4"].update(unfunded_n=1, unfunded_cents=52360)
+    out, _ = page_run({"/api/ema/data": data})
+    text = re.sub(r"<[^>]+>", "", out["data_html"])
+    assert "1 payment the payer reported but never sent, $524 (ask the payer for it)" in text
