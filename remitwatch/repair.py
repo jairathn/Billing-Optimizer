@@ -338,12 +338,14 @@ class Registry:
         return {"remedy": remedy, "target": target, "status": "ok"}
 
     def failed(self, remedy: str, target: str, exc: BaseException | None, *, reason: str | None = None, run_failed: bool = True,
-               hold: bool | None = None) -> dict:
-        """A failure counted against the target. run_failed: this ends the target's try in this run (counts toward
-        failed_runs and the back-off). hold: hold it now (None: when its remedy's attempts are used up)."""
+               hold: bool | None = None, tries: int = 1, run_id: str | None = None) -> dict:
+        """A failure counted against the target. run_failed: this ends the target's try in this run: it counts toward
+        failed_runs and the back-off, once per run however many calls of the run were held (run_id: the run it counts
+        for, by default this registry's own; a killed run is counted under its own id). hold: hold it now (None: when
+        its remedy's attempts are used up). tries: the calls actually made (attempts counts them)."""
         spec = REMEDIES.get(remedy) or REMEDIES["network"]
         e = dict(self.entry(remedy, target))
-        e["attempts"] = int(e.get("attempts") or 0) + 1
+        e["attempts"] = int(e.get("attempts") or 0) + max(1, int(tries or 1))
         now = self._t()
         e.setdefault("first_at", runlog._iso(now))
         e["last_at"] = runlog._iso(now)
@@ -354,8 +356,10 @@ class Registry:
             e["reason"] = runlog.scrub_text(reason, 300)
         elif exc is not None:
             e["reason"] = f"{type(exc).__name__}: {runlog.scrub_text(str(exc), 200)}"
-        if run_failed:
+        rid = run_id or self._run_key()
+        if run_failed and e.get("counted_run") != rid:
             e["failed_runs"] = int(e.get("failed_runs") or 0) + 1
+            e["counted_run"] = rid
             wait = spec.backoff[min(e["failed_runs"] - 1, len(spec.backoff) - 1)] if spec.backoff else 0
             e["next_at"] = runlog._iso(now + timedelta(seconds=wait)) if wait else None
         do_hold = hold if hold is not None else (remedy != "network" and e["failed_runs"] >= spec.attempts)
