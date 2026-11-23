@@ -21,6 +21,7 @@ the payer, or emailed where the practice allows that) and for the note review, w
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -842,12 +843,99 @@ PATIENT_LABEL = re.compile(r"\bpatient(?:'s)?(?:\s+name)?\s*:", re.I)
 ROW_MONEY = re.compile(r"\$\s?\d{1,3}(?:,\d{3})*\.\d{2}\b")
 ROW_CODE = re.compile(r"(?<![\w.])\d{4}[0-9A-Z](?![\w.])")
 NAME_FILLER = {"NAME", "DOB", "MRN", "ID", "DATE", "OF", "BIRTH", "SEX", "AGE", "PMS", "CHART", "ACCOUNT", "PATIENT", "DOS"}
+# a column whose header says whose row it is: a list of patients has one; one patient's own tables (the procedures done,
+# the specimens sent, the medicines) do not. A bare "Name" is left out: a list of medicines has one
+WHO_COLUMN = re.compile(r"(?:patient|pt\.?)(?:\s*(?:name|id|#|no\.?|number))?|dob|d\.o\.b\.?|date\s+of\s+birth|birth\s*date|mrn|"
+                        r"medical\s+record(?:\s*(?:#|no\.?|number))?|chart\s*(?:#|no\.?|number)?|acc(?:oun)?t\.?\s*(?:#|no\.?|number)?|"
+                        r"pms\s*(?:id|#)|person\s*(?:id|#)|member(?:\s*(?:name|id|#))?", re.I)
+BIRTH_GAP_DAYS = 3650           # a row whose earliest date is ten years or more before its latest gives a birth date
+# the header of a printed list of visits by patient, its columns one space apart as a PDF reader gives them: it names the
+# patient's column, the visit's date, and its code or charge. The money columns of one patient's statement or EOB
+# ("Patient Balance", "Member Responsibility", "Account Balance") do not name a patient
+PRINTED_WHO = re.compile(r"\b(?:patient(?!\s*(?:resp|responsibility|balance|portion|due|paid|pay|pmt|copay|amount|share)\b)|dob|"
+                         r"birth|mrn)\b", re.I)
+PRINTED_DAY = re.compile(r"\b(?:dos|date|service)\b", re.I)
+PRINTED_CODE = re.compile(r"\b(?:cpt|hcpcs|code|proc|charges?|amount|amt|billed|paid|balance|fee)\b", re.I)
+
+
+def _cells(line: str, sep: str) -> list[str]:
+    if sep == ",":
+        try:
+            return [c.strip() for c in next(csv.reader([line]), [])]
+        except csv.Error:
+            return [line.strip()]       # a line too long for a CSV field: one cell, nothing to compare
+    return [c.strip() for c in (re.split(r"\s{2,}", line.strip()) if sep == " " else line.strip().strip(sep).split(sep))]
+
+
+def _printed_head(line: str) -> bool:
+    words = line.split()
+    return (0 < len(words) <= 12 and ":" not in line and not any(rx.search(line) for rx, _k in DATE_RES)
+            and 2 * sum(w[0].isupper() for w in words) >= len(words)
+            and all(rx.search(line) for rx in (PRINTED_WHO, PRINTED_DAY, PRINTED_CODE)))
+
+
+def _column_patients(lines: list[str], rows: set[int]) -> bool:
+    """Whether a table's rows give two different values in a column whose header (the line just above the rows) says
+    whose row it is: Patient, DOB, MRN... The columns are told apart by bars, tabs, commas or two spaces or more. Rows
+    whose columns cannot be told apart under the header of a printed list of visits by patient (_printed_head), two or
+    more of them, are that list."""
+    seen: dict[tuple[int, int], set[str]] = defaultdict(set)
+    head, who, sep, width, printed, under = -1, [], " ", 0, False, 0
+    for n, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if n not in rows:
+            sep = next((s for s in ("|", "\t", ",") if s in line), " ")
+            cells = _cells(line, sep)
+            head, width, under = n, len(cells), 0
+            who = [k for k, c in enumerate(cells) if WHO_COLUMN.fullmatch(c)] if width > 1 else []
+            printed = _printed_head(line)
+            continue
+        cells = _cells(line, sep) if who else []
+        if who and len(cells) == width:
+            for k in who:
+                if _words(cells[k]).strip():
+                    seen[(head, k)].add(_words(cells[k]).strip())
+        elif printed:
+            under += 1
+            if under > 1:
+                return True
+    return any(len(v) > 1 for v in seen.values())
+
+
+def _row_births(lines: list[str], rows: set[int]) -> set[str]:
+    """The birth dates a table's rows give: in a row with two dates or more, the earliest when it is ten years or more
+    before the latest (a list of patients gives each one's birth date beside the date of service)."""
+    out = set()
+    for n in rows:
+        days = sorted(d for rx, kind in DATE_RES for d in (_iso(kind, m) for m in rx.finditer(lines[n])) if d)
+        if len(days) > 1 and (date.fromisoformat(days[-1]) - date.fromisoformat(days[0])).days >= BIRTH_GAP_DAYS:
+            out.add(days[0])
+    return out
+
+
+def _labelled_ids(text: str) -> dict[str, set[str]]:
+    """The identifier just after each label ("MRN: 12345", "Patient ID 12345"), by label. A label followed by words is
+    not one ("medical record reviewed on ..." gives nothing)."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for m in ID_LABEL.finditer(text):
+        for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]*", text[m.end(): m.end() + 40]):
+            t = modmed._nid(tok)
+            if t in ID_FILLER:
+                continue
+            if any(c.isdigit() for c in t):
+                out[m.group(0).split()[0].upper().rstrip("#")].add(t)
+            break
+    return out
 
 
 def several_patients(text: str | None) -> bool:
     """Whether a document names more than one patient, so is not one visit note: two different birth dates after a "DOB"
     label, two "Patient:" names with no word in common, or a table of rows (five lines or more that each give a date with
-    a procedure code or a dollar amount)."""
+    a procedure code or a dollar amount) that shows two or more different patients: two names, birth dates or record
+    numbers in a column its header gives to the patient (or rows under the header of a printed list of visits by
+    patient), rows that give two different birth dates, or two record numbers after one label. One patient's own tables (the procedures done that day, a pathology history with its accession
+    numbers) do not make a note a report: such a note is checked like any other (note_identity)."""
     t = text or ""
     births = set()
     for m in BIRTH_LABEL.finditer(t):
@@ -873,9 +961,12 @@ def several_patients(text: str | None) -> bool:
             names.append(set(got))
     if any(not (a & b) for i, a in enumerate(names) for b in names[i + 1:]):
         return True
-    rows = sum(1 for line in t.splitlines()
-               if any(rx.search(line) for rx, _k in DATE_RES) and (ROW_MONEY.search(line) or ROW_CODE.search(line)))
-    return rows >= 5
+    lines = t.splitlines()
+    rows = {n for n, line in enumerate(lines)
+            if any(rx.search(line) for rx, _k in DATE_RES) and (ROW_MONEY.search(line) or ROW_CODE.search(line))}
+    if len(rows) < 5:
+        return False
+    return _column_patients(lines, rows) or len(_row_births(lines, rows)) > 1 or any(len(v) > 1 for v in _labelled_ids(t).values())
 
 
 def note_identity(text: str | None, last: str | None, first: str | None, dos: str | None, ids) -> dict:
