@@ -104,8 +104,8 @@ class AlertEngine:
         self.run_id = run_id
         self.now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.today = today or date.today().isoformat()
-        r = conn.execute("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0").fetchone()
-        self.asof = asof or (r["d"] if r else None) or self.today      # asof can be set to replay history
+        from .store import feed_through
+        self.asof = asof or feed_through(conn) or self.today      # asof can be set to replay history
         self.recent_start = _shift(self.asof, -RECENT_DAYS)
         self.base_start = _shift(self.recent_start, -BASELINE_DAYS)
         self.active: dict[str, dict] = {}
@@ -364,7 +364,36 @@ class AlertEngine:
             self.new_code_rule()
             self.deadline_rule()
         self.stale_rule()
+        self.swing_rule()
         return self.active
+
+    def swing_rule(self) -> None:
+        """A run that added or removed far more work than any day of the last year (detect.record_swing): red, or amber
+        when a release re-checked every claim. It stays for 7 days or until someone acknowledges it."""
+        try:
+            r = self.conn.execute("SELECT value FROM meta WHERE key='detect:swing'").fetchone()
+            s = json.loads(r[0]) if r and r[0] else None
+        except (sqlite3.Error, ValueError, TypeError):
+            s = None
+        if not s or not s.get("at"):
+            return
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(s["at"])
+        except ValueError:
+            return
+        if age.days >= 7:
+            return
+        (an, ac), (rn, rc) = s.get("added") or [0, 0], s.get("removed") or [0, 0]
+        moved = f"{an:,} items added (${ac / 100:,.0f}) and {rn:,} removed (${rc / 100:,.0f})"
+        if s.get("rules_changed"):
+            sev, title = "medium", f"A new release re-checked every claim: {moved}. Expected once after an update; check a few before working them."
+        else:
+            sev, title = "high", (f"One run changed the worklist far more than any day of the last year: {moved}. Check what moved "
+                                  "before working the new items: a stray file or a broken rule can do this.")
+        cats = s.get("categories") or {}
+        note = "; ".join(f"{k or 'other'}: +{v['added'][0]} / -{v['removed'][0]}" for k, v in list(cats.items())[:6])
+        self._raise("WORKLIST_SWING", sev, title, dict(s, note=f"By category: {note}" if note else None), key=("swing", s["at"]),
+                    n=an + rn, cents=ac + rc)
 
     def run(self) -> dict:
         self.evaluate()

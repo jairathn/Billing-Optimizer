@@ -65,11 +65,11 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import (ADD_ON_CODES, AGREEMENT_FILING_NOTE, EM_CODES, EM_LEVEL, GLOBAL_DAYS, MEDICARE_SAME_DAY_EM, MPPR_CODES, appeal_rule,
-                    carc_text, code_category, corrected_rule, filing_rule, normalize_payer, payer_group_kind, pos_class, rarc_text)
+                    carc_text, code_category, corrected_rule, filing_rule, normalize_payer, payer_group_kind, pos_class, rarc_text, window_end)
 from .fees import FeeTable, family_of, is_downcode
-from .store import Store
+from .store import Store, feed_through
 
-DETECT_RULES = "2.6"
+DETECT_RULES = "2.7"
 # whether what EMA has posted as paid closes an item (resolve_elsewhere), or only adds a hint: the billers check EMA, and
 # an item EMA shows paid is not work
 EMA_CLOSES = os.environ.get("REMITWATCH_EMA_CLOSES", "1") != "0"
@@ -1214,7 +1214,7 @@ class Detector:
         deadlines, due, by_due = [], {}, defaultdict(lambda: [0, 0])
         for l in lines:
             rule = appeal_rule(grp, l.get("payer_kind"), (l.get("contract_class") or "").strip() or None)
-            d = _add_days(l.get("payment_date") or l.get("txn_payment_date"), rule["days"])
+            d = window_end(l.get("payment_date") or l.get("txn_payment_date"), rule)
             if d:
                 deadlines.append((d, rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")))
                 due[l["line_key"]] = d
@@ -1559,11 +1559,11 @@ class Detector:
         if fix:
             # a corrected claim (a reopening for Medicare Part B) runs on its own clock, from the remittance or the date of service
             start = pay_date if fix["clock"] == "remit" else (self._first_service_day(base) or pay_date)
-            deadline = _add_days(start, fix["days"])
+            deadline = window_end(start, fix)
             deadline_basis = fix["label"] + ("" if fix["verified"] else " (not confirmed against the payer's current manual)")
         elif actionable in ("appeal", "correct_and_resubmit") or signal == "TAKEBACK":
             # a takeback is disputed inside the payer's appeal window from the remittance that took the money back
-            deadline = _add_days(pay_date, rule["days"])
+            deadline = window_end(pay_date, rule)
             deadline_basis = rule["label"] + ("" if rule["verified"] else " (not confirmed against the payer's current manual)")
             if signal == "TAKEBACK":
                 deadline_basis += (". Counted from the remittance that took the money back; the payer's overpayment letter, which the "
@@ -2182,7 +2182,10 @@ class Detector:
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "ema_rows" not in tables:
             return
-        newest, oldest = c.execute("SELECT MAX(payment_date), MIN(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()
+        oldest = c.execute("SELECT MIN(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0").fetchone()[0]
+        # how far the payers' answers are known to have arrived: a stray remittance file days after the feed stopped (one
+        # with only provider-level adjustments, or one file on its own) must not make every claim sent since look unanswered
+        newest = feed_through(c)
         if not newest:
             return
         # as far back as an item can still be open (a claim sent on time runs the longest appeal window, 730 days, past the
@@ -2231,7 +2234,8 @@ class Detector:
             if l.get("claim_status_code") in ("1", "4", "19"):
                 pcn_payer.setdefault(l["patient_control_number"], (l.get("payer_group") or "Unknown", l.get("payer_kind") or "other"))
         name_last: dict[str, str] = {}
-        for name, d in c.execute("SELECT payer_name, MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0 GROUP BY 1"):
+        for name, d in c.execute("""SELECT payer_name, MAX(payment_date) FROM transactions WHERE COALESCE(superseded,0)=0
+                                    AND (claim_count IS NULL OR claim_count > 0) GROUP BY 1"""):
             g = normalize_payer(name)[0]
             name_last[g] = max(name_last.get(g, ""), d or "")
         # when each export was pulled: the newest says what a claim's status and payments are now. A spreadsheet's own creation
@@ -2472,7 +2476,7 @@ class Detector:
         else:
             grp, kind = votes[ema_payer].most_common(1)[0][0] if votes.get(ema_payer) else normalize_payer(ema_payer)
         rule = filing_rule(grp, kind)
-        file_by = _add_days(days[0], rule["days"])
+        file_by = window_end(days[0], rule)
         # a payer whose limit is not known: the item is dated by the longest common limit, and names the shortest
         early_by = _add_days(days[0], rule["earliest"]) if rule.get("earliest") else None
         billed = sum(x[2] for x in items)
@@ -2514,7 +2518,7 @@ class Detector:
         limit = rule["label"] + ("" if rule["verified"] else ", not confirmed against the payer's current manual")
         if timely:
             ap = appeal_rule(grp, kind)
-            deadline = _add_days(max(file_by, due), ap["days"])
+            deadline = window_end(max(file_by, due), ap)
             by = f"by {early_by} where you can, and by {file_by} at the latest" if early_by else f"by {file_by}"
             dbasis = (f"Sent on time ({sent}). If the payer has no record of it, send it again {by}, the first-filing "
                       f"limit ({limit}); after that, most payers take proof of timely filing (EMA's submission date, or the "
@@ -3039,6 +3043,14 @@ class Detector:
                     self.conn.commit()
                 except Exception:
                     pass
+        # the worklist before this run, to measure what it adds and removes (the swing alarm)
+        swing_since = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        before = _worklist(self.conn)
+        try:
+            last = self.conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
+        except sqlite3.Error:
+            last = None
+        rules_changed = bool(last) and last[0] != DETECT_VERSION
         self.load()
         self.build_baselines()
         self.run_line_rules()
@@ -3054,7 +3066,65 @@ class Detector:
                 self.conn.commit()
         except Exception:
             self.conn.rollback()        # the analysis is saved; the rules run again after the next one
+        try:
+            record_swing(self.conn, before, _worklist(self.conn), swing_since, self.run_id, rules_changed)
+        except Exception:
+            self.conn.rollback()        # the alarm is measured again by the next run
         return out
+
+
+# --------------------------------------------------------------------------- the swing alarm
+# One run that adds or removes far more work than any day of the practice's own last year is held up to a person: a
+# stray file or a bad rule must not quietly fill or empty the worklist. Measured on the last 12 months of remittances,
+# the busiest single day added 290 items and the busiest week 421.
+SWING_ADD_N, SWING_ADD_CENTS = 500, 25_000_000          # items, cents added by one run
+SWING_CAT_N, SWING_CAT_CENTS = 300, 20_000_000          # added within one category
+SWING_DROP_N, SWING_DROP_CENTS = 200, 10_000_000        # removed by one run
+SWING_KEY = "detect:swing"                              # the newest swing, for the alerts (7 days, or until acknowledged)
+
+
+def _worklist(conn: sqlite3.Connection) -> dict[str, tuple[str, int]]:
+    """The items on the worklist as a person sees it, item by item: open or in progress, not stale, inside their window."""
+    try:
+        return {fid: (cat or "", int(cents or 0)) for fid, cat, cents in conn.execute(
+            """SELECT finding_id, category, shortfall_cents FROM findings WHERE status IN ('open', 'in_progress') AND COALESCE(stale,0)=0
+               AND (appeal_deadline IS NULL OR appeal_deadline >= date('now'))""")}
+    except sqlite3.Error:
+        return {}
+
+
+def record_swing(conn: sqlite3.Connection, before: dict, after: dict, since: str, run_id: str, rules_changed: bool) -> dict | None:
+    """What one run added to and removed from the worklist, counted item by item (a run that swaps hundreds of items for
+    others nets to nothing in the totals), leaving out the items people changed while it ran. Kept in meta when it passes
+    the swing levels; None otherwise, and nothing for a first run."""
+    if not before:
+        return None
+    try:
+        people = {r[0] for r in conn.execute("SELECT DISTINCT finding_id FROM finding_events WHERE at >= ? AND run_id IS NULL", (since,))}
+    except sqlite3.Error:
+        people = set()
+    added = [f for f in after if f not in before and f not in people]
+    removed = [f for f in before if f not in after and f not in people]
+    cats: dict[str, dict] = defaultdict(lambda: {"added": [0, 0], "removed": [0, 0]})
+    for fid in added:
+        cats[after[fid][0]]["added"][0] += 1
+        cats[after[fid][0]]["added"][1] += after[fid][1]
+    for fid in removed:
+        cats[before[fid][0]]["removed"][0] += 1
+        cats[before[fid][0]]["removed"][1] += before[fid][1]
+    add_n, add_c = len(added), sum(after[f][1] for f in added)
+    drop_n, drop_c = len(removed), sum(before[f][1] for f in removed)
+    over = (add_n > SWING_ADD_N or add_c > SWING_ADD_CENTS or drop_n > SWING_DROP_N or drop_c > SWING_DROP_CENTS
+            or any(v["added"][0] > SWING_CAT_N or v["added"][1] > SWING_CAT_CENTS for v in cats.values()))
+    if not over:
+        return None
+    swing = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "run_id": run_id, "rules_changed": bool(rules_changed),
+             "added": [add_n, add_c], "removed": [drop_n, drop_c], "people_changed": len(people),
+             "categories": {k: v for k, v in sorted(cats.items(), key=lambda kv: -(kv[1]["added"][1] + kv[1]["removed"][1]))},
+             "sample_added": sorted(added)[:20], "sample_removed": sorted(removed)[:20]}
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (SWING_KEY, json.dumps(swing)))
+    conn.commit()
+    return swing
 
 
 def run_detection(db_path: str, run_id: str | None = None) -> dict:

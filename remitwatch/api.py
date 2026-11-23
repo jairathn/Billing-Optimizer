@@ -2297,7 +2297,14 @@ def _cloud_sync_status() -> dict:
     from .pipeline import dropbox_configured
     st = cloud.SERVING_COPY.status()
     lc = st.get("last_cycle") or {}
-    newest = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d") if has_table("transactions") else None
+    newest = None
+    if has_table("transactions"):
+        from .store import feed_through
+        conn = db()
+        try:
+            newest = feed_through(conn)
+        finally:
+            conn.close()
     files = (one("SELECT MAX(ingested_at) last, MAX(CASE WHEN kind='835' THEN ingested_at END) last835 FROM files") or {}) if has_table("files") else {}
     behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(newest).date()).days if newest else None
     return {"mode": "serverless", "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
@@ -3052,7 +3059,12 @@ def _data_behind_days() -> int | None:
     may have been paid since and nobody here can see it."""
     if not has_table("transactions"):
         return None
-    d = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d")
+    from .store import feed_through
+    conn = db()
+    try:
+        d = feed_through(conn)      # a stray remittance file does not make old data current
+    finally:
+        conn.close()
     try:
         return (datetime.now(timezone.utc).date() - datetime.fromisoformat(d[:10]).date()).days if d else None
     except ValueError:
@@ -4040,18 +4052,20 @@ def _fax_refresh(prov, use_ai: bool = True, days: int = 45, budget_s: float = 20
     return out
 
 
-def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) -> dict:
+def _send_followup(prov, d: dict, actor: str, person_number: str | None = None, stale_ok: bool = False) -> dict:
     """One follow-up from fax.followups: the letter on top, the original packet behind it (and, for the next level, the
     payer's decision), to the number saved now for that level. A send nobody pressed a button for waits for a person when
     the number is not one it may use (fax.number_hold), and so does a request that says the claim is unpaid while the
-    remittances are behind. person_number: a person pressed send for this one item, with this number in front of them."""
+    remittances are behind. person_number: a person pressed send for this one item, with this number in front of them.
+    stale_ok: a person checked in EMA that the claim is still unpaid, so a request that says so goes although the
+    remittances are behind (the daily run never passes it)."""
     from . import fax
     from .appeals import PRACTICE
     fid = d["finding_id"]
     out = {"finding_id": fid, "action": d["action"], "payer_group": d.get("payer_group")}
 
-    def held(reason: str) -> dict:
-        return dict(out, status="held", reason=reason)
+    def held(reason: str, code: str | None = None) -> dict:
+        return dict(out, status="held", reason=reason, **({"code": code} if code else {}))
     if d["action"] == "person":
         if not (person_number and d.get("resend") in RESEND):
             return held(d["why"])
@@ -4079,9 +4093,11 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) 
     elif hold:
         return held(hold)
     behind = _data_behind_days()
-    if d["action"] in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS:
-        return held(f"The newest remittance RemitWatch has is {behind} days old, so the claim may have been paid since. "
-                    "A request that says it is unpaid waits until the remittances are current.")
+    stale = d["action"] in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS
+    if stale and not stale_ok:
+        return held(f"The newest remittance RemitWatch has is {behind} days old, so the claim may have been paid since. The daily run "
+                    "does not send a request that says it is unpaid until the remittances are current; a person who checks in EMA "
+                    "that it is still unpaid can send it now (\"Still unpaid in EMA: send it\").", code="stale")
     missing = _practice_missing()
     if missing:
         return held("The letters still lack the practice's details: set " + ", ".join(missing) + " in the host's settings.")
@@ -4138,12 +4154,14 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) 
     except fax.FaxError as exc:
         return held(str(exc))
     _record_action({"kind": "event", "finding_id": fid, "actor": actor,
-                    "note": f"{title}: faxed to {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages). Why: {d['why']}."})
+                    "note": f"{title}: faxed to {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages). Why: {d['why']}."
+                            + (f" Sent while the remittances were {behind} days behind: the person checked in EMA that it is still unpaid."
+                               if stale else "")})
     return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), title=title)
 
 
 def _send_followups(prov, actor: str, ids: list[str] | None = None, budget_s: float = 240.0, person_number: str | None = None,
-                    lock: str | None = None) -> dict:
+                    lock: str | None = None, stale_ok: bool = False) -> dict:
     import time as _time
     from . import fax
     t0 = _time.monotonic()
@@ -4159,7 +4177,7 @@ def _send_followups(prov, actor: str, ids: list[str] | None = None, budget_s: fl
             break
         _fax_lock_beat(lock)
         try:
-            results.append(_send_followup(prov, d, actor, person_number=person_number))
+            results.append(_send_followup(prov, d, actor, person_number=person_number, stale_ok=stale_ok))
         except Exception as exc:        # one item that cannot go must not stop the ones after it, run after run
             results.append({"finding_id": d["finding_id"], "action": d["action"], "payer_group": d.get("payer_group"), "status": "held",
                             "reason": f"It stopped on an error ({type(exc).__name__}: {str(exc)[:160]}). The others went on."})
@@ -4193,9 +4211,11 @@ def faxes_follow_up(body: dict = Body(default={}), user: str = Depends(require_a
     ids = body.get("finding_ids")
     ids = [str(i) for i in ids][:500] if isinstance(ids, list) else None
     person = str(body.get("number") or "") if ids and len(ids) == 1 and body.get("number") else None
+    # "still unpaid in EMA" is said of the items a person names, never of everything due
+    stale_ok = bool(ids) and body.get("stale_ok") is True
     try:
         with fax_run(user) as lock:
-            return _send_followups(prov, user, ids, person_number=person, lock=lock)
+            return _send_followups(prov, user, ids, person_number=person, lock=lock, stale_ok=stale_ok)
     except FaxBusy as exc:
         raise HTTPException(409, str(exc))
 

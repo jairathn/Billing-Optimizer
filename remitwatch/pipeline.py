@@ -399,7 +399,8 @@ def status(db_path: str) -> dict:
     try:
         last = _meta_get(c, LAST_KEY)
         lock = _meta_get(c, LOCK_KEY)
-        newest = c.execute("SELECT MAX(payment_date) FROM transactions WHERE superseded=0").fetchone()[0]
+        from .store import feed_through
+        newest = feed_through(c)
         last_file = c.execute("SELECT MAX(ingested_at) FROM files").fetchone()[0]
         last_remit = c.execute("SELECT MAX(ingested_at) FROM files WHERE kind='835'").fetchone()[0]
         behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(newest).date()).days if newest else None
