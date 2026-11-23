@@ -460,7 +460,8 @@ function rsBind(v, d){
     t.onclick = go; t.onkeydown = e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); go(); } }; });
   v.querySelectorAll('.rs-item').forEach(a => a.onclick = e => { e.preventDefault(); openDetail(a.dataset.id); });
   const go = v.querySelector('#rsGoSpot'); if(go) go.onclick = () => { const s = $('#rs-spot'); if(s) s.scrollIntoView({block: 'start'}); const b = document.querySelector('.rs-spot .actions:not([hidden]) .rs-agree'); if(b) b.focus(); };
-  const who = v.querySelector('#rsWho') || document.querySelector('#rsWho'); if(who && v.querySelector('#rsWho')) who.onchange = () => rsSetName(who.value.trim());
+  const who = v.querySelector('#rsWho') || document.querySelector('#rsWho');      // a panel drawn again in place keeps the page's own name box
+  if(who) who.onchange = () => rsSetName(who.value.trim());
   v.querySelectorAll('.rs-spot').forEach(row => {
     const err = row.querySelector('.rs-err'), sel = row.querySelector('.rs-reason'), sendBtn = row.querySelector('.rs-send');
     const send = async (answer, reason, note) => {
