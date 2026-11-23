@@ -796,16 +796,19 @@ def test_the_red_number_on_a_tab_counts_the_work_closing_this_week_never_an_item
     state, so an item that only waits on the payer (its follow-up not due yet) was counted, and the list the tab opens
     (Work now and the follow-ups due, closing within 7 days) does not hold it."""
     conn = _store(server)
-    wid = conn.execute("SELECT finding_id FROM findings WHERE category='denial' AND status='open' ORDER BY finding_id LIMIT 1").fetchone()[0]
-    today = D.fromisoformat(server.api._day(0))
+    wid, work = [r[0] for r in conn.execute("SELECT finding_id FROM findings WHERE category='denial' AND status='open' "
+                                            "ORDER BY finding_id LIMIT 2")]
+    today = dt.datetime.now(dt.timezone.utc).date()                  # the window filters read SQLite's date('now')
     conn.execute("UPDATE findings SET work_state='waiting', appeal_deadline=?, follow_up_on=? WHERE finding_id=?",
                  ((today + dt.timedelta(days=3)).isoformat(), (today + dt.timedelta(days=20)).isoformat(), wid))
+    conn.execute("UPDATE findings SET work_state='work_now', appeal_deadline=?, follow_up_on=NULL WHERE finding_id=?",
+                 ((today + dt.timedelta(days=2)).isoformat(), work))
     conn.commit()
     conn.close()
     badge = server.c.get("/api/brief").json()["badges"]["denial"]
     opened = _items(server, category="denial", live=1, status="open,in_progress", deadline="week", state="todo")
-    assert wid not in {i["finding_id"] for i in opened["items"]}
-    assert (badge["n"], badge["cents"]) == (opened["total"], opened["shortfall_cents"])
+    assert work in {i["finding_id"] for i in opened["items"]} and wid not in {i["finding_id"] for i in opened["items"]}
+    assert (badge["n"], badge["cents"]) == (opened["total"], opened["shortfall_cents"] or 0) and badge["n"] >= 1
     window = _items(server, category="denial", live=1, status="open,in_progress", deadline="week")
     assert wid in {i["finding_id"] for i in window["items"]}            # the window alone would have counted it
 

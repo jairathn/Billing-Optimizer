@@ -742,8 +742,9 @@ CHECKS: dict[str, tuple] = {
                     "the owner's decision 1: none).",
                     "states.py expires an item the day its last window closes: compare the example's deadlines and state_basis."),
     "vanished": ("critical", "keep", 0, "No open item disappeared without a reason",
-                 "An item people were shown as work leaves the list only by a closure, a replacement for its line, a fold "
-                 "into another item, or its remittance being superseded.",
+                 "An item people were shown as work leaves the list only by a closure, a person's decision, an item this run "
+                 "made for its line or claim, a fold into another item, its remittance being superseded, or new facts on its "
+                 "own claim; never as a stale row nobody sees.",
                  "The run no longer produced these items: find the rule that stopped (the signal of the examples). They were "
                  "kept on the worklist with a note; accept the change on the Data tab once it is intended."),
     "money_conservation": ("critical", "hold", 0, "Each month's money adds up to its charges",

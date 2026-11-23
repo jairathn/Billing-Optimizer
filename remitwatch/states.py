@@ -1849,7 +1849,24 @@ def settled_in_ema(fx: dict) -> dict | None:
     if tot["ins_paid"] > 0:
         return dict(out, kind="insurer")
     if not tot["several"] and tot["pat_paid"] > 0 and tot["pat_paid"] * 2 >= _owed(f, fx):
-        return dict(out, kind="patient_pr" if group == "PR" else "patient_co")
+        # the patient's payment is the patient's share when a later answer of the line put it on the patient (the payer
+        # reprocessed it to the deductible), when this denial only repeats a claim already answered (a duplicate), or when
+        # the payer's answer put nothing on the practice (group PR or OA, or only the patient's share and the contract
+        # reduction): only a CO or PI denial the patient paid is the practice's to appeal or refund
+        mine = str(f.get("payment_date") or "")[:10]
+        code, svc = f.get("procedure_code"), str(f.get("service_date") or "")[:10]
+        later = [x for x in standing_rows(fx["r835"]["rows"]) if x.get("line_key") and (x["date"] or "") > mine
+                 and x.get("code") == code and (x.get("svc") or "")[:10] == svc and any(g == "PR" and a > 0 for g, _c, a in x["adj"])]
+        if later:
+            x = max(later, key=lambda r: (r["date"] or "", r.get("line_key") or ""))
+            return dict(out, kind="patient_pr", why="later_pr", date=x["date"],
+                        pr=", ".join(f"{g}-{c}" for g, c, a in x["adj"] if g == "PR" and a > 0))
+        if str(f.get("carc") or "") in DUP_CARCS:
+            return dict(out, kind="patient_pr", why="duplicate")
+        own_adj = [(g, c) for x in own_rows(fx) for g, c, a in x["adj"] if a]
+        if group in ("PR", "OA") or (not group and own_adj and all(g == "PR" or (g == "CO" and c in ("45", "253")) for g, c in own_adj)):
+            return dict(out, kind="patient_pr", why="pr" if group in ("PR", "") else "oa")
+        return dict(out, kind="patient_co")
     return None
 
 
@@ -2257,9 +2274,13 @@ def _decide(fx: dict, today: str) -> dict:
     if se:
         res["settled"] = se
         if se["kind"] == "patient_pr":
-            pr = {"rule": "moved_to_patient", "cents": 0, "date": None, "payer": None, "source": "production",
-                  "text": f"Settled by the patient: EMA shows {usd(se['pat'])} paid by the patient and the line closed, and the payer put this "
-                          f"service on the patient ({_carcs_text(fx)})"}
+            paid = f"EMA shows {usd(se['pat'])} paid by the patient and the line closed"
+            text = {"later_pr": f"Settled by the patient: the payer's later answer of {day(se.get('date'))} put this service on the patient "
+                                f"({se.get('pr')}), and {paid}",
+                    "duplicate": f"Settled by the patient: {paid}; this denial ({_carcs_text(fx)}) repeats a claim the payer already answered",
+                    "oa": f"Settled by the patient: {paid}; the payer's answer ({_carcs_text(fx)}) put nothing on the practice"}.get(
+                se.get("why") or "", f"Settled by the patient: {paid}, and the payer put this service on the patient ({_carcs_text(fx)})")
+            pr = {"rule": "moved_to_patient", "cents": 0, "date": se.get("date"), "payer": None, "source": "production", "text": text}
             res["proof"], res["appeal_block"] = pr, "paid"
             return put("done", "moved_to_patient", pr["text"], [{"source": "production", "kind": "proof", "text": pr["text"]}])
         if se["kind"] == "patient_co":
