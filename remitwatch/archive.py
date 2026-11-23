@@ -95,6 +95,7 @@ BATCH_ROWS = 60_000                 # ... and at most about this many rows
 PIN_DAYS = 90                       # a reopened bill stays hot this long
 HISTORY_KEPT = 120                  # runs kept in meta archive:history
 COMPACT_FREE_SHARE = 0.10           # compact() vacuums when this share of the pages is free
+COMPACT_MARGIN_MB = 64              # ... and the budget leaves room for the compacted copy plus this much
 OPEN_STATES = ("work_now", "waiting", "cant_check")
 CLOSED_STATES = ("done", "accepted", "expired")
 ACTIVE_STATUSES = ("open", "in_progress", "appealed")
@@ -2276,17 +2277,72 @@ def panel(conn: sqlite3.Connection, state: Any = None) -> dict:
             "health": data_health(conn), "lines": lines}
 
 
-def compact(conn: sqlite3.Connection, *, min_free_share: float = COMPACT_FREE_SHARE) -> dict:
+def _rss_mb() -> int | None:
+    """The memory this process holds now, in MB (its resident set), or None where it cannot be read."""
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _temp_store(conn: sqlite3.Connection, value: int | str) -> int | None:
+    """Set PRAGMA temp_store; returns the value it had (None when it could not be read). Changing it drops the
+    connection's temporary tables: call it only where none of the caller's are in use."""
+    try:
+        old = conn.execute("PRAGMA temp_store").fetchone()[0]
+        if str(old) != str(value):
+            conn.execute(f"PRAGMA temp_store={value}")
+        return int(old)
+    except sqlite3.Error:
+        return None
+
+
+def compact(conn: sqlite3.Connection, *, min_free_share: float = COMPACT_FREE_SHARE, budget: int | None = None,
+            mode: str | None = None, rss: int | None = None, margin_mb: int = COMPACT_MARGIN_MB, env: dict | None = None) -> dict:
     """Give back the pages the archive freed (VACUUM) when at least `min_free_share` of the store is free. A serverless
-    host's store image is its memory and its upload, so it matters there; on a server SQLite reuses the free pages. It
-    needs about the store's size again while it runs: call it where the run has that room (before detection)."""
-    ps = conn.execute("PRAGMA page_size").fetchone()[0]
-    pc = conn.execute("PRAGMA page_count").fetchone()[0]
-    fl = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    host's store image is its memory and its upload, so it matters there; on a server SQLite reuses the free pages.
+
+    VACUUM builds the compacted copy beside the store. It is built in memory (temp_store=MEMORY while it runs): with
+    SQLite's default it is written to a file of that size in the temporary folder, which on a serverless host is small
+    and shared with the dashboard's copy and the ledger. So it runs only when the memory budget (`budget`, else
+    budget_mb(mode)) less what the process holds now (`rss`, else its resident set) leaves room for the compacted copy
+    and `margin_mb`. It never raises: a skip or a failure is returned with its reason ({'skipped': why, ...}), and the
+    store is then as it was."""
+    try:
+        ps = conn.execute("PRAGMA page_size").fetchone()[0]
+        pc = conn.execute("PRAGMA page_count").fetchone()[0]
+        fl = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    except sqlite3.Error as exc:
+        return {"skipped": "the store's size could not be read", "error": type(exc).__name__}
     if not pc or fl / pc < min_free_share:
-        return {"skipped": True, "free_share": round(fl / pc, 3) if pc else 0, "bytes": ps * pc}
+        return {"skipped": "too little of the store is free to be worth it", "free_share": round(fl / pc, 3) if pc else 0,
+                "bytes": ps * pc}
+    need_mb = -(-ps * (pc - fl) // 1048576) + int(margin_mb)
+    bud = budget if budget is not None else budget_mb(mode, env=env)
+    held = rss if rss is not None else _rss_mb()
+    if bud and held is not None and bud - held < need_mb:
+        return {"skipped": f"not enough memory: the compacted copy needs about {need_mb:,} MB and {max(bud - held, 0):,} MB "
+                           f"of the {bud:,} MB budget is left", "bytes": ps * pc, "need_mb": need_mb, "rss_mb": held,
+                "budget_mb": bud}
     t0 = time.time()
-    conn.commit()
-    conn.execute("VACUUM")
-    pc2 = conn.execute("PRAGMA page_count").fetchone()[0]
+    try:
+        conn.commit()
+        old = _temp_store(conn, "MEMORY")
+        try:
+            conn.execute("VACUUM")
+        finally:
+            if old is not None:
+                _temp_store(conn, old)
+        pc2 = conn.execute("PRAGMA page_count").fetchone()[0]
+    except sqlite3.Error as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return {"skipped": "the store could not be compacted; it is as it was", "error": type(exc).__name__,
+                "bytes": ps * pc}
     return {"before": ps * pc, "after": ps * pc2, "seconds": round(time.time() - t0, 2)}
