@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS results_items (
     flagged_cents INTEGER, shortfall_cents INTEGER, last_state TEXT, last_status TEXT,
     expired_on TEXT, lost_on TEXT, lost_cents INTEGER, flag_info TEXT, item TEXT);
 CREATE TABLE IF NOT EXISTS results_snapshots (week TEXT PRIMARY KEY, at TEXT, final INTEGER DEFAULT 0, version TEXT, data TEXT);
+CREATE TABLE IF NOT EXISTS results_money (finding_id TEXT PRIMARY KEY, at TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS spot_checks (
     day TEXT, finding_id TEXT, stratum TEXT, picked_at TEXT, state TEXT, signal TEXT, payer_group TEXT, cents INTEGER,
     basis TEXT, answer TEXT, reason TEXT, note TEXT, who TEXT, answered_at TEXT, PRIMARY KEY (day, finding_id));
@@ -737,19 +738,61 @@ def _pair_group(rows: dict) -> None:
         x["reverses"] = key(pick)
 
 
+def _via835(conn: sqlite3.Connection, facts: dict[str, dict]) -> None:
+    """Which of EMA's postings an 835 carries, by ema_checks' own rule (line_outcomes): the ledger matched the check to an
+    835 (in_835), or the check match found that 835 exactly or loosely, or paired the check with an 835 EMA keyed under
+    another number (misnumbered), or a spreadsheet damaged the check's number. Sets 'via835' on every posting of `facts`.
+    Such a posting is that 835's payment: it counts through the 835 (or, for an 835 payment EMA had not posted, as money
+    found), never as a payment of its own."""
+    want: set = set()
+    for fx in facts.values():
+        for p in fx.get("pays", []):
+            if not p.get("in_835") and p.get("check"):
+                want.add((str(p["check"]), str(p.get("payer") or "")))
+    carried: set = set()
+    if want and _table(conn, "ema_checks"):
+        cols = _cols(conn, "ema_checks")
+        match = "c.match" if "match" in cols else "NULL"
+        cause = "c.cause" if "cause" in cols else "NULL"
+        damaged = "c.damaged" if "damaged" in cols else "0"
+        for part in _chunks(sorted(want)):
+            conn.execute("DROP TABLE IF EXISTS temp.rs_ck")
+            conn.execute("CREATE TEMP TABLE rs_ck (check_no TEXT, payer TEXT, PRIMARY KEY (check_no, payer))")
+            conn.executemany("INSERT OR IGNORE INTO temp.rs_ck VALUES (?,?)", part)
+            for chk, payer, m, c, dmg in conn.execute(f"""SELECT c.check_no, c.payer, {match}, {cause}, {damaged} FROM temp.rs_ck k
+                                                         JOIN ema_checks c ON c.check_no = k.check_no AND c.payer = k.payer"""):
+                if m in ("exact", "loose") or c in ("misnumbered", "damaged") or dmg:
+                    carried.add((str(chk), str(payer or "")))
+        _drop(conn, "rs_ck")
+    for fx in facts.values():
+        for p in fx.get("pays", []):
+            p["via835"] = bool(p.get("in_835")) or (str(p.get("check") or ""), str(p.get("payer") or "")) in carried
+
+
 def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[str, list[dict]]:
     """The money on one group's records, each record given to the earliest item that covers it and was flagged before it
     (never the remittance that raised that item): standing 835 payments, less the 835 reversals after the line's first
-    flag of payments made on or before it; and EMA's insurer postings that no 835 carries (a payment an 835 also
-    carries, the same amount within SAME_PAYMENT_DAYS, is that payment). A reversal of money no 835 here shows paid takes
-    back the check EMA posted for it (which then counts in its own right) or, with none, money paid before the flag.
+    flag of payments made on or before it; and EMA's insurer postings that no 835 carries. A posting an 835 carries
+    (via835) is that 835's payment and never counts as its own; neither does EMA's copy of an 835 payment or reversal under
+    a number the check match did not find (the same amount on the same service within SAME_PAYMENT_DAYS of an 835 row of
+    it, reversed or not). A reversal of money no 835 here shows paid takes back the check EMA posted for it (which then
+    counts in its own right) or, with none, money paid before the flag. Each event names the items that cover its record
+    ('covers': whose work and signals decide its part of the split) and the record's payer group.
     {finding id: [event, ...]}."""
     out: dict[str, list[dict]] = defaultdict(list)
 
     def order(ids: Iterable[str]) -> list[str]:
         return sorted(set(ids), key=lambda m: (items[m]["F"], m))
     by_key = {(x.get("line_key") or x.get("claim_key")): x for x in rows.values()}
-    standing_835 = [x for x in rows.values() if x.get("status") != "22" and not x.get("reversed_by") and _amount(x) > 0 and x.get("date")]
+    paid_835 = [(rid, x) for rid, x in rows.items() if x.get("status") != "22" and _amount(x) > 0 and x.get("date")]
+    back_835 = [(rid, x) for rid, x in rows.items() if x.get("status") == "22" and _amount(x) < 0 and x.get("date")]
+
+    def copy_of_835(pid: tuple, cents: int, posted: str) -> bool:
+        # EMA's posting of an 835's money under a check number the match did not find: the same amount, on a service the
+        # 835 row also answers, within SAME_PAYMENT_DAYS (the same day included), whatever became of the 835 payment since
+        mine = set(claim_of.get(pid) or [])
+        return any(_amount(x) == cents and _near(x.get("date"), posted, SAME_PAYMENT_DAYS) and mine & set(claim_of.get(rid) or [])
+                   for rid, x in (paid_835 if cents > 0 else back_835))
     # a reversal of money no 835 here shows paid (its pair paid nothing, or it has none): the check EMA posted outside the
     # 835s for that amount on the line, on or before the reversal, is the money it takes back; with no such posting the
     # money is taken as paid before the flag (the archive does not hold that payment)
@@ -763,8 +806,8 @@ def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[
             continue
         d = str(x.get("date") or "")[:10]
         mine = set(claim_of.get(rid) or [])
-        cands = [pid for pid, p in pays.items() if pid not in taken and not p.get("in_835") and int(p.get("cents") or 0) == -_amount(x)
-                 and str(p.get("posted") or "")[:10] <= d and mine & set(claim_of.get(pid) or [])]
+        cands = [pid for pid, p in pays.items() if pid not in taken and not p.get("in_835") and not p.get("via835")
+                 and int(p.get("cents") or 0) == -_amount(x) and str(p.get("posted") or "")[:10] <= d and mine & set(claim_of.get(pid) or [])]
         pid = max(cands, key=lambda q: (str(pays[q].get("posted") or ""), str(q))) if cands else None
         if pid is not None:
             taken.add(pid)
@@ -773,6 +816,7 @@ def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[
     def took_back(first: str, rid: tuple, x: dict, took: int, why: str) -> None:
         d = str(x.get("date") or "")[:10]
         out[first].append({"id": ("835r", rid[1]), "date": d, "cents": took, "kind": "takeback", "source": "835", "payer": x.get("payer") or "",
+                           "group": _row_payer(x), "covers": order(claim_of.get(rid) or []),
                            "text": f"{x.get('payer') or 'The payer'} took back {usd(-took)}{_line_words(x)} on {d} ({why})"})
     for rid, x in sorted(rows.items(), key=lambda kv: (str(kv[1].get("date") or ""), str(kv[0]))):
         d = str(x.get("date") or "")[:10]
@@ -803,16 +847,17 @@ def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[
         elig = [m for m in cl if d > items[m]["F"] and not _own(items[m]["item"], x)]
         if elig:
             out[elig[0]].append({"id": rid, "date": d, "cents": amt, "kind": "payment", "source": "835", "payer": x.get("payer") or "",
+                                 "group": _row_payer(x), "covers": cl,
                                  "text": f"{x.get('payer') or 'The payer'} paid {usd(amt)}{_line_words(x)} on {d} (835 remittance)"})
     rev_of = {pid: rid for rid, pid in unseen.items() if pid is not None}
     for pid, p in sorted(pays.items(), key=lambda kv: (str(kv[1].get("posted") or ""), str(kv[0]))):
         posted = str(p.get("posted") or "")[:10]
         cents = int(p.get("cents") or 0)
         cl = order(claim_of.get(pid) or [])
-        if not posted or p.get("in_835") or not cents or not cl:
+        if not posted or p.get("in_835") or p.get("via835") or not cents or not cl:
             continue
         rid = rev_of.get(pid)       # an 835 reversal takes this check back: it is its own payment, not an 835's
-        if rid is None and cents > 0 and any(_amount(x) == cents and abs(_days(x.get("date"), posted) or 999) <= SAME_PAYMENT_DAYS for x in standing_835):
+        if rid is None and copy_of_835(pid, cents, posted):
             continue
         if cents > 0:
             elig = [m for m in cl if posted > items[m]["F"]]
@@ -829,8 +874,9 @@ def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[
             continue
         who = p.get("payer") or p.get("group") or "the payer"
         out[winner].append({"id": pid, "date": posted, "cents": cents, "kind": "payment" if cents > 0 else "takeback", "source": "production",
-                            "payer": who, "text": (f"EMA posted {usd(cents)} from {who}{_line_words(p)} on {posted} (a check no 835 carries)"
-                                                   if cents > 0 else f"EMA posted a takeback of {usd(-cents)} from {who}{_line_words(p)} on {posted}")})
+                            "payer": who, "group": p.get("group") or None, "covers": cl,
+                            "text": (f"EMA posted {usd(cents)} from {who}{_line_words(p)} on {posted} (a check no 835 carries)"
+                                     if cents > 0 else f"EMA posted a takeback of {usd(-cents)} from {who}{_line_words(p)} on {posted}")})
         if rid is not None:
             took_back(winner, rid, rows[rid], _amount(rows[rid]), f"the check EMA posted on {posted}")
     for evs in out.values():
@@ -840,8 +886,9 @@ def _assign_events(rows: dict, pays: dict, claim_of: dict, items: dict) -> dict[
 
 def _found_postings(conn: sqlite3.Connection, items: dict[str, dict]) -> dict[str, list[dict]]:
     """An 835 payment EMA had not posted when RemitWatch flagged it, posted since: EMA's checks matched to that 835
-    (ema_checks.trace_key = the item's payment), the amount posted beyond what EMA had posted when the item was first
-    flagged, at most what was unposted then, dated by EMA's newest posting of the check (after the flag)."""
+    (ema_checks.trace_key = the item's payment) or paired with it under another number (cause misnumbered, pair_trace),
+    the amount posted beyond what EMA had posted when the item was first flagged, at most what was unposted then, dated by
+    EMA's newest posting of those checks (after the flag)."""
     out: dict[str, list[dict]] = {}
     rnp = {fid: r for fid, r in items.items() if r.get("signal") == "REMIT_NOT_POSTED" and r["item"].get("transaction_key")}
     if not rnp or not _table(conn, "ema_checks") or "trace_key" not in _cols(conn, "ema_checks"):
@@ -849,11 +896,16 @@ def _found_postings(conn: sqlite3.Connection, items: dict[str, dict]) -> dict[st
     by_tk: dict[str, list] = defaultdict(list)
     for fid, r in rnp.items():
         by_tk[r["item"]["transaction_key"]].append(fid)
+    cols = _cols(conn, "ema_checks")
+    paired = ("""UNION ALL SELECT pair_trace AS k, last_posted, ins_paid FROM ema_checks WHERE cause = 'misnumbered'
+                 AND pair_trace IN (SELECT id FROM temp.rs_tk) AND COALESCE(trace_key, '') <> pair_trace"""
+              if {"cause", "pair_trace"} <= cols else "")
     got: dict[str, tuple] = {}
     for part in _chunks(sorted(by_tk)):
         _temp_ids(conn, "rs_tk", part)
-        for tk, last, cents in conn.execute("""SELECT trace_key, MAX(last_posted), SUM(ins_paid) FROM ema_checks
-                                               WHERE trace_key IN (SELECT id FROM temp.rs_tk) GROUP BY trace_key"""):
+        for tk, last, cents in conn.execute(f"""SELECT k, MAX(last_posted), SUM(ins_paid) FROM (
+                                                   SELECT trace_key AS k, last_posted, ins_paid FROM ema_checks
+                                                   WHERE trace_key IN (SELECT id FROM temp.rs_tk) {paired}) GROUP BY k"""):
             got[tk] = (str(last or "")[:10], int(cents or 0))
     _drop(conn, "rs_tk")
     for tk, fids in by_tk.items():
@@ -867,7 +919,7 @@ def _found_postings(conn: sqlite3.Connection, items: dict[str, dict]) -> dict[st
             found = min(cap, max(0, now_cents - before)) if cap > 0 else 0
             if found > 0 and last and last > r["F"]:
                 out[fid] = [{"id": ("posted", tk), "date": last, "cents": found, "kind": "posting", "source": "production",
-                             "payer": r.get("payer_group") or "",
+                             "payer": r.get("payer_group") or "", "group": r.get("payer_group") or None, "covers": [fid],
                              "text": f"EMA posted {usd(found)} of this 835 payment by {last}, after RemitWatch found it unposted"}]
     return out
 
@@ -880,48 +932,131 @@ def _window(conn: sqlite3.Connection, group: Any, kind_of_payer: Any, work: str,
     return cache[key]
 
 
-def _bucket(conn: sqlite3.Connection, ev_date: str, works: list[dict], signals: set, group: Any, pkind: Any,
-            cache: dict) -> tuple[str, dict | None, int | None]:
-    """(a) when a person's work in RemitWatch came before the payment and the payment came inside the payer's answer time
-    for that kind of work (the most recent such work is credited); else (b) when the item is money the practice's own
-    systems missed; else (c)."""
-    for w in sorted(works, key=lambda w: w["at"], reverse=True):
-        if w["date"] >= ev_date:
+FOUND_WHY = {"secondary": "a second payer nobody had billed", "unposted": "an 835 payment EMA had not posted",
+             "not_sent": "a claim that had never left EMA"}
+
+
+def _found_why(ev: dict, cover: list[str], reg: dict) -> str | None:
+    """Why this payment is money the practice's own systems missed, or None: EMA's posting of an 835 payment it had not
+    posted (an unposted payment's own money); any money on a claim that had never left EMA; money from a payer other than
+    the one that answered, on a service where no second payer had been billed (a person's Paid mark on such an item says
+    the second payer paid). Only the items covering the payment's own record count, never another service's item."""
+    if ev.get("kind") == "posting":
+        return "unposted"
+    regs = [reg[m] for m in cover if m in reg]
+    if any(r.get("signal") == "NOT_SENT" for r in regs):
+        return "not_sent"
+    for r in regs:
+        if r.get("signal") == "SECONDARY_NOT_BILLED" and (
+                ev.get("kind") == "mark" or (ev.get("group") and not _same_payer(ev.get("group"), r.get("payer_group")))):
+            return "secondary"
+    return None
+
+
+def _bucket(conn: sqlite3.Connection, ev: dict, cover: list[str], reg: dict, work: dict,
+            cache: dict) -> tuple[str, dict | None, int | None, str | None]:
+    """(a) when a person's work in RemitWatch on an item that covers this payment's own record (its line, or the claim for
+    a claim-level item) came before the payment, and the payment came inside the payer's answer time for that kind of work
+    (the most recent such work is credited); else (b) when the money is money the practice's own systems missed
+    (_found_why); else (c). Returns (bucket, the work credited, the answer time, why it was found)."""
+    works = sorted(((w, m) for m in cover for w in work.get(m) or []), key=lambda wm: wm[0]["at"], reverse=True)
+    for w, m in works:
+        if w["date"] >= ev["date"]:
             continue
-        win = _window(conn, group, pkind, w["kind"], cache)
-        if (_days(w["date"], ev_date) or 0) <= win:
-            return "a", w, win
-    if signals & set(FOUND_SIGNALS):
-        return "b", None, None
-    return "c", None, None
+        r = reg.get(m) or {}
+        win = _window(conn, r.get("payer_group"), r.get("payer_kind"), w["kind"], cache)
+        gap = _days(w["date"], ev["date"])
+        if gap is not None and gap <= win:
+            return "a", w, win, None
+    why = _found_why(ev, cover, reg)
+    return ("b", None, None, why) if why else ("c", None, None, None)
 
 
-def _rule_text(bucket: str, ev: dict, credit: dict | None, win: int | None, F: str, signals: set) -> str:
+def _rule_text(bucket: str, ev: dict, credit: dict | None, win: int | None, F: str, why: str | None) -> str:
     if bucket == "a" and credit:
         return (f"{ev['text']}: {_days(credit['date'], ev['date'])} days after the {WORK_PHRASES.get(credit['kind'], 'work')} of "
                 f"{credit['date']} by {credit['who']}, inside the payer's {win}-day answer time")
     if bucket == "b":
-        what = ("a second payer nobody had billed" if "SECONDARY_NOT_BILLED" in signals else
-                "an 835 payment EMA had not posted" if "REMIT_NOT_POSTED" in signals else "a claim that had never left EMA")
-        return f"{ev['text']}: money on {what}, found by RemitWatch on {F}"
+        return f"{ev['text']}: money on {FOUND_WHY.get(why or '', 'something your own systems missed')}, found by RemitWatch on {F}"
     return f"{ev['text']}: after RemitWatch flagged it on {F}, with no work recorded in RemitWatch inside the payer's answer time"
+
+
+# --------------------------------------------------------------------------- what the figures keep for archived bills
+def _saved(conn: sqlite3.Connection) -> dict[str, dict]:
+    """What the last refresh kept of each item's money and work (results_money)."""
+    if not _table(conn, "results_money"):
+        return {}
+    return {fid: _json(data) for fid, data in conn.execute("SELECT finding_id, data FROM results_money")}
+
+
+def _archived(conn: sqlite3.Connection, reg: dict, saved: dict) -> set[str]:
+    """The items whose bill the archive (remitwatch.archive) has taken out of the store: their claims, lines, history and
+    the item itself are gone, so their money and work are what the last refresh before the archive kept."""
+    if not saved or not _table(conn, "archive_bills"):
+        return set()
+    from .states import bill_of
+    bills: dict[str, list] = defaultdict(list)
+    for fid in saved:
+        b = bill_of(((reg.get(fid) or {}).get("item") or {}).get("patient_control_number"))
+        if b:
+            bills[b].append(fid)
+    out: set[str] = set()
+    for part in _chunks(sorted(bills)):
+        conn.execute("DROP TABLE IF EXISTS temp.rs_ab")
+        conn.execute("CREATE TEMP TABLE rs_ab (bill TEXT PRIMARY KEY)")
+        conn.executemany("INSERT OR IGNORE INTO temp.rs_ab VALUES (?)", [(b,) for b in part])
+        for (b,) in conn.execute("SELECT a.bill FROM archive_bills a JOIN temp.rs_ab k ON k.bill = a.bill"):
+            out.update(bills.get(b, []))
+    _drop(conn, "rs_ab")
+    return out
+
+
+def save_money(conn: sqlite3.Connection, att: dict) -> dict:
+    """Keep each item's money and work as this refresh worked them out (results_money), so the figures of an item whose
+    bill the archive takes later stay what they were: never a dollar dropped because the rows behind it moved out. Only
+    rows that changed are written; an archived item's row is never touched. Returns the counts."""
+    ensure_schema(conn)
+    keep = set(att.get("archived") or ())
+    have = {fid: data for fid, data in conn.execute("SELECT finding_id, data FROM results_money")}
+    now: dict[str, str] = {}
+    members = att.get("group_members") or {}
+    for fid in set(att["items"]) | {f for f, ws in att["work"].items() if ws} | set(att.get("mark_back") or ()):
+        if fid in keep:
+            continue
+        rep = att["groups"].get(fid)
+        rec = {"money": att["items"].get(fid), "work": att["work"].get(fid) or [], "rep": rep,
+               "members": members.get(rep) if rep else None, "answered": att["answered"].get(fid),
+               "denied_again": att["denied_again"].get(fid), "mark_back": fid in set(att.get("mark_back") or ())}
+        now[fid] = json.dumps(rec, separators=(",", ":"), sort_keys=True, default=str)
+    at = _now()
+    write = [(fid, at, data) for fid, data in now.items() if have.get(fid) != data]
+    gone = [fid for fid in have if fid not in now and fid not in keep]
+    conn.executemany("INSERT OR REPLACE INTO results_money (finding_id, at, data) VALUES (?,?,?)", write)
+    conn.executemany("DELETE FROM results_money WHERE finding_id=?", [(f,) for f in gone])
+    return {"written": len(write), "removed": len(gone), "kept_archived": len(keep)}
 
 
 def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | None = None, errors: list | None = None,
               keep_events: int = 12) -> dict:
     """The top line, item by item. Each payment record goes to the earliest item that covers it and was flagged before it;
     items that share a record form a group (the line counted once in the lift and the outcomes). Returns {'items':
-    {finding id: {'a', 'b', 'c', 'returned', 'taken_back', 'events', 'members', 'F'}}, 'groups': {finding id: the group's
-    earliest item}, 'group_members', 'group_money', 'work': {finding id: [...]}, 'denied_again': {finding id: date},
-    'answered': {finding id: 'win'|'loss'}, 'candidates': n, 'newest': day, 'errors': [...]}."""
+    {finding id: {'a', 'b', 'c', 'returned', 'taken_back', 'events', 'members', 'F', 'first_money'}}, 'groups': {finding
+    id: the group's earliest item}, 'group_members', 'group_money', 'work': {finding id: [...]}, 'denied_again': {finding
+    id: date}, 'answered': {finding id: 'win'|'loss'}, 'mark_back': [...], 'archived': [...], 'candidates': n, 'newest':
+    day, 'errors': [...]}. An item whose bill the archive took keeps the money and work the last refresh saw."""
     t = _today(today)
     errors = errors if errors is not None else []
     reg = registry if registry is not None else load_registry(conn)
-    items = {fid: r for fid, r in reg.items() if r["returnable"] and r["F"]}
+    saved = _saved(conn)
+    archived = _archived(conn, reg, saved)
+    items = {fid: r for fid, r in reg.items() if r["returnable"] and r["F"] and fid not in archived}
     newest = _newest_data(conn)
-    work = work_of(conn, reg.keys())
+    work = work_of(conn, [f for f in reg if f not in archived])
+    for fid in archived:
+        work[fid] = list(saved[fid].get("work") or [])
     cands = sorted(_candidates(conn, items))
     facts = _facts(conn, [items[f]["item"] for f in cands], t, errors)
+    _via835(conn, facts)
     # one group per set of items that share a payment record (union by the records' identities)
     parent: dict[str, str] = {}
 
@@ -956,28 +1091,35 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     out_items: dict[str, dict] = {}
     group_of: dict[str, str] = {}
     group_members: dict[str, list] = {}
+    record_days: dict[str, list] = {}
     item_events: dict[str, list] = {}
     cache: dict = {}
     denied_again: dict[str, str] = {}
     answered: dict[str, str] = {}
 
-    def settle(fid: str, mem: list, evs: list[dict]) -> None:
+    def settle(fid: str, evs: list[dict]) -> None:
         r = items.get(fid) or reg[fid]
-        signals = {reg[m].get("signal") for m in mem if m in reg}
-        works = [w for m in mem for w in work.get(m, [])]
         stack: list[list] = []
         took = 0
         kept: list[dict] = []
         # on one day, money in before money out: a reprocessing reverses the old payment and pays the new one together
         for e in sorted(evs, key=lambda e: (e["date"], e["cents"] < 0, str(e["id"]))):
+            rec = {k: v for k, v in e.items() if k not in ("id", "covers")}
             if e["cents"] > 0:
-                b, credit, win = _bucket(conn, e["date"], works, signals, r.get("payer_group"), r.get("payer_kind"), cache)
-                rec = dict(e, bucket=b, rule=_rule_text(b, e, credit, win, r["F"], signals),
-                           work_kind=credit["kind"] if credit else None, work_who=credit["who"] if credit else None,
-                           work_date=credit["date"] if credit else None)
-                rec.pop("id", None)
+                cover = [m for m in (e.get("covers") or [fid]) if m in reg] or [fid]
+                b, credit, win, why = _bucket(conn, e, cover, reg, work, cache)
+                # money paid before the flag that the payer took back earlier: a later payment first pays that back, and only
+                # what it brings beyond it is new money (a reprocessing split over two remittances counts as one on the same day)
+                repay = min(took, e["cents"])
+                took -= repay
+                rule = _rule_text(b, e, credit, win, r["F"], why)
+                if repay:
+                    rule += f"; {usd(repay)} of it only paid back money the payer had paid before the flag and taken back"
+                rec.update(bucket=b, rule=rule, repaid_cents=repay, work_kind=credit["kind"] if credit else None,
+                           work_who=credit["who"] if credit else None, work_date=credit["date"] if credit else None)
                 kept.append(rec)
-                stack.append([rec, e["cents"]])
+                if e["cents"] > repay:
+                    stack.append([rec, e["cents"] - repay])
             else:
                 need = -e["cents"]
                 while need > 0 and stack:
@@ -988,8 +1130,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
                     if top[1] == 0:
                         stack.pop()
                 took += need
-                rec = dict(e, bucket=None, rule=e["text"])
-                rec.pop("id", None)
+                rec.update(bucket=None, rule=e["text"])
                 kept.append(rec)
         left = {id(rec): cents for rec, cents in stack}
         split = {b: 0 for b in BUCKETS}
@@ -997,8 +1138,10 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             if rec["cents"] > 0:
                 rec["counted_cents"] = left.get(id(rec), 0)
                 split[rec["bucket"]] += rec["counted_cents"]
+        firsts = [rec["date"] for rec in kept if (rec.get("counted_cents") or 0) > 0]
+        rep = group_of.get(fid, fid)
         out_items[fid] = dict(split, returned=sum(split.values()), taken_back=took, events=kept[:keep_events], n_events=len(kept),
-                              members=sorted(mem), F=r["F"])
+                              members=sorted(group_members.get(rep) or [fid]), F=r["F"], first_money=min(firsts) if firsts else None)
         item_events[fid] = list(evs)
 
     for root, mem in members.items():
@@ -1013,6 +1156,8 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             for p in fx.get("pays", []):
                 pays.setdefault(_pay_id(p), p)
         group_members[rep] = sorted(mem)
+        record_days[rep] = sorted({str(x.get("date") or "")[:10] for x in rows.values() if _amount(x) and x.get("date")}
+                                  | {str(p.get("posted") or "")[:10] for p in pays.values() if int(p.get("cents") or 0) and p.get("posted")})
         _pair_group(rows)
         per = _assign_events(rows, pays, claim_of, items)
         for m in mem:
@@ -1020,11 +1165,12 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
                 per[m].extend(found[m])
         for m, evs in per.items():
             if evs:
-                settle(m, mem, evs)
+                settle(m, evs)
         group_evs = [e for evs in per.values() for e in evs]
-        # worked items answered again: money on the line after the first work (a win), or a denial after it and no money (a loss)
+        # worked items answered again: money on the line after the first work (a win), or a denial after it and no money (a
+        # loss). Bookkeeping (a payment marked posted) is not work that asks the payer anything.
         for m in mem:
-            ws = work.get(m) or []
+            ws = real_work(work.get(m))
             if not ws:
                 continue
             w0 = ws[0]["date"]
@@ -1045,15 +1191,20 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
     for fid, evs in found.items():
         if fid not in group_of:
             group_of[fid], group_members[fid] = fid, [fid]
-            settle(fid, [fid], list(evs))
+            settle(fid, list(evs))
 
     def group_money(rep: str) -> int:
         return sum((out_items.get(m) or {}).get("returned", 0) for m in group_members.get(rep, [rep]))
-    # a person who marked an item Paid, where no payment record of its group shows money: their amount, on their day (one
-    # mark per group, the earliest-raised marked item's, so two people marking the same line Paid count it once)
+    # a person who marked an item Paid, where no payment record of its group shows any money after its flag (paid or taken
+    # back): their amount, on their day (one mark per group, the earliest-raised marked item's, so two people marking the
+    # same line Paid count it once). Only items whose line can bring money back: a refund to sign, a fee or takeback item
+    # and an unposted payment (whose money is found by its posting) are never money a payer returned. A mark on a group
+    # whose records after the flag came to nothing (the payer paid and took it back) is listed apart, never counted.
     marks: dict[str, tuple] = {}
+    mark_back: list[str] = []
     if _fx(conn):
-        resolved = [fid for fid, r in reg.items() if r.get("last_status") == "resolved" and r["F"]]
+        resolved = [fid for fid, r in reg.items() if r.get("last_status") == "resolved" and r["F"] and fid not in archived
+                    and r.get("category") in RETURN_CATEGORIES and r.get("signal") != "REMIT_NOT_POSTED"]
         for part in _chunks(sorted(resolved)):
             _temp_ids(conn, "rs_pm", part)
             for fid, rc, rd, auto in conn.execute("""SELECT finding_id, recovered_cents, recovered_date, auto_note FROM findings
@@ -1064,21 +1215,37 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
                 rep = group_of.get(fid, fid)
                 if group_money(rep):
                     continue
+                if any(d > r["F"] for d in record_days.get(rep, ())):
+                    mark_back.append(fid)
+                    continue
                 e = {"id": ("mark", fid), "date": str(rd)[:10], "cents": int(rc), "kind": "mark", "source": "person",
-                     "payer": r.get("payer_group") or "",
+                     "payer": r.get("payer_group") or "", "group": None, "covers": [fid],
                      "text": f"Marked Paid ({usd(rc)}) on {str(rd)[:10]} by a person; no payment record shows it yet"}
                 if rep not in marks or (r["F"], fid) < marks[rep][0]:
                     marks[rep] = ((r["F"], fid), e)
         _drop(conn, "rs_pm")
     for rep, ((_f, fid), e) in marks.items():
-        mem = group_members.get(rep) or [fid]
         group_of.setdefault(fid, rep)
-        if items.get(fid) is None and fid not in reg:
-            continue
-        settle(fid, mem, list(item_events.get(fid) or []) + [e])
+        group_members.setdefault(rep, [fid])
+        settle(fid, list(item_events.get(fid) or []) + [e])
+    # the items whose bill the archive took: what the last refresh before it saw
+    for fid in sorted(archived):
+        s = saved.get(fid) or {}
+        rep = s.get("rep") or fid
+        group_of.setdefault(fid, rep)
+        group_members.setdefault(rep, sorted(s.get("members") or [fid]))
+        if isinstance(s.get("money"), dict):
+            out_items[fid] = s["money"]
+        if s.get("answered"):
+            answered[fid] = s["answered"]
+        if s.get("denied_again"):
+            denied_again[fid] = s["denied_again"]
+        if s.get("mark_back"):
+            mark_back.append(fid)
     money_of_group = {rep: group_money(rep) for rep in group_members}
     return {"items": out_items, "groups": group_of, "group_members": group_members, "group_money": money_of_group, "work": work,
-            "denied_again": denied_again, "answered": answered, "candidates": len(cands), "newest": newest, "errors": errors}
+            "denied_again": denied_again, "answered": answered, "mark_back": sorted(set(mark_back)), "archived": sorted(archived),
+            "candidates": len(cands), "newest": newest, "errors": errors}
 
 
 # ------------------------------------------------------------------------------------------------------------- lift
@@ -1094,11 +1261,23 @@ def _pattern(r: dict) -> tuple:
     return (r.get("payer_group") or "", r.get("procedure_code") or "", str(r.get("carc") or r.get("signal") or ""))
 
 
+def _worked_before_money(att: dict, mem: list[str]) -> bool:
+    """Whether a group was worked before its money came: work that can bring money (not bookkeeping such as a payment
+    marked posted) dated before the group's first counted payment, or any such work when nothing came. Work recorded after
+    the money (marking it posted, logging the payment) never makes an item 'worked' in the comparison: it would credit the
+    work with money that came first."""
+    firsts = [(att["items"].get(m) or {}).get("first_money") for m in mem]
+    first = min((f for f in firsts if f), default=None)
+    ws = [w for m in mem for w in real_work(att["work"].get(m))]
+    return any(w["date"] < first for w in ws) if first else bool(ws)
+
+
 def lift(reg: dict, att: dict, today: Any = None) -> dict:
     """Worked against unworked, among the items that can bring money back: the share that brought money in each pattern
     (payer group x code x reason) and age band since the flag, the worked items' money against what the unworked rate
     predicts for them (the pattern's own rate when it has MIN_STRATUM unworked cases, else payer group x reason, else the
-    age band, else every unworked item), and Z: the share paid among the unworked items the comparison used."""
+    age band, else every unworked item), and Z: the share paid among the unworked items the comparison used. An item is
+    worked when it was worked before its money came (_worked_before_money)."""
     t = _today(today)
     groups = att["groups"]
     money = att["items"]
@@ -1110,7 +1289,7 @@ def lift(reg: dict, att: dict, today: Any = None) -> dict:
         if rep is not None and rep != fid:
             continue            # its money is its group's: the group is counted once, by its earliest item
         mem = (att.get("group_members") or {}).get(fid) or [fid]
-        worked = any(att["work"].get(m) for m in mem)
+        worked = _worked_before_money(att, mem)
         ret = int((att.get("group_money") or {}).get(fid, (money.get(fid) or {}).get("returned") or 0) or 0)
         stake = max(int(reg[m].get("flagged_cents") or 0) for m in mem if m in reg) if mem else 0
         pat = _pattern(r)
@@ -1212,6 +1391,8 @@ def _money(conn: sqlite3.Connection, reg: dict, att: dict, lf: dict, today: str)
         lists[f"returned:{b}"] = [[fid, it[b]] for fid, it in sorted(rows, key=lambda x: (-x[1][b], x[0])) if it[b] > 0]
     lists["taken_back"] = [[fid, it["taken_back"]] for fid, it in sorted(items.items(), key=lambda x: (-x[1]["taken_back"], x[0]))
                            if it["taken_back"] > 0]
+    # marked Paid by a person, but the payment records after the flag came to nothing (the payer paid and took it back)
+    lists["mark_taken_back"] = [[fid, 0] for fid in att.get("mark_back") or []]
     tot = {b: sum(it[b] for _f, it in rows) for b in BUCKETS}
     total = sum(tot.values())
     # the qualifier: Z of the dollars flagged on the items whose money is in (c), at most (c)
@@ -1243,7 +1424,9 @@ def _money(conn: sqlite3.Connection, reg: dict, att: dict, lf: dict, today: str)
     out = {"returned_cents": total, "a_cents": tot["a"], "b_cents": tot["b"], "c_cents": tot["c"], "items": len(rows),
            "a_items": len(lists["returned:a"]), "b_items": len(lists["returned:b"]), "c_items": len(lists["returned:c"]),
            "taken_back_cents": sum(it["taken_back"] for it in items.values()), "taken_back_items": len(lists["taken_back"]),
+           "mark_taken_back_items": len(lists["mark_taken_back"]),
            "anyway": {"cents": y, "rate": z, "n": lf.get("z_n"), "paid": lf.get("z_paid"), "c_flagged_cents": c_flagged,
+                      "enough": bool(lf.get("z_n") and lf["z_n"] >= MIN_RATE_N),
                       "basis": (f"Similar items with no work were paid at {round((z or 0) * 100)}% ({lf.get('z_n')} items); that share "
                                 f"of the {usd(c_flagged)} flagged on the items that came back with no work, at most what they brought "
                                 f"back ({usd(tot['c'])})") if z is not None else "Not enough similar items yet"},
@@ -1363,14 +1546,14 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
         elif f and f.get("work_state") == "cant_check":
             basis = str(f.get("state_basis") or "No reason recorded")
             cant[re.split(r"[:.(]", basis, maxsplit=1)[0].strip()[:80] or "No reason recorded"].append(fid)
-        ws = att["work"].get(fid) or []
+        ws = real_work(att["work"].get(fid))
         # worked and still open with nothing back yet; an item denied again after the work had its answer (counted apart)
         if ws and f and f.get("work_state") in OPEN_STATES and not money.get(fid) and fid not in att["denied_again"]:
             waiting_no_money.append(fid)
             waited.append(_days(ws[-1]["date"], today))
     n = len(book)
     n_closed = sum(len(v) for v in closed.values())
-    worked = [fid for fid in book if att["work"].get(fid)]
+    worked = [fid for fid in book if real_work(att["work"].get(fid))]
     denied = sorted(fid for fid in worked if fid in att["denied_again"])
     wins = defaultdict(lambda: [0, 0])
     pat = defaultdict(lambda: [0, 0])
@@ -1378,7 +1561,7 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
         a = att["answered"].get(fid)
         if not a:
             continue
-        k = att["work"][fid][0]["kind"]
+        k = real_work(att["work"][fid])[0]["kind"]
         wins[k][0 if a == "win" else 1] += 1
         p = _pattern(book[fid])
         pat[" x ".join(x for x in p if x) or "Unknown"][0 if a == "win" else 1] += 1
@@ -1404,41 +1587,55 @@ def _outcomes(conn: sqlite3.Connection, reg: dict, att: dict, today: str) -> tup
     return out, lists
 
 
+HOUR_KINDS = ("investigate", "packet", "fax", "duplicate")
+
+
 def _hours_counts(conn: sqlite3.Connection, att: dict, today: str) -> tuple[dict, dict]:
     """What the hours-saved estimate multiplies: items RemitWatch proved settled or closed by itself, appeal packets built,
-    faxes sent, and repeat listings folded into one item."""
+    faxes sent, and repeat listings folded into one item. Each count with how many items it is on (the list a count opens
+    holds the items), and dated by week (by_week: the minutes in force that week price it; see hours_saved)."""
     lists: dict[str, list] = {}
+    dated: dict[str, dict] = {k: defaultdict(int) for k in HOUR_KINDS}
     invest: list = []
-    if _fx(conn) and "work_state" in _cols(conn, "findings"):
+    fc = _cols(conn, "findings") if _fx(conn) else set()
+    if fc and "work_state" in fc:
         w, p = live_sql("hours:investigate", today)
-        invest = [r[0] for r in conn.execute(f"SELECT finding_id FROM findings f WHERE {w} ORDER BY finding_id", p)]
-    packets: set = set()
-    n_packets = 0
+        changed = "f.status_changed_at" if "status_changed_at" in fc else "NULL"
+        for fid, at, first, st in conn.execute(f"SELECT f.finding_id, {changed}, f.first_seen, f.status FROM findings f WHERE {w} "
+                                               f"ORDER BY f.finding_id", p):
+            invest.append(fid)
+            dated["investigate"][week_of((at if st == "resolved" else None) or first) or ""] += 1
+    packet_rows: list = []
+    event_rows: list = []
     if _table(conn, "appeal_packets") and "finding_id" in _cols(conn, "appeal_packets"):
-        for fid, n in conn.execute("SELECT finding_id, COUNT(*) FROM appeal_packets GROUP BY finding_id"):
-            if fid:
-                packets.add(fid)
-                n_packets += n
+        made = "created_at" if "created_at" in _cols(conn, "appeal_packets") else "NULL"
+        packet_rows = [(fid, at) for fid, at in conn.execute(f"SELECT finding_id, {made} FROM appeal_packets") if fid]
     if _table(conn, "finding_events"):
-        ev_n = 0
-        for fid, n in conn.execute("SELECT finding_id, COUNT(*) FROM finding_events WHERE kind='packet' GROUP BY finding_id"):
-            packets.add(fid)
-            ev_n += n
-        n_packets = max(n_packets, ev_n)
+        event_rows = [(fid, at) for fid, at in conn.execute("SELECT finding_id, at FROM finding_events WHERE kind='packet'") if fid]
+    packets = sorted({fid for fid, _at in packet_rows + event_rows})
+    # a packet is in both places when the app recorded it in the item's history too: counted once, from the fuller record
+    for _fid, at in (packet_rows if len(packet_rows) >= len(event_rows) else event_rows):
+        dated["packet"][week_of(at) or ""] += 1
     faxed = sorted({f for f, ws in att["work"].items() for w in ws if w["kind"] == "fax"})
-    n_fax = sum(1 for ws in att["work"].values() for w in ws if w["kind"] == "fax")
-    folded_n, carriers = 0, []
-    if _fx(conn) and "evidence" in _cols(conn, "findings"):
-        for fid, ev in conn.execute("SELECT finding_id, evidence FROM findings WHERE evidence LIKE '%\"folded\"%'"):
+    for ws in att["work"].values():
+        for w in ws:
+            if w["kind"] == "fax":
+                dated["fax"][week_of(w["date"]) or ""] += 1
+    carriers = []
+    if fc and "evidence" in fc:
+        for fid, ev, first in conn.execute("SELECT finding_id, evidence, first_seen FROM findings WHERE evidence LIKE '%\"folded\"%'"):
             k = len(_json(ev).get("folded") or [])
             if k:
-                folded_n += k
+                dated["duplicate"][week_of(first) or ""] += k
                 carriers.append(fid)
     lists["hours:investigate"] = [[f, 0] for f in invest]
-    lists["hours:packet"] = [[f, 0] for f in sorted(packets)]
+    lists["hours:packet"] = [[f, 0] for f in packets]
     lists["hours:fax"] = [[f, 0] for f in faxed]
     lists["hours:duplicate"] = [[f, 0] for f in sorted(carriers)]
-    return {"investigate": len(invest), "packet": n_packets, "fax": n_fax, "duplicate": folded_n}, lists
+    out = {k: sum(dated[k].values()) for k in HOUR_KINDS}
+    out["items"] = {"investigate": len(invest), "packet": len(packets), "fax": len(faxed), "duplicate": len(carriers)}
+    out["by_week"] = {k: dict(sorted(dated[k].items())) for k in HOUR_KINDS}
+    return out, lists
 
 
 def _ai_calls(conn: sqlite3.Connection) -> dict:
@@ -1722,13 +1919,24 @@ def live_figures(conn: sqlite3.Connection, today: Any = None) -> dict:
 
 
 def _given_up_selfcheck(conn: sqlite3.Connection, today: str) -> dict | None:
-    """The self-check's own figure for money given up without a decision, when the run stores it (unit G): shown beside
-    ours, named as its own."""
+    """The self-check's own figure for money given up without a decision, when the run stores it (unit G), named as its
+    own; with the items it counted ('ids': [[finding id, cents], ...]) when it stores them (then it is the figure shown,
+    see given_up_figure), and its week by week."""
     g = _meta(conn, "selfcheck:given_up", None)
-    if isinstance(g, dict) and g.get("cents") is not None:
-        return {"cents": int(g.get("cents") or 0), "n": g.get("n"), "recoverable_cents": g.get("recoverable_cents"), "at": g.get("at"),
-                "source": "selfcheck"}
-    return None
+    if not (isinstance(g, dict) and g.get("cents") is not None):
+        return None
+    out = {"cents": int(g.get("cents") or 0), "n": g.get("n") if g.get("n") is not None else g.get("items"),
+           "recoverable_cents": g.get("recoverable_cents"), "at": g.get("at"), "source": "selfcheck",
+           "weeks": [w for w in g.get("weeks") or [] if isinstance(w, dict)]}
+    if isinstance(g.get("ids"), list):
+        ids = []
+        for x in g["ids"]:
+            if isinstance(x, (list, tuple)) and x:
+                ids.append([str(x[0]), int(x[1] or 0) if len(x) > 1 and isinstance(x[1], (int, float)) else 0])
+            elif isinstance(x, str):
+                ids.append([x, 0])
+        out["ids"] = ids
+    return out
 
 
 def _given_up_weeks(conn: sqlite3.Connection, today: str) -> list[dict]:
@@ -1764,12 +1972,15 @@ def data_rev(conn: sqlite3.Connection, today: Any = None) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:20]
 
 
-def compute(conn: sqlite3.Connection, today: Any = None, *, errors: list | None = None) -> tuple[dict, dict]:
-    """Every figure of the Results tab from the full store, and the lists behind them: (payload, lists)."""
+def compute(conn: sqlite3.Connection, today: Any = None, *, errors: list | None = None, save: bool = False) -> tuple[dict, dict]:
+    """Every figure of the Results tab from the full store, and the lists behind them: (payload, lists). save: keep each
+    item's money and work for the day the archive takes its bill (save_money; the run's step does)."""
     t = _today(today)
     errors = errors if errors is not None else []
     reg = load_registry(conn)
     att = attribute(conn, t, registry=reg, errors=errors)
+    if save:
+        save_money(conn, att)
     lf = lift(reg, att, t)
     money, lists = _money(conn, reg, att, lf, t)
     lists.update(lf.pop("lists"))
@@ -1815,10 +2026,13 @@ def _weeks_payload(payload: dict) -> None:
     payload["weeks"] = [{"week": w, "recovered_cents": rec.get(w, 0), "lost_cents": lost.get(w, 0)} for w in weeks][-26:]
 
 
-def snapshot(conn: sqlite3.Connection, payload: dict, live: dict, today: Any = None, settings: dict | None = None) -> dict:
+def snapshot(conn: sqlite3.Connection, payload: dict, live: dict, today: Any = None, settings: dict | None = None,
+             lists: dict | None = None) -> dict:
     """Weekly snapshots (results_snapshots). The current week's row keeps what holds at a moment (items by state, money at
     risk) as of the newest run in the week; a week is frozen once it ended SETTLE_DAYS ago: its money figures are written
-    with the settings in force, and a frozen week is never written again. Returns what it did."""
+    with the settings in force, the lists behind them (finding ids and cents, so the frozen figure opens the items it
+    counted, whatever happens to them later) and the hours saved that week at the minutes then in force. A frozen week is
+    never written again. Returns what it did."""
     ensure_schema(conn)
     t = _today(today)
     wk = week_of(t)
@@ -1852,6 +2066,9 @@ def snapshot(conn: sqlite3.Connection, payload: dict, live: dict, today: Any = N
         data.update(money={"returned_cents": m.get("cents", 0), "a_cents": m.get("a", 0), "b_cents": m.get("b", 0),
                            "c_cents": m.get("c", 0), "items": m.get("n", 0)},
                     lost={"n": (lost_week.get(w) or {}).get("n", 0), "cents": (lost_week.get(w) or {}).get("cents", 0)},
+                    lists={"returned": list((lists or {}).get(f"returned:week:{w}") or []),
+                           "lost": list((lists or {}).get(f"lost:week:{w}") or [])},
+                    hours=hours_saved(payload.get("hours_counts") or {}, settings or {}, week=w),
                     settings=(settings or {}).get("values"), frozen_at=_now(), rules_version=VERSION)
         conn.execute("UPDATE results_snapshots SET final=1, at=?, data=? WHERE week=? AND final=0",
                      (_now(), json.dumps(data, separators=(",", ":")), w))
@@ -1859,11 +2076,21 @@ def snapshot(conn: sqlite3.Connection, payload: dict, live: dict, today: Any = N
     return did
 
 
-def snapshots(conn: sqlite3.Connection) -> list[dict]:
-    if not _table(conn, "results_snapshots"):
-        return []
-    return [{"week": w, "at": at, "final": bool(fin), "version": v, **_json(d)}
-            for w, at, fin, v, d in conn.execute("SELECT week, at, final, version, data FROM results_snapshots ORDER BY week")]
+def snapshots(conn: sqlite3.Connection, d: dict | None = None, lists: bool = False) -> list[dict]:
+    """The weekly snapshots, oldest first: the store's table, or, on a serverless host's dashboard copy (which carries no
+    such table), the copy the run put in its figures, so both hosts show the same frozen weeks. lists: with each frozen
+    week's lists (the store's table only; the run keeps them for the copy in its lists, see list_entries)."""
+    out = []
+    if _table(conn, "results_snapshots"):
+        out = [{"week": w, "at": at, "final": bool(fin), "version": v, **_json(data)}
+               for w, at, fin, v, data in conn.execute("SELECT week, at, final, version, data FROM results_snapshots ORDER BY week")]
+    if not out:
+        d = d if d is not None else dashboard(conn)
+        out = [dict(s) for s in (d or {}).get("snapshots") or [] if isinstance(s, dict)]
+    if not lists:
+        for s in out:
+            s.pop("lists", None)
+    return out
 
 
 def baseline(conn: sqlite3.Connection, live: dict, today: Any = None) -> dict | None:
@@ -1900,13 +2127,18 @@ def refresh(conn: sqlite3.Connection, *, today: Any = None, run_id: Any = None, 
         return out
     errors: list = []
     out["registry"] = update_registry(conn, t)
-    payload, lists = compute(conn, t, errors=errors)
+    payload, lists = compute(conn, t, errors=errors, save=True)
     live = live_figures(conn, t)
     _weeks_payload(payload)
+    out["snapshot"] = snapshot(conn, payload, live, t, read_settings(conn), lists=lists["lists"])
+    # the frozen weeks travel with the figures (a serverless host's dashboard copy carries meta, not the snapshots table),
+    # their lists with the lists, so a frozen figure opens what it counted on either host
+    snaps = snapshots(conn, lists=True)
+    lists["frozen"] = {sn["week"]: sn.get("lists") or {} for sn in snaps if sn.get("final") and isinstance(sn.get("lists"), dict)}
+    payload["snapshots"] = [{k: v for k, v in sn.items() if k != "lists"} for sn in snaps][-120:]
     payload.update(rev=rev, run_id=run_id, host=host, seconds=round(time.time() - t0, 1), detect_run=detect_run(conn))
     _set_meta(conn, DASH_KEY, payload)
     _set_meta(conn, LISTS_KEY, lists)
-    out["snapshot"] = snapshot(conn, payload, live, t, read_settings(conn))
     b = baseline(conn, live, t)
     out["baseline"] = bool(b)
     conn.commit()
@@ -1985,16 +2217,48 @@ def needs_compute(conn: sqlite3.Connection) -> bool:
     return d is None or d.get("detect_run") != detect_run(conn)
 
 
-def hours_saved(counts: dict, settings: dict) -> dict:
-    """The estimate (labelled as one): each count times the minutes the owner set for it."""
-    mins = (settings or {}).get("values", {}).get("minutes") or DEFAULT_SETTINGS["minutes"]
+def _minutes_at(settings: dict | None, day: str) -> dict:
+    """The minutes in force on a day: the newest version the owner saved on or before it (the history keeps each), the
+    defaults before the first save."""
+    best = None
+    for h in (settings or {}).get("history") or []:
+        at = str(h.get("at") or "")[:10]
+        if at and at <= day and (best is None or at >= best[0]):
+            best = (at, h)
+    got = ((best[1].get("values") or {}).get("minutes") if best else None) or {}
+    return {k: got.get(k, v) for k, v in DEFAULT_SETTINGS["minutes"].items()}
+
+
+def hours_saved(counts: dict | None, settings: dict, week: str | None = None) -> dict:
+    """The estimate (labelled as one): each thing RemitWatch did times the minutes the owner set for it, at the minutes in
+    force the week it happened (editing a figure prices what happens from then on; the history keeps the earlier ones).
+    counts None (no run has worked them out yet): every count and hour is None. week: only that week's things (a frozen
+    week keeps its own hours)."""
+    cur = {k: v for k, v in DEFAULT_SETTINGS["minutes"].items()}
+    cur.update(((settings or {}).get("values") or {}).get("minutes") or {})
+    if counts is None:
+        return {"rows": [{"key": k, "label": MINUTE_LABELS[k], "n": None, "items": None, "minutes": cur.get(k), "hours": None}
+                         for k in HOUR_KINDS], "hours": None}
+    by_week = counts.get("by_week") or {}
+    items = counts.get("items") or {}
     rows = []
     total = 0.0
-    for k in ("investigate", "packet", "fax", "duplicate"):
-        n = int((counts or {}).get(k) or 0)
-        h = n * float(mins.get(k) or 0) / 60
+    priced: dict[str, dict] = {}
+    for k in HOUR_KINDS:
+        weeks = {wk: n for wk, n in (by_week.get(k) or {}).items() if week is None or wk == week}
+        n = int(sum(weeks.values()) if week is not None else (counts.get(k) or 0))
+        mins = 0.0
+        for wk, cnt in weeks.items():
+            if wk:
+                if wk not in priced:
+                    priced[wk] = _minutes_at(settings, _add(wk, 6) or wk)
+                mins += cnt * float(priced[wk].get(k) or 0)
+        undated = n - sum(cnt for wk, cnt in weeks.items() if wk)
+        mins += max(undated, 0) * float(cur.get(k) or 0)
+        h = mins / 60
         total += h
-        rows.append({"key": k, "label": MINUTE_LABELS[k], "n": n, "minutes": mins.get(k), "hours": round(h, 1)})
+        rows.append({"key": k, "label": MINUTE_LABELS[k], "n": n, "items": items.get(k) if week is None else None,
+                     "minutes": cur.get(k), "hours": round(h, 1)})
     return {"rows": rows, "hours": round(total, 1)}
 
 
@@ -2038,16 +2302,32 @@ def roi(payload: dict, settings: dict, today: Any = None) -> dict:
 
 
 # ------------------------------------------------------------------------------------------------------------- lists
+FROZEN_RE = re.compile(r"(returned|lost):week:(\d{4}-\d{2}-\d{2})")
+
+
 def list_entries(conn: sqlite3.Connection, key: str, today: Any = None, lists: dict | None = None) -> list[list]:
     """The items behind one figure: [[finding id, cents], ...] in the order shown. Live keys are counted on the findings
-    table now; every other key is the run's own list."""
+    table now (given up: the self-check's own items when its figure is the one shown); a frozen week's figure opens the
+    list frozen with it ('returned:week_now:<week>' opens that week's money as read today); every other key is the run's
+    own list, from the same run as the figure."""
     t = _today(today)
-    if key in LIVE_KEYS or key == "hours:investigate":
+    if key == "given_up":
+        g = _given_up_selfcheck(conn, t)
+        if g and g.get("ids") is not None:
+            return sorted(g["ids"], key=lambda x: (-x[1], x[0]))
+    if key in LIVE_KEYS:
         w, p = live_sql(key, t)
         col = "f.written_off_cents" if key.startswith("given_up") else "f.shortfall_cents"
         order = "f.appeal_deadline, f.finding_id" if key == "at_risk" else f"COALESCE({col},0) DESC, f.finding_id"
         return [[r[0], int(r[1] or 0)] for r in conn.execute(f"SELECT f.finding_id, {col} FROM findings f WHERE {w} ORDER BY {order}", p)]
     got = lists if lists is not None else _meta(conn, LISTS_KEY, {}) or {}
+    m = FROZEN_RE.fullmatch(key)
+    if m:
+        frozen = (got.get("frozen") or {}).get(m.group(2))
+        if isinstance(frozen, dict):
+            return list(frozen.get(m.group(1)) or [])
+    if key.startswith("returned:week_now:"):
+        key = "returned:week:" + key.split(":", 2)[2]
     if key not in (got.get("lists") or {}):
         raise KeyError(key)
     return got["lists"][key]
@@ -2131,14 +2411,34 @@ def _csv_safe(v: Any) -> Any:
 
 
 # -------------------------------------------------------------------------------------------------------- scoreboard
+def given_up_figure(conn: sqlite3.Connection, live: dict) -> dict:
+    """The one figure 'money given up without a decision' shows, and the list it opens, from one source. The self-check's
+    (unit G) when it stores the items it counted (selfcheck:given_up 'ids'), so its figure opens exactly those; otherwise
+    the one worked out here, with the self-check's own figure beside it as a cross-check that opens nothing."""
+    g = live.get("given_up_selfcheck")
+    if g and g.get("ids") is not None:
+        ids = g["ids"]
+        cents = sum(c for _f, c in ids) if all(c for _f, c in ids) and ids else int(g.get("cents") or 0)
+        return {"cents": cents, "n": len(ids), "source": "selfcheck", "at": g.get("at"),
+                "basis": ("From the self-check: dollars EMA wrote off at posting on service from 2025 on, on items no person let "
+                          "go and no owner-approved policy accepts."), "weeks": g.get("weeks") or []}
+    own = dict(live.get("given_up") or {"n": 0, "cents": 0})
+    out = {"cents": own.get("cents"), "n": own.get("n"), "source": "results", "basis": own.get("basis"), "weeks": None}
+    if g:
+        out["check"] = {"cents": g.get("cents"), "n": g.get("n"), "at": g.get("at"), "source": "selfcheck"}
+    return out
+
+
 def scoreboard(conn: sqlite3.Connection, today: Any = None) -> dict:
     """Today's money scoreboard: recovered (the top line, to date), lost to deadlines, at risk in the next 14 days and given
     up without a decision, week by week. Recovered and lost come from the run's figures; at risk and given up are counted
-    now on the findings table. A figure the run has not worked out yet is None (the page shows a dash)."""
+    now on the findings table (given up: one source, see given_up_figure). A figure the run has not worked out yet is None
+    (the page shows a dash). A frozen week shows what was frozen and opens the list frozen with it; where money moved in
+    that week since, the reading of today is given beside it (now_cents, opening its own list)."""
     t = _today(today)
     d = dashboard(conn)
     live = live_figures(conn, t)
-    gu = live.get("given_up_selfcheck") or live.get("given_up") or {}
+    gu = given_up_figure(conn, live)
     out = {"recovered_cents": d["money"]["returned_cents"] if d else None, "lost_cents": d["lost"]["cents"] if d else None,
            "at_risk_cents": live["at_risk"]["cents"], "given_up_cents": gu.get("cents"), "as_of": (d or {}).get("at"),
            "today": t, "counts": {"recovered": d["money"]["items"] if d else None, "lost": d["lost"]["n"] if d else None,
@@ -2148,31 +2448,43 @@ def scoreboard(conn: sqlite3.Connection, today: Any = None) -> dict:
                      "at_risk": f"Work now items whose filing date is in the next {AT_RISK_DAYS} days.",
                      "given_up": (gu.get("basis") or "Dollars written off with no person's decision and no owner-approved policy.")},
            "given_up_source": gu.get("source")}
+    if gu.get("check"):
+        out["given_up_check"] = gu["check"]
     if live["at_risk"].get("expected_n"):
         out["at_risk_expected_cents"] = live["at_risk"]["expected_cents"]
         out["counts"]["at_risk_expected"] = live["at_risk"]["expected_n"]
         out["basis"]["at_risk_expected"] = ("Each at-risk item's dollars at stake times its pattern's recovery rate (payer group, code "
                                             "and reason, from the payment archive), where the run has worked it out.")
+    blank = lambda w: {"week": w, "recovered_cents": 0, "lost_cents": 0, "at_risk_cents": None, "given_up_cents": 0}     # noqa: E731
     weeks: dict = {}
     for r in (d or {}).get("weeks") or []:
-        weeks[r["week"]] = {"week": r["week"], "recovered_cents": r.get("recovered_cents", 0), "lost_cents": r.get("lost_cents", 0),
-                            "at_risk_cents": None, "given_up_cents": 0}
-    for s in snapshots(conn):
-        pt = s.get("point") or {}
-        w = weeks.setdefault(s["week"], {"week": s["week"], "recovered_cents": 0, "lost_cents": 0, "at_risk_cents": None, "given_up_cents": 0})
+        weeks[r["week"]] = dict(blank(r["week"]), recovered_cents=r.get("recovered_cents", 0), lost_cents=r.get("lost_cents", 0))
+    for sn in snapshots(conn, d):
+        pt = sn.get("point") or {}
+        w = weeks.setdefault(sn["week"], blank(sn["week"]))
         if pt.get("at_risk"):
             w["at_risk_cents"] = pt["at_risk"].get("cents")
-        if s.get("final") and s.get("money"):
-            w["recovered_cents"] = s["money"].get("returned_cents", w["recovered_cents"])
-            w["lost_cents"] = (s.get("lost") or {}).get("cents", w["lost_cents"])
+        if sn.get("final") and sn.get("money"):
+            now = w["recovered_cents"]
+            w["recovered_cents"] = sn["money"].get("returned_cents", now)
+            w["lost_cents"] = (sn.get("lost") or {}).get("cents", w["lost_cents"])
             w["frozen"] = True
-    for r in _given_up_weeks(conn, t):
-        w = weeks.setdefault(r["week"], {"week": r["week"], "recovered_cents": 0, "lost_cents": 0, "at_risk_cents": None, "given_up_cents": 0})
-        w["given_up_cents"] = r["cents"]
+            w["frozen_at"] = str(sn.get("frozen_at") or "")[:10] or None
+            if now != w["recovered_cents"]:
+                w["now_cents"] = now
+    if gu.get("source") == "selfcheck":
+        for r in gu.get("weeks") or []:
+            if r.get("week"):
+                weeks.setdefault(r["week"], blank(r["week"]))["given_up_cents"] = int(r.get("cents") or 0)
+    else:
+        for r in _given_up_weeks(conn, t):
+            weeks.setdefault(r["week"], blank(r["week"]))["given_up_cents"] = r["cents"]
     cur = week_of(t)
-    w = weeks.setdefault(cur, {"week": cur, "recovered_cents": 0, "lost_cents": 0, "at_risk_cents": None, "given_up_cents": 0})
+    w = weeks.setdefault(cur, blank(cur))
     w["at_risk_cents"] = live["at_risk"]["cents"]
     out["weeks"] = [weeks[k] for k in sorted(weeks)][-26:]
+    out["given_up_weeks"] = ("as the self-check counted it each week" if gu.get("source") == "selfcheck"
+                             else "written off in that week")
     return out
 
 

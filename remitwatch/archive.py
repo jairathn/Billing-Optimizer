@@ -4,11 +4,16 @@ memory stays flat as the years add up, and nothing is lost.
 
 What stays in the store (hot): every bill with an open item (work now, waiting, can't be checked, or a person's open,
 started or sent status), every bill a worked or open routine-rate pattern lists, every bill reopened in the last 90 days,
-and everything with service inside the retention horizon. What leaves (to compressed archive files the daily run never
-reads): a bill whose newest service is older than the horizon and whose items are all settled (done, accepted, expired, or
-closed by a person): its 835 claims, lines, adjustments and remarks, its weekly EMA export rows, its 837 rows, its links,
-its items and their history. The A/R snapshots older than 13 months go the same way, and the posting ledger's postings go
-to the archive before the ledger's own retention deletes them (`before_ledger_retain`, the hook in Ledger.retain).
+every bill EMA's reports in the store still name (the posting ledger's summaries, the claim-number map, the A/R: EMA's
+checks find the remittance that answered a line by its bill), and everything with service inside the retention horizon.
+What leaves (to compressed archive files the daily run never reads): a bill whose newest service and newest payment are
+older than the horizon and whose items are all settled (done, accepted, expired, or closed by a person): its 835 claims,
+lines, adjustments and remarks, its weekly EMA export rows, its 837 rows, its links, its items and their history. The
+A/R snapshots older than 13 months go the same way (the rows of an item still open stay: they are its evidence of work),
+and the posting ledger's postings go to the archive before the ledger's own retention deletes them
+(`before_ledger_retain`, the hook in Ledger.retain). An archived bill comes back whole when new data names it: a
+remittance or reprocessing of its claim, a weekly EMA row, an 837, a payer's offset taking its money back (PLB WO, FB,
+72), or EMA's reports listing it again (`restore_touched`).
 
 Never archived: the remittances themselves (transactions and provider-level adjustments stay: they are the payments by
 month, and their content fingerprints stop a re-delivered remittance from being read twice), the files and Dropbox lists,
@@ -51,8 +56,11 @@ Public names:
   lookup_claim(conn, claim_or_bill, *, sink) / claim_db(...) / search(conn, text) / lookup_finding(...)
   restore(conn, bill, *, sink, ...) / request_restore / journal_entry / take_journal / process_requests / restore_touched
   before_ledger_retain(ledger, cutoff) / ledger_postings(sink, links, ...)
-  apply_frozen_rates(det)                                                the detection hook
-  measure(conn, ...) / record_run(conn, ...) / history(conn) / data_health(conn) / panel(conn, state=None) / compact(conn)
+  apply_frozen_rates(det) / carry_locked_aggregates(det)                 the two detection hooks
+  archived_835(conn, bills)                                              a second guard for EMA's checks
+  copy_archive(conn, src, dst) / verify_files(conn, sink)                moving a store moves its archive
+  measure(conn, ...) / record_run(conn, ...) / history(conn) / data_health(conn) / panel(conn, state=None)
+  compact(conn, ...)                                                     VACUUM in memory, within the budget; never raises
 
 Nothing here reads the clock or the environment except through `_today` and `settings`; every function a run calls takes
 the run's context (conn, run_id, today, the sink) and returns what it did. No log line or returned summary holds a claim
@@ -659,9 +667,12 @@ def _plan_tables(conn: sqlite3.Connection) -> None:
 
 # EMA's tables that name a bill, as (table, its bill column, its claim id column): the posting ledger's summaries (kept
 # for the ledger's retention: a line with a payer's denial posted, a payment under a check that is no 835, a line not yet
-# paid, ...), the claim-number map, the A/R's claim ids and the A/R rows themselves
-EMA_NAMES = (("ema_lines", "bill", "claim_id"), ("ema_link_map", "bill", "claim_id"), ("ema_claim_links", "bill", "claim_id"),
-             ("ema_ar", "bill", "claim_id"))
+# paid, ...), the claim-number map (every EMA claim number the ledger holds: a map rebuilt without the bill's 835 would
+# leave the claim unmapped, and an unmapped claim with no answer posted reads as never answered) and the A/R rows (an
+# open balance in EMA; they leave after 13 months). Not the A/R's claim-id pairs (ema_claim_links, kept 1,100 days after
+# a claim was last on an A/R): through the map they name a bill only while the ledger holds its postings, and alone they
+# would hold nearly every bill for three years, since every claim waits on the A/R for a while.
+EMA_NAMES = (("ema_lines", "bill", "claim_id"), ("ema_link_map", "bill", "claim_id"), ("ema_ar", "bill", "claim_id"))
 HELD_EMA = "EMA still lists it"
 
 
@@ -2524,11 +2535,14 @@ def record_run(conn: sqlite3.Connection, *, run_id: str | None, measured: dict, 
             entry["retired"]["ar_files"] = result["ar"]["files"]
         entry["horizon_months"] = (result.get("horizon") or {}).get("months")
         entry["cutoff"] = result.get("cutoff")
+        if result.get("held"):
+            entry["held"] = {str(k): int(v) for k, v in result["held"].items()}     # why old bills stayed: counts only
         if result.get("errors"):
             entry["errors"] = len(result["errors"])
     hist = _meta_json(conn, META_HISTORY, [])
     hist.append(entry)
     _meta_put(conn, META_HISTORY, hist[-HISTORY_KEPT:])
+    _meta_put(conn, "archive:last", entry)         # the diagnostic bundle's copy of the last run (counts, sizes, no claim)
     conn.commit()
     return entry
 

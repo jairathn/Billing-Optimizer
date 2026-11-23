@@ -779,8 +779,9 @@ CHECKS: dict[str, tuple] = {
                  "The Production report is at most 14 days old and the A/R at most 8.",
                  "Pull the weekly EMA reports (Upload page lists them)."),
     "line_balance": ("warning", None, 0, "EMA's A/R agrees with its postings",
-                     "Each line carries on EMA's newest A/R the balance its postings leave, to the dollar, both ways; a line "
-                     "the A/R no longer lists (settled in EMA) leaves nothing open in its postings.",
+                     "Each line carries on EMA's newest A/R the balance its postings leave, to the dollar, both ways (a denied "
+                     "line by its Denial Amount); a line the A/R no longer lists (settled in EMA) leaves nothing open in its "
+                     "postings.",
                      "A posting missing from the Production export (the postings leave more than the A/R), or one missing from "
                      "the A/R, or an A/R pulled before the postings: compare the example lines in EMA."),
 }

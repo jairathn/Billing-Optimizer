@@ -1527,3 +1527,22 @@ def test_archived_835_tells_emas_checks_which_bills_the_archive_answered(tmp_pat
     archive.run(store.conn, sink=sink_of(tmp_path, "file"), today=TODAY)
     assert archive.archived_835(store.conn, ["KA01AAAAA", "KB01AAAAA", "KA01AAAAB", None, ""]) == {"KA01AAAAA"}
     store.close()
+
+
+def test_an_old_claim_id_pair_from_the_ar_alone_holds_nothing(tmp_path):
+    """The A/R's claim id to claim number pairs are kept 1,100 days after a claim was last on an A/R, and every claim
+    waits on the A/R for a while: alone they would hold nearly every bill for three years. They name a bill only through
+    the map while the ledger holds its postings (the tests above); with nothing in the ledger, the bill leaves."""
+    from remitwatch import ema_reports as er
+    store = crafted("file", tmp_path)
+    er.ensure_schema(store.conn)
+    put_claim(store, "KA01AAAAA", "2021-03-01")
+    store.conn.execute("INSERT INTO ema_claim_links (claim_id, link, bill, first_seen, last_seen) VALUES (?,?,?,?,?)",
+                       ("KA01AAAAAC017", 90000077, "KA01AAAAA", "2024-01-05", "2024-02-05"))
+    store.conn.commit()
+    freeze_all(store)
+    assert [b for b, *_ in archive.plan(store.conn, today=TODAY)["bills"]] == ["KA01AAAAA"]
+    sink = sink_of(tmp_path, "file")
+    assert archive.run(store.conn, sink=sink, today=TODAY)["bills"] == 1
+    assert archive.restore_touched(store.conn, sink=sink, today=TODAY)["restored"] == 0    # and it does not bounce back
+    store.close()
