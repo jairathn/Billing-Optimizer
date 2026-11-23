@@ -303,6 +303,26 @@ def test_a_word_of_the_codes_own_in_a_name_the_store_holds_is_masked_in_every_fo
     store.close()
 
 
+def test_a_name_with_one_part_missing_is_still_learned():
+    """learn reads the names a pair of columns at a time; a row with no first name (or no last name), and a store with
+    only some of the name columns, still teach every word they hold."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE claims (patient_last TEXT, patient_first TEXT, insured_last TEXT, insured_first TEXT)")
+    conn.executemany("INSERT INTO claims VALUES (?,?,?,?)",
+                     [("QUORVANDEL", None, None, None), (None, "ZELTHRAMIR", "OBRISKAYE", None), (None, None, None, "VENTRILLO")])
+    runlog.SCRUB.names.clear()
+    runlog.SCRUB.learn(conn)
+    assert {"quorvandel", "zelthramir", "obriskaye", "ventrillo"} <= runlog.SCRUB.names
+    only = sqlite3.connect(":memory:")
+    only.execute("CREATE TABLE claims (patient_last TEXT)")
+    only.execute("INSERT INTO claims VALUES ('MAULDRETH')")
+    runlog.SCRUB.names.clear()
+    runlog.SCRUB.learn(only)
+    assert "mauldreth" in runlog.SCRUB.names and "Mauldreth" not in runlog.scrub_text("held for Mauldreth")
+    conn.close()
+    only.close()
+
+
 def test_a_structured_value_under_a_word_key_loses_names_dates_and_ids():
     """A key that says what its value is (status, result, source, how, action, rule...) does not make free text safe:
     a value is kept as it is only where the scrubber would keep it anyway, or where its key has a strict shape (a
