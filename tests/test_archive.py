@@ -1391,10 +1391,13 @@ def test_a_payers_offset_of_an_archived_bills_payment_brings_the_bill_back(tmp_p
     store = world(tmp_path, kind)
     detect(store)
     sink = sink_of(tmp_path, kind)
-    _plb_remittance(tmp_path, store, "WO:CB0000003C017", "50.00", "20250301", "old-plb.RMT", "000000701")   # before the archive
+    assert archive.run(store.conn, sink=sink, today=TODAY, max_bills=5)["bills"] == 5      # CB0000001 to CB0000005 leave
+    # an offset naming a bill still in the store: the analysis sees it, and the bill leaves after it, knowing it
+    _plb_remittance(tmp_path, store, "WO:CB0000008C017", "50.00", "20250301", "old-plb.RMT", "000000701")
     detect(store, "r2")
-    archive.run(store.conn, sink=sink, today=TODAY)
+    assert archive.run(store.conn, sink=sink, today=TODAY)["bills"] == 4
     assert archive.resolve_bill(store.conn, "CB0000001C017") == "CB0000001"
+    assert archive.resolve_bill(store.conn, "CB0000008C017") == "CB0000008"
     assert archive.restore_touched(store.conn, sink=sink, today=TODAY)["restored"] == 0    # the old offset is no news
     _plb_remittance(tmp_path, store, "WO:CB0000001C017", "117.60", "20261101", "late-plb.RMT", "000000777")
     assert store.conn.execute("SELECT COUNT(*) FROM plb WHERE reference LIKE 'CB0000001C017%'").fetchone()[0] == 1
