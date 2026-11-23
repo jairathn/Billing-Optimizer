@@ -2200,7 +2200,10 @@ def _decide(fx: dict, today: str) -> dict:
     reopen_at = str((last_manual or {}).get("at") or "")[:10]
     auto_reopened = (st == "open" and last_manual is not None and last_manual.get("to") == "open"
                      and last_manual.get("from") in ("resolved", "dismissed", "lost"))
-    same_proof = bool(proof) and auto_reopened and (proof.get("date") or "") <= reopen_at
+    newer = auto_reopened and (any((x["paid"] or 0) > 0 and (x["date"] or "") > reopen_at for x in standing_rows(fx["r835"]["rows"])
+                                   if x.get("line_key") and x.get("code") == f.get("procedure_code"))
+                               or any((p["cents"] or 0) > 0 and (p["posted"] or "") > reopen_at for p in fx["ema"]["pays"]))
+    same_proof = bool(proof) and auto_reopened and not newer
     if rejected or same_proof:
         res["person"] = True
         r_ = rejected if isinstance(rejected, dict) else {}

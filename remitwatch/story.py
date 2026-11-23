@@ -1647,13 +1647,12 @@ def _claim_url(conn: sqlite3.Connection, fx: dict) -> str | None:
         tpl = er.claim_url_template(conn)
     except Exception:       # noqa: BLE001
         tpl = None
-    links = fx["ema"]["links"]
-    if not tpl or not links:
+    links = list(fx["ema"]["links"]) or ([fx["item"]["ema_link"]] if fx["item"].get("ema_link") else [])
+    if not tpl or not links or "{claim}" not in tpl:
         return None
-    try:
-        return tpl.format(n=links[0])
-    except (KeyError, IndexError, ValueError):
-        return None
+    n = str(links[0]).strip()
+    # the template's placeholder is {claim} (ema_reports.claim_url_template); only an EMA claim number of 6 to 12 digits
+    return tpl.replace("{claim}", n) if re.fullmatch(r"\d{6,12}", n) else None
 
 
 def _payer_claim_number(fx: dict) -> str | None:

@@ -1537,3 +1537,13 @@ def test_an_informational_remittance_whose_money_never_came_is_asked_for_never_p
     assert n["action"].startswith(f"Ask {BCBS} for the $90.00 its informational remittance of Mar 28, 2026 reported paid")
     assert "mark_posted" not in n["buttons"] and not n["appeal_ok"]
     plain(out)
+
+
+def test_the_next_step_opens_the_claim_in_ema_when_its_address_is_set(store, ledger, tmp_path, monkeypatch):
+    """needs_C1 F.2 2(a): with REMITWATCH_EMA_CLAIM_URL set ({claim} where the number goes) and the item's EMA claim number
+    known, the next step carries the link and the Open in EMA button; without the setting, neither."""
+    auto_writeoff_world(store, ledger, tmp_path, reason=("CO", "50"), signal="DENIED_MEDICAL_NECESSITY", carc="50", ema_link=F.link_no(1))
+    assert story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)["claim_url"] is None
+    monkeypatch.setenv("REMITWATCH_EMA_CLAIM_URL", "https://ema.example.test/claims/{claim}")
+    n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert n["claim_url"] == f"https://ema.example.test/claims/{F.link_no(1)}" and "open_in_ema" in n["buttons"]

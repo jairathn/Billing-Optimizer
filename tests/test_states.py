@@ -724,6 +724,9 @@ def test_a_person_who_reopens_an_automatic_closure_keeps_it_open_until_a_newer_p
     assert st["state_basis"].startswith("Reopened by Biller One on Apr 20, 2026 after RemitWatch closed it: Paid on a later remittance: "
                                         "$90.00 by BLUE CROSS TEST on Apr 10, 2026")
     assert st["state_basis"].endswith("the person said it does not pay this line, so it is worked as open")
+    from remitwatch import story
+    v = story.item_verdict(store.conn, "F1", today=TODAY)
+    assert v["state"] == "work_now" and v["sentence"].startswith("Reopened by Biller One on Apr 20, 2026"), v["sentence"]
     f = dict(store.conn.execute("SELECT * FROM findings").fetchone())
     oc = {"F1": {"outcome": "open", "person_reopened": True, "paid_after_same": 0, "paid_after_other": 0,
                  "rejected_payment": {"date": "2026-04-18", "payer": "Testcare Health", "cents": 4000, "check_tail": "0007"}}}
