@@ -639,6 +639,24 @@ def test_each_keep_rule_keeps_its_line_and_the_rest_are_pruned(store, ledger, tm
     assert one(store.conn, f"SELECT COUNT(*) FROM ema_lines WHERE NOT {el.keep_rule_sql()}") == (0,)
 
 
+def test_a_line_with_a_second_payer_on_file_and_a_balance_left_is_kept_though_its_bill_has_no_item(store, ledger, tmp_path):
+    """Detection's "second payer never billed" reads EMA's line (the second payer on file, the balance left) for a bill
+    that has no item yet: that line stays in the store. One whose balance is settled, or with no second payer, goes."""
+    second = F.PAYERS["commercial"]
+    rows_ = [charge(F.link_no(8), secondary=second), payment(F.link_no(8), F.check_no(8), 80, secondary=second),
+             charge(F.link_no(9), secondary=second),
+             payment(F.link_no(9), F.check_no(9), 80, contractual=70, secondary=second),          # nothing left to bill
+             charge(F.link_no(10)), payment(F.link_no(10), F.check_no(10), 80, status="Resolved/Paid")]   # no second payer
+    apply(store, ledger, prod_file(tmp_path, rows_))
+    for n in (8, 9, 10):
+        add_remit(store, trace=F.check_no(n), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(n), "lines": [(S, "99213", 150, 80)]}])
+    el.refresh(store, ledger, log=Log())
+    got = {r[0] - 90_000_000: r[1] for r in rows(store.conn, "SELECT link, keep FROM ema_lines")}
+    assert got.get(8, "").split(",").count("second_payer") == 1
+    assert "second_payer" not in got.get(9, "") and "second_payer" not in got.get(10, "")
+    assert one(store.conn, "SELECT secondary_payer, balance FROM ema_lines WHERE link=?", F.link_no(8)) == (second, 7000)
+
+
 def test_part_b_alone_maps_a_link_once_its_remittance_arrives_and_prunes_it(store, ledger, tmp_path):
     keep_world(store, ledger, tmp_path)
     el.refresh(store, ledger, log=Log())
