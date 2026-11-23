@@ -1311,3 +1311,64 @@ def test_a_locked_year_keeps_a_rate_only_late_lines_can_explain_and_drops_one_me
     out = archive.apply_frozen_rates(det)
     assert ghost not in det.rates and late_key in det.rates and out["late_keys"] == 1
     store.close()
+
+
+# =========================================================================== 13. the A/R archive keeps an open item's evidence
+# (the review's finding F: the A/R snapshot archive took the billing note that showed an open item was already worked)
+def test_an_open_items_ar_rows_stay_as_its_work_evidence_and_leave_once_it_is_settled(tmp_path):
+    """An open (waiting) denial on claim KA01AAAAAC017: EMA's A/R of 2025-09-30 lists the claim with a billing note that
+    says an appeal was sent. The newer A/R of 2026-11-20 no longer lists the claim (EMA wrote the balance off). Thirteen
+    months on, the old snapshot's other rows leave; the item's row stays, so the item still reads as worked. Once the item
+    is settled, the row leaves too and the snapshot's catalog row says it was moved."""
+    from remitwatch import ema_reports as er
+    from remitwatch import states
+    store = crafted("file", tmp_path)
+    er.ensure_schema(store.conn)
+    put_claim(store, "KA01AAAAA", "2025-06-02", paid_on="2025-06-20")
+    store.conn.execute("""INSERT INTO findings (finding_id, signal, category, patient_control_number, status, work_state, stale,
+                          service_date, payment_date, procedure_code, shortfall_cents) VALUES ('den', 'DENIED_AUTH', 'denial',
+                          'KA01AAAAAC017', 'open', 'waiting', 0, '2025-06-02', '2025-06-20', '99213', 5000)""")
+    for fid, as_of, n in (("ar-old", "2025-09-30", 4), ("ar-new", "2026-11-20", 1)):
+        store.conn.execute("INSERT INTO ema_report_files (file_id, report, status, as_of, live_rows) VALUES (?,?,?,?,?)",
+                           (fid, "ar_report", "current", as_of, n))
+    store.conn.execute("""INSERT INTO ema_ar (file_id, row_no, as_of, svc_year, item_key, party, claim_id, bill, cpt, svc,
+                          balance_cents, has_note, note_kind, note_date) VALUES ('ar-old', 0, '2025-09-30', '2025', 'IK1',
+                          'Insurance', 'KA01AAAAAC017', 'KA01AAAAA', '99213', '2025-06-02', 10000, 1, 'appeal', '2025-08-15')""")
+    for i in range(1, 4):                                   # three rows of claims with nothing open
+        store.conn.execute("""INSERT INTO ema_ar (file_id, row_no, as_of, svc_year, item_key, party, claim_id, bill, cpt, svc,
+                              balance_cents) VALUES ('ar-old', ?, '2025-09-30', '2025', ?, 'Insurance', ?, ?, '99213', '2025-05-01', 900)""",
+                           (i, f"IK-O{i}", f"KQ0{i}QQQQQC017", f"KQ0{i}QQQQQ"))
+    store.conn.execute("""INSERT INTO ema_ar (file_id, row_no, as_of, svc_year, item_key, party, claim_id, bill, cpt, svc,
+                          balance_cents) VALUES ('ar-new', 0, '2026-11-20', '2026', 'IK9', 'Insurance', 'KZ09ZZZZZC017',
+                          'KZ09ZZZZZ', '99213', '2026-10-01', 5000)""")
+    store.conn.commit()
+    item = dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='den'").fetchone())
+
+    def ar_kinds():
+        return [e["kind"] for e in states.work_evidence(store.conn, item, today="2026-11-22") if e["source"] == "ar"]
+    assert "appeal" in ar_kinds()
+    sink = sink_of(tmp_path, "file")
+    out = archive.archive_ar(store.conn, sink, today="2026-11-22")
+    assert out["files"] == 1 and out["rows"] == 3 and out["kept_rows"] == 1
+    assert "appeal" in ar_kinds()                            # the item still reads as worked
+    st = store.conn.execute("SELECT status, live_rows, status_reason FROM ema_report_files WHERE file_id='ar-old'").fetchone()
+    assert st[0] == "current" and st[1] == 1 and "stay while" in st[2]
+    assert archive.archive_ar(store.conn, sink, today="2026-11-22")["files"] == 0         # a second run: nothing new
+    # settled: the row leaves in a file of its own, and the snapshot is marked moved
+    store.conn.execute("UPDATE findings SET work_state='expired' WHERE finding_id='den'")
+    store.conn.commit()
+    again = archive.archive_ar(store.conn, sink, today="2026-11-23")
+    assert again["files"] == 1 and again["rows"] == 1 and again["kept_rows"] == 0
+    st = store.conn.execute("SELECT status, live_rows, replaced_by FROM ema_report_files WHERE file_id='ar-old'").fetchone()
+    assert st[0] == "replaced" and st[1] == 0 and st[2] == "archive:" + again["names"][0]
+    assert len(sink.list("ar")) == 2 and store.conn.execute("SELECT COUNT(*) FROM ema_ar WHERE file_id='ar-old'").fetchone()[0] == 0
+    # the item's EMA claim number keeps its rows too
+    store.conn.execute("""INSERT INTO ema_ar (file_id, row_no, as_of, svc_year, item_key, party, claim_id, link, cpt, svc,
+                          balance_cents) VALUES ('ar-mid', 0, '2025-08-30', '2025', 'IK5', 'Insurance', NULL, 90000005, '99213',
+                          '2025-06-02', 700)""")
+    store.conn.execute("""INSERT INTO findings (finding_id, signal, category, status, work_state, stale, ema_link, shortfall_cents)
+                          VALUES ('ema-den', 'EMA_DENIED', 'denial', 'open', 'work_now', 0, 90000005, 700)""")
+    store.conn.commit()
+    assert archive.archive_ar(store.conn, sink, today="2026-11-23") == {"files": 0, "rows": 0, "names": [], "kept_rows": 1,
+                                                                         "kept_files": 1}
+    store.close()
