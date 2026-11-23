@@ -964,7 +964,8 @@ def _found_why(ev: dict, cover: list[str], reg: dict) -> str | None:
         return "not_sent"
     for r in regs:
         if r.get("signal") == "SECONDARY_NOT_BILLED" and (
-                ev.get("kind") == "mark" or (ev.get("group") and not _same_payer(ev.get("group"), r.get("payer_group")))):
+                ev.get("kind") == "mark" or (ev.get("group") not in (None, "", "Unknown")
+                                             and not _same_payer(ev.get("group"), r.get("payer_group")))):
             return "secondary"
     return None
 
@@ -1032,6 +1033,10 @@ def save_money(conn: sqlite3.Connection, att: dict) -> dict:
     bill the archive takes later stay what they were: never a dollar dropped because the rows behind it moved out. Only
     rows that changed are written; an archived item's row is never touched. Returns the counts."""
     ensure_schema(conn)
+    if att.get("errors"):
+        # part of the money could not be worked out this time: what was kept stays as it was (never a saved dollar
+        # replaced by a gap); the next run that works everything out brings it up to date
+        return {"written": 0, "removed": 0, "skipped": "errors"}
     keep = set(att.get("archived") or ())
     have = {fid: data for fid, data in conn.execute("SELECT finding_id, data FROM results_money")}
     now: dict[str, str] = {}

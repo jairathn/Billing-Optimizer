@@ -1622,3 +1622,27 @@ def test_counts_name_their_items_frozen_weeks_say_so_and_the_open_book_adds_up(r
     assert 'data-key="book:open:work_now"' in rs_page["book"] and "since the first run on Apr 10, 2026" in rs_page["book"]
     assert 'data-key="state:work_now"' in rs_page["book_live"]
     assert "not enough cases yet" in rs_page["roi"] and "Lift-adjusted" not in rs_page["roi"]
+
+
+def test_a_run_that_could_not_work_part_of_the_money_out_keeps_what_was_saved(store, monkeypatch):
+    fid, _ = denial(store)
+    paid(store, on="2026-04-20")
+    run(store)
+    saved = store.conn.execute("SELECT data FROM results_money WHERE finding_id=?", (fid,)).fetchone()[0]
+
+    def broken(*a, **kw):
+        raise RuntimeError("the facts could not be read")
+    monkeypatch.setattr(states, "facts_of", broken)
+    out = run(store, today="2026-07-01")
+    assert out["errors"] and dash(store)["errors"]                      # the gap is said on the figures
+    assert store.conn.execute("SELECT data FROM results_money WHERE finding_id=?", (fid,)).fetchone()[0] == saved
+
+
+def test_a_payment_from_an_unknown_payer_is_never_counted_as_a_second_payers(store):
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "lines": [ln("99213", 150, 80, [("PR", "2", 20), ("CO", "45", 50)])]}])
+    item(store, finding_id="S1", signal="SECONDARY_NOT_BILLED", category="denial", line_key=f"{tk}-0-0", claim_key=f"{tk}-0",
+         transaction_key=tk, first_seen="2026-04-01T08:00:00+00:00", work_state="work_now", shortfall_cents=2000)
+    remit(store, trace=F.check_no(2), paid_on="2026-05-02", payer="",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "2", "lines": [ln("99213", 150, 20, [("CO", "45", 130)])]}])
+    run(store)
+    assert {e["bucket"] for e in money_of(store, "S1")["events"] if e["cents"] > 0} == {"c"}
