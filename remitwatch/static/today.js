@@ -151,8 +151,10 @@ function tdSteps(b, look){
   const byKind7 = (b.work.types||[]).filter(t=>t.due7_n).sort((x,y)=>y.due7_cents-x.due7_cents);
   const steps = [];
   // never "all clear" while blind: what closes is what the files on hand show
+  // on a phone the three kinds worth most and how many more, so Start stays on the first screen; the list has them all
+  const kinds7 = tdNarrow() && byKind7.length > 3 ? byKind7.slice(0, 3) : byKind7, more7 = byKind7.length - kinds7.length;
   steps.push(w.due7_n ? {n:1, title:'Work what closes this week', line:`${pl(w.due7_n, 'item')} worth ${money(w.due7_cents)} ${w.due7_n===1?'has':'have'} a filing window that closes within 7 days.`,
-      chips: byKind7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' '), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
+      chips: kinds7.map(t=>`${kindBadge(b,t.key)} ${t.due7_n}`).join(' ') + (more7 ? ` <span class="muted small">and ${more7} more</span>` : ''), btn:`Start (${w.due7_n})`, go:{deadline:'week', sort:'deadline'}}
     : {n:1, title: blind ? 'Nothing closes this week in the payments on file' : 'Nothing closes this week', line: w.due30_n ? `${pl(w.due30_n, 'item')} worth ${money(w.due30_cents)} close within 30 days.` : 'No filing window closes in the next 30 days.', done:!held, btn: w.due30_n ? 'See the next 30 days' : '', go:{deadline:'month', sort:'deadline'}});
   // money the biller wrote off in EMA while the payer can still be asked for it: the quiet loss
   const wo = b.written_off || {};

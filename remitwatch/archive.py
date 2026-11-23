@@ -2683,7 +2683,7 @@ def compact(conn: sqlite3.Connection, *, min_free_share: float = COMPACT_FREE_SH
     t0 = time.time()
     try:
         conn.commit()
-        old = _temp_store(conn, "MEMORY")
+        old = None
         try:
             conn.execute("VACUUM")
         finally:
