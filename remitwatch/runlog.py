@@ -161,6 +161,8 @@ _NAME_WORD = re.compile(r"[^\W\d_](?:[^\W\d_]|['\-])+")    # a word of a name as
 _TWO_LETTER_KEEP = frozenset("of to in is it on at by or as an be we he me my no so up us if go am ok id co pr oa pi cr ar".split())
 # what stands between the words of one name: "Last, First", "First Last", and the 835's own "LAST*FIRST"
 _NAME_GAPS = (" ", ", ", ",", "  ", "*")
+# the same with a middle initial or a suffix between them ("Mark J Smith", "SMITH JR, MARK")
+_NAME_GAP_RX = re.compile(r"(?: {1,2}|, ?|\*)(?:[A-Z][A-Za-z]?\.?(?: {1,2}|, ?|\*))?")
 # the level words of the logs' own lines: the only words of the code's own kept beside a name the store holds
 _LOG_WORDS = frozenset("error warning warn info debug critical".split())
 _ALNUM_OK = frozenset({"sha256", "x86-64", "utf-16", "utf-32", "base64", "py313", "py312", "py311"})
@@ -327,11 +329,12 @@ class Scrubber:
             if i + 1 < len(toks) and cap(w):
                 nxt = toks[i + 1].group(0)
                 gap = s[m.end():toks[i + 1].start()]
-                if cap(nxt) and gap in _NAME_GAPS and not (known(w) and known(nxt)):
+                if cap(nxt) and _NAME_GAP_RX.fullmatch(gap) and not (known(w) and known(nxt)):
                     # the unknown word goes; a known one beside it goes too unless it is an ALL-CAPS word of the code's
                     # own (ERROR, EMA): "John Smith" loses both, "ERROR Smith" keeps ERROR. Beside a name the store
                     # holds only the level word stays: the 835 writes "SMITH, MARK", and MARK is a word of the code's
-                    held = bool(names) and (lw in names or low(nxt) in names)
+                    # own too
+                    held =bool(names) and (lw in names or low(nxt) in names)
                     for j, x in ((i, w), (i + 1, nxt)):
                         if not known(x) or not x.isupper() or (held and low(x) not in _LOG_WORDS):
                             mask[j] = True
@@ -342,7 +345,7 @@ class Scrubber:
             seq = sorted(toks + words2, key=lambda m: m.start())
             for a, b in zip(seq, seq[1:]):
                 wa, wb = a.group(0), b.group(0)
-                if cap(wa) and cap(wb) and s[a.end():b.start()] in _NAME_GAPS and f"{low(wa)} {low(wb)}" in names:
+                if cap(wa) and cap(wb) and _NAME_GAP_RX.fullmatch(s[a.end():b.start()]) and f"{low(wa)} {low(wb)}" in names:
                     spans.update(((a.start(), a.end()), (b.start(), b.end())))
         if not spans:
             return s

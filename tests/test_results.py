@@ -500,6 +500,10 @@ def test_hours_saved_use_the_owners_minutes_and_the_history_keeps_each_version(s
                 {"minutes": {"fax": True}}, "nonsense"):
         with pytest.raises(results.ResultsError):
             results.save_settings(bad, who="x", base_version=s2["version"], conn=store.conn)
+    # the refusals name each figure as the page does, never by its internal name
+    assert results.settings_problem({"costs": {"hosting_month": -1}}) == "Hosting per month must be between $0 and $1,000,000."
+    assert results.settings_problem({"minutes": {"investigate": 601}}) == "The minutes to investigate one item by hand must be between 0 and 600 minutes."
+    assert "_" not in results.settings_problem({"minutes": {"fax_x": 1}})
 
 
 def test_roi_is_money_returned_over_cost_by_month_with_the_lift_adjusted_return_beside_it(store):
@@ -760,6 +764,12 @@ def test_work_done_and_the_open_book(store):
     assert o["denied_again"] == 1 and {k["key"]: (k["won"], k["lost"]) for k in o["win_by_kind"]} == {"fax": (1, 0), "sent": (0, 1)}
     assert e5 not in [x[0] for x in results.list_entries(store.conn, "book", TODAY)]      # never open while RemitWatch watched it
     assert c4
+    # the open book's own breakdown: still open by state, closed, cannot be checked, adding up to the book
+    assert {r["key"]: r["n"] for r in o["open_by"]} == {"work_now": 1, "waiting": 1} and o["still_open"] == 2
+    assert o["still_open"] + o["closed"] + o["cant_check"] == o["book"]
+    for r in o["open_by"]:
+        assert len(results.list_entries(store.conn, f"book:open:{r['key']}", TODAY)) == r["n"]
+    assert d["first_run"] == "2026-04-10"
 
 
 # ================================================================================================ spot checks
@@ -986,7 +996,7 @@ def test_the_server_routes_work_the_figures_out_after_an_analysis_and_counts_equ
     c.commit()
     c.close()
     first = tc.get("/api/results").json()
-    assert first["ready"] and first["money"] == d["money"]
+    assert first["ready"] and first["updating"] is True and first["detect_run"] == d["detect_run"] and first["money"] == d["money"]
     api_results.wait_background()
     again = tc.get("/api/results").json()
     assert again["detect_run"] == "2026-06-30T01:05:00" and again["updating"] is False
@@ -1499,7 +1509,7 @@ def test_a_serverless_results_page_load_reads_the_state_folder_a_few_times_at_mo
     tc.get("/api/results")                      # the first visit of the day picks the day's spot checks
     counting.calls.clear()
     tc.get("/api/results")                      # every later visit: one read each of the owner's figures and this year's checks
-    assert len(counting.calls) <= 3, counting.calls
+    assert len(counting.calls) <= 2, counting.calls
 
 
 def test_a_spot_answer_returns_the_agreement_rates_so_the_page_never_reloads(server_api):

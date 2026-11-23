@@ -269,11 +269,12 @@ def test_a_word_of_the_codes_own_in_a_name_the_store_holds_is_masked_in_every_fo
     claims = clean_visits(1, 3, "99214", "223.65", "127.80", cfi="16")
     claims.append(named_claim(300, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="ZORVATHIQ", first="MARK"))
     claims.append(named_claim(301, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="PRICE", first="WILL ROSE"))
+    claims.append(named_claim(302, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="LANE", first="MAY J"))
     p = feed / "r001.RMT"
     p.write_bytes(remit("".join(claims), "100.00", seg_count=99, isa_ctrl="000000001", pay_date="20260415"))
     store.ingest_835_paths([str(p)])
     code = runlog.SCRUB.code_words()
-    assert {"mark", "will", "rose", "price"} <= code and "zorvathiq" not in code        # what the test is about
+    assert {"mark", "will", "rose", "price", "may", "lane"} <= code and "zorvathiq" not in code   # what the test is about
     runlog.SCRUB.names.clear()
     runlog.SCRUB.learn(store.conn)
     for text, planted in (("row for ZORVATHIQ, MARK was held", ("ZORVATHIQ", "MARK")),
@@ -281,7 +282,13 @@ def test_a_word_of_the_codes_own_in_a_name_the_store_holds_is_masked_in_every_fo
                           ("bad segment NM1*QC*1*ZORVATHIQ*MARK****MI was held", ("ZORVATHIQ", "MARK")),
                           ("row for PRICE, WILL ROSE was held", ("PRICE", "WILL", "ROSE")),
                           ("row for Will Rose Price was held", ("Will", "Rose", "Price")),
-                          ("row for WILL ROSE PRICE was held", ("WILL", "ROSE", "PRICE"))):
+                          ("row for WILL ROSE PRICE was held", ("WILL", "ROSE", "PRICE")),
+                          # a middle initial or a suffix between the words of a name still leaves them one name
+                          ("row for Mark J Zorvathiq was held", ("Mark", "Zorvathiq")),
+                          ("row for MARK J. ZORVATHIQ was held", ("MARK", "ZORVATHIQ")),
+                          ("row for ZORVATHIQ JR, MARK was held", ("ZORVATHIQ", "JR", "MARK")),
+                          ("row for May J Lane was held", ("May", "Lane")),
+                          ("row for LANE, MAY J was held", ("LANE", "MAY"))):
         out = runlog.scrub_text(text)
         assert out.endswith(" was held"), out
         for word in planted:
