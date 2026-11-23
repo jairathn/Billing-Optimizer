@@ -233,32 +233,34 @@ class Scrubber:
             have = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
         except sqlite3.Error:
             return len(self.names)
-        use = [c for c in cols if c in have]
-        if not use:
+        # one pass over each pair of columns gives both the words and the pairs (a second pass over the claims would
+        # cost a second each run on the real store)
+        both = [(a if a in have else "NULL", b if b in have else "NULL") for a, b in zip(cols[0::2], cols[1::2]) if a in have or b in have]
+        if not both:
             return len(self.names)
-        sql = " UNION ".join(f"SELECT DISTINCT {c} FROM claims WHERE {c} IS NOT NULL" for c in use) + f" LIMIT {int(limit)}"
-        both = [(a, b) for a, b in zip(cols[0::2], cols[1::2]) if a in have and b in have]
         stop = self.code_words() | _NAME_STOP
         cur = conn.cursor()
         cur.row_factory = None
+        whole: list[tuple[list[str], list[str]]] = []
         try:
-            for (v,) in cur.execute(sql):
-                for w in _NAME_WORD.findall(str(v)):
-                    w = w.lower().strip("'-")
-                    if (len(w) >= 3 and w not in stop) or (len(w) == 2 and w.isalpha() and w not in _TWO_LETTER_KEEP):
-                        self.names.add(w)
             for last_col, first_col in both:
                 for last, first in cur.execute(f"SELECT DISTINCT {last_col}, {first_col} FROM claims WHERE {last_col} IS NOT NULL "
-                                               f"AND {first_col} IS NOT NULL LIMIT {int(limit)}"):
-                    lw = [w.lower().strip("'-") for w in _NAME_WORD.findall(str(last))]
-                    fw = [w.lower().strip("'-") for w in _NAME_WORD.findall(str(first))]
-                    for seq in (lw + fw, fw + lw):          # "LAST, FIRST" as the 835 writes it, "First Last" as people do
-                        for x, y in zip(seq, seq[1:]):
-                            if len(x) >= 2 and len(y) >= 2 and x not in self.names and y not in self.names:
-                                self.names.add(f"{x} {y}")
-                                self._pair_heads.add(x)
+                                               f"OR {first_col} IS NOT NULL LIMIT {int(limit)}"):
+                    lw = [w.lower().strip("'-") for w in _NAME_WORD.findall(str(last))] if last is not None else []
+                    fw = [w.lower().strip("'-") for w in _NAME_WORD.findall(str(first))] if first is not None else []
+                    for w in lw + fw:
+                        if (len(w) >= 3 and w not in stop) or (len(w) == 2 and w.isalpha() and w not in _TWO_LETTER_KEEP):
+                            self.names.add(w)
+                    if lw and fw:
+                        whole.append((lw, fw))
         except sqlite3.Error as exc:
             _note_internal("learn", exc)
+        for lw, fw in whole:
+            for seq in (lw + fw, fw + lw):          # "LAST, FIRST" as the 835 writes it, "First Last" as people do
+                for x, y in zip(seq, seq[1:]):
+                    if len(x) >= 2 and len(y) >= 2 and x not in self.names and y not in self.names:
+                        self.names.add(f"{x} {y}")
+                        self._pair_heads.add(x)
         return len(self.names)
 
     def add_names(self, words: Iterable[str]) -> None:
