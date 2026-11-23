@@ -144,7 +144,7 @@ remitwatch/
   report.py       summary report and email
   api.py          FastAPI endpoints
   static/         dashboard (index.html, today.js, desk.js, features.js, claim.js, faxes.js, providers.js, calc*.js, lab*.js, asc*.js), the setup checklist (setup.html) and the Upload page (upload.html); no build step
-  cli.py          cycle | weekly | sync | ingest-835 | ingest-ema | link | detect | activity | alerts | stats | serve | oauth | modmed-key | modmed-check | prepare-appeals | send-appeals | fax-cycle | import-cloud | compare-cloud | backup
+  cli.py          cycle | weekly | sync | ingest-835 | ingest-ema | link | detect | activity | alerts | stats | serve | oauth | modmed-key | modmed-check | prepare-appeals | send-appeals | fax-cycle | import-cloud | compare-cloud | accept-store | backup
 api/index.py      Vercel entry point
 vercel.json       one function behind every address, two daily schedules (the cycle at 10:17 UTC, the fax line at 15:43 UTC)
 public/           robots.txt only: Vercel serves nothing else from the repository

@@ -242,6 +242,10 @@ def backup_store(db: str, dest_dir: str | None = None, keep: int = 7) -> str:
     import gzip
     import shutil
     import sqlite3
+    from .store import store_problem
+    why = store_problem(db)
+    if why:                 # a copy of an empty file made in its place would push the good copies out, one a day
+        raise RuntimeError(why)
     dest_dir = dest_dir or os.environ.get("REMITWATCH_BACKUP_DIR") or os.path.join(os.path.dirname(os.path.abspath(db)), "backups")
     os.makedirs(dest_dir, mode=0o700, exist_ok=True)
     os.chmod(dest_dir, 0o700)             # copies of patient data: the owner only
@@ -298,11 +302,37 @@ def _daily_backup(db: str) -> dict:
     return {"file": path, "mb": round(os.path.getsize(path) / 1048576, 1)}
 
 
+def cmd_accept_store(args: argparse.Namespace) -> int:
+    """After a run stopped because the store was missing or not the one last saved (docs/OPERATIONS.md, Recovering the
+    store): a person says the store now in place is the store. On a server, the store file (--db); with --state-folder,
+    the serverless site's store image in its state folder (the Dropbox settings, or REMITWATCH_STATE_DIR)."""
+    if args.state_folder:
+        from . import cloud
+        from .state import state_from_env
+        st = state_from_env()
+        if st is None:
+            print("No state folder is configured: set the site's DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN "
+                  "(and REMITWATCH_STATE_PATH if the site sets it).")
+            return 1
+        try:
+            print(cloud.accept_image(st))
+        except cloud.StoreImageProblem as exc:
+            print(exc)
+            return 1
+        return 0
+    from .store import accept_store
+    print(accept_store(args.db))
+    return 0
+
+
 def cmd_backup(args: argparse.Namespace) -> int:
     try:
         path = backup_store(args.db, args.dir, args.keep)
     except BackupBusy as exc:
         print(f"{exc} Run this again when it has finished.")
+        return 1
+    except RuntimeError as exc:         # the store is missing (remitwatch.store.store_problem): nothing to copy
+        print(exc)
         return 1
     print(json.dumps({"file": path, "mb": round(os.path.getsize(path) / 1048576, 1)}))
     return 0
@@ -748,6 +778,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="move even though some of what people did on Vercel still waits for its item (listed; it is left behind)")
     ic.set_defaults(fn=cmd_import_cloud)
     sub.add_parser("compare-cloud", help="prove a move: the Vercel site's state against this server's store, table by table").set_defaults(fn=cmd_compare_cloud)
+    acc = sub.add_parser("accept-store", help="after a run stopped for a missing or replaced store: the store now in place is the store")
+    acc.add_argument("--state-folder", action="store_true", help="the serverless site's store image, in its state folder")
+    acc.set_defaults(fn=cmd_accept_store)
     bk = sub.add_parser("backup", help="a consistent, gzipped copy of the store, taken while the site runs")
     bk.add_argument("--dir", default=None, help="where (default: a backups folder beside the store)")
     bk.add_argument("--keep", type=int, default=7, help="how many copies to keep"); bk.set_defaults(fn=cmd_backup)
