@@ -68,7 +68,8 @@ function bindGuide(v){
   const close = () => { guideDone(); g.remove(); };
   g.querySelector('#guideClose').onclick = close;
   g.querySelector('#guideOk').onclick = close;
-  g.querySelector('#guideGo').onclick = () => { guideDone(); goWork({deadline:'valid', sort:'deadline', first:'1'}); };
+  // the first item to work: in Work now (never one that waits on the payer or a question for the owner), soonest first
+  g.querySelector('#guideGo').onclick = () => { guideDone(); goWork({state:'todo', deadline:'valid', sort:'deadline', first:'1'}); };
 }
 function openGuide(){ guideReset(); if(state.tab !== 'today'){ state.tab = 'today'; location.hash = 'today'; } render(); }
 

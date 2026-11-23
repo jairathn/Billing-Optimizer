@@ -1205,113 +1205,249 @@ def _check_error(cid: str, exc: BaseException) -> dict:
 
 # ---------------------------------------------------------------------------------------------- the run: before and after
 SNAPSHOT = "sc_before"
+# what a person (or a hide rule a person made) records in an item's history: put back on a held worklist
+PERSON_KINDS = ("manual", "hidden", "unhidden")
+ROW_COLS = ("finding_id", "signal", "category", "status", "work_state", "follow_up_on", "line_key", "claim_key",
+            "patient_control_number", "service_date", "procedure_code", "shortfall_cents", "payer_group", "auto_note",
+            "transaction_key", "payment_date", "stale", "evidence", "hint", "appeal_deadline", "recovered_cents", "ema_link",
+            "first_seen")
 
 
 def begin_detection(conn: sqlite3.Connection, *, run_id: str | None = None, today: Any = None) -> dict:
     """Before detection saves: a copy of the findings as people see them now (temp.sc_before, in this connection's
-    temporary database), for the vanished check, the track record and safe mode. Cheap: one table copy."""
+    temporary database), for the vanished check, the track record and safe mode, and the newest entry of the items'
+    history (a status a person saves while the run runs is put back on a held worklist). Cheap: one table copy."""
     ensure_tables(conn)
     conn.execute(f"DROP TABLE IF EXISTS temp.{SNAPSHOT}")
     n = 0
     if _has_table(conn, "findings"):
         conn.execute(f"CREATE TEMP TABLE {SNAPSHOT} AS SELECT * FROM main.findings")
         n = conn.execute(f"SELECT COUNT(*) FROM temp.{SNAPSHOT}").fetchone()[0]
-    return {"run_id": run_id, "today": today_of(today), "before": n, "at": now_of(), "t0": time.time()}
+    events_max = None
+    if _has_table(conn, "finding_events"):
+        events_max = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM finding_events").fetchone()[0] or 0)
+    return {"run_id": run_id, "today": today_of(today), "before": n, "at": now_of(), "t0": time.time(),
+            "events_max": events_max}
+
+
+def _rows_of(conn: sqlite3.Connection, table: str, schema: str = "main") -> dict[str, dict]:
+    cols = set(_cols(conn, table, schema))
+    if not cols:
+        return {}
+    sel = ", ".join(c if c in cols else f"NULL AS {c}" for c in ROW_COLS)
+    cur = conn.execute(f"SELECT {sel} FROM {schema}.{table}")
+    names = [d[0] for d in cur.description]
+    return {r[0]: dict(zip(names, r)) for r in cur.fetchall()}
 
 
 def _before_rows(conn: sqlite3.Connection) -> dict[str, dict]:
     if not _has_table(conn, SNAPSHOT, "temp"):
         return {}
-    cols = set(_cols(conn, SNAPSHOT, "temp"))
-    want = ["finding_id", "signal", "category", "status", "work_state", "follow_up_on", "line_key", "claim_key",
-            "patient_control_number", "service_date", "procedure_code", "shortfall_cents", "payer_group", "auto_note",
-            "transaction_key", "payment_date", "stale", "evidence", "hint", "appeal_deadline"]
-    sel = ", ".join(c if c in cols else f"NULL AS {c}" for c in want)
-    cur = conn.execute(f"SELECT {sel} FROM temp.{SNAPSHOT}")
-    names = [d[0] for d in cur.description]
-    return {r[0]: dict(zip(names, r)) for r in cur.fetchall()}
+    return _rows_of(conn, SNAPSHOT, "temp")
 
 
 def _after_rows(conn: sqlite3.Connection) -> dict[str, dict]:
-    cols = _findings_ok(conn)
-    want = ["finding_id", "signal", "category", "status", "work_state", "follow_up_on", "line_key", "claim_key",
-            "patient_control_number", "service_date", "procedure_code", "shortfall_cents", "payer_group", "auto_note",
-            "transaction_key", "payment_date", "stale", "evidence", "hint", "appeal_deadline", "recovered_cents"]
-    sel = ", ".join(c if c in cols else f"NULL AS {c}" for c in want)
-    cur = conn.execute(f"SELECT {sel} FROM findings")
-    names = [d[0] for d in cur.description]
-    return {r[0]: dict(zip(names, r)) for r in cur.fetchall()}
+    return _rows_of(conn, "findings")
 
 
-def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dict[str, dict]) -> dict:
-    """Open items people were shown as work (Work now or Waiting) before the run that the run no longer has, with no
-    route out: no item now for the same line or claim and code, not folded into another item, their remittance not
-    superseded."""
+def _is_listed(r: dict, states_kept: bool) -> bool:
+    """On a list people work from: not stale, open, and Work now or Waiting (an open money item where the store keeps no
+    states yet)."""
+    if r.get("stale") or r.get("status") not in OPEN_STATUSES:
+        return False
+    return r.get("work_state") in LISTED if states_kept else (r.get("status") == "open" and r.get("category") in MONEY)
+
+
+def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dict[str, dict], *,
+                   facts: dict[str, str] | None = None) -> dict:
+    """Open items people were shown as work (Work now or Waiting) before the run that the run no longer has, or keeps only
+    as a stale row (an item a person worked that no rule produces any more: it is on no list), with no route out: a
+    person's own decision on it while the run ran; an item THIS run made for the same line, claim and code, or service (an
+    old item left on the line, such as one a person let go long ago, carries nothing on); for an item about a whole claim
+    (no answer, rejected, never sent), an item this run made for its bill and day or an 835 answer on its bill since it
+    was raised; a fold into another item; its remittance superseded; or new facts on its own claim since the run before
+    (`facts`: the fingerprints that run stored, selfcheck_facts: the 835 answers on its bill, EMA's lines and newest A/R
+    rows for its EMA claim number), as the rules' answer may then rightly change."""
     if not before:
         return _skip("vanished", "no items before this run")
-    lines = {r["line_key"] for r in after.values() if r.get("line_key")}
-    claim_codes = {(r.get("claim_key"), r.get("procedure_code")) for r in after.values() if r.get("claim_key")}
-    service = {(bill_of(r.get("patient_control_number")), r.get("service_date"), r.get("procedure_code"))
-               for r in after.values() if r.get("patient_control_number")}
+    states_kept = any(r.get("work_state") for r in before.values())
+    new_rows = [r for f, r in after.items() if f not in before and not r.get("stale")]
+    lines = {r["line_key"] for r in new_rows if r.get("line_key")}
+    claim_codes = {(r.get("claim_key"), r.get("procedure_code")) for r in new_rows if r.get("claim_key")}
+    service = {(bill_of(r.get("patient_control_number")), str(r.get("service_date") or "")[:10], r.get("procedure_code"))
+               for r in new_rows if r.get("patient_control_number")}
+    bill_days = {(bill_of(r.get("patient_control_number")), str(r.get("service_date") or "")[:10])
+                 for r in new_rows if r.get("patient_control_number")}
     folded: set[str] = set()
     for r in after.values():
         ev = r.get("evidence")
-        if ev and "folded" in str(ev):
-            for x in _ev(ev).get("folded") or []:
-                if isinstance(x, dict) and x.get("finding_id"):
-                    folded.add(str(x["finding_id"]))
-                elif isinstance(x, str):
-                    folded.add(x)
-    superseded: set[str] = set()
-    tks = sorted({r.get("transaction_key") for f, r in before.items() if f not in after and r.get("transaction_key")})
-    for i in range(0, len(tks), 500):
-        part = tks[i:i + 500]
-        have = {tk: sup for tk, sup in conn.execute(f"SELECT transaction_key, COALESCE(superseded, 0) FROM transactions "
-                                                    f"WHERE transaction_key IN ({','.join('?' * len(part))})", part)}
-        superseded.update(tk for tk in part if have.get(tk, 1))      # gone from the store, or superseded
-    offs = []
+        if r.get("stale") or not ev or "folded" not in str(ev):
+            continue
+        for x in _ev(ev).get("folded") or []:
+            if isinstance(x, dict) and x.get("finding_id"):
+                folded.add(str(x["finding_id"]))
+            elif isinstance(x, str):
+                folded.add(x)
     routes: Counter = Counter()
-    states_kept = any(r.get("work_state") for r in before.values())
+    cands: list[dict] = []
     for fid, r in before.items():
-        if fid in after or r.get("stale") or r.get("status") not in OPEN_STATUSES:
+        if not _is_listed(r, states_kept):
             continue
-        listed = r.get("work_state") in LISTED if states_kept else (r.get("status") == "open" and r.get("category") in MONEY)
-        if not listed:
+        a = after.get(fid)
+        if a is not None and not a.get("stale"):
+            continue                            # still on record: where it went is the other checks' business
+        if a is not None and a.get("status") not in OPEN_STATUSES:
+            routes["decided"] += 1              # a person let it go, lost it or marked it paid while the run ran
             continue
-        if r.get("line_key") and r["line_key"] in lines:
+        lk = r.get("line_key")
+        b = bill_of(r.get("patient_control_number"))
+        svc = str(r.get("service_date") or "")[:10]
+        if lk and lk in lines:
             routes["same_line"] += 1
-            continue
-        if r.get("claim_key") and (r["claim_key"], r.get("procedure_code")) in claim_codes:
+        elif r.get("claim_key") and (r["claim_key"], r.get("procedure_code")) in claim_codes:
             routes["same_claim_code"] += 1
-            continue
-        if not r.get("line_key") and r.get("patient_control_number") and \
-                (bill_of(r["patient_control_number"]), r.get("service_date"), r.get("procedure_code")) in service:
-            routes["same_service"] += 1         # a claim-level item (no remittance line) carried on by an item for its service
-            continue
-        if fid in folded:
+        elif not lk and b and (b, svc, r.get("procedure_code")) in service:
+            routes["same_service"] += 1         # a claim-level item carried on by an item for its service
+        elif not lk and b and r.get("signal") in CLAIM_SIGNALS and (b, svc) in bill_days:
+            routes["claim_answered"] += 1       # the claim's answer brought items of its own
+        elif fid in folded:
             routes["folded"] += 1
-            continue
+        else:
+            cands.append(r)
+    superseded: set[str] = set()
+    tks = sorted({r.get("transaction_key") for r in cands if r.get("transaction_key")})
+    if tks and _has_table(conn, "transactions"):
+        for i in range(0, len(tks), 500):
+            part = tks[i:i + 500]
+            have = {tk: sup for tk, sup in conn.execute(f"SELECT transaction_key, COALESCE(superseded, 0) FROM transactions "
+                                                        f"WHERE transaction_key IN ({','.join('?' * len(part))})", part)}
+            superseded.update(tk for tk in part if have.get(tk, 1))     # gone from the store, or superseded
+    answered = _answered_since(conn, [r for r in cands if not r.get("line_key") and r.get("signal") in CLAIM_SIGNALS])
+    left: list[dict] = []
+    for r in cands:
         if r.get("transaction_key") and r["transaction_key"] in superseded:
             routes["superseded"] += 1
+        elif r["finding_id"] in answered:
+            routes["claim_answered"] += 1
+        else:
+            left.append(r)
+    if facts and left:
+        now_fp = _facts_of(conn, left)
+        kept_left = []
+        for r in left:
+            old, new = facts.get(r["finding_id"]), now_fp.get(r["finding_id"])
+            if old and new and old != new:
+                routes["facts_changed"] += 1
+            else:
+                kept_left.append(r)
+        left = kept_left
+    offs = [(r["finding_id"], int(r.get("shortfall_cents") or 0), r["finding_id"]) for r in left]
+    by_signal = Counter(r.get("signal") for r in left)
+    return _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10)),
+                                           "stale": sum(1 for r in left if r["finding_id"] in after)})
+
+
+def _answered_since(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
+    """Items about a whole claim whose bill has an 835 answer (not superseded) paid on or after the day they were raised."""
+    out: set[str] = set()
+    if not items or not (_has_table(conn, "claims") and _has_table(conn, "transactions")):
+        return out
+    for r in items:
+        b = bill_of(r.get("patient_control_number"))
+        if not b:
             continue
-        offs.append((fid, int(r.get("shortfall_cents") or 0), fid))
-    by_signal = Counter(before[f]["signal"] for f, _c, _x in offs)
-    return _result("vanished", offs, info={"routes": dict(routes), "by_signal": dict(by_signal.most_common(10))})
+        since = str(r.get("first_seen") or "")[:10]
+        for pcn, paid_on in conn.execute("""SELECT c.patient_control_number, c.payment_date FROM claims c
+                                            JOIN transactions t ON t.transaction_key = c.transaction_key
+                                            WHERE c.patient_control_number >= ? AND c.patient_control_number < ?
+                                              AND COALESCE(t.superseded, 0) = 0""", (b, b + "~")):
+            if bill_of(pcn) == b and str(paid_on or "")[:10] >= since:
+                out.add(r["finding_id"])
+                break
+    return out
+
+
+def _facts_of(conn: sqlite3.Connection, items: list[dict]) -> dict[str, str]:
+    """A fingerprint of what each item's own claim shows in the data now: the 835 answers on its bill (how many, the
+    newest date, the money), and for its EMA claim number EMA's lines (count, insurer paid, balance, newest posting, status
+    classes) and the newest A/R rows (claim status, balance); for an item with no bill, the remittance feed as a whole.
+    Two runs that see the same fingerprint saw the same facts, so an item that left between them left because a rule
+    changed, not because its claim did."""
+    out: dict[str, str] = {}
+    if not items:
+        return out
+    has_835 = _has_table(conn, "claims") and _has_table(conn, "transactions")
+    has_lines = _has_table(conn, "ema_lines")
+    has_ar = _has_table(conn, "ema_ar")
+    feed = list(conn.execute("SELECT COUNT(*), MAX(payment_date) FROM transactions WHERE COALESCE(superseded, 0) = 0")
+                .fetchone()) if has_835 else None
+    by_bill: dict[str, list] = {}
+    by_link: dict[int, list] = {}
+    for it in items:
+        b = bill_of(it.get("patient_control_number"))
+        if b and has_835 and b not in by_bill:
+            mine = [(pd, paid) for pcn, pd, paid in conn.execute(
+                """SELECT c.patient_control_number, c.payment_date, COALESCE(c.paid_cents, 0) FROM claims c
+                   JOIN transactions t ON t.transaction_key = c.transaction_key
+                   WHERE c.patient_control_number >= ? AND c.patient_control_number < ? AND COALESCE(t.superseded, 0) = 0""",
+                (b, b + "~")) if bill_of(pcn) == b]
+            by_bill[b] = [len(mine), max((str(pd or "") for pd, _p in mine), default=""), sum(int(p or 0) for _pd, p in mine)]
+        link = it.get("ema_link")
+        try:
+            link = int(link) if link is not None else None
+        except (TypeError, ValueError):
+            link = None
+        if link is not None and link not in by_link:
+            ema = ar = None
+            if has_lines:
+                ema = list(conn.execute("""SELECT COUNT(*), SUM(COALESCE(ins_paid, 0)), SUM(COALESCE(balance, 0)), MAX(last_posted)
+                                           FROM ema_lines WHERE link = ?""", (link,)).fetchone())
+                ema.append(sorted({str(s or "") for (s,) in conn.execute("SELECT status_class FROM ema_lines WHERE link = ?", (link,))}))
+            if has_ar:
+                ar = [list(x) for x in conn.execute("""SELECT COALESCE(claim_status, ''), SUM(COALESCE(balance_cents, 0)) FROM ema_ar
+                                                       WHERE link = ? AND as_of = (SELECT MAX(as_of) FROM ema_ar WHERE link = ?)
+                                                       GROUP BY 1 ORDER BY 1""", (link, link))]
+            by_link[link] = [ema, ar]
+        raw = json.dumps([by_bill.get(b) if b else feed, by_link.get(link) if link is not None else None], default=str)
+        out[it["finding_id"]] = hashlib.sha1(raw.encode()).hexdigest()[:16]
+    return out
+
+
+def _stored_facts(conn: sqlite3.Connection) -> dict[str, str]:
+    try:
+        return {f: fp for f, fp in conn.execute("SELECT finding_id, fp FROM selfcheck_facts")}
+    except sqlite3.Error:
+        return {}
+
+
+def _save_facts(conn: sqlite3.Connection) -> int:
+    """The fingerprints of the items people see now (the next run's vanished check compares against them)."""
+    rows = _after_rows(conn)
+    states_kept = any(r.get("work_state") for r in rows.values())
+    listed = [r for r in rows.values() if _is_listed(r, states_kept)]
+    fps = _facts_of(conn, listed)
+    conn.execute("DELETE FROM selfcheck_facts")
+    conn.executemany("INSERT OR REPLACE INTO selfcheck_facts (finding_id, fp) VALUES (?, ?)", list(fps.items()))
+    return len(fps)
 
 
 def _stored_results(conn: sqlite3.Connection) -> list[dict]:
     """The checks other steps ran and kept in meta: the money checks (check_ledger, while the store's EMA summaries are of
-    the ledger revision they were measured on) and the dashboard copy's check (check_serving, from the last save)."""
+    the ledger revision they were measured on), posted money (check_posted: the ledger's own history, current whenever it
+    ran) and the dashboard copy's check (check_serving, from the last save)."""
     out = []
     money = meta_get(conn, K_MONEY, {}) or {}
     current = money.get("ledger_seq") is None or str(money.get("ledger_seq")) == str(meta_get(conn, "ema:ledger_seq"))
     for m in (money.get("checks") or []):
-        if isinstance(m, dict) and m.get("id") in CHECKS:
+        if isinstance(m, dict) and m.get("id") in CHECKS and m.get("id") != "posted_money":
             r = dict(m, keys=[tuple(k) for k in m.get("keys") or []])
             if not current:
                 r.update(status="skip", text=f"{CHECKS[r['id']][3]}: measured on an earlier ledger revision; checked again "
                                              "when the ledger is next open")
             out.append(r)
+    posted = (meta_get(conn, K_POSTED, {}) or {}).get("check")
+    if isinstance(posted, dict) and posted.get("id") == "posted_money":
+        out.append(dict(posted, keys=[tuple(k) for k in posted.get("keys") or []]))
     sv = meta_get(conn, "selfcheck:serving")
     if isinstance(sv, dict) and sv.get("status") in ("ok", "fail"):
         out.append(_result("serving_copy", [(f"copy:{i}", 0, None) for i in range(int(sv.get("n") or 0))],
@@ -1319,10 +1455,10 @@ def _stored_results(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
-def _baseline(conn: sqlite3.Connection) -> dict[str, set[str]]:
-    out: dict[str, set[str]] = defaultdict(set)
-    for cid, key in conn.execute("SELECT check_id, key FROM selfcheck_baseline"):
-        out[cid].add(key)
+def _baseline(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    out: dict[str, dict[str, int]] = defaultdict(dict)
+    for cid, key, cents in conn.execute("SELECT check_id, key, cents FROM selfcheck_baseline"):
+        out[cid][key] = int(cents or 0)
     return out
 
 
@@ -1334,21 +1470,47 @@ def _accepted(conn: sqlite3.Connection) -> dict[str, set[str]]:
     return out
 
 
-def _set_baseline(conn: sqlite3.Connection, results: list[dict], at: str, accepted_by: str | None = None,
-                  only: Iterable[str] | None = None) -> None:
-    keep = set(only) if only is not None else None
+def _set_baseline(conn: sqlite3.Connection, results: list[dict], at: str) -> None:
+    """This run's offenders of each critical check that holds become the baseline the next run is compared with (a
+    person's acceptances stay). The vanished check keeps no baseline of its own: an item stays kept until accepted."""
     for r in results:
-        if r["severity"] != "critical" or r["status"] not in ("ok", "fail") or (keep is not None and r["id"] not in keep):
+        if r["severity"] != "critical" or r["status"] not in ("ok", "fail") or r.get("contain") == "keep":
             continue
-        if accepted_by is None:
-            conn.execute("DELETE FROM selfcheck_baseline WHERE check_id = ? AND accepted_by IS NULL", (r["id"],))
+        conn.execute("DELETE FROM selfcheck_baseline WHERE check_id = ? AND accepted_by IS NULL", (r["id"],))
         conn.executemany("INSERT OR IGNORE INTO selfcheck_baseline (check_id, key, cents, since, accepted_by) VALUES (?,?,?,?,?)",
-                         [(r["id"], k, c, at, accepted_by) for k, c in r["keys"]])
+                         [(r["id"], k, c, at, None) for k, c in r["keys"]])
 
 
-def _new_keys(r: dict, base: dict[str, set[str]]) -> list[tuple[str, int]]:
-    known = base.get(r["id"], set())
-    return [(k, c) for k, c in r["keys"] if k not in known]
+MONEY_CHECKS = ("money_conservation", "ledger_store", "posted_money")
+
+
+def _new_keys(r: dict, base: dict[str, dict[str, int]]) -> list[tuple[str, int]]:
+    """Offenders the baseline does not have; for a money check also a known cell whose gap grew by more than $1."""
+    known = base.get(r["id"], {})
+    out = []
+    for k, c in r["keys"]:
+        if k not in known or (r["id"] in MONEY_CHECKS and int(c or 0) > known[k] + 100):
+            out.append((k, c))
+    return out
+
+
+def _save_offenders(conn: sqlite3.Connection, results: list[dict], rid: str) -> None:
+    """Every offender of each failing critical check of this run (not only the 20 examples): what a person accepts, and
+    what the Data tab lists (offenders)."""
+    conn.execute("DELETE FROM selfcheck_offenders")
+    rows = [(r["id"], str(k), int(c or 0), rid) for r in results if r["severity"] == "critical" and r["status"] == "fail"
+            for k, c in r["keys"]]
+    conn.executemany("INSERT OR REPLACE INTO selfcheck_offenders (check_id, key, cents, run_id) VALUES (?,?,?,?)", rows)
+    meta_set(conn, "selfcheck:offenders_run", rid)
+
+
+def offenders(conn: sqlite3.Connection, check_id: str, *, limit: int = 5000) -> list[dict]:
+    """The latest run's offenders of one critical check, largest first (the Data tab's list behind a failing check, and
+    what accept_findings accepts): [{'key', 'cents', 'run_id', 'accepted'}]."""
+    ensure_tables(conn)
+    acc = _accepted(conn).get(check_id, set())
+    return [{"key": k, "cents": c, "run_id": rid, "accepted": k in acc} for k, c, rid in conn.execute(
+        "SELECT key, cents, run_id FROM selfcheck_offenders WHERE check_id = ? ORDER BY cents DESC, key LIMIT ?", (check_id, limit))]
 
 
 def _pack(rows: list) -> list[bytes]:
@@ -1363,16 +1525,78 @@ def _unpack(parts: list[bytes]) -> list:
     return json.loads(zlib.decompress(b"".join(parts)).decode())
 
 
-def _hold(conn: sqlite3.Connection, run_id: str, at: str) -> dict:
+def _new_work(conn: sqlite3.Connection, run_id: str, results: list[dict]) -> list[str]:
+    """The run's new items to work that a held worklist must still show: not on the worklist before, open and listed, no
+    status of their own from this run (an item that inherits a person's work or closes at once is the run's to hold), named
+    by no failing critical check, and on no line (or claim-level service) an item of the held worklist already covers."""
+    before = _before_rows(conn)
+    after = _after_rows(conn)
+    blocked = {str(k) for r in results if r["severity"] == "critical" and r["status"] == "fail" for k, _c in r.get("keys") or []}
+    touched = {f for (f,) in conn.execute("SELECT DISTINCT finding_id FROM finding_events WHERE run_id = ?", (run_id,))} \
+        if _has_table(conn, "finding_events") else set()
+    lines = {r["line_key"] for r in before.values() if r.get("line_key")}
+    services = {(bill_of(r.get("patient_control_number")), str(r.get("service_date") or "")[:10], r.get("procedure_code"))
+                for r in before.values()}
+    states_kept = any(r.get("work_state") for r in after.values())
+    out = []
+    for fid, r in after.items():
+        if fid in before or fid in blocked or fid in touched or r.get("status") != "open" or not _is_listed(r, states_kept):
+            continue
+        if r.get("line_key"):
+            if r["line_key"] in lines:
+                continue
+        elif (bill_of(r.get("patient_control_number")), str(r.get("service_date") or "")[:10], r.get("procedure_code")) in services:
+            continue
+        out.append(fid)
+    return out
+
+
+def _reapply_person_changes(conn: sqlite3.Connection, since_id: int | None) -> int:
+    """Put back on the restored worklist every status a person saved while the run ran (remitwatch.actions.apply_status:
+    the same columns, from the history entry it wrote), and every item a hide rule a person made let go or brought back:
+    those history entries belong to no run, so the item must say what its history says. Returns the changes put back."""
+    if since_id is None or not _has_table(conn, "finding_events"):
+        return 0
+    cols = set(_cols(conn, "findings"))
+    n = 0
+    marks = ",".join("?" * len(PERSON_KINDS))
+    for fid, at, kind, to, amount, note in conn.execute(
+            f"""SELECT finding_id, at, kind, to_status, amount_cents, note FROM finding_events WHERE id > ? AND kind IN ({marks})
+                ORDER BY id""", (since_id, *PERSON_KINDS)).fetchall():
+        sets, args = [], []
+        if kind == "manual" and to:
+            sets, args = ["status = ?"], [to]
+            for col, expr, vals in (("notes", "notes = COALESCE(?, notes)", [note]),
+                                    ("status_changed_at", "status_changed_at = ?", [at]),
+                                    ("recovered_cents", "recovered_cents = ?", [amount if to == "resolved" else None]),
+                                    ("recovered_date", "recovered_date = ?", [str(at or "")[:10] if to == "resolved" else None]),
+                                    ("appealed_at", "appealed_at = CASE WHEN ? = 'appealed' AND appealed_at IS NULL THEN ? "
+                                                    "ELSE appealed_at END", [to, at]),
+                                    ("auto_note", "auto_note = NULL", []), ("prev_status", "prev_status = NULL", [])):
+                if col in cols:
+                    sets.append(expr)
+                    args += vals
+            n += conn.execute(f"UPDATE findings SET {', '.join(sets)} WHERE finding_id = ?", (*args, fid)).rowcount
+        elif kind in ("hidden", "unhidden"):
+            want, was = ("dismissed", "open") if kind == "hidden" else ("open", "dismissed")
+            extra = ", status_changed_at = ?" if "status_changed_at" in cols else ""
+            n += conn.execute(f"UPDATE findings SET status = ?{extra} WHERE finding_id = ? AND status = ?",
+                              (want, *([at] if extra else []), fid, was)).rowcount
+    return n
+
+
+def _hold(conn: sqlite3.Connection, run_id: str, at: str, ctx: dict, results: list[dict]) -> dict:
     """Safe mode: keep the run's items (compressed, selfcheck_held) and events, put the items back as they were before the
-    run (temp.sc_before: the last good run's, with every person's change since), take this run's events out of the item
-    history (they describe changes that were held), and rebuild this run's progress counts from what people see."""
+    run (temp.sc_before: the last good run's), add the run's new items to work that no failing check names (a hold never
+    hides new work), take this run's events out of the item history (they describe changes that were held), put back every
+    status a person saved while the run ran, and rebuild this run's progress counts from what people see."""
     cols = _cols(conn, "findings")
     bcols = set(_cols(conn, SNAPSHOT, "temp"))
     use = [c for c in cols if c in bcols]
     held_rows = [list(r) for r in conn.execute(f"SELECT {', '.join(cols)} FROM findings")]
-    closures = conn.execute("""SELECT COUNT(*) FROM finding_events WHERE run_id = ? AND kind = 'paid_on_later_remit'""",
-                            (run_id,)).fetchone()[0] if _has_table(conn, "finding_events") else 0
+    has_ev = _has_table(conn, "finding_events")
+    closures = conn.execute("SELECT COUNT(*) FROM finding_events WHERE run_id = ? AND kind = 'paid_on_later_remit'",
+                            (run_id,)).fetchone()[0] if has_ev else 0
     ev_cols = _cols(conn, "finding_events")
     events = [list(r) for r in conn.execute(f"SELECT {', '.join(ev_cols)} FROM finding_events WHERE run_id = ?", (run_id,))] \
         if ev_cols else []
@@ -1380,36 +1604,63 @@ def _hold(conn: sqlite3.Connection, run_id: str, at: str) -> dict:
     for kind, payload in (("findings", {"cols": cols, "rows": held_rows}), ("events", {"cols": ev_cols, "rows": events})):
         for i, part in enumerate(_pack(payload)):
             conn.execute("INSERT INTO selfcheck_held (run_id, kind, part, data) VALUES (?,?,?,?)", (run_id, kind, i, part))
+    new_ids = _new_work(conn, run_id, results)
+    for tb in ("sc_new", "sc_new_rows"):
+        conn.execute(f"DROP TABLE IF EXISTS temp.{tb}")
+    conn.execute("CREATE TEMP TABLE sc_new (finding_id TEXT PRIMARY KEY)")
+    conn.executemany("INSERT OR IGNORE INTO temp.sc_new VALUES (?)", [(f,) for f in new_ids])
+    conn.execute("CREATE TEMP TABLE sc_new_rows AS SELECT * FROM main.findings WHERE finding_id IN (SELECT finding_id FROM temp.sc_new)")
     conn.execute("DELETE FROM findings")
     conn.execute(f"INSERT INTO findings ({', '.join(use)}) SELECT {', '.join(use)} FROM temp.{SNAPSHOT}")
+    conn.execute(f"INSERT OR IGNORE INTO findings ({', '.join(cols)}) SELECT {', '.join(cols)} FROM temp.sc_new_rows")
+    for tb in ("sc_new", "sc_new_rows"):
+        conn.execute(f"DROP TABLE IF EXISTS temp.{tb}")
     if ev_cols:
         conn.execute("DELETE FROM finding_events WHERE run_id = ?", (run_id,))
+    person = _reapply_person_changes(conn, ctx.get("events_max"))
+    if has_ev and ctx.get("events_max") is not None and "actor" in ev_cols:
+        # the hide rules' entries for the run's held items (no item of the worklist carries them): kept with the held copy
+        conn.execute("""DELETE FROM finding_events WHERE id > ? AND kind = 'hidden' AND actor = 'hide rule'
+                        AND finding_id NOT IN (SELECT finding_id FROM findings)""", (ctx["events_max"],))
     if _has_table(conn, "progress_snapshots"):
         conn.execute("DELETE FROM progress_snapshots WHERE run_id = ?", (run_id,))
         conn.execute("""INSERT INTO progress_snapshots (run_id, at, category, status, n, cents)
                         SELECT ?, ?, category, status, COUNT(*), COALESCE(SUM(shortfall_cents), 0) FROM findings
                         WHERE COALESCE(stale, 0) = 0 GROUP BY category, status""", (run_id, at))
     return {"held_items": len(held_rows), "held_events": len(events), "held_closures": closures,
-            "kept_items": conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]}
+            "kept_items": conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0], "new_items": len(new_ids),
+            "person_changes": person}
 
 
 KEPT_HINT = ("Kept by RemitWatch's self-check: the newest analysis no longer lists this item and nothing explains why "
              "(no payment, no replacement, no fold). It stays until a person checks it.")
 
 
-def _keep_vanished(conn: sqlite3.Connection, fids: list[str], run_id: str, at: str) -> int:
-    """Put back the items that disappeared with no reason, as they were before the run, with a note; record it."""
+def _keep_vanished(conn: sqlite3.Connection, fids: list[str], run_id: str, at: str, before: dict[str, dict],
+                   after: dict[str, dict]) -> int:
+    """Put back the items that disappeared with no reason, as they were before the run, and list again the ones detection
+    kept only as stale rows (with the person's status and notes as they are now, and the state people last saw when the
+    new one is not a list's), each with a note and a line in its history."""
     if not fids:
         return 0
     cols = _cols(conn, "findings")
     bcols = set(_cols(conn, SNAPSHOT, "temp"))
     use = [c for c in cols if c in bcols]
-    n = 0
-    for i in range(0, len(fids), 500):
-        part = fids[i:i + 500]
+    gone = [f for f in fids if f not in after]
+    for i in range(0, len(gone), 500):
+        part = gone[i:i + 500]
         conn.execute(f"INSERT OR IGNORE INTO findings ({', '.join(use)}) SELECT {', '.join(use)} FROM temp.{SNAPSHOT} "
                      f"WHERE finding_id IN ({','.join('?' * len(part))})", part)
-        n += len(part)
+    state_cols = [c for c in ("work_state", "follow_up_on", "state_basis", "appeal_block") if c in cols and c in bcols]
+    for f in fids:
+        if f not in after:
+            continue
+        sets, args = ["stale = 0"], []
+        if after[f].get("work_state") not in LISTED:
+            for c in state_cols:
+                sets.append(f"{c} = (SELECT {c} FROM temp.{SNAPSHOT} WHERE finding_id = ?)")
+                args.append(f)
+        conn.execute(f"UPDATE findings SET {', '.join(sets)} WHERE finding_id = ?", (*args, f))
     if "hint" in cols:
         for i in range(0, len(fids), 500):
             part = fids[i:i + 500]
@@ -1419,14 +1670,15 @@ def _keep_vanished(conn: sqlite3.Connection, fids: list[str], run_id: str, at: s
                             VALUES (?, ?, 'kept_by_selfcheck', NULL, NULL, NULL, 'system', ?, ?)""",
                          [(f, at, "The analysis no longer listed it with no reason; kept so nothing is dropped silently", run_id)
                           for f in fids])
-    return n
+    return len(fids)
 
 
 def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: str = "server", today: Any = None,
                     run_id: str | None = None) -> dict:
-    """After detection saved (inside Detector.run, before the hide rules and the decision log): run the checks, keep
-    what disappeared with no reason, decide safe mode, update the track record and the history. Returns
-    {'held', 'first', 'failing', 'new', 'kept', 'checks': [...summaries], 'safe_mode': {...}}."""
+    """After detection saved (inside Detector.run, after the hide rules, before the decision log): run the checks, keep
+    what disappeared with no reason (every run, the first included), decide safe mode, update the track record, the
+    history, the offenders a person may accept and the facts the next run's vanished check compares against. Returns
+    {'held', 'first', 'failing', 'errors', 'new', 'kept', 'checks': [...summaries], 'safe_mode': {...}}."""
     ensure_tables(conn)
     ctx = ctx or {}
     t = today_of(today or ctx.get("today"))
@@ -1436,13 +1688,12 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     after = _after_rows(conn)
     results = run_checks(conn, today=t, run_id=rid)
     try:
-        results.append(check_vanished(conn, before, after))
+        results.append(check_vanished(conn, before, after, facts=_stored_facts(conn)))
     except Exception as exc:       # noqa: BLE001
         _caught(exc, "vanished")
         results.append(_check_error("vanished", exc))
     results.extend(_stored_results(conn))
     first = conn.execute("SELECT COUNT(*) FROM selfcheck_runs").fetchone()[0] == 0
-    _apply_acceptances(conn, results)
     base = _baseline(conn)
     new_by: dict[str, list] = {}
     hold_ids: list[str] = []
@@ -1455,8 +1706,6 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
         if r["contain"] == "hold" and len(nk) > r["tolerance"]:
             hold_ids.append(r["id"])
     kept = 0
-    # items that vanished with no reason are kept every run until a person accepts the change (not only the first time:
-    # the last good run's baseline would otherwise let them go on the second run)
     accepted = _accepted(conn).get("vanished", set())
     van = next((r for r in results if r["id"] == "vanished"), None)
     van_new = [k for k, _c in (van or {}).get("keys", []) if k not in accepted] if van and van["status"] == "fail" else []
@@ -1465,11 +1714,13 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
     held = bool(hold_ids) and can_hold
     track: dict = {}
     if held:
-        held_info = _hold(conn, rid, at)
-        _log("safe_mode", counts={"held_items": held_info.get("held_items"), "held_closures": held_info.get("held_closures")},
+        held_info = _hold(conn, rid, at, ctx, results)
+        _log("safe_mode", counts={"held_items": held_info.get("held_items"), "held_closures": held_info.get("held_closures"),
+                                  "new_items": held_info.get("new_items"), "person_changes": held_info.get("person_changes")},
              detail={"checks": hold_ids, "run_id": rid})
-    elif van_new and not first:
-        kept = _keep_vanished(conn, van_new, rid, at)
+    elif van_new:
+        # kept on every run, the first included (keeping needs no baseline: only the hold does), until a person accepts
+        kept = _keep_vanished(conn, van_new, rid, at, before, after)
         _log("kept_vanished", counts={"kept": kept}, detail={"examples": van_new[:EXAMPLES]})
     if not held:
         # this run is the last good one: its offenders are the baseline (a person's acceptances stay)
@@ -1480,6 +1731,11 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
             except Exception as exc:       # noqa: BLE001  (the track record waits for the next run; the checks stand)
                 _caught(exc, "track")
         conn.execute("DELETE FROM selfcheck_held")
+    _save_offenders(conn, results, rid)
+    try:
+        _save_facts(conn)
+    except Exception as exc:       # noqa: BLE001  (without them the next run judges every departure as unexplained)
+        _caught(exc, "facts")
     safe = _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_hold)
     summary = _store_results(conn, results, rid, t, mode, held, first, kept, at)
     conn.execute(f"DROP TABLE IF EXISTS temp.{SNAPSHOT}")
@@ -1496,13 +1752,16 @@ def _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_ho
     prev = meta_get(conn, K_SAFE, {}) or {}
     if held:
         why = [r for r in results if r["id"] in hold_ids]
+        n_new, n_person = int(held_info.get("new_items") or 0), int(held_info.get("person_changes") or 0)
         state = {"on": True, "since": prev.get("since") if prev.get("on") else at, "run_id": rid, "at": at,
                  "checks": [{"id": r["id"], "title": r["title"], "n": r["n"], "new": r.get("new", 0), "cents": r["cents"],
                              "examples": r["examples"][:EXAMPLES], "what_to_check": r["what_to_check"]} for r in why],
                  **held_info,
                  "text": ("RemitWatch kept the worklist as it was before this run and held the run's automatic closures, "
-                          f"because {', '.join(r['title'].lower() for r in why)} failed. Nothing was lost: the new results "
-                          "are kept for diagnosis. The next run that passes releases it."),
+                          f"because {', '.join(r['title'].lower() for r in why)} failed. "
+                          + (f"It still lists the {_n(n_new, 'new item')} to work the run found. " if n_new else "")
+                          + (f"The {_n(n_person, 'change')} people saved during the run stand. " if n_person else "")
+                          + "Nothing was lost: the new results are kept for diagnosis. The next run that passes releases it."),
                  "runs_held": int(prev.get("runs_held") or 0) + 1 if prev.get("on") else 1}
     else:
         state = {"on": False, "at": at, "run_id": rid}
@@ -1525,7 +1784,7 @@ def _store_results(conn, results, rid, today, mode, held, first, kept, at) -> li
         summary.append({k: r.get(k) for k in ("id", "severity", "status", "n", "cents", "new", "title", "sentence", "text",
                                               "what_to_check", "examples", "info")})
     failing = sum(1 for r in results if r["status"] == "fail")
-    critical = sum(1 for r in results if r["status"] == "fail" and r["severity"] == "critical")
+    critical = sum(1 for r in results if r["status"] in ("fail", "error") and r["severity"] == "critical")
     conn.execute("""INSERT OR REPLACE INTO selfcheck_runs (run_id, at, today, mode, held, first, failing, critical, checks, summary)
                     VALUES (?,?,?,?,?,?,?,?,?,?)""",
                  (rid, at, today, mode, int(held), int(first), failing, critical,
@@ -1540,38 +1799,40 @@ def _store_results(conn, results, rid, today, mode, held, first, kept, at) -> li
     return summary
 
 
-def accept_findings(conn: sqlite3.Connection, user: str, check_ids: Iterable[str] | None = None) -> dict:
+def accept_findings(conn: sqlite3.Connection, user: str, check_ids: Iterable[str] | None = None, *,
+                    run_id: str | None = None) -> dict:
     """A person accepts what the latest checks found (a business decision on the Data tab: "this change is intended", or
-    "use the new results"): those offenders become the baseline, recorded with who and when, so they no longer hold a
-    run or keep items. Returns what was accepted."""
+    "use the new results"): exactly the offenders of the run they looked at (selfcheck_offenders: every one, not only the
+    20 examples) become the accepted baseline, recorded with who and when, so they no longer hold a run or keep items; an
+    offender a later run finds is new again. With `run_id` (the run the page showed), an acceptance that arrives after the
+    checks ran again accepts nothing and says so. Accepting posted money moves its marks to what the ledger holds now.
+    Returns what was accepted."""
     ensure_tables(conn)
-    last = meta_get(conn, K_LAST, {}) or {}
     ids = set(check_ids) if check_ids is not None else set(CRITICAL)
     at = now_of()
+    who = str(user or "")[:80]
+    latest = meta_get(conn, "selfcheck:offenders_run")
+    if run_id and latest and str(run_id) != str(latest):
+        return {"accepted": {}, "by": who, "at": at, "run_id": latest, "stale": True,
+                "text": "The checks ran again after this page was opened: look at the new results, then accept them."}
     accepted = {}
-    for c in last.get("checks") or []:
-        if c.get("id") in ids and c.get("status") == "fail":
-            accepted[c["id"]] = c.get("n")
-    # the offenders' keys are in the held copy or recomputed by the next run: record the acceptance itself; the next run
-    # adds its offenders for these checks to the baseline under this person's name
-    pend = meta_get(conn, "selfcheck:accepted", {}) or {}
-    for cid in accepted:
-        pend[cid] = {"by": str(user or "")[:80], "at": at}
-    meta_set(conn, "selfcheck:accepted", pend)
+    for cid in sorted(ids):
+        rows = conn.execute("SELECT key, cents FROM selfcheck_offenders WHERE check_id = ?", (cid,)).fetchall()
+        if not rows:
+            continue
+        conn.executemany("INSERT OR REPLACE INTO selfcheck_baseline (check_id, key, cents, since, accepted_by) VALUES (?,?,?,?,?)",
+                         [(cid, k, c, at, who) for k, c in rows])
+        accepted[cid] = len(rows)
+        if cid == "posted_money":
+            conn.executemany("""UPDATE selfcheck_posted SET high_cents = last_cents
+                                WHERE svc_month || '|' || posted_month || '|' || payer_group || '|' || measure = ?""",
+                             [(k,) for k, _c in rows])
+    if accepted:
+        hist = list(meta_get(conn, K_ACCEPTED, []) or [])[-49:]
+        hist.append({"at": at, "by": who, "run_id": latest, "checks": accepted})
+        meta_set(conn, K_ACCEPTED, hist)
     conn.commit()
-    return {"accepted": accepted, "by": user, "at": at}
-
-
-def _apply_acceptances(conn: sqlite3.Connection, results: list[dict]) -> None:
-    pend = meta_get(conn, "selfcheck:accepted", {}) or {}
-    if not pend:
-        return
-    for r in results:
-        a = pend.get(r["id"])
-        if a and r["status"] == "fail":
-            conn.executemany("INSERT OR REPLACE INTO selfcheck_baseline (check_id, key, cents, since, accepted_by) VALUES (?,?,?,?,?)",
-                             [(r["id"], k, c, a["at"], a["by"]) for k, c in r["keys"]])
-    conn.execute("DELETE FROM meta WHERE key = 'selfcheck:accepted'")
+    return {"accepted": accepted, "by": who, "at": at, "run_id": latest}
 
 
 def held_copy(conn: sqlite3.Connection) -> dict:
@@ -1733,8 +1994,11 @@ def _week_of(iso: Any) -> str:
 def check_ledger(conn: sqlite3.Connection, ledger: Any, *, today: Any = None, sample: int = 2000, seed: str | None = None) -> dict:
     """When the posting ledger is open (a server cycle; a serverless run that applies a Production file): the store's EMA
     money against the ledger's (ledger_store), money conservation per service month and payer group from the ledger
-    (money_conservation), and EMA's A/R against its postings (line_balance). Saved in meta selfcheck:money with the
-    ledger's seq; after_detection counts these results while the store's summaries are of that seq. Returns the dict."""
+    (money_conservation), EMA's A/R against its postings both ways, in the same pass over the ledger (line_balance), and
+    money posted in a closed month never disappearing (check_posted: posted_money). Every dollar the checks cannot tie
+    is counted in out['gaps'] (a total with its parts). Saved in meta selfcheck:money with the ledger's seq (posted money
+    in selfcheck:posted); after_detection counts these results while the store's summaries are of that seq. Returns the
+    dict, its 'checks' with posted_money last."""
     ensure_tables(conn)
     t = today_of(today)
     lc = ledger.conn if hasattr(ledger, "conn") else ledger
@@ -1752,18 +2016,33 @@ def check_ledger(conn: sqlite3.Connection, ledger: Any, *, today: Any = None, sa
                                             "the next refresh brings them level"))
     else:
         checks.append(_ledger_store(conn, lc, sample=sample, seed=seed or t))
-    cons = _conservation(conn, lc, t)
+    cons = _conservation(conn, lc, t, ar=_ar_lines(conn))
     checks.append(cons.pop("check"))
-    out["conservation"] = cons
-    bal = _ar_balance(conn, lc, t)
+    bal = cons.pop("ar_balance")
     checks.append(bal.pop("check"))
+    out["conservation"] = cons
     out["ar_balance"] = bal
     for c in checks:
         c["current"] = True
+    posted = check_posted(conn, ledger, today=t)
+    out["posted"] = {k: posted.get(k) for k in ("status", "n", "cents", "text", "info")}
+    out["gaps"] = _gap_total(checks[1], cons, bal, posted)
     out["checks"] = checks
     meta_set(conn, K_MONEY, out)
     conn.commit()
-    return out
+    return dict(out, checks=checks + [posted])
+
+
+def _gap_total(conservation: dict, cons: dict, bal: dict, posted: dict) -> dict:
+    """Every dollar the money checks could not tie, by kind, and their total (NON-NEGOTIABLE 1: an unreconciled dollar is
+    a visible gap with an amount)."""
+    g = {"posted_drop_cents": int(posted.get("cents") or 0) if posted.get("status") == "fail" else 0,
+         "cells_off_cents": int(conservation.get("cents") or 0) if conservation.get("status") == "fail" else 0,
+         "unlinked_since_cents": int(cons.get("unlinked_since_cents") or 0),
+         "ar_above_cents": int(bal.get("ar_above_cents") or 0), "postings_above_cents": int(bal.get("postings_above_cents") or 0),
+         "left_ar_cents": int(bal.get("left_ar_cents") or 0), "not_in_postings_cents": int(bal.get("not_in_postings_cents") or 0)}
+    g["total_cents"] = sum(abs(v) for v in g.values())
+    return g
 
 
 def _ledger_store(conn: sqlite3.Connection, lc: sqlite3.Connection, *, sample: int, seed: str) -> dict:

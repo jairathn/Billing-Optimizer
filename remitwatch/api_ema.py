@@ -444,8 +444,7 @@ def today(user: str = Depends(_user)):
         has_outcome = "ema_outcome" in fcols
         through = _unworked_since(c)
         try:
-            tot = policy_table(c)["totals"]
-            out["decide"] = tot["decide"]
+            out["decide"] = decide_totals(c)
         except (sqlite3.Error, ValueError, TypeError, KeyError):
             out["decide"] = None
     token = a._WINDOWS_MEMO.set({})
@@ -812,6 +811,18 @@ def _payer_policies(c: sqlite3.Connection, stored: dict) -> dict:
         if isinstance(row, dict) and row.get("kind") == "payer_policy" and row.get("pattern") and row["pattern"] not in out:
             out[row["pattern"]] = {"n": row.get("items"), "cents": row.get("cents"), "paid": row.get("paid"), "answered": row.get("answered")}
     return out
+
+
+def decide_totals(c: sqlite3.Connection) -> dict:
+    """The codes a payer almost never pays that wait for the owner's decision (no person decided them): their count, the
+    denials the run set aside and those denials' dollars. What the policy page's totals.decide says, from meta alone (so
+    Today does not count the whole table)."""
+    stored = _meta(c, "ema:policy_summary", {}) or {}
+    decided = _meta(c, "ema:writeoff_policy", {}) or {}
+    decided = decided if isinstance(decided, dict) else {}
+    waiting = [p for k, p in _payer_policies(c, stored if isinstance(stored, dict) else {}).items()
+               if not (isinstance(decided.get(k), dict) and decided[k].get("decision"))]
+    return {"patterns": len(waiting), "items": sum(int(p.get("n") or 0) for p in waiting), "cents": sum(int(p.get("cents") or 0) for p in waiting)}
 
 
 def _blank(key: str) -> dict:

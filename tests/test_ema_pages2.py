@@ -1104,6 +1104,8 @@ def page_run(worlds, tmp_path, monkeypatch):
     c = _site(monkeypatch, db)
 
     def run(extra=None):
+        if callable(extra):                 # answers worked out on this world's own site
+            extra = extra(c)
         answers = {p: c.get(p).json() for p in ("/api/meta", "/api/brief", "/api/ema/today", "/api/ema/exports", "/api/ema/data",
                                                 "/api/ema/policy", "/api/coverage", "/api/sync/status", "/api/alerts")}
         answers["/api/results/scoreboard"] = {"recovered_cents": 123400, "lost_cents": None, "at_risk_cents": 9000, "as_of": TODAY, "weeks": []}
@@ -1586,3 +1588,175 @@ def test_an_ar_row_in_a_bucket_with_an_item_names_the_item(server):
     want = rows(db, "SELECT finding_id FROM findings WHERE ema_link=? AND COALESCE(stale,0)=0 AND status IN ('open','in_progress')", row["link"])
     assert want and row["finding_id"] == want[0][0]
     assert all("finding_id" not in x for x in c.get("/api/ema/ar", params={"bucket": "credits"}).json()["rows"])
+
+
+# ------------------------------------------------------------------------- the pages, after the two reviews (node)
+def test_today_and_the_data_tab_draw_at_once_and_fill_each_place_when_its_answer_comes(page_run):
+    """Review 2: nothing blocks while loading. Today's plan comes from the brief and shows before EMA's counts, the
+    scoreboard and the exports' ages answer; the Data tab's checklist shows before EMA's panels."""
+    slow = {k: 700 for k in ("/api/ema/today", "/api/results/scoreboard", "/api/ema/exports", "/api/ema/data")}
+    out, _ = page_run({"__delay": slow})
+    early, late = out["today_early"], out["today_html"]
+    assert 'id="tdPlan"' in early and 'class="title"' in early and 'id="tdStates"' not in early and 'id="tdScore"' not in early
+    assert 'id="tdStates"' in late and 'id="tdScore"' in late and late.index('id="tdStates"') < late.index('id="tdPlan"')
+    assert "Can the numbers be trusted?" in out["data_early"] and 'id="dtReports"' not in out["data_early"]
+    assert out["checks_ms"] is not None and out["checks_ms"] < 500 and 'id="dtReports"' in out["data_html"]
+
+
+def test_today_stays_blind_and_ticks_nothing_when_its_counts_do_not_come_back(page_run):
+    """Review 2: when /api/ema/today fails, Today asks the blind spot on its own (as every other page does), says the
+    counts did not come back, and never ticks step 1 as an all clear while a feed is behind."""
+    out, ans = page_run()
+    brief = json.loads(json.dumps(ans["/api/brief"]))
+    brief["work"]["total"]["due7_n"] = 0
+    blind = {"blind": True, "cents": 8000, "source": "run", "parts": [], "feeds": [{"feed": "835", "stale": True}],
+             "lines": ["No remittance after Oct 28, 2026 (25 days)."]}
+    out, _ = page_run({"/api/brief": brief, "/api/ema/blind": blind, "__fail": ["/api/ema/today"]})
+    h = out["today_html"]
+    assert "Today's EMA counts did not come back" in h and "Blind spot" in h and out["today_done"] == 0
+    assert "dtMissing" in out["today_links"]                   # What to do lands on the payments with no remittance
+    out, _ = page_run({"/api/brief": brief, "/api/ema/blind": dict(blind, blind=False), "__fail": ["/api/ema/today"]})
+    assert "Blind spot" not in out["today_html"] and out["today_done"] == 1
+
+
+def test_the_payments_to_post_and_the_credits_to_refund_land_on_lists_of_exactly_those_items(page_run, worlds):
+    """Both reviews: Today's "1 payment to post in EMA" and "1 credit to refund" open the Data tab on a list of exactly
+    the items counted (the count line says Today's number), and an item opened there walks that list."""
+    out, ans = page_run()
+    db = worlds["fresh"]
+    for key, signal, line in (("post", "REMIT_NOT_POSTED", "1 payment to post in EMA, $85"),
+                              ("refund", "CREDIT_BALANCE", "1 credit to refund or take back, $60")):
+        want = [r[0] for r in rows(db, "SELECT finding_id FROM findings WHERE signal=? AND COALESCE(stale,0)=0", signal)]
+        got = out["landing"][key]
+        anchor = {"post": "dtPostList", "refund": "dtRefundList"}[key]
+        assert got["ids"] == want and anchor in got["scrolled"] and line in got["html"], (key, got)
+        assert got["opened"] == [{"open": want[0], "worklist": want, "total": 1}]
+    assert "Fees &amp; takebacks" not in out["data_html"]
+    assert "On EMA's A/R of the newest pull" in out["data_html"]        # the A/R's own credits, said apart
+
+
+def test_a_held_report_is_decided_safely_and_offered_again_when_a_run_left_it_held(page_run):
+    """Review 2: Apply is never the obvious button and asks first, saying what it replaces. Review 1: a report someone
+    chose to apply that a run since left held is offered again; one chosen since the newest run waits for that run."""
+    out, ans = page_run()
+    assert out["decide_button"] == "heldfile1" and out["decide_primary"] is False
+    assert out["apply_dialogs"] == ["confirm"] and "replaces what is on file" in out["apply_words"]
+    assert out["apply_calls"] == ["/api/ema/reports/heldfile1/decision"]
+    data = json.loads(json.dumps(ans["/api/ema/data"]))
+    f = next(x for x in data["catalog"]["files"] if x["file_id"] == "heldfile1")
+    f.update(decision="apply", decided_by="biller", decided_at=iso(9) + "T09:00:00+00:00", decision_pending=False)
+    out, _ = page_run({"/api/ema/data": data})
+    assert out["decide_button"] == "heldfile1" and "still held: choose again" in out["data_html"]
+    assert "the next run reads it" not in out["data_html"]
+    f.update(decided_at=TODAY + "T23:00:00+00:00", decision_pending=True)
+    out, _ = page_run({"/api/ema/data": data})
+    assert out["decide_button"] is None and "the next run reads it" in out["data_html"] and "Discard it instead" in out["data_html"]
+
+
+def test_the_policy_page_keeps_the_owners_place_asks_at_most_once_and_walks_a_patterns_items(page_run):
+    """Review 2: a decision changes its row in place (the filter and what it shows stay), Accept asks once and Pursue
+    not at all (the name is a remembered field, not a question), "/" searches the pattern filter, and an item opened
+    from a pattern's list walks that list with Next."""
+    out, ans = page_run({"__find": "99213"})
+    assert out["policy_find_f"] == "q"
+    assert (out["policy_shown_before"], out["policy_find_after"], out["policy_shown_after"]) == (1, "99213", 1)
+    assert out["accept_dialogs"] == ["confirm"] and out["pursue_dialogs"] == [] and out["pursue_calls"] == 1
+    items = ans["/api/ema/policy/items?"]
+    assert out["items_walk"] == {"worklist": [r["finding_id"] for r in items["rows"]], "total": items["count"]}
+
+
+def test_the_policy_page_shows_what_waits_for_the_owners_decision(page_run):
+    """PLAN decision 14 and review 1's highs, on the page: a code a payer almost never pays and a reason EMA posts as
+    contractual have no button pressed until the owner decides, say so, and show their dollars apart; Today says how
+    many wait, and opens the policy page."""
+    out, ans = page_run()
+    pol = json.loads(json.dumps(ans["/api/ema/policy"]))
+    p0 = pol["patterns"][0]
+    pp = dict(p0, pattern="VA Community Care|77600||payer_policy", payer_group="VA Community Care", code="77600", modifier="", reason="",
+              kind="payer_policy", items=21, cents=630000, appealable=None, appealable_cents=None, auto=None, decision="decide",
+              decided_by=None, decided_at=None, pending=False, paid=0, answered=21, later_paid_share=0.0,
+              reason_text="The payer almost never pays this code")
+    c7 = dict(p0, pattern=f"{BCBS}|||CO-97", code="", modifier="", reason="CO-97", kind="contractual", items=1, cents=0, appealable=None,
+              appealable_cents=None, auto=None, decision="decide", decided_by=None, decided_at=None, pending=False, written_off_cents=110000,
+              inside_cents=0)
+    pol["patterns"] = [pp, c7] + pol["patterns"]
+    pol["totals"]["decide"] = {"patterns": 1, "items": 21, "cents": 630000}
+    pol["totals"]["contractual"] = {"patterns": 1, "items": 1, "written_off_cents": 110000}
+    today = dict(ans["/api/ema/today"], decide={"patterns": 1, "items": 21, "cents": 630000})
+    out, _ = page_run({"/api/ema/policy": pol, "/api/ema/today": today})
+    h = out["policy_html"]
+    pressed = {(b[0], b[1]): b[2] for b in out["policy_buttons"]}
+    assert [pressed[(i, d)] for i in ("0", "1") for d in ("pursue", "accept")] == ["false"] * 4
+    assert h.count("Waits for your decision") == 2 and "out of Work now until then" in h
+    assert "1 code a payer almost never pays wait for your decision" in h.replace("waits", "wait")
+    assert "written off, in no total" in h and "0 of 21 lines" in h and 'class="polItems" data-i="0"' not in h
+    assert "1 write-off pattern worth $6,300 (est.) waits for the owner's decision" in out["today_html"]
+
+
+def test_today_words_dollars_and_phone(page_run):
+    """Review 2: the Work now tile does not say "this week"; review 1 and PLAN decision 5: each dollar figure carries its
+    basis on hover and estimates are labelled; decision 9: no nudge to leave small items; review 2: at phone width
+    the figures are two compact lines, so the plan's first step is on the first screen."""
+    out, ans = page_run()
+    h = out["today_html"]
+    assert "this week, follow-ups too" not in h and "to work, follow-ups due included" in h
+    assert "of Work now, nothing done in 21 days" in h and "worth less than" not in h
+    assert "Estimate" in out["today_titles"]["todo"] and "est.</small>" in h
+    assert "safe date" in out["today_titles"]["auto_written_off"]
+    assert "Estimate" in out["policy_html"] and "Dollars (est.)" in out["policy_html"]
+    assert "postings: insurance payments posted on checks" in out["data_html"] and "The remittances (835)" in out["data_html"]
+    narrow, _ = page_run({"__narrow": True})
+    nh = narrow["today_html"]
+    assert nh.count("td-compact") == 2 and 'class="tile' not in nh.split('id="tdPlan"')[0]
+    assert set(narrow["today_tiles"][:5]) == {"todo", "followup_due", "waiting", "auto_written_off", "unworked"}
+
+
+def test_the_blind_spot_gives_each_part_its_dollars_and_basis(page_run):
+    """Review 1: with two feeds behind, the banner's headline gives each part its own dollars (and its basis on hover),
+    never one sum alone."""
+    out, ans = page_run()
+    blind = {"blind": True, "cents": 29000, "source": "run", "feeds": [{"feed": "835", "stale": True}, {"feed": "ar", "stale": True}],
+             "parts": [{"feed": "835", "cents": 8000, "words": "of insurance payments no remittance explains", "basis": "EMA's postings"},
+                       {"feed": "ema", "cents": 21000, "words": "in Work now that may already be worked", "basis": "Estimate"}],
+             "lines": ["No remittance after Oct 28, 2026.", "EMA's A/R report (20 days old)."]}
+    out, _ = page_run({"/api/ema/today": dict(ans["/api/ema/today"], blind=blind)})
+    text = re.sub(r"<[^>]+>", "", out["today_html"])
+    assert "Blind spot: $80 of insurance payments no remittance explains and $210 in Work now that may already be worked." in text
+    assert "$290" not in text
+
+
+def test_the_data_tab_lands_on_what_a_link_names_says_remittance_and_shows_an_ar_rows_item(page_run):
+    """Review 2: Today's links name where they land on the Data tab; the Data tab says "remittance", not "835", in its
+    headings; an A/R row in a bucket with an item opens it, and at phone width its actions come first."""
+    out, ans = page_run()
+    today = dict(ans["/api/ema/today"], reports_held=1, reports_pending=1)
+    out, _ = page_run({"/api/ema/today": today})
+    assert {"dtReports"} <= set(out["today_links"]) and "1 EMA report waits for the next run" in out["today_html"]
+    heads = re.findall(r"<h2>([^<]*)</h2>", out["data_html"])
+    assert heads and not [x for x in heads if "835" in x] and "no 835 on file" not in out["data_html"]
+    narrow, ans = page_run(lambda c: {"/api/ema/ar?": c.get("/api/ema/ar", params={"bucket": "denied_todo"}).json(), "__narrow": True})
+    denied = ans["/api/ema/ar?"]
+    fid = denied["rows"][0]["finding_id"]
+    rh = narrow["ar_rows_html"]
+    assert f'data-id="{fid}"' in rh and rh.index("Open the item") < rh.index(denied["rows"][0]["claim_id"])
+
+
+def test_an_export_held_or_not_read_yet_is_not_said_never_to_have_arrived(page_run):
+    """needs_A2 F.5: an export's age is that of what RemitWatch read, so an overdue row with no age may be a file that
+    arrived and is held or not read yet: Today says which, never "never arrived" for it."""
+    out, ans = page_run()
+    rows_ = [{"key": "ar", "title": "A/R report", "overdue": True, "age_days": None, "held": True, "unread": "held", "arrived": iso(2)},
+             {"key": "prod", "title": "Production report", "overdue": True, "age_days": None, "held": False, "unread": "waiting", "arrived": iso(3)},
+             {"key": "w1", "title": "Weekly export", "overdue": True, "age_days": None, "held": False, "unread": None, "arrived": None}]
+    out, _ = page_run({"/api/ema/exports": {"exports": rows_}})
+    h = out["today_html"]
+    assert "A/R report: the newest file is held" in h and "Production report: none read yet" in h and "Weekly export: never arrived" in h
+
+
+def test_no_page_tells_a_person_to_leave_an_item_for_its_size():
+    """PLAN decision 9: no dollar amount is too small. Nothing on Today, the Data tab or the policy page nudges a person to
+    hide small items or to let one go as not worth pursuing."""
+    static = os.path.join(os.path.dirname(cloud.__file__), "static")
+    for name in ("today.js", "data.js", "policy.js"):
+        src = open(os.path.join(static, name), encoding="utf-8").read()
+        assert "not worth pursuing" not in src and "worth less than" not in src and "amount filter hides" not in src, name
