@@ -861,3 +861,73 @@ def test_serverless_a_fax_the_line_did_not_take_is_not_tried_again_for_a_claim_t
     assert sum(1 for a in journal if a.get("kind") == "event" and a.get("note") == PAID_WHY) == 1
     held = [a["record"]["doc"] for a in journal if a.get("kind") == "fax" and a["record"].get("fax_key") == BUSY_KEY and "held" in str(a["record"].get("doc"))]
     assert held and all((d if isinstance(d, dict) else json.loads(d)).get("held") == PAID_WHY for d in held), held
+
+
+# --------------------------------------------------------------------------- a status written for an item's old id (review mr-9)
+
+def test_a_status_written_for_the_old_id_after_the_change_lands_on_the_heir(tmp_path, kind):
+    """Review mr-9: two Started items get new ids in a run. The Sent a person pressed on a page opened before it reaches
+    each heir (on Vercel through the journal: one entry for one item, a bulk entry for the other), with the status the
+    person saw logged as the one they changed it from. The same entries applied again change nothing."""
+    from remitwatch import actions
+    from remitwatch.detect import Detector
+    s = _downcode_store(tmp_path, kind)
+    c = s.conn
+    olds = [r[0] for r in c.execute("SELECT finding_id FROM findings WHERE signal='DOWNCODE_CHARGE' ORDER BY patient_control_number")][:2]
+    for fid in olds:
+        actions.apply_status(c, fid, "in_progress", "calling the payer", actor="biller", at="2026-11-19T15:00:00+00:00")
+    c.commit()
+    _claim_files_arrive(s)
+    Detector(s, run_id="r2").run()
+    heirs = [c.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (o,)).fetchone()[0] for o in olds]
+    assert all(c.execute("SELECT status FROM findings WHERE finding_id=?", (h,)).fetchone()[0] == "in_progress" for h in heirs)
+    entries = [("actions/20261120T150000000000-aaaaaa.json",
+                {"kind": "status", "finding_id": olds[0], "status": "appealed", "notes": "Sent on the portal", "actor": "biller",
+                 "at": "2026-11-20T15:00:00+00:00", "seen": "in_progress", "entry": "e1"}),
+               ("actions/20261120T150001000000-bbbbbb.json",
+                {"kind": "bulk_status", "ids": [olds[1]], "status": "appealed", "notes": None, "actor": "biller",
+                 "at": "2026-11-20T15:00:01+00:00", "seen": {olds[1]: "in_progress"}, "entry": "e2"})]
+    done, left, wrote = cloud.apply_actions(c, entries)
+    assert left == [] and len(done) == 2 and wrote, "a person's Sent waits for an item that no longer exists, and is dropped after a week"
+    assert [c.execute("SELECT status FROM findings WHERE finding_id=?", (h,)).fetchone()[0] for h in heirs] == ["appealed", "appealed"]
+    def logged(h: str) -> list[tuple]:
+        return [tuple(r) for r in c.execute("""SELECT from_status, to_status, actor FROM finding_events WHERE finding_id=? AND kind='manual'
+                                              AND at LIKE '2026-11-20%'""", (h,))]
+    assert logged(heirs[0]) == [("in_progress", "appealed", "biller")] and logged(heirs[1]) == [("in_progress", "appealed", "biller")]
+    assert cloud.apply_actions(c, entries)[2] is False                  # folded again (another instance): nothing written
+    assert len(logged(heirs[0])) == 1 and len(logged(heirs[1])) == 1
+    # on a server: the Sent a send records for the id it reserved under (api._record_status) reaches the heir too
+    assert actions.apply_status(c, olds[0], "appealed", "Faxed", actor="biller") is True
+
+
+def test_serverless_a_status_journaled_for_the_old_id_lands_on_the_heir(tmp_path, monkeypatch):
+    """The same through the serverless runs: a Started item gets a new id in one run; the Sent a person pressed on the
+    dashboard's copy from before it, journaled for the old id, reaches the heir in the next run (and its copy) instead of
+    waiting a week for an item that will not come back."""
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    _write_remits(root / "Trizetto Data", _downcode_claims(), "d", 900)
+    assert "error" not in _cycle(state, client)
+    store, _ = cloud.load_raw(state)
+    old = _first_downcode(store.conn)
+    store.close()
+    cloud.record_action(state, {"kind": "status", "finding_id": old, "status": "in_progress", "notes": "calling the payer", "actor": "biller",
+                                "at": SENT_AT})
+    store, _ = cloud.load_raw(state)
+    _claim_files_arrive(store)
+    cloud.save_raw(state, store)
+    store.close()
+    assert "error" not in _cycle(state, client, force_detect=True)          # folds the Started, then gives the money a new id
+    store, _ = cloud.load_raw(state)
+    heir = store.conn.execute("SELECT new_id FROM finding_heirs WHERE old_id=?", (old,)).fetchone()[0]
+    store.close()
+    cloud.record_action(state, {"kind": "status", "finding_id": old, "status": "appealed", "notes": "Sent on the portal", "actor": "biller",
+                                "seen": "in_progress"})
+    out = _cycle(state, client)
+    assert "error" not in out and not out.get("actions_waiting"), out
+    assert state.list(cloud.ACTIONS) == []
+    store, _ = cloud.load_raw(state)
+    assert store.conn.execute("SELECT status FROM findings WHERE finding_id=?", (heir,)).fetchone()[0] == "appealed"
+    store.close()
+    serving = _serving(state, tmp_path)
+    assert serving.execute("SELECT status FROM findings WHERE finding_id=?", (heir,)).fetchone()[0] == "appealed"
+    serving.close()

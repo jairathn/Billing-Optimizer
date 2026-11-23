@@ -282,10 +282,13 @@ def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: 
     """Set a finding's status and log the change. Returns False when the finding does not exist. `seen` is the status the
     person was looking at when they made the change (recorded in the journal on a serverless host): it is logged as the
     status they changed from, because the copy this is replayed on may have moved since. `entry`: the journal entry's own
-    id; an entry is applied once by that id. An entry written before entries had one is recognised as before."""
+    id; an entry is applied once by that id. An entry written before entries had one is recognised as before. A status
+    written for an item whose money has a new id since (a page opened before the run, a journal entry folded after it) is
+    the heir's (heir_of): applied to it, and checked against it for being applied already."""
     if status not in STATUSES:
         raise ValueError("bad status")
     conn.row_factory = sqlite3.Row
+    finding_id = heir_of(conn, finding_id)
     r = conn.execute("SELECT status, shortfall_cents, appealed_at FROM findings WHERE finding_id=?", (finding_id,)).fetchone()
     if not r:
         return False
