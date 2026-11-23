@@ -1183,6 +1183,42 @@ def test_a_second_procedure_cut_deeper_than_the_payers_share_is_mppr_excess(stor
     assert f["signal"] == "MPPR_EXCESS" and f["shortfall_cents"] == 29256 - 14628
 
 
+def _two_procedures(store, flap_rate: float):
+    """Humana's usual 17311 is $585.12 and its usual 14040 `flap_rate` (22 clean claims of each). On one claim it paid the
+    14040 in full and cut the 17311 to half, as if the 17311 were the second procedure."""
+    for n in range(22):
+        remit(store, trace=f"7776{n:05d}", paid_on="2026-02-10", payer="HUMANA CARE PLAN",
+              claims=[{"pcn": F.claim_id(600 + n), "last": f"MOHS{n}", "first": "INDIA", "member": f"I{n:011d}",
+                       "lines": [("2026-02-02", "17311", 900, 585.12, [("CO", "45", 314.88)], {"allowed_cents": 58512})]}])
+        remit(store, trace=f"7777{n:05d}", paid_on="2026-02-10", payer="HUMANA CARE PLAN",
+              claims=[{"pcn": F.claim_id(700 + n), "last": f"FLAP{n}", "first": "JULIET", "member": f"J{n:011d}",
+                       "lines": [("2026-02-02", "14040", 1500, flap_rate, [("CO", "45", 1500 - flap_rate)],
+                                  {"allowed_cents": round(flap_rate * 100)})]}])
+    remit(store, trace=F.check_no(53), paid_on="2026-03-28", payer="HUMANA CARE PLAN",
+          claims=[{"pcn": F.claim_id(53), "lines": [(S, "17311", 900, 292.56, [("CO", "59", 292.56), ("CO", "45", 314.88)],
+                                                     {"allowed_cents": 29256}),
+                                                    (S, "14040", 1500, flap_rate, [("CO", "45", 1500 - flap_rate)],
+                                                     {"allowed_cents": round(flap_rate * 100)})]}])
+    return run(store)
+
+
+def test_the_highest_valued_procedure_cut_as_the_second_one_is_an_underpayment(store):
+    """PM case C28: the payer cut the 17311 ($585.12 usual) to half and paid the 14040 ($450 usual) in full. Ranked by what
+    was allowed, the 17311 looked like the second procedure, so its cut read as the multiple-procedure rule (23 lines,
+    $6,190 missed on real data). It is the highest-valued procedure on the claim: the full rate was due."""
+    det = _two_procedures(store, flap_rate=450)
+    f = one(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(53))
+    assert f["signal"] == "UNDERPAID_VS_OWN_RATE" and f["shortfall_cents"] == 29256, (f["signal"], f["shortfall_cents"])
+    assert json.loads(f["evidence"])["highest_valued"] is True and "highest-valued" in f["title"]
+    assert det.ema_counts["mppr_highest_cut"] == 1
+
+
+def test_a_cut_on_a_procedure_another_one_outranks_stays_the_payers_rule(store):
+    """The 14040 is worth more than 95% of the 17311 at this payer's rates: the 17311 is rightly the second procedure."""
+    _two_procedures(store, flap_rate=600)
+    assert items(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(53)) == []
+
+
 def test_remittance_denials_of_a_code_the_payer_never_pays_as_primary_are_its_policy(store, ledger, tmp_path):
     """PM case C18: UHC never paid G6001 as primary (0 of 27 lines it answered as primary; its payments of it were as the
     second payer). Its denials fold into one pattern in the owner's table and leave the line-by-line work until the owner

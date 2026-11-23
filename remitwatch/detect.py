@@ -2046,7 +2046,8 @@ class Detector:
                 if not rate or not r or r["share"] < 0.4 or r["n"] < 20:
                     continue
                 rank = l.get("surg_rank", 0)
-                if rank >= 2 and is_surgical(code) and code not in ADD_ON_CODES:
+                top_cut = rank >= 2 and is_surgical(code) and code not in ADD_ON_CODES and not self._outranked(l, rate)
+                if rank >= 2 and is_surgical(code) and code not in ADD_ON_CODES and not top_cut:
                     if self._same_day_policy_claim(l):
                         continue        # how the 2027 same-day cut and the multiple-procedure cut combine awaits CMS's instructions
                     pct_paid = allowed / rate
@@ -2072,6 +2073,18 @@ class Detector:
                     one_off = ("UNDERPAID_VS_OWN_RATE", "underpayment", "medium", "appeal",
                                f"{code} allowed ${allowed/100:.2f} vs usual ${rate/100:.2f} ({l['payer_group']})", l, rate, rate - allowed, top, rarc,
                                {"basis": basis, "usual_share": round(r["share"], 3), "usual_n": r["n"], "rank": rank})
+                    if top_cut:
+                        # the payer cut this one as a second procedure, but it is the highest-valued procedure on the claim
+                        # (the one it paid in full is worth less): the full rate was due (PM case C28)
+                        ev = dict(one_off[10], highest_valued=True,
+                                  note="Reduced as a second procedure although it is the highest-valued procedure on the claim: "
+                                       "the multiple-procedure cut belongs on the lower-valued one")
+                        one_off = one_off[:4] + (f"{code} allowed ${allowed/100:.2f} vs usual ${rate/100:.2f} ({l['payer_group']}): "
+                                                 "cut as a second procedure although it is the highest-valued one on the claim",) \
+                            + one_off[5:10] + (ev,)
+                        self.ema_counts["mppr_highest_cut"] += 1
+                        self._emit(*one_off)
+                        continue
                     if is_surgical(code) and code not in ADD_ON_CODES:
                         # first on its own claim, but perhaps not that day: a reducible procedure paid more on another claim of the
                         # same patient and clinician makes this one the payer's second procedure (settled after the line rules)
@@ -2079,6 +2092,21 @@ class Detector:
                         continue
                     self._emit_underpaid(l, allowed, r, one_off)
         self._settle_mppr_candidates()
+
+    def _outranked(self, l: dict, rate: int) -> bool:
+        """Whether another reducible procedure on the line's claim is worth at least 95% of this one at the same payer's
+        usual rates (the same code counts as worth as much): then this one is rightly the second procedure. A procedure
+        whose usual rate is not known counts as outranking it (no item on a guess)."""
+        for o in self.lines_by_claim.get(l["claim_key"]) or []:
+            c2 = o.get("procedure_code")
+            if o["line_key"] == l["line_key"] or not is_surgical(c2) or (o.get("allowed_cents") or 0) <= 0:
+                continue
+            if c2 == l.get("procedure_code"):
+                return True
+            r2 = self.usual_rate(o, c2)[0]
+            if not r2 or r2 >= 0.95 * rate:
+                return True
+        return False
 
     def _emit_underpaid(self, l, allowed: int, r: dict, one_off: tuple) -> None:
         """A one-off underpayment, or a line of a payer's routine lower amount (grouped by emit_second_rates)."""
