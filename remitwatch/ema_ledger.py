@@ -1269,7 +1269,7 @@ def sync_catalog(store: Any, ledger: Ledger, file_ids: Iterable[str] | None = No
 
 
 # ---------------------------------------------------------------------------------------------------- the keep rule
-KEEP_RULES = ("nonroutine", "no835", "unmapped", "on_ar", "finding", "open_status")
+KEEP_RULES = ("nonroutine", "no835", "unmapped", "on_ar", "finding", "open_status", "second_payer")
 _LIVE_FINDING = ("COALESCE(stale, 0) = 0 AND (status IN ('open','in_progress','appealed','lost','dismissed') "
                  "OR notes IS NOT NULL OR appealed_at IS NOT NULL OR (status = 'resolved' AND auto_note IS NULL))")
 
@@ -1299,6 +1299,10 @@ def _keep_conditions(lines: str, payments: str, link_map: str, claim_links: str,
         ("finding", (f"{L}.link IN (SELECT m.link FROM {link_map} m WHERE COALESCE(m.conflict, 0) = 0 AND m.bill IN ({finding_bills}))"
                      if finding_bills else "0")),
         ("open_status", f"COALESCE({L}.status_class, 'none') <> 'paid'"),
+        # a second payer on file, the first payer paid and EMA still shows a balance: detection's "second payer never
+        # billed" needs the line whether or not the bill has an item yet (3,861 more lines of 70,285 on the real archive)
+        ("second_payer", f"COALESCE({L}.secondary_payer, '') <> '' AND COALESCE({L}.ins_paid, 0) > 0 "
+                         f"AND COALESCE({L}.balance, 0) > 0"),
     ]
 
 
@@ -1309,8 +1313,9 @@ def keep_rule_sql(lines: str = "ema_lines", payments: str = "main.ema_line_payme
     of these holds: a non-routine insurance adjustment (a payer's CARC, group not PR, code not in detect.IGNORE_CARCS);
     an insurance payment under a check that is not an 835 trace; its link is not mapped to a bill (or is a conflict);
     its link is on the A/R; its mapped bill has a finding that is open, started, sent or worked; its newest status is not
-    Resolved/Paid. The finding rule reads the store's findings (pass `conn` to leave it out when there are none) and
-    needs rw_bill registered (ema_reports.register_functions)."""
+    Resolved/Paid; a second payer is on file, the first payer paid and a balance is left. The finding rule reads the
+    store's findings (pass `conn` to leave it out when there are none) and needs rw_bill registered
+    (ema_reports.register_functions)."""
     if finding_bills == "auto":
         finding_bills = _finding_bills_sql(conn) if conn is not None else (
             "SELECT rw_bill(patient_control_number) AS bill FROM main.findings WHERE patient_control_number IS NOT NULL "
