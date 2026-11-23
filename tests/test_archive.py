@@ -943,3 +943,163 @@ def test_no_claim_id_or_name_reaches_the_log_or_the_run_summary(tmp_path, frozen
     assert said and pcns
     assert not any(p in text for p in pcns) and "SAMPLE" not in text and not re.search(r"CB\d{7}", text)
     store.close()
+
+
+# =========================================================================== 10. EMA's reports still name the bill
+# (the review's finding A: a bill whose 835 left while EMA's posting summaries kept it came back as "denied in EMA, no
+# remittance on file", with a deadline still open). The EMA side goes through the real readers, the posting ledger and its
+# refresh, as tests/test_ema_checks.py builds it; every row is invented (tests/ema_fixtures.py).
+from tests import ema_fixtures as EF  # noqa: E402
+from tests.test_ema_checks import adj as ema_adj, charge as ema_charge, load as ema_load, pay as ema_pay  # noqa: E402
+from tests.test_ema_checks import remit as ema_remit  # noqa: E402
+
+EMA_TODAY = "2026-05-03"            # the 24-month horizon's cutoff is 2024-05-01
+D = __import__("datetime").date
+
+
+@pytest.fixture
+def ema_world(tmp_path, monkeypatch):
+    """A server store with the EMA tables and a posting ledger, set up as tests/test_ema_checks.py's fixtures are."""
+    from remitwatch import ema_checks as ec, ema_ledger as el, ema_reports as er
+    monkeypatch.setattr(er, "CLAIM_HOST_SUFFIX", EF.HOST_SUFFIX)
+    monkeypatch.setenv("REMITWATCH_MODE", "server")
+    for k in ("VERCEL", "REMITWATCH_EMA_REPORTS", "REMITWATCH_EMA_CLAIM_URL", "REMITWATCH_EMA_PAYER_ALIASES",
+              "REMITWATCH_EMA_LEDGER", "REMITWATCH_EMA_REPORT_KEEP"):
+        monkeypatch.delenv(k, raising=False)
+    ec._LAST_POST.clear()
+    store = Store(str(tmp_path / "store.sqlite"))
+    er.ensure_schema(store.conn)
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:key_salt', ?)", ("cd" * 32,))
+    store.conn.commit()
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    yield store, lg
+    lg.close()
+    store.close()
+
+
+def _c5(store) -> list:
+    from remitwatch import ema_checks as ec
+    return [(i["signal"], i.get("appeal_deadline")) for i in ec.ema_denials(store.conn, today=EMA_TODAY)]
+
+
+def _denied_835(store) -> None:
+    """Claim 1: a 99213 denied by its 835 (service 2024-03-02, the $0 answer on 2024-03-28, CO-197)."""
+    ema_remit(store, trace=EF.check_no(1), paid_on="2024-03-28",
+              claims=[{"pcn": EF.claim_id(1), "lines": [("2024-03-02", "99213", 150, 0, [("CO", "197", 150)])]}])
+
+
+def _ema_rows(posted=D(2024, 6, 15)) -> list:
+    """EMA posted the same $0 answer under the 835's check and the CO-197 on `posted`; a recent charge on claim 99 keeps
+    Production fresh."""
+    svc = D(2024, 3, 2)
+    return [ema_charge(EF.link_no(1), svc=svc, status="Resolved/Paid"),
+            ema_pay(EF.link_no(1), EF.check_no(1), 0, svc=svc, posted=posted, status="Resolved/Paid"),
+            ema_adj(EF.link_no(1), "CO-197", 150, svc=svc, posted=posted, status="Resolved/Paid"),
+            ema_charge(EF.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1), status="Payment Pending")]
+
+
+def _analysed(conn) -> None:
+    """What the analysis that ran before the archive leaves: a detection run, kept baselines, the 835's own item (its
+    windows long closed)."""
+    detect_schema(conn)
+    conn.execute("INSERT INTO detection_runs (run_id, started_at, finished_at, version) VALUES ('r0', ?, ?, 't')", (EMA_TODAY, EMA_TODAY))
+    archive.ensure_schema(conn)
+    archive._meta_put(conn, archive.META_FROZEN, {y: {"at": EMA_TODAY, "digest": "x", "rates": 0} for y in ("2023", "2024")})
+    conn.execute("""INSERT INTO findings (finding_id, signal, category, patient_control_number, status, work_state, stale,
+                    service_date, shortfall_cents) VALUES ('den-1', 'DENIED_AUTH', 'denial', ?, 'open', 'expired', 0,
+                    '2024-03-02', 9000)""", (EF.claim_id(1),))
+    conn.commit()
+
+
+def _ema_named_bill(store, ledger, tmp_path, posted=D(2024, 6, 15)) -> None:
+    from remitwatch import ema_checks as ec
+    _denied_835(store)
+    ema_load(store, ledger, tmp_path, _ema_rows(posted))
+    ec.classify_checks(store.conn)
+    assert _c5(store) == []                                  # the 835 covers the denial: no EMA-only item
+    _analysed(store.conn)
+
+
+@pytest.mark.parametrize("posted", [D(2024, 6, 15), D(2024, 4, 15)])      # EMA's posting after the cutoff, and before it
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_a_bill_emas_reports_still_list_keeps_its_835_and_is_never_listed_as_denied_with_no_remittance(ema_world, tmp_path,
+                                                                                                        kind, posted):
+    """A 24-month horizon (the floor) and an old bill whose items are all closed: while EMA's posting summaries still list
+    it (the ledger keeps a line with a payer's denial posted for its whole retention, longer than the floor), its 835 rows
+    stay, so EMA's checks still find the remittance that answered it."""
+    store, ledger = ema_world
+    _ema_named_bill(store, ledger, tmp_path, posted)
+    if kind == "compact":
+        store = as_image(store)              # the serverless host's image of the same store (no ledger needed to plan)
+    p = archive.plan(store.conn, today=EMA_TODAY, horizon=24)
+    assert p["bills"] == [] and p["held"] == {archive.HELD_EMA: 1}
+    res = archive.run(store.conn, sink=sink_of(tmp_path, kind), today=EMA_TODAY, horizon=24)
+    assert res["bills"] == 0 and not res["errors"]
+    assert store.conn.execute("SELECT COUNT(*) FROM claims WHERE patient_control_number=?", (EF.claim_id(1),)).fetchone()[0] == 1
+    assert _c5(store) == []
+    if kind == "compact":
+        store.close()
+
+
+def test_end_to_end_the_next_analysis_puts_no_item_of_an_old_bill_emas_reports_list_on_the_worklist(ema_world, tmp_path):
+    store, ledger = ema_world
+    _ema_named_bill(store, ledger, tmp_path)
+    archive.run(store.conn, sink=sink_of(tmp_path, "file"), today=EMA_TODAY, horizon=24)
+    Detector(store, run_id="after", today=EMA_TODAY).run()
+    rows = store.conn.execute("""SELECT signal, work_state FROM findings WHERE patient_control_number LIKE ? AND COALESCE(stale,0)=0
+                                 AND signal = 'EMA_DENIED'""", (EF.bill_id(1) + "%",)).fetchall()
+    assert [tuple(r) for r in rows] == []
+
+
+def test_the_map_refresh_and_a_claim_the_ar_ties_to_its_bill_keep_it_too(ema_world, tmp_path):
+    """Detection's map refresh (Part B, when new 835s arrive) and a full refresh with the A/R's claim id tying the EMA
+    claim number to the bill: the bill is held either way, and EMA's checks list nothing."""
+    from remitwatch import ema_checks as ec, ema_ledger as el
+    store, ledger = ema_world
+    store.conn.execute("INSERT INTO ema_claim_links (claim_id, link, bill, first_seen, last_seen) VALUES (?,?,?,?,?)",
+                       (EF.claim_id(1), EF.link_no(1), EF.bill_id(1), "2026-04-30", "2026-04-30"))
+    store.conn.commit()
+    _ema_named_bill(store, ledger, tmp_path, D(2024, 3, 31))
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "file"), today=EMA_TODAY, horizon=24)
+    assert res["bills"] == 0 and res["held"] == {archive.HELD_EMA: 1}
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:map_dirty', '1')")
+    store.conn.commit()
+    el.refresh(store, None, parts="B", log=lambda *a: None)
+    assert _c5(store) == []
+    el.refresh(store, ledger, parts="AB", log=lambda *a: None)
+    ec.classify_checks(store.conn)
+    assert _c5(store) == []
+
+
+def test_an_archived_bill_emas_reports_name_again_comes_back_before_the_analysis(ema_world, tmp_path):
+    """The bill left while EMA had nothing on it. Later the A/R ties its claim id to an EMA claim number and Production
+    posts the payer's denial on it: EMA's summaries name the bill again, so it comes back whole (restore_touched) and
+    EMA's checks find its remittance."""
+    from remitwatch import ema_checks as ec
+    store, ledger = ema_world
+    _denied_835(store)
+    _analysed(store.conn)
+    sink = sink_of(tmp_path, "file")
+    assert archive.run(store.conn, sink=sink, today=EMA_TODAY, horizon=24)["bills"] == 1
+    assert archive.restore_touched(store.conn, sink=sink, today=EMA_TODAY)["restored"] == 0
+    store.conn.execute("INSERT INTO ema_claim_links (claim_id, link, bill, first_seen, last_seen) VALUES (?,?,?,?,?)",
+                       (EF.claim_id(1), EF.link_no(1), EF.bill_id(1), "2026-04-30", "2026-04-30"))
+    store.conn.commit()
+    ema_load(store, ledger, tmp_path, _ema_rows())
+    ec.classify_checks(store.conn)
+    out = archive.restore_touched(store.conn, sink=sink, today=EMA_TODAY)
+    assert out["restored"] == 1 and out["why"] == {"EMA lists it again": 1}
+    assert store.conn.execute("SELECT COUNT(*) FROM claims WHERE patient_control_number=?", (EF.claim_id(1),)).fetchone()[0] == 1
+    assert _c5(store) == []
+    # and it stays while EMA lists it: the next run takes nothing
+    assert archive.run(store.conn, sink=sink, today="2026-09-01", horizon=24)["bills"] == 0
+
+
+def test_control_without_the_archive_the_analysis_lists_no_ema_only_denial_for_the_bill(ema_world, tmp_path):
+    store, ledger = ema_world
+    _denied_835(store)
+    ema_load(store, ledger, tmp_path, _ema_rows())
+    Detector(store, run_id="no-archive", today=EMA_TODAY).run()
+    sig = [r[0] for r in store.conn.execute("SELECT signal FROM findings WHERE patient_control_number LIKE ? AND COALESCE(stale,0)=0",
+                                            (EF.bill_id(1) + "%",))]
+    assert "EMA_DENIED" not in sig
