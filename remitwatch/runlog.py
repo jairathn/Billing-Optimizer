@@ -1730,9 +1730,11 @@ def _ev_json(raw: Any) -> dict:
         return {}
 
 
-def _evidence_refs(row: dict, det: dict, ev: dict) -> list[dict]:
+def _evidence_refs(row: dict, det: dict, ev: dict, change: dict | None = None, kind: str | None = None) -> list[dict]:
     """The evidence a decision rests on, as row keys and rule names only (no claim id, check number or free text but
-    the scrubbed basis)."""
+    the scrubbed basis). A basis comes with the change it explains: the state's with a state, a closure or a raise; the
+    deadline's with a moved deadline or a raise; the recovery rate's with a moved expected value or a raise."""
+    change = change or {}
     out: list[dict] = []
     if row.get("line_key") or row.get("claim_key"):
         out.append({"source": "item", "line_key": row.get("line_key"), "claim_key": row.get("claim_key")})
@@ -1747,12 +1749,15 @@ def _evidence_refs(row: dict, det: dict, ev: dict) -> list[dict]:
     pl = ev.get("paid_later")
     if isinstance(pl, dict):
         out.append({"source": "paid_later", "how": pl.get("how"), "amount_cents": pl.get("paid_cents"),
-                    "claim_status": pl.get("claim_status"), "from": pl.get("source")})
+                    "claim_status": pl.get("claim_status"), "from": pl.get("source"), "payer": pl.get("payer")})
     folded = ev.get("folded")
     if isinstance(folded, list) and folded:
         out.append({"source": "folded", "items": [x.get("finding_id") for x in folded if isinstance(x, dict)][:20]})
+    wanted = {"state_basis": "work_state" in change or kind in ("closed", "reopened", "raised", "hidden", "state", "signal_changed"),
+              "deadline_basis": "appeal_deadline" in change or "legal_deadline" in change or kind == "raised",
+              "recovery_basis": "expected_value_cents" in change or kind == "raised"}
     for k, src in (("state_basis", "states"), ("deadline_basis", "deadline"), ("recovery_basis", "recovery")):
-        if det.get(k):
+        if det.get(k) and wanted[k]:
             out.append({"source": src, "basis": scrub_text(det[k], 300)})
     return scrub(out)
 
@@ -1763,7 +1768,10 @@ def _closed_rule(ev: dict, row: dict) -> str:
         return f"archive_rules:{_slug(ar.get('rule'))}"
     pl = ev.get("paid_later")
     if isinstance(pl, dict):
-        return f"paid_later:{_slug(pl.get('how') or 'later_payment')}"
+        how = str(pl.get("how") or "later payment")
+        if how.lower().startswith("rebilled to"):
+            how = "rebilled to another payer"           # one rule, whichever payer (the payer is in the evidence)
+        return f"paid_later:{_slug(how)}"
     if row.get("ema_outcome"):
         return f"ema_outcome:{_slug(row.get('ema_outcome'))}"
     return "detect:auto_close"
@@ -1872,7 +1880,7 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
         r = rowd(acols, after.rows[f])
         d = det.get(f, {})
         ev = _ev_json(d.get("evidence"))
-        refs = _evidence_refs(r, d, ev)
+        refs = _evidence_refs(r, d, ev, kind="signal_changed" if f in pairs else "raised")
         if f in pairs:
             old = pairs[f]
             ob = rowd(bcols, before.rows[old])
@@ -1905,7 +1913,7 @@ def record_decisions(conn: sqlite3.Connection, run_id: str, before: Snapshot, af
             continue
         d = det.get(f, {})
         ev = _ev_json(d.get("evidence"))
-        refs = _evidence_refs(a, d, ev)
+        refs = _evidence_refs(a, d, ev, ch, kind)
         if kind == "closed":
             rule = _closed_rule(ev, a)
         elif kind == "reopened":

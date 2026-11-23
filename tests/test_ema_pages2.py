@@ -525,6 +525,38 @@ def test_the_data_tab_gets_the_runs_figures_in_one_call(server):
     assert set(d["cause_words"]) >= {"feed_gap", "after_feed", "no_era", "no_era_va", "separate_payee", "misnumbered", "other"}
 
 
+def test_checks_posted_after_the_newest_remittance_are_not_asked_for_one_by_one(server):
+    """A check posted after the newest remittance is there because the feed is behind: the fix is the newest downloads,
+    not a request per payer, so it is not a re-send row. It stays in the checks list and its CSV."""
+    c, db = server.c, server.db
+    before = c.get("/api/ema/data").json()["resend"]
+    assert [r["cause"] for r in before] == ["no_era"]
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE ema_checks SET cause='after_feed' WHERE match='none' AND cause='no_era'")
+    conn.commit()
+    conn.close()
+    assert c.get("/api/ema/data").json()["resend"] == []
+    r = c.get("/api/ema/checks", params={"cause": "after_feed"}).json()
+    assert r["count"] == 1 and r["rows"][0]["check_number"] == "777000555"
+    assert "777000555" in c.get("/api/ema/checks.csv").text
+
+
+def test_the_data_tab_counts_the_write_off_patterns_as_the_policy_page_does(server):
+    """The Data tab's line about EMA's write-offs gives the policy page's own figures, counted now and over every
+    pattern (the run stores only its 500 largest)."""
+    c, db = server.c, server.db
+    tab = c.get("/api/ema/policy").json()
+    want = (len(tab["patterns"]), tab["totals"]["cents"], tab["totals"]["appealable_cents"], tab["totals"]["accepted"])
+    pol = c.get("/api/ema/data").json()["policy"]
+    assert (pol["patterns"], pol["cents"], pol["appealable_cents"], pol["accepted"]) == want == (2, 21000, 21000, 0)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE meta SET value=? WHERE key='ema:policy_summary'", (json.dumps({"at": TODAY + "T00:00:00+00:00", "patterns": []}),))
+    conn.commit()
+    conn.close()
+    pol = c.get("/api/ema/data").json()["policy"]
+    assert (pol["patterns"], pol["cents"], pol["appealable_cents"], pol["accepted"]) == want
+
+
 def test_a_report_that_waits_or_is_held_says_so_on_today_with_what_to_do(server):
     c, db = server.c, server.db
     assert (c.get("/api/ema/today").json()["reports_waiting"], c.get("/api/ema/today").json()["reports_held"]) == ([], 0)
@@ -1008,10 +1040,21 @@ def test_the_data_tab_draws_each_panel_and_its_lists(page_run):
                               if ans["/api/ema/data"]["reconcile"]["w4"]["buckets"][b]["n"]]
     assert out["bucket_calls"] and out["bucket_calls"][0].startswith("/api/ema/ar?bucket=")
     assert out["request"].startswith("Please set up electronic remittances (835) for Testcare Health.")
+    assert "posted after the newest remittance" not in h                     # nothing came after the newest remittance here
     assert "- check 777000555, posted " + iso(5) + ", Testcare Health, $80.00" in out["request"]
     for path in ("/api/ema/checks.csv", "/api/ema/unposted.csv", "/api/ema/credits.csv"):
         assert path in h
     assert "—" not in h and "false positive" not in h.lower()
+
+
+def test_the_data_tab_says_how_to_close_the_gap_after_the_newest_remittance(page_run):
+    out, ans = page_run()
+    data = json.loads(json.dumps(ans["/api/ema/data"]))
+    data["reconcile"]["since_feed_stopped"] = {"cents": 8000, "checks": 1}
+    out, _ = page_run({"/api/ema/data": data})
+    h = out["data_html"]
+    assert "<b>$80</b> of it was posted after the newest remittance (1 check). The remittance feed is behind: get the newest TriZetto" in h
+    assert "Those checks match by themselves once their remittances are in, so they are not among the requests below." in h
 
 
 def test_the_policy_page_draws_each_pattern_and_records_a_decision(page_run):
@@ -1083,8 +1126,11 @@ def test_today_says_which_report_waits_and_what_to_do(page_run):
     reason = "Too big to read on this site: upload it on the Upload page (it compresses it), or put a zipped copy in the same folder."
     today = dict(ans["/api/ema/today"], reports_held=1,
                  reports_waiting=[{"report": "production", "source_name": "x.csv", "status": "waiting", "reason": reason}],
-                 remits_missing={"key": "remits_missing", "ok": False, "title": "Payments without a remittance in 2026-10: $12,345"})
+                 remits_missing={"key": "remits_missing", "ok": False, "month": "2026-10", "cents": 1234500,
+                                 "title": "Payments without a remittance in 2026-10: $12,345"})
     out, _ = page_run({"/api/ema/today": today})
     h = out["today_html"]
     assert "A Production report waits: " + reason.replace("'", "&#39;") in h
-    assert "1 EMA report waits for a decision</a>" in h and "Payments without a remittance in 2026-10: $12,345</a>" in h
+    # the run's judgment of last month, with the month by name
+    assert "1 EMA report waits for a decision</a>" in h and "EMA posted $12,345 of insurance payments in October 2026 with no remittance</a>" in h
+    assert "2026-10" not in h

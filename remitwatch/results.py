@@ -767,7 +767,8 @@ def _rule_text(bucket: str, ev: dict, credit: dict | None, win: int | None, F: s
     return f"{ev['text']}: after RemitWatch flagged it on {F}, with no work recorded in RemitWatch inside the payer's answer time"
 
 
-def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | None = None, errors: list | None = None) -> dict:
+def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | None = None, errors: list | None = None,
+              keep_events: int = 12) -> dict:
     """The top line, item by item. Each payment record goes to the earliest item that covers it and was flagged before it;
     items that share a record form a group (the line counted once in the lift and the outcomes). Returns {'items':
     {finding id: {'a', 'b', 'c', 'returned', 'taken_back', 'events', 'members', 'F'}}, 'groups': {finding id: the group's
@@ -856,7 +857,7 @@ def attribute(conn: sqlite3.Connection, today: Any = None, *, registry: dict | N
             if rec["cents"] > 0:
                 rec["counted_cents"] = left.get(id(rec), 0)
                 split[rec["bucket"]] += rec["counted_cents"]
-        out_items[fid] = dict(split, returned=sum(split.values()), taken_back=took, events=kept[:12], n_events=len(kept),
+        out_items[fid] = dict(split, returned=sum(split.values()), taken_back=took, events=kept[:keep_events], n_events=len(kept),
                               members=sorted(mem), F=r["F"])
         item_events[fid] = list(evs)
 

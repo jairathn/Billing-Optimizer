@@ -499,6 +499,15 @@ def test_an_item_that_vanishes_with_no_reason_is_kept_and_a_replaced_one_is_not(
     assert c.execute("SELECT kind FROM finding_events WHERE finding_id='F-gone'").fetchone()[0] == "kept_by_selfcheck"
     van = check_of(sc.meta_get(c, sc.K_LAST)["checks"], "vanished")
     assert van["status"] == "fail" and van["examples"] == ["F-gone"]
+    kind.reopen()
+    c = kind.conn
+
+    def save_again(cn):                                                      # the rule is still broken the next day
+        cn.execute("DELETE FROM findings WHERE finding_id = 'F-gone'")
+    assert run(c, save_again, "r3")["kept"] == 1                             # kept again, not let go on the second run
+    sc.accept_findings(c, "owner@example.test", ["vanished"])               # a person says the change is intended
+    out = run(c, save_again, "r4")
+    assert out["kept"] == 0 and c.execute("SELECT COUNT(*) FROM findings WHERE finding_id='F-gone'").fetchone()[0] == 0
 
 
 def test_the_real_detector_with_a_dropped_rule_keeps_its_items(kind, monkeypatch):

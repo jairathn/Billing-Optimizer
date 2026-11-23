@@ -115,6 +115,9 @@ UNPOSTED_POSTED = (-3, 21)
 UNPOSTED_HIGH = 100_000
 DIFF_MIN, DIFF_SHARE, SHORT_MIN = 100, 0.005, 2_500
 OFFSET_DAYS = 60                    # a payer's over- and under-postings this close offset
+# PLB reasons by which a payer keeps money it owes (a recovery, a return, a balance carried forward, a levy): a remittance
+# they bring to $0 moved its money all the same, so it is not an informational copy
+OFFSET_PLB = frozenset({"WO", "72", "FB", "J1", "WU", "OB", "L3", "50", "IR", "LE", "GO", "BD", "B2"})
 MANY_PAYER_GROUPS = ("Medicare Supplement carriers", "Self-funded plan TPAs")    # within one, only the payer's name says who
 
 # C5
@@ -883,7 +886,8 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
     t = fr["today"]
     summary: dict = {"as_of": fr["production_as_of"], "fresh": fr["production_fresh"], "n": 0, "cents": 0, "short_n": 0,
                      "short_cents": 0, "offset_n": 0, "offset_cents": 0, "over_n": 0, "over_cents": 0, "damaged_n": 0,
-                     "damaged_cents": 0, "elsewhere_n": 0, "elsewhere_cents": 0, "by_group": {}, "by_month": {}, "rows": []}
+                     "damaged_cents": 0, "elsewhere_n": 0, "elsewhere_cents": 0, "informational_n": 0, "informational_cents": 0,
+                     "unfunded_n": 0, "unfunded_cents": 0, "by_group": {}, "by_month": {}, "rows": []}
     if not _full_store(conn) or not fr["production_fresh"] or not _table(conn, "transactions"):
         if save and _full_store(conn):
             _set_meta(conn, UNPOSTED_KEY, summary)
@@ -902,15 +906,22 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
     conn.execute("""CREATE TEMP TABLE ec_tt AS SELECT trace_key AS tk, SUM(ins_paid) AS ema FROM ema_checks
                     WHERE trace_key IS NOT NULL GROUP BY trace_key""")
     conn.execute("CREATE INDEX temp.ix_ec_tt ON ec_tt(tk)")
-    rows = conn.execute("""SELECT t.transaction_key, t.payment_date, rw_payer_group(t.payer_name), rw_payer_kind(t.payer_name),
+    # a remittance that moved no money (BPR04 'NON', or a $0 deposit) unless a recovery the payer took (PLB WO, 72, ...) used
+    # the money up: an informational copy (a plan's administrator reporting what the plan pays), never money to post
+    offset_sql = (f"""EXISTS (SELECT 1 FROM plb p WHERE p.transaction_key = t.transaction_key
+                              AND upper(COALESCE(p.reason_code, '')) IN ({','.join("'" + c + "'" for c in sorted(OFFSET_PLB))}))"""
+                  if _table(conn, "plb") else "0")
+    rows = conn.execute(f"""SELECT t.transaction_key, t.payment_date, rw_payer_group(t.payer_name), rw_payer_kind(t.payer_name),
                                   t.payer_name, COALESCE(t.claim_paid_total_cents, 0), t.payment_amount_cents, t.trace_number, x.ema,
-                                  t.transaction_key IN (SELECT tk FROM temp.ec_ut)
+                                  t.transaction_key IN (SELECT tk FROM temp.ec_ut),
+                                  (upper(COALESCE(t.payment_method, '')) = 'NON' OR COALESCE(t.payment_amount_cents, 0) = 0)
+                                      AND NOT {offset_sql}
                            FROM transactions t LEFT JOIN temp.ec_tt x ON x.tk = t.transaction_key
                            WHERE COALESCE(t.superseded, 0) = 0 AND t.payment_date >= ? AND t.trace_number IS NOT NULL
                              AND trim(t.trace_number) <> ''
                            ORDER BY t.payment_date, t.transaction_key""", (since,)).fetchall()
     diffs = []
-    for tk, paid_on, grp, kind, payer, paid, deposit, trace, ema, unmatched in rows:
+    for tk, paid_on, grp, kind, payer, paid, deposit, trace, ema, unmatched, informational in rows:
         if unmatched and tk in paired:
             continue                    # C1 paired it with an EMA check under another number
         if not unmatched and ema is None:
@@ -924,13 +935,25 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
         if abs(diff) <= max(DIFF_MIN, DIFF_SHARE * abs(paid)):
             continue
         diffs.append({"tk": tk, "paid_on": paid_on, "grp": grp, "kind": kind, "payer": payer, "paid": paid, "deposit": deposit,
-                      "trace": trace, "posted": posted, "diff": diff, "unmatched": bool(unmatched), "left": diff})
+                      "trace": trace, "posted": posted, "diff": diff, "unmatched": bool(unmatched), "left": diff,
+                      "informational": bool(informational) and diff > 0})
     dates = _claim_dates_of(conn, [d["tk"] for d in diffs])
     for d in diffs:
         info = dates.get(d["tk"]) or {"svcs": [], "pcns": []}
         d["covered"] = _remit_covered(boxes, d["paid_on"], info["svcs"])
         d["svcs"], d["pcns"] = info["svcs"], sorted(set(info["pcns"]))
     diffs = [d for d in diffs if d["covered"]]
+    # an informational remittance whose every paid claim another, funded 835 also paid (the plan's own payment beside its
+    # administrator's copy), or whose amounts EMA holds under any check: the money is accounted for, nothing to post or chase
+    info = [d for d in diffs if d["informational"]]
+    if info:
+        done = _funded_twins(conn, info)
+        done |= _posted_elsewhere(conn, [d for d in info if d["tk"] not in done], any_check=True)
+        for d in info:
+            if d["tk"] in done:
+                summary["informational_n"] += 1
+                summary["informational_cents"] += d["diff"]
+        diffs = [d for d in diffs if d["tk"] not in done]
     # a payment EMA posted under another check number: every claim of the trace has EMA insurance payments of its amount
     # (within $1) on its own EMA claims, 7 days before to 120 days after the 835's date. Not "never posted": counted apart
     elsewhere = _posted_elsewhere(conn, [d for d in diffs if d["unmatched"]])
@@ -976,7 +999,22 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
               "ema_posted_cents": d["posted"], "payment_date": d["paid_on"], "production_as_of": fr["production_as_of"],
               "covered_by": d["covered"], "offset_cents": d["diff"] - left}
         payer = d["payer"] or d["grp"]
-        if d["unmatched"]:
+        if d["informational"]:
+            # an informational remittance reported the claims paid and moved no money, and no funded 835 or EMA posting
+            # shows the payment: the money never arrived. Never "post it": ask the payer for it (R14, PM case C54)
+            if left <= UNPOSTED_MIN_CENTS:
+                continue
+            title = (f"{payer} reported {_usd(d['paid'])} paid on {d['paid_on']} (trace ending {_tail(d['trace'])}) on an "
+                     "informational remittance that moved no money: the payment never arrived")
+            ev.update(informational=True, payment_method="NON" if not (d["deposit"] or 0) else "other")
+            ev["steps"] = [f"Ask {payer} (or the plan behind it) whether the payment it reported was issued: date, amount, EFT trace or check number.",
+                           "If it was issued, find the deposit and post it in EMA under that trace.",
+                           "If it was not, ask them to issue it; the patient's share it reported can be billed meanwhile."]
+            hint = (f"The remittance was informational only (no money moved) and no payment followed: ask {payer} for the payment it reported; "
+                    "there is nothing to post yet")
+            summary["unfunded_n"] += 1
+            summary["unfunded_cents"] += left
+        elif d["unmatched"]:
             if left <= UNPOSTED_MIN_CENTS:
                 continue
             title = f"Paid {_usd(d['paid'])} by {payer} on {d['paid_on']} (trace ending {_tail(d['trace'])}): not posted in EMA"
@@ -1005,7 +1043,7 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
                           key_parts=(d["tk"],), claim=claim, expected=left, shortfall=left, evidence=ev, source="835",
                           hint=hint))
         summary["rows"].append([ev["trace_tail"], d["paid_on"], d["payer"], d["grp"], ev["claims"], f"{left / 100:.2f}",
-                                "short" if ev.get("short") else "not_posted"])
+                                "never_arrived" if ev.get("informational") else "short" if ev.get("short") else "not_posted"])
     _drop(conn, "ec_tt", "ec_ut", "ec_ck")
     if save:
         _set_meta(conn, UNPOSTED_KEY, summary)
@@ -1013,10 +1051,47 @@ def unposted_remits(conn: sqlite3.Connection, *, today: str | None = None, save:
     return out
 
 
-def _posted_elsewhere(conn: sqlite3.Connection, diffs: list[dict]) -> set[str]:
+def _funded_twins(conn: sqlite3.Connection, diffs: list[dict]) -> set[str]:
+    """The informational 835 payments (transaction keys) among these whose every paid claim (its claim id) another 835
+    paid too, for its amount within $1, from 30 days before to 90 days after: one that moved money (not BPR04 'NON', a
+    deposit above $0) and was not superseded. A plan's administrator and the plan itself report one payment twice."""
+    out: set[str] = set()
+    tks = sorted({d["tk"] for d in diffs})
+    if not tks:
+        return out
+    when = {d["tk"]: d["paid_on"] for d in diffs}
+    claims: dict[str, list] = defaultdict(list)
+    for part in _chunks(tks):
+        _temp(conn, "ec_ft2", ["tk TEXT PRIMARY KEY"], [(x,) for x in part])
+        for tk, pcn, paid in conn.execute("""SELECT transaction_key, patient_control_number, COALESCE(paid_cents, 0) FROM claims
+                                             WHERE transaction_key IN (SELECT tk FROM temp.ec_ft2)"""):
+            claims[tk].append((pcn, paid))
+    _drop(conn, "ec_ft2")
+    pcns = sorted({pcn for v in claims.values() for pcn, paid in v if pcn and paid > 0})
+    funded: dict[str, list] = defaultdict(list)
+    for part in _chunks(pcns):
+        _temp(conn, "ec_fp", ["pcn TEXT PRIMARY KEY"], [(x,) for x in part])
+        for pcn, paid, tk2, on in conn.execute("""SELECT c.patient_control_number, COALESCE(c.paid_cents, 0), t.transaction_key, t.payment_date
+                                                  FROM claims c JOIN transactions t ON t.transaction_key = c.transaction_key
+                                                  WHERE c.patient_control_number IN (SELECT pcn FROM temp.ec_fp)
+                                                    AND COALESCE(t.superseded, 0) = 0 AND upper(COALESCE(t.payment_method, '')) <> 'NON'
+                                                    AND COALESCE(t.payment_amount_cents, 0) > 0"""):
+            funded[pcn].append((paid, tk2, on or ""))
+    _drop(conn, "ec_fp")
+    for tk, cl in claims.items():
+        lo, hi = _add(when.get(tk), -30) or "", _add(when.get(tk), 90) or ""
+        paid_claims = [(pcn, paid) for pcn, paid in cl if paid > 0]
+        if paid_claims and all(any(tk2 != tk and abs(p2 - paid) <= 100 and lo <= on <= hi for p2, tk2, on in funded.get(pcn or "", []))
+                               for pcn, paid in paid_claims):
+            out.add(tk)
+    return out
+
+
+def _posted_elsewhere(conn: sqlite3.Connection, diffs: list[dict], *, any_check: bool = False) -> set[str]:
     """The 835 payments (transaction keys) among these whose every claim EMA posted, for its amount within $1, under
     another check number no 835 carries, on the claim's own EMA claims (the map: no conflict, never the ASC's facility
-    claim), from 7 days before to 120 days after the 835's payment date."""
+    claim), from 7 days before to 120 days after the 835's payment date. With `any_check`, a check an 835 carries counts
+    too (an informational remittance whose money came on the plan's own funded payment, which EMA posted)."""
     out: set[str] = set()
     tks = sorted({d["tk"] for d in diffs})
     if not tks:
@@ -1041,9 +1116,9 @@ def _posted_elsewhere(conn: sqlite3.Connection, diffs: list[dict]) -> set[str]:
     lks = sorted({lk for v in links.values() for lk in v})
     for part in _chunks(lks):
         _temp(conn, "ec_pel", ["link INTEGER PRIMARY KEY"], [(x,) for x in part])
-        for lk, posted, cents in conn.execute("""SELECT link, posted, SUM(COALESCE(ins_paid, 0)) FROM ema_line_payments
+        for lk, posted, cents in conn.execute(f"""SELECT link, posted, SUM(COALESCE(ins_paid, 0)) FROM ema_line_payments
                                                  WHERE link IN (SELECT link FROM temp.ec_pel) AND COALESCE(ins_paid, 0) <> 0
-                                                   AND COALESCE(in_835, 0) = 0
+                                                   {'' if any_check else 'AND COALESCE(in_835, 0) = 0'}
                                                  GROUP BY link, posted, check_no"""):
             pays[lk].append((posted, cents or 0))
     _drop(conn, "ec_pel")

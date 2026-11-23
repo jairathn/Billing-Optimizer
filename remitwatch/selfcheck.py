@@ -1178,6 +1178,14 @@ def _baseline(conn: sqlite3.Connection) -> dict[str, set[str]]:
     return out
 
 
+def _accepted(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """The offenders a person accepted (accept_findings), by check."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for cid, key in conn.execute("SELECT check_id, key FROM selfcheck_baseline WHERE accepted_by IS NOT NULL"):
+        out[cid].add(key)
+    return out
+
+
 def _set_baseline(conn: sqlite3.Connection, results: list[dict], at: str, accepted_by: str | None = None,
                   only: Iterable[str] | None = None) -> None:
     keep = set(only) if only is not None else None
@@ -1299,7 +1307,11 @@ def after_detection(conn: sqlite3.Connection, ctx: dict | None = None, *, mode: 
         if r["contain"] == "hold" and len(nk) > r["tolerance"]:
             hold_ids.append(r["id"])
     kept = 0
-    van_new = [k for k, _c in new_by.get("vanished", [])]
+    # items that vanished with no reason are kept every run until a person accepts the change (not only the first time:
+    # the last good run's baseline would otherwise let them go on the second run)
+    accepted = _accepted(conn).get("vanished", set())
+    van = next((r for r in results if r["id"] == "vanished"), None)
+    van_new = [k for k, _c in (van or {}).get("keys", []) if k not in accepted] if van and van["status"] == "fail" else []
     held_info: dict = {}
     can_hold = not first and len(before) > 0 and _has_table(conn, SNAPSHOT, "temp")
     held = bool(hold_ids) and can_hold

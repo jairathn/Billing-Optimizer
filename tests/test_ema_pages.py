@@ -722,6 +722,52 @@ def test_items_let_go_one_at_a_time_mirror_the_server_and_say_so(page):
     assert page["left_mixed"].startswith("Let go leaves out 2 items that are let go one at a time")
 
 
+BLIND_JS = r"""
+const fs = require('fs'), vm = require('vm'), path = require('path');
+const read = f => fs.readFileSync(path.join(process.argv[2], f), 'utf8');
+const html = read('index.html');
+const grab = (src, re) => { const m = src.match(re); if (!m) throw new Error('not found: ' + re); return m[0]; };
+const helpers = [/const money = [^\n]*\n/, /const esc = [^\n]*\n/].map(re => grab(html, re)).join('\n');
+const fn = grab(html, /async function blindBar\(\)\{[\s\S]*?\n\}\n/);
+const el = { innerHTML: 'old', querySelectorAll: () => [] };
+let calls = 0, answer = { blind: true, cents: 123456, basis: 'The 835s stopped 12 days ago.' }, hold = null;
+const ctx = { console, state: { tab: 'worklist' }, $: q => q === '#blindBar' ? el : null, Date,
+  api: async p => { calls++; if (p !== '/api/ema/blind') throw new Error(p); if (hold) await hold; if (answer instanceof Error) throw answer; return answer; } };
+vm.createContext(ctx);
+for (const src of [helpers, read('today.js'), fn]) vm.runInContext(src, ctx);
+(async () => {
+  const out = {};
+  await ctx.blindBar(); out.first = el.innerHTML; out.calls_first = calls;
+  await ctx.blindBar(); out.calls_again = calls;                          // asked once in ten minutes
+  ctx.state.tab = 'today'; ctx.state.blindAt = 0; await ctx.blindBar(); out.today = el.innerHTML; out.calls_today = calls;  // Today draws its own, unasked
+  ctx.state.blindAt = Date.now();
+  ctx.state.tab = 'payers'; await ctx.blindBar(); out.back = el.innerHTML.includes('Blind spot');
+  ctx.state.blindAt = 0; let open; hold = new Promise(r => open = r);       // the page moves to Data while it is asked
+  const p = ctx.blindBar(); ctx.state.tab = 'data'; open(); await p; out.moved = el.innerHTML;
+  hold = null; ctx.state.tab = 'worklist'; ctx.state.blindAt = 0; answer = new Error('down'); el.innerHTML = 'stale';
+  await ctx.blindBar(); out.failed = el.innerHTML;                         // a failed ask clears the banner, never an error
+  answer = { blind: false }; ctx.state.blindAt = 0; await ctx.blindBar(); out.current = el.innerHTML;
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+def test_the_blind_spot_banner_shows_under_the_tabs_of_every_page_and_never_twice(tmp_path):
+    if not NODE:
+        pytest.skip("node is not installed")
+    html = open(os.path.join(STATIC, "index.html"), encoding="utf-8").read()
+    assert html.index('<nav id="nav"></nav>') < html.index('<div id="blindBar"') < html.index('<main id="view">')
+    script = tmp_path / "blind.js"
+    script.write_text(BLIND_JS, encoding="utf-8")
+    res = subprocess.run([NODE, str(script), STATIC], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert "Blind spot: $1,235 the site cannot check." in out["first"] and "The 835s stopped 12 days ago." in out["first"]
+    assert out["calls_first"] == 1 and out["calls_again"] == 1
+    assert out["today"] == "" and out["calls_today"] == 1 and out["back"] is True and out["moved"] == ""
+    assert out["failed"] == "" and out["current"] == ""
+
+
 # ------------------------------------------------------------------ an upload finished while a Vercel run was going
 def test_an_upload_that_finished_during_a_run_is_read_by_a_run_started_right_after(tmp_path, monkeypatch):
     """On Vercel, an upload finished while a run held the lock asked for a run that was skipped: the run going on ends by

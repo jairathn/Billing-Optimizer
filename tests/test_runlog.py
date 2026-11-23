@@ -556,6 +556,7 @@ def test_every_kind_of_automatic_change_is_classified(tmp_path, kind):
         _item(L, shortfall_cents=25000),                                                   # $150: a value decision
         _item(M, evidence=json.dumps({"folded": [{"finding_id": B}]})),                    # (B would be folded into M; see below)
     ]
+    after_rows[6]["state_basis"] = "Not paid and nobody has worked it; act by 2026-12-01"      # I: its state did not change
     _findings_table(c, after_rows)
     c.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, actor, note) VALUES (?,?,?,?,?,?,?)",
               (D, runlog._iso(), "hidden", "open", "dismissed", "hide rule", "not expected to pay"))
@@ -582,6 +583,9 @@ def test_every_kind_of_automatic_change_is_classified(tmp_path, kind):
     st = runlog.decisions_for(c, G)["items"][0]
     assert {"source": "states", "basis": "Appealed; the payer answers in 45 days"} in st["evidence"]
     assert st["change"]["follow_up_on"] == [None, "2026-12-15"]
+    # a basis travels with the change it explains: a moved deadline carries no state basis, a value change neither
+    dl = runlog.decisions_for(c, I)["items"][0]
+    assert not any(e["source"] == "states" for e in dl["evidence"])
     store.close()
 
 

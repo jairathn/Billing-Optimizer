@@ -514,3 +514,144 @@ def test_a_decision_on_a_held_report_recorded_on_a_serverless_host_is_applied_fr
     assert not actions.apply(store.conn, {"kind": "ema_report_decision", "file_id": "HELD1", "decision": "apply", "actor": "biller"})
     assert not actions.apply(store.conn, {"kind": "ema_report_decision", "file_id": "NOPE", "decision": "discard", "actor": "biller"})
     assert store.conn.execute("SELECT status FROM ema_report_files WHERE file_id='HELD1'").fetchone()[0] == "discarded"
+
+
+# ---------------------------------------------------------------- fixes from the independent reviews (money and gates)
+def _remark(store, tk, code):
+    """A line-level remark (RARC) on every line of the 835 payment tk."""
+    for ck, lk in store.conn.execute("SELECT claim_key, line_key FROM lines WHERE transaction_key=?", (tk,)).fetchall():
+        store.conn.execute("INSERT INTO remarks (transaction_key, claim_key, line_key, level, code) VALUES (?,?,?,?,?)",
+                           (tk, ck, lk, "line", code))
+    store.conn.commit()
+
+
+def test_a_humana_ma_corrected_claim_keeps_the_18_month_dispute_as_the_payers_limit(store):
+    """Humana MA CO-16: the safe date is the corrected-claim year from the date of service, and Humana's 18-month claim
+    dispute from the determination stays open beside it: that later date is the payer's limit, so the item does not
+    expire when the corrected-claim year passes (64 truth-listed lines on real data)."""
+    remit(store, trace="777000331", paid_on="2026-03-28", payer="HUMANA CARE PLAN",
+          claims=[{"pcn": F.claim_id(31), "lines": [(S, "99213", 150, 0, [("CO", "16", 150)])]}])
+    run(store, today="2027-05-15")
+    f = one(store, "patient_control_number=?", F.claim_id(31))
+    assert f["signal"] == "DENIED_MISSING_INFO" and f["appeal_deadline"] == "2027-03-02"
+    assert f["legal_deadline"] == "2027-09-28" and "2027-09-28" in f["deadline_basis"]
+    assert f["work_state"] != "expired", f["state_basis"]
+
+
+def test_an_anthem_ma_authorization_denial_keeps_the_corrected_claim_year_beside_the_reconsideration(store):
+    """Anthem MA CO-197: the reconsideration window is 120 days from the EOP (the due date); a corrected claim carrying the
+    authorization number can go within a year of the date of service (Anthem's own corrected-claim rule): the payer's limit."""
+    remit(store, trace="777000332", paid_on="2026-03-28", payer="ANTHEM MEDICARE ADVANTAGE TEST",
+          claims=[{"pcn": F.claim_id(32), "lines": [(S, "99213", 150, 0, [("CO", "197", 150)])]}])
+    run(store)
+    f = one(store, "patient_control_number=?", F.claim_id(32))
+    assert f["signal"] == "DENIED_AUTH" and f["payer_group"] == "Anthem Medicare Advantage"
+    assert f["appeal_deadline"] == "2026-07-26" and f["legal_deadline"] == "2027-03-02"
+    assert "corrected claim" in f["deadline_basis"]
+
+
+def test_a_medicare_unprocessable_claim_gets_no_dispute_route_beside_its_year(store):
+    """Medicare MA130 (unprocessable: no appeal rights): a new claim within a year of the date of service is the only route,
+    even when the remittance came late enough that a redetermination window would end after that year."""
+    tk = remit(store, trace="777000333", paid_on="2026-12-15", payer="MEDICARE OF KENTUCKY TEST",
+               claims=[{"pcn": F.claim_id(33), "lines": [(S, "99213", 150, 0, [("CO", "16", 150)])]}])
+    _remark(store, tk, "MA130")
+    run(store)
+    f = one(store, "patient_control_number=?", F.claim_id(33))
+    assert f["appeal_deadline"] == "2027-03-02" and f["legal_deadline"] is None, (f["legal_deadline"], f["deadline_basis"])
+
+
+def test_a_claim_sent_on_to_another_carrier_and_a_denial_to_review_end_with_the_payers_window(store):
+    """FORWARDED_TO_CARRIER and a non-covered denial (review) had no deadline, so no state could ever expire them (121
+    forwarded items from 2024-25 on real data). Each now ends with the payer's window to dispute its remittance, the
+    payer's own limit beside it."""
+    remit(store, trace=F.check_no(3), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(3), "crossover": "WELLMED TEST", "lines": [(S, "99214", 200, 0, [("CO", "B11", 200)])]}])
+    remit(store, trace=F.check_no(34), paid_on="2026-03-28",
+          claims=[{"pcn": F.claim_id(34), "lines": [(S, "99213", 150, 0, [("CO", "96", 150)])]}])
+    run(store)
+    fw = one(store, "signal='FORWARDED_TO_CARRIER'")
+    assert fw["appeal_deadline"] == "2028-03-27" and fw["legal_deadline"] == "2028-03-28" and "sent the claim on" in fw["deadline_basis"]
+    nc = one(store, "signal='DENIED_NONCOVERED'")
+    assert nc["appeal_deadline"] == "2028-03-27" and "payer takes no dispute" in nc["deadline_basis"]
+
+
+def _informational(store, tk):
+    store.conn.execute("UPDATE transactions SET payment_method='NON', payment_amount_cents=0 WHERE transaction_key=?", (tk,))
+    store.conn.commit()
+
+
+def test_an_informational_835_that_repeats_a_funded_payment_is_not_money_to_post(store, ledger, tmp_path):
+    """The administrator's 835 moved no money (BPR04 'NON') and reports the claim the plan paid on its own funded 835, which
+    EMA posted: one payment reported twice, nothing to post (65 items, $13,019 on real data)."""
+    remit(store, trace="777000111", paid_on="2026-04-01", payer="TESTCARE HEALTH",
+          claims=[{"pcn": F.claim_id(7), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "99214", 200, 120)]}])
+    tk = remit(store, trace="888000111", paid_on="2026-04-01", payer="TEST BENEFIT ADMINISTRATORS",
+               claims=[{"pcn": F.claim_id(7), "last": "SAMPLE", "first": "BRAVO", "lines": [(S, "99214", 200, 120)]}])
+    _informational(store, tk)
+    rows = [charge(F.link_no(7), cpt="99214", amount=200, patient=1),
+            pay(F.link_no(7), "777000111", 120, cpt="99214", patient=1, posted=D(2026, 4, 3))]
+    denial_world(store, ledger, tmp_path, rows)
+    run(store)
+    assert items(store, "signal='REMIT_NOT_POSTED' AND transaction_key=?", tk) == []
+    summary = json.loads(store.conn.execute("SELECT value FROM meta WHERE key='ema:unposted'").fetchone()[0])
+    assert summary["informational_n"] == 1 and summary["informational_cents"] == 12000
+
+
+def test_an_informational_835_whose_money_never_came_is_a_payment_to_ask_for_not_to_post(store, ledger, tmp_path):
+    """PM case C54: the administrator's informational 835 reports the claim paid, and no funded payment or EMA posting
+    follows. Not 'post it in EMA': the money never arrived, ask the payer for it."""
+    tk = remit(store, trace="888000112", paid_on="2026-04-01", payer="TEST BENEFIT ADMINISTRATORS",
+               claims=[{"pcn": F.claim_id(17), "last": "SAMPLE", "first": "ECHO", "lines": [(S, "99214", 200, 120)]}])
+    _informational(store, tk)
+    denial_world(store, ledger, tmp_path, [charge(F.link_no(17), cpt="99214", amount=200, patient=1)])
+    run(store)
+    f = one(store, "signal='REMIT_NOT_POSTED' AND transaction_key=?", tk)
+    ev = json.loads(f["evidence"])
+    assert ev["informational"] is True and "never arrived" in f["title"] and "ask" in f["hint"].lower()
+    assert "post the payment" not in f["hint"].lower() and f["shortfall_cents"] == 12000
+
+
+def test_a_zero_deposit_835_a_recovery_used_up_is_still_money_to_post(store, ledger, tmp_path):
+    """A $0 deposit because the payer took back an earlier overpayment (PLB WO) moved its money all the same: the claim's
+    payment is EMA's to post (with the recovery), not an informational copy."""
+    tk = remit(store, trace="888000113", paid_on="2026-04-01", payer="TESTCARE HEALTH",
+               claims=[{"pcn": F.claim_id(18), "last": "SAMPLE", "first": "FOXTROT", "lines": [(S, "99214", 200, 120)]}])
+    _informational(store, tk)
+    store.conn.execute("INSERT INTO plb (transaction_key, reason_code, amount_cents, payment_date) VALUES (?,?,?,?)",
+                       (tk, "WO", 12000, "2026-04-01"))
+    store.conn.commit()
+    denial_world(store, ledger, tmp_path, [charge(F.link_no(18), cpt="99214", amount=200, patient=1)])
+    run(store)
+    f = one(store, "signal='REMIT_NOT_POSTED' AND transaction_key=?", tk)
+    assert not json.loads(f["evidence"]).get("informational") and "not posted in EMA" in f["title"]
+
+
+def test_the_plans_funded_payment_is_listed_once_and_its_informational_copy_not_again(store, ledger, tmp_path):
+    """Neither 835 is posted in EMA: the plan's funded payment is the one to post; the administrator's informational copy
+    of it is the same money and is not listed a second time."""
+    funded = remit(store, trace="777000114", paid_on="2026-04-01", payer="TESTCARE HEALTH",
+                   claims=[{"pcn": F.claim_id(19), "last": "SAMPLE", "first": "GOLF", "lines": [(S, "99214", 200, 120)]}])
+    info = remit(store, trace="888000114", paid_on="2026-04-01", payer="TEST BENEFIT ADMINISTRATORS",
+                 claims=[{"pcn": F.claim_id(19), "last": "SAMPLE", "first": "GOLF", "lines": [(S, "99214", 200, 120)]}])
+    _informational(store, info)
+    denial_world(store, ledger, tmp_path, [charge(F.link_no(19), cpt="99214", amount=200, patient=1)])
+    run(store)
+    got = [g["transaction_key"] for g in items(store, "signal='REMIT_NOT_POSTED'")]
+    assert funded in got and info not in got
+
+
+def test_an_informational_835_whose_money_ema_posted_under_another_835s_check_is_accounted_for(store, ledger, tmp_path):
+    """The plan paid the claim under its resubmission's number (another claim id, so no twin by claim id), and EMA posted
+    that check on the claim: EMA holds the informational 835's money under a check an 835 carries."""
+    remit(store, trace="777000115", paid_on="2026-04-02", payer="TESTCARE HEALTH",
+          claims=[{"pcn": F.claim_id(20) + "C2", "last": "SAMPLE", "first": "HOTEL", "lines": [(S, "99214", 200, 120)]}])
+    info = remit(store, trace="888000115", paid_on="2026-04-01", payer="TEST BENEFIT ADMINISTRATORS",
+                 claims=[{"pcn": F.claim_id(20), "last": "SAMPLE", "first": "HOTEL", "lines": [(S, "99214", 200, 120)]}])
+    _informational(store, info)
+    rows = [charge(F.link_no(20), cpt="99214", amount=200, patient=1),
+            pay(F.link_no(20), "777000115", 120, cpt="99214", patient=1, posted=D(2026, 4, 4))]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=[F.ar_row(claim=F.claim_id(20), link=F.link_no(20), status="Payment Pending",
+                                                                  current=0, aging=D(2026, 4, 4), svc=SVC, patient=1)])
+    run(store)
+    assert items(store, "signal='REMIT_NOT_POSTED' AND transaction_key=?", info) == []

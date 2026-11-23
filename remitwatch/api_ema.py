@@ -69,7 +69,9 @@ CHECK_CAUSES = {
     "before_feed": ("Posted before the first remittance on file", "Older than the remittance archive: nothing to ask for."),
     "other": ("No cause found", "Look the check up in EMA and on the payer's portal."),
 }
-MISSING_CAUSES = ("feed_gap", "after_feed", "no_era", "no_era_va")          # remittances someone can ask for
+# remittances someone can ask for: a gap in the feed, a payer that sends none. Checks posted after the newest remittance
+# (after_feed) are not asked for one by one: the feed is behind, and they match once the newest downloads arrive.
+MISSING_CAUSES = ("feed_gap", "no_era", "no_era_va")
 OUTCOME_WORDS = {"auto_written_off": "Written off by EMA's posting rule", "written_off_while_pending": "Written off while the payer was still deciding",
                  "lost_to_timely_filing": "Lost to late filing", "written_off_at_posting": "Written off the day it posted",
                  "contractual_at_posting": "Taken as contractual the day it posted", "written_off_later": "Written off later",
@@ -484,13 +486,14 @@ def data(user: str = Depends(_user)):
                 out[name] = {"error": _fault(exc)}
         wiring = _meta(c, "ema:wiring", {}) or {}
         out["wiring"] = wiring if isinstance(wiring, dict) else {}
-        pol = _meta(c, "ema:policy_summary", {}) or {}
-        decided = _meta(c, "ema:writeoff_policy", {}) or {}
-        pats = pol.get("patterns") or [] if isinstance(pol, dict) else []
-        out["policy"] = {"patterns": len(pats), "cents": sum(int(p.get("cents") or 0) for p in pats),
-                         "appealable_cents": sum(int(p.get("appealable_cents") or 0) for p in pats),
-                         "accepted": sum(1 for v in (decided.values() if isinstance(decided, dict) else []) if (v or {}).get("decision") == "accept"),
-                         "at": pol.get("at") if isinstance(pol, dict) else None}
+        # the same figures the write-off policy page opens with (counted now, every pattern: the run stores its 500 largest)
+        try:
+            tab = policy_table(c)
+            tot = tab["totals"]
+            out["policy"] = {"patterns": len(tab["patterns"]), "cents": tot["cents"], "appealable_cents": tot["appealable_cents"],
+                             "accepted": tot["accepted"], "at": tab["run_at"]}
+        except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+            out["policy"] = {"error": _fault(exc)}
         out["cause_words"] = {k: {"why": v[0], "ask": v[1]} for k, v in CHECK_CAUSES.items()}
         return out
 

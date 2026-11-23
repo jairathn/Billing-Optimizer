@@ -14,7 +14,7 @@ function polName(){ try { return localStorage.getItem(POL_NAME_KEY) || ''; } cat
 function polNarrow(){ return typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth <= 640; }
 function polRemember(n){ try { localStorage.setItem(POL_NAME_KEY, n); } catch(e){} }
 function polShare(x){
-  if(x == null) return '<span class="muted" title="Not enough earlier denials of this pattern to say">–</span>';
+  if(x == null) return '<span class="muted" title="Not known for this pattern: too few earlier denials like it, or a pattern too small for the run to size">–</span>';
   const p = Math.round(100 * x);
   return `<span title="Of this pattern's earlier unpaid denials, the share the payer paid later">${p}%</span>${p === 0 ? '<div class="small muted">never paid later</div>' : (p >= 20 ? '<div class="small ok">often paid later</div>' : '')}`;
 }

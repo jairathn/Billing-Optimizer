@@ -141,7 +141,7 @@ function dtMissingHtml(e){
   const causes = Object.entries(c1.causes || {}).sort((a,b)=>(b[1].cents||0)-(a[1].cents||0));
   const since = r.since_feed_stopped || {};
   return `<div class="panel" id="dtMissing"><div class="panel-head"><h2>Payments with no remittance</h2><span class="small muted">EMA posted ${money(c1.unmatched_cents)} of insurance payments that no 835 on file carries. Without the remittance nobody can see what the payer denied, cut or wrote off on those claims.</span></div>
-    ${since.cents ? `<div class="small"><b>${money(since.cents)}</b> of it was posted after the newest remittance (${esc(pl(since.checks, 'check'))}): the feed is behind.</div>` : ''}
+    ${since.cents ? `<div class="small"><b>${money(since.cents)}</b> of it was posted after the newest remittance (${esc(pl(since.checks, 'check'))}). ${esc((words.after_feed || {}).ask || 'The remittance feed is behind.')} Those checks match by themselves once their remittances are in, so they are not among the requests below.</div>` : ''}
     ${rows.length ? `<h3 class="small" style="margin:10px 0 4px">Remittances to ask for</h3>
       <div class="batches" id="dtAskList">${rows.slice(0, DT_ASK_SHOW).map(dtAskRow).join('')}</div>
       ${rows.length > DT_ASK_SHOW ? `<button class="ghost" id="dtAllAsk">Show all ${rows.length.toLocaleString()} requests</button>` : ''}
@@ -195,6 +195,7 @@ function dtArHtml(e){
 
 function dtPolicyHtml(e){
   const p = e.policy || {}, ub = e.upper_bound || {};
+  if(p.error) return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>What EMA writes off by itself</h2></div><div class="note sev-high">These figures did not come back (${esc(p.error)}).</div></div>`;
   if(!p.patterns && !ub.n) return '';
   return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>What EMA writes off by itself</h2></div>
     ${p.patterns ? `<div class="small">EMA's posting rules wrote off denials in <b>${esc(pl(p.patterns, 'pattern'))}</b> (payer, code, reason), ${money(p.cents)} in all, ${money(p.appealable_cents)} still inside a window. ${p.accepted ? esc(pl(p.accepted, 'pattern')) + ' accepted so far. ' : ''}<a href="#policy" class="dtGo" data-tab="policy">Decide them on the write-off policy page</a>.</div>` : ''}
