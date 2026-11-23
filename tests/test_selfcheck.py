@@ -1545,6 +1545,17 @@ def test_an_item_kept_from_a_store_with_no_states_yet_is_listed_and_kept_again(k
     assert [o["key"] for o in sc.offenders(c, "vanished")] == ["F-a"]
 
 
+def test_an_open_item_with_no_state_is_listed_as_the_lists_show_it(store):
+    """In a store that keeps states, an open item with none (saved outside a detection run) shows on Work now, because
+    every list reads a missing state as Work now or Waiting; when it disappears with no reason it is kept like any listed
+    item."""
+    c = store.conn
+    add_item(c, "F-x", line_key="Lx", work_state=None, state_basis=None)
+    add_item(c, "F-y", line_key="Ly")
+    out = run(c, lambda cn: cn.execute("DELETE FROM findings WHERE finding_id='F-x'"), "r1")
+    assert out["kept"] == 1 and "F-x" in _listed(c), (out["kept"], _listed(c))
+
+
 def test_any_new_coverage_gap_and_any_rise_in_money_given_up_raise_their_alerts(store):
     """The owner's decision 9: no dollar floor. A new $3 coverage gap raises AUDIT_GAPS; money given up rising by $1
     raises GIVEN_UP_RISING."""

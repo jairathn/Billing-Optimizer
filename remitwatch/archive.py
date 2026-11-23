@@ -2187,14 +2187,21 @@ def journal_entry(bill_or_claim: str, *, actor: str = "", reason: str = "reopene
 
 
 def take_journal(conn: sqlite3.Connection, entries: list[tuple[str, dict]], *, sink: Any = None) -> tuple[list[str], list[tuple]]:
-    """The cycle's journal (serverless): the reopenings become requests; returns (names taken, the other entries)."""
+    """The cycle's journal (serverless): the reopenings become requests; returns (names taken, the other entries). A
+    reopening of a bill that is not archived (it came back meanwhile with new data, or never left) still carries the
+    person's status: it goes on as a plain status entry with the rest, so the journal applies it to the item, or keeps
+    it waiting (and tries again) while the item is not in this copy. Nothing a person asked for is dropped unread."""
     ensure_schema(conn)
     taken, rest = [], []
     for name, a in entries:
         if isinstance(a, dict) and a.get("kind") == "archive_restore":
-            request_restore(conn, str(a.get("bill") or ""), actor=a.get("actor") or "", reason=a.get("reason") or "reopened",
-                            finding_id=a.get("finding_id"), status=a.get("status"), at=a.get("at"))
-            taken.append(name)
+            got = request_restore(conn, str(a.get("bill") or ""), actor=a.get("actor") or "", reason=a.get("reason") or "reopened",
+                                  finding_id=a.get("finding_id"), status=a.get("status"), at=a.get("at"))
+            if got.get("queued") or not (a.get("finding_id") and a.get("status")):
+                taken.append(name)
+            else:
+                rest.append((name, {"kind": "status", "finding_id": a["finding_id"], "status": a["status"], "notes": None,
+                                    "actor": a.get("actor") or "", "at": a.get("at"), "seen": None}))
         else:
             rest.append((name, a))
     return taken, rest
