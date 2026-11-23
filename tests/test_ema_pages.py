@@ -911,8 +911,25 @@ const out = {
   ema_nolink: ctx.xpBoxHtml(Object.assign({}, f, { ema_link: 'CB0000300C017' }), Object.assign(x('call', ['copy_instructions']), { ema_block: { claim_url: 'https://ema.example.test/claims/{claim}' } }), { packets: [] }),
   todo_link: (ctx.state.filt.worklist = { status: 'open,in_progress', deadline: 'week' }, ctx.deskFilter('worklist')),
   closed_link: (ctx.state.filt.worklist = { status: 'open', deadline: 'missed' }, ctx.deskFilter('worklist')),
+  // review C1: every Let go and Lost asks why, and nothing changes without an answer (desk.js letGoNote)
+  let_go: (() => { const said = []; ctx.alert = m => said.push(m);
+    const ask = (answer, signal, status) => { ctx.prompt = () => answer; const r = ctx.letGoNote(signal, status); return r === undefined ? 'no question' : r; };
+    return { given: ask('  The payer never pays these  ', 'DENIED_AUTH', 'dismissed'), blank: ask('   ', 'UNDERPAID', 'lost'),
+             cancelled: ask(null, 'DENIED_AUTH', 'dismissed'), claim: ask('', 'NO_ANSWER', 'dismissed'), sent: ask('x', 'DENIED_AUTH', 'appealed'), said }; })(),
 };
-console.log(JSON.stringify(out));
+(async () => {
+  // review C1: the Hidden list's Show again posts the rule as the list shows it, at its own grain (desk.js hiddenManage)
+  const sent = [], btns = [{ dataset: { unhide: '0' } }, { dataset: { unhide: '1' } }], box = { innerHTML: '', querySelectorAll: () => btns };
+  const modal = { classList: { add() {}, remove() {} } };
+  ctx.$ = q => q === '#modalBox' ? box : q === '#modal' ? modal : {};
+  ctx.post = async (p, body) => { sent.push([p, body]); return { ok: true }; };
+  ctx.render = () => {};
+  ctx.hiddenManage([{ payer_group: 'Plan A', signal: 'DENIED_AUTH', code: '17110', modifier: null, reason: 'CO-197', label: 'Denied', n: 2, cents: 100 },
+                    { payer_group: 'Plan B', signal: 'DENIED_AUTH', code: null, modifier: null, reason: null, label: 'Denied', n: 1, cents: 50 }]);
+  for (const b of btns) await b.onclick();
+  out.unhide = sent;
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(e); process.exit(1); });
 """
 
 
@@ -996,6 +1013,20 @@ def test_items_let_go_one_at_a_time_mirror_the_server_and_say_so(page):
     assert page["left_claims"] == ("Let go leaves out 2 claims with no answer from the payer or rejected before the payer. "
                                    "Open each one to let it go, with a note.")
     assert page["left_mixed"].startswith("Let go leaves out 2 items that are let go one at a time")
+
+
+def test_every_let_go_on_the_page_asks_why_and_show_again_sends_the_rules_own_grain(page):
+    """Review C1 (high and medium): the page asked a reason only for the items let go one at a time, so Let go and Lost on
+    any other item (its panel, the status bar, the l key, the list's bulk bar) went with none; and the Hidden list's Show
+    again posted only payer and reason, which a rule by code, modifier or the payer's reason code never matched."""
+    lg = page["let_go"]
+    assert lg["given"] == "The payer never pays these"                  # trimmed, and sent as the item's note
+    assert lg["blank"] is None and lg["cancelled"] is None and lg["claim"] is None
+    assert lg["sent"] == "no question"                                  # every other status needs no reason
+    assert len(lg["said"]) == 2 and "needs a reason" in lg["said"][0] and "needs a note" in lg["said"][1]
+    assert page["unhide"] == [
+        ["/api/hide", {"payer_group": "Plan A", "signal": "DENIED_AUTH", "code": "17110", "modifier": "*", "reason": "CO-197", "remove": True}],
+        ["/api/hide", {"payer_group": "Plan B", "signal": "DENIED_AUTH", "code": "*", "modifier": "*", "reason": "*", "remove": True}]]
 
 
 FAX_JS = r"""

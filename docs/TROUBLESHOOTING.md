@@ -21,10 +21,10 @@ to their month. It is safe to give to Claude Code.
 
 | part | what it answers |
 |---|---|
-| bundle.json | which runs it covers, the code commit and rules version, the versions of Python and SQLite, the scan of the bundle |
-| errors.json | every error of those runs: `type`, `message` (scrubbed), `where` (file:line in function), `stack`, `step`, `contained` (true: the run went on; null: raised to the caller; false: it ended the run) |
-| runs/<run_id>.json | one run's manifest: `outcome`, `steps` (each with ms, rss_mb, peak_mb, peak_rise_mb, /tmp on Vercel), `inputs` (files by hash, kind, origin, result), `positions` (Dropbox cursor and ledger revision, as fingerprints), `outputs` (items by state and signal), `invariants`, `repairs`, `sections.decisions` |
-| events/<run_id>.jsonl | the run's event log, one JSON object per line: ts, run_id, step, level, event, rule, rule_version, item, counts, ms, mem_mb, detail, error |
+| bundle.json | which runs it covers, the code commit and rules version, the versions of Python and SQLite, the scan of the bundle (`masked_on_second_pass`: what the second pass had to mask, 0 on a clean bundle; `left_out`: errors left out of errors.json) |
+| errors.json | every error of those runs: `type`, `message` (scrubbed), `where` (file:line in function), `stack`, `step`, `contained` (true: the run went on; null: raised to the caller; false: it ended the run). Past 2,000 errors it keeps each run's first error and the newest ones, and `left_out` says how many it left out |
+| runs/<run_id>.json | one run's manifest, whole: `outcome`, `steps` (each with ms, rss_mb, peak_mb, peak_rise_mb, /tmp on Vercel), `inputs` (files by hash, kind, origin, result), `positions` (Dropbox cursor and ledger revision, as fingerprints), `outputs` (items by state and signal), `invariants`, `repairs`, `sections.decisions`. A killed run's record has its `last_step`, its memory then and the steps it finished |
+| events/<run_id>.jsonl | the run's event log, one JSON object per line, all of it: ts, run_id, step, level, event, rule, rule_version, item, counts, ms, mem_mb, detail, error (a killed run: its last 20 events) |
 | invariants.json | the self-check results run by run, and the self-check's own history tables |
 | examples/<check>.json | for each failing check: up to 20 example items, each with its decision log |
 | repairs.json | what was repaired by itself, and the open problems with their next step |
@@ -37,35 +37,55 @@ Order of attack:
    cause; later errors are often consequences.
 2. Its `where` and `stack` point at the line. The `step` says which part of the cycle it was in; the step's
    `inputs` name what it was working on (by id or hash).
-3. A run whose outcome is "killed" never wrote a manifest: the index line has its `last_step` and `peak_mb`. The next
-   run logged `previous_run_killed`.
-4. A failing self-check: its example items and their decisions show which rule changed them, in which run, from what
+3. A run whose outcome is "killed" was stopped by the platform and wrote nothing at its end. The next run found its open
+   marker and wrote its record: runs/<run_id>.json (the step it was in, `last_step`, its memory then and the steps it
+   finished) and events/<run_id>.jsonl (its last 20 events). The next run also logged `previous_run_killed`.
+4. A run that failed before its run log started (a store that could not be opened) has a record with the error's stack
+   and its `step` (open_store). A scheduled cycle that ended with an error code before its run log could say why is a
+   run with an `exit_code`.
+5. A failing self-check: its example items and their decisions show which rule changed them, in which run, from what
    to what. A check that started failing at one run points at what that run changed (its `inputs`, its
    `sections.decisions`, its commit).
-5. Item changes nobody expected: decisions.json by rule, then an item's own decisions (the drawer's "Why did this
+6. Item changes nobody expected: decisions.json by rule, then an item's own decisions (the drawer's "Why did this
    change?", or `runlog.decisions_for(conn, finding_id)` on a copy).
 
 ## 3. Failure classes, what RemitWatch does about each, and what a person does
 
 **A feed does not answer** (Dropbox, TriZetto or SRFax: a dropped connection, a timeout, HTTP 5xx or 429).
 RemitWatch tries the call again after 2, 8 and 30 seconds within the run's time (remitwatch/repair.py, remedy
-`network`), then holds that step and carries on with the rest. A step held on three runs in a row raises the alert
-"RemitWatch could not repair ... by itself". A refused token or password is never tried again (TriZetto keeps its own
-hold for a day so the login is not locked), and a fax whose sending may have happened is never sent again by a retry.
-To do: run the service's test on the setup page; fix the setting it names; the next run tries again by itself.
+`network`), then holds that call and carries on with the rest. Later calls to the same service in that run get one
+plain try each, with no waiting (a success ends the hold), and after three of those fail, none: an outage costs a run
+one wait, not one per file. A run counts once however many of its calls were held, and a service held on three runs
+in a row raises the alert "RemitWatch could not repair ... by itself". Only network trouble is tried again: a code bug
+is raised at once whatever its message says (a TypeError about a `timeout` argument, a row number that holds "502"),
+and so is anything the ingest raises inside a TriZetto pull. A refused token or password is never tried again
+(TriZetto keeps its own hold for a day so the login is not locked), and a fax whose sending may have happened is never
+sent again by a retry (the fax line's status checks and inbox reads are tried again: they send nothing). To do: run the
+service's test on the setup page; fix the setting it names; the next run tries again by itself.
 
 **A file cannot be read** (an export cut short, the wrong report, columns missing, too big for Vercel, too slow three
 runs in a row). The reader refuses or holds it with the reason; the other files go on. The registry (remedy
-`unreadable_file`) holds a file that failed twice and raises an alert naming its kind and hash. To do: open the Data
-tab, check the held file's reason, export it again from EMA (or upload it in the app, which compresses it), and
-discard the held one. If a fresh copy is held too, it is a code bug: reproduce with an invented file of the same shape.
+`unreadable_file`) holds a file that failed twice, and a report the reader held, and raises an alert naming its kind
+and hash. A refused report (the wrong file, columns missing) is not a hold there: the Data tab and the Upload page say
+why, and only a new export helps. To do: open the Data tab, check the held file's reason, export it again from EMA (or
+upload it in the app, which compresses it), and discard the held one. The alert clears by itself once the held file
+is discarded or applied, or a later export of the same report and years is applied. If a fresh copy is held too, it
+is a code bug: reproduce with an invented file of the same shape.
 
 **A run was stopped** (Vercel's 2 GB memory or 300 second limit; a server container restarted). The run's open marker
-(logs/open/) is found by the next run, which records it as killed with its last step. The cycle's own repair paths run
-(cloud.repair_ledger when the ledger was saved and the store was not; a Production file whose read was started three
-times is held). To do: look at the killed run's last step and peak memory and the steps before it in earlier runs; the
-self-regulation (remitwatch/selfcheck.py) spreads the work over more runs when a run passes 80% of its budget. Two kills
-at the same step raise an alert.
+(logs/open/) is written whenever a step starts (on Vercel also every 20 seconds within a long step), with the run's
+memory and its last 20 events. The next run finds it, records the run as killed in the step it was in, and writes its
+record (the bundle's runs/ and events/ have it). The cycle's own repair paths run (cloud.repair_ledger when the ledger
+was saved and the store was not; a Production file whose read was started three times is held). To do: look at the
+killed run's last step, its memory and its last events, and the steps before it in earlier runs; the self-regulation
+(remitwatch/selfcheck.py) spreads the work over more runs when a run passes 80% of its budget. Two kills at the same
+step in a row raise an alert; a later run that finishes and passes that step clears the count by itself.
+
+**A cycle died before its run log started** (a store that cannot be opened or brought up to date, a full disk, a
+damaged file). The cycle writes a failed run with the error's stack to the logs folder, which needs no store, and the
+scheduler notes a cycle that ended with an error code. The Data tab's panel says so, and also says when no run has
+started for twice the usual time between runs (the scheduler or the cron stopped). To do: the bundle's first error;
+reproduce on a copy of the store.
 
 **A lock left behind.** Server: a cycle lock whose process is gone is removed at the next start or after its child ends
 (pipeline.clear_locks_left_behind, clear_lock_of_pid); a lock with no heartbeat for three hours is taken over. Vercel:
@@ -82,8 +102,9 @@ which check failed. To do: the bundle's examples/ for that check, then reproduce
 
 **A code bug** (an exception in a step, a category of items gone, a wrong verdict). The exception is logged with its
 stack where the step contains it; the self-checks catch the effects they cover (an item with no state, a closure with
-no proof, money that does not add up, items that vanished between runs) and hold closures in safe mode. To do: the
-bundle, a copy, a failing test, the fix, the four environments.
+no proof, money that does not add up, items that vanished between runs) and hold closures in safe mode. A progress line
+the code marks ERROR (a file that failed and was skipped) also makes the run partial, and the panel counts those lines
+with the errors. To do: the bundle, a copy, a failing test, the fix, the four environments.
 
 **Items changed and nobody knows why.** Every automatic change to an item is in item_decisions with its rule, the rule
 version (the rules hash of detect.py and the files it reads), the evidence keys, and before and after: raised, closed
@@ -124,6 +145,7 @@ Serverless:
 | kept | 180 days, then 512 MB at most, oldest first | 90 days, then 100 MB at most, oldest first |
 | in the store | run_log (200 days), item_decisions (400 days), repair_log (200 days) | the same, in the store image |
 | platform log | the container's log: the progress lines | Vercel's function log: one line per run (run id and outcome) |
+| run in progress | logs/open/<run_id>.json, rewritten at each step | the same in the state folder, at each step and every 20 s within one |
 
 Dropping old logs is itself logged (event logs_pruned). Logs are never in git (data/ is ignored).
 
