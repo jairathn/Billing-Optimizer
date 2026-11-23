@@ -852,6 +852,56 @@ def test_a_payment_on_the_ascs_facility_claim_never_reads_as_paid_on_another_cla
     assert [i["key_parts"][0] for i in c5(store, rate=lambda g, c, y: 7000)] == [F.link_no(2)]
 
 
+def test_an_item_whose_service_ema_shows_paid_on_another_claim_gets_a_hint(store, ledger, tmp_path):
+    """The 835 denied claim 1's 99213 and EMA shows the same patient, date and code paid $90 on another of its claims (a
+    resubmission). paid_in_ema read only the item's own line, so the item said nothing (6 work-now items on real data): it
+    now carries a hint, never a closure. A hint already on the item stays, and the ASC's facility claim never counts."""
+    again = [charge(F.link_no(3)), pay(F.link_no(3), "PAPER-33", 90, posted=D(2026, 4, 20))]
+    tk = denial_world(store, ledger, tmp_path, again)
+    f = finding(tk)
+    o = outcomes(store, [f])
+    assert o["F1"]["outcome"] not in ec.PAID_OUTCOMES and not o["F1"]["paid_after_same"]
+    got = ec.paid_in_ema(store.conn, [f], o)["F1"]
+    assert (got["action"], got["paid_cents"], got["used"]) == ("hint_paid_elsewhere", 9000, None)
+    assert got["hint"].startswith(f"EMA shows $90.00 paid by {BCBS} on another of its claims for this patient, date and code")
+    assert "F1" not in ec.paid_in_ema(store.conn, [dict(f, hint="Possibly paid on claim X")], o)
+    assert "F1" not in ec.paid_in_ema(store.conn, [dict(f, expected_cents=30000)], o)        # under half: no hint
+    store.conn.execute("INSERT OR REPLACE INTO ema_link_map (link, method, facility) VALUES (?, 'test', 1)", (F.link_no(3),))
+    store.conn.commit()
+    assert "F1" not in ec.paid_in_ema(store.conn, [f], o)
+
+
+def test_a_claim_never_sent_whose_service_its_payer_paid_on_another_claim_is_not_listed(store, ledger, tmp_path):
+    """EMA claim 4 sits 'Batched for Printing' while its payer paid the same patient, date and code on EMA claim 14: the
+    service was billed and paid there, nothing is stuck (3 NOT_SENT items on real data). Another payer's payment on the
+    other claim leaves the item listed, with a hint to check it."""
+    kw = dict(patient=3, status="Batched for Printing")
+    ar = [F.ar_row(claim=F.claim_id(4), link=F.link_no(4), status="Batched for Printing", current=150, aging=None, patient=3, svc=SVC)]
+    rows = [charge(F.link_no(4), **kw), charge(F.link_no(14), patient=3),
+            pay(F.link_no(14), "PAPER-44", 90, patient=3, posted=D(2026, 4, 10))]
+    denial_world(store, ledger, tmp_path, rows, ar_rows=ar)
+    assert [p for p in ec.not_sent(store.conn, today="2026-04-25") if p["key_parts"] == (F.claim_id(4),)] == []
+    store.conn.execute("UPDATE ema_line_payments SET payer = ?, payer_group = 'Testcare' WHERE link = ?", (P["commercial"], F.link_no(14)))
+    store.conn.commit()
+    p = next(x for x in ec.not_sent(store.conn, today="2026-04-25") if x["key_parts"] == (F.claim_id(4),))
+    assert p["hint"].startswith("EMA shows $90.00 paid by Testcare on another of its claims for this patient, date and code")
+
+
+def test_an_unanswered_claim_whose_service_its_payer_paid_on_another_claim_is_not_listed(store, ledger, tmp_path):
+    rows = [charge(F.link_no(1), status="Payment Pending", posted=D(2026, 3, 3)),
+            charge(F.link_no(11), status="Resolved/Paid", posted=D(2026, 3, 20)),
+            pay(F.link_no(11), "PAPER-11", 90, posted=D(2026, 4, 1)),                                 # claim 1's service, paid
+            charge(F.link_no(99), cpt="99212", patient=3, svc=D(2026, 3, 20), posted=D(2026, 5, 1)),
+            pay(F.link_no(98), "PAPER-5", 20, cpt="99212", patient=3, posted=D(2026, 4, 28))]
+    load(store, ledger, tmp_path, rows)
+    assert ec.unanswered_claims(store.conn, today=TODAY) == []
+    store.conn.execute("UPDATE ema_line_payments SET payer = ?, payer_group = 'Testcare' WHERE link = ?", (P["commercial"], F.link_no(11)))
+    store.conn.commit()
+    items = ec.unanswered_claims(store.conn, today=TODAY)
+    assert [i["key_parts"] for i in items] == [(f"link:{F.link_no(1)}",)]
+    assert items[0]["hint"].startswith("EMA shows $90.00 paid by Testcare on another of its claims")
+
+
 def test_the_ascs_facility_claim_is_titled_as_such(store, ledger, tmp_path):
     ar = [F.ar_row(claim=F.claim_id(2, facility=True), link=F.link_no(2), status="Denied", denial=0, current=150, patient=1,
                    primary=P["commercial"])]
