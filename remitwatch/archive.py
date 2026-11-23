@@ -1378,17 +1378,27 @@ def archive_ar(conn: sqlite3.Connection, sink: Any, *, today: Any = None, months
         conn.commit()
         conn.execute("BEGIN IMMEDIATE")
         try:
-            n = conn.execute("DELETE FROM ema_ar WHERE file_id = ?", (file_id,)).rowcount
+            before = conn.total_changes
+            if kept:
+                conn.executemany("DELETE FROM ema_ar WHERE file_id = ? AND row_no = ?", [(file_id, r[ri]) for r in rows])
+            else:
+                conn.execute("DELETE FROM ema_ar WHERE file_id = ?", (file_id,))
+            n = conn.total_changes - before
             if n != len(rows):
                 raise ArchiveError("the A/R rows leaving the store do not match the rows archived: nothing was deleted")
             if _have(conn, "ema_report_files"):
-                conn.execute("""UPDATE ema_report_files SET status = 'replaced', live_rows = 0, replaced_by = ?, status_reason = ?
-                                WHERE file_id = ?""",
-                             ("archive:" + name, f"Moved to the archive on {today}: pulled more than {months} months ago.", file_id))
+                if kept:
+                    conn.execute("UPDATE ema_report_files SET live_rows = ?, status_reason = ? WHERE file_id = ?",
+                                 (kept, f"Pulled more than {months} months ago: {len(rows):,} rows moved to the archive on {today}; "
+                                        f"{kept:,} stay while the items they belong to are open.", file_id))
+                else:
+                    conn.execute("""UPDATE ema_report_files SET status = 'replaced', live_rows = 0, replaced_by = ?, status_reason = ?
+                                    WHERE file_id = ?""",
+                                 ("archive:" + name, f"Moved to the archive on {today}: pulled more than {months} months ago.", file_id))
             conn.execute("""INSERT OR REPLACE INTO archive_files (name, kind, sha256, gz_bytes, raw_bytes, records, rows, svc_lo, svc_hi,
                             created_at, run_id, horizon_months, cutoff, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (name, "ar", sha, put["gz_bytes"], len(payload), 1, len(rows), str(as_of)[:10], str(as_of)[:10], _now(),
-                          run_id, None, cut, _canon({"file_id": file_id})))
+                          run_id, None, cut, _canon({"file_id": file_id, "rows_kept": kept})))
             conn.execute("COMMIT")
         except BaseException:
             try:
