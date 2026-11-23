@@ -358,6 +358,97 @@ def test_srfax_answers_are_retried_but_a_send_whose_fate_is_unknown_never_is(tmp
     store.close()
 
 
+class _SRFaxAnswer:
+    status_code = 200
+
+    def json(self):
+        return {"Status": "Success", "Result": [{"SentStatus": "Sent", "Pages": "2"}]}
+
+
+class FlakySession:
+    """requests.Session for the real SRFax client: the first `fail` POSTs drop the connection, the next ones answer."""
+
+    def __init__(self, fail: int = 1):
+        self.fail, self.calls = fail, 0
+
+    def post(self, url, data=None, timeout=None):
+        self.calls += 1
+        if self.calls <= self.fail:
+            raise requests.ConnectionError("Connection reset by peer")
+        return _SRFaxAnswer()
+
+
+def test_a_dropped_srfax_read_is_tried_again_through_the_real_client_and_a_send_never_is(tmp_path):
+    """fax.SRFax._call turns every dropped connection into FaxError(maybe_sent=True), a status check's too. The calls
+    the fax line wraps (needs_H L2: `only` names the reads) are tried again; a send never is, and a wrapper that was
+    not told which calls are reads keeps refusing a maybe-sent error."""
+    store, reg = server_registry(tmp_path)
+    sess = FlakySession()
+    prov = fax.SRFax("id", "pwd", "5025550100", "fax@example.test", url="https://srfax.invalid/api", session=sess)
+    safe = repair.resilient(prov, "srfax", registry=reg, sleep=Waits(), only=("status", "inbox", "fetch", "check", "find_sent"))
+    assert safe.status("F1")["state"] == "sent" and sess.calls == 2
+    sess.calls, sess.fail = 0, 1
+    with pytest.raises(FaxError) as sent:
+        safe.send("5025550100", b"%PDF-1.4", "packet.pdf")
+    assert sent.value.maybe_sent and sess.calls == 1                 # the fax may have gone out: never sent again here
+    sess.calls, sess.fail = 0, 1
+    with pytest.raises(FaxError):
+        repair.resilient(prov, "srfax", registry=reg, sleep=Waits()).status("F2")
+    assert sess.calls == 1
+    store.close()
+
+
+def test_one_outage_is_one_failed_run_and_later_calls_in_that_run_wait_no_more(tmp_path):
+    """dropbox_sync's mirror() downloads file by file and contains each failure. With the wrapped client, an outage
+    holds the first download after its back-off; the next downloads of that run get one plain try each (no back-off),
+    then none; the run counts once, and only three runs in a row raise the alert."""
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+
+    class DownDropbox:
+        def __init__(self):
+            self.calls, self.up = 0, False
+
+        def download(self, path, dest):
+            self.calls += 1
+            if not self.up:
+                raise requests.ConnectionError("Connection reset by peer")
+            return {"path": path}
+    names = [f"r{i:03d}.835" for i in range(8)]                       # eight files of one listing
+    for run in range(3):
+        rl = runlog.start_run("cycle", db_path=db, host="server")
+        store, reg = server_registry(tmp_path, rl)
+        box, waits = DownDropbox(), Waits()
+        client = repair.resilient(box, "dropbox", registry=reg, sleep=waits, until=10 ** 10)
+        for name in names:
+            with pytest.raises(repair.Held):
+                client.download(name, "/tmp/x")
+        assert waits == [2, 8, 30] and box.calls == 4 + repair.PROBES_AFTER_HOLD
+        reg.save()
+        e = reg.entry("network", "dropbox")
+        assert e["failed_runs"] == run + 1 and e["attempts"] == (run + 1) * (4 + repair.PROBES_AFTER_HOLD)
+        held_rows = store.conn.execute("SELECT COUNT(*) FROM repair_log WHERE run_id=? AND outcome='held'", (rl.run_id,)).fetchone()[0]
+        assert held_rows == 1                                          # one hold in the log per run, not one per file
+        alerts = repair.alert_candidates(store.conn)
+        assert (alerts == []) is (run < 2)
+        rl.finish()
+        store.close()
+    (a,) = alerts
+    assert "Tried: 21 attempt(s) over 3 run(s)" in a["title"]
+    # the fourth run: the service comes back during the run; a later download's plain try ends the hold
+    rl = runlog.start_run("cycle", db_path=db, host="server")
+    store, reg = server_registry(tmp_path, rl)
+    box = DownDropbox()
+    client = repair.resilient(box, "dropbox", registry=reg, sleep=Waits(), until=10 ** 10)
+    with pytest.raises(repair.Held):
+        client.download(names[0], "/tmp/x")
+    box.up = True
+    assert client.download(names[1], "/tmp/x") == {"path": names[1]} and client.download(names[2], "/tmp/x") == {"path": names[2]}
+    reg.save()
+    assert repair.alert_candidates(store.conn) == [] and reg.entry("network", "dropbox")["status"] == "ok"
+    rl.finish()
+    store.close()
+
+
 # ====================================================================================================== unreadable file
 def test_an_unreadable_file_is_held_after_two_runs_and_the_others_keep_going(tmp_path):
     def reader(key):
@@ -402,6 +493,47 @@ def test_held_and_refused_reports_become_open_problems(tmp_path):
     store.close()
 
 
+def test_a_held_reports_alert_clears_once_it_is_discarded_or_a_later_export_covers_it(tmp_path):
+    """The alert's next step tells the person to export again and discard the held file. Doing that (or a later export
+    of the same report and years being applied) ends the hold: the alert must not stay up forever. A refused report
+    (the wrong file, columns missing) is explained on the Data tab and is not a self-repair hold."""
+    from remitwatch import ema_reports
+    store, reg = server_registry(tmp_path)
+    c = store.conn
+    logs = str(tmp_path / "data" / "logs")
+    since = runlog._iso()
+    ins = "INSERT INTO ema_report_files (file_id, report, status, status_reason, attempts, received_at, scope) VALUES (?,?,?,?,?,?,?)"
+    c.execute(ins, ("f" * 64, "production", "held", "the file was cut short", 1, since, None))
+    c.execute(ins, ("a" * 64, "ar_report", "refused", "missing_columns", 1, since, None))
+    c.commit()
+    assert repair.sweep_reports(c, reg, since) == 1
+    reg.save()
+    assert [a["key"] for a in repair.alert_candidates(c)] == [["repair", "unreadable_file", "production:" + "f" * 16]]
+    assert ema_reports.decide(c, "f" * 64, "discard", "a biller")["status"] == "discarded"
+    nxt = repair.Registry(conn=c, sink=runlog.DirSink(logs))                        # the next run
+    repair.sweep_reports(c, nxt, runlog._iso())
+    nxt.save()
+    assert repair.alert_candidates(c) == [] and nxt.open_problems() == []
+    assert c.execute("SELECT outcome FROM repair_log ORDER BY id DESC LIMIT 1").fetchone()[0] == "released"
+    # a held export of 2026 that a later export of 2026 replaced: released with no decision needed
+    c.execute(ins, ("b" * 64, "production", "held", "the file was cut short", 1, "2026-11-20T10:00:00+00:00", "2026"))
+    c.commit()
+    third = repair.Registry(conn=c, sink=runlog.DirSink(logs))
+    assert repair.sweep_reports(c, third, "2026-11-20T00:00:00+00:00") == 1
+    third.save()
+    assert len(repair.alert_candidates(c)) == 1
+    c.execute(ins, ("c" * 64, "production", "current", None, 1, "2026-11-21T10:00:00+00:00", "2025"))   # another year: no
+    c.commit()
+    repair.sweep_reports(c, third, runlog._iso())
+    assert third.held("unreadable_file", "production:" + "b" * 16)
+    c.execute(ins, ("d" * 64, "production", "current", None, 1, "2026-11-21T11:00:00+00:00", "2026"))
+    c.commit()
+    repair.sweep_reports(c, third, runlog._iso())
+    third.save()
+    assert repair.alert_candidates(c) == [] and not third.held("unreadable_file", "production:" + "b" * 16)
+    store.close()
+
+
 # ======================================================================================================= derived tables
 def test_a_derived_table_is_rebuilt_once_and_safe_mode_is_asked_when_that_does_not_help(tmp_path):
     store, reg = server_registry(tmp_path)
@@ -442,6 +574,58 @@ def test_killed_runs_are_logged_and_raise_an_alert_when_they_repeat_at_one_step(
     assert p["target"] == "step:detect" and p["status"] == "exhausted" and p["alert"]
     repair.note_run_finished(reg, ["load", "detect"])
     assert reg.open_problems() == []
+    # the steps of a manifest can be given as they are: only the ones that went well count
+    repair.note_killed_runs(reg, [dict(k, run_id="run-20261124T101700Z-dead"), dict(k, run_id="run-20261125T101700Z-dead")])
+    repair.note_run_finished(reg, [{"step": "load", "ok": True}, {"step": "detect", "ok": False}])
+    assert [p["target"] for p in reg.open_problems()] == ["step:detect"]
+    repair.note_run_finished(reg, [{"step": "detect", "ok": True}])
+    assert reg.open_problems() == []
+    store.close()
+
+
+def _serverless_run(state, store, *, killed_at=None, now=None):
+    """A serverless run wired only as needs_H.md C2, C3, C7 and C8 wire it (no note_run_finished anywhere): the run log,
+    the registry, the killed runs noted, the steps, then the registry and the run saved. killed_at: the platform stops
+    the run in that step (nothing after it happens)."""
+    rl = runlog.start_run("cycle", trigger="cron", state=state, host="serverless", now=now)
+    runlog.SCRUB.learn(store.conn)
+    reg = repair.registry_for(rl, conn=store.conn)
+    if rl.manifest["sections"].get("killed_runs"):
+        repair.note_killed_runs(reg, rl.manifest["sections"]["killed_runs"])
+    for name in ("load", "dropbox", "detect", "save_store"):
+        if name == killed_at:
+            rl.step(name).__enter__()
+            runlog._CURRENT.set(None)
+            return None
+        with rl.step(name):
+            pass
+    repair.sweep_reports(store.conn, reg, rl.manifest["started_at"])
+    if reg.dirty:
+        reg.save()
+    rl.save_to_store(store.conn)
+    return rl.finish(state=state)
+
+
+def test_good_runs_after_a_kill_clear_its_count_without_a_hook_and_two_kills_in_a_row_still_alert(tmp_path):
+    """On Vercel, kills (2 GB, 300 s) are the common failure. A kill at one step months after another, with good runs
+    that passed that step between them, is not 'runs keep stopping at the same step'. Two kills there in a row are,
+    including when the run that noted the first kill was itself stopped."""
+    from datetime import timedelta
+    state = LocalState(str(tmp_path / "state"))
+    store = compact_store()
+    t = runlog.utcnow()
+    gap = timedelta(seconds=runlog.SERVERLESS_STALE_SECONDS + 60)
+    _serverless_run(state, store, killed_at="detect", now=t)
+    for i in range(1, 6):                                         # five good runs, each passes detection
+        _serverless_run(state, store, now=t + i * gap)
+    _serverless_run(state, store, killed_at="detect", now=t + 6 * gap)         # weeks later, one kill
+    _serverless_run(state, store, now=t + 7 * gap)
+    assert repair.alert_candidates(store.conn) == []
+    _serverless_run(state, store, killed_at="detect", now=t + 8 * gap)
+    _serverless_run(state, store, killed_at="detect", now=t + 9 * gap)        # noted the kill before, then stopped too
+    _serverless_run(state, store, now=t + 10 * gap)
+    (a,) = repair.alert_candidates(store.conn)
+    assert a["key"] == ["repair", "killed_run", "step:detect"] and "over 2 run(s)" in a["title"]
     store.close()
 
 

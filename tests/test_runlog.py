@@ -203,6 +203,48 @@ def test_structured_values_keep_a_value_only_where_its_key_and_shape_agree():
         assert g not in text, g
 
 
+def test_a_two_letter_surname_is_masked_once_the_store_holds_it(tmp_path):
+    """Le, Ng, Li, Wu, Vu, Do: common surnames of two letters. Once the store holds one, it is masked wherever it is
+    written in capitals; English words and RemitWatch's own two-letter codes stay readable."""
+    runlog.SCRUB.add_names(["LE", "NG"])
+    out = runlog.scrub_text("could not match NG, LE to a claim")
+    assert "NG" not in out and "LE" not in out and "could not match" in out, out
+    store = file_store(tmp_path)
+    feed = tmp_path / "feed"
+    os.makedirs(feed)
+    claims = clean_visits(1, 3, "99214", "223.65", "127.80", cfi="16")
+    claims.append(named_claim(300, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="WU", first="DO"))
+    p = feed / "r001.RMT"
+    p.write_bytes(remit("".join(claims), "100.00", seg_count=99, isa_ctrl="000000001", pay_date="20260415"))
+    store.ingest_835_paths([str(p)])
+    runlog.SCRUB.names.clear()
+    runlog.SCRUB.learn(store.conn)
+    out = runlog.scrub_text("row for WU, DO: Wu was not paid; Do not retry")
+    assert "WU" not in out and "Wu" not in out and "DO" not in out and "Do not" not in out, out   # privacy first
+    out = runlog.scrub_text("No run is going. Check CO-45 or PR-1 as OK: it is on the list, as an item to do.")
+    for word in ("No run", "CO-45", "PR-1", "OK", "it is on the list", "an item to do"):
+        assert word in out, (word, out)
+    assert json.dumps(runlog.scrub({"payer_group": "Anthem WU Plan"})).count("WU") == 0
+    store.close()
+
+
+def test_a_structured_value_under_a_word_key_loses_names_dates_and_ids():
+    """A key that says what its value is (status, result, source, how, action, rule...) does not make free text safe:
+    a value is kept as it is only where the scrubber would keep it anyway, or where its key has a strict shape (a
+    timestamp, a finding id, a code, a version)."""
+    text = "held: Zelphine Orbwick born 02/29/1960 member W123456789"
+    for key in ("status", "result", "source", "how", "action", "rule", "kind", "target", "state", "decision", "payer_group"):
+        out = json.dumps(runlog.scrub({key: text}))
+        for planted in ("Zelphine", "Orbwick", "02/29/1960", "W123456789"):
+            assert planted not in out, (key, out)
+    # what those keys really carry stays as it is
+    kept = {"rule": "hide_rule:Anthem / BCBS|DENIED_AUTH", "status": "in_progress", "source": "paid_later", "how": "rebilled to another payer",
+            "target": "ar:0011223344556677", "python": "3.11.10", "sqlite": "3.40.0", "rule_version": "2.11-b9ce3828",
+            "detect_rules": "2.11", "kind": "signal_changed", "step": "ema:production", "event": "previous_run_killed",
+            "type": "OperationalError", "payer_group": "Humana Gold Plus", "trigger": "cron", "signal": "SECONDARY_NOT_BILLED"}
+    assert runlog.scrub(kept) == kept
+
+
 def test_names_the_store_holds_are_learned(tmp_path):
     store = file_store(tmp_path)
     store.ingest_835_paths(denial_files(tmp_path / "feed"))
@@ -289,19 +331,65 @@ def test_a_serverless_run_writes_one_file_per_run_and_prints_nothing(tmp_path, b
     assert events[1]["detail"]["text"] == "  downloaded 3 files"
 
 
-def test_the_open_marker_is_rewritten_at_most_every_twenty_seconds_on_a_serverless_host(tmp_path, monkeypatch):
+def test_the_open_marker_is_written_at_each_step_and_at_most_every_twenty_seconds_within_one(tmp_path, monkeypatch):
+    """A serverless run's marker (each write is a Dropbox call) is written when a step starts, so a run the platform
+    stops is blamed on the step it was in, and within one long step at most every CHECKPOINT_SECONDS_REMOTE."""
     state = LocalState(str(tmp_path / "state"))
     puts = []
     real = state.put
     monkeypatch.setattr(state, "put", lambda name, data, **kw: (puts.append(name), real(name, data, **kw))[1])
+    clock = [1000.0]
+    monkeypatch.setattr(runlog.time, "monotonic", lambda: clock[0])
+
+    def markers() -> int:
+        return sum(1 for n in puts if n.startswith("logs/open/"))
     rl = runlog.start_run("cycle", state=state, host="serverless")
+    assert markers() == 0                                         # an idle start costs no Dropbox call
     for s in ("load", "ingest", "detect", "save"):
         with rl.step(s):
             pass
-    assert sum(1 for n in puts if n.startswith("logs/open/")) == 1
+    assert markers() == 4
+    with rl.step("detect"):                                       # 50 s in one step, a progress line every 5 s
+        for i in range(10):
+            clock[0] += 5
+            rl.log(f"  compared {i * 1000} items")
+    assert markers() == 7                                         # its start, then at 20 s and 40 s
     rl.checkpoint("detect", force=True)
-    assert sum(1 for n in puts if n.startswith("logs/open/")) == 2
+    assert markers() == 8
     rl.finish()
+
+
+def test_a_serverless_run_killed_in_detection_is_blamed_on_detection_and_keeps_its_trail(tmp_path, monkeypatch):
+    """Vercel stops a run (2 GB, 300 s) without a word. The next run finds its marker: the step it was in, its memory,
+    and its last events, written as the killed run's own record so the bundle and the panel have it."""
+    from remitwatch.state import LocalState
+    state = LocalState(str(tmp_path / "state"))
+    clock = [1000.0]
+    monkeypatch.setattr(runlog.time, "monotonic", lambda: clock[0])
+    rl = runlog.start_run("cycle", state=state, host="serverless")
+    with rl.step("load"):
+        clock[0] += 6                          # the store image loads in 6 s
+    with rl.step("dropbox"):
+        rl.log("  downloaded 3 files")
+        clock[0] += 3                          # nothing big
+    rl.step("detect").__enter__()              # detection starts 9 s after the last marker ...
+    clock[0] += 30
+    rl.log(f"  compared 12,000 items for {FIRST} {LAST}")
+    clock[0] += 170                            # ... and the platform stops the function during it (no finish)
+    runlog._CURRENT.set(None)
+    later = runlog.utcnow() + timedelta(seconds=runlog.SERVERLESS_STALE_SECONDS + 60)
+    nxt = runlog.start_run("cycle", state=state, host="serverless", now=later)
+    killed = nxt.manifest["sections"]["killed_runs"]
+    assert killed[0]["run_id"] == rl.run_id and killed[0]["last_step"] == "detect" and killed[0]["started_at"]
+    m, events = runlog.read_run(runlog.StateSink(state), rl.run_id)
+    assert m["outcome"] == "killed" and m["last_step"] == "detect" and m["memory"]["peak_mb"]
+    assert [s["step"] for s in m["steps"]] == ["load", "dropbox", "detect"] and m["steps"][-1]["ok"] is False
+    assert [e["event"] for e in events][-2:] == ["step_start", "log"] and "12,000 items" in events[-1]["detail"]["text"]
+    nxt.finish()
+    files = all_log_bytes(str(tmp_path / "state" / "logs"))
+    assert_clean(files)
+    p = runlog.panel(None, state)
+    assert {r["run_id"]: r["outcome"] for r in p["runs"]}[rl.run_id] == "killed"
 
 
 def test_a_failing_step_is_logged_once_with_its_stack_and_inputs(tmp_path):
@@ -349,6 +437,136 @@ def test_a_serverless_runs_file_holds_the_note_that_old_logs_were_dropped(tmp_pa
     _m, events = runlog.read_run(runlog.StateSink(state), rl.run_id)
     assert [e["event"] for e in events][-1] == "logs_pruned"
     assert not state.list("logs/runs/2025-01-02")
+
+
+def test_a_contained_error_does_not_keep_the_failed_steps_data_alive(tmp_path):
+    """A reader that failed while holding a downloaded report (60 to 300 MB on Vercel) must not stay in memory through
+    detection because the run log kept its exception (and so its frames) to spot the same exception logged twice."""
+    import gc
+    import weakref
+    rl = runlog.start_run("cycle", db_path=str(tmp_path / "data" / "s.sqlite"), host="server")
+
+    class Report:                                   # stands for a downloaded file or a reader's buffers
+        def __init__(self):
+            self.data = bytearray(8 << 20)
+    refs = []
+
+    def reader():
+        rep = Report()
+        refs.append(weakref.ref(rep))
+        raise ValueError("the file was cut short")
+
+    def ema_waiting_step():
+        try:
+            reader()
+        except ValueError as exc:                   # the hook: runlog.caught(exc, "ema_waiting"), then carry on
+            runlog.caught(exc, "ema_waiting")
+    ema_waiting_step()
+    with rl.step("ema_repair", contain=True) as st:     # a contained step whose handle the caller keeps
+        reader()
+    gc.collect()
+    assert [r() is None for r in refs] == [True, True]
+    assert isinstance(st.failed, ValueError) and [e["step"] for e in rl.manifest["errors"]] == ["ema_waiting", "ema_repair"]
+    assert all(e["stack"] and e["where"] for e in rl.manifest["errors"])
+    try:                                            # the same exception logged twice is still recorded once
+        with rl.step("detect"):
+            raise KeyError("work_state")
+    except KeyError as exc:
+        runlog.caught(exc, "detect")
+    assert len(rl.manifest["errors"]) == 3 and rl.manifest["errors"][-1]["contained"] is True
+    rl.finish()
+
+
+def test_a_progress_line_is_an_error_only_when_the_code_says_so(tmp_path):
+    """The code marks a failed file in its progress lines with the word ERROR. A file whose name holds 'error' is not
+    one: the level is read from the scrubbed line, by whole words."""
+    rl = runlog.start_run("cycle", db_path=str(tmp_path / "data" / "s.sqlite"), host="server")
+    rl.log("  EMA report Billing errors 2026.xlsx: current, 1,234 rows applied")
+    rl.log("  Terror Warnings Inc ERRORS.csv: read")
+    assert [e["level"] for e in rl.events if e["event"] == "log"] == ["info", "info"]
+    assert rl.finish().split(": ")[1].startswith("ok")
+    rl = runlog.start_run("cycle", db_path=str(tmp_path / "data" / "s.sqlite"), host="server")
+    rl.log("  ERROR /Trizetto Data/x/r001.RMT: Dropbox files/download failed 409: path/not_found")
+    rl.log("  WARNING: slow")
+    assert [e["level"] for e in rl.events if e["event"] == "log"] == ["error", "warning"]
+    assert rl.finish().split(": ")[1].startswith("partial")
+
+
+def test_the_panel_counts_the_errors_of_a_partial_run_from_its_lines_too(tmp_path):
+    """dropbox_sync's per-file failure is a progress line ('  ERROR <path>: ...'): an error-level event that makes the
+    run partial. The panel's sentence must count it, not only the exceptions."""
+    store = Store(str(tmp_path / "data" / "remitwatch.sqlite"))
+    rl = runlog.start_run("cycle", db_path=store.db_path, conn=store.conn, host="server")
+    rl.log("  ERROR /Trizetto Data/x/r001.RMT: Dropbox files/download failed 409: path/not_found")
+    rl.log("  ERROR /Trizetto Data/x/r002.RMT: Dropbox files/download failed 409: path/not_found")
+    rl.finish(conn=store.conn)
+    p = runlog.panel(store.conn, runlog.logs_dir_for(store.db_path))
+    assert p["last_run"]["outcome"] == "partial" and p["last_run"]["logged_errors"] == 2
+    assert "2 error(s)" in p["sentence"] and "0 " not in p["sentence"], p["sentence"]
+    store.close()
+
+
+def test_a_cycle_that_dies_before_its_run_log_starts_leaves_a_failed_run(tmp_path):
+    """A store that cannot be opened (a migration bug, a full disk) kills the cycle before its lock and its run log.
+    The hook (needs_H.md P0) records it as a failed run in the logs folder, which needs no store, so the panel and the
+    bundle show it instead of the last good run."""
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    store = Store(db)
+    rl = runlog.start_run("cycle", trigger="schedule", db_path=db, conn=store.conn, host="server")
+    rl.finish(conn=store.conn)                                  # yesterday's good run
+    store.close()
+    try:
+        raise sqlite3.OperationalError(f"duplicate column name: work_state ({LAST})")
+    except sqlite3.OperationalError as exc:
+        line = runlog.record_early_failure(exc, "open_store", trigger="schedule", db_path=db)
+    assert line.split(": ")[1].startswith("failed")
+    c = sqlite3.connect(db)
+    p = runlog.panel(c, runlog.logs_dir_for(db))
+    c.close()
+    assert p["last_run"]["outcome"] == "failed" and p["last_run"]["first_error"]["type"] == "OperationalError"
+    assert "failed" in p["sentence"]
+    m, _events = runlog.read_run(runlog.DirSink(runlog.logs_dir_for(db)), p["last_run"]["run_id"])
+    assert m["errors"][0]["step"] == "open_store" and m["errors"][0]["contained"] is False
+    assert_clean(all_log_bytes(runlog.logs_dir_for(db)))
+    assert runlog.record_early_failure(ValueError("x"), "open_store", db_path=str(tmp_path / "nowhere" / "x" / "s.sqlite")) is not None
+
+
+def test_a_scheduled_child_that_ended_badly_is_noted_once(tmp_path):
+    """The scheduler runs each cycle as a child process. A child that exits with an error before its run log could say
+    so, or is killed, is noted from its exit code; one whose run log already said so is not noted twice."""
+    db = str(tmp_path / "data" / "remitwatch.sqlite")
+    logs = runlog.logs_dir_for(db)
+    t0 = runlog.utcnow()
+    got = runlog.note_child_exit(db, 1, trigger="schedule", started=t0.timestamp() - 5)
+    assert got["outcome"] == "failed" and got["exit_code"] == 1
+    assert runlog.read_index(runlog.DirSink(logs))[-1]["outcome"] == "failed"
+    assert runlog.note_child_exit(db, 0, started=t0.timestamp()) is None
+    rl = runlog.start_run("cycle", trigger="schedule", db_path=db, host="server")     # a child that logged its own end
+    rl.fail(RuntimeError("detection"), "detect")
+    rl.finish()
+    assert runlog.note_child_exit(db, 1, trigger="schedule", started=t0.timestamp()) is None
+    # a child killed (signal 9) after its run log started: its marker is found at once and it is recorded as killed
+    sink = runlog.DirSink(logs)
+    sink.write_json("open/run-20261123T101700Z-dead.json", {"run_id": "run-20261123T101700Z-dead", "kind": "cycle", "host_mode": "server",
+                                                             "started_at": runlog._iso(), "last_step": "detect", "last_at": runlog._iso(),
+                                                             "pid": 2 ** 22 + 777, "host": runlog._host_tag(), "peak_mb": 2900})
+    got = runlog.note_child_exit(db, -9, trigger="schedule", started=t0.timestamp())
+    assert got["outcome"] == "killed" and got["run_id"] == "run-20261123T101700Z-dead"
+    assert [r["outcome"] for r in runlog.read_index(sink) if r["run_id"] == "run-20261123T101700Z-dead"] == ["killed"]
+
+
+def test_the_panel_says_when_runs_stopped_coming(tmp_path):
+    """Runs that usually start every few minutes (server) or every day (Vercel) and stopped: the panel says so."""
+    logs = tmp_path / "logs"
+    sink = runlog.DirSink(str(logs))
+    t = datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        runlog.update_index(sink, {"run_id": f"run-2026112{i}T101700Z-aaa{i}", "started_at": runlog._iso(t + timedelta(days=i)),
+                                   "finished_at": runlog._iso(t + timedelta(days=i, minutes=2)), "outcome": "ok"})
+    fresh = runlog.panel(None, str(logs), now=t + timedelta(days=5, hours=3))
+    assert "usually" not in fresh["sentence"] and fresh["stale"] is False
+    late = runlog.panel(None, str(logs), now=t + timedelta(days=8))
+    assert late["stale"] is True and "No run has started for 3 days" in late["sentence"] and "every day" in late["sentence"]
 
 
 def test_caught_logs_to_the_run_in_progress_and_is_harmless_without_one(tmp_path):

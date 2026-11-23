@@ -446,7 +446,10 @@ def _restated_claims(arch: Archive) -> None:
     repeats an earlier payment on the lines and cancels it at the claim level (OA-23 the prior payment, CO-B13 or PI-B13
     previously paid, PI-22), or a secondary that lists the primary's part on its lines and takes it off the claim (OA-23,
     OA-253, PR-2). The money is the claim's own payment (CLP04): each paid line keeps at most its share of it, so a
-    restatement is never read as a second payment. A gap no claim-level adjustment accounts for is left as the lines say."""
+    restatement is never read as a second payment. A line's share is what it lists now beyond the payer's latest earlier
+    answer of the same line (_line_increases: a line restated unchanged gets none of a payment another line's raise
+    explains); where that cannot be told, the claim's payment is shared in proportion to what the lines list. A gap no
+    claim-level adjustment accounts for is left as the lines say."""
     for cl in arch.claims.values():
         if cl.status == REVERSAL_STATUS:
             continue
@@ -456,9 +459,27 @@ def _restated_claims(arch: Archive) -> None:
         if not paid_lines or net < 0 or listed - net <= 100 or abs(sum(c for _g, _r, c in cl.adj) - (listed - net)) > 100:
             continue
         cl.restated, cl.net = True, net
+        raised = _line_increases(cl, paid_lines, net, arch)
         for x in paid_lines:
             x.restated = True
-            x.standing = min(x.standing or 0, int(round(x.paid * net / listed)))
+            share = raised[x.line_key] if raised is not None else int(round(x.paid * net / listed))
+            x.standing = min(x.standing or 0, share)
+
+
+def _line_increases(cl: Claim, paid_lines: Sequence[Ans], net: int, arch: Archive) -> dict[str, int] | None:
+    """{line_key: the new money} of a restating claim's paid lines: each line's listed payment less the payer's latest
+    earlier answer of the same line (the same claim id and payer, the same line number, else the same charge), never below
+    0. None when a line has no earlier answer, or the raises do not add up to the claim's own payment within $1."""
+    out: dict[str, int] = {}
+    for x in paid_lines:
+        prev = [y for y in arch.answers_of(x) if y.claim is not None and y.claim is not cl and y.claim.pcn == cl.pcn
+                and y.status != REVERSAL_STATUS and (y.paid or 0) > 0 and _before(y, x) and _same_payer_loose(y, x)
+                and ((x.lcn and y.lcn == x.lcn) or abs((y.charge or 0) - (x.charge or 0)) <= 100)]
+        if not prev:
+            return None
+        last = max(prev, key=lambda y: (y.paid_on or "", y.trace or "", y.line_key))
+        out[x.line_key] = max((x.paid or 0) - (last.paid or 0), 0)
+    return out if abs(sum(out.values()) - net) <= 100 else None
 
 
 def _freq_family(freq: Any) -> str:
