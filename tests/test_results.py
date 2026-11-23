@@ -254,6 +254,54 @@ def test_money_paid_before_the_flag_and_taken_back_after_it_is_subtracted_newest
     assert m["taken_back_cents"] == 7000 and m["returned_cents"] == 4000
 
 
+def test_a_reversal_cancels_the_earlier_answer_not_the_new_one_on_its_own_remittance_even_under_another_product(store):
+    # paid 50 dollars before the flag; after it the payer moves the claim to its Medicare Advantage product: it reverses
+    # the 50 (filing indicator 16) and pays 60 on the same remittance, then reverses the 60 and pays 60 again
+    fid, _ = denial(store, 1, flagged="2026-04-10")
+    remit(store, trace=F.check_no(170), paid_on="2026-04-01",
+          claims=[{"pcn": F.claim_id(1, sub=2), "received": "2026-03-05", "lines": [ln("99213", 150, 50, [("CO", "45", 100)])]}])
+    remit(store, trace=F.check_no(171), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "22", "cfi": "16", "received": "2026-03-05", "lines": [ln("99213", -150, -50, [("CO", "45", -100)])]},
+                  {"pcn": F.claim_id(1, sub=3), "status": "1", "cfi": "16", "received": "2026-03-05", "lines": [ln("99213", 150, 60, [("CO", "45", 90)])]}])
+    remit(store, trace=F.check_no(172), paid_on="2026-06-10",
+          claims=[{"pcn": F.claim_id(1, sub=3), "status": "22", "cfi": "16", "received": "2026-03-05", "lines": [ln("99213", -150, -60, [("CO", "45", -90)])]},
+                  {"pcn": F.claim_id(1, sub=4), "status": "1", "cfi": "16", "received": "2026-06-01", "lines": [ln("99213", 150, 60, [("CO", "45", 90)])]}])
+    run(store)
+    d = money_of(store, fid)
+    # after the flag: 50 of the money before it taken back, 60 paid and taken back, 60 paid again: 10 dollars net
+    assert (d["returned"], d["taken_back"]) == (6000, 5000)
+
+
+def test_a_reversal_of_money_no_835_shows_takes_back_emas_check_or_money_paid_before_the_flag(store):
+    # 1: EMA posted the payer's check after the flag (no 835 here carries it); the payer then reverses that payment (its
+    # pair here, the denial, paid nothing) and pays again: the check counts, the reversal takes it back, the new payment counts
+    fid, _ = denial(store, 1, ema_link=F.link_no(1))
+    ema_line(store, F.link_no(1), bill=F.bill_id(1))
+    ema_pay(store, F.link_no(1), posted="2026-04-22", cents=9000, check="PAPER1", in_835=0)
+    remit(store, trace=F.check_no(180), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(1, sub=2), "status": "22", "received": "2026-03-05", "lines": [ln("99213", -150, -90, [("CO", "45", -60)])]},
+                  {"pcn": F.claim_id(1, sub=3), "status": "1", "received": "2026-05-10", "lines": [ln("99213", 150, 90, [("CO", "45", 60)])]}])
+    # 2: the same with EMA's check posted before the flag: money paid before the flag, taken back after it
+    fid2, _ = denial(store, 2, ema_link=F.link_no(2), flagged="2026-04-10")
+    ema_line(store, F.link_no(2), bill=F.bill_id(2))
+    ema_pay(store, F.link_no(2), posted="2026-04-05", cents=9000, check="PAPER2", in_835=0)
+    remit(store, trace=F.check_no(280), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(2, sub=2), "status": "22", "received": "2026-03-05", "lines": [ln("99213", -150, -90, [("CO", "45", -60)])]},
+                  {"pcn": F.claim_id(2, sub=3), "status": "1", "received": "2026-05-10", "lines": [ln("99213", 150, 90, [("CO", "45", 60)])]}])
+    # 3: a reversal nothing here pairs with (the payment is older than the archive): money paid before the flag
+    fid3, _ = denial(store, 3, flagged="2026-04-10")
+    remit(store, trace=F.check_no(380), paid_on="2026-05-20",
+          claims=[{"pcn": F.claim_id(3, sub=2), "status": "22", "received": "2026-01-05", "lines": [ln("99213", -120, -70, [("CO", "45", -50)])]},
+                  {"pcn": F.claim_id(3, sub=3), "status": "1", "received": "2026-05-10", "lines": [ln("99213", 150, 90, [("CO", "45", 60)])]}])
+    run(store)
+    d = money_of(store, fid)
+    assert (d["returned"], d["taken_back"]) == (9000, 0)
+    assert {(e["source"], e["kind"]) for e in d["events"]} == {("production", "payment"), ("835", "payment"), ("835", "takeback")}
+    assert ((money_of(store, fid2) or {}).get("returned", 0), (money_of(store, fid2) or {}).get("taken_back", 0)) == (0, 0)
+    assert (money_of(store, fid3)["returned"], money_of(store, fid3)["taken_back"]) == (2000, 0)
+    assert dash(store)["money"]["returned_cents"] == 11000
+
+
 def test_one_payment_counts_once_to_the_earliest_raised_item_of_its_line(store):
     early, tk = denial(store, 1, flagged="2026-04-01")
     # a second item on the same line and claim, raised later (say the same denial read again under another signal)
