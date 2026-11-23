@@ -1368,6 +1368,33 @@ def test_a_line_the_ar_shows_settled_while_its_postings_leave_money_open_is_a_ga
         s.close()
 
 
+def test_a_denied_line_the_ar_lists_by_its_denial_amount_agrees_with_its_postings(tmp_path):
+    """EMA's A/R lists a denied line with $0 in Current A/R and the money in Denial Amount (the store's exposure_cents).
+    Its postings (the charge, no money since) leave the same $150 open: the line agrees, it is no gap. Found on the real
+    world: 545 lines ($192,106.30) read as 'the postings leave more' because the A/R's current column was compared alone."""
+    s = _new("file", tmp_path)
+    lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
+    try:
+        rows = prod_rows() + [F.production_row(posted=F.D(2026, 3, 6), svc=F.D(2026, 3, 5), cpt="99212", link=F.link_no(4),
+                                               charges=150.0, payer=F.PAYERS["bcbs"])]      # billed, denied, nothing posted since
+        er.ingest_file(s, F.write(str(tmp_path / "p.csv"), F.production_csv(rows)), via="test", ledger=lg, log=lambda *a: None)
+        el.refresh(s, lg, log=lambda *a: None)
+        s.conn.execute("""INSERT INTO ema_ar (file_id, row_no, as_of, link, svc, cpt, party, balance_type, balance_cents,
+                                              denial_cents, exposure_cents, facility)
+                          VALUES ('ar1', 1, '2026-11-20', ?, '2026-03-05', '99212', 'Insurance', 'Debit', 0, 15000, 15000, 0)""",
+                       (F.link_no(4),))
+        s.conn.commit()
+        bal = sc.check_ledger(s.conn, lg, today=TODAY)["ar_balance"]
+        assert (bal["equal"], bal["postings_above"], bal["ar_above"]) == (1, 0, 0), bal
+        s.conn.execute("UPDATE ema_ar SET denial_cents = 10000, exposure_cents = 10000")       # the A/R holds $50 less
+        s.conn.commit()
+        bal = sc.check_ledger(s.conn, lg, today=TODAY)["ar_balance"]
+        assert (bal["postings_above"], bal["postings_above_cents"]) == (1, 5000), bal
+    finally:
+        lg.close()
+        s.close()
+
+
 def test_blind_dollars_leave_out_claims_ema_shows_answered(ledger_world):
     """'billed since then has no payer's answer on file': both March lines have the insurer's answer posted in EMA (a $90
     payment; a CO-197 denial), so they are not blind dollars (finding 11)."""
