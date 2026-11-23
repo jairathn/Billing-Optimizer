@@ -2122,9 +2122,31 @@ def brief(_: str = Depends(require_auth)):
         token = _WINDOWS_MEMO.set({})
         try:
             out["badges"] = {c: _bucket(c, None, TODO_STATUSES, "week", state="todo") for c in BADGE_CATEGORIES}
+            _todo_soon(out.get("work") or {})
         finally:
             _WINDOWS_MEMO.reset(token)
     return out
+
+
+def _todo_soon(work: dict) -> None:
+    """Today's step 1 (what closes within 7 days, or within 30) and its chips by kind of work, counted as the list its
+    Start button opens: the to-do statuses closing then, the work now and the follow-ups due among them (desk.js
+    deskFilter), as the red numbers on the tabs are. insights.brief counts them by status and window alone, which also
+    counted an item that only waits on the payer, and the list did not show it."""
+    from .insights import WORK_TYPES
+    meta = {t["key"]: t for t in WORK_TYPES}
+    total = work.setdefault("total", {})
+    types = {t["key"]: t for t in work.get("types") or []}
+    for dl, key in (("week", "due7"), ("month", "due30")):
+        got = _desk_kinds(CLAIM_CATEGORIES, None, TODO_STATUSES, dl, state="todo")
+        total[key + "_n"], total[key + "_cents"] = got["n"], got["cents"]
+        by = {k["key"]: k for k in got["kinds"]}
+        for k in by:
+            if k not in types:          # never expected (7 and 30 days are inside the window), but a chip is never lost
+                types[k] = dict(meta.get(k, {"key": k}), n=0, cents=0, due7_n=0, due7_cents=0, due30_n=0, due30_cents=0, working_n=0)
+                work.setdefault("types", []).append(types[k])
+        for k, t in types.items():
+            t[key + "_n"], t[key + "_cents"] = (by.get(k) or {}).get("n", 0), (by.get(k) or {}).get("cents", 0)
 
 
 @app.get("/api/worklist/counts")

@@ -1542,22 +1542,28 @@ def test_any_new_coverage_gap_and_any_rise_in_money_given_up_raise_their_alerts(
 
 
 def test_a_line_that_left_the_ar_while_its_postings_leave_money_open_is_a_gap(tmp_path):
-    """EMA's A/R lists only lines with a balance: a line inside the dates the A/R covers that it no longer lists, while
-    its postings leave $150 open, is a gap (left_ar); a line whose postings leave nothing is settled (finding 10)."""
+    """A line an earlier A/R listed and the newest no longer does (settled in EMA: ema_ar_items.absent_since) while its
+    postings still leave $150 open is a gap (left_ar); one that left with nothing open is settled; a line no A/R ever
+    listed is not compared (finding 10)."""
     s = _new("file", tmp_path)
     lg = el.Ledger.open(str(tmp_path / "ema_ledger.sqlite"))
     try:
         rows = prod_rows() + [F.production_row(posted=F.D(2026, 3, 6), svc=F.D(2026, 3, 5), cpt="99212", link=F.link_no(4),
-                                               charges=150.0, payer=F.PAYERS["bcbs"])]      # billed, never answered
+                                               charges=150.0, payer=F.PAYERS["bcbs"]),      # billed, never answered
+                              F.production_row(posted=F.D(2026, 3, 7), svc=F.D(2026, 3, 6), cpt="99212", link=F.link_no(5),
+                                               charges=120.0, payer=F.PAYERS["bcbs"])]      # never on any A/R
         er.ingest_file(s, F.write(str(tmp_path / "p.csv"), F.production_csv(rows)), via="test", ledger=lg, log=lambda *a: None)
         el.refresh(s, lg, log=lambda *a: None)
         s.conn.executemany("""INSERT INTO ema_ar (file_id, row_no, as_of, link, svc, cpt, party, balance_cents, facility)
                               VALUES ('ar1', ?, '2026-11-20', ?, ?, ?, 'Insurance', 0, 0)""",
                            [(1, F.link_no(1), "2026-03-02", "99213"), (2, F.link_no(9), "2026-03-09", "99212")])
+        s.conn.executemany("""INSERT INTO ema_ar_items (item_key, party, link, cpt, svc, first_seen, last_seen, snapshots, absent_since)
+                              VALUES (?, 'Insurance', ?, ?, ?, '2026-10-30', '2026-11-13', 3, '2026-11-20')""",
+                           [("k4", F.link_no(4), "99212", "2026-03-05"), ("k2", F.link_no(2), "99214", "2026-03-03")])
         s.conn.commit()
         bal = sc.check_ledger(s.conn, lg, today=TODAY)["ar_balance"]
         assert (bal["left_ar"], bal["left_ar_cents"]) == (1, 15000), bal
-        assert bal["settled"] == 1 and bal["equal"] == 1          # the CO-197 line (written off: nothing open) and line 1
+        assert bal["settled"] == 1 and bal["equal"] == 1 and bal["left_lines"] == 2      # line 2 left with nothing open
     finally:
         lg.close()
         s.close()

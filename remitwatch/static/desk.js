@@ -81,14 +81,16 @@ function viewName(f){
   return [st, d, ['open,in_progress','all'].includes(f.status) ? '' : s].filter(Boolean).join(' · ');
 }
 // a desk's filter: the defaults, then what was chosen. An older link that names a status or a filing date and no state
-// (Today's steps, the guide, the red number on a tab, Bigger wins) lists by those; one that asks for work to do (To do, or
-// To do and started) lists the work now and the follow-ups due among them, never an item that only waits on the payer or
-// needs no work. A link about what was sent, paid or let go keeps every state.
+// (Today's steps, the guide, the red number on a tab, Bigger wins) lists by those. One that asks for the work closing soon
+// (To do, or To do and started, closing within 7 or 30 days: Today's step 1 and the red number on a tab) lists the work
+// now and the follow-ups due among them, never an item that only waits on the payer, and its number is counted the same
+// way (/api/brief). Any other keeps every state, as the number beside it was counted.
 const TODO_LINK = new Set(['open', 'open,in_progress', 'in_progress']);
+const SOON_LINK = new Set(['week', 'month']);
 function deskFilter(key){
   const given = state.filt[key] || {}, f = Object.assign({}, DESK_DEFAULTS, given);
   if(!('state' in given) && ('status' in given || 'deadline' in given)){
-    f.state = TODO_LINK.has(f.status) && !['expired','missed'].includes(f.deadline || '') ? 'todo' : '';
+    f.state = TODO_LINK.has(f.status) && SOON_LINK.has(f.deadline || '') ? 'todo' : '';
     if(!('sort' in given)) f.sort = 'deadline';
   }
   return f;

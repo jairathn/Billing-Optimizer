@@ -2348,9 +2348,10 @@ def _conservation(conn: sqlite3.Connection, lc: sqlite3.Connection, today: str, 
 
 def _ar_lines(conn: sqlite3.Connection) -> dict | None:
     """EMA's newest A/R by line (EMA claim number, date of service, code), the insurance and the patient rows together:
-    {'lines': {(link, svc, cpt): cents}, 'spans': [(first service date, last service date, as-of day)], 'as_of'}, from
-    each current A/R file of the catalog on its own day, or the newest day's rows when the catalog lists none. The span a
-    file covers is its catalog's service dates, else the service dates of its rows. None when there is no A/R."""
+    {'lines': {(link, svc, cpt): cents}, 'spans': [(first service date, last service date, as-of day)], 'as_of', 'left':
+    lines an earlier A/R listed that the newest no longer does}, from each current A/R file of the catalog on its own day, or
+    the newest day's rows when the catalog lists none. The span a file covers is its catalog's service dates, else the
+    service dates of its rows (it picks the as-of day a month's postings are cut at). None when there is no A/R."""
     if not _has_table(conn, "ema_ar") or not conn.execute("SELECT 1 FROM ema_ar LIMIT 1").fetchone():
         return None
     files = []
@@ -2378,18 +2379,26 @@ def _ar_lines(conn: sqlite3.Connection) -> dict | None:
         take("as_of = ?", (newest,), None, None, newest)
     if not spans:
         return None
-    return {"lines": dict(lines), "spans": spans, "as_of": max(s[2] for s in spans)}
+    left = set()
+    if _has_table(conn, "ema_ar_items") and "absent_since" in _cols(conn, "ema_ar_items"):
+        # lines an earlier A/R listed and the newest no longer does (settled in EMA): the A/R's own history
+        left = {(int(link), str(svc)[:10], cpt or "") for link, svc, cpt in conn.execute(
+            """SELECT link, svc, cpt FROM ema_ar_items WHERE absent_since IS NOT NULL AND link IS NOT NULL""")}
+    return {"lines": dict(lines), "spans": spans, "as_of": max(s[2] for s in spans), "left": left}
 
 
 class _ArCompare:
-    """EMA's newest A/R against what each line's postings leave up to the A/R's day, inside the service dates the A/R
-    covers: both ways (the A/R holds more: a posting missing from Production, or an A/R pulled before the postings; the
-    postings leave more: a payment or adjustment missing from Production), a line the A/R no longer lists while its
-    postings leave money open (settled in EMA), and an A/R line with no posting at all. A difference that patient money
-    paid on no claim number, by the same patient on the same day, can account for is counted beside, not as a gap."""
+    """EMA's newest A/R against what each line's postings leave up to the A/R's day: for a line on the A/R, both ways (the
+    A/R holds more: a posting missing from Production, or an A/R pulled before the postings; the postings leave more: a
+    payment or adjustment missing from Production); for a line that LEFT the A/R (an earlier A/R listed it, the newest no
+    longer does: settled in EMA, ema_ar_items.absent_since) while its postings still leave money open, a gap; an A/R line
+    with no posting at all, a gap. A line no A/R ever listed is not compared (the A/R lists open balances, and not every
+    patient balance). A difference that patient money paid on no claim number, by the same patient on the same day, can
+    account for is counted beside, not as a gap."""
 
     def __init__(self, ar: dict, facility: set[int]):
         self.ar = ar["lines"]
+        self.left = set(ar.get("left") or ()) - set(self.ar)
         self.spans = ar["spans"]
         self.as_of_day = ar["as_of"]
         self.fac = facility
@@ -2402,9 +2411,6 @@ class _ArCompare:
         hits = [a for lo, hi, a in self.spans if lo[:7] <= month <= hi[:7]]
         return min(hits) if hits else None
 
-    def covered(self, svc: str) -> bool:
-        return any(lo <= svc <= hi for lo, hi, _a in self.spans)
-
     def _off(self, kind: str, key: tuple, cents: int) -> None:
         self.n[kind] += 1
         self.cents[kind] += cents
@@ -2413,10 +2419,12 @@ class _ArCompare:
     def month(self, lines: dict[tuple, list], unlinked_pd: dict[tuple, int]) -> None:
         for (link, svc, cpt), v in lines.items():
             key = (int(link), str(svc)[:10], cpt or "")
-            if key[0] in self.fac or not self.covered(key[1]):
+            if key[0] in self.fac:
                 continue
-            led = int(v[11] or 0)
             a = self.ar.get(key)
+            if a is None and key not in self.left:
+                continue                        # no A/R ever listed it: nothing to compare with
+            led = int(v[11] or 0)
             if a is not None:
                 self.seen.add(key)
                 if a - led > 100:
@@ -2439,8 +2447,8 @@ class _ArCompare:
         for key, bal in self.ar.items():
             if key not in self.seen and key[0] not in self.fac and abs(bal) > 100:
                 self._off("not_in_postings", key, abs(bal))
-        info = {"as_of": self.as_of_day, "lines": len(self.ar), "equal": self.n["equal"], "settled": self.n["settled"],
-                "explained": self.n["explained"], "explained_cents": self.cents["explained"]}
+        info = {"as_of": self.as_of_day, "lines": len(self.ar), "left_lines": len(self.left), "equal": self.n["equal"],
+                "settled": self.n["settled"], "explained": self.n["explained"], "explained_cents": self.cents["explained"]}
         for kind in ("ar_above", "postings_above", "left_ar", "not_in_postings"):
             info[kind] = self.n[kind]
             info[kind + "_cents"] = self.cents[kind]

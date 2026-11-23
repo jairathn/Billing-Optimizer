@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS archive_files (name TEXT PRIMARY KEY, kind TEXT, sha2
     raw_bytes INTEGER, records INTEGER, rows INTEGER, svc_lo TEXT, svc_hi TEXT, created_at TEXT, run_id TEXT,
     horizon_months INTEGER, cutoff TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS archive_bills (bill TEXT PRIMARY KEY, file TEXT, digest TEXT, svc_lo TEXT, svc_hi TEXT,
-    claims INTEGER, lines INTEGER, findings INTEGER, archived_at TEXT, run_id TEXT);
+    claims INTEGER, lines INTEGER, findings INTEGER, archived_at TEXT, run_id TEXT, plb_seen INTEGER);
 CREATE INDEX IF NOT EXISTS ix_archive_bills_file ON archive_bills(file);
 CREATE TABLE IF NOT EXISTS archive_ids (id TEXT, kind TEXT, bill TEXT, PRIMARY KEY (id, kind, bill)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ix_archive_ids_bill ON archive_ids(bill);
@@ -465,6 +465,10 @@ def _read_lines(sink: Any, name: str) -> Iterator[dict]:
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(DDL)
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    if "plb_seen" not in _cols(conn, "archive_bills"):
+        # the newest provider-level adjustment the store held when the bill left: a payer's offset naming the bill after
+        # that brings it back (restore_touched). An index written before this column treats every offset as new.
+        conn.execute("ALTER TABLE archive_bills ADD COLUMN plb_seen INTEGER")
 
 
 def _have(conn: sqlite3.Connection, table: str) -> bool:
@@ -519,11 +523,21 @@ def _bill_fn(pcn: Any, claim_key: Any) -> str | None:
     return ("#" + str(claim_key)) if claim_key else None
 
 
+def _ebill_fn(claim_id: Any) -> str | None:
+    """The bill of a claim id as EMA's reports write it (ema_reports.bill_of_claim: the ASC's facility claims keep their F),
+    so a bill EMA's tables name meets the archive's own bills."""
+    if not claim_id:
+        return None
+    from .ema_reports import bill_of_claim
+    return bill_of_claim(str(claim_id))
+
+
 def _register(conn: sqlite3.Connection) -> None:
-    try:
-        conn.create_function("rw_arc_bill", 2, _bill_fn, deterministic=True)
-    except (TypeError, sqlite3.NotSupportedError):        # an SQLite without deterministic functions
-        conn.create_function("rw_arc_bill", 2, _bill_fn)
+    for name, n, fn in (("rw_arc_bill", 2, _bill_fn), ("rw_arc_ebill", 1, _ebill_fn)):
+        try:
+            conn.create_function(name, n, fn, deterministic=True)
+        except (TypeError, sqlite3.NotSupportedError):        # an SQLite without deterministic functions
+            conn.create_function(name, n, fn)
 
 
 def _norm_ref(text: Any) -> str:
@@ -597,24 +611,24 @@ def effective_horizon(conn: sqlite3.Connection, *, horizon: int | None = None, b
 
 def _plan_tables(conn: sqlite3.Connection) -> None:
     """Temporary tables: every claim with its bill (arc_cb), every EMA and 837 claim id with its bill (arc_xb), and the
-    newest service day of each bill with its counts (arc_bd)."""
+    newest service day of each bill with its counts (arc_bd). `ebill` is the same bill as EMA's reports write it."""
     _register(conn)
     for t in ("arc_cb", "arc_xb", "arc_dates", "arc_bd"):
         conn.execute(f"DROP TABLE IF EXISTS temp.{t}")
-    conn.execute("CREATE TEMP TABLE arc_cb (claim_key TEXT PRIMARY KEY, bill TEXT, pcn TEXT)")
+    conn.execute("CREATE TEMP TABLE arc_cb (claim_key TEXT PRIMARY KEY, bill TEXT, pcn TEXT, ebill TEXT)")
     conn.execute("""INSERT OR IGNORE INTO temp.arc_cb SELECT claim_key, rw_arc_bill(patient_control_number, claim_key),
-                    patient_control_number FROM claims WHERE claim_key IS NOT NULL""")
+                    patient_control_number, rw_arc_ebill(patient_control_number) FROM claims WHERE claim_key IS NOT NULL""")
     conn.execute("CREATE INDEX temp.ix_arc_cb_bill ON arc_cb(bill)")
-    conn.execute("CREATE TEMP TABLE arc_xb (id TEXT, kind TEXT, bill TEXT, PRIMARY KEY (id, kind))")
+    conn.execute("CREATE TEMP TABLE arc_xb (id TEXT, kind TEXT, bill TEXT, ebill TEXT, PRIMARY KEY (id, kind))")
     if _have(conn, "ema_rows"):
-        conn.execute("""INSERT OR IGNORE INTO temp.arc_xb SELECT claim_id, 'ema', rw_arc_bill(claim_id, NULL)
+        conn.execute("""INSERT OR IGNORE INTO temp.arc_xb SELECT claim_id, 'ema', rw_arc_bill(claim_id, NULL), rw_arc_ebill(claim_id)
                         FROM (SELECT DISTINCT claim_id FROM ema_rows WHERE claim_id IS NOT NULL AND claim_id <> '')""")
     if _have(conn, "claims_837"):
-        conn.execute("""INSERT OR IGNORE INTO temp.arc_xb SELECT pcn, '837', rw_arc_bill(pcn, NULL) FROM
+        conn.execute("""INSERT OR IGNORE INTO temp.arc_xb SELECT pcn, '837', rw_arc_bill(pcn, NULL), rw_arc_ebill(pcn) FROM
                         (SELECT DISTINCT patient_control_number pcn FROM claims_837 WHERE patient_control_number IS NOT NULL
                          AND patient_control_number <> '')""")
     if _have(conn, "lines_837"):
-        conn.execute("""INSERT OR IGNORE INTO temp.arc_xb SELECT pcn, '837', rw_arc_bill(pcn, NULL) FROM
+        conn.execute("""INSERT OR IGNORE INTO temp.arc_xb SELECT pcn, '837', rw_arc_bill(pcn, NULL), rw_arc_ebill(pcn) FROM
                         (SELECT DISTINCT patient_control_number pcn FROM lines_837 WHERE patient_control_number IS NOT NULL
                          AND patient_control_number <> '')""")
     conn.execute("CREATE INDEX temp.ix_arc_xb_bill ON arc_xb(bill)")
@@ -641,9 +655,39 @@ def _plan_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX temp.ix_arc_bd ON arc_bd(bill)")
 
 
+# EMA's tables that name a bill, as (table, its bill column, its claim id column): the posting ledger's summaries (kept
+# for the ledger's retention: a line with a payer's denial posted, a payment under a check that is no 835, a line not yet
+# paid, ...), the claim-number map, the A/R's claim ids and the A/R rows themselves
+EMA_NAMES = (("ema_lines", "bill", "claim_id"), ("ema_link_map", "bill", "claim_id"), ("ema_claim_links", "bill", "claim_id"),
+             ("ema_ar", "bill", "claim_id"))
+HELD_EMA = "EMA still lists it"
+
+
+def _ema_named(conn: sqlite3.Connection) -> int:
+    """temp.arc_eb: every bill EMA's reports in the store still name (EMA_NAMES), in EMA's own form of a bill. While they
+    do, the bill's 835 rows stay: EMA's checks (denials only EMA saw, claims no payer answered, the A/R buckets) find the
+    remittance that answered a line by its bill, so a bill whose 835 left while EMA still listed it would come back as a
+    denial "with no remittance on file". EMA's summaries let go of a bill with the ledger's own retention. Returns the
+    number of bills named."""
+    _register(conn)
+    conn.execute("DROP TABLE IF EXISTS temp.arc_eb")
+    conn.execute("CREATE TEMP TABLE arc_eb (ebill TEXT PRIMARY KEY)")
+    for table, bill_col, claim_col in EMA_NAMES:
+        if not _have(conn, table):
+            continue
+        cols = set(_cols(conn, table))
+        if bill_col in cols:
+            conn.execute(f"""INSERT OR IGNORE INTO temp.arc_eb SELECT DISTINCT {bill_col} FROM {table}
+                             WHERE {bill_col} IS NOT NULL AND {bill_col} <> ''""")
+        if claim_col in cols:
+            conn.execute(f"""INSERT OR IGNORE INTO temp.arc_eb SELECT e FROM (SELECT DISTINCT rw_arc_ebill({claim_col}) e
+                             FROM {table} WHERE {claim_col} IS NOT NULL AND {claim_col} <> '') WHERE e IS NOT NULL""")
+    return conn.execute("SELECT COUNT(*) FROM temp.arc_eb").fetchone()[0]
+
+
 def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
     """Bills that stay hot whatever their age, with the reason: an open item, a worked or open pattern listing one of
-    their lines, a recent reopening, a reopening asked for."""
+    their lines, a recent reopening, a reopening asked for, EMA's reports still listing the bill."""
     held: dict[str, str] = {}
     if _have(conn, "findings"):
         fcols = set(_cols(conn, "findings"))
@@ -696,6 +740,11 @@ def _held_bills(conn: sqlite3.Connection, today: str) -> dict[str, str]:
         held.setdefault(b, "reopened")
     for (b,) in conn.execute("SELECT DISTINCT bill FROM archive_requests"):
         held.setdefault(b, "reopen asked")
+    if _ema_named(conn):
+        for t in ("arc_cb", "arc_xb"):
+            for (b,) in conn.execute(f"SELECT DISTINCT bill FROM temp.{t} WHERE ebill IN (SELECT ebill FROM temp.arc_eb)"):
+                held.setdefault(b, HELD_EMA)
+    conn.execute("DROP TABLE IF EXISTS temp.arc_eb")
     return held
 
 
@@ -1023,7 +1072,10 @@ def _drop_from_keys(conn: sqlite3.Connection, bills: Iterable[str]) -> None:
         conn.executemany(f"DELETE FROM temp.{t} WHERE bill = ?", gone)
 
 
-def _index_rows(rec: dict, name: str, at: str, run_id: str | None) -> tuple[tuple, list[tuple], list[tuple]]:
+BILL_COLS = ("bill", "file", "digest", "svc_lo", "svc_hi", "claims", "lines", "findings", "archived_at", "run_id", "plb_seen")
+
+
+def _index_rows(rec: dict, name: str, at: str, run_id: str | None, plb_seen: int | None = None) -> tuple[tuple, list[tuple], list[tuple]]:
     t = rec["tables"]
 
     def dicts(table: str) -> list[dict]:
@@ -1044,7 +1096,7 @@ def _index_rows(rec: dict, name: str, at: str, run_id: str | None) -> tuple[tupl
             if r.get("patient_control_number"):
                 ids.add((str(r["patient_control_number"]).upper(), "837"))
     bill_row = (rec["bill"], name, rec["digest"], rec.get("svc_lo"), rec.get("svc_hi"), len(claims),
-                len((t.get("lines") or {}).get("rows") or []), len(findings), at, run_id)
+                len((t.get("lines") or {}).get("rows") or []), len(findings), at, run_id, plb_seen)
     id_rows = [(i, k, rec["bill"]) for i, k in sorted(ids) if i]
     f_rows = [(f.get("finding_id"), rec["bill"], f.get("signal"), f.get("category"), f.get("status"), f.get("work_state"),
                f.get("payer_group"), f.get("service_date"), f.get("payment_date"), f.get("appeal_deadline"),
@@ -1102,9 +1154,11 @@ def _commit_batch(conn: sqlite3.Connection, records: list[dict], counts: dict, n
                          (name, "bills", meta["sha256"], meta["gz_bytes"], meta["raw_bytes"], len(records), meta["rows"],
                           meta.get("svc_lo"), meta.get("svc_hi"), at, run_id, meta.get("horizon_months"), meta.get("cutoff"),
                           _canon({"tables": counts, "bills": len(records), "indexed": len(keep)})))
+        plb_seen = conn.execute("SELECT MAX(id) FROM plb").fetchone()[0] if _have(conn, "plb") else None
         for rec in keep:
-            bill_row, id_rows, f_rows = _index_rows(rec, name, at, run_id)
-            conn.execute("INSERT OR REPLACE INTO archive_bills VALUES (?,?,?,?,?,?,?,?,?,?)", bill_row)
+            bill_row, id_rows, f_rows = _index_rows(rec, name, at, run_id, plb_seen or 0)
+            conn.execute(f"INSERT OR REPLACE INTO archive_bills ({','.join(BILL_COLS)}) VALUES ({','.join('?' * len(BILL_COLS))})",
+                         bill_row)
             conn.execute("DELETE FROM archive_ids WHERE bill = ?", (rec["bill"],))
             conn.executemany("INSERT OR IGNORE INTO archive_ids (id, kind, bill) VALUES (?,?,?)", id_rows)
             conn.executemany("INSERT OR REPLACE INTO archive_findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", f_rows)
@@ -1959,31 +2013,99 @@ def process_requests(conn: sqlite3.Connection, *, sink: Any, today: Any = None, 
     return out
 
 
+# a payer's provider-level adjustments that take a claim's money back or carry it forward (an offset, a forwarding
+# balance, an authorized return): naming an archived bill, they are new data for it
+PLB_TOUCH = ("WO", "FB", "72")
+
+
+def _ref_forms(ref: Any) -> list[str]:
+    """The forms a provider-level adjustment's reference can name a claim by: the whole reference, and its first word
+    (some payers add the payer's claim number or a date after the claim id)."""
+    raw = str(ref or "").strip().upper()
+    if not raw:
+        return []
+    out = [raw]
+    first = re.split(r"[\s:;,]+", raw)[0]
+    if first and first != raw:
+        out.append(first)
+    return out
+
+
+def _plb_touched(conn: sqlite3.Connection) -> set[str]:
+    """Archived bills a payer's offset (PLB WO, FB or 72) names, added to the store after the bill left (its row id is
+    newer than the bill's plb_seen): the takeback reverses a payment the rules counted, and opens a dispute window from
+    the remittance that took the money. Matched by the claim id (any submission of the bill) or the payer's claim number."""
+    if not _have(conn, "plb") or "reference" not in _cols(conn, "plb"):
+        return set()
+    lo = conn.execute("SELECT MIN(COALESCE(plb_seen, 0)) FROM archive_bills").fetchone()[0]
+    if lo is None:
+        return set()
+    out: set[str] = set()
+    q = ",".join("?" * len(PLB_TOUCH))
+    for pid, ref in conn.execute(f"""SELECT id, reference FROM plb WHERE id > ? AND reason_code IN ({q})
+                                     AND COALESCE(reference, '') <> ''""", (lo,) + PLB_TOUCH).fetchall():
+        bills: set[str] = set()
+        for form in _ref_forms(ref):
+            for cand in (_bill_of(form), form):
+                if cand and conn.execute("SELECT 1 FROM archive_bills WHERE bill = ?", (cand,)).fetchone():
+                    bills.add(cand)
+            bills.update(b for (b,) in conn.execute("SELECT bill FROM archive_ids WHERE id = ? AND kind IN ('pcn','ema','837')", (form,)))
+            norm = _norm_ref(form)
+            if norm:
+                bills.update(b for (b,) in conn.execute("SELECT bill FROM archive_ids WHERE id = ? AND kind = 'payer_ref'", (norm,)))
+        for b in bills:
+            seen = conn.execute("SELECT COALESCE(plb_seen, 0) FROM archive_bills WHERE bill = ?", (b,)).fetchone()
+            if seen is not None and pid > seen[0]:
+                out.add(b)
+    return out
+
+
+def _ema_touched(conn: sqlite3.Connection) -> set[str]:
+    """Archived bills EMA's reports name again (a new A/R pull lists the claim, the posting ledger holds new postings for
+    it, the claim-number map ties a claim number to it): the bill comes back so EMA's checks find its remittances."""
+    if not _ema_named(conn):
+        conn.execute("DROP TABLE IF EXISTS temp.arc_eb")
+        return set()
+    got = {b for (b,) in conn.execute("""SELECT DISTINCT bill FROM archive_ids WHERE kind IN ('pcn','ema','837')
+                                         AND rw_arc_ebill(id) IN (SELECT ebill FROM temp.arc_eb)""")}
+    got |= {b for (b,) in conn.execute("SELECT bill FROM archive_bills WHERE bill IN (SELECT ebill FROM temp.arc_eb)")}
+    conn.execute("DROP TABLE IF EXISTS temp.arc_eb")
+    return got
+
+
 def restore_touched(conn: sqlite3.Connection, *, sink: Any, today: Any = None, run_id: str | None = None, limit: int = 500,
                     log: Callable[..., Any] | None = None) -> dict:
-    """Before detection: an archived bill that has new rows in the store (a late remittance, a reprocessing, an EMA row)
-    comes back whole, so the rules see its history. Returns {'restored', 'bills_seen', 'changed'}."""
+    """Before detection: an archived bill that has new rows in the store comes back whole, so the rules see its history:
+    a late remittance or a reprocessing of its claim, a weekly EMA export row or an 837 for it, a payer's offset that
+    takes its money back (PLB WO, FB or 72 added after it left), or EMA's reports naming it again (the A/R, the posting
+    ledger's summaries, the claim-number map). Returns {'restored', 'errors', 'changed', 'more', 'why': {reason: n}}."""
     ensure_schema(conn)
-    out = {"restored": 0, "errors": 0, "changed": False}
+    out: dict = {"restored": 0, "errors": 0, "changed": False, "more": False, "why": {}}
     archived = {b for (b,) in conn.execute("SELECT bill FROM archive_bills")}
     if not archived:
         return out
-    touched: set[str] = set()
+    why: dict[str, str] = {}
     for (pcn,) in conn.execute("SELECT DISTINCT patient_control_number FROM claims WHERE patient_control_number IS NOT NULL"):
         b = _bill_of(pcn)
         if b in archived:
-            touched.add(b)
+            why.setdefault(b, "new remittance")
     for table, col in (("ema_rows", "claim_id"), ("claims_837", "patient_control_number"), ("lines_837", "patient_control_number")):
         if _have(conn, table):
             for (x,) in conn.execute(f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL"):
                 b = _bill_of(x)
                 if b in archived:
-                    touched.add(b)
+                    why.setdefault(b, "new EMA export row" if table == "ema_rows" else "new 837")
+    for b in _plb_touched(conn):
+        why.setdefault(b, "payer offset")
+    for b in _ema_touched(conn):
+        why.setdefault(b, "EMA lists it again")
+    touched = set(why)
     for b in sorted(touched)[:limit]:
         try:
             restore(conn, b, sink=sink, reason="new data arrived", run_id=run_id, today=today, log=log)
             out["restored"] += 1
             out["changed"] = True
+            out["why"][why[b]] = out["why"].get(why[b], 0) + 1
         except ArchiveError:
             out["errors"] += 1
     out["more"] = len(touched) > limit

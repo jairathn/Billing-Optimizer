@@ -813,6 +813,35 @@ def test_the_red_number_on_a_tab_counts_the_work_closing_this_week_never_an_item
     assert wid in {i["finding_id"] for i in window["items"]}            # the window alone would have counted it
 
 
+def test_todays_step_one_counts_what_its_start_button_opens_on_both_hosts(site):
+    """Review C1 (medium), the other half of the red number's fix: Today's "Work what closes this week" (and the 30-day
+    line, and its chips by kind of work) was counted by status and window alone, so an item that only waits on the payer
+    was in the number while the list its Start button opens (Work now and the follow-ups due) did not show it."""
+    wid = None
+    if site.mode == "server":
+        conn = _store(site)
+        wid, work = [r[0] for r in conn.execute("SELECT finding_id FROM findings WHERE category='denial' AND status='open' "
+                                                "ORDER BY finding_id LIMIT 2")]
+        today = dt.datetime.now(dt.timezone.utc).date()              # Today and the window filters read the real date
+        conn.execute("UPDATE findings SET work_state='waiting', appeal_deadline=?, follow_up_on=? WHERE finding_id=?",
+                     ((today + dt.timedelta(days=3)).isoformat(), (today + dt.timedelta(days=20)).isoformat(), wid))
+        conn.execute("UPDATE findings SET work_state='work_now', appeal_deadline=?, follow_up_on=NULL WHERE finding_id=?",
+                     ((today + dt.timedelta(days=2)).isoformat(), work))
+        conn.commit()
+        conn.close()
+    b = site.c.get("/api/brief").json()
+    w = b["work"]["total"]
+    for dl, key in (("week", "due7"), ("month", "due30")):
+        opened = _items(site, category=CATS, live=1, status="open,in_progress", deadline=dl, state="todo")
+        assert (w[key + "_n"], w[key + "_cents"]) == (opened["total"], opened["shortfall_cents"] or 0), dl
+        assert sum(t[key + "_n"] for t in b["work"]["types"]) == w[key + "_n"], dl
+        if wid:
+            assert wid not in {i["finding_id"] for i in opened["items"]}
+    assert w["due7_n"] == sum(v["n"] for v in b["badges"].values())
+    if wid:
+        assert w["due7_n"] >= 1
+
+
 def test_show_again_removes_the_rule_it_lists_at_any_grain_on_both_hosts(site):
     """Review C1 (medium, both reviews): Show again posted payer and reason only, so a rule by code, modifier or the payer's
     reason code answered 404, and a rule for any reason by a code hit the whole-payer refusal (400). Its items stayed let go
@@ -933,6 +962,8 @@ const out = {
   ema_nolink: ctx.xpBoxHtml(Object.assign({}, f, { ema_link: 'CB0000300C017' }), Object.assign(x('call', ['copy_instructions']), { ema_block: { claim_url: 'https://ema.example.test/claims/{claim}' } }), { packets: [] }),
   todo_link: (ctx.state.filt.worklist = { status: 'open,in_progress', deadline: 'week' }, ctx.deskFilter('worklist')),
   closed_link: (ctx.state.filt.worklist = { status: 'open', deadline: 'missed' }, ctx.deskFilter('worklist')),
+  month_link: (ctx.state.filt.worklist = { status: 'open,in_progress', deadline: 'month' }, ctx.deskFilter('worklist')),
+  valid_link: (ctx.state.filt.worklist = { status: 'open,in_progress', deadline: 'valid', handling: 'written_off' }, ctx.deskFilter('worklist')),
   // review C1: a packet built in the panel joins its packets and the box is drawn again (features.js xpPacketBuilt)
   packet_built: (() => { const redrawn = []; ctx.xpRedrawBox = id => redrawn.push(id);
     ctx.state.detailId = 'b'; ctx.state.detailR = { packets: [{ packet_id: 'old' }] };
@@ -1029,11 +1060,13 @@ def test_the_box_keeps_its_words_short_and_its_basis_on_hover(page):
 
 
 def test_a_to_do_link_with_a_window_opens_the_work_never_an_item_that_only_waits(page):
-    """Review C1 (medium): Today's step 1, the guide's first item and the red number on a tab name a window and the to-do
-    statuses but no state; they open Work now and the follow-ups due inside that window, never a waiting item. A link to
-    a closed window, or about what was sent, keeps every state."""
+    """Review C1 (medium): Today's step 1 and the red number on a tab name the to-do statuses and a window closing within
+    7 (or 30) days but no state; they open Work now and the follow-ups due inside that window, never a waiting item, and
+    their numbers are counted that way (/api/brief). Any other older link (a closed window, what was sent, Today's other
+    steps counted by status and window) keeps every state, as its number was counted."""
     assert page["todo_link"]["state"] == "todo" and page["todo_link"]["deadline"] == "week" and page["todo_link"]["status"] == "open,in_progress"
-    assert page["closed_link"]["state"] == "" and page["older_link"]["state"] == ""
+    assert page["month_link"]["state"] == "todo"
+    assert page["closed_link"]["state"] == "" and page["older_link"]["state"] == "" and page["valid_link"]["state"] == ""
 
 
 def test_items_let_go_one_at_a_time_mirror_the_server_and_say_so(page):
