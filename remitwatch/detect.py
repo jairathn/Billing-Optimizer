@@ -267,8 +267,10 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
     file from one payer (a small one, an adjustment, a file dated in the future) moves it only when that payer carries half
     the volume. Nor does the newest week put in after weeks that are missing: when no payer paid for more than
     FEED_GAP_DAYS in a row, the feed reaches only the last day before that hole. With fewer than three payer groups it is
-    the newest date, clamped to today. A payment date no calendar has is skipped (real_day). None with no remittances."""
-    today = today or datetime.now(timezone.utc).date().isoformat()
+    the newest date, clamped to today. A payment date no calendar has is skipped (real_day). None with no remittances.
+    Today is the practice's day unless given (runtime.practice_today: from 7 PM Eastern the UTC date is already tomorrow)."""
+    from . import runtime
+    today = today or runtime.practice_today()
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "transactions" not in tables:
         return None

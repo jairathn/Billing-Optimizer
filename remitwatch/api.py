@@ -2530,7 +2530,7 @@ def _cloud_sync_status() -> dict:
     newest = (one("SELECT MAX(payment_date) d FROM transactions WHERE superseded=0") or {}).get("d") if has_table("transactions") else None
     files = (one("SELECT MAX(ingested_at) last, MAX(CASE WHEN kind='835' THEN ingested_at END) last835 FROM files") or {}) if has_table("files") else {}
     feed = _feed_day()
-    behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(feed).date()).days if feed else None
+    behind = (datetime.fromisoformat(_day(0)).date() - datetime.fromisoformat(feed).date()).days if feed else None     # the practice's day
     return {"mode": "serverless", "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),
             "interval_minutes": 0, "scheduler_running": False, "next_run": None, "cron_ready": bool(os.environ.get("CRON_SECRET")),
             "running": bool(st.get("running")), "running_since": (st.get("running") or {}).get("since"), "last_cycle": lc or None,
@@ -3342,10 +3342,11 @@ def _feed_day() -> str | None:
 
 def _data_behind_days() -> int | None:
     """Days since the day the remittances reach for most payers (None without remittances): past two weeks or so, a claim
-    on the lists may have been paid since and nobody here can see it. One stray newer file from one payer does not lift it."""
+    on the lists may have been paid since and nobody here can see it. One stray newer file from one payer does not lift it.
+    Counted to the practice's day, as the stale-feed alert counts (the UTC date is a day ahead from 7 PM Eastern)."""
     d = _feed_day()
     try:
-        return (datetime.now(timezone.utc).date() - datetime.fromisoformat(d[:10]).date()).days if d else None
+        return (datetime.fromisoformat(_day(0)).date() - datetime.fromisoformat(d[:10]).date()).days if d else None
     except ValueError:
         return None
 

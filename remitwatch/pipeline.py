@@ -447,8 +447,10 @@ def status(db_path: str) -> dict:
         last_file = c.execute("SELECT MAX(ingested_at) FROM files").fetchone()[0]
         last_remit = c.execute("SELECT MAX(ingested_at) FROM files WHERE kind='835'").fetchone()[0]
         from .detect import feed_date
-        feed = feed_date(c)         # how far the remittances reach for most payers: one stray newer file does not count
-        behind = (datetime.now(timezone.utc).date() - datetime.fromisoformat(feed).date()).days if feed else None
+        from .runtime import practice_today
+        today = practice_today()    # days behind count to the practice's day, as the stale-feed alert and the fax hold count
+        feed = feed_date(c, today)  # how far the remittances reach for most payers: one stray newer file does not count
+        behind = (datetime.fromisoformat(today).date() - datetime.fromisoformat(feed).date()).days if feed else None
         interval = int(os.environ.get("REMITWATCH_SYNC_INTERVAL_MINUTES", "0") or 0)
         return {
             "dropbox_configured": dropbox_configured(), "webhook_ready": bool(os.environ.get("DROPBOX_APP_SECRET")),

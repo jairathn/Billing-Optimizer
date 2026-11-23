@@ -297,7 +297,8 @@ class AlertEngine:
         conn.executescript(ALERTS_DDL)
         self.run_id = run_id
         self.now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        self.today = today or date.today().isoformat()
+        from . import runtime
+        self.today = today or runtime.practice_today()     # the practice's day, as every caller passes it
         # the day the remittances reach for most payers (detect.feed_date), not the newest payment of any one: one stray file
         # must not move every window and clear the stale-feed alert. asof can be set to replay history
         self.asof = asof or feed_date(conn, self.today) or self.today

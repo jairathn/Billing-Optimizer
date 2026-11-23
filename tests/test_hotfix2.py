@@ -546,7 +546,8 @@ def test_h8_the_fax_hold_goes_by_the_day_the_feed_reaches(tmp_path, monkeypatch)
     monkeypatch.delenv("REMITWATCH_MODE", raising=False)
     monkeypatch.setattr(api, "DB_PATH", db)
     monkeypatch.setattr(api, "PASSWORD", "")
-    assert api._data_behind_days() == (datetime.now(timezone.utc).date() - date(2026, 9, 1)).days
+    from remitwatch import runtime
+    assert api._data_behind_days() == (date.fromisoformat(runtime.practice_today()) - date(2026, 9, 1)).days    # the practice's day
     c = TestClient(api.app)
     st = c.get("/api/sync/status").json()
     assert st["feed_date"] == "2026-09-01" and st["days_behind"] == api._data_behind_days()

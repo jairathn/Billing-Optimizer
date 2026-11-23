@@ -587,6 +587,8 @@ def test_the_work_goes_only_to_the_claims_own_answer_or_its_resend_to_the_same_p
         def now(cls, tz=None):
             return _real(2027, 1, 6, 12, 0, tzinfo=tz or _utc)
     monkeypatch.setattr(detect_mod, "datetime", _January)
+    from remitwatch import runtime
+    monkeypatch.setattr(runtime, "_utc_now", lambda: _real(2027, 1, 6, 12, 0, tzinfo=_utc.utc))     # the practice's day the feed is clamped to
     found = chased(s)
     assert "CB0000S31C024" in found and found["CB0000S31C024"]["notes"] is None and found["CB0000S31C024"]["status"] == "open"
     c.execute("UPDATE ema_rows SET claim_submission_date='2026-10-01' WHERE claim_id='CB0000R31C017' AND family='claim_status'")

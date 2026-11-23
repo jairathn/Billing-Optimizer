@@ -2,6 +2,7 @@
 
 mr-1   a payment date no calendar has (BPR16 20260931, 20270229) never stops the analysis, the alerts or a page
 mr-2   the Data tab's feed check, Today's banner, the brief and the warning line go by the day the feed reaches
+mr-8   days behind and the clamp of a future-dated file count from the practice's day, not the UTC date
 Both hosts: the server's store file and the serverless site (the compact store image its cycle keeps, the dashboard's
 copy). Invented data only: payers, claim numbers and amounts are made up."""
 from __future__ import annotations
@@ -16,7 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -329,3 +330,50 @@ def test_the_pages_say_how_far_the_remittances_reach(tmp_path, box, on):  # noqa
     assert seen["errors"] == [] and seen["failed"] == [], (seen["errors"], seen["failed"])
     assert seen["banner"].startswith("Before you start: The remittances reach 2026-09-01 for most payers ("), seen["banner"]
     assert "Payments after Sep 1, 2026 are not all in yet; some items may already be paid." in seen["line"], seen["line"]
+
+
+# =========================================================================== mr-8: the practice's day
+EVENING = "2026-11-23T01:30:00+00:00"           # 8:30 PM Eastern on Sunday, November 22, 2026: already the 23rd in UTC
+
+
+def _at(monkeypatch, iso: str) -> None:
+    """Move the clock the practice's day is read from (runtime._utc_now), as tests/test_hotfix2c.py does."""
+    t = datetime.fromisoformat(iso)
+    monkeypatch.setattr(runtime, "_utc_now", lambda: t)
+
+
+@pytest.mark.parametrize("host", HOSTS, indirect=True)
+def test_days_behind_count_from_the_practice_s_day_in_the_evening(host, monkeypatch):
+    """At 8:30 PM Eastern, remittances paid every other day to November 8 are 14 days behind where the practice is. The
+    sync status on both hosts and the fax hold count 14, as the stale-feed alert does (they counted 15 from the UTC
+    date, and held an appeal the alert called current)."""
+    _at(monkeypatch, EVENING)
+    assert runtime.practice_today() == "2026-11-22"
+    c, h = host({**_steady("2026-11-08"), **_downcodes("20261108")})
+    st = c.get("/api/sync/status", headers=h).json()
+    assert (st["feed_date"], st["days_behind"]) == ("2026-11-08", 14), st
+    from remitwatch import api
+    assert api._data_behind_days() == 14
+    assert "STALE_FEED" not in [a["kind"] for a in c.get("/api/alerts", headers=h).json()["items"]]
+    items = c.get("/api/findings?signal=DOWNCODE_LEVEL_REDUCED", headers=h).json()["items"]
+    r = c.post("/api/appeals/send", json={"finding_id": items[0]["finding_id"]}, headers=h).json()
+    assert r["status"] in ("held", "sent") and r.get("code") != "stale", r
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_with_no_day_given_the_feed_date_and_the_alerts_take_the_practice_s_day(tmp_path, monkeypatch, kind):
+    """At 8:30 PM Eastern on November 22, a file dated November 23 (the UTC day, the practice's tomorrow) counts as
+    November 22: in the feed date with no day given, in the date the analysis saves, in the alert engine's own day and,
+    on a server, in the sync status (they took the UTC date)."""
+    from remitwatch import pipeline
+    from remitwatch.alerts import AlertEngine
+    _at(monkeypatch, EVENING)
+    s = _store(tmp_path, {**_one("a.RMT", "20261120", payer="ANTHEM", n=910), **_one("b.RMT", "20261123", n=911)}, kind)
+    assert feed_date(s.conn) == "2026-11-22"
+    Detector(s, run_id="t").run()
+    assert _saved_feed(s.conn) == "2026-11-22"
+    assert AlertEngine(s.conn).today == "2026-11-22"
+    s.close()
+    if kind == "file":
+        st = pipeline.status(str(tmp_path / "s.sqlite"))
+        assert (st["feed_date"], st["days_behind"]) == ("2026-11-22", 0), st
