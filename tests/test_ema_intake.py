@@ -1708,22 +1708,32 @@ def test_a_report_whose_read_fails_once_is_read_by_the_next_cycle(how, server, m
         s.close()
 
 
-def test_a_fetched_file_whose_read_fails_every_cycle_is_listed_as_not_read_and_the_cycles_go_on(server, monkeypatch):
+def test_a_fetched_file_whose_read_fails_every_cycle_waits_a_day_between_tries_and_is_read_once_it_can_be(server, monkeypatch):
+    """A file whose read raises cycle after cycle (or stops the cycle) is never dropped: after PENDING_TRIES cycles it is
+    offered once a day, so it costs one cycle a day, and it is read as soon as reading works again."""
     root, client, mirror, db = server
     run(db)
     prod = write(root / DATA / "Trizetto" / "2026 Production(Sheet1).csv", F.production_csv(prod_rows()))
+    real = el.apply_production_file
 
     def broken(*a, **k):
         raise sqlite3.OperationalError("disk I/O error")
     monkeypatch.setattr(el, "apply_production_file", broken)
     for _ in range(dropbox_sync.PENDING_TRIES):
         assert "error" not in run(db)
-    out = run(db)
-    assert out["sync_pending"]["given_up"] == 1
+    out = run(db)                                            # waits now: not offered in this cycle
+    assert out["sync_pending"]["failing"] == 1 and out["ingest"]["ema"] == 0 and out["ingest"].get("errors", 0) == 0
+    monkeypatch.setattr(el, "apply_production_file", real)
     s = open_store(db)
     try:
-        row = s.conn.execute("SELECT kind, status FROM files WHERE sha256=?", (sha(prod),)).fetchone()
-        assert tuple(row or ()) == ("ema:failed", "not_read")
+        s.conn.execute("UPDATE sync_pending SET last_try = last_try - 2 * 86400")     # a day and more later
+        s.conn.commit()
+    finally:
+        s.close()
+    run(db)
+    s = open_store(db)
+    try:
+        assert catalog(s.conn).get(sha(prod)) == "current"
         assert s.conn.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0] == 0
     finally:
         s.close()

@@ -560,10 +560,13 @@ def _not_read(store, path: str, kind: str) -> None:
 # The server's Dropbox position moves on as soon as a listing is complete, before the readers take the files it fetched:
 # a cycle stopped in between (a deploy restart, the out-of-memory killer) or a read that failed (a busy database, a full
 # disk) would leave a file in the mirror that no later listing names again. Each fetched file (and each the one-time
-# re-find brought in) is therefore kept in sync_pending until a cycle has offered it to the readers; one whose read raised
-# stays, and after PENDING_TRIES cycles it is listed as not read (files kind 'ema:failed') until it changes in Dropbox.
+# re-find brought in) is therefore kept in sync_pending until a cycle has offered it to the readers, counted before each
+# offer (a cycle stopped while reading it counts too). One offered PENDING_TRIES cycles in a row without being read is
+# then offered once a day, never dropped: a file that stops the cycle costs one cycle a day, and a long outage (a full
+# disk) loses nothing.
 PENDING_DDL = ("CREATE TABLE IF NOT EXISTS sync_pending (path TEXT PRIMARY KEY, added_at TEXT, tries INTEGER NOT NULL "
-               "DEFAULT 0)")
+               "DEFAULT 0, last_try REAL)")
+PENDING_RETRY_AFTER = 24 * 3600
 
 
 def add_pending(conn, paths: Iterable[str], *, commit: bool = True) -> None:
@@ -573,33 +576,36 @@ def add_pending(conn, paths: Iterable[str], *, commit: bool = True) -> None:
         return
     conn.execute(PENDING_DDL)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    conn.executemany("INSERT OR REPLACE INTO sync_pending (path, added_at, tries) VALUES (?, ?, 0)", [(p, now) for p in paths])
+    conn.executemany("INSERT OR REPLACE INTO sync_pending (path, added_at, tries, last_try) VALUES (?, ?, 0, NULL)",
+                     [(p, now) for p in paths])
     if commit:
         conn.commit()
 
 
-def take_pending(store, log=print) -> dict:
-    """The fetched files a cycle offers the readers again, each counted before it is read (a cycle stopped while reading
-    one counts too): {'paths', 'gone', 'given_up'}. A file no longer in the mirror is dropped; one offered PENDING_TRIES
-    times is listed as not read."""
+def take_pending(store, log=print, *, now: float | None = None) -> dict:
+    """The fetched files a cycle offers the readers again, each counted before it is read: {'paths', 'gone', 'failing'}.
+    A file no longer in the mirror is dropped; one that has failed PENDING_TRIES cycles in a row waits a day between
+    offers ('failing' counts them, and the cycle's output shows it)."""
     conn = store.conn
     conn.execute(PENDING_DDL)
-    take, gone, give_up = [], [], []
-    for path, tries in conn.execute("SELECT path, tries FROM sync_pending ORDER BY added_at, path").fetchall():
+    now = time.time() if now is None else now
+    take, gone, failing = [], [], 0
+    for path, tries, last in conn.execute("SELECT path, tries, last_try FROM sync_pending ORDER BY added_at, path").fetchall():
         if not os.path.isfile(path):
             gone.append(path)
-        elif int(tries or 0) >= PENDING_TRIES:
-            give_up.append(path)
-        else:
-            take.append(path)
-    for path in give_up:
-        _not_read(store, path, "ema:failed")
-        log(f"  ERROR {os.path.basename(path)}: not read after {PENDING_TRIES} cycles; it is read again when it changes in "
-            "Dropbox")
-    conn.executemany("DELETE FROM sync_pending WHERE path=?", [(p,) for p in gone + give_up])
-    conn.executemany("UPDATE sync_pending SET tries = tries + 1 WHERE path=?", [(p,) for p in take])
+            continue
+        if int(tries or 0) >= PENDING_TRIES:
+            failing += 1
+            if last is not None and now - float(last) < PENDING_RETRY_AFTER:
+                continue
+            if int(tries or 0) == PENDING_TRIES:
+                log(f"  ERROR {os.path.basename(path)}: not read in {PENDING_TRIES} cycles; offered again once a day until "
+                    "it is read")
+        take.append(path)
+    conn.executemany("DELETE FROM sync_pending WHERE path=?", [(p,) for p in gone])
+    conn.executemany("UPDATE sync_pending SET tries = tries + 1, last_try = ? WHERE path=?", [(now, p) for p in take])
     conn.commit()
-    return {"paths": take, "gone": len(gone), "given_up": len(give_up)}
+    return {"paths": take, "gone": len(gone), "failing": failing}
 
 
 def settle_pending(store, offered: Iterable[str], retry: Iterable[str] = ()) -> int:

@@ -509,8 +509,8 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
             heartbeat(store.conn, token)
         retry = ingested.pop("retry", None) or []
         waiting_files = _ema_step(out, "sync_settle", settle_pending, store, new_files, retry)
-        if waiting_files or pend.get("given_up") or pend.get("gone"):
-            out["sync_pending"] = {"waiting": waiting_files or 0, "given_up": pend.get("given_up", 0),
+        if waiting_files or pend.get("failing") or pend.get("gone"):
+            out["sync_pending"] = {"waiting": waiting_files or 0, "failing": pend.get("failing", 0),
                                    "gone": pend.get("gone", 0)}
         from . import trizetto
         if trizetto.configured():         # the remittances straight from TriZetto's SFTP (remitwatch.trizetto)
