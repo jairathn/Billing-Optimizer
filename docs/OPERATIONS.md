@@ -402,6 +402,14 @@ Also set every `PRACTICE_` detail (name, address, tax ID, group NPI, phone, emai
 - An item whose last fax at a level went to another number waits for a person, who sends it in one click ("Send it to ..." under For a person).
 - A group that holds many insurers keeps no number. One company's line must not get another company's appeals, so the
   Faxes page says to fax those by hand, and their letters back are matched by a person.
+- A payer that files nothing faxed at a level is never faxed at that level, whoever presses the button (`fax.NO_FAX`).
+  CGS, Kentucky's Medicare contractor, files no faxed redetermination: a faxed one is not filed and the 120-day window
+  keeps running (CGS's reopening and redetermination job aid, revised December 16, 2025). So a first-level appeal for
+  Medicare KY, its follow-ups and its retries are held, saying to file it on myCGS or by mail, and the Faxes page says "File
+  them on myCGS or by mail." in place of its appeal number. The rule is matched without regard to case, on the payer group
+  and on the payer's own name on the remittance. If CGS upholds the appeal, the reconsideration goes to the Medicare review
+  contractor C2C, which takes faxes: RemitWatch sends it by itself only for an appeal it faxed, so for one filed on myCGS
+  a person sends that too.
 
 **What happens next, by itself.** On the server every cycle (hourly) does this after the analysis; on the Vercel site, when it is the one that sends, a daily call at 15:43 UTC does. No cron is needed. `sudo docker compose exec app python -m remitwatch.cli fax-cycle` does the same by hand. Fax runs never overlap: one that finds another going skips it (`fax-cycle` then exits 1).
 

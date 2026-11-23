@@ -3543,6 +3543,11 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     again = f.get("status") == "appealed" and not _faxes_out(fid) and bool(_faxes_out(fid, live=False))
     if f.get("status") not in ("open", "in_progress") and not again:
         return dict(out, status="skipped", reason=f"It is {STATUS_WORDS.get(f.get('status'), f.get('status'))}.")
+    # a payer that files no faxed request at the first level (CGS): a person files it on the payer's portal or by mail. An
+    # item whose window has closed is told that instead, below
+    route = fax.no_fax(f.get("payer_group"), 1, f.get("payer_name"))
+    if route and not (f.get("appeal_deadline") and f["appeal_deadline"] < datetime.now(timezone.utc).date().isoformat()):
+        return held("no_fax_route", route)
     # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed. Only a
     # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
     behind = _data_behind_days()
@@ -3687,15 +3692,16 @@ def appeals_appealable(payer: Optional[str] = Query(None, max_length=200), limit
             continue
         k = work_type(i["signal"], i["actionable"], i["carc"])
         pg = i["payer_group"] or ""
-        # a group of many insurers keeps no number: its appeals are faxed by hand (fax.shared_group)
-        by_hand = fax.shared_why(pg) if fax.shared_group(pg) else None
+        # a group of many insurers keeps no number: its appeals are faxed by hand (fax.shared_group); a payer that files no
+        # faxed first-level appeal (fax.no_fax) gets them on its portal or by mail
+        by_hand = fax.shared_why(pg) if fax.shared_group(pg) else fax.no_fax(pg, 1)
         b = by.setdefault(pg, {"payer_group": pg, "n": 0, "cents": 0, "number": fax.pretty(numbers.get(pg)) if numbers.get(pg) else "", "kinds": {},
                                "by_hand": by_hand})
         b["n"] += 1
         b["cents"] += i["shortfall_cents"] or 0
         b["kinds"][k] = b["kinds"].get(k, 0) + 1
-        out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0, "ready": bool(numbers.get(pg)),
-                    "by_hand": bool(by_hand)})
+        out.append({"finding_id": i["finding_id"], "payer_group": pg, "kind": k, "cents": i["shortfall_cents"] or 0,
+                    "ready": bool(numbers.get(pg)) and not by_hand, "by_hand": bool(by_hand), "no_fax": bool(fax.no_fax(pg, 1))})
     return {"items": out, "payers": sorted(by.values(), key=lambda b: -b["cents"]), "fax": fax.configured(), "not_here": fax.not_here(),
             "practice_missing": _practice_missing(), "modmed": modmed.Settings.from_env().configured(), "review": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
@@ -3785,7 +3791,8 @@ def fax_payers(_: str = Depends(require_auth)):
         # a group of many insurers keeps no number (one saved before is not used): its appeals are faxed by hand
         shared = fax.shared_group(pg)
         out.append({"payer_group": pg, "payer_kind": o.get("payer_kind"), "n": o.get("n") or 0, "cents": o.get("cents") or 0,
-                    "numbers": {} if shared else saved.get(pg, {}), "by_hand": fax.shared_why(pg) if shared else None, **contact.get(pg, {})})
+                    "numbers": {} if shared else saved.get(pg, {}), "by_hand": fax.shared_why(pg) if shared else None,
+                    "no_fax": fax.no_fax_short(pg, 1), **contact.get(pg, {})})
     return {"payers": out, "owner": bool(OWNER_PASSWORD)}
 
 
@@ -4060,6 +4067,9 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None) 
         nb, hold = fax.number_hold(conn, f, level, earlier)
     finally:
         conn.close()
+    route = fax.no_fax(f.get("payer_group"), level, f.get("payer_name"))
+    if route:                   # never faxed at this level, a person's send included: filed on the payer's portal or by mail
+        return held(route)
     number = nb["number"]
     if person_number is not None:
         if not number:

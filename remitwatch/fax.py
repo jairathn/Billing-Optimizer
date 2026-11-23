@@ -414,8 +414,47 @@ def shared_group(payer_group: str | None) -> bool:
 
 
 def shared_why(payer_group: str | None) -> str:
+    if (payer_group or "").startswith("Medicare (other)"):
+        return ("Medicare (other) holds remittances from more than one Medicare contractor, so RemitWatch keeps no fax number for it. "
+                "File the first-level appeal (a redetermination) the way the contractor on the remittance takes it: CGS (Kentucky) "
+                "files no faxed redetermination, so use myCGS or mail; WPS (Indiana) takes a fax with its cover sheet.")
     return (f"{payer_group or 'This group'} holds many insurers, each with its own fax line, so RemitWatch keeps no fax number "
             "for it. Build the packet in the item and fax it to the insurer by hand.")
+
+
+# Payers that file nothing faxed at a level. A fax to them is never filed while the payer's clock keeps running, so
+# RemitWatch never sends one, whoever presses the button: not the appeal, its follow-ups or its retries. Matched without
+# regard to case on the payer group (a name the payer rules do not know is grouped under itself, title-cased) and on the
+# payer's own name on the remittance (a CGS remittance grouped elsewhere, as Medicare (other) or a TPA, is still CGS's).
+NO_FAX: tuple[dict, ...] = (
+    {"group": re.compile(r"^Medicare KY\b|\bCGS\b", re.I),
+     "name": re.compile(r"\bCGS\b|\bKY MEDICARE\b|MEDICARE OF KENTUCKY|^KENTUCKY MEDICARE", re.I),
+     "levels": (1,),
+     "why": "CGS, Kentucky's Medicare contractor, does not accept a faxed redetermination request (its reopening and redetermination "
+            "job aid, revised December 16, 2025): file this first-level appeal on myCGS, which CGS prefers, or by mail, one claim per "
+            "request. A faxed one is not filed, and the 120-day window keeps running. If CGS upholds it, the reconsideration goes to "
+            "C2C, which takes faxes: RemitWatch sends that by itself only for an appeal it faxed, so for one filed on myCGS a person "
+            "sends it too.",
+     "short": "No fax at the first level: CGS files no faxed redeterminations. File them on myCGS or by mail."},
+)
+
+
+def _no_fax_rule(payer_group: str | None, level: int, payer_name: str | None = None) -> dict | None:
+    pg, nm = (payer_group or "").strip(), (payer_name or "").strip()
+    return next((r for r in NO_FAX if int(level or 1) in r["levels"] and ((pg and r["group"].search(pg)) or (nm and r["name"].search(nm)))),
+                None)
+
+
+def no_fax(payer_group: str | None, level: int = 1, payer_name: str | None = None) -> str | None:
+    """Why nothing at this level may be faxed to this payer (it files no faxed request there), or None. payer_name: the
+    payer's own name on the remittance, where known."""
+    rule = _no_fax_rule(payer_group, level, payer_name)
+    return rule["why"] if rule else None
+
+
+def no_fax_short(payer_group: str | None, level: int = 1, payer_name: str | None = None) -> str | None:
+    rule = _no_fax_rule(payer_group, level, payer_name)
+    return rule["short"] if rule else None
 
 
 def number_for(conn: sqlite3.Connection, payer_group: str | None, payer_kind: str | None, level: int) -> dict:
@@ -444,6 +483,9 @@ def number_hold(conn: sqlite3.Connection, f: dict, level: int, earlier: list[dic
     nb = number_for(conn, f.get("payer_group"), f.get("payer_kind"), level)
     pg = f.get("payer_group") or "this payer"
     second = "second-level " if int(level or 1) >= 2 else ""
+    route = no_fax(f.get("payer_group"), level, f.get("payer_name"))
+    if route:
+        return nb, route
     if shared_group(f.get("payer_group")):
         return nb, shared_why(f.get("payer_group"))
     if not nb["number"]:
@@ -497,9 +539,11 @@ def followups(conn: sqlite3.Connection, today: str | None = None, ids: list[str]
     in_by = _ties(conn)
     days = lambda d: (t - date.fromisoformat(d)).days       # noqa: E731
     due = []
+    # the payer's own name on the remittance, where the store has it: a payer that files no faxed request is known by it too
+    name_col = ", payer_name" if "payer_name" in {r[1] for r in conn.execute("PRAGMA table_info(findings)")} else ""
     for fid, outs in out_by.items():
-        f = conn.execute("""SELECT finding_id, status, payer_group, payer_kind, signal, title, service_date, shortfall_cents
-                            FROM findings WHERE finding_id=?""", (fid,)).fetchone()
+        f = conn.execute(f"""SELECT finding_id, status, payer_group, payer_kind, signal, title, service_date, shortfall_cents{name_col}
+                             FROM findings WHERE finding_id=?""", (fid,)).fetchone()
         if not f or f["status"] != "appealed":
             continue
         f = dict(f)
@@ -521,11 +565,12 @@ def followups(conn: sqlite3.Connection, today: str | None = None, ids: list[str]
             # number changed since, a person takes it (and can send it again in one click)
             nb = number_for(conn, f["payer_group"], f["payer_kind"], lvl)
             word = PURPOSE_WORDS.get(newest["purpose"], "fax")
+            route = no_fax(f.get("payer_group"), lvl, f.get("payer_name"))
             if nd.get("held"):
                 due.append(dict(base, action="person", level=lvl, why=nd["held"], resend=newest["purpose"], n=int(nd.get("n") or 1),
-                                number=nb["number"]))
+                                number="" if route else nb["number"]))
             elif _attempts(newest) >= MAX_ATTEMPTS:
-                due.append(dict(base, action="person", level=lvl, resend=newest["purpose"], n=int(nd.get("n") or 1), number=nb["number"],
+                due.append(dict(base, action="person", level=lvl, resend=newest["purpose"], n=int(nd.get("n") or 1), number="" if route else nb["number"],
                                 why=f"the payer's line never took the {word} ({MAX_ATTEMPTS} tries): check the number on the Faxes page"))
             continue
         level = max(int(o["level"] or 1) for o in sent)
@@ -586,7 +631,8 @@ def followups(conn: sqlite3.Connection, today: str | None = None, ids: list[str]
                          decision={k: latest.get(k) for k in ("decision", "decision_date", "received", "document_type")} if latest else None)
             if action != "person":
                 nb, hold = number_hold(conn, f, to_level, [o for o in outs if int(o["level"] or 1) == to_level])
-                entry.update(number=nb["number"], number_purpose=nb["purpose"], hold=hold)
+                route = no_fax(f.get("payer_group"), to_level, f.get("payer_name"))
+                entry.update(number="" if route else nb["number"], number_purpose=nb["purpose"], hold=hold)
             due.append(entry)
     return sorted(due, key=lambda d: (d["action"] == "person" or bool(d.get("hold")), d["last_sent"], -(d["shortfall_cents"] or 0)))
 
