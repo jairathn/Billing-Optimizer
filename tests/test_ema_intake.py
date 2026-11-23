@@ -1131,14 +1131,22 @@ def test_a_gzip_bomb_uploaded_on_vercel_is_refused_without_ever_being_unpacked_w
     assert done["result"]["status"] == "refused" and "far beyond any export" in " ".join(done["result"]["lines"])
 
 
-def test_a_gzip_bomb_uploaded_on_a_server_is_set_aside_and_the_cycle_goes_on(tmp_path):
+def test_a_gzip_bomb_uploaded_on_a_server_is_set_aside_and_the_cycle_goes_on(tmp_path, monkeypatch):
     db = str(tmp_path / "data" / "remitwatch.sqlite")
     ready = intake.ready_dir(os.path.dirname(db))
     bomb, digest = _gz_of(160 << 20)
     _raw_pair(ready, "2026 Production.csv", bomb, digest, 160 << 20, uid="a" * 32)
     ar = F.ar_xlsx(ar_rows())
     _pair(ready, "AR 2026.xlsx", ar)
+    opened: list[str] = []
+    real = intake.read_file
+
+    def reader(store, path, **kw):
+        opened.append(os.path.basename(path))
+        return real(store, path, **kw)
+    monkeypatch.setattr(intake, "read_file", reader)
     out = run(db, sync=False)
+    assert not [n for n in opened if n.startswith("a" * 32)]                 # set aside while its digest was taken
     s = open_store(db)
     try:
         cat = catalog(s.conn)

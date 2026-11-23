@@ -1037,6 +1037,8 @@ WRONG_PAYER_CARCS = frozenset({"B11", "109", "22", "24", "26", "27", "31", "32",
 WRONG_PAYER_RARCS = frozenset({"N418", "N30"})
 COB_CARCS = frozenset({"22"})           # another payer covers this first: the payer is a secondary that wants the primary's answer
 NOT_ITS_CARCS = WRONG_PAYER_CARCS - COB_CARCS   # not its member, not its claim, not covered that day
+INFO_CARCS = frozenset({"16", "226", "252"})    # the payer asks for information, records or an attachment: what it declined
+                                                # is collectible once that is sent, not the patient's
 
 
 def _denied_units(a: Ans, prim: Sequence[Ans]) -> float:
@@ -1062,6 +1064,9 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
     it is sent again as a secondary claim with the primary's payment. Where it says the patient or the claim is not its
     at all (B11, 109, 27, N418, ...) and no other plan answered the service, no payer owes the share: the patient's
     share is billed as usual ('done', the share kept as information); another plan that answered gets it as secondary.
+    A denying payer that paid part of the share as secondary (on its own line, or at its claim's level) and declined the
+    rest: 'done', the rest is the patient's; but where it asks for information, records or an attachment (CO-16,
+    CO-226, CO-252) it has not declined the rest, which stays to work.
     Two Medicare contractors (one paid, the other denied) are no primary and secondary: one of them should pay the
     service, so the item keeps its size, 'likely', with the jurisdiction to check while the window is open. A payment
     another payer made only as secondary says nothing here: a crossover secondary pays on the primary's answer, and when
@@ -1113,13 +1118,15 @@ def other_payer_paid_first(conn: sqlite3.Connection, items: Iterable[Mapping], *
         reasons = {r for _g, r, _c in a.denial_reasons()}
         not_its = bool(reasons & NOT_ITS_CARCS) or any(r in WRONG_PAYER_RARCS for r in (a.rem or []))
         cob = bool(reasons & COB_CARCS)
+        asks = bool(reasons & INFO_CARCS)
         # another plan of the patient's that answered the service (neither the primary nor the payer that denied it)
         other_plan = next((x for x in ans if x.line_key != a.line_key and x.status != REVERSAL_STATUS and not _void(x)
                            and not _same_payer_loose(x, a) and not any(_same_payer_loose(x, q) for q in prim)), None)
         state = "work_now" if left else "done"
         size = left
-        if left and denier_paid > 0:
-            # it answered as the secondary it is, paid part of the share and declined the rest: no payer owes the rest
+        if left and denier_paid > 0 and not asks:
+            # it answered as the secondary it is, paid part of the share and declined the rest: no payer owes the rest (a
+            # payer that asks for information or records for the rest has not declined it: that is the work below)
             hint += (f": {who} paid {_usd(denier_paid)} of the patient's share as secondary and declined the rest ({_reasons_text(a)}). "
                      f"The rest, {_usd(left)}, is the patient's, billed as usual (a Medicaid member is never billed: it is written off).")
             state, size = "done", 0

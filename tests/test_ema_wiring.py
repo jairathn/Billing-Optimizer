@@ -1219,6 +1219,41 @@ def test_a_cut_on_a_procedure_another_one_outranks_stays_the_payers_rule(store):
     assert items(store, "patient_control_number=? AND procedure_code='17311'", F.claim_id(53)) == []
 
 
+def _copies_denied(store, *, dup_days_after: int, processed: bool = True, copies=(("OA", "18"), ("CO", "129"))):
+    """PM case C12: the payer processed the claim to the patient's deductible and, on the same remittance (or later),
+    denied copies of it: OA-18 (a duplicate) and CO-129."""
+    pcn = F.claim_id(80)
+    lines = [(S, "12042", 479.80, 0, [("PR", "1", 229.63), ("CO", "45", 250.17)], {"allowed_cents": 22963}),
+             (S, "11403", 309.75, 0, [("PR", "1", 75.02), ("CO", "45", 234.73)], {"allowed_cents": 7502})]
+    if processed:
+        remit(store, trace="ZZPROC80", paid_on="2026-04-01", claims=[{"pcn": pcn, "lines": lines}])
+    when = (D(2026, 4, 1) + dt.timedelta(days=dup_days_after)).isoformat()
+    remit(store, trace="ZZDUP80", paid_on=when, claims=[
+        {"pcn": pcn, "status": "4", "lines": [(S, "12042", 479.80, 0, [(g, r, 479.80)]), (S, "11403", 309.75, 0, [(g, r, 309.75)])]}
+        for g, r in copies])
+    run(store)
+    return items(store, "signal='CLAIM_DENIED_UNPAID'")
+
+
+def test_a_duplicate_copy_denied_on_the_remittance_that_processed_the_claim_is_not_money_owed(store):
+    """The payer put the claim to the patient's deductible and denied the copies on the same remittance: nothing is owed
+    (C12 stayed in work now as a $628.70 claim denial)."""
+    assert _copies_denied(store, dup_days_after=0) == []
+
+
+def test_a_duplicates_denial_after_the_payer_processed_the_service_is_not_money_owed(store):
+    assert _copies_denied(store, dup_days_after=10, copies=(("OA", "18"),)) == []
+
+
+def test_another_denial_after_the_payer_processed_the_claim_on_an_earlier_remittance_is_still_judged(store):
+    """Not a duplicate and not the same remittance: the existing rule (a processing after the denial) decides."""
+    assert [f["carc"] for f in _copies_denied(store, dup_days_after=10, copies=(("CO", "129"),))] == ["129"]
+
+
+def test_a_duplicates_denial_with_nothing_processed_is_still_listed(store):
+    assert len(_copies_denied(store, dup_days_after=0, processed=False)) == 1
+
+
 def test_remittance_denials_of_a_code_the_payer_never_pays_as_primary_are_its_policy(store, ledger, tmp_path):
     """PM case C18: UHC never paid G6001 as primary (0 of 27 lines it answered as primary; its payments of it were as the
     second payer). Its denials fold into one pattern in the owner's table and leave the line-by-line work until the owner

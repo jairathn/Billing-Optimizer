@@ -2209,12 +2209,15 @@ class Detector:
             elif l["line_key"] in self.standing:
                 paid_by_payer.add((l["patient_control_number"], who(l)))
 
-        def settled(bill: str, code: str, dos: str | None, payer: str | None, when: str, pcn: str, dates: set) -> tuple | None:
+        def settled(bill: str, code: str, dos: str | None, payer: str | None, when: str, pcn: str, dates: set,
+                    dup: bool = False) -> tuple | None:
             """How another claim of the bill settled this code and date other than by a payment still standing, if it did:
             - processed to the patient (copay, coinsurance, deductible) by the same payer after this denial (a corrected
-              claim), or by another payer that paid something on this same claim id (a crossover the primary paid and the
-              secondary denied); a secondary owes what a primary put to the deductible, so a primary that paid nothing on
-              the claim settles nothing;
+              claim), on the same remittance under the same claim id (the payer processed the claim and denied a copy of
+              it), or at any time when this is a duplicate's denial (the payer says it processed that service already: PM
+              case C12); or by another payer that paid something on this same claim id (a crossover the primary paid and
+              the secondary denied); a secondary owes what a primary put to the deductible, so a primary that paid nothing
+              on the claim settles nothing;
             - denied as a primary line that has its own finding, which no person dismissed or marked lost;
             - paid under another code (SVC06, or a finding saying this code was billed), its own downcode finding;
             - billed again under another date, for a code this claim has on one date only.
@@ -2226,7 +2229,9 @@ class Detector:
                     continue
                 if o.get("procedure_code") == code and not (o.get("paid_cents") or 0):
                     if (o.get("allowed_cents") or 0) > 0 or any(g == "PR" for g, _rc, _a in self.adj.get(o["line_key"], [])):
-                        if (who(o) == payer and at(o) > when) or (who(o) != payer and (pcn, who(o)) in paid_by_payer):
+                        same_payer = who(o) == payer and (at(o) > when or dup
+                                                          or (at(o) == when and o["patient_control_number"] == pcn))
+                        if same_payer or (who(o) != payer and (pcn, who(o)) in paid_by_payer):
                             return ("processed to the patient", o["patient_control_number"])
                     elif o["line_key"] in listed_lines:
                         return ("denied again as a line", o["patient_control_number"])
@@ -2313,7 +2318,8 @@ class Detector:
                     pays += [e for e in evs if e[0] > when]
                     if got < units:
                         how = settled(bill, code, dos, payer, when, cl["patient_control_number"],
-                                      {ln.get("service_date") for ln in lines if ln.get("procedure_code") == code})
+                                      {ln.get("service_date") for ln in lines if ln.get("procedure_code") == code},
+                                      dup=top in DUP_CARCS)
                         if how and not (prev and prev["worked"]):
                             elsewhere[(code, dos)] = how
                             continue

@@ -1060,8 +1060,8 @@ def test_the_page_script_is_plain_and_the_module_mirrors_the_apps_categories():
 
     from remitwatch import api
     js = (Path(results.__file__).parent / "static" / "results.js").read_text()
-    assert "async function resultsTab(v)" in js and "—" not in js and "false positive" not in js.lower()
-    assert "—" not in Path(results.__file__).read_text()
+    assert "async function resultsTab(v)" in js and "\u2014" not in js and "false positive" not in js.lower()
+    assert "\u2014" not in Path(results.__file__).read_text()
     assert tuple(results.STATE_CATEGORIES) == tuple(api.MONEY_CATEGORIES)
     # every global the script declares starts with rs / RS_ (or is the page itself): nothing clashes with index.html
     import re as _re

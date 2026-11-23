@@ -2205,6 +2205,7 @@ def _wait_step(f: dict, fx: dict, st: dict) -> tuple[str, list[str], str]:
     follow = st.get("follow_up_on")
     work = st.get("work") or {}
     wkind = S.WORK_WORDS.get(work.get("kind") or "", "the work")
+    verb = S.WORK_WHEN.get(work.get("kind") or "", "sent")
     when = day(work.get("date")) if work.get("date") and work.get("dated_by") != "first_report" else "on a date nobody recorded"
     who = "A/R follow-up biller"
     if not follow:
@@ -2228,10 +2229,10 @@ def _wait_step(f: dict, fx: dict, st: dict) -> tuple[str, list[str], str]:
         return (f"Wait for {_poss(second)} payment of the claim billed on {when}; follow up with {second} on {day(follow)} if nothing comes.",
                 [f"On {day(follow)}, ask {second} whether it received the claim and when it will pay the "
                  f"{S._ev(f).get('share') or 'share'} ({usd(f.get('shortfall_cents'))})."], who)
-    steps = [f"On {day(follow)}, check {_poss(grp)} portal or call about {wkind} (sent {when}), quoting what was sent and when."]
+    steps = [f"On {day(follow)}, check {_poss(grp)} portal or call about {wkind} ({verb} {when}), quoting what was done and when."]
     if st.get("deadline"):
         steps.append(f"If the payer has no record of it then, send it again in writing before {day(st['deadline'])}.")
-    return (f"Wait for {_poss(grp)} answer to {wkind} (sent {when}); follow up on {day(follow)} if nothing comes.", steps, who)
+    return (f"Wait for {_poss(grp)} answer to {wkind} ({verb} {when}); follow up on {day(follow)} if nothing comes.", steps, who)
 
 
 def _refund_step(f: dict, fx: dict, st: dict, bal: dict, deadline: str | None, basis: str | None):
@@ -2356,6 +2357,7 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
     a = st.get("answered") or {}
     work = st.get("work") or {}
     wkind = S.WORK_WORDS.get(work.get("kind") or "", "the work")
+    verb = S.WORK_WHEN.get(work.get("kind") or "", "sent")
     when = day(work.get("date")) if work.get("dated_by") not in ("first_report",) and work.get("date") else "on a date nobody recorded"
     fallback = _work_fallback(conn, f, fx, st)
     if st.get("work_state") == "cant_check":
@@ -2398,11 +2400,11 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
             return (f"Read the claim's notes in EMA, then follow up with {grp}: {_lower(st.get('state_basis') or '')}.",
                     [facts, "Paid or reprocessed: post it and close the item. Not on file: send it again now."], "A/R follow-up biller")
         follow = st.get("follow_up_on")
-        steps = [f"Ask {grp} whether it received {wkind} (sent {when}) and what it decided.", facts,
+        steps = [f"Ask {grp} whether it received {wkind} ({verb} {when}) and what it decided.", facts,
                  "Paid or reprocessed: post it and close the item. Not on file: send it again now."]
         if fallback:
             steps.append("Denied again, or nothing on file: " + fallback)
-        return (f"Follow up with {grp} on {wkind} (sent {when})" + (f": no answer by {day(follow)}." if follow else "."), steps,
+        return (f"Follow up with {grp} on {wkind} ({verb} {when})" + (f": no answer by {day(follow)}." if follow else "."), steps,
                 "A/R follow-up biller")
     if rule == "forwarded_late":
         fwd = S._forwarded(fx) or {}

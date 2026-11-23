@@ -85,6 +85,8 @@ WORK_WORDS = {"appeal": "the appeal", "corrected": "the corrected claim", "recor
               "fax": "the faxed appeal", "resubmitted": "the resubmitted claim", "started": "the work started", "billed": "the claim billed to the next payer",
               "follow_up": "the follow-up date set in EMA", "note": "the billing note in EMA", "packet": "the appeal packet",
               "no_appeal": "a decision not to appeal", "write_off": "a write-off"}
+# the verb that dates a piece of work ("the call or portal check, made Apr 2"; "the appeal, sent Apr 1")
+WORK_WHEN = {"call": "made", "follow_up": "set", "note": "written", "started": "started", "no_appeal": "written", "write_off": "written"}
 # work that holds an item (it waits for the payer's answer to it, or a person must read it first)
 WORK_KINDS = ("sent", "fax", "appeal", "corrected", "records", "reprocess", "secondary", "call", "resubmitted", "billed", "note", "follow_up")
 # denials whose route can be a corrected claim (an authorization number, a modifier, a code): its clock counts too
@@ -1865,7 +1867,7 @@ def _pending_action(fx: dict) -> str | None:
 def _short_label(basis: Any, n: int = 120) -> str:
     """A window's basis cut to its first clause, for sentences that name it."""
     b = str(basis or "").strip()
-    m = re.search(r"(?<=[a-z0-9)])[.;:] ", b)
+    m = re.search(r"(?<=[a-z0-9)])[.;] ", b)
     b = b[:m.start()] if m else b.rstrip(".")
     return b if len(b) <= n else b[:n].rsplit(" ", 1)[0] + "..."
 

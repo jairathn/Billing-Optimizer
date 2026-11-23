@@ -284,11 +284,21 @@ def test_response_days_with_no_archive_is_the_45_day_default(store):
 
 # ================================================================================================ work now and done
 def test_an_unworked_denial_inside_its_window_is_work_now(store):
-    tk = denied(store)
-    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
     st = state(store)
     assert st["work_state"] == "work_now" and st["rule"] == "open" and st["label"] == "Work now"
     assert "nobody has worked it" in st["state_basis"] and st["follow_up_on"] is None and st["appeal_block"] is None
+    assert st["route"] == "appeal"
+
+
+def test_an_authorization_denial_is_checked_first_and_kept_out_of_a_bulk_appeal(store):
+    """M10: a blind appeal of an authorization denial is almost never paid (amendment 8.2): its route is to find the
+    authorization first, so it carries an appeal_block and never goes out in bulk."""
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    st = state(store)
+    assert (st["work_state"], st["rule"], st["route"], st["appeal_block"]) == ("work_now", "open", "decide", "check_first")
 
 
 def test_a_later_payment_of_the_same_line_on_another_submission_is_done(store):
@@ -413,6 +423,18 @@ def test_a_claim_forwarded_to_another_carrier_waits_45_days_then_is_work_now(sto
     st = state(store, today="2026-04-20")
     assert (st["work_state"], st["rule"], st["follow_up_on"]) == ("waiting", "forwarded", "2026-05-12")
     assert st["appeal_block"] == "waiting" and "DELEGATE TEST" in st["state_basis"]
+    # past the 45 days with no source that could show the carrier's money (no 835 from it, no EMA report): can't be checked
+    st = state(store, today="2026-05-20")
+    assert (st["work_state"], st["rule"]) == ("cant_check", "cant_check_carrier") and "no 835 from DELEGATE TEST" in st["state_basis"]
+
+
+def test_a_forwarded_claim_ema_covers_is_chased_after_45_days(store, ledger, tmp_path):
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[
+        {"pcn": F.claim_id(1), "status": "19", "crossover": "DELEGATE TEST", "received": "2026-03-05",
+         "lines": [ln("99214", 128, 0, [("CO", "B11", 128)], lcn="1", rmk=["N418"])]}])
+    item(store, signal="DENIED_NONCOVERED", carc="B11", procedure_code="99214", billed_code="99214", line_key=line_key(store, tk),
+         claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1), cpt="99214", amount=128), pay(F.link_no(1), F.check_no(1), 0, cpt="99214"), later()])
     st = state(store, today="2026-05-20")
     assert (st["work_state"], st["rule"]) == ("work_now", "forwarded_late") and "ask DELEGATE TEST for it" in st["state_basis"]
 
@@ -564,23 +586,44 @@ def test_information_only_signals_are_accepted_and_contract_items_go_to_the_owne
     assert (st["work_state"], st["rule"]) == ("work_now", "owner_decision")
 
 
-def test_past_every_window_plus_30_days_with_no_work_is_expired(store):
-    tk = denied(store)
-    item(store, appeal_deadline="2026-04-01", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
-    st = state(store, today="2026-05-10")
-    assert (st["work_state"], st["rule"]) == ("expired", "expired") and st["closed_on"] == "2026-04-01"
-    # inside the 30 days after the window: still work (the step says to file today or mark it Lost)
-    assert state(store, today="2026-04-20")["work_state"] == "work_now"
+def short_window_item(store, **kw):
+    """A denial by a payer whose only window is 180 days from the remittance (a commercial plan the rules do not know):
+    remittance Oct 1, 2025, window to Mar 30, 2026."""
+    tk = denied(store, reason=("CO", "50"), paid_on="2025-10-01", received="2025-09-20", payer="TESTCARE HEALTH")
+    args = dict(signal="DENIED_MEDICAL_NECESSITY", carc="50", payer_name="TESTCARE HEALTH", payer_group="Testcare Health",
+                payer_kind="commercial", payment_date="2025-10-01", appeal_deadline="2026-03-30",
+                deadline_basis="Commercial plans: 180 days is the common default", line_key=line_key(store, tk), claim_key=f"{tk}-0",
+                transaction_key=tk)
+    args.update(kw)
+    return item(store, **args), tk
 
 
-def test_undated_work_does_not_hold_an_item_past_every_window(store, ledger, tmp_path):
-    """C59: EMA's claim action was already on the first report; nothing shows it was done in time."""
-    tk = denied(store)
-    item(store, appeal_deadline="2026-04-01", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+def test_past_every_window_is_expired_the_next_day_with_no_grace(store):
+    """Orchestrator decision 1 (H5): EXPIRED starts the day after the last window closes; no 30-day grace in the work queue."""
+    short_window_item(store)
+    assert state(store, today="2026-03-30")["work_state"] == "work_now"
+    st = state(store, today="2026-03-31")
+    assert (st["work_state"], st["rule"], st["closed_on"]) == ("expired", "expired", "2026-03-30")
+    assert st["state_basis"] == ("The last window closed on Mar 30, 2026 (Commercial plans: 180 days is the common default), with no work "
+                                 "pending")
+    assert states.EXPIRE_GRACE_DAYS == 0 and states.ARCHIVE_GRACE_DAYS == 30
+
+
+def test_undated_work_does_not_hold_an_item_past_every_window_unless_ema_still_shows_it_pending(store, ledger, tmp_path):
+    """C59: EMA's claim action was already on the first report, so its own date is unknown. While EMA's current claim
+    action still shows the corrected claim and no answer to it is on file, it may be pending: follow it up (M1, related).
+    An action that no longer shows any work at the payer proves nothing: past every window, the item expires."""
+    short_window_item(store)
     load(store, ledger, tmp_path, [charge(F.link_no(1), action="Submitted Corrected Claim Portal", status="Denied"),
-                                   pay(F.link_no(1), F.check_no(1), 0), later()])
+                                   pay(F.link_no(1), F.check_no(1), 0, posted=D(2025, 10, 3)), later()])
+    st = state(store, today="2026-05-10")
+    assert st["work_state"] == "work_now" and st["rule"] in ("work_stale", "follow_up_due"), st["state_basis"]
+    assert "EMA's claim action still shows 'Submitted Corrected Claim Portal'" in st["state_basis"]
+    store.conn.execute("UPDATE ema_lines SET action='Pending Patient'")
+    store.conn.commit()
     st = state(store, today="2026-05-10")
     assert (st["work_state"], st["rule"]) == ("expired", "expired") and "Submitted Corrected Claim Portal" in st["state_basis"]
+    assert "nothing shows that work was done in time or is still pending" in st["state_basis"]
 
 
 def test_rebilled_to_the_right_payer_whose_denial_window_closed_is_expired(store):
@@ -594,7 +637,8 @@ def test_rebilled_to_the_right_payer_whose_denial_window_closed_is_expired(store
          claim_key=f"{tk}-0", transaction_key=tk)
     st = state(store, today="2026-07-15")
     assert (st["work_state"], st["rule"]) == ("expired", "expired")
-    assert "Rebilled to Medicare (other)" in st["state_basis"] and st["closed_on"] == "2026-05-30"
+    # Medicare's window to dispute its answer: 120 days, its own limit 125 (42 CFR 405.942), so it closed on Jun 4, 2026
+    assert "Rebilled to Medicare (other)" in st["state_basis"] and st["closed_on"] == "2026-06-04"
 
 
 def test_an_unanswered_claim_no_source_can_show_is_cant_check(store):
@@ -699,7 +743,7 @@ OUTCOME_STATES = [
     ("patient", {"patient_after": 15000, "outcome_on": "2026-04-15"}, ("done", "moved_to_patient"),
      "Settled by the patient: EMA shows $150.00 paid by the patient after the denial and the line closed"),
     ("written_off_by_policy", {"pattern": "Anthem / BCBS|99213||CO-197"}, ("accepted", "policy"),
-     "The owner's write-off policy accepts Anthem / BCBS|99213||CO-197"),
+     "The owner's write-off policy accepts Anthem / BCBS's CO-197 denials of 99213"),
     ("auto_written_off", {}, ("work_now", "open"), "; EMA's posting rule wrote it off the day the remittance posted; nobody worked it;"),
     ("written_off_while_pending", {}, ("work_now", "open"), "; EMA wrote it off the day it posted, while the payer was still waiting for information;"),
     ("lost_to_timely_filing", {}, ("work_now", "open"), "; written off for late filing after an earlier denial;"),
@@ -726,16 +770,15 @@ def test_each_ema_outcome_gives_its_state(store, ledger, tmp_path, oc, extra, wa
 
 # ================================================================================================ the payer's own limit, the new signals, the archive's hints
 def test_the_payers_own_limit_keeps_an_item_open_past_its_safe_date(store):
-    """Detection keeps the safe date in appeal_deadline and the payer's own later limit in legal_deadline: an item expires
-    only 30 days past the later of the two."""
-    tk = denied(store)
-    item(store, appeal_deadline="2026-04-01", legal_deadline="2026-06-30", line_key=line_key(store, tk), claim_key=f"{tk}-0",
-         transaction_key=tk)
+    """Detection keeps the safe date in appeal_deadline and the payer's own later limit in legal_deadline: an item
+    expires only past the later of the two (and past every other window)."""
+    short_window_item(store, appeal_deadline="2026-03-01", legal_deadline="2026-06-30")
     st = state(store, today="2026-05-10")
     assert (st["work_state"], st["rule"], st["legal_deadline"]) == ("work_now", "open", "2026-06-30")
-    st = state(store, today="2026-08-05")
-    assert (st["work_state"], st["closed_on"], st["closed_basis"]) == ("expired", "2026-06-30", "the payer's own limit")
-    assert st["state_basis"].startswith("Every window closed (the last on Jun 30, 2026) more than 30 days ago")
+    st = state(store, today="2026-07-01")
+    assert (st["work_state"], st["closed_on"]) == ("expired", "2026-06-30")
+    assert st["closed_basis"] == "the payer's own limit for the same request"
+    assert st["state_basis"].startswith("The last window closed on Jun 30, 2026 (the payer's own limit for the same request)")
 
 
 def test_a_credit_balance_is_a_refund_to_decide_and_never_expires(store):
@@ -801,7 +844,8 @@ def test_contractual_denials_the_owner_accepted_are_accepted(store):
     store.conn.commit()
     st = state(store)
     assert (st["work_state"], st["rule"]) == ("accepted", "policy")
-    assert st["state_basis"] == f"The owner's write-off policy accepts {BCBS}|||CO-97 (set by Owner One on Apr 3, 2026)"
+    assert st["state_basis"] == f"The owner's write-off policy accepts {BCBS}'s CO-97 denials on every code (set by Owner One on Apr 3, 2026)"
+    assert "|" not in st["state_basis"]
 
 
 def test_the_archive_rules_hints_decide_a_proven_done_and_a_waiting_and_never_close_a_likely_one(store):
@@ -816,8 +860,8 @@ def test_the_archive_rules_hints_decide_a_proven_done_and_a_waiting_and_never_cl
     assert st["evidence"][0]["text"] == "Paid $90.00 on the claim's other copy"
     item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, evidence={"archive_rule": dict(hint, strength="likely")})
     st = state(store)
-    assert (st["work_state"], st["rule"]) == ("work_now", "open")
-    assert "Answered on another claim the same day: the same remittance paid this line on the claim's other copy; check it before" in st["state_basis"]
+    assert (st["work_state"], st["rule"], st["appeal_block"], st["route"]) == ("work_now", "check_first", "likely_paid", "decide")
+    assert st["state_basis"] == "Answered on another claim the same day: the same remittance paid this line on the claim's other copy"
     rev = {"rule": "same_day_answers", "reclass": "reversed_no_answer", "label": "Reversed by the payer, no new answer yet",
            "hint": "Blue Cross reversed this payment on 2026-04-10 and no new answer is on file.", "state_hint": "waiting", "strength": "proven",
            "proof": [{"date": "2026-04-10", "source": "835", "kind": "reversal", "text": "reversal", "decisive": True}]}

@@ -18,7 +18,7 @@ from remitwatch import cloud, ema_checks as ec, ema_ledger as el, ema_reports as
 from remitwatch.store import Store
 from tests import ema_fixtures as F
 from tests.test_states import (BCBS, S, SVC, TODAY, _secondary_world, adj, charge, denied, event, item, later, line_key, ln, load,
-                               new_store, pay, patient_pay, remit)
+                               new_store, pay, patient_pay, remit, short_window_item)
 
 D = dt.date
 P = F.PAYERS
@@ -80,13 +80,14 @@ def plain(out: dict) -> None:
 
 
 # ------------------------------------------------------------------------------------------------------- worlds
-def auto_writeoff_world(store, ledger, tmp_path, *, handled=None, status="Resolved/Paid", **kw):
-    """The item's 99213 denied CO-197 by Blue Cross on 835 check 1; EMA posted the $0 answer and wrote the $150 off the
-    same day; Production reaches May 1. handled: EMA's ERA export rows for the line (adjustment status by reason)."""
-    tk = denied(store)
+def auto_writeoff_world(store, ledger, tmp_path, *, handled=None, status="Resolved/Paid", reason=("CO", "197"), **kw):
+    """The item's 99213 denied (CO-197 by default) by Blue Cross on 835 check 1; EMA posted the $0 answer and wrote the
+    $150 off the same day; Production reaches May 1. handled: EMA's ERA export rows for the line (adjustment status by
+    reason)."""
+    tk = denied(store, reason=reason)
     item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, **kw)
     load(store, ledger, tmp_path, [charge(F.link_no(1), status=status), pay(F.link_no(1), F.check_no(1), 0, status=status),
-                                   adj(F.link_no(1), "CO-197", 150, status=status), later()])
+                                   adj(F.link_no(1), f"{reason[0]}-{reason[1]}", 150, status=status), later()])
     if handled:
         from remitwatch.link import DDL
         store.conn.executescript(DDL)
@@ -155,8 +156,11 @@ def test_the_balance_reconciles_to_the_cent_on_the_server_and_on_the_dashboard_c
     out2 = story.explain(mem.conn, "F1", ledger=None, today=TODAY)
     assert out2["story"]["reconciles"] and out2["story"]["mode"] == "summary" and story.SERVER_ONLY in out2["story"]["notes"]
     assert out2["story"]["balance"]["text"] == b["text"]
-    assert any("the daily run's full store holds every remittance of the bill" in n for n in out2["story"]["notes"])
-    assert out2["verdict"]["state"] == "done" and out2["verdict"]["sentence"] == "Done: " + st["state_basis"] + "."
+    # the copy keeps every remittance of the bill (cloud.SERVING_BUILD 8): the same state and the same verdict as the server,
+    # row numbers aside (the server lists each posting, the copy EMA's summaries)
+    import re
+    unrow = lambda t: re.sub(r" \(rows? [^)]*\)", "", t)
+    assert out2["verdict"]["state"] == "done" and unrow(out2["verdict"]["sentence"]) == unrow(out["verdict"]["sentence"])
     assert out2["next_step"]["route"] == out["next_step"]["route"] == "nothing"
     mem.close()
     plain(out)
@@ -254,13 +258,16 @@ def test_a_whole_claim_story_by_claim_key(store, ledger, tmp_path):
 
 # ================================================================================================ the verdict
 def test_an_auto_write_off_says_so_in_the_owners_words(store, ledger, tmp_path):
-    auto_writeoff_world(store, ledger, tmp_path)
+    auto_writeoff_world(store, ledger, tmp_path, reason=("CO", "50"), signal="DENIED_MEDICAL_NECESSITY", carc="50")
     v = story.item_verdict(store.conn, "F1", ledger=ledger, today=TODAY)
     assert v["state"] == "work_now" and v["strength"] == "inferred"
     assert v["sentence"].startswith("EMA shows this claim as Resolved, but nobody worked this line. EMA's posting rule wrote off the "
-                                    "denial (CO-197, $150.00) on Mar 31, 2026, the day the payer's remittance was posted. The payer "
+                                    "denial (CO-50, $150.00) on Mar 31, 2026, the day the payer's remittance was posted. The payer "
                                     "paid nothing. You can still appeal until Dec 31, 2027. Inferred from the posting date.")
     assert v["rows"] and "posting day" in v["rule"]
+    # an authorization denial says its window in the words of its route (find the authorization first, not an appeal)
+    item(store, finding_id="F9", signal="DENIED_AUTH", carc="197", procedure_code="99212", line_key=None)
+    assert "The payer's window closes on Dec 31, 2027." in story.item_verdict(store.conn, "F9", today=TODAY)["sentence"]
 
 
 def test_an_auto_write_off_the_era_export_records_is_proven(store, ledger, tmp_path):
@@ -273,13 +280,32 @@ def test_an_auto_write_off_the_era_export_records_is_proven(store, ledger, tmp_p
     assert any(r["kind"] == "era_line" for r in out["story"]["rows"])
 
 
-def test_a_window_that_closed_says_so(store, ledger, tmp_path):
-    auto_writeoff_world(store, ledger, tmp_path, appeal_deadline="2026-04-20")
+def test_a_deadline_that_passed_inside_a_later_window_names_that_window(store, ledger, tmp_path):
+    """M1 (money review): the item's own deadline passed, but Anthem's two-year dispute window is open: never expired, and the
+    step says which window is open and until when; never 'file today only if ... otherwise mark it Lost' (H5)."""
+    auto_writeoff_world(store, ledger, tmp_path, reason=("CO", "50"), signal="DENIED_MEDICAL_NECESSITY", carc="50", appeal_deadline="2026-04-20")
     out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
-    assert "The appeal window closed on Apr 20, 2026." in out["verdict"]["sentence"]
-    n = out["next_step"]
-    assert n["action"].startswith("The window closed on Apr 20, 2026, 13 days ago") and "otherwise mark it Lost" in n["action"]
-    assert not n["appeal_ok"] and "let_go" in n["buttons"]
+    v, n = out["verdict"], out["next_step"]
+    assert v["state"] == "work_now" and out["state"]["rule"] == "open_late"
+    assert v["sentence"].startswith("Its own deadline passed on Apr 20, 2026; the payer's dispute window is open until Mar 28, 2028")
+    assert n["action"].startswith("Its own deadline passed on Apr 20, 2026; the payer's dispute window is open until Mar 28, 2028")
+    assert "File today only if" not in n["action"] and "mark it Lost" not in n["action"]
+    assert (n["deadline"], n["route"]) == ("2028-03-28", "appeal")
+    assert any(c["what"] == "appeal" and c["date"] == "2028-03-28" for c in n["clocks"])
+
+
+def test_a_window_that_closed_with_every_other_one_is_expired_and_asks_for_nothing(store):
+    """H5, M2: past its last window the item expires that day; the step says nothing can be recovered and offers no Let go
+    (an expired item already left the list and counts as lost to the deadline)."""
+    short_window_item(store)
+    out = story.explain(store.conn, "F1", today="2026-04-01")
+    v, n = out["verdict"], out["next_step"]
+    assert v["sentence"].startswith("Expired: the last window closed on Mar 30, 2026 (Commercial plans: 180 days is the common default), "
+                                    "with no work pending")
+    assert (v["strength"], v["rule"], n["route"], n["appeal_ok"]) == ("inferred", "past every window", "nothing", False)
+    assert n["action"] == ("Nothing can be recovered: the last window closed on Mar 30, 2026 (Commercial plans: 180 days is the common "
+                           "default). It left the work list on its own and counts as lost to the deadline.")
+    assert n["steps"] == [] and "let_go" not in n["buttons"] and not any("Lost" in s_ for s_ in n["steps"])
 
 
 def test_paid_later_on_a_check_with_no_835_names_the_row_and_asks_for_the_era(store, ledger, tmp_path):
@@ -316,7 +342,8 @@ def test_an_unanswered_claim_says_how_long_and_the_payers_usual_time(store):
          evidence={"sent": "2026-03-03", "answer_due": "2026-04-02", "days_waiting": 61, "turnaround_days": 18,
                    "lines": [["99213", S]], "billed_cents": 15000})
     out = story.explain(store.conn, "F1", today=TODAY)
-    assert out["verdict"]["sentence"].startswith("Unanswered: no answer from any payer in 61 days; this payer usually answers in 18 days")
+    assert out["verdict"]["sentence"].startswith("Unanswered: no answer from any payer in 61 days; Anthem / BCBS answers 95% of claims "
+                                                 "within 18 days")
     n = out["next_step"]
     assert n["route"] == "call" and n["who"] == "A/R follow-up biller" and "log_outcome" in n["buttons"]
     assert any("999" in s_ and "277CA" in s_ for s_ in n["steps"])
@@ -412,7 +439,8 @@ def test_a_short_payment_on_the_days_main_procedure_carries_the_argument(store):
     assert out["verdict"]["sentence"].startswith("Paid short: Anthem / BCBS allowed $302.00 for 17313 against its usual $604.00")
     assert "17313 was the highest-valued procedure of the day (the others: 13121 (allowed $142.76))" in out["verdict"]["sentence"]
     n = out["next_step"]
-    assert n["route"] == "rate" and n["appeal_ok"] and "The argument: 17313 was the highest-valued procedure" in n["action"]
+    assert n["route"] == "rate" and n["appeal_ok"] and any(s_.startswith("The argument: 17313 was the highest-valued procedure")
+                                                           for s_ in n["steps"])
 
 
 def test_a_short_payment_of_a_second_procedure_says_check_first_and_is_not_appealed(store):
@@ -432,13 +460,12 @@ def test_a_short_payment_of_a_second_procedure_says_check_first_and_is_not_appea
 
 
 def test_expired_and_accepted_and_waiting_sentences(store, ledger, tmp_path):
-    tk = denied(store)
-    item(store, appeal_deadline="2026-03-30", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    _f, tk = short_window_item(store)
     out = story.explain(store.conn, "F1", today=TODAY)
-    assert out["verdict"]["sentence"].startswith("Expired: every window closed (the last on Mar 30, 2026) more than 30 days ago, with no "
-                                                 "work pending")
+    assert out["verdict"]["sentence"].startswith("Expired: the last window closed on Mar 30, 2026 (Commercial plans: 180 days is the common "
+                                                 "default), with no work pending")
     assert (out["verdict"]["strength"], out["next_step"]["route"]) == ("inferred", "nothing")
-    assert "Mark it Lost so it leaves the list (it stays findable)." in out["next_step"]["steps"]
+    assert out["next_step"]["buttons"] == ["log_outcome"] and out["next_step"]["steps"] == []
     item(store, finding_id="F2", status="dismissed", status_changed_at="2026-04-02", line_key=line_key(store, tk), claim_key=f"{tk}-0")
     event(store, "F2", "manual", at="2026-04-02T10:00:00", frm="open", to="dismissed", actor="Biller Two", note="contract rate")
     v = story.item_verdict(store.conn, "F2", today=TODAY)
@@ -476,7 +503,8 @@ def test_an_appeal_needs_the_visit_note_and_faxes_only_to_a_confirmed_number(sto
     assert n["action"].startswith("Appeal to Anthem / BCBS: Modifier 25: 99214 was a separate problem evaluated and managed beyond the "
                                   "pre-procedure work of 17311")
     assert "the visit note of Mar 2, 2026 showing a significant, separately identifiable problem" in n["needs"][0]
-    assert any("No fax number is saved for Anthem / BCBS" in s_ for s_ in n["steps"])
+    # where the appeal goes (M15): Anthem's disputes go on Availity
+    assert any(s_.startswith("File it on Availity as a Claim Payment Dispute (Claims & Payments > Disputes)") for s_ in n["steps"])
     assert n["who"] == "Coder reads the note, then the biller sends it" and n["deadline"] == "2027-12-31"
     actions.ensure_fax_tables(store.conn)
     store.conn.execute("INSERT INTO payer_fax (payer_group, purpose, number, confirmed_by, confirmed_at, auto_ok) VALUES (?,?,?,?,?,1)",
@@ -501,7 +529,9 @@ def test_a_write_off_decision_goes_through_the_policy_table_or_a_persons_let_go(
     auto_writeoff_world(store, ledger, tmp_path)
     n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
     assert "accept_pattern" in n["buttons"] and "let_go" in n["buttons"]
-    assert any("Accept pattern" in s_ and "A single item is let go only by a person, with a reason." in s_ for s_ in n["steps"])
+    assert any("Accept this pattern" in s_ and "A single item is let go only by a person, with a reason." in s_ for s_ in n["steps"])
+    # the button accepts the pattern in one click: the next step carries the owner's policy key (needs_C1 1)
+    assert n["pattern"] == f"{BCBS}|99213||CO-197"
     assert any(s_.startswith("When you send it, reverse EMA's write-off of $150.00 (CO-197)") for s_ in n["steps"])
 
 
@@ -530,7 +560,8 @@ def test_a_timely_filing_denial_with_no_earlier_submission_on_file_is_let_go(sto
     n = story.next_step(store.conn, "F1", today="2026-10-01")
     assert n["route"] == "decide" and not n["appeal_ok"]
     assert "On file: the payer first received it on Sep 1, 2026, after the limit." in n["action"]
-    assert "No earlier submission is on file." in n["action"] and "mark it Lost (provider liability: do not bill the patient)" in n["action"]
+    assert "No earlier submission is on file." in n["action"]
+    assert 'Let go with the reason "lost to timely filing" (provider liability: do not bill the patient)' in n["action"]
 
 
 def test_a_payers_answer_ema_never_posted_is_the_first_step(store, ledger, tmp_path):
@@ -659,19 +690,19 @@ def test_a_claim_the_first_payer_forwarded_asks_the_second_payer_for_its_payment
 
 
 def test_the_payers_own_limit_is_named_when_the_safe_date_passed(store):
-    tk = denied(store)
-    item(store, appeal_deadline="2026-04-01", legal_deadline="2026-06-30", line_key=line_key(store, tk), claim_key=f"{tk}-0",
-         transaction_key=tk)
+    short_window_item(store, appeal_deadline="2026-03-01", legal_deadline="2026-06-30")
     out = story.explain(store.conn, "F1", today="2026-05-10")
-    assert "The safe date to appeal passed on Apr 1, 2026; the payer's own limit is Jun 30, 2026, so it can still be sent." in out["verdict"]["sentence"]
+    assert "The safe date to appeal passed on Mar 1, 2026; the payer's own limit is Jun 30, 2026, so it can still be sent." in out["verdict"]["sentence"]
     n = out["next_step"]
-    assert n["action"].startswith(f"The safe date passed on Apr 1, 2026, but {BCBS}'s own limit is Jun 30, 2026 (51 days left): send it now.")
+    assert n["action"].startswith("The safe date passed on Mar 1, 2026, but Testcare Health's own limit is Jun 30, 2026 (51 days left): "
+                                  "send it now.")
     assert n["appeal_ok"] and n["route"] == "appeal"
     plain(out)
-    # past both: the window that closed last is named, the step offers Lost, and no bulk appeal takes it
-    n = story.next_step(store.conn, "F1", today="2026-07-10")
-    assert n["action"].startswith("The window closed on Jun 30, 2026, 10 days ago (the payer's own limit).") and "let_go" in n["buttons"]
-    assert not n["appeal_ok"]
+    # past both (and every other window): expired the next day, nothing asked, never appealed
+    out = story.explain(store.conn, "F1", today="2026-07-01")
+    assert out["verdict"]["state"] == "expired" and out["next_step"]["action"].startswith("Nothing can be recovered: the last window closed "
+                                                                                          "on Jun 30, 2026")
+    assert not out["next_step"]["appeal_ok"] and "let_go" not in out["next_step"]["buttons"]
 
 
 def test_a_credit_balance_keeps_medicares_date(store):

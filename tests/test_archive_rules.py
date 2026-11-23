@@ -1249,6 +1249,22 @@ def test_rule2_a_secondary_that_paid_part_of_the_share_at_the_claim_level_declin
     assert "paid $14.54 of the patient's share as secondary" in a["hint"]
 
 
+def test_rule2_a_secondary_that_paid_part_of_the_share_and_asks_for_records_for_the_rest_is_work(store):
+    """Medicare paid two units and left $56.11 of coinsurance. The secondary paid $37.41 of it on one line; its later answer
+    of the other line asks for the medical record (CO-226): it has not declined that unit's share, which stays to work at
+    its part of what is left."""
+    remit(store, "2026-03-02", [cl("CB0002506C017", [ln("17273", 187.03, 149.58, 187.03, [("PR", "2", 37.41)], lcn="1"),
+                                                     ln("17273", 187.03, 74.79, 93.52, [("CO", "59", 93.51), ("PR", "2", 18.70)], mods=("51",),
+                                                        lcn="2")], status="19", cfi="MB")], payer="STATE MEDICARE", payer_id="MCR01")
+    remit(store, "2026-03-20", [cl("CB0002506C017", [ln("17273", 187.03, 37.41, 186.99, [("OA", "94", 149.62)], lcn="1")], status="2", cfi="12")],
+          payer="TEST SECONDARY CO", payer_id="SEC01")
+    lk = remit(store, "2026-04-20", [cl("CB0002506C017", [ln("17273", 187.03, 0, None, [("CO", "226", 187.03)], rem=("M127",), lcn="2")],
+                                        cfi="12")], payer="TEST SECONDARY CO", payer_id="SEC01")[0]
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_MISSING_INFO", expected=18703)]))
+    assert (a["state_hint"], a["shortfall_cents"], a["patient_share_left_cents"]) == ("work_now", 935, 935)
+    assert "declined the rest" not in a["hint"] and "Fix what it asks" in a["hint"]
+
+
 def test_rule4_a_restated_short_payment_topped_up_later_closes(store):
     """The item's own answer restates an earlier payment (its claim paid $0, CO-B13); the payer's later answer raises the
     allowed amount to the expected one and its claim pays the difference: closed as topped up."""
