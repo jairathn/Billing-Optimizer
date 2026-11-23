@@ -615,7 +615,7 @@ def _plan_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX temp.ix_arc_xb_bill ON arc_xb(bill)")
     conn.execute("CREATE TEMP TABLE arc_dates (bill TEXT, d TEXT, paid TEXT, claims INTEGER, lines INTEGER, years TEXT)")
     conn.execute("""INSERT INTO temp.arc_dates (bill, d, lines, years)
-                    SELECT k.bill, MAX(COALESCE(l.service_date, l.service_period_end, l.service_period_start)) || COALESCE((SELECT '' FROM remarks r WHERE r.claim_key = k.claim_key LIMIT 1), ''), COUNT(*),
+                    SELECT k.bill, MAX(COALESCE(l.service_date, l.service_period_end, l.service_period_start)), COUNT(*),
                            GROUP_CONCAT(DISTINCT substr(COALESCE(l.service_date, l.service_period_start, l.payment_date), 1, 4))
                     FROM temp.arc_cb k JOIN lines l ON l.claim_key = k.claim_key GROUP BY k.bill""")
     conn.execute("""INSERT INTO temp.arc_dates (bill, d, paid, claims)
