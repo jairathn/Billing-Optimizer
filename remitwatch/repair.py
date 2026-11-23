@@ -117,10 +117,29 @@ class Held(RuntimeError):
 _TRANSIENT_WORDS = ("too many retries", "timed out", "timeout", "temporarily", "service unavailable", "bad gateway",
                     "gateway time", "connection reset", "connection aborted", "connection refused", "broken pipe",
                     "remote end closed", "eof occurred", "name resolution", "temporary failure", "try again", "rate limit",
-                    "too_many_requests", "too_many_write_operations", "internal server error", " 429", " 500", " 502", " 503",
-                    " 504", "(429", "(500", "(502", "(503", "(504", "error reading ssh protocol banner", "stalled")
-_NEVER_TRANSIENT = ("DropboxAuthError", "SignInRefused", "SignInUnclear", "FileServiceRefused", "DropboxNotFound",
-                    "DropboxConflict", "Conflict", "PermissionError", "FileNotFoundError", "OutOfTime", "Held")
+                    "too_many_requests", "too_many_write_operations", "internal server error", "network is unreachable",
+                    "no route to host", "ssh handshake", "error reading ssh protocol banner", "stalled")
+# an HTTP status in a message, only as a status: after the word that names it ("failed 503", "answered 502", "HTTP 429",
+# "(503"), or before its reason ("503 Server Error"); never a number that merely holds one ("row 5021", "found 429")
+_STATUS_WORDS = re.compile(r"(?:\b(?:failed|answered|status|http|error|code|returned|got)[\s:=#]*|\()(?:429|5\d\d)\b|"
+                           r"\b(?:429|5\d\d)\s+(?:server error|too many requests|service unavailable|bad gateway|gateway time)", re.I)
+_NEVER_TRANSIENT = frozenset({"DropboxAuthError", "SignInRefused", "SignInUnclear", "FileServiceRefused", "DropboxNotFound",
+                              "DropboxConflict", "Conflict", "PermissionError", "FileNotFoundError", "OutOfTime", "Held",
+                              "ReportRefused",
+                              # paramiko's refused sign-ins and changed server keys: SSHExceptions, never network trouble
+                              "AuthenticationException", "BadAuthenticationType", "PasswordRequiredException",
+                              "BadHostKeyException"})
+_TRANSIENT_NAMES = frozenset({"ConnectionError", "Timeout", "ReadTimeout", "ConnectTimeout", "ChunkedEncodingError", "SSLError",
+                              "ProtocolError", "RemoteDisconnected", "IncompleteRead", "SSHException", "NoValidConnectionsError",
+                              "Stalled", "ProxyError"})
+# a code bug, whatever its message says (a TypeError about a `timeout` argument, a ValueError about row 5021 or 429
+# columns): its words are never read as network trouble
+_CODE_BUGS = (TypeError, LookupError, AttributeError, NameError, ValueError, AssertionError, ArithmeticError, NotImplementedError,
+              RecursionError, ImportError, SyntaxError, MemoryError, StopIteration, sqlite3.Error)
+# the errors whose words can name network trouble: the network's own (OSError: sockets, TLS, requests' exceptions) and the
+# clients' (the Dropbox client's RuntimeError, TriZettoError, FaxError)
+_CARRIER_NAMES = frozenset({"TriZettoError", "FaxError", "DropboxError"})
+NOT_RETRIED_FLAG = "_remitwatch_not_retried"
 
 
 def status_of(exc: BaseException) -> int | None:
@@ -132,22 +151,63 @@ def status_of(exc: BaseException) -> int | None:
     return None
 
 
-def is_transient(exc: BaseException) -> bool:
+def _not_retried_mark(exc: BaseException | None) -> bool:
+    """Whether the exception, or one it was raised from or while handling, came out of a not_retried callback."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen and len(seen) < 8:
+        if getattr(exc, NOT_RETRIED_FLAG, False):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def is_transient(exc: BaseException, *, read: bool = False, _depth: int = 0) -> bool:
     """Network trouble worth trying again: a reset or refused connection, a timeout, a server's 5xx or 429, a line
-    that went silent. Never a refused password or token, a missing file, a conflict or a code bug."""
+    that went silent (by its type, its HTTP status, the network error it was raised from, or, for the network's own
+    and the clients' errors only, its words). Never a refused password or token, a missing file, a conflict, a code
+    bug, or anything raised inside a not_retried callback. read: the call only reads (a fax status, an inbox), so a
+    fax error's "it may have been sent" does not apply to it."""
+    if _depth > 4 or _not_retried_mark(exc):
+        return False
     names = {c.__name__ for c in type(exc).__mro__}
-    if names & set(_NEVER_TRANSIENT) or getattr(exc, "maybe_sent", False):
-        return False            # a refused login, a conflict, or a fax that may have gone out: trying again could repeat it
+    if names & _NEVER_TRANSIENT:
+        return False            # a refused login, a conflict: trying again could lock the login or repeat the conflict
+    if getattr(exc, "maybe_sent", False) and not read:
+        return False            # a fax that may have gone out: only a call known to be a read is tried again
     code = status_of(exc)
     if code is not None:
         return code == 429 or code >= 500
     if isinstance(exc, (TimeoutError, ConnectionError, socket.timeout, EOFError)):
         return True
-    if names & {"ConnectionError", "Timeout", "ReadTimeout", "ConnectTimeout", "ChunkedEncodingError", "SSLError", "ProtocolError",
-                "RemoteDisconnected", "IncompleteRead", "SSHException", "NoValidConnectionsError", "Stalled", "ProxyError"}:
+    if names & _TRANSIENT_NAMES:
         return True
+    if isinstance(exc, _CODE_BUGS):
+        return False
+    if not (isinstance(exc, (OSError, RuntimeError)) or names & _CARRIER_NAMES):
+        return False
+    cause = exc.__cause__
+    if cause is not None and cause is not exc and is_transient(cause, read=read, _depth=_depth + 1):
+        return True             # a client's own error raised from the network's (TriZetto: "Could not reach ...")
     text = f" {exc}".lower()
-    return any(w in text for w in _TRANSIENT_WORDS)
+    return any(w in text for w in _TRANSIENT_WORDS) or bool(_STATUS_WORDS.search(text))
+
+
+def not_retried(fn: Callable) -> Callable:
+    """Wrap a callback that a retried call makes (trizetto.pull hands the files it read to `handle`, the ingest): what
+    the callback raises is its own (a code bug, a file that cannot be read), never the network's, so retry_call raises
+    it at once instead of repeating the whole call. The exception keeps its type; it only carries a mark."""
+    @functools.wraps(fn)
+    def call(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except BaseException as exc:
+            try:
+                setattr(exc, NOT_RETRIED_FLAG, True)
+            except (AttributeError, TypeError) as no_attr:      # an exception that takes no attribute: retried as before
+                runlog.caught(no_attr, "not_retried", level="warning")
+            raise
+    return call
 
 
 # ---------------------------------------------------------------------------------------------------------- registry
@@ -159,7 +219,14 @@ class Registry:
         self.now = now
         self.state: dict = {"version": 1, "saved_at": None, "entries": {}}
         self.dirty = False
+        # one registry is one run: a run without a run log still counts once (its own token), and the targets this run
+        # held, with the plain tries they got since, live here (retry_call)
+        self._token = "registry-" + secrets.token_hex(4)
+        self._run_holds: dict[str, int] = {}
         self.load()
+
+    def _run_key(self) -> str:
+        return getattr(self.run, "run_id", None) or getattr(self, "_token", None) or "registry"
 
     # ---------------------------------------------------------------- persistence
     def _t(self) -> datetime:

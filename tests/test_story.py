@@ -794,3 +794,668 @@ def test_a_credit_or_a_second_payer_item_keeps_its_own_route_when_the_stored_sta
     n = story.next_step(store.conn, "F1", today=TODAY)
     assert n["route"] == "refund" and not n["appeal_ok"]
     assert story.next_step(store.conn, "F2", today=TODAY)["route"] == "bill_secondary"
+
+
+# ================================================================================================ after the two reviews
+# Each fix from the money review and the practice manager's review, on invented rows. A test names the rule it holds.
+def _fax(store, group, number="5555550100"):
+    """A confirmed appeal fax number for the payer group (the Faxes page's table)."""
+    store.conn.execute("CREATE TABLE IF NOT EXISTS payer_fax (payer_group TEXT, purpose TEXT, number TEXT, auto_ok INTEGER, "
+                       "changed_at TEXT, previous TEXT)")
+    store.conn.execute("INSERT INTO payer_fax VALUES (?,?,?,?,?,?)", (group, "appeal", number, 1, None, None))
+    store.conn.commit()
+
+
+def _all_text(out: dict) -> list[str]:
+    n = out["next_step"]
+    return [out["verdict"]["sentence"], n["action"]] + list(n["steps"]) + [str((out["state"] or {}).get("state_basis") or "")]
+
+
+def _medicare_item(store, *, signal, carc, rarc=None, code="99213", group="Medicare KY (CGS J15)", **kw):
+    """A Medicare Part B denial of Mar 20, 2026 (redetermination to Jul 18, 2026, its own limit Jul 23, 2026)."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-20", payer="MEDICARE PART B TEST", claims=[{"pcn": F.claim_id(1), "cfi": "MB",
+        "received": "2026-03-05", "lines": [ln(code, 400, 0, [("CO", carc, 400)], lcn="1", rmk=[rarc] if rarc else [])]}])
+    item(store, signal=signal, carc=carc, rarc=rarc, procedure_code=code, billed_code=code, charge_cents=40000,
+         payer_name="MEDICARE PART B TEST", payer_group=group, payer_kind="medicare", payment_date="2026-03-20",
+         appeal_deadline="2026-07-18", legal_deadline="2026-07-23", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         **kw)
+    return tk
+
+
+# ------------------------------------------------------------------------------------------- windows and expiry
+def test_the_payers_own_dispute_window_keeps_a_corrected_claim_item_open(store):
+    """Money review 1: dated by Humana's one-year corrected-claim clock, the item stays open while Humana's 18-month dispute
+    window is open; it expires the day after that window."""
+    tk = denied(store, reason=("CO", "16"), payer="HUMANA TEST", paid_on="2026-03-20")
+    item(store, signal="DENIED_MISSING_MODIFIER", carc="16", rarc="N822", actionable="correct_and_resubmit", payer_name="HUMANA TEST",
+         payer_group="Humana Medicare Advantage", payer_kind="medicare_advantage", payment_date="2026-03-20", appeal_deadline="2027-03-02",
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    last = states.last_window(dict(store.conn.execute("SELECT * FROM findings").fetchone()))
+    assert last["what"] == "the payer's dispute window" and last["date"] > "2027-05-01"
+    out = story.explain(store.conn, "F1", today="2027-05-01")
+    assert (out["verdict"]["state"], out["state"]["rule"]) == ("work_now", "open_late")
+    assert out["next_step"]["deadline"] == last["date"]
+    after = states.state_of(store.conn, dict(store.conn.execute("SELECT * FROM findings").fetchone()), today=states._add(last["date"], 1))
+    assert after["work_state"] == "expired"
+
+
+def test_a_medicare_remark_naming_a_coding_error_keeps_the_reopening_open_a_year(store):
+    """C59: a drug line denied CO-114 with remark M51 (a code missing or invalid). The redetermination window is 120 days,
+    but a clerical fix is a Medicare reopening, open for a year from the remittance: the item stays on Work now until then,
+    its step compares the line with a paid one, and it expires the day after the year."""
+    _medicare_item(store, signal="DENIED_NONCOVERED", carc="114", rarc="M51", code="J3301", group="Medicare IN (WPS J8)")
+    n = story.next_step(store.conn, "F1", today="2026-05-01")
+    assert any(s_.startswith("The remark M51 (Missing/incomplete/invalid procedure code(s)) points to a coding error: compare this line "
+                             "with a paid one of the same code") and "reopening until Mar 20, 2027" in s_ and "by Jul 23, 2026" in s_
+               for s_ in n["steps"]), n["steps"]
+    out = story.explain(store.conn, "F1", today="2026-10-01")
+    v, n = out["verdict"], out["next_step"]
+    assert (v["state"], out["state"]["rule"], n["deadline"]) == ("work_now", "open_late", "2027-03-20")
+    assert v["sentence"].startswith("Its own deadline passed on Jul 23, 2026; a Medicare reopening is open until Mar 20, 2027 (Medicare "
+                                    "reopening of a clerical error, within one year of the remittance (42 CFR 405.980)).")
+    assert "ask the Medicare contractor for it on the WPS portal or by phone" in n["action"] and not n["appeal_ok"]
+    assert story.item_verdict(store.conn, "F1", today="2027-03-21")["state"] == "expired"
+    plain(out)
+
+
+def test_a_bundling_denial_that_needs_the_visit_note_has_no_reopening_and_its_clocks_match_its_state(store):
+    """Money review 1, the modifier-57 case: an E/M billed with 57 and still bundled into a major surgery needs the visit
+    note (the decision for surgery), which a reopening never takes. Its clocks list no reopening, and its state expires the
+    day after the last clock it lists (C59 is a different case: a remark naming a coding error)."""
+    _medicare_item(store, signal="EM_BUNDLED_MOD57_MAJOR", carc="97", category="bundling", actionable="appeal")
+    out = story.explain(store.conn, "F1", today="2026-07-23")
+    clocks = out["next_step"]["clocks"]
+    assert not any(c["process"] == "reopening" for c in clocks)
+    assert max(c["date"] for c in clocks) == "2026-07-23" and out["verdict"]["state"] == "work_now"
+    assert "(today is the last day): send it now" in out["next_step"]["action"]
+    # the argument's first sentence is cut at its end, never inside "ch. 12 sec. 40.2"
+    assert "(CMS Claims Processing Manual ch. 12 sec. 40.2). Medicare contractors take no faxed redeterminations" in out["next_step"]["action"]
+    late = story.explain(store.conn, "F1", today="2026-07-24")
+    assert late["verdict"]["state"] == "expired" and max(c["date"] for c in late["next_step"]["clocks"]) < "2026-07-24"
+
+
+def test_a_forwarded_claim_past_every_window_expires_and_never_stays_on_work_now(store):
+    """Money review 4, practice-manager M19: a claim forwarded to another carrier (CO-B11) runs on the carrier's filing
+    limit; past it, nothing can be recovered and the item expires."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-01-10", claims=[{"pcn": F.claim_id(1), "status": "19", "crossover": "TESTCARE MEDIGAP",
+               "pccn": "PCN-A", "received": "2026-01-05", "lines": [ln("99213", 150, 0, [("CO", "B11", 150)], lcn="1")]}])
+    item(store, signal="FORWARDED_TO_CARRIER", carc="B11", payment_date="2026-01-10", appeal_deadline="2026-04-10",
+         deadline_basis="the carrier's filing limit", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    assert story.explain(store.conn, "F1", today="2026-11-22")["verdict"]["state"] == "expired"
+    assert states.state_of(store.conn, dict(store.conn.execute("SELECT * FROM findings").fetchone()), today="2028-05-01")["work_state"] == "expired"
+
+
+def test_the_payers_answer_to_a_resubmission_is_worked_in_the_new_answers_window(store):
+    """Practice-manager M20: the payer answered a resubmission with a new denial; the step never leads with the first
+    denial's closed window."""
+    tk = denied(store, reason=("CO", "16"), paid_on="2026-01-10", received="2026-01-05")
+    remit(store, trace="T2", paid_on="2026-06-15", claims=[{"pcn": F.claim_id(1, sub=2), "pccn": "PCN-B", "received": "2026-06-01",
+          "freq": "7", "lines": [ln("99213", 150, 0, [("CO", "50", 150)], lcn="1")]}])
+    item(store, signal="DENIED_MISSING_INFO", carc="16", payment_date="2026-01-10", appeal_deadline="2026-04-10",
+         deadline_basis="Blue Cross: 90 days to correct", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    out = story.explain(store.conn, "F1", today="2026-07-01")
+    assert out["state"]["rule"] == "work_answered" and out["verdict"]["state"] == "work_now"
+    assert "File today only if" not in out["next_step"]["action"] and "mark it Lost" not in out["next_step"]["action"]
+
+
+# ------------------------------------------------------------------------------------------- proof of payment
+def test_a_short_payment_reversed_and_repaid_at_the_same_amount_is_not_paid_again(store):
+    """Money review 5: the payer reversed its $60 answer and paid the same $60 again; nothing more arrived, so the
+    underpayment stays open."""
+    tk = remit(store, trace="T1", paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+        "lines": [ln("99214", 200, 60, [("CO", "45", 140)], lcn="1", allowed=60)]}])
+    item(store, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, procedure_code="99214", billed_code="99214",
+         paid_cents=6000, allowed_cents=6000, expected_cents=10000, shortfall_cents=4000, line_key=line_key(store, tk),
+         claim_key=f"{tk}-0", transaction_key=tk)
+    remit(store, trace="T2", paid_on="2026-05-10", claims=[
+        {"pcn": F.claim_id(1), "status": "22", "pccn": "PCN-A", "received": "2026-03-05",
+         "lines": [ln("99214", -200, -60, [("CO", "45", -140)], lcn="1", allowed=-60)]},
+        {"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-05-01",
+         "lines": [ln("99214", 200, 60, [("CO", "45", 140)], lcn="1", allowed=60)]}])
+    st = states.state_of(store.conn, dict(store.conn.execute("SELECT * FROM findings").fetchone()), today="2026-06-01")
+    assert st["work_state"] == "work_now", st["state_basis"]
+
+
+def test_a_second_payers_copay_never_settles_the_first_payers_downcode(store):
+    """Money review 5: the first payer paid 99204 as 99203 ($25.00 short); the second plan later paid the $20.00 copay.
+    That is the patient's share, not the missing money."""
+    tk = remit(store, trace="T1", paid_on="2026-03-11", claims=[{"pcn": F.claim_id(1), "received": "2026-03-05",
+        "lines": [ln("99203", 280, 60, [("PR", "3", 20), ("CO", "186", 200)], lcn="1", allowed=80, ocode="99204")]}])
+    item(store, signal="DOWNCODE_SVC06", category="downcoding", carc="186", procedure_code="99203", original_procedure_code="99204",
+         billed_code="99204", charge_cents=28000, paid_cents=6000, allowed_cents=8000, expected_cents=10500, shortfall_cents=2500,
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    remit(store, trace="T2", paid_on="2026-03-31", payer="SECONDARY TEST PLAN", claims=[
+        {"pcn": F.claim_id(1, sub=2), "status": "2", "received": "2026-03-20",
+         "lines": [ln("99204", 280, 20, [("OA", "23", 260)], lcn="1", allowed=80)]}])
+    st = states.state_of(store.conn, dict(store.conn.execute("SELECT * FROM findings").fetchone()), today="2026-04-15")
+    assert st["work_state"] != "done", st["state_basis"]
+
+
+def test_another_payers_payment_closes_a_line_whose_claim_has_a_zero_charge_twin(store, ledger, tmp_path):
+    """Money review 7 (C02): the claim carries the code twice, once with a $0 charge; the $0 line is not a second service,
+    so EMA's proof that another payer paid and settled the line closes it."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+        "lines": [ln("17311", 0, 0, [], lcn="1"), ln("17311", 1080, 0, [("CO", "96", 1080)], lcn="2")]}])
+    item(store, signal="DENIED_NONCOVERED", carc="96", procedure_code="17311", billed_code="17311", charge_cents=108000,
+         expected_cents=60000, shortfall_cents=60000, line_key=line_key(store, tk, 0, 1), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1), cpt="17311", amount=1080, status="Resolved/Paid"),
+                                   pay(F.link_no(1), F.check_no(1), 0, cpt="17311"),
+                                   pay(F.link_no(1), "NOERA77", 375, cpt="17311", posted=D(2026, 4, 28), payer=P["commercial"],
+                                       status="Resolved/Paid"),
+                                   adj(F.link_no(1), "CO-45", 705, cpt="17311", contractual=True, posted=D(2026, 4, 28),
+                                       payer=P["commercial"], status="Resolved/Paid"), later()])
+    out = story.explain(store.conn, "F1", ledger=ledger, today="2026-05-03")
+    b = out["story"]["balance"]
+    assert b["insurer_paid_cents"] == 37500 and b["open_cents"] == 0
+    assert out["verdict"]["state"] == "done", out["verdict"]["sentence"]
+
+
+def test_a_short_payment_split_into_two_lines_of_one_claim_is_paid_in_full(store):
+    """Money review 7 (C27): the payer split the code into two lines of one claim sharing a line control number; their
+    allowed amounts ($385.00 + $90.00) reach the usual $475.00."""
+    tk = remit(store, trace="T1", paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+        "lines": [ln("77600", 860, 360, [("CO", "45", 475), ("PR", "2", 25)], lcn="1", allowed=385),
+                  ln("77600", 0, 0, [("CO", "45", 0)], lcn="1", allowed=90)]}])
+    item(store, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, procedure_code="77600", billed_code="77600",
+         charge_cents=86000, paid_cents=36000, allowed_cents=38500, expected_cents=47500, shortfall_cents=9000,
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    out = story.explain(store.conn, "F1", today="2026-05-03")
+    assert out["verdict"]["state"] == "done" and "into 2 lines of the claim" in out["state"]["state_basis"], out["verdict"]["sentence"]
+    assert not out["next_step"]["appeal_ok"]
+
+
+def test_a_line_ema_shows_settled_by_insurance_is_never_called_unpaid(store, ledger, tmp_path):
+    """Practice-manager H6 (C02): EMA shows another payer paid and nothing open; the verdict never says 'Unpaid ... $0.00
+    still open' and never claims proof it does not have."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+               "lines": [ln("17311", 600, 0, [("CO", "96", 600)], lcn="1"), ln("17311", 400, 0, [("CO", "96", 400)], lcn="2")]}])
+    item(store, signal="DENIED_NONCOVERED", carc="96", procedure_code="17311", billed_code="17311", charge_cents=60000, expected_cents=60000,
+         shortfall_cents=60000, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1), cpt="17311", amount=1000), pay(F.link_no(1), F.check_no(1), 0, cpt="17311"),
+                                   pay(F.link_no(1), "OTHR0001", 375, cpt="17311", posted=D(2026, 4, 20), payer=P["commercial"]),
+                                   adj(F.link_no(1), "CO-45", 625, cpt="17311", contractual=True, posted=D(2026, 4, 20), payer=P["commercial"]),
+                                   later()])
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    s_ = out["verdict"]["sentence"]
+    assert "Unpaid" not in s_ and "$0.00 still open" not in s_, s_
+    assert out["verdict"]["strength"] != "proven"
+
+
+def test_a_payment_that_came_before_the_item_closes_with_nothing_recovered(store):
+    """Practice-manager M3: the line was paid before this denial; closing it as Paid records $0.00 recovered."""
+    remit(store, trace="P1", paid_on="2026-03-20", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+          "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    tk = denied(store, paid_on="2026-04-10", reason=("CO", "50"), pcn=F.claim_id(1, sub=2), pccn="PCN-B", received="2026-04-01")
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", payment_date="2026-04-10", patient_control_number=F.claim_id(1, sub=2),
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert n["route"] == "nothing"
+    assert not any(s_.startswith("Close it in RemitWatch: Paid, with the amount") for s_ in n["steps"]), n["steps"]
+    assert any("$0.00 recovered" in s_ for s_ in n["steps"]), n["steps"]
+
+
+# ------------------------------------------------------------------------------------------- credits and refunds
+def test_a_credit_made_by_a_takeback_ema_never_posted_is_posted_never_refunded(store, ledger, tmp_path):
+    """Money review 1 (high): the payer paid $100, reversed it and paid $60 on reprocessing. EMA posted both payments and
+    never the reversal, so EMA shows a $60 credit. The 835 nets $60: nothing was overpaid. The step is to post the
+    takeback; deciding a refund would pay the payer back twice."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+        "lines": [ln("99214", 150, 100, [("CO", "45", 50)], lcn="1", allowed=100)]}])
+    item(store, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, procedure_code="99214", billed_code="99214",
+         paid_cents=10000, allowed_cents=10000, expected_cents=11500, shortfall_cents=1500, line_key=line_key(store, tk),
+         claim_key=f"{tk}-0", transaction_key=tk)
+    remit(store, trace=F.check_no(2), paid_on="2026-04-20", claims=[
+        {"pcn": F.claim_id(1), "status": "22", "pccn": "PCN-A", "received": "2026-03-05",
+         "lines": [ln("99214", -150, -100, [("CO", "45", -50)], lcn="1", allowed=-100)]},
+        {"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-04-10",
+         "lines": [ln("99214", 150, 60, [("CO", "45", 90)], lcn="1", allowed=60)]}])
+    load(store, ledger, tmp_path, [charge(F.link_no(1), cpt="99214"), pay(F.link_no(1), F.check_no(1), 100, cpt="99214"),
+                                   adj(F.link_no(1), "CO-45", 50, cpt="99214", contractual=True),
+                                   pay(F.link_no(1), F.check_no(2), 60, cpt="99214", posted=D(2026, 4, 22)), later()])
+    out = story.explain(store.conn, "F1", ledger=ledger, today="2026-05-03")
+    n = out["next_step"]
+    assert out["state"]["rule"] == "credit_unposted_takeback" and n["route"] == "post", n["action"]
+    assert "refund" not in n["action"].lower().split("not a refund")[0] and not n["appeal_ok"]
+    assert "mark_posted" in n["buttons"]
+
+
+def test_a_refund_lists_who_paid_and_never_dates_it_by_the_appeal_window(store):
+    """Practice-manager M18: a credit with no payment on file never prints 'Who paid:.', and its deadline is never the
+    appeal window."""
+    item(store, signal="CREDIT_BALANCE", category="refund", carc=None, title="Credit on the claim", expected_cents=4500, shortfall_cents=4500,
+         appeal_deadline=None, deadline_basis=None, evidence={"credit_cents": 4500})
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert "Who paid:." not in n["steps"] and not any(s_.startswith("Who paid:.") for s_ in n["steps"]), n["steps"]
+    assert "Reconsideration" not in str(n["basis"]) and "appeal" not in str(n["basis"]).lower(), n["basis"]
+    assert n["route"] == "refund" and not n["appeal_ok"]
+
+
+def test_a_possible_overpayment_is_a_refund_to_decide_never_a_rate_request(store):
+    """Practice-manager H2: the archive shows the payer paid the line twice; asking it to reprocess at the usual rate would
+    grow the overpayment. A $0 shortfall is worth $0."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+               "lines": [ln("99213", 150, 40, [("CO", "45", 110)], allowed=40, lcn="1")]}])
+    hint = {"rule": "short_pay_topped_up", "reclass": "overpaid", "label": "Paid more than the payer owes",
+            "hint": "Blue Cross Test paid this line again on 2026-04-20 ($90.00) and both payments stand: a possible overpayment of $40.00. "
+                    "Settle it with the payer; do not ask for more.", "state_hint": "work_now", "strength": "proven",
+            "possible_overpayment_cents": 4000, "proof": []}
+    item(store, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", actionable="appeal", carc=None, paid_cents=4000, allowed_cents=4000,
+         expected_cents=9000, shortfall_cents=0, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         hint=hint["hint"], evidence={"archive_rule": hint})
+    out = story.explain(store.conn, "F1", today=TODAY)
+    n = out["next_step"]
+    assert out["state"]["rule"] == "possible_overpayment" and n["route"] == "refund" and not n["appeal_ok"], n["action"]
+    assert "reprocess" not in n["action"] and n["expected_cents"] == 0
+
+
+# ------------------------------------------------------------------------------------------- work already done
+def test_an_ar_billing_note_with_a_follow_up_date_waits_and_is_never_bulk_appealed(store, ledger, tmp_path):
+    """Money review 3 (high), C37 to C39: the A/R's billing note records a call with 'allow 30 days' and a follow-up date.
+    The reader stores the note's kinds; the item waits for them, its verdict never says nobody worked it, and it stays out
+    of the bulk appeal."""
+    tk = denied(store, reason=("CO", "B10"))
+    item(store, signal="PROCEDURE_BUNDLED", category="bundling", carc="B10", line_key=line_key(store, tk), claim_key=f"{tk}-0",
+         transaction_key=tk)
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), svc=SVC, cpt="99213", current=150, denial=150, status="Denied",
+                   note="04/20 spoke with rep, reprocessing request, allow 30 days", follow=D(2026, 5, 20), aging=D(2026, 4, 28))]
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Denied"), pay(F.link_no(1), F.check_no(1), 0), later()], ar_rows=ar)
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert out["verdict"]["state"] == "waiting" and out["state"]["follow_up_on"] == "2026-05-20", out["verdict"]["sentence"]
+    assert "nobody has worked it" not in out["verdict"]["sentence"] and not out["next_step"]["appeal_ok"]
+    assert out["state"]["appeal_block"] is not None
+
+
+def test_an_ar_note_the_reader_could_not_classify_is_read_first_never_appealed_blind(store, ledger, tmp_path):
+    """Money review 3: a billing note whose kind is not on file (note_kind empty) is read first: the item is checked
+    first, never in a bulk appeal, and the step says what to do with each kind of note."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), svc=SVC, cpt="99213", current=150, denial=150, status="Denied",
+                   note="see attached", aging=D(2026, 4, 28))]
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Denied"), pay(F.link_no(1), F.check_no(1), 0, status="Denied"), later()], ar_rows=ar)
+    store.conn.execute("UPDATE ema_ar SET note_kind=NULL")
+    store.conn.commit()
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    n = out["next_step"]
+    assert out["state"]["rule"] == "note_unread" and out["state"]["appeal_block"] == "note" and not n["appeal_ok"]
+    assert n["action"].startswith("Read EMA's billing note on this claim first") and "otherwise appeal it" in n["action"]
+    assert "nobody has worked it" not in out["verdict"]["sentence"]
+
+
+def test_an_ar_note_that_records_a_decision_not_to_appeal_is_not_appealed(store, ledger, tmp_path):
+    """Practice-manager M8: the note says the practice decided not to appeal; the item is never appealed, singly or in
+    bulk, and the step asks to Let go with that reason or appeal if the decision does not stand."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), svc=SVC, cpt="99213", current=150, denial=150, status="Denied",
+                   note="Test note: reviewed, decided not to appeal", aging=D(2026, 4, 28))]
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Denied"), pay(F.link_no(1), F.check_no(1), 0, status="Denied"), later()], ar_rows=ar)
+    store.conn.execute("UPDATE ema_ar SET note_kind='no_appeal'")
+    store.conn.commit()
+    out = story.explain(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert out["state"]["rule"] == "decided_no_appeal" and out["state"]["appeal_block"] == "decided"
+    assert not out["next_step"]["appeal_ok"], out["next_step"]["action"]
+    assert "nobody has worked it" not in out["verdict"]["sentence"], out["verdict"]["sentence"]
+
+
+def test_a_persons_started_status_is_named_and_never_contradicted(store, ledger, tmp_path):
+    """Practice-manager M1: a person marked the item Started; the verdict names who and when and never says nobody
+    worked it."""
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, status="in_progress", status_changed_at="2026-04-02")
+    event(store, "F1", "manual", at="2026-04-02T09:00:00", frm="open", to="in_progress", actor="Biller One")
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Resolved/Paid"), pay(F.link_no(1), F.check_no(1), 0, status="Resolved/Paid"),
+                                   adj(F.link_no(1), "CO-197", 150, status="Resolved/Paid"), later()])
+    v = story.item_verdict(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert "Started by Biller One on Apr 2, 2026" in v["sentence"], v["sentence"]
+    assert "nobody worked" not in v["sentence"] and "nobody has worked" not in v["sentence"], v["sentence"]
+
+
+def test_the_follow_up_of_a_persons_sent_reads_as_english_and_is_due_now(store):
+    """Practice-manager M4: the follow-up of a Sent appeal names the work in plain words and is due by its follow-up day,
+    not by the far appeal window."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", status="appealed", appealed_at="2026-04-01", status_changed_at="2026-04-01",
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    event(store, "F1", "manual", at="2026-04-01T09:00:00", frm="open", to="appealed", actor="Biller One", note="faxed the appeal")
+    n = story.next_step(store.conn, "F1", today="2026-06-15")
+    joined = " ".join([n["action"]] + n["steps"])
+    assert "on sent to the payer" not in joined and "whether it has sent to the payer" not in joined, joined
+    assert n["deadline"] <= "2026-06-15", n["deadline"]
+
+
+def test_a_secondary_billed_through_mark_billed_closes_on_the_second_payers_payment(store, ledger, tmp_path):
+    """Practice-manager H4: Mark billed sets the item to Sent with 'Billed: <second payer>'. When the second payer pays, the
+    verdict names the payment, and the follow-up never goes to the first payer."""
+    second = _secondary_world(store, ledger, tmp_path)
+    store.conn.execute("UPDATE findings SET status='appealed', appealed_at='2026-04-05', status_changed_at='2026-04-05'")
+    event(store, "F1", "billed", at="2026-04-05T09:00:00", note=f"{second}, Apr 5")
+    event(store, "F1", "manual", at="2026-04-05T09:00:01", frm="open", to="appealed", actor="Biller One", note=f"Billed: {second}, Apr 5")
+    load(store, ledger, tmp_path, [pay(F.link_no(1), "SEC01", 20, posted=D(2026, 4, 20), payer=P["commercial"]), later(posted=D(2026, 5, 2))])
+    out = story.explain(store.conn, "F1", ledger=ledger, today="2026-07-10")
+    v, n = out["verdict"], out["next_step"]
+    assert "$20.00" in v["sentence"] and second in v["sentence"], v["sentence"]
+    assert not n["action"].startswith(f"Follow up with {BCBS}"), n["action"]
+
+
+def test_a_stored_state_never_falls_back_to_a_first_level_appeal_after_a_sent_appeal(store):
+    """Practice-manager M22: a stored Work now ('the payer answered the appeal') while today's reading differs: the step
+    works the payer's answer, never a fresh first-level appeal with Build packet."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", status="appealed", appealed_at="2026-04-01", status_changed_at="2026-04-01",
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, work_state="work_now", follow_up_on="2026-05-16",
+         state_basis="Marked Sent by Biller One on Apr 1, 2026; the payer answered on Apr 15, 2026 (answered CO-50): work its answer")
+    event(store, "F1", "manual", at="2026-04-01T09:00:00", frm="open", to="appealed", actor="Biller One", note="faxed the appeal")
+    n = story.next_step(store.conn, "F1", today="2026-04-20")
+    assert n["route"] != "appeal" and "build_packet" not in n["buttons"], (n["route"], n["action"])
+
+
+def test_a_stale_item_is_never_closed_as_paid_and_a_persons_sent_still_wins(store):
+    """Practice-manager L6: a stale item (its remittance replaced) is never told to be closed as Paid, and a person's Sent
+    wins over staleness."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, stale=1)
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert not any("Paid" in s_ for s_ in n["steps"]), n["steps"]
+    item(store, finding_id="F2", signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0",
+         transaction_key=tk, stale=1, status="appealed", appealed_at="2026-04-20", status_changed_at="2026-04-20")
+    event(store, "F2", "manual", at="2026-04-20T09:00:00", frm="open", to="appealed", actor="Biller One")
+    st = states.state_of(store.conn, dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F2'").fetchone()), today=TODAY)
+    assert st["work_state"] == "waiting", st["state_basis"]
+
+
+# ------------------------------------------------------------------------------------------- routes and their steps
+def test_an_archive_likely_paid_item_is_checked_first_never_appealed(store):
+    """Practice-manager H1: a 'likely' done from the archive rules never closes an item; its step is a check first naming
+    what to verify, with no Fax button and no place in the bulk appeal."""
+    tk = denied(store, reason=("CO", "50"))
+    hint = {"rule": "same_payer_paid_before", "reclass": "paid_before", "label": "Already paid by this payer, denied again",
+            "hint": "Already paid by Blue Cross Test on 2026-03-10 ($90.00); this is a later denial of the same line. Nothing is owed "
+                    "unless the payer takes that payment back.", "state_hint": "done", "strength": "likely",
+            "proof": [{"date": "2026-03-10", "source": "835", "kind": "payment", "text": "Blue Cross paid $90.00", "decisive": True}]}
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         shortfall_cents=0, hint=hint["hint"], evidence={"archive_rule": hint})
+    _fax(store, BCBS)
+    out = story.explain(store.conn, "F1", today=TODAY)
+    n = out["next_step"]
+    assert out["state"]["rule"] == "check_first" and out["state"]["appeal_block"] == "check_first"
+    assert not n["appeal_ok"] and "fax_payer" not in n["buttons"] and "build_packet" not in n["buttons"], n["buttons"]
+    assert n["action"].startswith("Check first"), n["action"]
+    assert "nobody has worked it" not in out["verdict"]["sentence"]
+
+
+def test_an_archive_hint_that_says_look_it_up_first_is_a_check_first(store):
+    """Practice-manager H2, L1: a hint that asks to look the primary's payment up before appealing is a check first; its
+    text keeps the payer's name as written and is never cut mid-sentence."""
+    tk = denied(store, reason=("CO", "50"))
+    hint = {"rule": "second_payer_share", "reclass": "secondary_paid", "label": "Paid by a secondary; the primary's payment not on file",
+            "hint": "Testcare paid $20.00 as secondary on 2026-04-10, and its remittance says a prior payer settled $70.00 of this service: "
+                    "the primary's payment is probably on a remittance that is not on file. Look it up before appealing this denial; the "
+                    "secondary's share is not an underpayment.", "state_hint": "work_now", "strength": "likely", "proof": []}
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         hint=hint["hint"], evidence={"archive_rule": hint})
+    st = states.state_of(store.conn, dict(store.conn.execute("SELECT * FROM findings").fetchone()), today=TODAY)
+    assert "testcare paid" not in st["state_basis"] and "Testcare paid" in st["state_basis"], st["state_basis"]
+    assert " ; act by" not in st["state_basis"] and "that is not on ;" not in st["state_basis"], st["state_basis"]
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert not n["appeal_ok"] and not n["action"].startswith("Appeal to"), n["action"]
+
+
+def _reprocessed_to_patient(store, ledger, tmp_path, *, payer="BLUE CROSS TEST", cfi="12", **kw):
+    """The payer reversed its CO-16 denial and reprocessed the line: $25.00 coinsurance to the patient and $125.00 CO-45.
+    EMA has not posted the reprocessing, so EMA shows the whole $150.00 open."""
+    tk = denied(store, reason=("CO", "16"), payer=payer, cfi=cfi)
+    remit(store, trace="T2", paid_on="2026-04-20", payer=payer, claims=[
+        {"pcn": F.claim_id(1), "status": "22", "cfi": cfi, "pccn": "PCN-A", "received": "2026-03-05",
+         "lines": [ln("99213", -150, 0, [("CO", "16", -150)], lcn="1")]},
+        {"pcn": F.claim_id(1), "status": "1", "cfi": cfi, "pccn": "PCN-A", "received": "2026-04-10",
+         "lines": [ln("99213", 150, 0, [("PR", "2", 25), ("CO", "45", 125)], lcn="1")]}])
+    item(store, signal="DENIED_MISSING_INFO", carc="16", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk, **kw)
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 0), later()])
+
+
+def test_bill_the_patient_only_their_share_never_the_contractual_amount(store, ledger, tmp_path):
+    """Practice-manager H3: the patient is billed the $25.00 the 835 put on them, never EMA's $150.00 open balance (which
+    holds the $125.00 contractual reduction EMA has not posted)."""
+    _reprocessed_to_patient(store, ledger, tmp_path)
+    n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert n["route"] == "bill_patient" and n["action"].startswith("Bill the patient $25.00"), n["action"]
+    assert "$150.00" not in n["action"].split(":")[0] and n["expected_cents"] == 2500
+    assert any("post" in s_.lower() and "$125.00" in s_ for s_ in n["steps"]), n["steps"]
+
+
+def test_a_medicaid_member_is_never_told_both_do_not_bill_and_bill(store, ledger, tmp_path):
+    """Practice-manager H3: a Medicaid member is never billed; the step says so once, with no statement step and no Mark
+    billed button."""
+    _reprocessed_to_patient(store, ledger, tmp_path, payer="STATE MEDICAID TEST", cfi="MC", payer_name="STATE MEDICAID TEST",
+                            payer_group="Medicaid (state)", payer_kind="medicaid")
+    n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert n["action"].startswith("Do not bill the patient")
+    assert "bill the patient" not in n["action"][len("Do not bill the patient"):].lower(), n["action"]
+    assert not any("next statement" in s_ for s_ in n["steps"]) and "mark_billed" not in n["buttons"]
+
+
+def test_a_forwarded_claim_waits_for_the_carrier_not_for_work_nobody_did(store):
+    """Practice-manager M5: a claim the first payer forwarded waits on the carrier it names; the step never speaks of work
+    already done."""
+    tk = remit(store, trace=F.check_no(1), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "status": "19", "crossover": "TESTCARE MEDIGAP",
+               "pccn": "PCN-A", "received": "2026-03-05", "lines": [ln("99213", 150, 0, [("CO", "B11", 150)], lcn="1")]}])
+    item(store, signal="DENIED_OTHER", carc="B11", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    n = story.next_step(store.conn, "F1", today="2026-04-20")
+    assert n["route"] == "wait" and "TESTCARE MEDIGAP" in n["action"], n["action"]
+    assert "work already done" not in n["action"] and not any("quoting what was sent" in s_ for s_ in n["steps"]), n["steps"]
+
+
+def test_ema_booking_denials_as_contractual_is_a_policy_decision_with_its_button(store):
+    """Practice-manager M6, M7: EMA posting a payer's CO-97 denials as contractual is the owner's decision: the step offers
+    Accept this pattern and carries the policy key the button reads; no sentence shows the key's pipes."""
+    item(store, signal="EMA_DENIAL_AS_CONTRACTUAL", category="contract", actionable="review", carc="97", expected_cents=None, shortfall_cents=None,
+         title="Anthem / BCBS: CO-97 denials posted as contractual in 2026, $1,500.00 on 12 lines", line_key=None, claim_key=None,
+         transaction_key=None, patient_control_number=None, procedure_code=None, service_date=None, payment_date=None,
+         evidence={"reason": "CO-97", "year": "2026", "top_codes": [["17311", 120000], ["17312", 30000]], "written_off_cents": 150000,
+                   "lines": 12, "inside_window_cents": 90000,
+                   "next_step": "Have EMA post this reason as non-contractual so it reaches the denial queue; then decide per code: appeal, "
+                                "bill it differently, or stop billing it."})
+    out = story.explain(store.conn, "F1", today=TODAY)
+    n = out["next_step"]
+    assert "contract review" not in n["action"] and "accept_pattern" in n["buttons"], (n["action"], n["buttons"])
+    assert n["pattern"] == f"{BCBS}|||CO-97"
+    assert not any("|" in t for t in _all_text(out)), _all_text(out)
+    pol = {f"{BCBS}|||CO-97": {"decision": "accept", "by": "Owner One", "at": "2026-04-03T10:00:00"}}
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ema:writeoff_policy', ?)", (__import__("json").dumps(pol),))
+    store.conn.commit()
+    out = story.explain(store.conn, "F1", today=TODAY)
+    assert not any("|" in t for t in _all_text(out)), _all_text(out)
+
+
+def test_a_line_lost_to_timely_filing_is_not_appealed_as_if_it_were_not(store, ledger, tmp_path):
+    """Practice-manager M9: EMA wrote the line off as lost to timely filing; the verdict says it ran out of time and the
+    step never opens with an appeal."""
+    tk = denied(store)
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 0), adj(F.link_no(1), "CO-197", 150), later()])
+    f = dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone())
+    base = ec.line_outcomes(store.conn, [f], code_once=lambda x: True, today=TODAY)["F1"]
+    oc = dict(base, outcome="lost_to_timely_filing", carcs=["CO-29"], written_off=15000, outcome_on="2026-04-20")
+    fx = states.facts_of(store.conn, [f], outcomes={"F1": oc}, today=TODAY)["F1"]
+    fx["ctx"]["response"] = states.response_table(store.conn)
+    sto = story._story(store.conn, fx, ledger)
+    st = story._state_of(store.conn, fx, TODAY)
+    v = story._verdict(store.conn, fx, sto, st, TODAY)
+    n = story._next(store.conn, fx, sto, st, v, TODAY)
+    assert "ran out of time" in v["sentence"]
+    assert not n["appeal_ok"] and not n["action"].startswith("Appeal to"), n["action"]
+
+
+def test_an_authorization_denial_starts_with_finding_the_authorization(store):
+    """Practice-manager M10: never a blind appeal asserting the service was authorized; the step finds the authorization."""
+    tk = denied(store)            # CO-197, DENIED_AUTH
+    item(store, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert "The service was authorized (or needed no authorization)" not in n["action"], n["action"]
+    assert "find the authorization or referral" in n["action"] and not n["appeal_ok"], n["action"]
+
+
+def test_medicare_steps_never_contradict_themselves(store):
+    """Practice-manager M12: a Medicare redetermination is never faxed (no Fax button even with a number on file), and a
+    Medicare fix is a reopening, never a corrected claim through the clearinghouse."""
+    _medicare_item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", group="Medicare Part B")
+    _fax(store, "Medicare Part B")
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert "take no faxed" in n["action"] and "fax_payer" not in n["buttons"], n["buttons"]
+    assert not any(s_.startswith("Fax to Medicare") for s_ in n["steps"]), n["steps"]
+    item(store, finding_id="F2", signal="EM_BUNDLED_NO_MODIFIER", category="bundling", carc="4", actionable="correct_and_resubmit",
+         payer_name="MEDICARE PART B TEST", payer_group="Medicare Part B", payer_kind="medicare", line_key=None,
+         deadline_basis="Medicare Part B: a reopening for a clerical error within one year", evidence={"same_day_codes": ["11102"]})
+    n = story.next_step(store.conn, "F2", today=TODAY)
+    assert "takes no corrected claims" in n["action"], n["action"]
+    assert not any("through the clearinghouse" in s_ for s_ in n["steps"]), n["steps"]
+    assert any(s_.startswith("Ask for the reopening on the contractor's portal or by phone") for s_ in n["steps"]), n["steps"]
+
+
+def test_a_secondary_never_billed_is_not_described_as_a_denial_to_appeal(store, ledger, tmp_path):
+    """Practice-manager M14: the verdict of a second payer never billed names the plan to bill, never an appeal or a
+    denial."""
+    _secondary_world(store, ledger, tmp_path)
+    s_ = story.item_verdict(store.conn, "F1", ledger=ledger, today=TODAY)["sentence"]
+    assert "appeal" not in s_ and "(the denial)" not in s_ and "paid nothing" not in s_, s_
+
+
+def test_the_era_button_always_has_an_era_request_to_copy(store, ledger, tmp_path):
+    """Practice-manager M15: the Copy the ERA request button is offered only with a request to copy."""
+    item(store, signal="EMA_DENIED", category="denial", actionable="correct_and_resubmit", carc="16", line_key=None, claim_key=None,
+         transaction_key=None, payment_date="2026-03-31", title="Denied in EMA: no remittance on file", ema_link=F.link_no(1),
+         evidence={"lines": [["99213", S]], "ema_link": F.link_no(1)})
+    load(store, ledger, tmp_path, [charge(F.link_no(1), status="Denied"), pay(F.link_no(1), F.check_no(7), 0, status="Denied"),
+                                   adj(F.link_no(1), "CO-16", 150, status="Denied"), later()])
+    n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
+    if "request_era" in n["buttons"]:
+        assert any("ERA of the check" in s_ for s_ in n["steps"]), n["steps"]
+
+
+def test_a_facility_claim_nobody_can_check_is_never_resent_as_a_new_claim(store):
+    """Practice-manager M16: the surgery center's claim goes to another payee; the step checks the facility's EOB and
+    never resends it as a new claim."""
+    item(store, signal="EMA_DENIED", category="denial", actionable="appeal", carc="197", line_key=None, claim_key=None, transaction_key=None,
+         payment_date="2026-03-31", patient_control_number=F.claim_id(1, facility=True), evidence={"lines": [["99213", S]], "facility": True})
+    f = dict(store.conn.execute("SELECT * FROM findings WHERE finding_id='F1'").fetchone())
+    fx = states.facts_of(store.conn, [f], today=TODAY)["F1"]
+    fx["ctx"]["response"] = states.response_table(store.conn)
+    st = {"work_state": "cant_check", "rule": "cant_check_facility", "deadline": "2027-12-31", "deadline_basis": "the payer's window",
+          "state_basis": "The surgery center's facility claim: its remittances go to another payee, and EMA shows nothing posted. "
+                         "Check the facility's EOB.", "label": "Can't be checked"}
+    sto = story._story(store.conn, fx, None)
+    n = story._next(store.conn, fx, sto, st, story._verdict(store.conn, fx, sto, st, TODAY), TODAY)
+    assert not any("send it again now as a new claim" in s_ for s_ in n["steps"]), n["steps"]
+
+
+def test_every_dollar_figure_of_the_next_step_has_its_basis_and_a_zero_shortfall_is_worth_zero(store):
+    """Practice-manager M17, M21 (orchestrator decision 5): the next step's figure carries its basis; an estimate says so;
+    a $0 shortfall is worth $0."""
+    tk = denied(store, reason=("CO", "50"))
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    n = story.next_step(store.conn, "F1", today=TODAY)
+    assert n["expected_cents"] == 9000 and n["expected_basis"].startswith("RemitWatch's estimate"), n["expected_basis"]
+    store.conn.execute("UPDATE findings SET shortfall_cents=0")
+    store.conn.commit()
+    assert story.next_step(store.conn, "F1", today=TODAY)["expected_cents"] == 0
+
+
+def test_an_ema_only_denial_after_the_first_payers_payment_is_worth_what_the_denial_took(store, ledger, tmp_path):
+    """Money review 11: a denial only EMA saw, posted after the first payer paid, is worth what it took in EMA (its
+    write-off on the denial's day and what is still open), not the item's full estimate."""
+    item(store, signal="EMA_DENIED", category="denial", actionable="appeal", carc="16", line_key=None, claim_key=None, transaction_key=None,
+         payment_date="2026-04-20", expected_cents=9000, shortfall_cents=9000, charge_cents=15000, title="Denied in EMA: no remittance on file",
+         ema_link=F.link_no(1), evidence={"lines": [["99213", S]], "ema_link": F.link_no(1)})
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), pay(F.link_no(1), F.check_no(1), 80), adj(F.link_no(1), "CO-45", 50, contractual=True),
+                                   adj(F.link_no(1), "CO-16", 20, posted=D(2026, 4, 20), payer=P["commercial"]), later()])
+    n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert n["expected_cents"] == 2000, (n["expected_cents"], n["expected_basis"])
+    assert n["expected_basis"] == "what the denial took in EMA (its write-off and what is still open)"
+
+
+def test_the_window_sentence_names_the_work_the_route_asks_for(store):
+    """Practice-manager L2: a corrected-claim item never says 'You can still appeal'."""
+    tk = denied(store, reason=("CO", "4"))
+    item(store, signal="EM_BUNDLED_NO_MODIFIER", category="bundling", carc="4", actionable="correct_and_resubmit", line_key=line_key(store, tk),
+         claim_key=f"{tk}-0", transaction_key=tk, appeal_deadline="2026-06-26", deadline_basis="Blue Cross: 90 days to correct",
+         evidence={"same_day_codes": ["11102"]})
+    out = story.explain(store.conn, "F1", today=TODAY)
+    assert out["next_step"]["route"] == "corrected"
+    assert "You can still appeal" not in out["verdict"]["sentence"], out["verdict"]["sentence"]
+
+
+def test_an_unposted_835_payment_reads_plainly(store):
+    """Practice-manager L3: 'The 835 paid $90.00 ... but EMA never posted it'."""
+    tk = remit(store, trace=F.check_no(3), paid_on="2026-03-28", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A", "received": "2026-03-05",
+               "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    item(store, signal="REMIT_NOT_POSTED", category="posting", actionable="review", carc=None, paid_cents=9000, shortfall_cents=9000,
+         title="Paid on the 835, not posted in EMA", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    s_ = story.item_verdict(store.conn, "F1", today=TODAY)["sentence"]
+    assert s_.startswith("The 835 paid $90.00") and "but EMA never posted it" in s_, s_
+
+
+def test_small_wording_and_button_rules(store):
+    """Practice-manager L4, L5, L7: Reopen only where it can change the state; the LCD is named only for Medicare; other
+    open items on the visit are named in words, not signal names."""
+    item(store, signal="SEQUESTRATION", category="info", carc="253", title="Sequestration")
+    assert "reopen" not in story.next_step(store.conn, "F1", today=TODAY)["buttons"]
+    tk = denied(store, reason=("CO", "50"))
+    item(store, finding_id="F2", signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0",
+         transaction_key=tk)
+    item(store, finding_id="F3", signal="DENIED_FREQUENCY", carc="151", procedure_code="17003", billed_code="17003", line_key=None)
+    n = story.next_step(store.conn, "F2", today=TODAY)
+    assert not any("(LCD)" in x for x in n["needs"] + n["steps"]), n["needs"]
+    sib = [s_ for s_ in n["steps"] if s_.startswith("Also open on this visit")]
+    assert sib and "DENIED_FREQUENCY" not in sib[0], sib
+
+
+# ------------------------------------------------------------------------------------------- the balance line
+def test_the_835_balance_counts_every_standing_payment_of_the_line(store):
+    """Money review 6: with no EMA postings, the balance counts the second payer's $50.00 too, or says it does not
+    reconcile; it never leaves money out and reconciles."""
+    tk = remit(store, trace="T1", paid_on="2026-03-11", claims=[{"pcn": F.claim_id(1), "received": "2026-03-05",
+        "lines": [ln("99214", 200, 80, [("CO", "45", 70), ("PR", "2", 50)], lcn="1", allowed=130)]}])
+    item(store, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, procedure_code="99214", billed_code="99214",
+         charge_cents=20000, paid_cents=8000, allowed_cents=13000, expected_cents=15000, shortfall_cents=2000,
+         line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    remit(store, trace="T2", paid_on="2026-03-31", payer="SECONDARY TEST PLAN", claims=[
+        {"pcn": F.claim_id(1, sub=2), "status": "2", "received": "2026-03-20",
+         "lines": [ln("99214", 200, 50, [("OA", "23", 150)], lcn="1", allowed=130)]}])
+    b = story.item_story(store.conn, "F1", today="2026-04-15")["balance"]
+    assert b["basis"] == "835" and b["insurer_paid_cents"] == 13000 and b["reconciles"], b["text"]
+    assert b["patient_owes_cents"] == 0 and b["open_cents"] == 0
+
+
+def test_the_ar_check_adds_every_ar_row_of_the_line(store, ledger, tmp_path):
+    """Money review 9: the line's A/R has a primary row ($40) and a secondary row ($20) in one pull; together they are the
+    $60 EMA shows open, so the balance reconciles."""
+    tk = denied(store, reason=("CO", "45"))
+    item(store, signal="UNDERPAID_VS_OWN_RATE", category="underpayment", carc=None, paid_cents=0, expected_cents=6000,
+         shortfall_cents=6000, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    ar = [F.ar_row(claim=F.claim_id(1), link=F.link_no(1), svc=SVC, cpt="99213", current=40, coverage="Primary", aging=D(2026, 4, 28)),
+          F.ar_row(claim=F.claim_id(1), link=F.link_no(1), svc=SVC, cpt="99213", current=20, coverage="Secondary", aging=D(2026, 4, 28))]
+    load(store, ledger, tmp_path, [charge(F.link_no(1)), adj(F.link_no(1), "CO-45", 90, contractual=True), later()], ar_rows=ar)
+    b = story.item_story(store.conn, "F1", ledger=ledger, today="2026-05-03")["balance"]
+    assert b["open_cents"] == 6000 and b["reconciles"], b["text"]
+    assert any(c["source"] == "ar" and c["agrees"] and c["rows"] == 2 for c in b["checks"]), b["checks"]
+
+
+def test_the_copy_never_says_it_reconciles_where_the_server_shows_a_gap(store, ledger, tmp_path):
+    """Money review 10: patient money for the patient, date and code that two claims share (the surgery center's claim) is
+    a gap on the server; the dashboard's copy, which cannot see it, says the balance cannot be checked to the cent there."""
+    tk = denied(store, code="17311", charge_=500, reason=("CO", "97"))
+    item(store, signal="PROCEDURE_BUNDLED", category="bundling", carc="97", procedure_code="17311", billed_code="17311",
+         charge_cents=50000, line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk)
+    load(store, ledger, tmp_path, [charge(F.link_no(1), cpt="17311", amount=500, patient=1, status="Denied"),
+                                   pay(F.link_no(1), F.check_no(1), 0, cpt="17311", patient=1),
+                                   charge(F.link_no(2), cpt="17311", amount=900, patient=1),
+                                   pay(F.link_no(2), "ASC77", 450, cpt="17311", patient=1, posted=D(2026, 3, 30)),
+                                   patient_pay(40, cpt="17311", patient=1, posted=D(2026, 4, 10)), later()])
+    server = story.item_story(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert server["reconciles"] is False and server["gap_cents"] == 4000
+    mem = dashboard_copy(store, tmp_path)
+    copy = story.item_story(mem.conn, "F1", ledger=None, today=TODAY)
+    assert copy["reconciles"] is None and "It reconciles to the cent" not in copy["balance"]["text"]
+    assert "It cannot be checked to the cent on this site: patient money for this date and code is listed on the server" in copy["balance"]["text"]
+    mem.close()

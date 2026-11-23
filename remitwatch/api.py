@@ -546,7 +546,13 @@ def _finding_cols() -> str:
     """FINDING_COLS, with NULL for a column the store does not have yet. A store saved by an earlier release lacks the
     newest columns until the next detection run adds them, and the dashboard must work in that window."""
     have = {r["name"] for r in rows("PRAGMA table_info(findings)")}
-    return ", ".join(c if c in have else f"NULL AS {c}" for c in (x.strip() for x in FINDING_COLS.split(",")))
+    cols = [c if c in have else f"NULL AS {c}" for c in (x.strip() for x in FINDING_COLS.split(","))]
+    if {"work_state", "follow_up_on", "state_basis"} <= have:
+        # the item's state as the lists filter by it (_state_expr): a person's status set since the newest run decides
+        at = {c: i for i, c in enumerate(cols)}
+        for name, expr in zip(("work_state", "follow_up_on", "state_basis"), _state_cols(have)):
+            cols[at[name]] = expr
+    return ", ".join(cols)
 
 
 def _value_sql(cols: set[str] | None = None) -> str:
@@ -605,20 +611,83 @@ STATE_WORDS = {"work_now": "Work now", "waiting": "Waiting", "done": "Done", "ac
                "cant_check": "Can't be checked", "followup_due": "Follow-up due", "todo": "Work now and follow-ups due"}
 # an item the run has not given a state yet (a store saved before states, or a run whose states step failed) is read the
 # way remitwatch.states reads a person's status, and as work to do otherwise: nothing drops off the lists for want of one
-_STATE_GUESS = ("CASE WHEN COALESCE(stale,0)=1 THEN 'done' WHEN status='resolved' THEN 'done' WHEN status IN ('lost','dismissed') "
-                "THEN 'accepted' WHEN status='appealed' THEN 'waiting' ELSE 'work_now' END")
+_STATE_GUESS_T = ("CASE WHEN COALESCE({a}stale,0)=1 THEN 'done' WHEN {a}status='resolved' THEN 'done' WHEN {a}status IN ('lost','dismissed') "
+                  "THEN 'accepted' WHEN {a}status='appealed' THEN 'waiting' ELSE 'work_now' END")
+_STATE_GUESS = _STATE_GUESS_T.format(a="")
+# A status a person set after the newest detection run started decides the item's state until the next run works it out
+# again, as remitwatch.states does (a person's status wins): Paid is done, Let go and Lost are accepted, Sent waits on the
+# payer (no follow-up due until the run dates one), Started is work now, and To do is work now (done when no rule lists the
+# item any more). Without it, an item a person let go, sent or marked paid stays on Work now until new data arrives.
+# The hide rules' own changes (actions.apply_hide_rules after a run, a rule added or removed) are statuses like any other.
+_STATUS_STATE = ("CASE {a}status WHEN 'resolved' THEN 'done' WHEN 'lost' THEN 'accepted' WHEN 'dismissed' THEN 'accepted' "
+                 "WHEN 'appealed' THEN 'waiting' WHEN 'in_progress' THEN 'work_now' "
+                 "ELSE CASE WHEN COALESCE({a}stale,0)=1 THEN 'done' ELSE 'work_now' END END")
+_ANCHOR_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[0-9T:.+Z -]{0,30}")
 # EMA's view of an item (needs_ema_checks section 4): each a condition on the findings row's own columns
 EMA_FILTERS = ("written_off", "contractual", "paid_other", "on_ar", "ema_only", "worked", "unworked", "auto_written_off")
 
 
+def _status_state(f: dict) -> str:
+    """_STATUS_STATE for one item at hand: the state a person's status gives it."""
+    st = f.get("status") or "open"
+    return {"resolved": "done", "lost": "accepted", "dismissed": "accepted", "appealed": "waiting", "in_progress": "work_now"}.get(
+        st, "done" if f.get("stale") else "work_now")
+
+
+def _run_anchor() -> str | None:
+    """When the newest detection run started (detection_runs.started_at, the time each item it saved carries as
+    last_seen): the states it stored were worked out on the statuses of that moment. None before any run is recorded (the
+    stored states, or the guess, stand)."""
+    if not has_table("detection_runs"):
+        return None
+    got = (one("SELECT MAX(started_at) a FROM detection_runs") or {}).get("a")
+    return got if isinstance(got, str) and _ANCHOR_RE.fullmatch(got) else None
+
+
+def _fresh_sql(cols: set[str], alias: str = "", anchor: str | None = None) -> str:
+    """'A person set this item's status after the newest run started' as SQL (the run's time inlined: it is the store's
+    own timestamp, checked by _ANCHOR_RE), or '0' when nothing can be newer."""
+    if "status_changed_at" not in cols:
+        return "0"
+    a = anchor if anchor is not None else _run_anchor()
+    return f"(COALESCE({alias}status_changed_at,'') > '{a}')" if a else "0"
+
+
+def _state_expr(cols: set[str], alias: str = "", anchor: str | None = None) -> str:
+    """The item's state as every list, tile, count and export reads it: the state the newest run stored (or the guess on a
+    store without one), unless a person's status is newer, when the status decides (_STATUS_STATE)."""
+    a = alias
+    guess = _STATE_GUESS_T.format(a=a)
+    stored = f"COALESCE({a}work_state, {guess})" if "work_state" in cols else guess
+    fresh = _fresh_sql(cols, a, anchor)
+    return stored if fresh == "0" else f"(CASE WHEN {fresh} THEN {_STATUS_STATE.format(a=a)} ELSE {stored} END)"
+
+
+def _state_cols(cols: set[str], alias: str = "", anchor: str | None = None) -> list[str]:
+    """work_state, follow_up_on and state_basis as a list shows them (three SQL expressions): the state per _state_expr,
+    and no follow-up day or basis from the run while a person's newer status decides (the next run gives its own)."""
+    a = alias
+    fresh = _fresh_sql(cols, a, anchor)
+    if fresh == "0":
+        return [f"{a}work_state", f"{a}follow_up_on", f"{a}state_basis"]
+    return [f"(CASE WHEN {fresh} THEN {_STATUS_STATE.format(a=a)} ELSE {a}work_state END) AS work_state",
+            f"(CASE WHEN {fresh} THEN NULL ELSE {a}follow_up_on END) AS follow_up_on",
+            f"(CASE WHEN {fresh} THEN NULL ELSE {a}state_basis END) AS state_basis"]
+
+
 def _state_sql(states: str | None, cols: set[str], today: str) -> tuple[str, list] | None:
     """`state=` as one condition: work_now, waiting, done, accepted, expired, cant_check, followup_due, todo (several,
-    comma separated, are any of them). None when nothing is asked; '0' for a name it does not know."""
+    comma separated, are any of them). None when nothing is asked; '0' for a name it does not know. The state is
+    _state_expr's: a status a person set since the newest run decides it at once."""
     wanted = [x.strip() for x in (states or "").split(",") if x.strip()]
     if not wanted:
         return None
-    ws = f"COALESCE(work_state, {_STATE_GUESS})" if "work_state" in cols else _STATE_GUESS
+    anchor = _run_anchor()
+    ws = _state_expr(cols, anchor=anchor)
+    fresh = _fresh_sql(cols, anchor=anchor)
     due = "(follow_up_on IS NOT NULL AND follow_up_on <= ?)" if "follow_up_on" in cols else "0"
+    if due != "0" and fresh != "0":
+        due = f"({due[1:-1]} AND NOT {fresh})"      # a person's newer status: the run has not dated its follow-up yet
     parts, params = [], []
     for x in wanted:
         if x in STATES:
@@ -1176,8 +1245,13 @@ def finding_detail(finding_id: str, _: str = "ok"):
 
 @app.get("/api/findings/{finding_id}")
 def finding_page(finding_id: str, story: int = Query(0, ge=0, le=1), _: str = Depends(require_auth)):
-    """An item's panel: finding_detail. story=1 adds what /api/findings/{id}/explain gives, in the same answer."""
+    """An item's panel: finding_detail. story=1 adds what /api/findings/{id}/explain gives, in the same answer. The state
+    is the one the lists show: a status a person set since the newest run decides it (state_by_status says so)."""
     out = finding_detail(finding_id, "ok")
+    f = out["finding"]
+    anchor = _run_anchor()
+    if anchor and "work_state" in f and str(f.get("status_changed_at") or "") > anchor:
+        f.update(work_state=_status_state(f), follow_up_on=None, state_basis=None, state_by_status=True)
     if story:
         out.update(_explained(out["finding"]))
     return out
@@ -1665,7 +1739,8 @@ def claim_view(request: Request, _: str = Depends(require_auth)):
     ids = sorted(set(pcns) | set(ema_ids))      # with the submissions no payer has answered: their items are on the bill too
     if ids:
         qp = ",".join("?" * len(ids))
-        state_cols = ", f.work_state, f.follow_up_on, f.state_basis" if "work_state" in _columns() else ""
+        have = _columns()
+        state_cols = (", " + ", ".join(_state_cols(have, "f."))) if {"work_state", "follow_up_on", "state_basis"} <= have else ""
         findings = [dict(f, via="line") for f in rows(f"""SELECT f.finding_id, f.signal, f.category, f.status, f.shortfall_cents, f.appeal_deadline, f.procedure_code,
                                                                 f.claim_key, f.line_key, f.stale, c.payment_date remit_date, c.payer_name remit_payer{state_cols}
                                                          FROM findings f LEFT JOIN claims c ON c.claim_key = f.claim_key
