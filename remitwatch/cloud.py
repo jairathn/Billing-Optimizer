@@ -1215,7 +1215,10 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if shown_changed or serving_stale:
             out["serving"] = save_serving(state, conn)
             state.put(SERVING_MARK, json.dumps({"data_rev": data_rev, "build": SERVING_BUILD, "at": _now()}).encode())
-        if ingest.get("cursor"):        # after the store, so the position never runs ahead of what was saved
+        # after the store, so the position never runs ahead of what was saved; and only beside a store image (saved now, or
+        # there when the run started): a cursor proves an earlier save (_saved_before), so a first run that found an empty
+        # data folder and saved nothing must leave none, or every run after it would stop as if the image were missing
+        if ingest.get("cursor") and (existed or out.get("store")):
             state.put(CURSOR, json.dumps({"cursor": ingest["cursor"], "root": os.environ.get("DROPBOX_ROOT_PATH", "/Trizetto Data"), "at": _now()}).encode())
         # the journal: entries now in the saved store go; one whose finding never turned up is kept for a week
         gone = done + [n for n in left if expired(n)]

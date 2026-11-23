@@ -311,6 +311,26 @@ def test_serverless_runs_that_never_saved_a_store_still_start_from_empty(tmp_pat
     assert "error" not in out and out["ingest"]["remits"] == 1
 
 
+def test_serverless_a_new_site_whose_first_runs_find_an_empty_folder_reads_its_first_file(tmp_path, monkeypatch):
+    """The misuse check's CH-2 (t9 b), with real runs: two runs on an empty data folder save no store image, so they leave no
+    Dropbox position either (cursor.json is written only beside a saved image: it is what proves a store existed). The
+    first file is then read as a first load, and the runs after it go on; a missing image is still a stop after that."""
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    (root / "Trizetto Data").mkdir(parents=True)
+    for _ in range(2):
+        out = _cycle(state, client)
+        assert "error" not in out and out["ingest"]["remits"] == 0, out
+        assert state.get(cloud.RAW) is None and state.get(cloud.CURSOR) is None, "a position was kept with no store saved"
+    _two_runs_folder(root)
+    out = _cycle(state, client)
+    assert "error" not in out and out["ingest"]["remits"] == 1, out
+    assert state.get(cloud.RAW) is not None and state.get(cloud.CURSOR) is not None
+    out = _cycle(state, client)
+    assert "error" not in out and out["ingest"]["mode"] == "delta", out
+    state.delete(cloud.RAW)
+    assert "missing" in (_cycle(state, client).get("error") or "")
+
+
 def test_serverless_a_status_written_before_the_image_record_proves_a_store_until_it_is_back(tmp_path, monkeypatch):
     """The live site's status.json was written by a release that recorded no image, only the size of the store it saved.
     With the image gone that is a stop, and it stays one run after run (the refusal keeps the proof in status.json) until
