@@ -252,6 +252,24 @@ def feed_day(conn: sqlite3.Connection, today: str) -> str | None:
     return min(str(d)[:10], today) if d else None
 
 
+def feed_hole(conn: sqlite3.Connection, today: str) -> dict | None:
+    """The weeks with no remittance from any payer that the day the remittances reach stops at (detect.feed_gap: "from",
+    "to", "newest"), else None. Worked out from the store on a server; on a serverless host's copy, the hole the last
+    analysis found on the full store (saved with FEED_META beside the date feed_day reads). What the fax hold
+    (api._feed_gap) and the Data tab's feed check name (misuse check CH-6)."""
+    from . import runtime
+    from .detect import FEED_META, feed_gap, real_day
+    if "transactions" not in _tables(conn):
+        return None
+    if not runtime.serverless():
+        return feed_gap(conn, today)
+    saved = _meta(conn, FEED_META)
+    gap = saved.get("gap") if isinstance(saved, dict) else None
+    if not isinstance(gap, dict) or not all(real_day(gap.get(k)) for k in ("from", "to", "newest")):
+        return None             # none saved (no hole, or an analysis before this release)
+    return {k: str(gap[k])[:10] for k in ("from", "to", "newest")}
+
+
 def work(conn: sqlite3.Connection, today: str) -> dict:
     """Work still to do (not yet sent to the payer) inside its filing window, by the kind of work it takes, with what
     falls due in 7 and 30 days, and what is sent and waiting on the payer. A routine-rate pattern counts its claims by
@@ -575,16 +593,25 @@ def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: 
             pass
         recent = bool(got) and (date.fromisoformat(today) - date.fromisoformat(got[:10])).days <= 10
         later = (newest or "")[:10] > reach         # newer payments are in, from a few payers or after weeks that are missing
+        # weeks with no remittance from any payer, then newer ones (misuse check CH-6): named, with what to do. Only the hole
+        # this day stops at (it starts the day after it)
+        gap = feed_hole(conn, today) if age > 10 else None
+        if gap and gap["from"] != (date.fromisoformat(reach) + timedelta(days=1)).isoformat():
+            gap = None
+        from .detect import gap_words
         items.append({"key": "feed", "ok": age <= 10, "days": age, "newest": (newest or reach)[:10], "feed": reach,
-                      "last_file": (got or "")[:10] or None,
-                      "title": "Payments are current" if age <= 10 else (f"The remittances reach {reach} for most payers ({age} days ago)" if later
-                                                                         else f"No payment newer than {reach} ({age} days ago)"),
+                      "last_file": (got or "")[:10] or None, "gap": gap,
+                      "title": "Payments are current" if age <= 10 else gap_words(gap) if gap else (
+                          f"The remittances reach {reach} for most payers ({age} days ago)" if later else f"No payment newer than {reach} ({age} days ago)"),
                       "detail": "" if age <= 10 else (
+                          "Nobody here can see what the payers paid in those weeks, so items paid then may still show as open." if gap else
                           "Newer payments are in for only a few payers, or after weeks of files that are missing, so items worked and paid "
                           "since then may still show as open." if later else
                           "Payments after that date are not in the site, so items worked and paid since then still show as open."
                           + (f" Files did arrive on {got[:10]}, but none holds a later payment." if recent else "")),
-                      "who": ("Billing lead, with TriZetto: ask whether newer remittances exist and why they are not in the downloads." if recent
+                      "who": ("Billing lead: put the TriZetto downloads of those weeks in the Dropbox folder (if TriZetto no longer shows "
+                              "them, ask TriZetto for them)." if gap else
+                              "Billing lead, with TriZetto: ask whether newer remittances exist and why they are not in the downloads." if recent
                               else "Billing lead: put the latest TriZetto downloads in the Dropbox folder.")})
     items += trizetto_health(conn, today)
     # versions of one remittance that differ (remitwatch.store.mark_superseded): no rule can say which stands, so both are

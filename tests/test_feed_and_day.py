@@ -407,3 +407,109 @@ def test_a_hole_holds_the_feed_while_the_remittances_after_it_span_at_most_35_da
     s = _store(tmp_path, _steady("2026-11-20", holes=holes), kind)
     assert feed_date(s.conn, today="2026-11-23") == reach
     s.close()
+
+
+# =========================================================================== CH-6: the missing weeks are named
+HOLE = (("2026-10-09", "2026-11-16"),)      # nothing at all from October 10 to November 15, then the newest week put in
+GAP = {"from": "2026-10-10", "to": "2026-11-15", "newest": "2026-11-20"}
+SAID = ("No remittance from any payer between 2026-10-10 and 2026-11-15: put those weeks in the folder (the newest remittance "
+        "is 2026-11-20).")
+
+
+def _big_payer_stopped() -> dict[str, bytes]:
+    """Aetna, which carries most of the lines, stopped on September 1 (350 visits in August and on September 1)."""
+    out = {f"big{n}.RMT": remit("".join(clean_visits(30000 + 100 * n, 50, "99214", "223.65", "117.60")), "100.00", payer="AETNA",
+                                seg_count=99, isa_ctrl=f"{600000000 + n:09d}", pay_date=f"202608{n + 10:02d}") for n in range(6)}
+    out["big9.RMT"] = remit("".join(clean_visits(30900, 50, "99214", "223.65", "117.60")), "100.00", payer="AETNA", seg_count=99,
+                            isa_ctrl="600000009", pay_date="20260901")
+    return out
+
+
+def _saved_gap(conn: sqlite3.Connection):
+    return json.loads(conn.execute("SELECT value FROM meta WHERE key='feed:date'").fetchone()[0]).get("gap", "not saved")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_feed_date_reports_the_hole_it_stops_at(tmp_path, kind):
+    """Misuse check CH-6: weeks with no remittance from any payer, then the newest week. The feed date stops before the hole
+    (the rule of mr-10), and the same code now says which hole: its first and last days with no remittance from any payer,
+    and the newest remittance. The analysis keeps it with the feed date, for a copy that does not hold every line (the
+    serverless dashboard's)."""
+    from remitwatch.detect import feed_gap
+    s = _store(tmp_path, _steady("2026-11-20", holes=HOLE), kind)
+    assert feed_date(s.conn, today="2026-11-23") == "2026-10-09"
+    assert feed_gap(s.conn, today="2026-11-23") == GAP
+    Detector(s, run_id="t").run()
+    assert _saved_feed(s.conn) == "2026-10-09" and _saved_gap(s.conn) == GAP
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("world", ["steady", "old hole", "most payers stopped first"])
+def test_no_hole_is_named_where_none_holds_the_feed(tmp_path, kind, world):
+    """A steady feed; a hole too old to hold the feed (mr-10); and the same hole when the payer that carries most of the lines
+    stopped weeks before it (the feed stops there, for most payers, not at the hole): no hole to name, and none saved."""
+    from remitwatch.detect import feed_gap
+    files, reach = {"steady": (_steady("2026-11-20"), "2026-11-20"),
+                    "old hole": (_steady("2026-11-20", holes=(("2026-07-29", "2026-08-20"),)), "2026-11-20"),
+                    "most payers stopped first": ({**_steady("2026-11-20", holes=HOLE), **_big_payer_stopped()}, "2026-09-01")}[world]
+    s = _store(tmp_path, files, kind)
+    assert feed_date(s.conn, today="2026-11-23") == reach
+    assert feed_gap(s.conn, today="2026-11-23") is None
+    Detector(s, run_id="t").run()
+    assert _saved_feed(s.conn) == reach and _saved_gap(s.conn) is None
+    s.close()
+
+
+@pytest.mark.parametrize("host", HOSTS, indirect=True)
+def test_the_alert_the_feed_check_and_the_fax_hold_name_the_missing_weeks(host):
+    """Misuse check CH-6, on both hosts: weeks of remittances missing, then the newest week put in. The stale-feed alert said
+    the remittances reach October 9 'for most payers', the Data tab's feed check (Today's banner leads with it) the same,
+    and the hold on Appeal by fax that the newest remittance is weeks old (it is three days old); nothing named the missing
+    dates or what to do. Each now names the weeks and what to do."""
+    c, h = host({**_steady("2026-11-20", holes=HOLE), **_downcodes("20261118")})
+    [stale] = [a for a in c.get("/api/alerts?status=new", headers=h).json()["items"] if a["kind"] == "STALE_FEED"]
+    assert stale["title"] == SAID, stale["title"]
+    b = c.get("/api/brief", headers=h).json()
+    [feed] = [x for x in b["health"] if x["key"] == "feed"]
+    assert (feed["ok"], feed["feed"], feed["title"]) == (False, "2026-10-09", SAID), feed
+    assert feed["gap"] == GAP and "those weeks" in feed["who"] and "most payers" not in json.dumps(feed), feed
+    items = c.get("/api/findings?signal=DOWNCODE_LEVEL_REDUCED", headers=h).json()["items"]
+    r = c.post("/api/appeals/send", json={"finding_id": items[0]["finding_id"]}, headers=h).json()
+    assert r["status"] == "held" and r["code"] == "stale" and r["reason"].startswith(SAID + " "), r
+    assert "days old" not in r["reason"] and "\"Still unpaid in EMA: fax it anyway\" in the item sends it now." in r["reason"], r
+
+
+@pytest.mark.parametrize("host", HOSTS, indirect=True)
+def test_the_follow_up_hold_names_the_missing_weeks(host, monkeypatch):
+    """The same hold on the follow-ups (CH-6), on both hosts: a second request for an appeal faxed 61 days ago waits for a
+    person while missing weeks hold the feed back. The Faxes page, the follow-up run's answer and Today's follow-up step
+    name the weeks and what to do, not an age the newest remittance does not have."""
+    from remitwatch import api, fax
+    from tests.fake_fax import FakeLine
+    from tests.test_hotfix2c import PAYER_FAX, _practice, _sent_back, _write
+    # two Anthem visits allowed below Anthem's usual rate, paid September 1 (before the hole): letter appeals, no note needed
+    under = remit(claim(302, svc("99214", "223.65", "110.00", "110.00", "CAS*CO*45*113.65~", dos="20260825"), dos="20260825")
+                  + claim(303, svc("99214", "223.65", "105.00", "105.00", "CAS*CO*45*118.65~", dos="20260825"), dos="20260825"),
+                  "100.00", seg_count=99, isa_ctrl="000000302", pay_date="20260901")
+    c, h = host({**_steady("2026-11-20", holes=HOLE), "under.RMT": under})
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _practice(monkeypatch)
+    line = FakeLine()
+    monkeypatch.setattr(fax, "provider", lambda env=None: line)
+    monkeypatch.setattr(fax, "configured", lambda env=None: True)
+    a = sorted(i["finding_id"] for i in c.get("/api/findings?signal=UNDERPAID_VS_OWN_RATE&status=all&limit=50", headers=h).json()["items"])[0]
+    assert c.post("/api/faxes/payer", json={"payer_group": "Anthem / BCBS", "number": PAYER_FAX}, headers=h).status_code == 200
+    assert c.post("/api/appeals/send", json={"finding_id": a, "stale_ok": True}, headers=h).json()["status"] == "sent"
+    line.deliver_all()
+    c.post("/api/faxes/refresh", headers=h)
+    copy = cloud.SERVING_COPY.ensure() if "Authorization" in h else api.DB_PATH      # the copy the API serves
+    _sent_back(lambda sql, args=(): _write(copy, sql, args), [a], date.fromisoformat(runtime.practice_today()) - timedelta(days=61))
+    [due] = [d for d in c.get("/api/faxes", headers=h).json()["due"] if d["finding_id"] == a]
+    assert due["action"] == "second_request" and due["stale"] and due["hold"].startswith(SAID + " "), due
+    assert "days old" not in due["hold"] and "Still unpaid in EMA: send it" in due["hold"], due
+    n0 = len(line.sent)
+    run = c.post("/api/faxes/follow_up", json={}, headers=h).json()
+    assert run["sent"] == 0 and len(line.sent) == n0 and run["results"][0]["reason"].startswith(SAID + " "), run
+    fu = c.get("/api/brief", headers=h).json()["follow_ups"]
+    assert fu["n"] == 1 and fu["note"].startswith(SAID + " ") and "days old" not in fu["note"] and "EMA" in fu["note"], fu

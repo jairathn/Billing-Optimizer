@@ -2028,8 +2028,11 @@ def brief(_: str = Depends(require_auth)):
         if fu.get("n") and behind is not None and behind > STALE_APPEAL_DAYS:
             # the same measure the fax hold uses: the items stay listed, and the person checks before asking the payer again
             fu["behind_days"] = behind
-            fu["note"] = (f"The newest remittance RemitWatch has is {behind} days old, so some of these may have been paid since. "
-                          "Check each one in EMA or on the payer's portal before you follow up.")
+            from .detect import gap_words
+            gap = _feed_gap()   # weeks missing, then newer files (misuse check CH-6): named, not an age
+            fu["note"] = (f"{gap_words(gap)} Some of these may have been paid in those weeks. " if gap else
+                          f"The newest remittance RemitWatch has is {behind} days old, so some of these may have been paid since. ") \
+                + "Check each one in EMA or on the payer's portal before you follow up."
         # the red number on each category tab: what closes within 7 days, counted as that page's first tile and its list
         token = _WINDOWS_MEMO.set({})
         try:
@@ -3353,6 +3356,19 @@ def _feed_day() -> str | None:
         conn.close()
 
 
+def _feed_gap() -> dict | None:
+    """The weeks with no remittance from any payer that the day above stops at (insights.feed_hole), else None: the fax hold
+    names them and what to do, not an age the newest remittance does not have (misuse check CH-6)."""
+    if not has_table("transactions"):
+        return None
+    from .insights import feed_hole
+    conn = db()
+    try:
+        return feed_hole(conn, _day(0))
+    finally:
+        conn.close()
+
+
 def _data_behind_days() -> int | None:
     """Days since the day the remittances reach for most payers (None without remittances): past two weeks or so, a claim
     on the lists may have been paid since and nobody here can see it. One stray newer file from one payer does not lift it.
@@ -3999,8 +4015,12 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
     behind = _data_behind_days()
     if behind is not None and behind > STALE_APPEAL_DAYS and body.get("stale_ok") is not True:
-        return held("stale", f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since. "
-                             "Get the remittances current first (Data tab, or the TriZetto feed); \"Still unpaid in EMA: fax it anyway\" in the item sends it now.")
+        from .detect import gap_words
+        gap = _feed_gap()       # weeks missing, then newer files (misuse check CH-6): named, with what to do
+        return held("stale", (f"{gap_words(gap)} This claim may have been paid in those weeks; " if gap else
+                              f"The newest remittance RemitWatch has is {behind} days old, so this claim may have been paid since. "
+                              "Get the remittances current first (Data tab, or the TriZetto feed); ")
+                    + "\"Still unpaid in EMA: fax it anyway\" in the item sends it now.")
     # the remittance does not say the payer changed the code: the higher level is inferred (from the charge, or from EMA's
     # charge rather than the claim file), and a letter saying it was billed must not go before a person has seen it went out
     ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
@@ -4244,6 +4264,7 @@ def faxes_list(_: str = Depends(require_auth)):
     finally:
         conn.close()
     behind = _data_behind_days()
+    gap = _feed_gap() if behind is not None and behind > STALE_APPEAL_DAYS else None
     for d in due:
         if d.get("number"):
             d["number"] = fax.pretty(d["number"])
@@ -4253,7 +4274,7 @@ def faxes_list(_: str = Depends(require_auth)):
         if act in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS:
             d["stale"] = True
             if not d.get("hold") and d.get("action") != "person":
-                d["hold"] = stale_followup_why(behind)
+                d["hold"] = stale_followup_why(behind, gap)
     prov = fax.provider()
     return {"configured": prov is not None or fax.line() is not None, "sends": prov is not None, "not_here": fax.not_here(),
             "line": fax.pretty(os.environ.get("SRFAX_CALLER_ID")), "practice_missing": _practice_missing(),
@@ -4377,7 +4398,7 @@ def _retry(prov, r: dict, doc: dict) -> str:
     if behind is not None and behind > STALE_APPEAL_DAYS:
         # the claim may have been paid since: listed for a person (who checks EMA and sends it), and tried again by itself
         # once the remittances are current (_fax_refresh)
-        _mark_held(r, dict(doc, **{HELD_BEHIND: True}), stale_followup_why(behind))
+        _mark_held(r, dict(doc, **{HELD_BEHIND: True}), stale_followup_why(behind, _feed_gap()))
         return "held"
     level = int(r["level"] or 1)
     conn = db()
@@ -4616,7 +4637,7 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None, 
     behind = _data_behind_days()
     if d["action"] in ("second_request", "payment") and behind is not None and behind > STALE_APPEAL_DAYS \
             and not (person_number is not None and stale_ok is True):
-        return held(stale_followup_why(behind))
+        return held(stale_followup_why(behind, _feed_gap()))
     missing = _practice_missing()
     if missing:
         return held("The letters still lack the practice's details: set " + ", ".join(missing) + " in the host's settings.")
@@ -4677,9 +4698,13 @@ def _send_followup(prov, d: dict, actor: str, person_number: str | None = None, 
     return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), title=title)
 
 
-def stale_followup_why(behind: int) -> str:
-    """Why a request that says the claim is unpaid waits while the remittances are behind, and how a person sends it."""
-    return (f"The newest remittance RemitWatch has is {behind} days old, so the claim may have been paid since. A request that says "
+def stale_followup_why(behind: int, gap: dict | None = None) -> str:
+    """Why a request that says the claim is unpaid waits while the remittances are behind, and how a person sends it. When
+    weeks with no remittance from any payer hold the feed back (`gap`, from _feed_gap), it names them (misuse check CH-6)."""
+    from .detect import gap_words
+    first = (f"{gap_words(gap)} The claim may have been paid in those weeks." if gap else
+             f"The newest remittance RemitWatch has is {behind} days old, so the claim may have been paid since.")
+    return (f"{first} A request that says "
             "it is unpaid is not sent by itself until the remittances are current. Check EMA or the payer's portal: if it is still "
             "unpaid, press \"Still unpaid in EMA: send it\" on the Faxes page.")
 

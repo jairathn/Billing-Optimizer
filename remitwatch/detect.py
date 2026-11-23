@@ -264,7 +264,7 @@ FEED_GAP_MIN_DAYS = 20
 FEED_GAP_RECENT_DAYS = 35
 
 
-def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
+def feed_date(conn: sqlite3.Connection, today: str | None = None, hole: dict | None = None) -> str | None:
     """The day the remittance feed reaches: a payment date after today counts as today; each payer group's newest payment
     date is how far its remittances reach; and the feed reaches the latest day D such that payer groups holding at least
     half of the remittance lines of the FEED_WINDOW_DAYS before the newest (clamped) date are current through D. One stray
@@ -273,7 +273,8 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
     FEED_GAP_DAYS in a row, the feed reaches only the last day before that hole, while the remittances after the hole
     span at most FEED_GAP_RECENT_DAYS (an older hole is history). With fewer than three payer groups it is
     the newest date, clamped to today. A payment date no calendar has is skipped (real_day). None with no remittances.
-    Today is the practice's day unless given (runtime.practice_today: from 7 PM Eastern the UTC date is already tomorrow)."""
+    Today is the practice's day unless given (runtime.practice_today: from 7 PM Eastern the UTC date is already tomorrow).
+    `hole`, when given (a dict), is filled with the hole the feed stops at, if one does (feed_gap)."""
     from . import runtime
     today = today or runtime.practice_today()
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -319,8 +320,27 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
         for a, b in zip(days, days[1:]):
             if (date.fromisoformat(b) - date.fromisoformat(a)).days > FEED_GAP_DAYS \
                     and (date.fromisoformat(days[-1]) - date.fromisoformat(b)).days <= FEED_GAP_RECENT_DAYS:
+                if hole is not None and a <= reach:     # the feed stops at the hole, not where most payers' files end
+                    hole.update({"from": _add_days(a, 1), "to": _add_days(b, -1), "newest": days[-1]})
                 return min(reach, a)
     return reach
+
+
+def feed_gap(conn: sqlite3.Connection, today: str | None = None) -> dict | None:
+    """The hole feed_date stops at, if it stops at one (misuse check CH-6): weeks with no remittance from any payer, then
+    newer remittances. "from" and "to": its first and last days with no remittance from any payer; "newest": the newest
+    remittance (a payment date after today counts as today). None when no hole holds the feed back. Worked out from the
+    store; each analysis saves it with the feed date (FEED_META), for a copy that does not hold every line
+    (insights.feed_hole)."""
+    hole: dict = {}
+    feed_date(conn, today, hole)
+    return hole or None
+
+
+def gap_words(gap: dict) -> str:
+    """What the stale-feed alert, the fax hold and the Data tab's feed check say of such a hole: the dates and what to do."""
+    return (f"No remittance from any payer between {gap['from']} and {gap['to']}: put those weeks in the folder (the newest "
+            f"remittance is {gap['newest']}).")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -3187,9 +3207,12 @@ class Detector:
         self.emit_second_rates()
         self.resolve_elsewhere()
         out = self.save()
-        try:        # the feed date this analysis used, for the dashboard's copy (which does not hold every line) and its fax hold
+        try:        # the feed date this analysis used, for the dashboard's copy (which does not hold every line) and its fax hold,
+                    # with the hole it stops at, if any (feed_gap), which the copy's fax hold and feed check name
+            hole: dict = {}
+            day = feed_date(self.conn, hole=hole)
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                              (FEED_META, json.dumps({"date": feed_date(self.conn), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})))
+                              (FEED_META, json.dumps({"date": day, "gap": hole or None, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})))
             self.conn.commit()
         except sqlite3.Error:
             self.conn.rollback()        # the analysis is saved; the API works the date out from the store, or the newest payment

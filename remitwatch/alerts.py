@@ -39,7 +39,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import carc_text, payer_group_kind
-from .detect import DOWNCODE_SIGNALS, EM_SQL, SWING_OPEN_STATUSES, ensure_schema, feed_date
+from .detect import DOWNCODE_SIGNALS, EM_SQL, SWING_OPEN_STATUSES, ensure_schema, feed_date, gap_words
 
 RECENT_DAYS = int(os.environ.get("REMITWATCH_ALERT_RECENT_DAYS", "28"))
 BASELINE_DAYS = int(os.environ.get("REMITWATCH_ALERT_BASELINE_DAYS", "182"))
@@ -300,8 +300,11 @@ class AlertEngine:
         from . import runtime
         self.today = today or runtime.practice_today()     # the practice's day, as every caller passes it
         # the day the remittances reach for most payers (detect.feed_date), not the newest payment of any one: one stray file
-        # must not move every window and clear the stale-feed alert. asof can be set to replay history
-        self.asof = asof or feed_date(conn, self.today) or self.today
+        # must not move every window and clear the stale-feed alert. asof can be set to replay history. gap: the weeks with no
+        # remittance from any payer that day stops at, if it stops at a hole (detect.feed_gap), which the stale-feed alert names
+        hole: dict = {}
+        self.asof = asof or feed_date(conn, self.today, hole) or self.today
+        self.gap = hole or None
         self.recent_start = _shift(self.asof, -RECENT_DAYS)
         self.base_start = _shift(self.recent_start, -BASELINE_DAYS)
         self.active: dict[str, dict] = {}
@@ -622,9 +625,13 @@ class AlertEngine:
         behind = (date.fromisoformat(self.today) - date.fromisoformat(self.asof)).days
         since_ingest = (date.fromisoformat(self.today) - date.fromisoformat(last_ingest)).days if last_ingest else None
         if behind > max(STALE_DAYS, 14) or (since_ingest is not None and since_ingest > STALE_DAYS):
-            self._raise("STALE_FEED", "high", f"No new remittances: the remittances on file reach {self.asof} for most payers ({behind} days ago) and the last new "
-                        f"file arrived {last_ingest or 'never'}. Check the TriZetto download and the Dropbox upload.",
-                        {"newest_payment": self.asof, "days_behind": behind, "last_file_ingested": last_ingest, "days_since_ingest": since_ingest},
+            # weeks missing, then newer files (misuse check CH-6): what to look for is those weeks' files, not new ones
+            title = gap_words(self.gap) if self.gap else (
+                f"No new remittances: the remittances on file reach {self.asof} for most payers ({behind} days ago) and the last new "
+                f"file arrived {last_ingest or 'never'}. Check the TriZetto download and the Dropbox upload.")
+            self._raise("STALE_FEED", "high", title,
+                        {"newest_payment": self.asof, "days_behind": behind, "last_file_ingested": last_ingest, "days_since_ingest": since_ingest,
+                         "gap": self.gap},
                         None, "feed", None, behind, STALE_DAYS, None, None, key=("feed",))
 
     # ------------------------------------------------------------------ run
