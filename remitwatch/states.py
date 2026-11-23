@@ -2481,10 +2481,21 @@ def _follow(res: dict, fx: dict, ev: list, anchor: str | None, work: str, text: 
         if a.get("status") != "22":
             ag = a.get("group") or (_grp_kind(a["payer"])[0] if a.get("payer") else None) or grp
             ak = a.get("kind") or (_grp_kind(a["payer"])[1] if a.get("payer") else None) or kind
-            from .codes import appeal_rule, legal_deadline
+            from .codes import appeal_rule, corrected_rule, legal_deadline
             ar_ = appeal_rule(ag, ak)
             closes = _later(_add(a["date"], ar_["days"]), legal_deadline(a["date"], ar_))
-            res["answer_window"] = {"date": closes, "basis": ar_["label"], "what": f"the window to dispute {ag or 'the payer'}'s answer"}
+            label, what_w = ar_["label"], f"the window to dispute {ag or 'the payer'}'s answer"
+            # an answer a corrected claim can fix (an authorization or referral, missing information) keeps the corrected
+            # claim's own clock (C14: a referral-absent answer, a Medicaid plan's 365 days from the date of service)
+            fixable = [cc for cc in (str(x).split("-")[-1] for x in a.get("codes") or []) if cc in AUTH_CARCS or cc in ("16", "252")]
+            cr = corrected_rule(ag, ak, f.get("rarc"), None, fixable[0]) if fixable and ak != "medicare" else None
+            if cr:
+                start = f.get("service_date") if cr["clock"] == "dos" else a["date"]
+                cl = _later(_add(start, cr["days"]), legal_deadline(start, cr))
+                if cl and cl > (closes or ""):
+                    closes, label, what_w = cl, cr["label"], f"the window to send {ag or 'the payer'} a corrected claim"
+            ar_ = dict(ar_, label=label)
+            res["answer_window"] = {"date": closes, "basis": label, "what": what_w}
             other = bool(ag) and bool(grp) and not _same_payer(ag, grp)
             lastw = _last_window(f, deadline)
             # expired when that window closed and the item's own windows have too, or the answer came from another payer (the

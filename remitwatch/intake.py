@@ -35,6 +35,8 @@ import zlib
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
+from . import runlog
+
 INCOMING, READY, DONE = "incoming", "ready", "done"
 STATE_INTAKE = "intake"
 SIDECAR_KEYS = ("name", "origin", "user", "sha256", "size", "gz", "received_at", "report_hint")
@@ -478,8 +480,8 @@ def _set_aside(store, sc: dict, pair: str, n: int, origin: dict) -> dict:
             er._catalog_put(store.conn, fid, commit=True, report=None, source_name=_plain_name(sc, pair), via="upload",
                             origin=origin, source_kind="upload", status="held", status_reason=msg, received_at=_now())
             store.ema_changed = True
-        except Exception:       # noqa: BLE001  (the done sidecar still says what happened)
-            pass
+        except Exception as exc:       # noqa: BLE001  (the done sidecar still says what happened)
+            runlog.caught(exc, "intake_set_aside", level="warning")
     return _result("held", [msg], file_id=fid)
 
 
@@ -548,8 +550,8 @@ def _bomb_result(store, exc, sc: dict, pair: str, origin: dict) -> dict:
         try:
             er._record_refusal(store, fid, exc, path=_plain_name(sc, pair), rec=None, via="upload", origin=origin,
                                log=lambda *a: None)
-        except Exception:       # noqa: BLE001  (the done sidecar still says what happened)
-            pass
+        except Exception as err:       # noqa: BLE001  (the done sidecar still says what happened)
+            runlog.caught(err, "intake_refused", level="warning")
     return _result("refused", [f"Not read: {exc.message}"], file_id=fid or None)
 
 
@@ -900,7 +902,8 @@ def note_state_attempt(state, pair: str) -> int:
     d[pair] = {"n": n, "at": _now()}
     try:
         state.put(STATE_ATTEMPTS, json.dumps(d, sort_keys=True).encode())
-    except Exception:       # noqa: BLE001  (the note is a safeguard; the reading goes on)
+    except Exception as exc:       # noqa: BLE001  (the note is a safeguard; the reading goes on)
+        runlog.caught(exc, "intake_attempts", level="warning")
         return 1
     return n
 
@@ -916,8 +919,8 @@ def clear_state_attempt(state, *pairs: str) -> None:
             state.put(STATE_ATTEMPTS, json.dumps(d, sort_keys=True).encode())
         else:
             state.delete(STATE_ATTEMPTS)
-    except Exception:       # noqa: BLE001  (an old note only lets a later run count one stop too many)
-        pass
+    except Exception as exc:       # noqa: BLE001  (an old note only lets a later run count one stop too many)
+        runlog.caught(exc, "intake_attempts", level="warning")
 
 
 def _unpacked_into(chunks: Iterable[bytes], fh, h: Hashes, gz: bool, *, expect: int | None, packed: int | None) -> None:

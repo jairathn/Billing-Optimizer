@@ -48,7 +48,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, BinaryIO, ContextManager, Iterable, Iterator, NamedTuple, Sequence
 
-from . import codes, runtime
+from . import codes, runlog, runtime
 from .ema_exports import NA_TEXT, TOTAL_LINE, export_created
 
 # --------------------------------------------------------------------------------------------------------- constants
@@ -1949,7 +1949,7 @@ def _note_classifier() -> Any:
     days"), or None on a build without it: the note columns then stay empty and the states see only that a note exists."""
     try:
         from .states import classify_note
-    except Exception:       # noqa: BLE001
+    except ImportError:
         return None
     return classify_note
 
@@ -1964,11 +1964,17 @@ def _stage_ar_notes(conn: sqlite3.Connection, acct: Any, as_of: str | None) -> i
     n = 0
     if classify is not None:
         batch = []
+        failed = 0
         for row_no, text in notes.items():
             try:
                 batch.append((classify(text, as_of).get("date"), row_no))
-            except Exception:       # noqa: BLE001  (left as the reader resolved it)
-                continue
+            except Exception as exc:       # noqa: BLE001  (left as the reader resolved it)
+                if not failed:      # the first one with its stack, never its message (it can quote the note's words)
+                    runlog.caught(RuntimeError(f"An A/R billing note could not be read for its date ({type(exc).__name__})")
+                                  .with_traceback(exc.__traceback__), "ar_note_dates", level="warning")
+                failed += 1
+        if failed > 1:
+            runlog.event("ar_note_dates", "notes_not_dated", level="warning", counts={"notes": failed})
         n = conn.executemany("UPDATE temp.ema_ar_stage SET note_date=? WHERE row_no=? AND note_date IS NOT ?",
                              [(d, r, d) for d, r in batch]).rowcount
     if hasattr(acct, "dated_notes"):

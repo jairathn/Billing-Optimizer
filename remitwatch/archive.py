@@ -1194,7 +1194,21 @@ def run(conn: sqlite3.Connection, *, horizon: int | None = None, budget_state: d
     {'horizon', 'cutoff', 'bills', 'claims', 'lines', 'findings', 'rows': {table: n}, 'files': [...], 'held': {...},
     'waiting_rates', 'ar': {...}, 'seconds', 'more'}. `sink` is where the archive lives (sink_for); without one the run
     only measures what it would do. `deadline` (time.time()) stops it between batches; what is left waits for the next
-    run. Idempotent: a second run with nothing new archives nothing."""
+    run. Idempotent: a second run with nothing new archives nothing. On a serverless host the run's temporary tables stay
+    in memory (temp_store=MEMORY while it runs): its temporary folder is small and shared."""
+    old = _temp_store(conn, "MEMORY") if (mode or ("serverless" if serverless(env) else "server")) == "serverless" else None
+    try:
+        return _run(conn, horizon=horizon, budget_state=budget_state, sink=sink, run_id=run_id, today=today, mode=mode,
+                    deadline=deadline, env=env, floor=floor, require_frozen=require_frozen, max_bills=max_bills,
+                    batch_bills=batch_bills, ar=ar, log=log)
+    finally:
+        if old is not None:
+            _temp_store(conn, old)
+
+
+def _run(conn: sqlite3.Connection, *, horizon: int | None, budget_state: dict | None, sink: Any, run_id: str | None,
+         today: Any, mode: str | None, deadline: float | None, env: dict | None, floor: int | None, require_frozen: bool,
+         max_bills: int | None, batch_bills: int, ar: bool, log: Callable[..., Any] | None) -> dict:
     log = log or _noop
     t0 = time.time()
     ensure_schema(conn)
@@ -2290,11 +2304,14 @@ def _rss_mb() -> int | None:
 
 
 def _temp_store(conn: sqlite3.Connection, value: int | str) -> int | None:
-    """Set PRAGMA temp_store; returns the value it had (None when it could not be read). Changing it drops the
-    connection's temporary tables: call it only where none of the caller's are in use."""
+    """Set PRAGMA temp_store (committing first: SQLite refuses the change inside a transaction once a temporary table
+    exists); returns the value it had, or None when it could not be changed. Changing it drops the connection's temporary
+    tables: call it only where none of the caller's are in use."""
     try:
         old = conn.execute("PRAGMA temp_store").fetchone()[0]
-        if str(old) != str(value):
+        if str(old) != str(value) and str(old) != {"DEFAULT": "0", "FILE": "1", "MEMORY": "2"}.get(str(value).upper(), "-"):
+            if conn.in_transaction:
+                conn.commit()
             conn.execute(f"PRAGMA temp_store={value}")
         return int(old)
     except sqlite3.Error:

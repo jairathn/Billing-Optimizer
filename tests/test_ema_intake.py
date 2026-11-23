@@ -1909,3 +1909,77 @@ def test_only_a_persons_change_after_the_last_run_asks_for_detection_never_the_h
     from remitwatch.ema_checks import POLICY_KEY
     c.execute("INSERT INTO meta VALUES (?, ?)", (POLICY_KEY, json.dumps({"p": {"decision": "accept", "at": later}})))
     assert pipeline.people_changed_since_detection(c)
+
+
+# ------------------------------------------------------------------------------- nothing caught without a word
+INTAKE_SILENT_CEILING = {"intake.py": 4, "dropbox_sync.py": 3, "ema_reports.py": 3, "ema_ledger.py": 0, "ema_exports.py": 0,
+                         "cli.py": 0}
+
+
+def test_the_intake_files_silent_blocks_do_not_grow():
+    """An exception is never caught without a word (runlog.caught in the except block): the blocks these files had before
+    the run log are counted and no new one is added (pipeline.py and cloud.py are counted in tests/test_runlog.py)."""
+    from remitwatch import runlog
+    pkg = os.path.dirname(intake.__file__)
+    for name, ceiling in INTAKE_SILENT_CEILING.items():
+        found = runlog.silent_excepts([os.path.join(pkg, name)])
+        assert len(found) <= ceiling, f"{name}: {len(found)} silent except blocks (ceiling {ceiling}): {found}"
+
+
+def test_what_the_intake_contains_is_in_the_runs_log_as_a_warning_never_a_notes_words(tmp_path, monkeypatch):
+    """A state folder that refuses the attempts note, a catalog row that cannot be written, a file row that cannot be
+    written and an A/R note the classifier cannot read: each run goes on, and each failure is in the run's log as a
+    warning with its stack (the run stays 'ok'); an A/R note's words never reach it, only that one could not be read."""
+    import types
+    from remitwatch import runlog
+    from remitwatch.state import LocalState
+
+    class Refusing(LocalState):
+        def put(self, name, data, *a, **k):
+            if name == intake.STATE_ATTEMPTS:
+                raise ConnectionError("the state folder did not answer")
+            return super().put(name, data, *a, **k)
+
+        def delete(self, name):
+            if name == intake.STATE_ATTEMPTS:
+                raise ConnectionError("the state folder did not answer")
+            return super().delete(name)
+
+    folder = str(tmp_path / "state")
+    LocalState(folder).put(intake.STATE_ATTEMPTS, json.dumps({"p1": {"n": 1, "at": "2026-02-29T23:59:59+00:00"}}).encode())
+    store = Store(str(tmp_path / "s.sqlite"))
+    rl = runlog.start_run("cycle", logs_dir=str(tmp_path / "logs"), host="serverless")
+    try:
+        assert intake.note_state_attempt(Refusing(folder), "p1") == 1          # the reading goes on
+        intake.clear_state_attempt(Refusing(folder), "p1")
+        monkeypatch.setattr(er, "_catalog_put", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")))
+        monkeypatch.setattr(er, "_record_refusal", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")))
+        sc = {"sha256": "ab" * 32, "name": "invented.csv"}
+        assert intake._set_aside(store, sc, "p1", 3, {})["outcome"] == "held"
+        assert intake._bomb_result(store, er.ReportRefused("unpacks_too_large", "It unpacks too far."), sc, "p1", {})["outcome"] == "refused"
+        broken = types.SimpleNamespace(record_file=lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+        (tmp_path / "x.dat").write_bytes(b"not a remittance")
+        dropbox_sync._not_read(broken, str(tmp_path / "x.dat"), "unknown")
+        words = "Spoke to Pat Invented 02/29, claim 1234567"
+
+        def classify(text, as_of):
+            raise ValueError("cannot read " + text)
+        monkeypatch.setattr(er, "_note_classifier", lambda: classify)
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TEMP TABLE ema_ar_stage (row_no INTEGER, note_date TEXT)")
+        acct = types.SimpleNamespace(dated_notes={1: words, 2: words + " again", 3: words + " twice"})
+        assert er._stage_ar_notes(conn, acct, "2028-03-01") == 0 and acct.dated_notes == {}
+        steps = [(e["step"], e["type"]) for e in rl.manifest["errors"]]
+        assert steps == [("intake_attempts", "ConnectionError"), ("intake_attempts", "ConnectionError"),
+                         ("intake_set_aside", "OperationalError"), ("intake_refused", "OperationalError"),
+                         ("not_read", "OperationalError"), ("ar_note_dates", "RuntimeError")]
+        assert all(e["stack"] for e in rl.manifest["errors"])        # where each one happened, for whoever reads the bundle
+        assert rl.outcome() == "ok" and rl.warnings >= 6 and rl.errors == 0
+        assert any(e["event"] == "notes_not_dated" and e["counts"] == {"notes": 3} for e in rl.events)
+    finally:
+        rl.finish()
+        store.close()
+    logged = json.dumps(rl.manifest) + "".join(p.read_text(errors="replace") for p in (tmp_path / "logs").rglob("*") if p.is_file()
+                                               and not p.name.endswith(".gz"))
+    for piece in ("Pat Invented", "Spoke to", "1234567", "invented.csv"):
+        assert piece not in logged

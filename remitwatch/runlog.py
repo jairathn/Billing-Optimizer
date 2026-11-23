@@ -1040,7 +1040,8 @@ class RunLog:
         """Mark how far the run got (the open marker: the step it is in, its memory, its last events), so a run killed
         by the platform is found by the next one and blamed on the step it was in. Written whenever a step starts; on
         a serverless host (each write is a Dropbox call) rewritten within one step at most every
-        CHECKPOINT_SECONDS_REMOTE seconds unless forced."""
+        CHECKPOINT_SECONDS_REMOTE seconds unless forced. Never after the run finished: a marker written then would make
+        the next run record a run that ended well as killed."""
         now = time.monotonic()
         if (getattr(self.sink, "remote", False) and not force and step == self._marker_step
                 and now - self._last_checkpoint < CHECKPOINT_SECONDS_REMOTE):

@@ -1107,3 +1107,86 @@ def test_control_without_the_archive_the_analysis_lists_no_ema_only_denial_for_t
     sig = [r[0] for r in store.conn.execute("SELECT signal FROM findings WHERE patient_control_number LIKE ? AND COALESCE(stale,0)=0",
                                             (EF.bill_id(1) + "%",))]
     assert "EMA_DENIED" not in sig
+
+
+# =========================================================================== 11. compacting the serverless image
+# (the review's finding C: VACUUM wrote the compacted image to a file in the temporary folder, which on Vercel is 512 MB and
+# shared with the dashboard's copy; the hook called it unguarded, so every idle run would end in error)
+_COMPACT_SCRIPT = r'''
+import json, resource, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+from remitwatch import archive
+from remitwatch.store import Store
+limit = int(sys.argv[2])
+s = Store(":memory:", compact=True)
+blob = "x" * 300
+s.conn.executemany("INSERT INTO remarks (transaction_key, claim_key, line_key, level, qualifier, code) VALUES (?,?,?,?,?,?)",
+                   ((f"T{i}", f"C{i}", f"L{i}" + blob, "line", "HE", "N123") for i in range(80_000)))
+s.conn.commit()
+s.conn.execute("DELETE FROM remarks WHERE id <= 30000")          # what an archive run frees: whole pages
+s.conn.commit()
+if hasattr(sqlite3.Connection, "serialize"):
+    img = Store.from_bytes(s.to_bytes())                         # the image a serverless run loads (cloud.load_raw)
+    s.close()
+else:                                                            # a Python without serialize: the same in-memory store
+    img = s
+ps, pc, fl = (img.conn.execute(f"PRAGMA {p}").fetchone()[0] for p in ("page_size", "page_count", "freelist_count"))
+ts = img.conn.execute("PRAGMA temp_store").fetchone()[0]
+resource.setrlimit(resource.RLIMIT_FSIZE, (limit << 20, limit << 20))
+out = archive.compact(img.conn, budget=1_000_000)
+print(json.dumps({"out": out, "compacted_mb": (ps * (pc - fl)) >> 20, "rows": img.conn.execute("SELECT COUNT(*) FROM remarks").fetchone()[0],
+                  "temp_store": [ts, img.conn.execute("PRAGMA temp_store").fetchone()[0]]}))
+'''
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the file-size limit is a POSIX resource limit")
+def test_compact_on_the_serverless_image_does_not_need_the_images_size_in_the_temporary_folder(tmp_path):
+    """The process may write only 4 MB to any file; the compacted image is about 18 MB. VACUUM still works (it builds
+    the copy in memory), the rows are all there, and the connection's temp_store is as it was."""
+    import subprocess
+    script = tmp_path / "compact_tmp.py"
+    script.write_text(_COMPACT_SCRIPT)
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    run = subprocess.run([sys.executable, "-I", str(script), repo, "4"], capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, run.stderr[-2000:]
+    got = json.loads(run.stdout.strip().splitlines()[-1])
+    assert got["compacted_mb"] > 4                       # it would not fit in the file space the process has
+    assert "skipped" not in got["out"], got["out"]
+    assert got["out"]["after"] < got["out"]["before"] and got["rows"] == 50_000
+    assert got["temp_store"][0] == got["temp_store"][1]
+
+
+def test_compact_waits_when_the_memory_budget_has_no_room_and_never_raises(tmp_path, frozen_hook):
+    store = Store(":memory:", compact=True)
+    ingest(store, tmp_path, [(visits(1, 60, OLD), "20220415"), (visits(500, 4, NEW), "20260415")])
+    detect(store)
+    archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY)
+    size = store.conn.execute("PRAGMA page_count").fetchone()[0]
+    # 1,600 MB budget, 1,590 MB held: no room for the compacted copy
+    out = archive.compact(store.conn, min_free_share=0.01, budget=1600, rss=1590)
+    assert out["skipped"].startswith("not enough memory") and out["need_mb"] >= archive.COMPACT_MARGIN_MB
+    assert store.conn.execute("PRAGMA page_count").fetchone()[0] == size            # nothing done
+    ok = archive.compact(store.conn, min_free_share=0.01, budget=1600, rss=100)
+    assert ok["after"] < ok["before"]
+    store.close()
+    # a store that cannot be read: a reason, never an exception
+    gone = sqlite3.connect(":memory:")
+    gone.close()
+    assert archive.compact(gone)["skipped"]
+
+
+def test_a_serverless_archive_run_keeps_its_temporary_tables_in_memory(tmp_path, frozen_hook, monkeypatch):
+    store = world(tmp_path, "compact")
+    detect(store)
+    seen = []
+    real = archive._build_records
+
+    def watch(c, bills):
+        seen.append(c.execute("PRAGMA temp_store").fetchone()[0])
+        return real(c, bills)
+    monkeypatch.setattr(archive, "_build_records", watch)
+    before = store.conn.execute("PRAGMA temp_store").fetchone()[0]
+    res = archive.run(store.conn, sink=sink_of(tmp_path, "compact"), today=TODAY, mode="serverless")
+    assert res["bills"] == 9 and seen and set(seen) == {2}                      # MEMORY while it ran
+    assert store.conn.execute("PRAGMA temp_store").fetchone()[0] == before      # as it was after
+    store.close()

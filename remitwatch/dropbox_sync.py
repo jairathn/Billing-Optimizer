@@ -29,6 +29,8 @@ from typing import Iterable, Iterator
 
 import requests
 
+from . import runlog
+
 API = "https://api.dropboxapi.com/2"
 CONTENT = "https://content.dropboxapi.com/2"
 TOKEN_URL = "https://api.dropboxapi.com/oauth2/token"
@@ -552,8 +554,8 @@ def _not_read(store, path: str, kind: str) -> None:
     'not_read', so the Data tab lists it and it is not fetched or read again until it changes."""
     try:
         store.record_file(file_sha256(path), path, kind=kind, status="not_read", lines=0)
-    except Exception:       # noqa: BLE001  (the cycle's output still names it)
-        pass
+    except Exception as exc:       # noqa: BLE001  (the cycle's output still names it)
+        runlog.caught(exc, "not_read", level="warning")
 
 
 # ------------------------------------------------------------------------------- files fetched and not yet read

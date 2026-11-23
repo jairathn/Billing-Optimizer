@@ -358,6 +358,10 @@ def test_the_open_marker_is_written_at_each_step_and_at_most_every_twenty_second
     rl.checkpoint("detect", force=True)
     assert markers() == 8
     rl.finish()
+    clock[0] += 60
+    rl.log("  a line after the run ended")                         # code that kept `log = rl.log` after the finish
+    rl.checkpoint("mail", force=True)
+    assert markers() == 8 and state.list("logs/open") == []       # no marker comes back: no phantom killed run later
 
 
 def test_a_serverless_run_killed_in_detection_is_blamed_on_detection_and_keeps_its_trail(tmp_path, monkeypatch):
