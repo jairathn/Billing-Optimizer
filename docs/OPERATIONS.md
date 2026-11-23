@@ -49,7 +49,9 @@ Nothing to do. While the dashboard runs it does one cycle every `REMITWATCH_SYNC
 
 For updates within a minute of an upload, add a webhook in the Dropbox app console (Settings, Webhooks): `https://YOUR-HOST/api/dropbox/webhook`. Dropbox verifies the address once and then calls it whenever a file changes. Calls are checked against the app secret.
 
-The header of every page shows the newest payment date in the store and whether sync is on. The Data tab shows the last cycle and has a "Sync and analyse now" button. If no new remittance arrives for `REMITWATCH_STALE_DAYS` days, an alert says so; that usually means the TriZetto download or the Dropbox upload stopped, not that the payers stopped paying.
+The header of every page shows how far the remittances reach and whether sync is on. The Data tab shows the last cycle and has a "Sync and analyse now" button. If no new remittance arrives for `REMITWATCH_STALE_DAYS` days, an alert says so; that usually means the TriZetto download or the Dropbox upload stopped, not that the payers stopped paying.
+
+How far the remittances reach is the day most payers' remittances are current through, not the newest payment of any one payer: one stray file (a small payer, an adjustment, a file dated in the future) does not make the whole feed look current. Weeks of files that are missing do not either: when no payer paid for more than a week in a row and newer remittances follow, the remittances reach only the last day before that gap, and every page keeps saying so until the missing weeks are read. Put every week in the folder, none skipped.
 
 Opening the dashboard also looks for new remittances when nothing has for `REMITWATCH_FRESHEN_HOURS` hours (3 by default): a run starts in the background (TriZetto, Dropbox, the analysis) and the page redraws itself when it has brought newer payments. Nobody has to press Sync.
 
@@ -218,7 +220,7 @@ When a payer is known never to pay something (a visit with modifier 57 at some p
 
 ### No appeal on old data
 
-When the newest remittance is more than `REMITWATCH_STALE_APPEAL_DAYS` days old (14), Appeal by fax holds every item: it may have been paid since. Get the remittances current (TriZetto direct, or the Dropbox upload) and send again; "Still unpaid in EMA: fax it anyway" in the item, or "Fax them anyway" after a batch, sends them when someone has checked in EMA that they are still unpaid. The follow-ups that say a claim is unpaid (second requests and payment requests) are not sent by the daily run until the remittances are current; the Faxes page lists them, and "Still unpaid in EMA: send it" sends one once someone has checked. Requests to the next level and records the payer asked for still go.
+When the remittances reach a day more than `REMITWATCH_STALE_APPEAL_DAYS` days ago (14), Appeal by fax holds every item: it may have been paid since. Get the remittances current (TriZetto direct, or the Dropbox upload) and send again; "Still unpaid in EMA: fax it anyway" in the item, or "Fax them anyway" after a batch, sends them when someone has checked in EMA that they are still unpaid. The follow-ups that say a claim is unpaid (second requests and payment requests) are not sent by the daily run until the remittances are current; the Faxes page lists them, and "Still unpaid in EMA: send it" sends one once someone has checked. Requests to the next level and records the payer asked for still go.
 
 ### The Providers tab
 
@@ -478,7 +480,7 @@ On Vercel the store is `store.sqlite.gz` in the state folder (`/RemitWatch-state
 
 - "The store image is missing from the state folder": it was moved, renamed or deleted. Put it back where it was, under the same name, or restore it with Dropbox's version history (on dropbox.com: the file's Version history, or Deleted files when it was deleted). The next run goes on by itself.
 - "The store image in the state folder is not the one the last run saved": an older copy was put back, or the file was replaced or cut short. Restore the newest version from Dropbox's version history. If an older copy was put back on purpose (everything recorded since that copy is lost), accept it on any computer with the code and the site's Dropbox settings (`DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`, and `REMITWATCH_STATE_PATH` if the site sets it): `python -m remitwatch.cli accept-store --state-folder`. It checks that the image opens as a store and records it; the next run loads it.
-- A first load (a new site) happens only when the state folder holds neither `status.json` nor `cursor.json`.
+- A first load (a new site) happens only when no earlier run saved a store there: no `cursor.json`, and no `status.json` that records a saved store. A `status.json` left by first runs that had nothing to read is not a store.
 
 On the server the store is `/data/remitwatch.sqlite` (`REMITWATCH_DB`). The file `remitwatch.sqlite.marker` beside it, written when the store was first made, says that a store was made there.
 
