@@ -191,7 +191,7 @@ function dtPolicyHtml(e){
   if(!p.patterns && !ub.n) return '';
   return `<div class="panel" id="dtPolicy"><div class="panel-head"><h2>What EMA writes off by itself</h2></div>
     ${p.patterns ? `<div class="small">EMA's posting rules wrote off denials in <b>${esc(pl(p.patterns, 'pattern'))}</b> (payer, code, reason), ${money(p.cents)} in all, ${money(p.appealable_cents)} still inside a window. ${p.accepted ? esc(pl(p.accepted, 'pattern')) + ' accepted so far. ' : ''}<a href="#policy" class="dtGo" data-tab="policy">Decide them on the write-off policy page</a>.</div>` : ''}
-    ${ub.n ? `<div class="small muted" style="margin-top:4px">${esc(pl(ub.n, 'open item'))} (${money(ub.cents)}) ${ub.n===1?'is':'are'} sized at the charge less what was paid, because no rate prices the line: an upper bound, not a figure to count on.</div>` : ''}</div>`;
+    ${ub.n ? `<div class="small muted" style="margin-top:4px">${esc(pl(ub.n, 'open item'))} ${ub.n===1?'has':'have'} no price, because no rate covers the line. EMA wrote off up to ${money(ub.cents)} on them (the charge less what was paid): an upper bound, left out of every total.</div>` : ''}</div>`;
 }
 
 function dtRunHtml(e){

@@ -234,22 +234,24 @@ def _where(c: sqlite3.Connection, go: dict) -> tuple[str, list]:
 
 def count(go: dict) -> dict:
     """{n, cents} of the Worklist under this filter, as its count line shows it (api.findings: the routine-rate patterns
-    counted by their claims in the date range), with the filter itself (`go`) for the page to open, and the cents of
-    items whose amount is only an upper bound (EMA wrote off a line no rate prices: charge less paid; needs_B 1.6)."""
+    counted by their claims in the date range), with the filter itself (`go`) for the page to open. Items EMA wrote off on
+    a line no rate prices have no shortfall, so they are counted but add nothing to the dollars; `upper_n` and
+    `upper_cents` say how many there are and what EMA wrote off on them, capped at the charge less what was paid: an upper
+    bound, never added to a total (ema_checks C2 written_off_basis charge_less_paid; needs_B 1.6)."""
     a = _api()
     with _conn() as c:
         w, params = _where(c, go)
         r = c.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings{w}", params).fetchone()
-        upper = 0
+        upper = (0, 0)
         if r[0] and {"evidence", "written_off_cents"} <= _cols(c, "findings"):
             # only a line EMA wrote off can carry the bound, so the JSON is read for those rows alone
-            upper = c.execute(f"""SELECT COALESCE(SUM(shortfall_cents),0) FROM findings{w}{' AND' if w else ' WHERE'}
+            upper = c.execute(f"""SELECT COUNT(*), COALESCE(SUM(written_off_cents),0) FROM findings{w}{' AND' if w else ' WHERE'}
                                   COALESCE(written_off_cents,0) > 0
-                                  AND json_extract(evidence, '$.written_off_basis') = 'charge_less_paid'""", params).fetchone()[0]
+                                  AND json_extract(evidence, '$.written_off_basis') = 'charge_less_paid'""", params).fetchone()
     delta = 0
     if r[0]:
         delta, _each = a._pattern_cents(w, params, go.get("deadline", "valid") or None)
-    return {"n": r[0], "cents": (r[1] or 0) + delta, "upper_cents": upper or 0, "go": go}
+    return {"n": r[0], "cents": (r[1] or 0) + delta, "upper_n": upper[0] or 0, "upper_cents": upper[1] or 0, "go": go}
 
 
 # ------------------------------------------------------------------------------------------------- the blind spot
@@ -455,11 +457,12 @@ def _c1_rows(c: sqlite3.Connection, rec: dict) -> list[dict]:
 
 
 def _upper_bound(c: sqlite3.Connection) -> dict:
-    """Open items whose amount is only an upper bound: EMA wrote off a line no rate prices, so the item is sized at the
-    charge less what was paid (ema_checks C2, written_off_basis charge_less_paid)."""
+    """Open items EMA wrote off on a line no rate prices: they have no shortfall, so no total counts their dollars; what
+    EMA wrote off on them is capped at the charge less what was paid (ema_checks C2, written_off_basis charge_less_paid),
+    an upper bound shown apart."""
     if "evidence" not in _cols(c, "findings") or "written_off_cents" not in _cols(c, "findings"):
         return {"n": 0, "cents": 0}
-    r = c.execute("""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE COALESCE(stale,0)=0 AND status IN ('open','in_progress')
+    r = c.execute("""SELECT COUNT(*), COALESCE(SUM(written_off_cents),0) FROM findings WHERE COALESCE(stale,0)=0 AND status IN ('open','in_progress')
                      AND COALESCE(written_off_cents,0) > 0 AND json_extract(evidence, '$.written_off_basis') = 'charge_less_paid'""").fetchone()
     return {"n": r[0], "cents": r[1]}
 
@@ -640,22 +643,23 @@ def policy_table(c: sqlite3.Connection) -> dict:
     pats: dict[str, dict] = {}
     if {"ema_outcome", "evidence"} <= _cols(c, "findings"):
         w, params = _pattern_where(c)
-        for (key, n, cents, appealable, appealable_cents, auto, at_posting, proven, by_policy, open_n, upper) in c.execute(
+        for (key, n, cents, appealable, appealable_cents, auto, at_posting, proven, by_policy, open_n, upper_n, upper) in c.execute(
                 f"""SELECT json_extract(evidence, '$.writeoff_pattern') k, COUNT(*), COALESCE(SUM(shortfall_cents),0),
                            SUM(status IN ('open','in_progress') AND appeal_deadline >= date('now')),
                            COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= date('now') THEN shortfall_cents END),0),
                            SUM(ema_outcome = 'auto_written_off'), SUM(written_off_when = 'at_posting'),
                            SUM(ema_writeoff_evidence = 'rule_proven'), SUM(ema_outcome = 'written_off_by_policy'),
                            SUM(status IN ('open','in_progress')),
-                           COALESCE(SUM(CASE WHEN json_extract(evidence, '$.written_off_basis') = 'charge_less_paid' THEN shortfall_cents END),0)
+                           SUM(json_extract(evidence, '$.written_off_basis') = 'charge_less_paid'),
+                           COALESCE(SUM(CASE WHEN json_extract(evidence, '$.written_off_basis') = 'charge_less_paid' THEN written_off_cents END),0)
                     FROM findings WHERE {w} GROUP BY k""", params):
             pats[key] = {"pattern": key, "items": n, "cents": cents, "appealable": appealable or 0, "appealable_cents": appealable_cents or 0,
                          "auto": auto or 0, "at_posting": at_posting or 0, "rule_proven": proven or 0, "by_policy": by_policy or 0,
-                         "open": open_n or 0, "upper_cents": upper or 0}
+                         "open": open_n or 0, "upper_n": upper_n or 0, "upper_cents": upper or 0}
     for key, d in decided.items():          # a pattern decided earlier that has no item now stays listed, so it can be changed back
         if key not in pats and isinstance(d, dict):
             pats[key] = {"pattern": key, "items": 0, "cents": 0, "appealable": 0, "appealable_cents": 0, "auto": 0, "at_posting": 0,
-                         "rule_proven": 0, "by_policy": 0, "open": 0, "upper_cents": 0}
+                         "rule_proven": 0, "by_policy": 0, "open": 0, "upper_n": 0, "upper_cents": 0}
     out = []
     for key, p in pats.items():
         d = decided.get(key) if isinstance(decided.get(key), dict) else {}
@@ -693,8 +697,10 @@ def policy_items(pattern: str = Query(..., max_length=200), page: int = Query(1,
         cols = [x for x in ("finding_id", "signal", "service_date", "procedure_code", "payer_group", "shortfall_cents", "appeal_deadline",
                             "status", "work_state", "ema_outcome", "written_off_cents", "written_off_on", "carc", "patient_control_number")
                 if x in _cols(c, "findings")]
-        rows = [dict(zip(cols, r)) for r in c.execute(
-            f"SELECT {', '.join(cols)} FROM findings WHERE {w} ORDER BY shortfall_cents DESC, appeal_deadline, finding_id LIMIT ? OFFSET ?",
+        # an item no rate prices has no shortfall; what EMA wrote off on it (charge less paid) is shown as an upper bound
+        rows = [dict(zip(cols + ["written_off_basis"], r)) for r in c.execute(
+            f"""SELECT {', '.join(cols)}, json_extract(evidence, '$.written_off_basis') FROM findings WHERE {w}
+                ORDER BY shortfall_cents DESC, appeal_deadline, finding_id LIMIT ? OFFSET ?""",
             params + [PAGE, (page - 1) * PAGE])]
         for r in rows:
             r["outcome_text"] = OUTCOME_WORDS.get(r.get("ema_outcome") or "", "")

@@ -2845,7 +2845,7 @@ def _precision(conn: sqlite3.Connection, today: str) -> list[dict]:
         return []
     later = later_payments(conn, [it for it in items if it.get("signal") not in CLAIM_SIGNALS])
     before = _earlier_payments(conn, items)
-    worked = _work_after(conn, items)
+    worked = _work_after(conn, items, today)
     out = []
     groups: dict[tuple, list] = defaultdict(list)
     for it in items:
@@ -2924,10 +2924,11 @@ def _earlier_payments(conn: sqlite3.Connection, items: list[dict]) -> dict[str, 
     return out
 
 
-def _work_after(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
+def _work_after(conn: sqlite3.Connection, items: list[dict], today: str | None = None) -> set[str]:
     """Items with dated work after their adverse answer, within 90 days of today (gate 2: worked and waiting): a person's
     status change or note in RemitWatch, EMA's claim action on the line, an A/R note about an appeal, call or resubmission."""
     out: set[str] = set()
+    t = today_of(today)
     fids = [it["finding_id"] for it in items]
     on = {it["finding_id"]: str(it.get("payment_date") or "")[:10] for it in items}
     if _has_table(conn, "finding_events"):
@@ -2954,7 +2955,7 @@ def _work_after(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
                         continue
                     for it in by_link[int(link)]:
                         if str(svc)[:10] == str(it.get("service_date") or "")[:10] and action_on and str(action_on)[:10] >= on[it["finding_id"]] \
-                                and (_days(action_on, today_of()) or 0) <= 90:
+                                and (_days(action_on, t) or 0) <= 90:
                             out.add(it["finding_id"])
     if _has_table(conn, "ema_ar") and "note_kind" in set(_cols(conn, "ema_ar")):
         by_link2: dict[int, list] = defaultdict(list)
@@ -2968,7 +2969,7 @@ def _work_after(conn: sqlite3.Connection, items: list[dict]) -> set[str]:
                                                     AND note_kind IS NOT NULL""", part):
                 if re.search(r"appeal|call|resubmitted|records|reprocess", str(kinds or "")):
                     for it in by_link2[int(link)]:
-                        if nd and str(nd)[:10] >= on[it["finding_id"]] and (_days(nd, today_of()) or 0) <= 90:
+                        if nd and str(nd)[:10] >= on[it["finding_id"]] and (_days(nd, t) or 0) <= 90:
                             out.add(it["finding_id"])
     return out
 
@@ -3388,21 +3389,26 @@ def _old_copies(mode: str, db_path: str | None, state: Any, conn: sqlite3.Connec
         return bool(c) and c[1] in ("replaced", "superseded", "discarded")
     if mode == "serverless" and state is not None:
         for e in state.list("intake/done/"):
-            name = e.get("name") or ""
+            name = e.get("name") or ""                  # relative to the state folder: intake/done/<pair>.json
             if not name.endswith(".json"):
                 continue
+            if "/" not in name:
+                name = "intake/done/" + name
             ts = e.get("modified") or e.get("server_modified") or e.get("mtime")
-            when = ts if isinstance(ts, (int, float)) else (datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() if ts else now)
+            try:
+                when = ts if isinstance(ts, (int, float)) else (datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+                                                                if ts else now)
+            except ValueError:
+                when = now
             if when > cut:
                 continue
-            raw = state.get(f"intake/done/{name}")
             try:
-                sc = json.loads(raw or b"{}")
+                sc = json.loads(state.get(name) or b"{}")
             except ValueError:
                 continue
             data = name[:-5]
-            if removable(sc) and state.meta(f"intake/done/{data}"):
-                if state.delete(f"intake/done/{data}"):
+            if removable(sc) and state.meta(data):
+                if state.delete(data):
                     removed += 1
             else:
                 kept += 1

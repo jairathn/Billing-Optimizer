@@ -491,6 +491,18 @@ def test_a_frozen_week_never_changes_and_the_baseline_is_written_once(store):
     assert results._meta(store.conn, results.BASELINE_KEY) == base
 
 
+def test_settled_weeks_before_the_first_run_are_frozen_the_first_time_a_run_sees_them(store):
+    fid, _ = denial(store)
+    paid(store, on="2026-04-20")
+    run(store, today="2026-06-30")              # the first run comes long after that week settled
+    snaps = {s["week"]: s for s in results.snapshots(store.conn)}
+    assert snaps["2026-04-20"]["final"] and snaps["2026-04-20"]["money"]["returned_cents"] == 9000
+    assert snaps["2026-04-20"]["point"] is None                 # nobody measured the items by state that week
+    assert not snaps[results.week_of("2026-06-30")]["final"]    # the current week keeps moving
+    weeks = {w["week"]: w for w in results.scoreboard(store.conn, "2026-06-30")["weeks"]}
+    assert weeks["2026-04-20"]["frozen"] is True and weeks["2026-04-20"]["at_risk_cents"] is None
+
+
 def test_refresh_does_nothing_when_nothing_it_rests_on_changed(store):
     denial(store)
     out = results.refresh(store.conn, today=TODAY)

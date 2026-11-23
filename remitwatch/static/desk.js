@@ -354,9 +354,15 @@ function rowHtml(b, r, o){
     <td class="who">${esc(r.patient||'')}<div class="small muted">${r.patient_control_number?'claim '+esc(r.patient_control_number):''}</div></td>
     ${o.onePayer ? '' : `<td class="payer">${esc(r.payer_group)}</td>`}
     <td class="what" title="${esc(lb.label)}">${o.oneSignal ? '' : `${o.oneKind ? '' : kindBadge(b, kindFor(b, r))+' '}${esc(shortOf(b, r.signal))}`}<div class="small muted">${code}</div>${r.hint || auto ? `<div class="small">${auto}${r.hint?`<span class="chip hint">${esc(r.hint)}</span>`:''}</div>`:''}</td>
-    <td class="num" ${r.recovery_basis ? `title="${esc('Worth ' + money2(r.expected_value_cents) + ': ' + r.recovery_basis)}"` : ''}>${amt}${pill}${wo}</td></tr>`;
+    <td class="num" title="${esc(amountBasis(r))}">${amt}${pill}${wo}</td></tr>`;
 }
 
+// where an amount comes from, on hover (every dollar figure says its basis; an estimate says so)
+function amountBasis(r){
+  const from = r.source === 'ema' ? "From EMA's postings (no remittance carries it)" : "From the payer's remittance (835)";
+  const est = r.expected_cents != null ? ', against the payer\'s usual rate or the charge: an estimate until the payer pays' : '';
+  return from + est + (r.recovery_basis ? `. Worth about ${money2(r.expected_value_cents)}: ${r.recovery_basis}` : '') + '.';
+}
 // At most two lines of money fixed once or payer behaviour. Never a claim, never a status button.
 function fixOnce(key, b){
   const causes = b.causes||[];

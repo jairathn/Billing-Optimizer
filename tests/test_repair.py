@@ -224,7 +224,7 @@ def test_the_backoff_never_passes_the_runs_deadline(tmp_path):
         now[0] += s
     client = FlakyDropbox([requests.Timeout("read timed out")] * 10)
     with pytest.raises(repair.Held) as held:
-        repair.retry_call(client.download_bytes, "/x", target="dropbox", registry=reg, sleep=sleep, deadline=1009.0,
+        repair.retry_call(client.download_bytes, "/x", target="dropbox", registry=reg, sleep=sleep, until=1009.0,
                           clock=lambda: now[0])
     assert waits == [2] and client.calls == 2 and held.value.attempts == 2        # the next wait (8 s) would pass the deadline
     store.close()
@@ -236,6 +236,8 @@ def test_a_wrapped_client_retries_each_call_and_a_listing_only_before_its_first_
     safe = repair.resilient(client, "dropbox", registry=reg, sleep=Waits())
     assert [e["name"] for e in safe.list_folder("/Trizetto Data")] == ["a.RMT", "b.RMT"] and client.calls == 2
     assert safe.app_secret == "fake" and repair.resilient(safe, "dropbox") is safe
+    import inspect
+    assert list(inspect.signature(safe.download_bytes).parameters) == ["path"]          # callers that read it still can
     client.fail_midway = True                     # data already flowed: the caller handles a failure in the middle
     with pytest.raises(requests.ConnectionError):
         list(safe.list_folder("/Trizetto Data"))
@@ -248,6 +250,10 @@ def test_trizetto_stalls_are_retried_and_a_refused_password_is_not(tmp_path):
     store, reg = server_registry(tmp_path)
     tz = FlakyTriZetto([Stalled("TriZetto stopped answering"), EOFError()])
     assert repair.retry_call(tz.pull, target="trizetto", registry=reg, sleep=Waits()) == {"remits": 2} and tz.calls == 3
+    seen = {}
+    repair.retry_call(lambda conn, handle, deadline, log: seen.update(deadline=deadline), "conn", "handle", deadline=123.0,
+                      log=print, target="trizetto", registry=reg, until=10 ** 10)
+    assert seen == {"deadline": 123.0}                           # the callee's own deadline passes through
     tz = FlakyTriZetto([SignInRefused("refused", kind="password")])
     with pytest.raises(SignInRefused):
         repair.retry_call(tz.pull, target="trizetto", registry=reg, sleep=Waits())
@@ -387,6 +393,12 @@ def test_a_lock_left_by_a_dead_run_is_removed_by_its_rule_and_logged_on_both_hos
     assert repair.note_stale_lock(reg2, ["lock.json"], "cloud.acquire") == 1
     reg2.save()
     assert json.loads(st.get("logs/repair_state.json"))["saved_at"]
+    # outside a run: the server's start and the serverless takeover log through log_stale_locks
+    assert repair.log_stale_locks(["pipeline:lock"], "pipeline.clear_locks_left_behind", db_path=db) == 1
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM repair_log WHERE remedy='stale_lock'").fetchone()[0] == 2
+    c.close()
+    assert repair.log_stale_locks(["lock.json"], "cloud.acquire", state=st) == 1 and repair.log_stale_locks([], "x") == 0
 
 
 def test_a_store_missing_columns_is_migrated_and_logged(tmp_path):

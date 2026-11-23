@@ -12,8 +12,23 @@ function rsPl(n, one, many){ return `${rsNum(n)} ${Number(n) === 1 ? one : (many
 function rsName(){ try { return localStorage.getItem(RS_NAME_KEY) || ''; } catch(e){ return ''; } }
 function rsSetName(v){ try { localStorage.setItem(RS_NAME_KEY, v || ''); } catch(e){} }
 function rsLink(key, text, title){ return `<a href="#" class="rs-open" data-key="${esc(key)}"${title ? ` title="${esc(title)}"` : ''}>${text}</a>`; }
-function rsTile(label, value, sub, key, cls){
-  return `<div class="kpi rs-tile${cls ? ' ' + cls : ''}" data-key="${esc(key || '')}" tabindex="0" role="button"><div class="l">${label}</div><div class="v">${value}</div><div class="s">${sub || ''}</div></div>`;
+// every dollar figure says on hover where it comes from (the 835s, EMA's postings, a person's mark, or an estimate)
+const RS_BASIS = {
+  returned: '835 remittances and EMA postings dated after RemitWatch first flagged the item, plus money it found; a person\'s Paid mark only where no payment record shows the money',
+  'returned:a': '835 remittances and EMA postings after a person\'s work in RemitWatch, inside the payer\'s answer time for that work',
+  'returned:b': 'Money your own systems missed: a second payer never billed, an 835 payment EMA never posted, a claim that never left EMA',
+  'returned:c': '835 remittances and EMA postings after the flag with no work recorded in RemitWatch; it may have come back anyway',
+  taken_back: '835 reversals and EMA takebacks dated after the flag',
+  lost: 'The items\' own dollars when they expired in Work now',
+  at_risk: 'Work now items whose filing date is in the next 14 days, at their dollars at stake',
+  given_up: 'What EMA wrote off with no person\'s decision and no owner-approved policy',
+  roi: 'Money returned over the monthly costs the owner entered (an estimate of the return)',
+  roi_cons: 'Estimate: the share of the money after work that similar unworked items do not explain, plus money found, over the costs',
+  lift: '835 remittances and EMA postings on worked and unworked items of the same pattern',
+  state: 'Items by state now, from the findings table'};
+function rsTile(label, value, sub, key, cls, basis){
+  const t = basis || RS_BASIS[key] || (String(key || '').startsWith('state:') ? RS_BASIS.state : (String(key || '').startsWith('lift:') ? RS_BASIS.lift : ''));
+  return `<div class="kpi rs-tile${cls ? ' ' + cls : ''}" data-key="${esc(key || '')}" tabindex="0" role="button"${t ? ` title="${esc(t)}"` : ''}><div class="l">${label}</div><div class="v">${value}</div><div class="s">${sub || ''}</div></div>`;
 }
 async function rsSend(path, method, body){
   const h = {'Content-Type': 'application/json', 'X-Requested-With': 'remitwatch'};
@@ -64,7 +79,7 @@ function rsMoneyHtml(d){
       : `Some of this may have come back anyway. Not enough similar items yet to say how much (${rsNum(any.n || 0)} of the 20 needed).`);
   return `<div class="panel" style="margin-top:0">
     <div class="panel-head"><h2>Money returned on claims RemitWatch flagged or worked</h2><span class="small muted">since ${esc(m.first_flag || 'the first flag')}</span></div>
-    <div class="rs-top">${rsLink('returned', `<span class="rs-big">${money(m.returned_cents)}</span>`, 'Every item behind this number')}
+    <div class="rs-top">${rsLink('returned', `<span class="rs-big">${money(m.returned_cents)}</span>`, RS_BASIS.returned)}
       <span class="muted">on ${rsPl(m.items, 'item')}</span></div>
     <div class="note">${esc(qual)}</div>
     <div class="grid kpis">
@@ -103,7 +118,7 @@ function rsLiftHtml(d){
     <div class="grid kpis">
       ${rsTile('Worked items paid', rsPct(l.worked.rate), `${rsNum(l.worked.paid)} of ${rsPl(l.worked.n, 'item')}`, 'lift:worked:paid')}
       ${rsTile('Similar unworked items paid', rsPct(l.unworked.rate), `${rsNum(l.unworked.paid)} of ${rsPl(l.unworked.n, 'item')}`, 'lift:unworked:paid')}
-      ${rsTile('Money the work added', money(l.incremental_cents), `worked items brought ${money(l.worked.returned_cents)}; the unworked rate predicts ${money(l.predicted_cents)}`, 'lift:worked')}
+      ${rsTile('Money the work added', money(l.incremental_cents), `worked items brought ${money(l.worked.returned_cents)}; the unworked rate predicts ${money(l.predicted_cents)} (an estimate)`, 'lift:worked')}
     </div>
     <div class="note">${enough ? esc(l.basis) : 'Not enough cases yet: these rates need 20 worked and 20 unworked items. ' + esc(l.basis)}</div></div>`;
 }
@@ -111,8 +126,8 @@ function rsLiftHtml(d){
 function rsRoiHtml(d){
   const r = d.roi; if(!r) return '';
   const head = r.costs_set ? `<div class="grid kpis">
-      ${rsTile('Return on cost', r.roi == null ? '–' : r.roi + '×', `${money(r.returned_cents)} returned for ${money(r.cost_cents)} spent`, 'returned')}
-      ${rsTile('Lift-adjusted return', r.roi_conservative == null ? '–' : r.roi_conservative + '×', `counting only what the work added, plus money found: ${money(r.conservative_cents)}`, 'returned:a')}
+      ${rsTile('Return on cost', r.roi == null ? '–' : r.roi + '×', `${money(r.returned_cents)} returned for ${money(r.cost_cents)} spent`, 'returned', '', RS_BASIS.roi)}
+      ${rsTile('Lift-adjusted return', r.roi_conservative == null ? '–' : r.roi_conservative + '×', `counting only what the work added, plus money found: ${money(r.conservative_cents)}`, 'returned:a', '', RS_BASIS.roi_cons)}
     </div>` : '<div class="note">Enter what RemitWatch costs each month (below, under Costs) to see the return on it.</div>';
   const rows = (r.months || []).slice(-12).reverse().map(x => `<tr><td>${esc(x.month)}</td><td class="num">${x.returned_cents ? rsLink('returned:month:' + x.month, money(x.returned_cents)) : money(0)}</td><td class="num">${money(x.cost_cents)}</td><td class="num">${x.roi == null ? '–' : x.roi + '×'}</td><td class="num">${x.roi_conservative == null ? '–' : x.roi_conservative + '×'}</td><td class="num small">${rsNum(x.fax_pages)} pages, ${rsNum(x.ai_calls)} AI calls</td></tr>`).join('');
   return `<div class="panel"><h2>Cost and return</h2>${head}

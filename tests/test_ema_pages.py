@@ -337,7 +337,9 @@ def test_an_items_story_verdict_and_next_step_come_beside_its_panel(site):
         nx = ex["next_step"]
         assert set(nx["buttons"]) <= {"build_packet", "attach_note", "find_note", "upload_note", "fax_payer", "copy_instructions", "mark_sent",
                                       "log_outcome", "mark_posted", "mark_billed", "accept_pattern", "let_go", "reopen", "request_era", "open_in_ema"}
-        assert "ema_block" in x and "explain_error" not in x
+        assert "explain_error" not in x
+        if it.get("ema_link") is not None:                              # an item on an EMA claim: what EMA's reports hold on it
+            assert isinstance(x["ema_block"], dict) and int(it["ema_link"]) in x["ema_block"]["links"], it["signal"]
         blob = json.dumps(x)
         for secret in F.SECRET_STRINGS:                 # names, record numbers and notes never leave the server in the story
             assert secret not in blob, secret
@@ -391,6 +393,9 @@ def _bulk_world(server):
     conn.execute(f"INSERT INTO findings ({','.join(twin)}) VALUES ({','.join('?' * len(twin))})", tuple(twin.values()))
     waiting = dict(twin, finding_id="waitingtwin0000000000aaa", appeal_block="waiting", work_state="waiting")
     conn.execute(f"INSERT INTO findings ({','.join(waiting)}) VALUES ({','.join('?' * len(waiting))})", tuple(waiting.values()))
+    # still work now, but the payer reprocessed the line after this answer: never in bulk
+    redo = dict(twin, finding_id="reprocessedtwin000000aaa", appeal_block="reprocessed", work_state="work_now")
+    conn.execute(f"INSERT INTO findings ({','.join(redo)}) VALUES ({','.join('?' * len(redo))})", tuple(redo.values()))
     conn.commit()
     conn.close()
     return fid
@@ -402,9 +407,11 @@ def test_the_bulk_list_is_unit_bs_rule_and_says_what_it_leaves_out_and_why(serve
     a = server.c.get("/api/appeals/appealable").json()
     assert [i["finding_id"] for i in a["items"]] == [fid]
     lo = a["left_out"]
-    assert lo["paid"] == 1 and lo["waiting"] == 1 and lo["line"].startswith("Left out: ") and "paid 1" in lo["line"] and "waiting 1" in lo["line"]
+    assert lo["paid"] == 1 and lo["waiting"] == 1 and lo["reprocessed"] == 1 and lo["line"].startswith("Left out: ")
+    assert "paid 1" in lo["line"] and "waiting 1" in lo["line"] and "reprocessed 1" in lo["line"]
     reasons = {x["finding_id"]: x["reason"] for x in lo["items"]}
     assert reasons["paidtwin00000000000000aa"] == "paid" and reasons["waitingtwin0000000000aaa"] == "waiting"
+    assert reasons["reprocessedtwin000000aaa"] == "reprocessed"
     # the switch off (the default on the live site): nothing in bulk, with why
     monkeypatch.setenv("REMITWATCH_BULK_APPEAL", "0")
     off = server.c.get("/api/appeals/appealable").json()
@@ -534,6 +541,7 @@ def test_the_owners_policy_recorded_on_vercel_is_applied_from_the_journal_newest
     assert actions.apply(conn, {"kind": "ema_policy", "pattern": pat, "decision": "accept", "actor": "owner", "at": "2026-05-02T00:00:00+00:00"})
     # an older entry read after a newer one, and a replay, change nothing
     assert actions.apply(conn, {"kind": "ema_policy", "pattern": pat, "decision": "pursue", "actor": "x", "at": "2026-05-01T00:00:00+00:00"})
+    assert json.loads(conn.execute("SELECT value FROM meta WHERE key=?", (POLICY_KEY,)).fetchone()[0])[pat]["decision"] == "accept"
     assert actions.apply(conn, {"kind": "ema_policy", "pattern": pat, "decision": "accept", "actor": "owner", "at": "2026-05-02T00:00:00+00:00"})
     pol = json.loads(conn.execute("SELECT value FROM meta WHERE key=?", (POLICY_KEY,)).fetchone()[0])
     assert pol == {pat: {"decision": "accept", "by": "owner", "at": "2026-05-02T00:00:00+00:00"}}

@@ -1656,6 +1656,13 @@ def snapshot(conn: sqlite3.Connection, payload: dict, live: dict, today: Any = N
         did["point"] = True
     money_week = {r["key"]: r for r in payload["money"].get("by_week") or []}
     lost_week = {r["week"]: r for r in payload["lost"].get("weeks") or []}
+    # a settled week with money or losses that has no row yet (before the first run, or a week no run fell in) is frozen
+    # the first time a run sees it, without the moment-figures nobody measured then
+    have = {r[0] for r in conn.execute("SELECT week FROM results_snapshots")}
+    for w in sorted((set(money_week) | set(lost_week)) - have):
+        if w and w < wk:
+            conn.execute("INSERT OR IGNORE INTO results_snapshots (week, at, final, version, data) VALUES (?,?,0,?,?)",
+                         (w, _now(), VERSION, json.dumps({"point": None}, separators=(",", ":"))))
     for w, data_raw in conn.execute("SELECT week, data FROM results_snapshots WHERE final=0 AND week < ? ORDER BY week", (wk,)).fetchall():
         end = _add(w, 6)
         if not end or _add(end, SETTLE_DAYS) > t:

@@ -27,6 +27,7 @@ alerts). Nothing here reads the clock or the environment except through runlog.u
 """
 from __future__ import annotations
 
+import functools
 import json
 import socket
 import sqlite3
@@ -323,13 +324,14 @@ def registry_for(rl: Any = None, *, conn: sqlite3.Connection | None = None, now:
 
 # ------------------------------------------------------------------------------------------------------------ remedies
 def retry_call(fn: Callable, *args: Any, remedy: str = "network", target: str = "dropbox", registry: Registry | None = None,
-               run: Any = None, deadline: float | None = None, sleep: Callable[[float], None] = time.sleep,
+               run: Any = None, until: float | None = None, sleep: Callable[[float], None] = time.sleep,
                attempts: int | None = None, delays: Iterable[float] | None = None,
                classify: Callable[[BaseException], bool] = is_transient, clock: Callable[[], float] = time.time, **kwargs: Any) -> Any:
-    """Call fn, trying again after a transient failure (is_transient) with the remedy's back-off, never past
-    `deadline` (seconds since the epoch, the run's own). Out of tries: the target is counted as failed for this run
-    and Held is raised from the last error, so the caller's existing except block holds the step and the run carries
-    on. A failure that is not transient is raised at once, unchanged."""
+    """Call fn(*args, **kwargs), trying again after a transient failure (is_transient) with the remedy's back-off, never
+    waiting past `until` (seconds since the epoch: the run's own deadline; named so that a callee's own `deadline`
+    argument passes through). Out of tries: the target is counted as failed for this run and Held is raised from the
+    last error, so the caller's existing except block holds the step and the run carries on. A failure that is not
+    transient is raised at once, unchanged."""
     spec = REMEDIES[remedy]
     n = attempts or spec.attempts
     waits = list(delays if delays is not None else spec.delays)
@@ -341,7 +343,7 @@ def retry_call(fn: Callable, *args: Any, remedy: str = "network", target: str = 
             if not classify(exc):
                 raise
             wait = waits[min(i, len(waits) - 1)] if waits else 0
-            last = i + 1 >= n or (deadline is not None and clock() + wait >= deadline)
+            last = i + 1 >= n or (until is not None and clock() + wait >= until)
             if last:
                 if registry is not None:
                     registry.failed(remedy, target, exc)
@@ -387,6 +389,7 @@ class _Resilient:
             return attr
         opts, target = self._opts, self._target
 
+        @functools.wraps(attr)          # the client's own signature stays visible (callers check it with inspect)
         def call(*args: Any, **kwargs: Any) -> Any:
             def first() -> Any:
                 got = attr(*args, **kwargs)
@@ -398,7 +401,6 @@ class _Resilient:
                     return _chain(head, got)
                 return got
             return retry_call(first, target=target, **opts)
-        call.__name__ = name
         return call
 
 
@@ -407,7 +409,7 @@ def _chain(head: Any, rest: Any):
     yield from rest
 
 
-def resilient(client: Any, target: str, *, registry: Registry | None = None, run: Any = None, deadline: float | None = None,
+def resilient(client: Any, target: str, *, registry: Registry | None = None, run: Any = None, until: float | None = None,
               sleep: Callable[[float], None] = time.sleep, attempts: int | None = None, delays: Iterable[float] | None = None,
               only: Iterable[str] | None = None) -> Any:
     """Wrap a Dropbox, TriZetto or SRFax client so each call is tried again after a transient failure. `only` names the
@@ -415,7 +417,7 @@ def resilient(client: Any, target: str, *, registry: Registry | None = None, run
     once (NEVER_RETRIED: a fax, an upload, a move) is never wrapped."""
     if client is None or isinstance(client, _Resilient):
         return client
-    return _Resilient(client, target, {"registry": registry, "run": run, "deadline": deadline, "sleep": sleep,
+    return _Resilient(client, target, {"registry": registry, "run": run, "until": until, "sleep": sleep,
                                        "attempts": attempts, "delays": delays}, frozenset(only) if only is not None else None)
 
 
@@ -526,6 +528,29 @@ def note_stale_lock(registry: Registry, removed: Iterable[str], how: str) -> int
                         after={"removed": True, "how": how})
         n += 1
     return n
+
+
+def log_stale_locks(removed: Iterable[str], how: str, *, db_path: str | None = None, state: Any = None) -> int:
+    """Outside a run (a server's start, the scheduler after a child ended, a serverless lock taken over): log the locks a
+    rule removed, in the store's repair_log (db_path) and the logs folder's registry state. Never raises."""
+    removed = [str(k) for k in removed or []]
+    if not removed:
+        return 0
+    conn = None
+    try:
+        if db_path:
+            conn = sqlite3.connect(db_path, timeout=30)
+        sink = runlog.sink_for(db_path=db_path, state=state)
+        reg = Registry(conn=conn, sink=sink, run=runlog.current())
+        n = note_stale_lock(reg, removed, how)
+        reg.save()
+        return n
+    except Exception as exc:        # noqa: BLE001  (the lock is gone either way; only its log line could not be written)
+        runlog.caught(exc, "stale_lock", level="warning")
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def check_schema(conn: sqlite3.Connection, ensure: Callable[[sqlite3.Connection], Any], expected: dict[str, Iterable[str]], *,

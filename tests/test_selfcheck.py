@@ -279,9 +279,11 @@ def test_nothing_is_both_open_and_closed(store):
     add_item(c, "F-2", status="open", auto_note="Paid on a later remittance")
     add_item(c, "F-3", status="lost", work_state="waiting", follow_up_on="2026-12-01")
     add_item(c, "F-4", status="dismissed", work_state="accepted")
+    add_item(c, "F-5", status="resolved", work_state="expired", auto_note="Paid on a later remittance",
+             evidence={"paid_later": {"payment_date": "2026-05-01", "paid_cents": 1, "trace": "T"}})
     r = sc.check_open_and_closed(c, TODAY)
-    assert sorted(r["examples"]) == ["F-1", "F-2", "F-3"]
-    assert r["info"]["by_kind"]["closed_but_listed"] == 2
+    assert sorted(r["examples"]) == ["F-1", "F-2", "F-3", "F-5"]
+    assert r["info"]["by_kind"] == {"closed_but_listed": 2, "open_with_closing_note": 1, "closed_by_analysis_not_done": 1}
 
 
 def test_an_automatic_closure_without_its_proof_is_caught(store):
@@ -688,6 +690,8 @@ def rates_world(c):
             remit(c, "2026-02-10", pcn, [("99213", 150, 90, [("CO", "45", 60)])])
     for i in range(6):                                                   # the payer's usual amount for the code
         remit(c, "2026-01-05", f"ZZ00T{300 + i:04d}C001", [("99213", 150, 90, [("CO", "45", 60)])])
+    for i in range(3):                                                   # a thin pattern: 11102 denied three times
+        remit(c, "2026-01-10", f"ZZ00T{200 + i:04d}C001", [("11102", 120, 0, [("CO", "197", 120)])])
     remit(c, "2026-08-01", "ZZ00T0999C001", [("99213", 150, 90, [("CO", "45", 60)])])    # the newest remittance
 
 
@@ -697,7 +701,7 @@ def test_recovery_rates_by_pattern_with_their_counts(store):
     r = sc.recovery_rates(c)
     v = r["levels"]["gcr"]["|".join((sc._group_kind("TESTCARE HEALTH", "CI")[0], "99213", "197"))]
     assert (v["n"], v["paid_n"]) == (12, 4) and v["rate"] == pytest.approx(4 / 12, abs=0.01) and v["median_days"] == 31
-    assert sc.meta_get(c, sc.K_RATES)["cases"] == 12
+    assert sc.meta_get(c, sc.K_RATES)["cases"] == 15
 
 
 def test_expected_value_falls_back_level_by_level_and_says_so(store):
@@ -708,6 +712,7 @@ def test_expected_value_falls_back_level_by_level_and_says_so(store):
     cents, rate, basis = sc.expected_value({"category": "denial", "signal": "DENIED_AUTH", "carc": "CO-197", "payer_group": grp,
                                             "procedure_code": "99213", "shortfall_cents": 9000}, r)
     assert cents == 3000 and basis.startswith("payer group x code x reason:") and "4 of 12" in basis
+    # 11102 has three cases of its own: too few, so the payer group x reason rate (4 of 15) is used, and the basis says so
     cents, rate, basis = sc.expected_value({"category": "denial", "carc": "197", "payer_group": grp, "procedure_code": "11102",
                                             "shortfall_cents": 9000}, r)
     assert basis.startswith("payer group x reason") and "fewer than 10" in basis
@@ -924,7 +929,7 @@ def test_serverless_housekeeping_keeps_the_newest_and_held_copies(tmp_path):
                        [("f-old", "superseded", "2026-01-01"), ("f-new", "current", "2026-02-01"), ("f-held", "held", "2026-02-02")])
     s.conn.commit()
     out = sc.housekeeping(mode="serverless", state=state, conn=s.conn, now=_t.time() + 40 * 86400)
-    names = {e["name"] for e in state.list("intake/done/")}
+    names = {e["name"].rsplit("/", 1)[-1] for e in state.list("intake/done/")}
     assert out["kept_copies"]["removed"] == 1 and "u1__p.csv" not in names
     assert {"u1__p.csv.json", "u2__p.csv", "u3__h.csv"} <= names
     s.close()
@@ -948,7 +953,7 @@ def test_randomized_postings_always_add_up_to_their_charges(tmp_path, seed):
     P, D = F.PAYERS, F.D
     rows, tot = [], {"charges": 0, "ins": 0, "pat": 0, "adj": 0}
     for n in range(1, 25):
-        svc = D(2026, rnd.randint(1, 9), rnd.randint(1, 28))
+        svc = D(2026, rnd.randint(1, 7), rnd.randint(1, 28))
         payer = rnd.choice([P["bcbs"], P["medicare"], P["commercial"]])
         charge = rnd.randint(50, 400)
         rows.append(F.production_row(posted=svc + F.dt.timedelta(days=2), svc=svc, link=F.link_no(n), charges=float(charge),

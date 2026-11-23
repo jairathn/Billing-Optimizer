@@ -163,7 +163,7 @@ async function tdBlindBanner(el, given){
 }
 function tdTile(key, label, hint, x, cls, more){
   const n = x && x.n != null ? x.n : null;
-  const upper = x && x.upper_cents ? ` Up to ${money(x.upper_cents)} of the dollars is an estimate (charge less paid), not a priced amount.` : '';
+  const upper = x && x.upper_n ? ` Not in this total: up to ${money(x.upper_cents)} EMA wrote off on ${pl(x.upper_n, 'item')} no rate prices (the charge less what was paid).` : '';
   return `<div class="tile ${cls||''}" role="button" tabindex="0" data-td="${esc(key)}" title="${esc((more||hint) + upper)}"><span class="t-l">${esc(label)}</span>
     <span class="t-v">${n == null ? '–' : Number(n).toLocaleString()}${n ? `<small>${short$(x.cents)}</small>` : ''}</span><span class="t-s">${esc(hint)}</span></div>`;
 }
