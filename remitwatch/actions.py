@@ -263,7 +263,9 @@ def apply_hide_rule(conn: sqlite3.Connection, a: dict) -> None:
             return
         cond, params = hide_sql(r, alias="f")
         others = [hide_sql(o, alias="f") for o in _rules_now(conn) if (o["payer_group"], o["signal"], o["code"], o["modifier"], o["reason"]) != key]
-        still = (" AND NOT (" + " OR ".join(f"({c})" for c, _p in others) + ")") if others else ""
+        # an item another rule in force covers stays hidden; a rule's test on a column the item lacks (no original or billed
+        # code, no reason code) is NULL there, not FALSE, and counts as not covering it: the item is reopened
+        still = (" AND NOT COALESCE((" + " OR ".join(f"({c})" for c, _p in others) + "), 0)") if others else ""
         for (fid,) in conn.execute(f"""SELECT f.finding_id FROM findings f WHERE {cond} AND f.status='dismissed'
                                          AND {LAST_DECISION}='hidden'{still}""", (*params, *[x for _c, p in others for x in p])).fetchall():
             conn.execute("UPDATE findings SET status='open', status_changed_at=? WHERE finding_id=?", (at, fid))
