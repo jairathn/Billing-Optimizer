@@ -275,6 +275,26 @@ def _now() -> str:
 
 
 JOURNAL_RUN = "journal:"        # a manual event's run_id: the journal entry it came from, so a replay applies it once
+# A person's change pressed on a page drawn before the run changed the item by itself is kept out (apply_status): this line
+# in the item's history says so. It changes no status, so it is no decision anywhere (DECIDING_KINDS, detect.save).
+NOT_APPLIED = "not_applied"
+STATUS_WORDS = {"open": "To do", "in_progress": "Started", "appealed": "Sent", "resolved": "Paid", "lost": "Lost", "dismissed": "Let go"}
+
+
+def _changed_by_run(conn: sqlite3.Connection, finding_id: str, status: str, auto_note: str | None) -> str | None:
+    """What the run did to an item by itself, in words for its history, or None: closed it as Paid on a payment it found
+    (Paid with its automatic note), or let it go under a reason hidden for its payer (Let go, the hide rule's decision last)."""
+    if status == "resolved" and auto_note:
+        return "the run closed it as Paid"
+    if status == "dismissed":
+        try:
+            last = conn.execute(f"""SELECT kind FROM finding_events WHERE finding_id=? AND kind IN {DECIDING_KINDS}
+                                    ORDER BY at DESC, id DESC LIMIT 1""", (finding_id,)).fetchone()
+        except sqlite3.OperationalError:            # a copy without the history
+            return None
+        if last and last[0] == "hidden":
+            return "its reason was hidden for this payer"
+    return None
 
 
 def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: str | None = None, recovered_cents: int | None = None,
@@ -284,23 +304,38 @@ def apply_status(conn: sqlite3.Connection, finding_id: str, status: str, notes: 
     status they changed from, because the copy this is replayed on may have moved since. `entry`: the journal entry's own
     id; an entry is applied once by that id. An entry written before entries had one is recognised as before. A status
     written for an item whose money has a new id since (a page opened before the run, a journal entry folded after it) is
-    the heir's (heir_of): applied to it, and checked against it for being applied already."""
+    the heir's (heir_of): applied to it, and checked against it for being applied already. A change whose page showed
+    another status than the item has now, where the change since was the run's own (a Paid it found, a reason hidden for
+    the payer), is not applied: a line in the item's history says so (NOT_APPLIED), and a person decides."""
     if status not in STATUSES:
         raise ValueError("bad status")
     conn.row_factory = sqlite3.Row
     finding_id = heir_of(conn, finding_id)
-    r = conn.execute("SELECT status, shortfall_cents, appealed_at FROM findings WHERE finding_id=?", (finding_id,)).fetchone()
+    r = conn.execute("SELECT status, shortfall_cents, appealed_at, auto_note FROM findings WHERE finding_id=?", (finding_id,)).fetchone()
     if not r:
         return False
     now = at or _now()
     if entry:
-        if conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND kind='manual' AND run_id=?",
+        if conn.execute(f"SELECT 1 FROM finding_events WHERE finding_id=? AND kind IN ('manual', '{NOT_APPLIED}') AND run_id=?",
                         (finding_id, JOURNAL_RUN + entry)).fetchone():
             return True     # a journal entry being replayed: it is already in this copy
     elif at and conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND at=? AND kind='manual' AND to_status=? AND COALESCE(actor,'')=?",
                              (finding_id, at, status, actor or "")).fetchone():
         return True     # a journal entry being replayed: it is already in this copy
-    recovered = (recovered_cents if recovered_cents is not None else r["shortfall_cents"]) if status == "resolved" else None
+    what = _changed_by_run(conn, finding_id, r["status"], r["auto_note"]) if seen and seen != r["status"] else None
+    if what:
+        # The page was drawn before the run changed the item by itself. On a serverless host the dashboard's copy can be a
+        # refresh behind the store, so the change passed the check there and was journaled; applied now it would undo the
+        # run's Paid (and its recovery) or the hide. The item keeps its status, its history says what was pressed.
+        pressed = STATUS_WORDS.get(status, status) + (f" (${recovered_cents / 100:,.2f})" if status == "resolved" and recovered_cents is not None else "")
+        if entry or not conn.execute("SELECT 1 FROM finding_events WHERE finding_id=? AND at=? AND kind=? AND COALESCE(actor,'')=?",
+                                     (finding_id, now, NOT_APPLIED, actor or "")).fetchone():
+            conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note, run_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                         (finding_id, now, NOT_APPLIED, r["status"], r["status"], recovered_cents if status == "resolved" else None, actor,
+                          f"{pressed} pressed on a page drawn before {what}: not applied." + (f" Its note: {notes}" if notes else ""),
+                          JOURNAL_RUN + entry if entry else None))
+        return True
+    recovered =(recovered_cents if recovered_cents is not None else r["shortfall_cents"]) if status == "resolved" else None
     # A person's status replaces whatever the automatic resolution recorded: its note no longer describes the finding, and
     # the next analysis does not close it again on the same grounds (remitwatch.detect save()).
     conn.execute("""UPDATE findings SET status=?, notes=COALESCE(?, notes), status_changed_at=?, recovered_cents=?, recovered_date=?,

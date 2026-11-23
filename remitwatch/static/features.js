@@ -296,8 +296,8 @@ function drawerExtras(f, r){
 }
 // One line of an item's history (its panel, and Activity on Progress): a status change, from → to, or what happened with
 // no change of status: a fax, the visit note looked up by "Build packets from EMA" (none found, or a person has to choose),
-// or a packet built by it (on a serverless host).
-const EVENT_WORDS = {fax:'Fax', note_lookup:'Note lookup', packet:'Packet built', note_check:'Note checked by a person'};
+// or a packet built by it (on a serverless host), a change pressed on a page drawn before the run changed the item (kept out).
+const EVENT_WORDS = {fax:'Fax', note_lookup:'Note lookup', packet:'Packet built', note_check:'Note checked by a person', not_applied:'Not applied'};
 function eventWhat(e){
   return EVENT_WORDS[e.kind] ? `<b>${EVENT_WORDS[e.kind]}</b>` : `${esc(e.from_status||'')} → <b>${esc(e.to_status||'')}</b>`;
 }
