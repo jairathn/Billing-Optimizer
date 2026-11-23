@@ -258,6 +258,10 @@ FEED_META = "feed:date"         # the feed date the last analysis used, for a co
 # 4 days (weekends and holidays). The rule needs a real feed to judge: FEED_GAP_MIN_DAYS payment days in the window.
 FEED_GAP_DAYS = 7
 FEED_GAP_MIN_DAYS = 20
+# Only a hole near the newest remittances holds the feed: once the remittances after it span more than
+# FEED_GAP_RECENT_DAYS (five weeks), the weeks since are in and the hole is history (weeks that may never come), and it
+# would otherwise hold the feed back for up to FEED_WINDOW_DAYS.
+FEED_GAP_RECENT_DAYS = 35
 
 
 def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
@@ -266,7 +270,8 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
     half of the remittance lines of the FEED_WINDOW_DAYS before the newest (clamped) date are current through D. One stray
     file from one payer (a small one, an adjustment, a file dated in the future) moves it only when that payer carries half
     the volume. Nor does the newest week put in after weeks that are missing: when no payer paid for more than
-    FEED_GAP_DAYS in a row, the feed reaches only the last day before that hole. With fewer than three payer groups it is
+    FEED_GAP_DAYS in a row, the feed reaches only the last day before that hole, while the remittances after the hole
+    span at most FEED_GAP_RECENT_DAYS (an older hole is history). With fewer than three payer groups it is
     the newest date, clamped to today. A payment date no calendar has is skipped (real_day). None with no remittances.
     Today is the practice's day unless given (runtime.practice_today: from 7 PM Eastern the UTC date is already tomorrow)."""
     from . import runtime
@@ -305,13 +310,15 @@ def feed_date(conn: sqlite3.Connection, today: str | None = None) -> str | None:
         if 2 * acc >= total:
             reach = last[g]
             break
-    # a hole: the feed reaches only the last day before the first one in the window
+    # a hole: the feed reaches only the last day before the first one in the window that the newest remittances follow
+    # closely (at most FEED_GAP_RECENT_DAYS of them after it)
     days = sorted({min(x, today) for x in (real_day(d) for (d,) in conn.execute(
         """SELECT DISTINCT payment_date FROM transactions WHERE COALESCE(superseded,0)=0 AND payment_date IS NOT NULL
            AND payment_date > ?""", (_add_days(newest, -FEED_WINDOW_DAYS),))) if x})
     if len(days) >= FEED_GAP_MIN_DAYS:
         for a, b in zip(days, days[1:]):
-            if (date.fromisoformat(b) - date.fromisoformat(a)).days > FEED_GAP_DAYS:
+            if (date.fromisoformat(b) - date.fromisoformat(a)).days > FEED_GAP_DAYS \
+                    and (date.fromisoformat(days[-1]) - date.fromisoformat(b)).days <= FEED_GAP_RECENT_DAYS:
                 return min(reach, a)
     return reach
 

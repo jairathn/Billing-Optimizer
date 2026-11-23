@@ -3,6 +3,7 @@
 mr-1   a payment date no calendar has (BPR16 20260931, 20270229) never stops the analysis, the alerts or a page
 mr-2   the Data tab's feed check, Today's banner, the brief and the warning line go by the day the feed reaches
 mr-8   days behind and the clamp of a future-dated file count from the practice's day, not the UTC date
+mr-10  only a hole near the newest remittances holds the feed back; an old one that may never be filled does not
 Both hosts: the server's store file and the serverless site (the compact store image its cycle keeps, the dashboard's
 copy). Invented data only: payers, claim numbers and amounts are made up."""
 from __future__ import annotations
@@ -35,13 +36,13 @@ HOSTS = ["server", "serverless"]
 XHR = {"X-Requested-With": "remitwatch"}
 
 
-def _steady(until: str, start: str = "2026-06-01", hole: tuple | None = None) -> dict[str, bytes]:
+def _steady(until: str, start: str = "2026-06-01", holes: tuple = ()) -> dict[str, bytes]:
     """Three payers paying every other day from `start` to `until`, one remittance each, with nothing at all strictly inside
-    `hole` (weeks a person forgot to put in the folder)."""
+    each of `holes` (weeks a person forgot to put in the folder)."""
     out, day, k = {}, date.fromisoformat(start), 0
     while day.isoformat() <= until:
         iso = day.isoformat()
-        if not (hole and hole[0] < iso < hole[1]):
+        if not any(a < iso < b for a, b in holes):
             for j, payer in enumerate(("ANTHEM", "KY MEDICARE", "HUMANA")):
                 k += 1
                 out[f"f{k:04d}.RMT"] = remit("".join(clean_visits(10000 + 10 * k + j, 1, "99214", "223.65", "117.60")), "100.00",
@@ -377,3 +378,32 @@ def test_with_no_day_given_the_feed_date_and_the_alerts_take_the_practice_s_day(
     if kind == "file":
         st = pipeline.status(str(tmp_path / "s.sqlite"))
         assert (st["feed_date"], st["days_behind"]) == ("2026-11-22", 0), st
+
+
+# =========================================================================== mr-10: an old hole
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_old_hole_that_may_never_be_filled_no_longer_holds_the_feed(tmp_path, kind):
+    """Three weeks with no remittance at all from July 29 to August 20, then every other day to November 20: the hole has
+    three months of remittances after it, so the feed reaches November 20 (it was held at July 29, for up to 120 days).
+    The analysis saves that day and the stale-feed alert stays quiet."""
+    s = _store(tmp_path, _steady("2026-11-20", holes=(("2026-07-29", "2026-08-20"),)), kind)
+    assert feed_date(s.conn, today="2026-11-23") == "2026-11-20"
+    Detector(s, run_id="t").run()
+    assert _saved_feed(s.conn) == "2026-11-20"
+    out = run_alerts(s.conn, today="2026-11-23")
+    s.conn.commit()
+    assert out["asof"] == "2026-11-20"
+    assert s.conn.execute("SELECT COUNT(*) FROM alerts WHERE kind='STALE_FEED' AND status!='cleared'").fetchone()[0] == 0
+    s.close()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("holes, reach", [
+    ((("2026-10-01", "2026-10-17"),), "2026-10-01"),          # 34 days of remittances after it (October 17 to November 20): holds
+    ((("2026-10-01", "2026-10-15"),), "2026-11-20"),          # 36 days after it: history
+    ((("2026-07-29", "2026-08-20"), ("2026-10-09", "2026-11-16")), "2026-10-09"),     # an old hole and a recent one: the recent one holds
+])
+def test_a_hole_holds_the_feed_while_the_remittances_after_it_span_at_most_35_days(tmp_path, kind, holes, reach):
+    s = _store(tmp_path, _steady("2026-11-20", holes=holes), kind)
+    assert feed_date(s.conn, today="2026-11-23") == reach
+    s.close()
