@@ -1307,22 +1307,62 @@ def summary(conn: sqlite3.Connection) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------------- A/R snapshots
+def _open_item_keys(conn: sqlite3.Connection) -> tuple[set[str], set[int]]:
+    """The bills and EMA claim numbers of every item still open (work now, waiting, can't be checked, a person's started
+    or sent status). Their A/R rows are their work evidence (states reads the A/R's billing notes, claim actions and
+    follow-up dates of an item's claim and EMA claim numbers from these rows only), so they stay in the store."""
+    bills: set[str] = set()
+    links: set[int] = set()
+    if not _have(conn, "findings"):
+        return bills, links
+    fcols = set(_cols(conn, "findings"))
+    sel = ", ".join(c if c in fcols else f"NULL AS {c}" for c in
+                    ("patient_control_number", "status", "work_state", "stale", "ema_link", "evidence"))
+    for pcn, status, ws, stale, link, ev in conn.execute(f"SELECT {sel} FROM findings"):
+        if not _is_open(status, ws, stale):
+            continue
+        if pcn:
+            bills.add(_bill_of(pcn))
+        e = _evidence({"evidence": ev}) if ev and "ema_link" in str(ev) else {}
+        for v in [link, e.get("ema_link")] + list(e.get("ema_links") or [] if isinstance(e.get("ema_links"), list) else []):
+            try:
+                if v is not None:
+                    links.add(int(v))
+            except (TypeError, ValueError):
+                continue
+    return bills, links
+
+
 def archive_ar(conn: sqlite3.Connection, sink: Any, *, today: Any = None, months: int = AR_MONTHS, run_id: str | None = None,
                log: Callable[..., Any] | None = None) -> dict:
     """A/R snapshots pulled more than 13 months ago leave the store: each file's rows (and its catalog row) to
     ar/<as_of>-<sha>.jsonl.gz, read back and checked; then its rows go and its catalog row says where they went
-    (status replaced, no live rows). The item history (ema_ar_items) stays: it has its own retention."""
+    (status replaced, no live rows). The rows of an item still open (its claim or its EMA claim number) stay: they are
+    its evidence of work (a billing note about an appeal, a claim action, a follow-up date); they leave, in a file of
+    their own, once the item is settled, and the catalog row says how many stay meanwhile. The item history
+    (ema_ar_items) stays: it has its own retention. Returns {'files', 'rows', 'names', 'kept_rows', 'kept_files'}."""
     log = log or _noop
     ensure_schema(conn)
     if not _have(conn, "ema_ar"):
         return {"files": 0, "rows": 0}
     today = _today(today)
     cut = _exact_months_before(today, months)
-    out = {"files": 0, "rows": 0, "names": []}
+    out = {"files": 0, "rows": 0, "names": [], "kept_rows": 0, "kept_files": 0}
     olds = conn.execute("SELECT file_id, MAX(as_of), COUNT(*) FROM ema_ar GROUP BY file_id HAVING MAX(as_of) < ? ORDER BY 2, 1",
                         (cut,)).fetchall()
+    keep_bills, keep_links = _open_item_keys(conn) if olds else (set(), set())
     for file_id, as_of, _n in olds:
-        cols, rows = _fetch(conn, "SELECT * FROM ema_ar WHERE file_id = ? ORDER BY row_no", (file_id,))
+        cols, every = _fetch(conn, "SELECT * FROM ema_ar WHERE file_id = ? ORDER BY row_no", (file_id,))
+        ci, li, ri = cols.index("claim_id"), cols.index("link"), cols.index("row_no")
+
+        def stays(r: tuple) -> bool:
+            return bool((r[ci] and _bill_of(r[ci]) in keep_bills) or (r[li] is not None and r[li] in keep_links))
+        rows = [r for r in every if not stays(r)]
+        kept = len(every) - len(rows)
+        if not rows:
+            out["kept_rows"] += kept
+            out["kept_files"] += 1
+            continue
         tables = {"ema_ar": {"cols": cols, "rows": [[_enc(v) for v in r] for r in rows]}}
         if _have(conn, "ema_report_files"):
             ccols, crow = _fetch(conn, "SELECT * FROM ema_report_files WHERE file_id = ?", (file_id,))

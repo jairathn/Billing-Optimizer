@@ -1281,10 +1281,13 @@ def _after_rows(conn: sqlite3.Connection) -> dict[str, dict]:
 
 def _is_listed(r: dict, states_kept: bool) -> bool:
     """On a list people work from: not stale, open, and Work now or Waiting (an open money item where the store keeps no
-    states yet)."""
+    states yet). An open item with no state in a store that keeps them is listed: every list reads a missing state as
+    Work now or Waiting (api._STATE_GUESS), so people see it."""
     if r.get("stale") or r.get("status") not in OPEN_STATUSES:
         return False
-    return r.get("work_state") in LISTED if states_kept else (r.get("status") == "open" and r.get("category") in MONEY)
+    if not states_kept:
+        return r.get("status") == "open" and r.get("category") in MONEY
+    return r.get("work_state") in LISTED or r.get("work_state") is None
 
 
 def check_vanished(conn: sqlite3.Connection, before: dict[str, dict], after: dict[str, dict], *,
@@ -1697,6 +1700,15 @@ def _keep_vanished(conn: sqlite3.Connection, fids: list[str], run_id: str, at: s
                 sets.append(f"{c} = (SELECT {c} FROM temp.{SNAPSHOT} WHERE finding_id = ?)")
                 args.append(f)
         conn.execute(f"UPDATE findings SET {', '.join(sets)} WHERE finding_id = ?", (*args, f))
+    if "work_state" in cols:
+        # an item kept from a store that kept no states (the first wired run) has none: it gets the one every list already
+        # shows for it (api._STATE_GUESS: Sent waits on the payer, anything else is Work now), so it is on Work now and the
+        # next run's vanished check sees it as listed (state_valid holds too)
+        for i in range(0, len(fids), 500):
+            part = fids[i:i + 500]
+            conn.execute(f"""UPDATE findings SET work_state = CASE WHEN status = 'appealed' THEN 'waiting' ELSE 'work_now' END
+                             WHERE finding_id IN ({','.join('?' * len(part))})
+                               AND (work_state IS NULL OR work_state NOT IN ('work_now', 'waiting'))""", part)
     if "hint" in cols:
         for i in range(0, len(fids), 500):
             part = fids[i:i + 500]
