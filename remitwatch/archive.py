@@ -688,10 +688,13 @@ def _plan_tables(conn: sqlite3.Connection) -> None:
                          AND patient_control_number <> '')""")
     conn.execute("CREATE INDEX temp.ix_arc_xb_bill ON arc_xb(bill)")
     conn.execute("CREATE TEMP TABLE arc_dates (bill TEXT, d TEXT, paid TEXT, claims INTEGER, lines INTEGER, years TEXT)")
-    conn.execute("""INSERT INTO temp.arc_dates (bill, d, lines, years)
-                    SELECT k.bill, MAX(COALESCE(l.service_date, l.service_period_end, l.service_period_start)), COUNT(*),
-                           GROUP_CONCAT(DISTINCT substr(COALESCE(l.service_date, l.service_period_start, l.payment_date), 1, 4))
-                    FROM temp.arc_cb k JOIN lines l ON l.claim_key = k.claim_key GROUP BY k.bill""")
+    # a line's year is the one detection gives it (its date, LINE_DAY_SQL, else its payment's): the year whose baseline
+    # it counts toward, so the year that must have a kept baseline before it leaves, and the year it locks
+    conn.execute(f"""INSERT INTO temp.arc_dates (bill, d, lines, years)
+                     SELECT k.bill, MAX(COALESCE(l.service_date, l.service_period_end, l.service_period_start)), COUNT(*),
+                            GROUP_CONCAT(DISTINCT substr(COALESCE({LINE_DAY_SQL}, l.payment_date), 1, 4))
+                     FROM temp.arc_cb k JOIN lines l ON l.claim_key = k.claim_key JOIN claims cl ON cl.claim_key = l.claim_key
+                     GROUP BY k.bill""")
     conn.execute("""INSERT INTO temp.arc_dates (bill, d, paid, claims)
                     SELECT k.bill, MAX(COALESCE(c.statement_to, c.statement_from)), MAX(c.payment_date), COUNT(*)
                     FROM temp.arc_cb k JOIN claims c ON c.claim_key = k.claim_key GROUP BY k.bill""")

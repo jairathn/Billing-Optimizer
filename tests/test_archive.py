@@ -1727,9 +1727,13 @@ def test_a_line_with_no_date_of_its_own_takes_the_date_detection_gives_it(tmp_pa
     freeze_all(store)
     p = archive.plan(c, today=TODAY)
     assert [b for b, *_ in p["bills"]] == ["KB01AAAAA"] and p["held"] == {archive.HELD_DAY: 2}
-    # later all four leave; the patient's 2021-03-01 day comes back whole, the other day stays in the archive
+    # later all four leave, in the service year detection gives their lines (KA01 was paid in 2026, its year is 2021);
+    # the patient's 2021-03-01 day comes back whole, the other day stays in the archive
+    later = {b: ys for b, _w, _n, _k, ys in archive.plan(c, today="2029-07-01")["bills"]}
+    assert later == {b: ["2021"] for b in ("KA01AAAAA", "KB01AAAAA", "KC01AAAAA", "KD01AAAAA")}
     sink = sink_of(tmp_path, "file")
     assert archive.run(c, sink=sink, today="2029-07-01")["bills"] == 4
+    assert archive.locked_years(c) == ["2021"]
     put_claim(store, "KE01AAAAA", "2021-03-01", name="SAME", paid_on="2029-06-01")   # a late claim of that day, undated line
     c.execute("UPDATE lines SET service_date = NULL WHERE patient_control_number = 'KE01AAAAAC017'")
     c.commit()
