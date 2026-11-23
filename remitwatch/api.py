@@ -2116,10 +2116,12 @@ def brief(_: str = Depends(require_auth)):
     if out.get("ready"):
         out["written_off"] = _written_off_summary()
         out["no_answer"] = _no_answer_summary()
-        # the red number on each category tab: what closes within 7 days, counted as that page's first tile and its list
+        # the red number on each category tab: the work that closes within 7 days, counted as the list a click on it opens
+        # (desk.js badgeOpen: to do and started, closing within 7 days, the work now and follow-ups due among them; never
+        # an item that only waits on the payer)
         token = _WINDOWS_MEMO.set({})
         try:
-            out["badges"] = {c: _bucket(c, None, TODO_STATUSES, "week") for c in BADGE_CATEGORIES}
+            out["badges"] = {c: _bucket(c, None, TODO_STATUSES, "week", state="todo") for c in BADGE_CATEGORIES}
         finally:
             _WINDOWS_MEMO.reset(token)
     return out
@@ -5006,6 +5008,16 @@ def hide_add(body: dict = Body(default={}), user: str = Depends(require_auth)):
         # included). A table still at the two-part key (a copy saved by an earlier release, until its first run here) holds
         # payer x reason rules only: the grain it lacks is read as any ('*')
         have = {r["name"] for r in rows("PRAGMA table_info(hide_rules)")} if has_table("hide_rules") else set()
+        if have and not any(k in body for k in HIDE_GRAIN) and set(HIDE_GRAIN) <= have:
+            # a page loaded before Show again sent the rule's grain names the payer and the reason only: the one rule in
+            # force for them, whatever its grain (never a guess between two)
+            mine = rows(f"SELECT code, modifier, reason FROM hide_rules WHERE payer_group=? AND signal=? AND {_rules_in_force()}",
+                        (pg, rule["signal"]))
+            if len(mine) > 1:
+                raise HTTPException(409, "This payer has more than one rule for that reason: open the Hidden list again and pick one.")
+            if mine:
+                rule = hide_rule_of(dict(mine[0], payer_group=pg, signal=rule["signal"]))
+                entry.update(code=rule["code"], modifier=rule["modifier"], reason=rule["reason"])
         conds, params = ["payer_group=?", "signal=?"], [pg, rule["signal"]]
         for k in HIDE_GRAIN:
             if k in have:

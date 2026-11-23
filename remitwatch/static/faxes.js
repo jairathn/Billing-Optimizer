@@ -9,15 +9,30 @@ const FAX_PURPOSE = {appeal:'Appeal', second_request:'Request again', next_level
 const FAX_DOC = {appeal_decision:'Decision', records_request:'Records request', payment_notice:'Payment notice', denial:'Denial',
   acknowledgement:'Received notice', other:'Other', unread:'Not read'};
 const FAX_DECISION = {overturned:['Overturned','ok'], partially_overturned:['Partly overturned','ok'], upheld:['Upheld','sev-high'], pending:['Pending','muted']};
-// what each hold means, in the order a person fixes them
+// what each hold means, in the order a person fixes them; a hold with a code not listed here is still listed, under its
+// own reason (faxSummary), so no item held at send time is left unnamed
 const HOLDS = [
+  ['bulk_paused', 'Sending in bulk is paused on this site: open each item and fax it from its panel'],
   ['practice', 'The practice\'s details are missing from the letters'], ['no_fax', 'The fax line is not set up'],
-  ['stale', 'The remittances are behind: these may have been paid since'], ['check_code', 'Check in EMA which code went out first (open each one)'], ['no_number', 'No fax number saved for the payer'], ['by_hand', 'Fax by hand: the payer group holds many insurers, each with its own fax line'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
+  ['paid_after', 'EMA shows a payment after the denial: open each one and check it before faxing'],
+  ['no_balance', 'EMA shows no balance left on the line: open each one and check it before faxing'],
+  ['stale', 'The remittances are behind: these may have been paid since'], ['check_code', 'Check in EMA which code went out first (open each one)'],
+  ['left_out', 'Not appealed in bulk: its own next step is not an appeal now (open each one)'],
+  ['blocked', 'Not appealed: paid, credited, reprocessed, closed or waiting on the payer'],
+  ['check_first', 'Check first that it is still unpaid: EMA shows it settled, or the archive shows it likely paid'],
+  ['no_remittance', 'A denial only EMA shows: wait for the payer\'s remittance or letter first'],
+  ['packet_changed', 'The packet changed after it was read: build it again and read it'],
+  ['no_number', 'No fax number saved for the payer'], ['by_hand', 'Fax by hand: the payer group holds many insurers, each with its own fax line'], ['no_ema', 'EMA is not connected'], ['ema_error', 'EMA did not answer'],
   ['ambiguous', 'The visit note needs a person to pick it or attach it: open each item'], ['no_note', 'No visit note yet (from EMA, or uploaded on the Upload page)'],
   ['review_no', 'Claude\'s review: the note does not support it (counted in Suggested templates)'], ['review_fix', 'Correct and resubmit instead'],
   ['review_caution', 'Claude\'s review has doubts: a person reads the packet first'], ['quotes', 'Claude quoted words the note does not have: a person checks the packet'],
   ['blanks', 'The letter still has blanks'], ['fax_error', 'The fax line refused it'], ['expired', 'Filing window closed'],
   ['not_appealable', 'Not something a letter settles'], ['no_claim', 'Not tied to one claim'], ['no_packet', 'Packet missing'], ['failed', 'Failed']];
+// held as stale only because EMA could not vouch for the item (no report, an old one, a line not tied to its claim): a
+// person who checked in EMA may fax these anyway. EMA's own sign of a payment (paid_after, no_balance) is never overridden in bulk
+const FAX_ANYWAY = new Set(['no_ema', 'production_old', 'not_mapped']);
+// an appeal sent again after every fax failed: its own Marked Sent is why it waits (or is due a check), not the payer
+const SENT_BLOCKS = new Set(['waiting', 'follow_up', 'call', 'note']);
 const FAX_SAYS = [['upheld','Upheld (denied again)'], ['overturned','Overturned (approved)'], ['partially_overturned','Partly overturned'],
   ['records_request','Asks for records'], ['other','Decides nothing']];
 
@@ -27,6 +42,9 @@ function faxModal(title, body){
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
   return $('#modalBox');
 }
+// whether this site faxes appeals in bulk (REMITWATCH_BULK_APPEAL, /api/meta bulk_appeal): while it is paused no page offers
+// a bulk appeal button, only the one-item send in each item's panel
+const bulkOn = () => !!(typeof state !== 'undefined' && state.meta && state.meta.bulk_appeal);
 const faxBar = (done, n) => `<div class="bar" style="margin:6px 0"><i style="width:${n ? Math.round(100*done/n) : 0}%"></i></div>`;
 // a US fax number as its ten digits, or '' (the server checks it the same way)
 function faxDigits(n){ let d = String(n||'').replace(/\D/g,''); if(d.length === 11 && d[0] === '1') d = d.slice(1); return d.length === 10 && !'01'.includes(d[0]) ? d : ''; }
@@ -87,8 +105,9 @@ async function appealByFax(ids, opts){
       try { r = await post('/api/appeals/send', {finding_id: id, stale_ok: !!opts.staleOk, bulk: true}); }
       catch(e){ r = {finding_id: id, status: 'held', code: 'failed', reason: e.message}; if([401,403,429].includes(e.status)) stopped = e.message; }
       res.push(r);
-      // a hold that every item would hit: say it once instead of running through the rest
-      if(r.code === 'practice' || r.code === 'no_fax' || r.code === 'stale' || r.code === 'bulk_paused') stopped = r.reason;
+      // a hold that every item would hit: say it once instead of running through the rest. Stale is not one of them: EMA
+      // vouches item by item (W5), so each item is tried
+      if(r.code === 'practice' || r.code === 'no_fax' || r.code === 'bulk_paused') stopped = r.reason;
       tally();
     }
   }
@@ -96,20 +115,25 @@ async function appealByFax(ids, opts){
   tally();
   state.brief = null; state.dirty = true;
   if(!box.querySelector('#fxOut')) return;
-  faxSummary(box.querySelector('#fxOut'), res, ids.length - res.length, opts);
-  if(res.some(r => r.code === 'stale')){
+  const paused = res.some(r => r.code === 'bulk_paused');
+  faxSummary(box.querySelector('#fxOut'), res, ids.length - res.length, Object.assign({}, opts, {paused}));
+  // "Fax them anyway" goes again only for the items EMA could not vouch for, never one EMA shows paid or closed
+  const anyway = res.filter(r => r.code === 'stale' && FAX_ANYWAY.has(r.vouch || 'no_ema')).map(r => r.finding_id);
+  if(anyway.length && !opts.staleOk){
     const out = box.querySelector('#fxOut'), b = document.createElement('div');
     b.className = 'actions';
-    b.innerHTML = '<button id="fxStaleGo">Fax them anyway</button><span class="small muted">Only when you know they are still unpaid (checked in EMA).</span>';
+    b.innerHTML = `<button id="fxStaleGo">Fax these ${anyway.length === 1 ? 'one' : anyway.length} anyway</button><span class="small muted">Only when you checked in EMA that ${anyway.length === 1 ? 'it is' : 'they are'} still unpaid. ${pl(anyway.length, 'item')}: ${esc(res.filter(r => anyway.includes(r.finding_id)).map(r => (r.payer_group || 'item') + ' ' + money2(r.cents)).slice(0, 8).join(', '))}${anyway.length > 8 ? '…' : ''}</span>`;
     out.prepend(b);
-    b.querySelector('#fxStaleGo').onclick = () => appealByFax(ids, Object.assign({}, opts, {staleOk: true}));
+    b.querySelector('#fxStaleGo').onclick = () => appealByFax(anyway, Object.assign({}, opts, {staleOk: true}));
   }
 }
 function faxSummary(el, res, notTried, opts){
   const sent = res.filter(r=>r.status==='sent'), skipped = res.filter(r=>r.status==='skipped'), held = res.filter(r=>r.status==='held');
   const by = {}; held.forEach(r=>{ (by[r.code||'failed'] = by[r.code||'failed'] || []).push(r); });
   const item = r => `<li><a href="#" data-open="${esc(r.finding_id)}">${esc(r.payer_group||'item')} · ${money2(r.cents)}</a> <span class="small muted">${esc(r.reason||'')}</span></li>`;
-  const groups = HOLDS.filter(([k])=>by[k]).map(([k, label]) => {
+  // every code held, the listed ones first in HOLDS' order, then any other under its own reason
+  const known = new Set(HOLDS.map(h => h[0]));
+  const groups = HOLDS.concat(Object.keys(by).filter(k => !known.has(k)).map(k => [k, 'Not sent'])).filter(([k])=>by[k]).map(([k, label]) => {
     const rs = by[k];
     if(k === 'no_number'){
       const payers = {}; rs.forEach(r=>{ (payers[r.payer_group||''] = payers[r.payer_group||''] || []).push(r); });
@@ -125,7 +149,7 @@ function faxSummary(el, res, notTried, opts){
   }).join('');
   el.innerHTML = `<div class="panel" style="margin-top:8px"><b class="ok">${pl(sent.length, 'appeal')} faxed</b>${sent.length ? ` · ${money(sent.reduce((a,r)=>a+(r.cents||0),0))}. Each is marked Sent; the Faxes page shows when the payer's line took it, and the follow-ups go out by themselves.` : '.'}
       ${skipped.length ? `<div class="small muted">${pl(skipped.length, 'item')} left alone: already sent, or no longer open.</div>` : ''}
-      ${notTried ? `<div class="small sev-medium">${pl(notTried, 'item')} not tried: fix what is below, then send again.</div>` : ''}</div>${groups}
+      ${notTried ? `<div class="small sev-medium">${pl(notTried, 'item')} not tried${opts.paused ? ': sending in bulk is paused on this site; open each item and fax it from its panel' : ': fix what is below, then send again'}.</div>` : ''}</div>${groups}
     <div class="actions" style="margin-top:8px"><button id="fxDone" class="primary">Done</button><button id="fxFaxes">Open the Faxes page</button></div>`;
   el.querySelectorAll('[data-open]').forEach(a => a.onclick = e => { e.preventDefault(); $('#modal').classList.remove('open'); openDetail(a.dataset.open); });
   el.querySelectorAll('[data-fxsave]').forEach(b => b.onclick = async () => {
@@ -205,9 +229,10 @@ function faxDrawerHtml(f, r){
       : esc(FAX_PURPOSE[x.purpose]||x.purpose||'') + (x.level > 1 ? ' (level ' + esc(x.level) + ')' : '')}</td>
     <td>${x.direction==='in' ? '' : `<span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status||'')}</span>`}</td>
     <td class="small muted">${esc(x.summary||x.error||'')}</td><td><a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">PDF</a></td></tr>`;
-  // an item whose own next step says not to appeal (paid, settled, credited, reprocessed or waiting) offers no fax
-  const blocked = !!f.appeal_block && !again;
-  return `<div class="fax-box" style="margin:8px 0">${can && !blocked ? `<div class="actions"><button id="fxOne">${again ? 'Send the appeal again' : 'Appeal by fax'}</button><span class="small muted">${again
+  // an item whose own next step says not to appeal (paid, settled, credited, reprocessed or waiting) offers no fax; an
+  // appeal sent again after every fax failed waits only because of its own Marked Sent, so that block alone does not stop it
+  const blocked = !!f.appeal_block && !(again && SENT_BLOCKS.has(f.appeal_block));
+  return `<div class="fax-box" style="margin:8px 0">${can && !blocked ? `<div class="actions" id="fxOneRow"><button id="fxOne">${again ? 'Send the appeal again' : 'Appeal by fax'}</button><span class="small muted">${again
       ? 'Its faxes never got through. It goes to the number saved for the payer now.' : 'You read the packet first; it goes to the payer\'s confirmed number and the item is marked Sent.'}</span></div>` : ''}
     ${list.length ? `<h3 class="small">Faxes</h3><table class="small"><tbody>${list.map(row).join('')}</tbody></table>` : ''}
     ${line && f.claim_key ? '<div><button class="ghost small" id="fxTie">Tie a fax that came in to this item</button></div>' : ''}
@@ -232,9 +257,11 @@ function bindFaxDrawer(id, d, r){
       + ((r.candidates||[]).length ? ' Open "Build the appeal from the visit note" below and pick it there.' : '');
     if(r.code === 'check_code') msg.innerHTML += ' <button id="fxCode">It went out as billed: fax it</button>';
     if(r.code === 'stale') msg.innerHTML += ' <button id="fxStale">Still unpaid in EMA: fax it anyway</button>';
+    if(r.code === 'check_first') msg.innerHTML += ' <button id="fxChecked">Checked: still unpaid, fax it</button>';
     const g = d.querySelector('#fxGoNums'); if(g) g.onclick = e => { e.preventDefault(); closeDetail(); state.tab = 'faxes'; location.hash = 'faxes'; render(); };
     const code = d.querySelector('#fxCode'); if(code) code.onclick = () => { said.confirmed = true; go(); };
     const stale = d.querySelector('#fxStale'); if(stale) stale.onclick = () => { said.stale_ok = true; go(); };
+    const checked = d.querySelector('#fxChecked'); if(checked) checked.onclick = () => { said.checked = true; go(); };
     b.disabled = false;
   };
   b.onclick = () => go();
@@ -271,7 +298,7 @@ async function faxesTab(v){
     : `<span class="sev-medium">Needs a person to match</span>${x.needs ? `<div class="muted">${esc(x.needs)}</div>` : ''}
        ${(x.suggested||[]).length ? `<div>${unread(x) ? says(x) : ''}${x.suggested.map(s => `<div><button data-tie="${esc(x.fax_key)}" data-to="${esc(s.finding_id)}">Tie to: ${esc(s.title||'item')} · ${esc(s.service_date||'')} · ${esc(s.payer_group||'')}${s.patient_control_number ? ' · claim ' + esc(s.patient_control_number) : ''}</button></div>`).join('')}</div>` : ''}`;
   v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">Faxes</h1> <span class="muted">Appeals faxed to payers, their answers read and matched, and the follow-ups that keep going every week until each claim is paid or decided.</span></div>
-      <div class="ph-go">${fx.configured && sends ? '<button id="fxCheck">Check for faxes now</button>' : ''}<button class="primary" id="fxAll">Appeal everything appealable</button></div></div>
+      <div class="ph-go">${fx.configured && sends ? '<button id="fxCheck">Check for faxes now</button>' : ''}${bulkOn() ? '<button class="primary" id="fxAll">Appeal everything appealable</button>' : ''}</div></div>
     <div class="panel"><b>The fax line:</b> ${fx.configured ? `${fx.line ? esc(fx.line) : 'set up'}${fx.line ? ' · payers answer to this number, so their letters come back here' : ' · set SRFAX_CALLER_ID to the line\'s number so letters give it'}` : '<span class="sev-medium">not set up yet</span>: sign up with SRFax (a healthcare plan, with its BAA), then set SRFAX_ACCESS_ID, SRFAX_ACCESS_PWD, SRFAX_CALLER_ID and SRFAX_SENDER_EMAIL in the host\'s settings. /setup checks it.'}
       ${fx.not_here ? `<div class="small sev-medium">${esc(fx.not_here)}</div>` : ''}
       ${(fx.practice_missing||[]).length ? `<div class="small sev-medium">The letters still lack the practice's details: set ${esc(fx.practice_missing.join(', '))}.</div>` : ''}
@@ -299,10 +326,10 @@ async function faxesTab(v){
         <td><span class="${x.status==='failed'?'sev-high':x.status==='sent'?'ok':'muted'}">${esc(x.status==='queued'?'going out':x.status==='sending'?'not settled':x.status||'')}</span>${x.error?`<div class="muted">${esc(x.error)}</div>`:''}
           ${x.unsettled ? `<div class="small">Look in SRFax's sent faxes: <button data-settle="${esc(x.fax_key)}" data-went="1">It went out</button> <button data-settle="${esc(x.fax_key)}" data-went="0">It did not go out</button></div>` : ''}</td>
         <td class="num">${esc(x.pages||'')}</td><td>${x.finding_id ? `<a href="#" data-open="${esc(x.finding_id)}">${esc(x.title||'Open')}</a>` : ''}</td>
-        <td>${x.packet_id ? `<a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">Packet</a>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted small">Nothing sent yet. Tick items on a list and use Appeal by fax, or Appeal everything appealable above.</div>'}</div>`;
+        <td>${x.packet_id ? `<a href="/api/faxes/pdf?key=${encodeURIComponent(x.fax_key)}" target="_blank" rel="noopener">Packet</a>` : ''}</td></tr>`).join('')}</tbody></table></div>` : `<div class="muted small">${bulkOn() ? 'Nothing sent yet. Tick items on a list and use Appeal by fax, or Appeal everything appealable above.' : 'Nothing sent yet. Open an item and use Appeal by fax in its panel.'}</div>`}</div>`;
   v.querySelectorAll('[data-open]').forEach(a => a.onclick = e => { e.preventDefault(); openDetail(a.dataset.open); });
   v.querySelectorAll('tr.row[data-id]').forEach(tr => tr.onclick = e => { if(e.target.closest('button,select,input,a')) return; openDetail(tr.dataset.id); });
-  v.querySelector('#fxAll').onclick = () => appealEverything({after: render});
+  const all = v.querySelector('#fxAll'); if(all) all.onclick = () => appealEverything({after: render});
   const ck = v.querySelector('#fxCheck');
   if(ck) ck.onclick = async () => {
     const msg = v.querySelector('#fxCheckMsg'); ck.disabled = true;

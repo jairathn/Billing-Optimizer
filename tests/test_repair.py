@@ -170,10 +170,12 @@ class AuthenticationException(SSHException):
     (ValueError("row 5021: the amount is not a number"), False),                   # " 502" inside a row number
     (ValueError("expected 39 columns, found 429"), False),                         # " 429" inside a count
     (sqlite3.OperationalError("database is locked: timeout"), False),
-    (RecursionError("maximum recursion depth exceeded while timing out"), False),
+    (RecursionError("maximum recursion depth exceeded in the timeout handler"), False),     # a RuntimeError, but a bug
+    (NotImplementedError("a retry after a timeout is not built for this client"), False),
     (RuntimeError("download /x.RMT failed 409: path/not_found"), False),         # a client's error that is not the network's
     (RuntimeError("found 5021 rows, 429 of them empty"), False),                   # a status number only after its word
     (OSError(28, "No space left on device"), False),
+    (Exception("the step timed out waiting for its own lock"), False),             # not the network's, nor a client's
     # the network's trouble inside a client's own error: by its cause or its words
     (caused(TriZettoError("Could not reach the server (ConnectionRefusedError)."), ConnectionRefusedError(111, "refused")), True),
     (TriZettoError("The server did not complete the SSH handshake within 30 s; nothing was sent."), True),

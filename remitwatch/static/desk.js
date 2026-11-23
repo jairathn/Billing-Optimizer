@@ -9,7 +9,7 @@
 // a credit). Each is let go one at a time.
 const NEVER_HIDDEN = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER', 'NOT_SENT', 'REMIT_NOT_POSTED', 'SECONDARY_NOT_BILLED', 'CREDIT_BALANCE']);
 // One at a time, and with a note. The list's Let go leaves these out and says so (bindBulk). Let go or Lost in an item's own
-// panel asks why and sends the answer as its note (letGoNote).
+// panel asks why and sends the answer as its note (letGoNote); so does every other Let go and Lost, one item or many.
 const ONE_AT_A_TIME = NEVER_HIDDEN;
 const CLAIM_CHASES = new Set(['NO_ANSWER', 'REJECTED_PRE_PAYER']);         // claims no payer answered, in the words below
 const ONE_WHY = {NOT_SENT: 'EMA shows this claim never went out', REMIT_NOT_POSTED: 'The payer paid this and EMA has not posted it',
@@ -17,17 +17,20 @@ const ONE_WHY = {NOT_SENT: 'EMA shows this claim never went out', REMIT_NOT_POST
 const leftOutLine = (n, kinds) => (kinds || []).every(k => CLAIM_CHASES.has(k))
   ? `Let go leaves out ${pl(n, 'claim')} with no answer from the payer or rejected before the payer. Open ${n===1?'it':'each one'} to let it go, with a note.`
   : `Let go leaves out ${pl(n, 'item')} that ${n===1?'is':'are'} let go one at a time (no answer from the payer, never sent, a payment not posted, a second payer never billed, or a credit). Open ${n===1?'it':'each one'} to let it go, with a note.`;
-// The note for letting one of those items go, or marking it lost. Returns the note; null when the person gave none
-// (nothing is changed then); undefined for every other item or status, which needs none.
+// The reason for letting an item go, or marking it lost: money is let go only by a person with a reason (or the owner's
+// policy table), and the server holds to it. Returns the reason; null when the person gave none (nothing is changed then);
+// undefined for any other status, which needs none. Asking for it is the confirmation.
 function letGoNote(signal, status){
-  if(!ONE_AT_A_TIME.has(signal) || !['dismissed','lost'].includes(status)) return undefined;
-  const claim = CLAIM_CHASES.has(signal);
+  if(!['dismissed','lost'].includes(status)) return undefined;
+  const claim = CLAIM_CHASES.has(signal), one = ONE_AT_A_TIME.has(signal), lost = status === 'lost';
   const typed = prompt(claim
-    ? `${status === 'lost' ? 'Mark this claim lost' : 'Let go of this claim'}?\n\nNo answer from a payer is on file for it, so this money may not have been asked for yet. It leaves the list${status === 'lost' ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`
-    : `${status === 'lost' ? 'Mark this item lost' : 'Let go of this item'}?\n\n${ONE_WHY[signal] || 'Nobody has asked for this money yet'}, so it is let go only by a person, with a note. It leaves the list${status === 'lost' ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`);
+    ? `${lost ? 'Mark this claim lost' : 'Let go of this claim'}?\n\nNo answer from a payer is on file for it, so this money may not have been asked for yet. It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`
+    : one ? `${lost ? 'Mark this item lost' : 'Let go of this item'}?\n\n${ONE_WHY[signal] || 'Nobody has asked for this money yet'}, so it is let go only by a person, with a note. It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history):`
+    : `${lost ? 'Mark this item lost' : 'Let go of this item'}? It leaves the list${lost ? '' : ' and counts as let go'}.\n\nWhy (kept in the item's history; required):`);
   if(typed === null) return null;
-  const note = typed.trim();
-  if(!note){ alert(claim ? 'Not changed. A claim with no answer from a payer needs a note that says why.' : 'Not changed. This item needs a note that says why.'); return null; }
+  const note = String(typed).trim();
+  if(!note){ alert(claim ? 'Not changed. A claim with no answer from a payer needs a note that says why.' : one ? 'Not changed. This item needs a note that says why.'
+    : 'Not changed. Letting an item go, or marking it lost, needs a reason.'); return null; }
   return note;
 }
 const DESKS = {
@@ -35,7 +38,7 @@ const DESKS = {
   bundling:   {cat:'bundling', title:'Bundling & modifiers', intro:'Visits, procedures and add-ons paid $0 because the payer folded them into another service.'},
   downcoding: {cat:'downcoding', title:'Downcoding', intro:'Visits paid at a lower level than billed, and procedure codes the payer changed.'},
   contracts:  {cat:'underpayment', title:'Contracts & underpayment', intro:"Claims paid below the payer's own usual rate, and contract rates that sit below Medicare."},
-  worklist:   {cat: MONEY_CATS, title:'Worklist', intro:'Every item from the four claim pages in one list, soonest filing date first.'},
+  worklist:   {cat: MONEY_CATS, title:'Worklist', intro:'Every item from the four claim pages in one list, what is worth most first.'},
 };
 const BADGE_CAT = {denials:'denial', bundling:'bundling', downcoding:'downcoding', contracts:'underpayment'};
 // The tiles go by the item's state (remitwatch.states): what to work now (with the follow-ups whose day has come), what of
@@ -78,14 +81,22 @@ function viewName(f){
   return [st, d, ['open,in_progress','all'].includes(f.status) ? '' : s].filter(Boolean).join(' · ');
 }
 // a desk's filter: the defaults, then what was chosen. An older link that names a status or a filing date and no state
-// (Today's steps, Bigger wins) lists by those, as it always did.
+// (Today's steps, the guide, the red number on a tab, Bigger wins) lists by those; one that asks for work to do (To do, or
+// To do and started) lists the work now and the follow-ups due among them, never an item that only waits on the payer or
+// needs no work. A link about what was sent, paid or let go keeps every state.
+const TODO_LINK = new Set(['open', 'open,in_progress', 'in_progress']);
 function deskFilter(key){
   const given = state.filt[key] || {}, f = Object.assign({}, DESK_DEFAULTS, given);
-  if(!('state' in given) && ('status' in given || 'deadline' in given)){ f.state = ''; if(!('sort' in given)) f.sort = 'deadline'; }
+  if(!('state' in given) && ('status' in given || 'deadline' in given)){
+    f.state = TODO_LINK.has(f.status) && !['expired','missed'].includes(f.deadline || '') ? 'todo' : '';
+    if(!('sort' in given)) f.sort = 'deadline';
+  }
   return f;
 }
-// one line while the payment feed is behind: an item on the list may already be paid
+// one line while the payment feed is behind: an item on the list may already be paid. Left out while the blind-spot bar
+// under the tabs says it, in dollars (index.html blindBar): the same news once
 function dataLine(b){
+  if(state.blind && state.blind.blind) return '';
   const h = (b.health||[]).find(x=>!x.ok && /No payment newer/.test(x.title||''));
   return h ? `<div class="oneline"><span class="sev-medium">●</span> Payments after ${esc(longDate((b.newest_payment||'').slice(0,10)))} are not in yet; some items may already be paid. <a href="#data" class="go-data">Data</a></div>` : '';
 }
@@ -181,7 +192,7 @@ async function deskTab(v, key){
   if(f.q) chips.push(chip('q', `“${esc(f.q)}”`));
   // a reason this payer is known not to pay: one click takes it off the lists (and keeps new ones off)
   if(f.signal && f.payer && !closed && !waiting && !NEVER_HIDDEN.has(f.signal)) chips.push(`<button class="ghost small" id="hideRule" title="Its open items go to Let go with your note, and new ones will too. Undo it under Hidden.">Hide “${esc(shortOf(b, f.signal))}” for ${esc(f.payer)}</button>`);
-  if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Window open">✕</button></span>`);
+  if(!tile) chips.push(`<span class="fchip">${esc(viewName(f))} <button data-reset="1" aria-label="Back to Work now">✕</button></span>`);
   const sel = (name, label, opts, cur) => `<select data-f="${name}" aria-label="${label}">${opts.map(([val,l])=>`<option value="${esc(val)}" ${String(cur)===val?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
   const plist = payers.concat(f.payer && !payers.includes(f.payer) ? [f.payer] : []);
   const orders = [['value','Worth most first'],['deadline','Soonest first'],['shortfall','Largest first'],['payer','By payer']].concat(waiting?[['sent','Oldest sent first']]:[]);
@@ -189,8 +200,10 @@ async function deskTab(v, key){
   const moreOpen = !!(state.moreF && state.moreF[key]);
   const oneKind = !!f.kind || single;
   const bulkSet = closed ? ['dismissed','open'] : waiting ? ['open','dismissed'] : ['in_progress','appealed','dismissed','open'];
+  // appeals faxed in bulk only where the site allows it (REMITWATCH_BULK_APPEAL): no button that can only say it is paused
+  const bulk = typeof bulkOn === 'function' && bulkOn();
   v.innerHTML = `<div class="page-head ph-row"><div><h1 class="page-title">${esc(D.title)}</h1> <span class="muted">${esc(D.intro)}</span></div>
-      ${startLbl || !(closed || waiting) ? `<div class="ph-go">${closed || waiting ? '' : '<button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax">Appeal everything appealable</button>'}${startLbl ? `<button class="primary" id="startFirst">${startLbl}</button>` : ''}</div>` : ''}</div>
+      ${startLbl || (bulk && !(closed || waiting)) ? `<div class="ph-go">${closed || waiting || !bulk ? '' : '<button id="fxEverything" title="Every open item a letter settles, inside its window: the visit note from EMA where needed, Claude\'s review, the letter, the fax">Appeal everything appealable</button>'}${startLbl ? `<button class="primary" id="startFirst">${startLbl}</button>` : ''}</div>` : ''}</div>
     ${dataLine(b)}
     <div class="tiles">${tiles}</div>
     <div class="small muted allopen">${only ? `Counting ${esc(only)} only. ` : ''}${quiet.length ? `Need no work: ${quiet.join(' · ')}. ` : ''}${key==='worklist' ? '' : `<a href="#" class="see-all" title="${esc(allTip)}">Everything to do, any window: ${num(all.n)} · ${money(all.cents)}</a>`}</div>
@@ -207,7 +220,7 @@ async function deskTab(v, key){
       <span class="lh-tools">${sel('payer','Payer',[['','Any payer'],...plist.map(p=>[p,p])],f.payer)}${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}
       <input data-f="q" maxlength="200" aria-label="Search" placeholder="${showPhi()?'Patient, claim ID or code':'Claim ID or code'}" value="${esc(f.q)}"><button class="ghost" id="moreF" aria-expanded="${moreOpen}">More filters</button><button class="ghost" id="wlCsv">Export</button></span></div>
     <div class="more-f" ${moreOpen?'':'hidden'}><span class="ph-only">${sel('min','Amount',[['','Any amount'],['20','Hide under $20'],['100','Hide under $100'],['500','Hide under $500']],f.min)}${sel('sort','Order',orders,f.sort)}<input data-f="q" maxlength="200" aria-label="Search" placeholder="Claim ID or code" value="${esc(f.q)}"></span>${sel('state','State',WL_STATES,f.state||'')}${sel('ema','What EMA shows',WL_EMA,f.ema||'')}${sel('deadline','Filing date',WL_DEADLINES,f.deadline||'')}${sel('status','Status',WL_STATUSES.concat(WL_STATUSES.some(x=>x[0]===f.status)?[]:[[f.status,f.status]]),f.status)}<button class="ghost" id="wlClear">Reset all filters</button></div>
-    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
+    <div class="bulk" id="bulk" hidden><span id="bulkN"></span>${closed || waiting || !bulk ? '' : '<button class="primary" id="bulkFax">Appeal by fax</button>'}${bulkSet.map(s=>`<button data-bulk="${s}">${BULK_WORDS[s]}</button>`).join('')}<span id="bulkLeftOut" class="small muted" role="status"></span></div>
     <div class="scroll"><table class="wl"><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select every item shown"></th><th>Closes</th><th>Patient</th>${f.payer?'':'<th>Payer</th>'}<th>What happened</th><th class="num">Amount</th></tr></thead>
     <tbody>${res.items.map(r=>rowHtml(b, r, {oneKind, onePayer: !!f.payer, oneSignal: !!f.signal})).join('')}</tbody></table></div>
     ${res.items.length ? '' : `<div class="empty">Nothing here. ${chips.length ? 'Remove a filter above, or pick' : 'Pick'} another box at the top.</div>`}
@@ -305,15 +318,20 @@ function bindBulk(v){
       if(keep.length < ids.length && !confirm(`${pl(ids.length-keep.length, 'item')} ${ids.length-keep.length===1?'has':'have'} a closed filing window and will be left out: nothing to send there.${keep.length?'':' Nothing else is ticked.'}`)) return;
       ids = keep; if(!ids.length) return;
     }
+    let notes = null;
     if(bt.dataset.bulk==='dismissed'){
       const out = new Set(leftOut()), kinds = leftKinds();
       ids = ids.filter(id=>!out.has(id));
       if(!ids.length){ alert(`Nothing let go. ${leftOutLine(out.size, kinds)}`); return; }
-      if(!confirm(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size, kinds) : ''}`)) return;
+      // one reason for all of them, kept in each item's history (the server refuses a Let go with none)
+      const typed = prompt(`Let go of ${pl(ids.length, 'item')}? They leave the list and count as let go.${out.size ? ' ' + leftOutLine(out.size, kinds) : ''}\n\nWhy (kept in each item's history; required):`);
+      if(typed === null) return;
+      notes = String(typed).trim();
+      if(!notes){ alert('Not changed. Letting items go needs a reason.'); return; }
     }
     if(bt.dataset.bulk==='appealed' && ids.length > 5 && !confirm(`Mark ${pl(ids.length, 'item')} as sent to the payer? They leave the to-do list until a follow-up is due.`)) return;
     bt.disabled = true;
-    try { await post('/api/findings/bulk-status', {ids, status: bt.dataset.bulk}); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
+    try { await post('/api/findings/bulk-status', Object.assign({ids, status: bt.dataset.bulk}, notes ? {notes} : {})); } catch(e){ alert('Not saved: '+e.message); bt.disabled = false; return; }
     state.brief = null; render(); });
 }
 async function exportCsv(params, find, key){      // fetched, not linked: the search text travels in a header, never in the address
@@ -621,7 +639,9 @@ function hiddenManage(rules){
   $('#closeM').onclick = () => $('#modal').classList.remove('open');
   $('#modalBox').querySelectorAll('[data-unhide]').forEach(b => b.onclick = async () => {
     const r = rules[+b.dataset.unhide];
-    try { await post('/api/hide', {payer_group: r.payer_group, signal: r.signal, remove: true}); } catch(e){ alert('Not saved: ' + e.message); return; }
+    // the rule as the list shows it, at its own grain (code, modifier, the payer's reason code): never only payer and reason
+    try { await post('/api/hide', {payer_group: r.payer_group, signal: r.signal, code: r.code || '*', modifier: r.modifier || '*', reason: r.reason || '*', remove: true}); }
+    catch(e){ alert('Not saved: ' + e.message); return; }
     $('#modal').classList.remove('open'); state.brief = null; state.dirty = true; render();
   });
 }

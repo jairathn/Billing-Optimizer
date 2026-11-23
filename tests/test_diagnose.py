@@ -254,6 +254,7 @@ def test_errors_json_holds_every_error_of_the_runs_and_the_first_of_each_when_it
     files = diagnose.unpack(diagnose.build_bundle(db_path=db, days=2)["bytes"])
     errs = json.loads(files["errors.json"])
     assert errs["count"] == 151 and len(errs["errors"]) == 151 and errs["errors"][-1]["step"] == "detect"
+    assert len(json.loads(files[f"runs/{run_id}.json"])["errors"]) == 151         # the manifest whole, too
     assert not any(LAST in json.dumps(e) for e in errs["errors"])
     monkeypatch.setattr(diagnose, "ERRORS_KEPT", 40)                # past the cap: each run's first error, then the newest
     res = diagnose.build_bundle(db_path=db, days=2)

@@ -811,6 +811,14 @@ def test_show_again_removes_the_rule_it_lists_at_any_grain_on_both_hosts(site):
         assert c.get("/api/hide").json()["rules"] == [], made
         assert {i["finding_id"]: i["status"] for i in _items(site)["items"]} == was, made        # what it hid is back
     assert hid == 3                                                    # each rule hid the open denial, and Show again brought it back
+    # a page loaded before this release sends the payer and the reason only: the one rule in force for them goes, whatever
+    # its grain; with two, it is never a guess
+    old_page = lambda sig: c.post("/api/hide", json={"payer_group": pg, "signal": sig, "remove": True}, headers=XHR)   # noqa: E731
+    assert c.post("/api/hide", json={"payer_group": pg, "code": code, "note": "x"}, headers=XHR).status_code == 200
+    assert old_page("*").status_code == 200 and c.get("/api/hide").json()["rules"] == []
+    for made in ({"code": code}, {"reason": f"CO-{item['carc']}"}):
+        assert c.post("/api/hide", json=dict(made, payer_group=pg, note="x"), headers=XHR).status_code == 200
+    assert old_page("*").status_code == 409 and len(c.get("/api/hide").json()["rules"]) == 2
     assert _show_again(c, {"payer_group": pg, "signal": "DENIED_AUTH", "code": code}).status_code == 404        # gone: nothing to remove
 
 

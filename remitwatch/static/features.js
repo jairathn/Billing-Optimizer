@@ -379,6 +379,7 @@ async function noteFromEma(id, d, documentId){
     const r = await post('/api/appeals/from_ema', {finding_id: id, use_ai: ai ? ai.checked : true, document_id: documentId || null});
     if(r.status === 'built'){
       showPacket(out, r.packet);
+      xpPacketBuilt(id, d, r.packet);
       const n = r.note || {};
       const what = `${esc(n.type||'note')}${n.date?' of '+esc(n.date):''}`;
       const how = noteIdWords(r.identified_by || n.identified_by) || (r.found_by ? 'patient found by ' + r.found_by : '');
@@ -408,19 +409,27 @@ function bindDrawerExtras(id, d){
     try {
       const p = await api('/api/appeals/build', {method:'POST', body: fd});
       showPacket(out, p);
+      xpPacketBuilt(id, d, p);
     } catch(e){ out.innerHTML = `<div class="sev-high small">Could not build the packet: ${esc(e.message)}</div>`; }
   };
+}
+// A packet built in the panel (attached, pasted or from EMA) can be read and faxed at once: it joins the item's packets
+// (the fax buttons read them when pressed) and the next step's box is drawn again, so its main button moves on to the fax
+function xpPacketBuilt(id, d, p){
+  const r = state.detailR;
+  if(!p || !p.packet_id || !r || state.detailId !== id) return;
+  r.packets = [{packet_id: p.packet_id, created_at: p.created_at || new Date().toISOString(), note_name: p.note_name || ''}]
+    .concat((r.packets || []).filter(q => q.packet_id !== p.packet_id));
+  if(typeof xpRedrawBox === 'function') xpRedrawBox(id, d);
 }
 // A status set from an item's own panel, with the questions it takes. False when the person backed out: nothing is sent.
 async function setFindingStatus(id, status, shortfall, signal){
   const body = {status};
   if(status==='resolved'){ const x = prompt('Amount recovered, in dollars. Leave blank to use the shortfall.', shortfall!=null ? (shortfall/100).toFixed(2) : ''); if(x===null) return false; if(x.trim()!=='' && !isNaN(parseFloat(x))) body.recovered_cents = Math.round(parseFloat(x)*100); }
-  // a claim no payer answered is let go, or marked lost, only with a note (letGoNote in desk.js): asking for it is the confirmation
+  // Let go and Lost take a reason, on every item (letGoNote in desk.js; the server holds to it): asking is the confirmation
   const why = letGoNote(signal, status);
   if(why === null) return false;
   if(why !== undefined) body.notes = why;
-  else if(status==='dismissed'){ if(!confirm('Let go of this item? It leaves the list and counts as let go.')) return false; }
-  else if(status==='lost'){ const n = prompt('Why was it lost? (optional note)'); if(n===null) return false; if(n) body.notes = n; }
   await post('/api/findings/'+id+'/status', body); return true;
 }
 
@@ -438,42 +447,81 @@ const XP_BUTTON = {build_packet:'Build the appeal packet', attach_note:'Attach t
 // the one button that moves the item on, the first of these its next step offers (fax only once a packet can be read first)
 const XP_FIRST = ['fax_payer','build_packet','mark_posted','mark_billed','mark_sent','log_outcome','copy_instructions','request_era','reopen'];
 const XP_OUTCOME = {auto_written_off:'Auto write-off', written_off_while_pending:'Written off while pending', lost_to_timely_filing:'Lost to late filing'};
+// what stops an appeal outright (the server holds to it): a line paid, credited, reprocessed or waiting on the payer. A line
+// EMA shows settled, or the archive shows likely paid, is checked first: its fax stays under More and asks for the check
+const XP_NO_FAX = new Set(['paid', 'credit', 'reprocessed', 'waiting']);
+const XP_CHECK_FIRST = new Set(['settled_in_ema', 'likely_paid']);
+XP_BUTTON.decide = 'Decide what to do';
 
 function xpPrimary(nx, hasPacket){
-  const b = (nx && nx.buttons) || [];
-  if(b.includes('fax_payer') && hasPacket) return 'fax_payer';
+  const b = xpButtons(nx);
+  if(b.includes('fax_payer') && hasPacket && !XP_CHECK_FIRST.has(nx.appeal_block)) return 'fax_payer';
   // a correction made in EMA: read the steps, do it there, then mark it sent
   if(['corrected','eob_first'].includes(nx.route) && b.includes('mark_sent')) return 'mark_sent';
+  // a decision first (fix, appeal or let go): the three choices, never "what did the payer do"
+  if(nx.route === 'decide') return 'decide';
   return XP_FIRST.find(k => k !== 'fax_payer' && b.includes(k)) || null;
+}
+// the next step's buttons the page offers: never a fax for a line the server would not send (XP_NO_FAX)
+function xpButtons(nx){
+  const b = (nx && nx.buttons) || [];
+  return nx && nx.appeal_ok === false && XP_NO_FAX.has(nx.appeal_block) ? b.filter(k => k !== 'fax_payer') : b;
 }
 function xpChips(f, ws){
   const st = XP_STATE[ws];
   return (st ? `<span class="xs ${st[1]}">${st[0]}</span>` : '') + (XP_OUTCOME[f.ema_outcome] ? ` <span class="xs xs-warn">${XP_OUTCOME[f.ema_outcome]}</span>` : '');
 }
-// what to do and how sure: the verdict sentence with its strength, the next step with who, by when, what it is worth and its buttons
+// The state a person's status gives the item since the newest run (the finding says so: state_by_status), when it differs
+// from the state the run stored that the story explains: the verdict and the next step follow the person, until the next
+// run works them out again. Otherwise the explain answer as it is.
+const XP_BY_STATUS = {waiting: ["Wait for the payer's answer. The next run dates the follow-up.", ['log_outcome', 'reopen']],
+  accepted: ['Nothing to do. Reopen it to work it again.', ['reopen']], done: ['Nothing to do.', ['reopen']],
+  work_now: ['Work it as its reason says; the next run gives its exact next step.', ['mark_sent', 'log_outcome', 'let_go']]};
+function xpEffective(f, x){
+  const ex = (x && x.explain) || {}, told = (ex.verdict || {}).state || (ex.state || {}).work_state;
+  if(!f.state_by_status || !f.work_state || f.work_state === told || !XP_BY_STATUS[f.work_state]) return x;
+  const when = f.status_changed_at ? ` on ${longDate(String(f.status_changed_at).slice(0, 10))}` : '';
+  const [action, buttons] = XP_BY_STATUS[f.work_state];
+  return Object.assign({}, x, {explain: Object.assign({}, ex, {
+    verdict: {state: f.work_state, sentence: `${(typeof STATUS_WORDS !== 'undefined' && STATUS_WORDS[f.status]) || f.status} by a person${when}.`, rows: []},
+    next_step: {route: 'status', action, buttons}, state: {work_state: f.work_state}})});
+}
+// EMA's address for the item's claim (Open in EMA): the next step's own, or the template EMA's block gives with the item's
+// EMA claim number (6 to 12 digits, as the Data tab builds it); none when either is missing
+function xpEmaUrl(f, x, nx){
+  if(nx && nx.claim_url) return nx.claim_url;
+  const b = (x && x.ema_block) || {}, tpl = String(b.claim_url || ''), n = String(f.ema_link != null ? f.ema_link : ((b.links || [])[0] || ''));
+  return tpl.startsWith('https://') && tpl.split('{claim}').length === 2 && /^\d{6,12}$/.test(n) ? tpl.replace('{claim}', n) : null;
+}
+// the verdict's own "(row 2)" and "(rows 1 and 3)" go when the Rows link beside it says the same
+const xpUncited = s => String(s || '').replace(/\s*\(rows? \d+(?:(?:, | and |-)\d+)*\)/gi, '');
+// what to do and how sure: the verdict sentence, the next step with who and by when, what it is worth and its buttons. The
+// rest (the deadline's basis, the recovery rate's basis, the rule) is on hover; the steps are folded
 function xpBoxHtml(f, x, r){
+  x = xpEffective(f, x);
   const ex = x.explain || {}, vd = ex.verdict || {}, nx = ex.next_step || {}, st = ex.state || {};
   const ws = vd.state || st.work_state || f.work_state;
   const follow = ws === 'waiting' && (vd.follow_up_on || st.follow_up_on || f.follow_up_on);
   const rowsCited = (vd.rows || []).filter(n => n != null);
-  const strength = vd.strength ? `${esc(XP_STRENGTH[vd.strength] || vd.strength)}${vd.strength === 'inferred' && vd.rule ? ` (rule: ${esc(vd.rule)})` : ''}` : '';
+  const strength = vd.strength ? `<span${vd.strength === 'inferred' && vd.rule ? ` title="${esc('Rule: ' + vd.rule)}"` : ''}>${esc(XP_STRENGTH[vd.strength] || vd.strength)}</span>` : '';
   const legal = st.legal_deadline || f.legal_deadline;
-  const due = nx.deadline ? `By <b>${esc(longDate(nx.deadline))}</b> <span class="${closesText(nx.deadline).cls}">(${esc(closesText(nx.deadline).text)})</span>${nx.basis ? `<span class="muted">: ${esc(nx.basis)}</span>` : ''}${legal && legal !== nx.deadline ? ` · Payer's limit: <b>${esc(longDate(legal))}</b>` : ''}` : '';
+  const due = nx.deadline ? `By <b${nx.basis ? ` title="${esc(nx.basis)}"` : ''}>${esc(longDate(nx.deadline))}</b> <span class="${closesText(nx.deadline).cls}">(${esc(closesText(nx.deadline).text)})</span>${legal && legal !== nx.deadline ? ` · Payer's limit: <b>${esc(longDate(legal))}</b>` : ''}` : '';
   const rec = nx.recovery || {};
   const worth = nx.expected_cents ? `At stake <b>${money2(nx.expected_cents)}</b>${nx.ranked_cents != null ? ` · about <b>${money2(nx.ranked_cents)}</b> expected back` : ''}` : '';
   const primary = xpPrimary(nx, (r.packets || []).length > 0);
-  const more = (nx.buttons || []).filter(k => k !== primary && XP_BUTTON[k]);
+  const url = xpEmaUrl(f, x, nx);
+  const more = xpButtons(nx).concat(url && !(nx.buttons || []).includes('open_in_ema') ? ['open_in_ema'] : []).filter(k => k !== primary && XP_BUTTON[k]);
   const ids = state.worklist || [], i = ids.indexOf(f.finding_id), more2 = i >= 0 && (i < ids.length - 1 || (!!state.wlNext && (state.wlTotal || 0) > ids.length));
   const steps = (nx.steps || []).filter(Boolean);
   const sib = (nx.siblings || []).length;
   return `<div class="todo-box xp-box" id="xpBox">
     <div class="todo-top">${xpChips(f, ws)}${follow ? `<span class="muted small">follow up ${esc(longDate(follow))}</span>` : ''}${i >= 0 ? `<span class="muted small">Item ${i+1} of ${Number(Math.max(state.wlTotal||0, ids.length)).toLocaleString()}</span>` : ''}</div>
-    ${vd.sentence ? `<div class="xp-verdict">${esc(vd.sentence)}${rowsCited.length ? ` <a href="#" class="xp-rows small" data-rows="${rowsCited.join(',')}">${rowsCited.length > 1 ? 'Rows' : 'Row'} ${rowsCited.join(', ')}</a>` : ''}</div>` : ''}
+    ${vd.sentence ? `<div class="xp-verdict">${esc(rowsCited.length ? xpUncited(vd.sentence) : vd.sentence)}${rowsCited.length ? ` <a href="#" class="xp-rows small" data-rows="${rowsCited.join(',')}">${rowsCited.length > 1 ? 'Rows' : 'Row'} ${rowsCited.join(', ')}</a>` : ''}</div>` : ''}
     ${strength ? `<div class="small muted">${strength}</div>` : ''}
     ${nx.action ? `<div class="todo-next"><b>Next:</b> ${esc(nx.action)}</div>` : ''}
     ${nx.who || due ? `<div class="small">${nx.who ? `Who: ${esc(nx.who)}` : ''}${nx.who && due ? ' · ' : ''}${due}</div>` : ''}
-    ${worth ? `<div class="small" ${rec.basis ? `title="${esc(rec.basis)}"` : ''}>${worth}${rec.basis ? ` <span class="muted">(${esc(rec.basis)})</span>` : ''}</div>` : ''}
-    ${steps.length ? `<details class="xp-steps" ${steps.length <= 3 ? 'open' : ''}><summary class="small">${steps.length === 1 ? 'The step' : `The ${steps.length} steps`}</summary><ol class="small">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
+    ${worth ? `<div class="small" ${rec.basis ? `title="${esc(rec.basis)}"` : ''}>${worth}</div>` : ''}
+    ${steps.length ? `<details class="xp-steps"><summary class="small">${steps.length === 1 ? 'The step' : `The ${steps.length} steps`}</summary><ol class="small">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></details>` : ''}
     ${(nx.needs || []).length ? `<div class="small muted">It needs: ${esc(nx.needs.join('; '))}</div>` : ''}
     ${sib ? `<div class="small muted">${pl(sib, 'other open item')} on this visit: work them together.</div>` : ''}
     <div class="todo-err sev-high small" id="xpErr" role="alert"></div>
@@ -527,7 +575,9 @@ async function xpDecisions(id, el){
 // the next step's buttons. Each changes what it says it changes and nothing else: a status (with its note), a line in the
 // item's history, the clipboard, or a page to open. A fax goes only after the packet has been read, to the confirmed number.
 function xpBind(f, x, r, d, done){
+  x = xpEffective(f, x);
   const nx = ((x || {}).explain || {}).next_step || {};
+  const url = xpEmaUrl(f, x, nx);
   const err = msg => { const e = d.querySelector('#xpErr'); if(e) e.textContent = msg; };
   const say = msg => { const m = d.querySelector('#xpMsg'); if(m){ m.className = 'small ok'; m.textContent = msg; } };
   const copy = async (text, what) => { try { await navigator.clipboard.writeText(text); say(`${what} copied.`); } catch(e){ err('Could not copy here: select the text and copy it by hand.'); } };
@@ -545,6 +595,7 @@ function xpBind(f, x, r, d, done){
     request_era: async () => { if(!eraText){ err('No ERA request for this item.'); return; } await copy(eraText, 'The ERA request'); event('era_requested').catch(()=>{}); },
     mark_sent: async () => { const n = prompt('Mark it sent? Say what went out and how (kept in its history; optional):', ''); if(n === null) return; await status('appealed', n.trim() || 'Sent from the next step'); },
     log_outcome: () => xpOutcome(f, d, status, err),
+    decide: () => xpDecide(f, d, status, err, act),
     mark_posted: async () => {
       if(nx.route === 'post'){ if(!confirm('Mark it posted in EMA? It leaves the list.')) return; await status('resolved', 'Posted in EMA', {recovered_cents: 0}); return; }
       const n = prompt('What did you post in EMA (the remittance or the takeback)? Kept in its history; the item stays on the list:', ''); if(n === null) return;
@@ -555,12 +606,33 @@ function xpBind(f, x, r, d, done){
     let_go: async () => { const n = prompt('Let it go? It leaves the list and counts as let go.\n\nWhy (kept in its history; required):', ''); if(n === null) return;
       if(!n.trim()){ err('Not changed: letting an item go needs a reason.'); return; } await status('dismissed', n.trim()); },
     reopen: async () => { if(!confirm('Reopen it? It goes back on the list as To do.')) return; await status('open', 'Reopened'); },
-    open_in_ema: () => { if(nx.claim_url) window.open(nx.claim_url, '_blank', 'noopener,noreferrer'); else err('No EMA address is set for this site.'); },
+    open_in_ema: () => { if(url) window.open(url, '_blank', 'noopener,noreferrer'); else err('No EMA address is set for this site.'); },
   };
   d.querySelectorAll('[data-xp]').forEach(b => b.onclick = async () => { const fn = act[b.dataset.xp]; if(!fn) return; err(''); b.disabled = true;
     try { await fn(); } catch(e){ err('Not done: ' + (e.message || 'no answer from the site') + '. Try again.'); } finally { b.disabled = false; } });
   d.querySelectorAll('a.xp-rows').forEach(a => a.onclick = e => { e.preventDefault(); const st = d.querySelector('#xpStory'); if(!st) return; st.open = true;
     const first = st.querySelector(`tr[data-n="${(a.dataset.rows || '').split(',')[0]}"]`); (first || st).scrollIntoView({block:'center'}); });
+}
+// Decide what to do, for an item whose next step is a decision (route decide): it needed a fix and was sent again (Sent,
+// with what went), the payer is wrong (the appeal: its packet or letter), or the payer is right (Let go, with the reason)
+function xpDecide(f, d, status, err, act){
+  const box = d.querySelector('#xpMsg'); if(!box) return;
+  box.className = 'small';
+  box.innerHTML = `<div class="xp-log"><b>What did you decide?</b>
+    <label><input type="radio" name="xpd" value="fixed" checked> It needed a fix: I corrected it and sent it again</label>
+    <label><input type="radio" name="xpd" value="appeal"> The payer is wrong: appeal it</label>
+    <label><input type="radio" name="xpd" value="let_go"> The payer is right: let it go</label>
+    <input id="xpdNote" maxlength="300" placeholder="What you sent, or why (kept in its history)" style="width:100%;margin:4px 0">
+    <div class="actions"><button class="primary" id="xpdSave">Go</button><button class="ghost" id="xpdCancel">Cancel</button></div></div>`;
+  box.querySelector('#xpdCancel').onclick = () => { box.innerHTML = ''; };
+  box.querySelector('#xpdSave').onclick = async () => {
+    const what = (box.querySelector('input[name=xpd]:checked') || {}).value, note = box.querySelector('#xpdNote').value.trim();
+    try {
+      if(what === 'appeal'){ box.innerHTML = ''; await act.build_packet(); return; }
+      if(what === 'let_go'){ if(!note){ err('Say why it is let go: the reason is kept in its history.'); return; } await status('dismissed', note); return; }
+      await status('appealed', 'Corrected and sent again' + (note ? ': ' + note : ''));
+    } catch(e){ err('Not saved: ' + (e.message || 'no answer from the site')); }
+  };
 }
 // Log what happened: the payer is working on it (it waits on the payer, with the note), the payer paid (Paid), or the payer
 // said no (it stays to do, with the answer in its history)
@@ -584,12 +656,16 @@ function xpOutcome(f, d, status, err){
     } catch(e){ err('Not saved: ' + (e.message || 'no answer from the site')); }
   };
 }
-// Accept a write-off pattern: the owner's policy table (one decision for every item of the pattern), never one item quietly
+// Accept a write-off pattern: the write-off policy table (one decision for every item of the pattern), never one item
+// quietly. It carries the owner's password where the page holds one, and asks for it when the site wants it (as a payer's
+// fax number does: faxes.js faxOwnerPost), so the owner's gate holds wherever the site sets one
 async function xpAccept(f, nx, err, say){
   const pattern = nx.pattern;
   if(!pattern){ state.tab = 'policy'; location.hash = 'policy'; if(typeof closeDetail === 'function') closeDetail(); render(); return; }
-  if(!confirm(`Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as the practice's policy? Its items leave the work list and stay findable; the owner can change it on the Write-off policy page.`)) return;
-  await post('/api/ema/policy', {pattern, decision: 'accept'});
+  if(!confirm(`Accept every write-off like this one (${pattern.split('|').filter(Boolean).join(', ')}) as policy? Its items leave the work list and stay findable. The decision shows on the Write-off policy page with who made it, where it can be changed.`)) return;
+  const where = document.querySelector('#xpMsg');
+  if(typeof faxOwnerPost === 'function') await faxOwnerPost('/api/ema/policy', {pattern, decision: 'accept'}, where);
+  else await post('/api/ema/policy', {pattern, decision: 'accept'});
   say('Accepted as policy: the next run takes these items off the work list.');
 }
 // Fax it to the payer: what goes is read first (the packet's letter and PDF; for a rate request, the letter), then sent as it
@@ -616,9 +692,13 @@ async function xpFaxPreview(f, packets, d){
     let res; try { res = await post('/api/appeals/send', Object.assign({finding_id: f.finding_id}, said)); } catch(e){ msg.className = 'small sev-high'; msg.textContent = e.message; bt.disabled = false; return; }
     if(res.status === 'sent'){ $('#modal').classList.remove('open'); state.brief = null; state.dirty = true; openDetail(f.finding_id); return; }
     msg.className = 'small sev-medium'; msg.textContent = res.reason || 'Not sent.'; bt.disabled = false;
-    if(res.code === 'stale' || res.code === 'check_code'){
-      const again = document.createElement('button'); again.textContent = res.code === 'stale' ? 'Still unpaid in EMA: fax it anyway' : 'It went out as billed: fax it';
-      again.onclick = () => { if(res.code === 'stale') said.stale_ok = true; else said.confirmed = true; again.remove(); go(); };
+    // the one answer a person may give where there is one: still unpaid in EMA, the code went out as billed, or it was
+    // checked and is still unpaid (EMA shows it settled, or the archive shows it likely paid)
+    const answer = {stale: ['Still unpaid in EMA: fax it anyway', 'stale_ok'], check_code: ['It went out as billed: fax it', 'confirmed'],
+      check_first: ['Checked: still unpaid, fax it', 'checked']}[res.code];
+    if(answer){
+      const again = document.createElement('button'); again.textContent = answer[0];
+      again.onclick = () => { said[answer[1]] = true; again.remove(); go(); };
       msg.appendChild(document.createTextNode(' ')); msg.appendChild(again);
     } };
   $('#xpFaxGo').onclick = go;

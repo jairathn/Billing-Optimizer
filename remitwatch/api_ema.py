@@ -14,8 +14,10 @@ CSVs. remitwatch.ema_checks does the work on the whole store during the run; thi
     GET  /api/ema/ar?bucket=&page=      one page of the A/R rows of one bucket of the A/R accounted for
     GET  /api/ema/checks?cause=&month=&payer=&page=   one page of the checks EMA posted that no 835 carries
     GET  /api/ema/checks.csv, /api/ema/unposted.csv, /api/ema/credits.csv   (no patient names)
-    GET  /api/ema/policy                the write-off patterns (payer group x code x modifier x reason) with the owner's
-                                        decisions
+    GET  /api/ema/policy                the owner's write-off policy table: the write-off patterns (payer group x code x
+                                        modifier x reason), the codes a payer almost never pays (group|code||payer_policy,
+                                        out of Work now until the owner decides) and the reasons EMA posts as contractual
+                                        (group|||reason, PLAN decision 3), with the decisions
     POST /api/ema/policy                {pattern, decision: pursue|accept, name}: decide a pattern (any signed-in person,
                                         as with the hide rules; who and when are kept)
     GET  /api/ema/policy/items?pattern=&page=   one page of a pattern's items
@@ -72,6 +74,29 @@ CHECK_CAUSES = {
 # remittances someone can ask for: a gap in the feed, a payer that sends none. Checks posted after the newest remittance
 # (after_feed) are not asked for one by one: the feed is behind, and they match once the newest downloads arrive.
 MISSING_CAUSES = ("feed_gap", "no_era", "no_era_va")
+# what each dollar figure rests on, said on hover beside it (PLAN decision 5); "estimate" where the figure is priced, not
+# paid or posted
+BASIS = {
+    "shortfall": "Estimate: what the payer kept short, against its usual rate for the code (from the remittances); no "
+                 "contract is on file to price it exactly.",
+    "auto_written_off": "EMA's postings: written off the day the payer's answer posted, nobody worked it, and its safe date to "
+                        "appeal has not passed (the date bulk appeal uses). Dollars: an estimate against the payer's usual rate.",
+    "unworked": "EMA's postings and A/R, and this site's own record: no work on the item in the 21 days to the date shown. "
+                "Dollars: an estimate against the payer's usual rate.",
+    "post": "The remittance (835): the payer paid it and EMA has no posting for it.",
+    "refund": "EMA's Production report: a line paid beyond what it owed.",
+    "upper": "An upper bound: the charge less what was paid, as EMA wrote it off. No rate prices the line, so it is in no total.",
+    "c1": "EMA's postings: insurance payments posted on checks no remittance on file carries.",
+    "c4": "The remittances (835): payments the payer sent that EMA has no posting for.",
+    "c8": "EMA's A/R report: lines with a balance below zero.",
+    "w4": "EMA's A/R report, each insurance line in one place.",
+    "policy": "Estimate: the shortfall against the payer's usual rate for the code, from the remittances.",
+    "payer_policy": "Estimate: what the set-aside denials would bring at the payer's usual rate; the payer paid the code on few "
+                    "of the lines it answered (shown beside it).",
+    "contractual": "EMA's postings: what EMA wrote off as contractual for this reason. Not in any total.",
+    "blind_835": "EMA's postings: insurance payments posted on checks no remittance on file explains.",
+    "blind_work": "Estimate: the shortfall of the items in Work now, against the payer's usual rate.",
+}
 OUTCOME_WORDS = {"auto_written_off": "Written off by EMA's posting rule", "written_off_while_pending": "Written off while the payer was still deciding",
                  "lost_to_timely_filing": "Lost to late filing", "written_off_at_posting": "Written off the day it posted",
                  "contractual_at_posting": "Taken as contractual the day it posted", "written_off_later": "Written off later",
@@ -257,12 +282,16 @@ def count(go: dict) -> dict:
 
 
 # ------------------------------------------------------------------------------------------------- the blind spot
-def blind_spot(c: sqlite3.Connection) -> dict:
+TODO_GO = {"state": "todo", "status": "all", "deadline": ""}      # Today's Work now tile (the Worklist's default list)
+
+
+def blind_spot(c: sqlite3.Connection, work: dict | None = None) -> dict:
     """What the site cannot see while a feed is behind, since when, and in dollars (PLAN non-negotiable 3). The run's own
     figure (meta selfcheck:blind, unit G) is used when it is stored; until then: the remittances (no payment newer than
     10 days), EMA's A/R (older than 8 days) and Production report (older than 14), with the dollars the run stored:
     insurance payments EMA posted after the newest remittance that no 835 carries (meta ema:reconcile), and the items in
-    Work now, any of which may have been paid or worked since."""
+    Work now (the Work now tile's own count, `work` when the caller has it), any of which may have been paid or worked
+    since. Each part (`parts`) carries its own dollars, its words and what they rest on; `cents` is their sum."""
     stored = _meta(c, "selfcheck:blind", None)
     if isinstance(stored, dict) and "blind" in stored and "error" not in stored:
         return dict(stored, source="selfcheck")
@@ -282,44 +311,49 @@ def blind_spot(c: sqlite3.Connection) -> dict:
             d = _days(as_of, today)
             feeds.append({"feed": key, "label": label, "since": str(as_of)[:10], "days": d, "stale": d is not None and d > limit})
     stale = [f for f in feeds if f["stale"]]
-    out: dict = {"blind": bool(stale), "feeds": feeds, "cents": 0, "lines": [], "source": "run", "today": today}
+    out: dict = {"blind": bool(stale), "feeds": feeds, "cents": 0, "lines": [], "parts": [], "source": "run", "today": today}
     if not stale:
         return out
-    work = _work_now(c)
-    lines = []
-    cents = 0
+    if work is None:
+        work = _work_now(c)
+    lines, parts = [], []
     by = {f["feed"]: f for f in stale}
+    work_said = False
     if "835" in by:
         f = by["835"]
         rec = _meta(c, "ema:reconcile", {}) or {}
         after = (rec.get("since_feed_stopped") or {}) if isinstance(rec, dict) else {}
         if after.get("cents"):
-            cents += int(after["cents"])
+            parts.append({"feed": "835", "cents": int(after["cents"]), "words": "of insurance payments no remittance explains",
+                          "basis": BASIS["blind_835"]})
             lines.append(f"No remittance after {_long(f['since'])} ({_n(f['days'], 'day')}). Since then EMA posted {_usd(after['cents'])} "
                          f"of insurance payments on {_n(after.get('checks'), 'check')} that no remittance on file explains, so "
                          "RemitWatch cannot see what the payers paid, cut or denied on them.")
         else:
-            cents += work["cents"]
-            lines.append(f"No remittance after {_long(f['since'])} ({_n(f['days'], 'day')}). {_n(work['n'], 'item')} worth "
+            work_said = True
+            parts.append({"feed": "835", "cents": int(work["cents"] or 0), "words": "in Work now that may have been paid",
+                          "basis": BASIS["blind_work"]})
+            lines.append(f"No remittance after {_long(f['since'])} ({_n(f['days'], 'day')}). The {_n(work['n'], 'item')} worth "
                          f"{_usd(work['cents'])} in Work now may have been paid since, and still show as open.")
     ema_stale = [by[k] for k in ("ar", "production") if k in by]
     if ema_stale:
         names = " and ".join(f"{f['label']} ({_n(f['days'], 'day')} old)" for f in ema_stale)
         oldest = min(f["since"] for f in ema_stale)
-        if "835" not in by or not lines or "may have been paid" not in lines[-1]:
-            cents += work["cents"]
+        if not work_said:
+            parts.append({"feed": "ema", "cents": int(work["cents"] or 0), "words": "in Work now that may already be worked",
+                          "basis": BASIS["blind_work"]})
         lines.append(f"{names[0].upper()}{names[1:]}: work done in EMA after {_long(oldest)} is not seen, so any of the "
                      f"{_n(work['n'], 'item')} worth {_usd(work['cents'])} in Work now may already be worked.")
-    out.update(cents=cents, lines=lines, since=min(f["since"] for f in stale))
+    out.update(cents=sum(p["cents"] for p in parts), lines=lines, parts=parts, since=min(f["since"] for f in stale))
     return out
 
 
 def _work_now(c: sqlite3.Connection) -> dict:
+    """The Work now tile's own count (work now and the follow-ups due, as the Worklist lists them), so the banner beside it
+    says the same number."""
     if "work_state" not in _cols(c, "findings"):
         return {"n": 0, "cents": 0}
-    r = c.execute(f"""SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE work_state='work_now' AND COALESCE(stale,0)=0
-                      AND category IN ({','.join('?' * 4)})""", MONEY_CATS.split(",")).fetchone()
-    return {"n": r[0], "cents": r[1]}
+    return count(dict(TODO_GO))
 
 
 def _freshness(c: sqlite3.Connection) -> dict:
@@ -339,36 +373,81 @@ def blind(user: str = Depends(_user)):
 
 
 # --------------------------------------------------------------------------------------------------------- Today
+# the money that is not claim work: 835 payments EMA never posted (to post) and credits (to refund). Each count opens
+# its own list on the Data tab, by this very filter (/api/findings), so the number is the list's count line
+OTHER_GO = {"post": {"signal": "REMIT_NOT_POSTED", "category": "fees", "status": TODO, "deadline": ""},
+            "refund": {"signal": "CREDIT_BALANCE", "category": "refund", "status": TODO, "deadline": ""}}
+
+
+def _other_counts() -> dict:
+    return {k: count(dict(go)) for k, go in OTHER_GO.items()}
+
+
+def _last_run_at(c: sqlite3.Connection) -> str | None:
+    """When the newest run that read EMA's reports finished its detection (meta ema:wiring at)."""
+    w = _meta(c, "ema:wiring", {}) or {}
+    return w.get("at") if isinstance(w, dict) else None
+
+
+def _after(a: Any, b: Any) -> bool:
+    """Whether time a is later than time b (ISO times; a missing b: yes)."""
+    if not b:
+        return True
+    try:
+        return datetime.fromisoformat(str(a)) > datetime.fromisoformat(str(b))
+    except (TypeError, ValueError):
+        return str(a or "") > str(b)
+
+
+def _decision_pending(row: dict, run_at: str | None) -> bool:
+    """A held report someone chose to apply after the newest run: the next run reads it. One chosen before the newest
+    run and still held was not read by it (too slow, or held again): it needs a person again."""
+    return row.get("status") == "held" and row.get("decision") == "apply" and bool(row.get("decided_by")) and \
+        _after(row.get("decided_at"), run_at)
+
+
 @router.get("/api/ema/today")
 def today(user: str = Depends(_user)):
     """Today's counts beside the plan: the money items by state (Work now with the follow-ups due, which is the Worklist's
     default; the follow-ups due among them; Waiting; and the four that need nothing today), EMA's automatic write-offs
-    still appealable, the items nobody has worked, the payments EMA posted with no remittance last month, the reports'
+    still appealable, the items nobody has worked (inside Work now), the payments to post and credits to refund, the
+    patterns that wait for the owner's decision, the payments EMA posted with no remittance last month, the reports'
     ages and what the run noted. Each count carries the Worklist filter it was counted with (`go`): a click opens exactly
-    that list."""
+    that list. `basis` says what each figure's dollars rest on (PLAN decision 5)."""
     a = _api()
     with _conn() as c:
         fcols = _cols(c, "findings")
         ready = "work_state" in fcols
-        out: dict = {"today": _today(), "ready": ready, "states": {}, "blind": blind_spot(c)}
+        out: dict = {"today": _today(), "ready": ready, "states": {}, "basis": dict(BASIS)}
         rec = _meta(c, "ema:reconcile", {}) or {}
         # last month's payments with no remittance, as the run judged them (ema_checks data health remits_missing)
         out["remits_missing"] = rec.get("remits_missing") if isinstance(rec, dict) and _reports_arrived(c) else None
         out["fresh"] = _freshness(c)
         # reports that wait (a raw CSV this site cannot read, a second Production file in one run) or need a decision, with
-        # the catalog's own words for what to do
-        out["reports_waiting"], out["reports_held"] = [], 0
+        # the catalog's own words for what to do. A held report a person chose to apply since the newest run waits for the
+        # next run, not for a decision
+        out["reports_waiting"], out["reports_held"], out["reports_pending"] = [], 0, 0
         if _reports_arrived(c):
-            for rep, name, status, reason in c.execute("""SELECT report, source_name, status, status_reason FROM ema_report_files
-                                                          WHERE status IN ('waiting','reread','held') ORDER BY received_at DESC"""):
+            run_at = _last_run_at(c)
+            for rep, name, status, reason, decision, by, at in c.execute(
+                    """SELECT report, source_name, status, status_reason, decision, decided_by, decided_at FROM ema_report_files
+                       WHERE status IN ('waiting','reread','held') ORDER BY received_at DESC"""):
                 if status == "held":
-                    out["reports_held"] += 1
+                    if _decision_pending({"status": status, "decision": decision, "decided_by": by, "decided_at": at}, run_at):
+                        out["reports_pending"] += 1
+                    else:
+                        out["reports_held"] += 1
                 elif len(out["reports_waiting"]) < 10:
                     out["reports_waiting"].append({"report": rep, "source_name": name, "status": status, "reason": reason})
         wiring = _meta(c, "ema:wiring", {}) or {}
         out["wiring_errors"] = len(wiring.get("errors") or []) if isinstance(wiring, dict) else 0
         has_outcome = "ema_outcome" in fcols
         through = _unworked_since(c)
+        try:
+            tot = policy_table(c)["totals"]
+            out["decide"] = tot["decide"]
+        except (sqlite3.Error, ValueError, TypeError, KeyError):
+            out["decide"] = None
     token = a._WINDOWS_MEMO.set({})
     try:
         if ready:
@@ -377,10 +456,14 @@ def today(user: str = Depends(_user)):
         if has_outcome:
             out["auto_written_off"] = count({"ema": "auto_written_off", "status": TODO, "deadline": "valid", "sort": "shortfall"})
         if has_outcome and through:
-            u = count({"ema": "unworked", "status": "all", "deadline": ""})
-            out["unworked"] = dict(u, data_through=through)
-        out["other"] = {"post": count({"signal": "REMIT_NOT_POSTED", "category": "fees", "status": TODO, "deadline": ""}),
-                        "refund": count({"signal": "CREDIT_BALANCE", "category": "refund", "status": TODO, "deadline": ""})}
+            # inside Work now: an item in Done, Expired or Accepted is not work, whatever EMA shows on it (a store before
+            # the states has no Work now to count inside)
+            go = {"state": "todo", "ema": "unworked", "status": "all", "deadline": ""} if ready else \
+                {"ema": "unworked", "status": "all", "deadline": ""}
+            out["unworked"] = dict(count(go), data_through=through)
+        out["other"] = _other_counts()
+        with _conn() as c:
+            out["blind"] = blind_spot(c, work=out["states"].get("todo"))
     finally:
         a._WINDOWS_MEMO.reset(token)
     if isinstance(rec, dict) and rec.get("since_feed_stopped"):
@@ -412,6 +495,13 @@ def _catalog(c: sqlite3.Connection) -> dict:
         cond = "kind IN ('ema:unknown','ema:too_large')" + (" AND COALESCE(status,'not_read') = 'not_read'" if "status" in fcols else "")
         not_read = [dict(zip(want, r)) for r in c.execute(f"SELECT {', '.join(want)} FROM files WHERE {cond} ORDER BY ingested_at DESC LIMIT 50")]
     cat["not_read"] = not_read
+    # a held report someone chose to apply after the newest run waits for the next run; one chosen before it and still
+    # held was not read by that run and needs a person again (the page offers Apply and Discard again)
+    run_at = _last_run_at(c)
+    cat["run_at"] = run_at
+    for f in cat["files"]:
+        f["decision_pending"] = _decision_pending(f, run_at)
+    cat["held"] = [f for f in cat["files"] if f.get("status") == "held"]
     cat["by_status"] = {}
     for f in by_id.values():
         cat["by_status"][f["status"]] = cat["by_status"].get(f["status"], 0) + 1
@@ -443,6 +533,10 @@ def reconcile(user: str = Depends(_user)):
         return _reconcile(c)
 
 
+# a check EMA posted with no payer name is grouped as Unknown (ema_reports' grouper names it so; an empty group is the same)
+_GROUP_SQL = "COALESCE(NULLIF(payer_group,''),'Unknown')"
+
+
 def _c1_rows(c: sqlite3.Connection, rec: dict) -> list[dict]:
     """The checks no 835 carries, by payer group, month and cause, for the remittances someone can ask for (MISSING_CAUSES):
     the rows of the re-send request table, each with what to ask for."""
@@ -450,11 +544,11 @@ def _c1_rows(c: sqlite3.Connection, rec: dict) -> list[dict]:
         return []
     out = []
     for grp, month, cause, n, cents in c.execute(
-            f"""SELECT COALESCE(payer_group,''), substr(first_posted,1,7), cause, COUNT(*), COALESCE(SUM(ins_paid),0) FROM ema_checks
+            f"""SELECT {_GROUP_SQL}, substr(first_posted,1,7), cause, COUNT(*), COALESCE(SUM(ins_paid),0) FROM ema_checks
                 WHERE match = 'none' AND COALESCE(ins_paid,0) <> 0 AND cause IN ({','.join('?' * len(MISSING_CAUSES))})
                 GROUP BY 1, 2, 3 ORDER BY 2 DESC, 5 DESC""", MISSING_CAUSES):
         why, ask = CHECK_CAUSES.get(cause, ("", ""))
-        out.append({"payer_group": grp or "Unknown", "month": month, "cause": cause, "why": why, "ask": ask, "checks": n, "cents": cents})
+        out.append({"payer_group": grp, "month": month, "cause": cause, "why": why, "ask": ask, "checks": n, "cents": cents})
     return out
 
 
@@ -491,11 +585,22 @@ def data(user: str = Depends(_user)):
             tab = policy_table(c)
             tot = tab["totals"]
             out["policy"] = {"patterns": len(tab["patterns"]), "cents": tot["cents"], "appealable_cents": tot["appealable_cents"],
-                             "accepted": tot["accepted"], "at": tab["run_at"]}
+                             "legal_only_cents": tot["legal_only_cents"], "accepted": tot["accepted"], "decide": tot["decide"],
+                             "contractual": tot["contractual"], "at": tab["run_at"]}
         except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
             out["policy"] = {"error": _fault(exc)}
         out["cause_words"] = {k: {"why": v[0], "ask": v[1]} for k, v in CHECK_CAUSES.items()}
-        return out
+        out["basis"] = dict(BASIS)
+    # the payments to post and the credits to refund the run found (Today's two counts): each with the filter of the list
+    # the panel opens, so the number is that list's count line
+    try:
+        out["items"] = _other_counts()
+    except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+        out["items"] = {"error": _fault(exc)}
+    return out
+
+
+ITEM_BUCKETS = ("denied_todo", "denied_started", "denied_sent")     # the A/R buckets whose rows have an item on this site
 
 
 @router.get("/api/ema/ar")
@@ -511,6 +616,19 @@ def ar(bucket: str = Query(..., max_length=40), page: int = Query(1, ge=1, le=10
             return {"bucket": bucket, "label": ec.AR_BUCKET_LABELS[bucket], "page": page, "size": 100, "count": 0, "cents": 0, "rows": [], "pending": 0}
         out = ec.ar_list(c, bucket, page)
         out["claim_url"] = er.claim_url_template(c)
+        if bucket in ITEM_BUCKETS and out.get("rows") and "ema_link" in _cols(c, "findings"):
+            # the item each row has (its EMA claim link), the open one first: a click opens it
+            links = sorted({r["link"] for r in out["rows"] if r.get("link") is not None})
+            got: dict = {}
+            for i in range(0, len(links), 500):
+                part = links[i:i + 500]
+                for link, fid in c.execute(
+                        f"""SELECT ema_link, finding_id FROM findings WHERE ema_link IN ({','.join('?' * len(part))})
+                            AND COALESCE(stale,0)=0 ORDER BY status NOT IN ('open','in_progress'), shortfall_cents DESC, finding_id""", part):
+                    got.setdefault(link, fid)
+            for r in out["rows"]:
+                if r.get("link") in got:
+                    r["finding_id"] = got[r["link"]]
         return out
 
 
@@ -534,8 +652,8 @@ def checks(cause: Optional[str] = Query(None, max_length=40), month: Optional[st
             where.append("substr(first_posted,1,7) = ?")
             args.append(month)
         if payer:
-            where.append("COALESCE(payer_group,'') = ?")
-            args.append("" if payer == "Unknown" else payer)
+            where.append(f"{_GROUP_SQL} = ?")
+            args.append(payer)
         w = " AND ".join(where)
         n, cents = c.execute(f"SELECT COUNT(*), COALESCE(SUM(ins_paid),0) FROM ema_checks WHERE {w}", args).fetchone()
         rows = [{"check_number": r[0], "first_posted": r[1], "payer": r[2], "payer_group": r[3] or "Unknown", "cents": r[4] or 0,
@@ -615,13 +733,29 @@ def unposted_csv(user: str = Depends(_user)):
     return _csv("remitwatch-payments-not-posted.csv", _stream(_unposted_rows))
 
 
+def _credit_rows(conn: sqlite3.Connection) -> Iterator[list]:
+    """The credits on EMA's A/R (a balance below zero: the rows ema_checks.credits counts), one row each with the claim ID
+    to find it in EMA. The patient's initials only while the names switch is on: with names off the file carries the claim
+    ID only, as findings.csv does (initials beside a date of service would point at a person)."""
+    names = bool(_api().SHOW_PHI)
+    yield ["claim_id", "initials", "service_date", "code", "amount", "age_days", "party", "coverage", "payer_group"]
+    cur = conn.execute("""SELECT claim_id, initials, svc, cpt, exposure_cents,
+                                 CAST(julianday(as_of) - julianday(COALESCE(aging_date, svc)) AS INTEGER), party, coverage, payer_group
+                          FROM ema_ar WHERE COALESCE(exposure_cents, 0) < 0 ORDER BY svc, cpt, claim_id""")
+    while True:
+        got = cur.fetchmany(500)
+        if not got:
+            break
+        for cid, ini, svc, cpt, cents, age, party, cov, grp in got:
+            yield [cid or "", (ini or "") if names else "", svc, cpt or "", f"{(cents or 0) / 100:.2f}", age, party, cov or "", grp or ""]
+
+
 @router.get("/api/ema/credits.csv")
 def credits_csv(user: str = Depends(_user)):
-    from . import ema_checks as ec
     with _conn() as c:
         if not _table(c, "ema_ar"):
             raise HTTPException(404, "No EMA A/R report has been read yet.")
-    return _csv("remitwatch-credits.csv", _stream(ec.credits_csv))
+    return _csv("remitwatch-credits.csv", _stream(_credit_rows))
 
 
 # ------------------------------------------------------------------------------- the owner's write-off policy (O11)
@@ -643,59 +777,160 @@ def split_pattern(pattern: str) -> dict:
     return {"payer_group": parts[0], "code": parts[1], "modifier": parts[2], "reason": parts[3]}
 
 
+def kind_of(pattern: str) -> str:
+    """The three kinds of key the owner decides: a code a payer almost never pays ('group|code||payer_policy': its denials
+    stay out of Work now until the owner decides), a reason EMA posts as contractual ('group|||reason', PLAN decision 3:
+    the EMA_DENIAL_AS_CONTRACTUAL items), and a write-off pattern ('group|code|modifier|reason')."""
+    parts = split_pattern(pattern)
+    if parts["reason"] == "payer_policy":
+        return "payer_policy"
+    if not parts["code"] and not parts["modifier"] and parts["reason"]:
+        return "contractual"
+    return "write_off"
+
+
 def _reason_text(reason: str) -> str:
     from .codes import CARC
     code = reason.split("-", 1)[-1] if reason else ""
     return CARC.get(code, "") if code else ""
 
 
+def _c7_key(group: Any, reason: Any, carc: Any) -> str:
+    """The owner's key for an EMA_DENIAL_AS_CONTRACTUAL item, exactly as story.next_step and states.py build it."""
+    return f"{group or ''}|||{str(reason or carc or '')}"
+
+
+def _payer_policies(c: sqlite3.Connection, stored: dict) -> dict:
+    """The codes a payer almost never pays, as the run folded them (meta ema:payer_policy: every one; the table the run
+    stores keeps its 500 largest rows): {pattern: {group, code, paid, answered, n, cents}}."""
+    out: dict = {}
+    pp = _meta(c, "ema:payer_policy", {}) or {}
+    pats = pp.get("patterns") if isinstance(pp, dict) else None
+    if isinstance(pats, dict):
+        out.update({k: v for k, v in pats.items() if isinstance(v, dict)})
+    for row in stored.get("patterns") or []:
+        if isinstance(row, dict) and row.get("kind") == "payer_policy" and row.get("pattern") and row["pattern"] not in out:
+            out[row["pattern"]] = {"n": row.get("items"), "cents": row.get("cents"), "paid": row.get("paid"), "answered": row.get("answered")}
+    return out
+
+
+def _blank(key: str) -> dict:
+    return {"pattern": key, "items": 0, "cents": 0, "appealable": 0, "appealable_cents": 0, "legal_only": 0, "legal_only_cents": 0,
+            "auto": 0, "at_posting": 0, "rule_proven": 0, "by_policy": 0, "open": 0, "upper_n": 0, "upper_cents": 0}
+
+
 def policy_table(c: sqlite3.Connection) -> dict:
-    """Every write-off pattern with its items counted now (so a count equals the list it opens), the archive's later-paid
-    share and the run's 'at posting' figures from what the run stored (meta ema:policy_summary), and the decision (meta
-    ema:writeoff_policy: pursue by default, accept by a person, who and when). A decision saved after the run is marked
-    `pending`: the next run moves the pattern's items (accepted ones leave the work queue and stay findable)."""
+    """The owner's write-off policy table (O11), one row per key the owner decides:
+      - write-off patterns (kind write_off): every live item EMA wrote off, by the pattern the run recorded on it, counted
+        now (so a count equals the list it opens), with what is still appealable: open items inside the safe date or the
+        payer's own limit (orchestrator decision 2: past the safe date, one at a time; `legal_only` is that part);
+        undecided means pursue (the items stay in Work now);
+      - the codes a payer almost never pays (kind payer_policy), as the run folded them (meta ema:payer_policy): their
+        denials stay out of Work now until the owner decides (PLAN decision 14: never accepted by default), so an
+        undecided one is 'decide' and its dollars are counted in totals.decide, never in the write-off totals;
+      - the reasons EMA posts as contractual (kind contractual, PLAN decision 3: 'group|||reason'), from the live
+        EMA_DENIAL_AS_CONTRACTUAL items, their written-off dollars said apart (outside every money total).
+    The archive's later-paid share comes from what the run stored (meta ema:policy_summary); the decision from meta
+    ema:writeoff_policy (who and when). A decision saved after the run is `pending`: the next run moves the items
+    (accepted ones leave the work queue and stay findable)."""
     stored = _meta(c, "ema:policy_summary", {}) or {}
     stored = stored if isinstance(stored, dict) else {}
     decided = _meta(c, "ema:writeoff_policy", {}) or {}
     decided = decided if isinstance(decided, dict) else {}
     run_at = stored.get("at")
     by_key = {p.get("pattern"): p for p in stored.get("patterns") or [] if isinstance(p, dict)}
+    fcols = _cols(c, "findings")
     pats: dict[str, dict] = {}
-    if {"ema_outcome", "evidence"} <= _cols(c, "findings"):
+    if {"ema_outcome", "evidence"} <= fcols:
         w, params = _pattern_where(c)
-        for (key, n, cents, appealable, appealable_cents, auto, at_posting, proven, by_policy, open_n, upper_n, upper) in c.execute(
+        # still appealable: the safe date, or the payer's own limit where it is later (legal_deadline)
+        last = "MAX(appeal_deadline, COALESCE(legal_deadline, appeal_deadline))" if "legal_deadline" in fcols else "appeal_deadline"
+        legal = "(appeal_deadline < date('now') AND legal_deadline >= date('now'))" if "legal_deadline" in fcols else "0"
+        todo = "status IN ('open','in_progress')"
+        for (key, n, cents, appealable, appealable_cents, legal_n, legal_cents, auto, at_posting, proven, by_policy, open_n, upper_n,
+             upper) in c.execute(
                 f"""SELECT json_extract(evidence, '$.writeoff_pattern') k, COUNT(*), COALESCE(SUM(shortfall_cents),0),
-                           SUM(status IN ('open','in_progress') AND appeal_deadline >= date('now')),
-                           COALESCE(SUM(CASE WHEN status IN ('open','in_progress') AND appeal_deadline >= date('now') THEN shortfall_cents END),0),
+                           SUM({todo} AND {last} >= date('now')),
+                           COALESCE(SUM(CASE WHEN {todo} AND {last} >= date('now') THEN shortfall_cents END),0),
+                           SUM({todo} AND {legal}), COALESCE(SUM(CASE WHEN {todo} AND {legal} THEN shortfall_cents END),0),
                            SUM(ema_outcome = 'auto_written_off'), SUM(written_off_when = 'at_posting'),
                            SUM(ema_writeoff_evidence = 'rule_proven'), SUM(ema_outcome = 'written_off_by_policy'),
-                           SUM(status IN ('open','in_progress')),
+                           SUM({todo}),
                            SUM(json_extract(evidence, '$.written_off_basis') = 'charge_less_paid'),
                            COALESCE(SUM(CASE WHEN json_extract(evidence, '$.written_off_basis') = 'charge_less_paid' THEN written_off_cents END),0)
                     FROM findings WHERE {w} GROUP BY k""", params):
-            pats[key] = {"pattern": key, "items": n, "cents": cents, "appealable": appealable or 0, "appealable_cents": appealable_cents or 0,
-                         "auto": auto or 0, "at_posting": at_posting or 0, "rule_proven": proven or 0, "by_policy": by_policy or 0,
-                         "open": open_n or 0, "upper_n": upper_n or 0, "upper_cents": upper or 0}
+            pats[key] = dict(_blank(key), kind="write_off", items=n, cents=cents, appealable=appealable or 0,
+                             appealable_cents=appealable_cents or 0, legal_only=legal_n or 0, legal_only_cents=legal_cents or 0,
+                             auto=auto or 0, at_posting=at_posting or 0, rule_proven=proven or 0, by_policy=by_policy or 0,
+                             open=open_n or 0, upper_n=upper_n or 0, upper_cents=upper or 0)
+    # the codes a payer almost never pays, as the run folded them
+    for key, pp in _payer_policies(c, stored).items():
+        n, cents = int(pp.get("n") or 0), int(pp.get("cents") or 0)
+        pats[key] = dict(_blank(key), kind="payer_policy", items=n, cents=cents, appealable=None, appealable_cents=None,
+                         legal_only=None, legal_only_cents=None, auto=None, at_posting=None, rule_proven=None, by_policy=None,
+                         open=None, paid=pp.get("paid"), answered=pp.get("answered"))
+    # the reasons EMA posts as contractual: one key per payer group and reason (the items are one per posted year)
+    if "evidence" in fcols:
+        for group, carc, ev_text, status in c.execute("""SELECT payer_group, carc, evidence, status FROM findings
+                                                         WHERE signal='EMA_DENIAL_AS_CONTRACTUAL' AND COALESCE(stale,0)=0"""):
+            try:
+                ev = json.loads(ev_text or "{}")
+            except ValueError:
+                ev = {}
+            ev = ev if isinstance(ev, dict) else {}
+            key = _c7_key(group, ev.get("reason"), carc)
+            # a claim-level write-off pattern has the same shape ('group|||reason'): the item joins that row, said apart
+            p = pats.setdefault(key, dict(_blank(key), kind="contractual", cents=0, appealable=None, appealable_cents=None,
+                                          legal_only=None, legal_only_cents=None, auto=None, at_posting=None, rule_proven=None,
+                                          by_policy=None))
+            p["items"] += 1
+            p["contractual_items"] = (p.get("contractual_items") or 0) + 1
+            p["open"] = (p.get("open") or 0) + (status in ("open", "in_progress"))
+            p["written_off_cents"] = (p.get("written_off_cents") or 0) + int(ev.get("written_off_cents") or 0)
+            p["inside_cents"] = (p.get("inside_cents") or 0) + int(ev.get("inside_window_cents") or 0)
+            p["lines"] = (p.get("lines") or 0) + int(ev.get("lines") or 0)
     for key, d in decided.items():          # a pattern decided earlier that has no item now stays listed, so it can be changed back
         if key not in pats and isinstance(d, dict):
-            pats[key] = {"pattern": key, "items": 0, "cents": 0, "appealable": 0, "appealable_cents": 0, "auto": 0, "at_posting": 0,
-                         "rule_proven": 0, "by_policy": 0, "open": 0, "upper_n": 0, "upper_cents": 0}
+            pats[key] = dict(_blank(key), kind=kind_of(key))
     out = []
     for key, p in pats.items():
         d = decided.get(key) if isinstance(decided.get(key), dict) else {}
         s = by_key.get(key) or {}
+        kind = p["kind"]
         p.update(split_pattern(key))
-        p["reason_text"] = _reason_text(p["reason"])
-        p["later_paid_share"] = s.get("later_paid_share")
-        p["decision"] = d.get("decision") or "pursue"
+        if kind == "payer_policy":
+            p["reason"] = ""
+            p["reason_text"] = "The payer almost never pays this code"
+            if p.get("answered"):
+                p["later_paid_share"] = round((p.get("paid") or 0) / p["answered"], 3)
+        else:
+            p["reason_text"] = _reason_text(p["reason"])
+        p.setdefault("later_paid_share", s.get("later_paid_share"))
+        # a person's decision, else: pursue for a write-off pattern (its items stay in Work now); waiting for the owner
+        # for the other two (nothing is accepted by default, PLAN decision 14)
+        p["decision"] = d.get("decision") or ("pursue" if kind == "write_off" else "decide")
         p["decided_by"], p["decided_at"] = d.get("by"), d.get("at")
         p["pending"] = bool(d.get("at")) and (not run_at or str(d.get("at")) > str(run_at))
+        p["basis"] = BASIS["policy" if kind == "write_off" else kind]
         out.append(p)
-    out.sort(key=lambda p: (-p["appealable_cents"], -p["cents"], p["pattern"]))
+    first = {"decide": 0}
+
+    def order(p: dict) -> tuple:
+        return (first.get(p["decision"], 1), -(p.get("appealable_cents") or 0), -(p.get("cents") or 0), -(p.get("written_off_cents") or 0),
+                p["pattern"])
+    out.sort(key=order)
+    wo = [p for p in out if p["kind"] == "write_off"]
+    undecided = [p for p in out if p["kind"] == "payer_policy" and p["decision"] == "decide"]
+    c7 = [p for p in out if p.get("contractual_items")]
     return {"patterns": out, "run_at": run_at, "today": _today(),
-            "totals": {"items": sum(p["items"] for p in out), "cents": sum(p["cents"] for p in out),
-                       "appealable": sum(p["appealable"] for p in out), "appealable_cents": sum(p["appealable_cents"] for p in out),
-                       "accepted": sum(1 for p in out if p["decision"] == "accept")}}
+            "totals": {"items": sum(p["items"] for p in wo), "cents": sum(p["cents"] for p in wo),
+                       "appealable": sum(p["appealable"] for p in wo), "appealable_cents": sum(p["appealable_cents"] for p in wo),
+                       "legal_only": sum(p["legal_only"] for p in wo), "legal_only_cents": sum(p["legal_only_cents"] for p in wo),
+                       "accepted": sum(1 for p in out if p["decision"] == "accept"),
+                       "decide": {"patterns": len(undecided), "items": sum(p["items"] for p in undecided),
+                                  "cents": sum(p["cents"] for p in undecided)},
+                       "contractual": {"patterns": len(c7), "items": sum(p["contractual_items"] for p in c7),
+                                       "written_off_cents": sum(p.get("written_off_cents") or 0 for p in c7)}}}
 
 
 @router.get("/api/ema/policy")
@@ -704,31 +939,73 @@ def policy(user: str = Depends(_user)):
         return policy_table(c)
 
 
+def _c7_rows(c: sqlite3.Connection, pattern: str) -> list[dict]:
+    """The EMA_DENIAL_AS_CONTRACTUAL items of one 'group|||reason' key (one per posted year), most dollars first."""
+    fcols = _cols(c, "findings")
+    if "evidence" not in fcols or kind_of(pattern) != "contractual":
+        return []
+    ws = "work_state" if "work_state" in fcols else "NULL"
+    found = []
+    for fid, group, carc, ev_text, status, state in c.execute(
+            f"""SELECT finding_id, payer_group, carc, evidence, status, {ws} FROM findings
+                WHERE signal='EMA_DENIAL_AS_CONTRACTUAL' AND COALESCE(stale,0)=0"""):
+        try:
+            ev = json.loads(ev_text or "{}")
+        except ValueError:
+            ev = {}
+        ev = ev if isinstance(ev, dict) else {}
+        if _c7_key(group, ev.get("reason"), carc) != pattern:
+            continue
+        found.append({"finding_id": fid, "kind": "contractual", "payer_group": group, "year": ev.get("year"),
+                      "written_off_cents": int(ev.get("written_off_cents") or 0), "inside_cents": int(ev.get("inside_window_cents") or 0),
+                      "lines": ev.get("lines"), "top_codes": [x[0] for x in ev.get("top_codes") or [] if isinstance(x, list) and x][:5],
+                      "status": status, "work_state": state, "state_text": STATE_WORDS.get(state or "", ""),
+                      "outcome_text": "Posted as a contractual write-off"})
+    found.sort(key=lambda r: (-r["written_off_cents"], r["finding_id"]))
+    return found
+
+
 @router.get("/api/ema/policy/items")
 def policy_items(pattern: str = Query(..., max_length=200), page: int = Query(1, ge=1, le=100000), user: str = Depends(_user)):
-    """One page of a pattern's items, most dollars first: what the pattern's count counts. No patient names."""
+    """One page of a key's items: what its count counts, the items EMA posted as contractual for the reason first, then
+    the written-off items, most dollars first. No patient names. A code a payer almost never pays lists nothing here: the
+    run sets its denials aside and lists them in the Worklist once the owner chooses Pursue."""
+    kind = kind_of(pattern)
+    empty = {"pattern": pattern, "kind": kind, "count": 0, "cents": 0, "written_off_cents": 0, "rows": [], "page": page, "size": PAGE}
+    if kind == "payer_policy":
+        return dict(empty, note=("The run sets these denials aside while the payer's policy is to not pay the code. Choose Pursue "
+                                 "and the next run lists every one in the Worklist, to appeal line by line."))
     with _conn() as c:
-        if not {"ema_outcome", "evidence"} <= _cols(c, "findings"):
-            return {"pattern": pattern, "count": 0, "cents": 0, "rows": [], "page": page, "size": PAGE}
-        w, params = _pattern_where(c)
-        w += " AND json_extract(evidence, '$.writeoff_pattern') = ?"
-        params.append(pattern)
-        n, cents = c.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE {w}", params).fetchone()
-        cols = [x for x in ("finding_id", "signal", "service_date", "procedure_code", "payer_group", "shortfall_cents", "appeal_deadline",
-                            "status", "work_state", "ema_outcome", "written_off_cents", "written_off_on", "carc", "patient_control_number")
-                if x in _cols(c, "findings")]
-        # an item no rate prices has no shortfall; what EMA wrote off on it (charge less paid) is shown as an upper bound
-        rows = [dict(zip(cols + ["written_off_basis"], r)) for r in c.execute(
-            f"""SELECT {', '.join(cols)}, json_extract(evidence, '$.written_off_basis') FROM findings WHERE {w}
-                ORDER BY shortfall_cents DESC, appeal_deadline, finding_id LIMIT ? OFFSET ?""",
-            params + [PAGE, (page - 1) * PAGE])]
-        for r in rows:
-            r["outcome_text"] = OUTCOME_WORDS.get(r.get("ema_outcome") or "", "")
-            r["state_text"] = STATE_WORDS.get(r.get("work_state") or "", "")
-        return {"pattern": pattern, "count": n, "cents": cents, "rows": rows, "page": page, "size": PAGE}
+        fcols = _cols(c, "findings")
+        c7 = _c7_rows(c, pattern)
+        n = cents = 0
+        if {"ema_outcome", "evidence"} <= fcols:
+            w, params = _pattern_where(c)
+            w += " AND json_extract(evidence, '$.writeoff_pattern') = ?"
+            params.append(pattern)
+            n, cents = c.execute(f"SELECT COUNT(*), COALESCE(SUM(shortfall_cents),0) FROM findings WHERE {w}", params).fetchone()
+        start = (page - 1) * PAGE
+        rows = c7[start:start + PAGE]
+        if n and len(rows) < PAGE:
+            cols = [x for x in ("finding_id", "signal", "service_date", "procedure_code", "payer_group", "shortfall_cents",
+                                "appeal_deadline", "legal_deadline", "status", "work_state", "ema_outcome", "written_off_cents",
+                                "written_off_on", "carc", "patient_control_number") if x in fcols]
+            # an item no rate prices has no shortfall; what EMA wrote off on it (charge less paid) is shown as an upper bound
+            got = [dict(zip(cols + ["written_off_basis"], r)) for r in c.execute(
+                f"""SELECT {', '.join(cols)}, json_extract(evidence, '$.written_off_basis') FROM findings WHERE {w}
+                    ORDER BY shortfall_cents DESC, appeal_deadline, finding_id LIMIT ? OFFSET ?""",
+                params + [PAGE - len(rows), max(0, start - len(c7))])]
+            for r in got:
+                r["kind"] = "write_off"
+                r["outcome_text"] = OUTCOME_WORDS.get(r.get("ema_outcome") or "", "")
+                r["state_text"] = STATE_WORDS.get(r.get("work_state") or "", "")
+            rows = rows + got
+        return dict(empty, count=n + len(c7), cents=cents, rows=rows, written_off_cents=sum(r["written_off_cents"] for r in c7))
 
 
 def _known_pattern(c: sqlite3.Connection, pattern: str) -> bool:
+    """A key the owner's table lists (a write-off pattern, a code a payer almost never pays, a reason EMA posts as
+    contractual, or one decided before)."""
     tab = policy_table(c)
     return any(p["pattern"] == pattern for p in tab["patterns"])
 
@@ -759,5 +1036,11 @@ def policy_set(body: dict = Body(default={}), user: str = Depends(_user)):
         return {"ok": True, "pattern": pattern, "decision": decision, "by": who[:80], "at": at, "applies": "next run"}
     from . import ema_checks as ec
     with _conn() as c:
-        rec = ec.set_policy(c, pattern, decision, who)
+        # the read and the write of the decisions under one write lock: two people deciding a moment apart both count
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            rec = ec.set_policy(c, pattern, decision, who)
+        except BaseException:
+            c.rollback()
+            raise
     return {"ok": True, "pattern": pattern, "decision": rec["decision"], "by": rec["by"], "at": rec["at"], "applies": "next run"}
