@@ -845,6 +845,19 @@ def test_rule2_two_medicare_contractors_are_not_primary_and_secondary(store):
     assert "secondary claim" not in a["hint"] and "jurisdiction" in a["hint"]
 
 
+def test_rule2_a_contractor_that_says_the_claim_is_not_in_its_jurisdiction_has_answered(store):
+    """One Medicare contractor paid and the Medigap paid the coinsurance; the other contractor says the claim is not in its
+    jurisdiction (CO-109, N104): nothing to check or collect, done."""
+    remit(store, "2026-03-20", [cl("CB0002507C017", [ln("99213", 85.71, 57.11, 72.85, [("CO", "45", 12.86), ("CO", "253", 1.17), ("PR", "2", 14.57)])],
+                                   status="19", cfi="MB")], payer="MEDICARE OF INDIANA", payer_id="MCRIN")
+    lk = remit(store, "2026-03-27", [cl("CB0002507C017", [ln("99213", 85.71, 0, None, [("CO", "109", 85.71)], rem=("N104",))], cfi="MB")],
+               payer="MEDICARE OF KENTUCKY", payer_id="MCRKY")[0]
+    remit(store, "2026-04-19", [cl("CB0002507C017", [ln("99213", 85.71, 14.57, 72.85, [("OA", "23", 71.14)])], status="2", cfi="15")],
+          payer="TEST MEDIGAP CO", payer_id="GAP01")
+    a = only(ar.other_payer_paid_first(store.conn, [item(store, lk, "DENIED_NONCOVERED", expected=7285)]))
+    assert (a["reclass"], a["strength"], a["shortfall_cents"], a["state_hint"]) == ("other_payer_paid", "proven", 0, "done")
+
+
 # ---- rule 1: a B13 answered under another code (review money, low)
 def test_rule1_a_b13_answered_under_another_code_is_not_the_items_payment(store):
     lk = remit(store, "2026-03-20", [cl("CB0002601C017", [ln("77401", 63.88, 0, None, [("CO", "96", 63.88)], lcn="1")])])[0]
