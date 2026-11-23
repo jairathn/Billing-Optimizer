@@ -39,7 +39,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .codes import carc_text, payer_group_kind
-from .detect import DOWNCODE_SIGNALS, EM_SQL, ensure_schema, feed_date
+from .detect import DOWNCODE_SIGNALS, EM_SQL, SWING_OPEN_STATUSES, ensure_schema, feed_date
 
 RECENT_DAYS = int(os.environ.get("REMITWATCH_ALERT_RECENT_DAYS", "28"))
 BASELINE_DAYS = int(os.environ.get("REMITWATCH_ALERT_BASELINE_DAYS", "182"))
@@ -129,7 +129,7 @@ SWING_FALL_CENTS = 10_000_000           # $100,000 removed, all categories (larg
 SWING_FALL_ITEMS_CATEGORY = 150         # open items removed in one category (largest normal: -97, a day)
 SWING_FALL_CENTS_CATEGORY = 7_500_000   # $75,000 removed in one category (largest normal: -$34,801, a week)
 SWING_DAYS = 7                          # on every page for seven days, counting the day of the run, unless acknowledged
-SWING_OPEN = ("open", "in_progress", "appealed")       # To do, Started, Sent: an item someone can still work
+SWING_OPEN = SWING_OPEN_STATUSES        # To do, Started, Sent: an item someone can still work (detect.py counts the same)
 SWING_CONTACT = "the practice owner"    # who the setup page says to tell when something is wrong
 SWING_CATEGORY_LABELS = {"denial": "Denials", "bundling": "Bundling and modifiers", "downcoding": "Downcoding",
                          "underpayment": "Underpayment", "contract": "Contract rates", "fees": "Fees and takebacks"}
@@ -162,6 +162,14 @@ def _swing_over(n: int, cents: int, rise_n: int, rise_c: int, fall_n: int, fall_
     return [w for w, hit in (("items", n > rise_n or -n > fall_n), ("dollars", cents > rise_c or -cents > fall_c)) if hit]
 
 
+def _moves_over(m: dict, rise_n: int, rise_c: int, fall_n: int, fall_c: int) -> list[str]:
+    """The levels the items that appeared (against the rise levels) and those that vanished (against the fall levels) pass,
+    counted item by item: what a run did even when its totals hardly moved."""
+    hits = (("items appeared", m["appeared_n"] > rise_n), ("dollars appeared", m["appeared_cents"] > rise_c),
+            ("items vanished", m["vanished_n"] > fall_n), ("dollars vanished", m["vanished_cents"] > fall_c))
+    return [w for w, hit in hits if hit]
+
+
 def swing_between(conn: sqlite3.Connection, before: dict, after: dict) -> dict | None:
     """What one detection run (`after`) did to the open worklist against the run before it (`before`): the open items and
     dollars each run saw, by category; people's own status changes between the two (every change in finding_events the
@@ -192,25 +200,40 @@ def swing_between(conn: sqlite3.Connection, before: dict, after: dict) -> dict |
             if step and cat != "info":
                 people[cat][0] += step
                 people[cat][1] += step * cents
+    # the run's own moves item by item (detect.record_moves): what it put on the open list and what it took off, which the
+    # totals above cannot show when a run replaces many items with as many others (guard audit L3-9)
+    moves: dict[str, tuple] = {}
+    if "swing_moves" in have:
+        for cat, a_n, a_c, v_n, v_c in conn.execute("""SELECT category, appeared_n, appeared_cents, vanished_n, vanished_cents
+                                                       FROM swing_moves WHERE run_id=?""", (after["run_id"],)):
+            if cat != "info":
+                moves[cat] = (a_n or 0, a_c or 0, v_n or 0, v_c or 0)
     cats = []
-    for cat in sorted(set(seen[0]) | set(seen[1]) | set(people)):
+    for cat in sorted(set(seen[0]) | set(seen[1]) | set(people) | set(moves)):
         (bn, bc), (an, ac), (pn, pc) = seen[0].get(cat, (0, 0)), seen[1].get(cat, (0, 0)), people.get(cat, (0, 0))
         c = {"category": cat, "label": SWING_CATEGORY_LABELS.get(cat, str(cat).replace("_", " ").capitalize()),
              "before_n": bn, "after_n": an, "before_cents": bc, "after_cents": ac, "people_n": pn, "people_cents": pc,
              "change_n": an - bn - pn, "change_cents": ac - bc - pc}
         c["over"] = _swing_over(c["change_n"], c["change_cents"], SWING_RISE_ITEMS_CATEGORY, SWING_RISE_CENTS_CATEGORY,
                                 SWING_FALL_ITEMS_CATEGORY, SWING_FALL_CENTS_CATEGORY)
+        c["appeared_n"], c["appeared_cents"], c["vanished_n"], c["vanished_cents"] = moves.get(cat, (0, 0, 0, 0))
+        c["moves_over"] = _moves_over(c, SWING_RISE_ITEMS_CATEGORY, SWING_RISE_CENTS_CATEGORY, SWING_FALL_ITEMS_CATEGORY,
+                                      SWING_FALL_CENTS_CATEGORY)
         cats.append(c)
     total = {k: sum(c[k] for c in cats) for k in ("before_n", "after_n", "before_cents", "after_cents", "people_n", "people_cents",
                                                     "change_n", "change_cents")}
+    gross = {k: sum(c[k] for c in cats) for k in ("appeared_n", "appeared_cents", "vanished_n", "vanished_cents")}
     over = [f"all {w}" for w in _swing_over(total["change_n"], total["change_cents"], SWING_RISE_ITEMS, SWING_RISE_CENTS,
                                             SWING_FALL_ITEMS, SWING_FALL_CENTS)]
     over += [f"{c['label']} {w}" for c in cats for w in c["over"]]
+    over += [f"all {w}" for w in _moves_over(gross, SWING_RISE_ITEMS, SWING_RISE_CENTS, SWING_FALL_ITEMS, SWING_FALL_CENTS)]
+    over += [f"{c['label']} {w}" for c in cats for w in c["moves_over"]]
     files: Counter = Counter()
     if "files" in have:
         for k, n in conn.execute("SELECT kind, COUNT(*) FROM files WHERE ingested_at > ? AND ingested_at <= ? GROUP BY kind", (t0, t1)):
             files[k if k in SWING_FILE_KINDS else ("ema" if str(k).startswith("ema:") else "other")] += n
-    return {"before": before, "after": after, "by_category": cats, "total": total, "over": over, "files": dict(files)}
+    return {"before": before, "after": after, "by_category": cats, "total": total, "over": over, "files": dict(files),
+            "moves": gross if moves else None}
 
 
 def _swing_lead(m: dict) -> str:
@@ -221,10 +244,30 @@ def _swing_lead(m: dict) -> str:
         return f"One analysis run {verb(t['change_n'])} {abs(t['change_n']):,} open items ({_signed_money(t['change_cents'])})"
     if "all dollars" in m["over"]:
         return f"One analysis run {verb(t['change_cents'])} {money(abs(t['change_cents']))} of open items ({_signed(t['change_n'])} items)"
-    c = max((c for c in m["by_category"] if c["over"]), key=lambda c: (abs(c["change_n"]), abs(c["change_cents"])))
+    net = [c for c in m["by_category"] if c["over"]]
+    if not net:
+        return _moves_lead(m)
+    c = max(net, key=lambda c: (abs(c["change_n"]), abs(c["change_cents"])))
     if "items" in c["over"]:
         return f"One analysis run {verb(c['change_n'])} {abs(c['change_n']):,} open items in {c['label']} ({_signed_money(c['change_cents'])})"
     return f"One analysis run {verb(c['change_cents'])} {money(abs(c['change_cents']))} of open items in {c['label']} ({_signed(c['change_n'])} items)"
+
+
+def _moves_lead(m: dict) -> str:
+    """The headline when only the item-by-item count passed a level: the totals hardly moved, but the run replaced items."""
+    hit = [c for c in m["by_category"] if c["moves_over"]]
+    if any(w.startswith("all ") and ("appeared" in w or "vanished" in w) for w in m["over"]) or not hit:
+        g, where = m["moves"] or {"appeared_n": 0, "appeared_cents": 0, "vanished_n": 0, "vanished_cents": 0}, ""
+    else:
+        g = max(hit, key=lambda c: (c["appeared_n"] + c["vanished_n"], c["appeared_cents"] + c["vanished_cents"]))
+        where = f" in {g['label']}"
+    a, v = g["appeared_n"], g["vanished_n"]
+    if a and v:
+        return (f"One analysis run put {a:,} open items on the list and took {v:,} off{where} ({money(g['appeared_cents'])} "
+                f"on, {money(g['vanished_cents'])} off)")
+    if a:
+        return f"One analysis run put {a:,} new open items on the list{where} ({money(g['appeared_cents'])})"
+    return f"One analysis run took {v:,} open items off the list{where} ({money(g['vanished_cents'])})"
 
 
 def _swing_files(files: dict, since: str) -> str:
@@ -241,8 +284,9 @@ def _swing_levels() -> str:
     return (f"Alarm levels for one run: more than {SWING_RISE_ITEMS:,} open items or {money(SWING_RISE_CENTS)} added, or more than "
             f"{SWING_FALL_ITEMS:,} items or {money(SWING_FALL_CENTS)} removed, in all; in one category, more than "
             f"{SWING_RISE_ITEMS_CATEGORY:,} items or {money(SWING_RISE_CENTS_CATEGORY)} added, or more than "
-            f"{SWING_FALL_ITEMS_CATEGORY:,} items or {money(SWING_FALL_CENTS_CATEGORY)} removed. Changes people made themselves "
-            "between the two runs do not count.")
+            f"{SWING_FALL_ITEMS_CATEGORY:,} items or {money(SWING_FALL_CENTS_CATEGORY)} removed. The same levels apply to the open "
+            "items that appeared (the added levels) and that vanished (the removed levels) in one run, counted item by item, even "
+            "when the totals hardly move. Changes people made themselves between the two runs do not count.")
 
 
 class AlertEngine:
@@ -443,6 +487,10 @@ class AlertEngine:
             if c["change_n"] or c["change_cents"]:
                 lines.append(f"{c['label']}: {c['before_n']:,} to {c['after_n']:,} open items, this run {_signed(c['change_n'])} "
                              f"({_signed_money(c['change_cents'])}).")
+        for c in sorted(m["by_category"], key=lambda c: (-(c["appeared_n"] + c["vanished_n"]), c["category"])):
+            if c["appeared_n"] or c["vanished_n"]:
+                lines.append(f"{c['label']}, item by item: {c['appeared_n']:,} appeared and {c['vanished_n']:,} vanished in this run "
+                             f"({money(c['appeared_cents'])} on, {money(c['vanished_cents'])} off).")
         lines.append(_swing_files(m["files"], since))
         if changed:
             lines.append(f"The rules changed between the two runs (version {before.get('version') or 'unknown'} to "
@@ -457,7 +505,8 @@ class AlertEngine:
                   "rules": [before.get("version"), after.get("version")], "rules_changed": changed,
                   "before": {"n": t["before_n"], "cents": t["before_cents"]}, "after": {"n": t["after_n"], "cents": t["after_cents"]},
                   "people": {"n": t["people_n"], "cents": t["people_cents"]}, "change": {"n": t["change_n"], "cents": t["change_cents"]},
-                  "by_category": m["by_category"], "over": m["over"], "files": m["files"], "headline": lead, "lines": lines,
+                  "by_category": m["by_category"], "over": m["over"], "files": m["files"], "moves": m.get("moves"),
+                  "headline": lead, "lines": lines,
                   "action": action}
         self._raise("SWING", "info" if changed else "high", title, detail, None, "swing", after["run_id"], t["change_n"], None,
                     abs(t["change_n"]), abs(t["change_cents"]), key=("swing", after["run_id"]))

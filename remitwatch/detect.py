@@ -213,6 +213,10 @@ CREATE TABLE IF NOT EXISTS fee_table (year TEXT, code TEXT, charge_cents INTEGER
 CREATE TABLE IF NOT EXISTS provider_tiers (npi TEXT PRIMARY KEY, name TEXT, tier TEXT, ratio REAL, n INTEGER);
 CREATE TABLE IF NOT EXISTS providers (npi TEXT PRIMARY KEY, name TEXT, tier TEXT, lines INTEGER, location TEXT);
 CREATE TABLE IF NOT EXISTS detection_runs (run_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, version TEXT, lines INTEGER, findings INTEGER, summary TEXT);
+CREATE TABLE IF NOT EXISTS swing_moves (
+    run_id TEXT, category TEXT, appeared_n INTEGER, appeared_cents INTEGER, vanished_n INTEGER, vanished_cents INTEGER,
+    PRIMARY KEY (run_id, category)
+);
 """
 
 
@@ -522,6 +526,38 @@ def bill_of(pcn: str | None) -> str:
     across patients."""
     m = _EMA_CLAIM_ID.fullmatch(pcn or "")
     return m.group(1) if m else (pcn or "")
+
+
+# The open items one run put on the list and took off it, item by item (guard audit L3-9): the swing alarm (alerts.py)
+# reads them beside the per-category totals, which net out when a run replaces many items with as many others. Open means
+# what someone can still work: To do, Started, Sent; the context rows and stale rows are not work.
+SWING_OPEN_STATUSES = ("open", "in_progress", "appealed")
+
+
+def _open_items(rows) -> dict[str, tuple[str, int]]:
+    """{finding_id: (category, shortfall cents)} of the open items among `rows` (dicts of findings rows)."""
+    return {r["finding_id"]: (r.get("category") or "", r.get("shortfall_cents") or 0) for r in rows
+            if r.get("status") in SWING_OPEN_STATUSES and r.get("category") != "info" and not r.get("stale")}
+
+
+def record_moves(conn: sqlite3.Connection, run_id: str, before: dict[str, tuple[str, int]]) -> None:
+    """Write swing_moves for one run: by category, the open items that appeared and those that vanished since `before` (the
+    open items when the run's save began), with their dollars. The changes people make between runs are already in
+    `before`, so what is counted is the run's own work (and the reasons hidden for a payer it applied after the save)."""
+    conn.row_factory = sqlite3.Row
+    after = _open_items(dict(r) for r in conn.execute("SELECT finding_id, category, status, shortfall_cents, stale FROM findings"))
+    by: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
+    for fid in after.keys() - before.keys():
+        cat, cents = after[fid]
+        by[cat][0] += 1
+        by[cat][1] += cents
+    for fid in before.keys() - after.keys():
+        cat, cents = before[fid]
+        by[cat][2] += 1
+        by[cat][3] += cents
+    conn.execute("DELETE FROM swing_moves WHERE run_id=?", (run_id,))
+    conn.executemany("INSERT INTO swing_moves (run_id, category, appeared_n, appeared_cents, vanished_n, vanished_cents) VALUES (?,?,?,?,?,?)",
+                     [(run_id, cat, *v) for cat, v in by.items()])
 
 
 class Detector:
@@ -2825,6 +2861,8 @@ class Detector:
         c = self.conn
         c.row_factory = sqlite3.Row
         existing = {r["finding_id"]: dict(r) for r in c.execute("SELECT * FROM findings")}
+        # the open items before this run's save, for swing_moves (record_moves); none on a first analysis, which is a load
+        self._open_before = _open_items(existing.values()) if existing else None
         cols = ["finding_id", "signal", "category", "severity", "actionable", "title", "line_key", "claim_key", "transaction_key",
                 "patient_control_number", "payer_name", "payer_group", "payer_kind", "payer_id", "rendering_provider_npi",
                 "rendering_provider_name", "provider_tier", "service_date", "payment_date", "year", "procedure_code", "modifiers",
@@ -3111,6 +3149,12 @@ class Detector:
                 self.conn.commit()
         except Exception:
             self.conn.rollback()        # the analysis is saved; the rules run again after the next one
+        if getattr(self, "_open_before", None) is not None:
+            try:    # what this run put on the open list and took off it, item by item, for the swing alarm
+                record_moves(self.conn, self.run_id, self._open_before)
+                self.conn.commit()
+            except sqlite3.Error:
+                self.conn.rollback()    # the analysis is saved; the alarm then reads the totals alone for this run
         return out
 
 

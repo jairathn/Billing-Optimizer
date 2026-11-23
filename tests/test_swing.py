@@ -160,6 +160,44 @@ def test_a_run_that_drops_800_items_raises_it(kind, tmp_path):
     store.close()
 
 
+def test_a_run_that_swaps_800_items_for_800_others_raises_it_though_the_totals_do_not_move(kind, tmp_path):
+    """Guard audit L3-9: per-category totals net out when one run takes many open items off the list and puts as many others
+    on it (different claims, or the same money under new item ids). The alarm also counts, item by item, the open items that
+    appeared and those that vanished in the run, by category."""
+    store = new_store(kind, tmp_path)
+    world(store, tmp_path, extra_denials=800)
+    read(store, write(tmp_path / "in", denials(30000, 800), "others"), READ2)
+    store.conn.execute("UPDATE transactions SET superseded=1 WHERE transaction_key IN (SELECT DISTINCT transaction_key FROM claims "
+                       "WHERE patient_control_number >= 'CB0020000' AND patient_control_number < 'CB0021000')")
+    store.conn.commit()
+    detect_at(store, "r2", RUN2)
+    run_alerts(store.conn, today=DAY2)
+    [a] = swings(store.conn, "new")
+    d = a["detail"]
+    assert a["severity"] == "high" and d["change"] == {"n": 0, "cents": 0}, d["change"]
+    den = {c["category"]: c for c in d["by_category"]}["denial"]
+    assert (den["appeared_n"], den["vanished_n"]) == (800, 800)
+    assert den["appeared_cents"] == den["vanished_cents"] == 800 * 7609
+    assert d["moves"] == {"appeared_n": 800, "appeared_cents": 800 * 7609, "vanished_n": 800, "vanished_cents": 800 * 7609}
+    assert "put 800 open items on the list and took 800 off" in a["title"], a["title"]
+    assert any("800 appeared and 800 vanished" in line for line in d["lines"]), d["lines"]
+    store.close()
+
+
+def test_an_ordinary_run_counts_what_appeared_and_vanished_without_raising_it(kind, tmp_path):
+    """A normal day: some items close, a few new ones come. The counts are kept per run; nothing is raised."""
+    store = new_store(kind, tmp_path)
+    world(store, tmp_path)
+    read(store, write(tmp_path / "in", paid(500, 25) + denials(40000, 30), "day2", pay_date="20260501"), READ2)
+    detect_at(store, "r2", RUN2)
+    moves = {r[0]: tuple(r[1:]) for r in store.conn.execute(
+        "SELECT category, appeared_n, appeared_cents, vanished_n, vanished_cents FROM swing_moves WHERE run_id='r2'")}
+    assert moves["denial"] == (30, 30 * 7609, 25, 25 * 7609)
+    run_alerts(store.conn, today=DAY2)
+    assert swings(store.conn) == []
+    store.close()
+
+
 def test_a_run_that_leaves_no_open_item_at_all_raises_it(kind, tmp_path):
     """Everything gone: the run keeps no snapshot row at all. That is the largest fall there is, not 'nothing to compare'."""
     store = new_store(kind, tmp_path)
