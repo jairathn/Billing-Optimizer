@@ -3332,7 +3332,7 @@ def _feed_day() -> str | None:
     if not has_table("transactions"):
         return None
     from .detect import FEED_META, feed_date
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = _day(0)                         # never after today where the practice is (a future-dated file counts as today)
     conn = db()
     try:
         if not runtime.serverless():
@@ -3989,7 +3989,7 @@ def appeals_send(body: dict = Body(default={}), user: str = Depends(require_auth
     # a payer that files no faxed request at the first level (CGS): a person files it on the payer's portal or by mail. An
     # item whose window has closed is told that instead, below
     route = fax.no_fax(f.get("payer_group"), 1, f.get("payer_name"))
-    if route and not (f.get("appeal_deadline") and f["appeal_deadline"] < datetime.now(timezone.utc).date().isoformat()):
+    if route and not (f.get("appeal_deadline") and f["appeal_deadline"] < _day(0)):
         return held("no_fax_route", route)
     # remittances that stopped coming: anything could have been paid since, and a paid claim must not be appealed. Only a
     # person's "still unpaid in EMA" passes this: it says nothing about which code went out (the check below)
@@ -4882,7 +4882,7 @@ def _hide_size(pg: str, sig: str) -> dict:
     try:
         ids = hide_candidates(conn, pg, sig, _now_iso())
         n = cents = live_n = live_cents = 0
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = _day(0)                     # inside its window until midnight where the practice is
         for k in range(0, len(ids), 500):
             part = ids[k:k + 500]
             for c, dl in conn.execute(f"SELECT COALESCE(shortfall_cents,0), appeal_deadline FROM findings WHERE finding_id IN ({','.join('?' * len(part))})", part):
