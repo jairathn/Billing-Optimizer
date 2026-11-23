@@ -18,7 +18,7 @@ import sqlite3
 import pytest
 
 from remitwatch import actions, detect, ema_reports as er, results, states
-from remitwatch.state import Conflict, LocalState
+from remitwatch.state import LocalState
 from remitwatch.store import Store
 from tests import ema_fixtures as F
 from tests.test_states import BCBS, SALT_HEX, event, item, ln, new_store, remit
