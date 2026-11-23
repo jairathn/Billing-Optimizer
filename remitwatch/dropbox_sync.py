@@ -622,6 +622,7 @@ def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, ori
     import shutil
     import tempfile
     import zipfile
+    import zlib
 
     from . import ema_reports as er
 
@@ -686,10 +687,23 @@ def _read_zip_members(store, path: str, names: list[str], *, out: dict, log, ori
                 out["failed"].append(f"{n}: {base} (too large)")
                 continue
             sub = os.path.join(d, f"{k:05d}")
-            os.makedirs(sub, exist_ok=True)
             q = os.path.join(sub, base)
-            with zf.open(info) as src, open(q, "wb") as dst:
-                shutil.copyfileobj(src, dst, 1 << 20)
+            try:
+                os.makedirs(sub, exist_ok=True)
+                with zf.open(info) as src, open(q, "wb") as dst:
+                    shutil.copyfileobj(src, dst, 1 << 20)
+            except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as exc:
+                # a damaged member (its bytes do not match what the zip says): listed, the others are read
+                out["errors"] += 1
+                out["failed"].append(f"{n}: {base} (damaged in the zip: {type(exc).__name__})")
+                shutil.rmtree(sub, ignore_errors=True)
+                continue
+            except OSError as exc:      # a full disk: the whole zip is offered again (members read are skipped then)
+                out["errors"] += 1
+                out["failed"].append(f"{n}: {base} (not unpacked: {type(exc).__name__})")
+                shutil.rmtree(sub, ignore_errors=True)
+                again(path)
+                continue
             try:
                 when = time.mktime(tuple(info.date_time) + (0, 0, -1))
                 os.utime(q, (when, when))       # the member's own date: the newest copy of a payment twice sent wins

@@ -53,6 +53,9 @@ STATUS_WORDS = {"1": "processed as primary", "2": "processed as secondary", "3":
 AR_WINDOW = ("The A/R export lists only lines with activity in its last 30 days and lines with a denial; a line missing "
              "from it is not closed or paid.")
 SERVER_ONLY = "Each of EMA's postings is kept on the server; this site shows EMA's summaries of this line."
+# the dashboard's copy keeps every 835 claim of an item's bill (cloud.SERVING_BUILD 8) but not EMA's single postings
+COPY_NOTE = ("This site keeps every remittance of the bill. The daily run works out each item's state from the full store, which also "
+             "keeps each of EMA's postings.")
 _SRC_ORDER = {"835": 0, "production": 1, "weekly": 2, "claim_status": 3, "ar": 4, "remitwatch": 5}
 
 
@@ -845,8 +848,7 @@ def _story(conn: sqlite3.Connection, fx: dict, ledger: Any) -> dict:
             r["n"] = i
     notes += _feed_notes(fx)
     if _is_copy(conn):
-        notes.append("This site keeps the remittances of the item's own claim; the daily run's full store holds every remittance of "
-                     "the bill, and the state above was worked out there.")
+        notes.append(COPY_NOTE)
     return {"rows": rows, "balance": bal, "reconciles": bal["reconciles"], "gap_cents": bal["gap_cents"], "twin": twin, "notes": notes,
             "mode": "server" if ledger is not None else "summary", "finding_id": fx["item"]["finding_id"]}
 
@@ -967,7 +969,8 @@ def _refs(ns: Sequence[int]) -> str:
 
 
 def _is_copy(conn: sqlite3.Connection) -> bool:
-    """The serverless dashboard's copy of the store (cloud.build_serving marks it): it keeps only part of the remittances."""
+    """The serverless dashboard's copy of the store (cloud.build_serving marks it): it keeps every remittance of an item's
+    bill, but EMA's summaries of its postings rather than each posting."""
     try:
         return conn.execute("SELECT 1 FROM meta WHERE key = 'cache:built'").fetchone() is not None
     except sqlite3.Error:
@@ -977,7 +980,7 @@ def _is_copy(conn: sqlite3.Connection) -> bool:
 def _state_of(conn: sqlite3.Connection, fx: dict, today: str | None) -> dict:
     """The state the detection run stored on the item, with state_of's reasons; state_of's own answer when none is stored.
     When the newest data no longer gives the stored state, the stored one is explained and the live one kept beside it; on
-    the dashboard's copy, which keeps only part of the remittances, the stored state stands alone. The route then follows
+    the dashboard's copy, which keeps EMA's summaries rather than each posting, the stored state stands alone. The route then follows
     the stored rule (state_rule, when detection keeps it); with none, an item a person sent or started is followed up,
     never appealed afresh (M22)."""
     t = S._today(today)

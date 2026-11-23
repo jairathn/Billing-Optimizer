@@ -156,6 +156,8 @@ def test_the_balance_reconciles_to_the_cent_on_the_server_and_on_the_dashboard_c
     out2 = story.explain(mem.conn, "F1", ledger=None, today=TODAY)
     assert out2["story"]["reconciles"] and out2["story"]["mode"] == "summary" and story.SERVER_ONLY in out2["story"]["notes"]
     assert out2["story"]["balance"]["text"] == b["text"]
+    assert story.COPY_NOTE in out2["story"]["notes"] and story.COPY_NOTE not in out["story"]["notes"]
+    assert not any("own claim" in n for n in out2["story"]["notes"])
     # the copy keeps every remittance of the bill (cloud.SERVING_BUILD 8): the same state and the same verdict as the server,
     # row numbers aside (the server lists each posting, the copy EMA's summaries)
     import re

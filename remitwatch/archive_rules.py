@@ -1515,6 +1515,20 @@ def _kept_lcns(a: Ans, arch: Archive) -> set[str]:
     return {x.lcn for x in top.lines if x.billed_code == a.billed_code and x.dos == a.dos and x.lcn}
 
 
+def _corrected_units(a: Ans, arch: Archive) -> float | None:
+    """The units the practice's newest corrected claim of the item's claim id bills for the item's code on its date (a
+    frequency 7 or 8 claim, or the payer's CO-129/N770 note of the adjustment request, which lists what the request
+    bills), answered after the item. None when there is no such claim."""
+    acks = {id(q) for q in arch.adj_requests.get(a.pcn or "", ())}
+    cands = [cl for cl in arch.by_bill.get(a.bill, []) if cl.pcn == a.pcn and cl.status != REVERSAL_STATUS
+             and (cl.paid_on or "") > (a.paid_on or "") and (_freq_family(cl.freq) == "7" or id(cl) in acks)
+             and any(x.billed_code == a.billed_code and x.dos == a.dos for x in cl.lines)]
+    if not cands:
+        return None
+    top = max(cands, key=lambda cl: (cl.paid_on or "", cl.trace or ""))
+    return sum(x.billed_units for x in top.lines if x.billed_code == a.billed_code and x.dos == a.dos)
+
+
 def _line_fate(a: Ans, r: Ans, arch: Archive) -> tuple[str, list[Ans], int] | None:
     """What the payer's newest answer of the item's claim id since the reversal says of the item's line when it no longer
     bills it: ('dropped', rows, charge drop) when it bills fewer units of the item's code and a total charge lower by at
@@ -1703,6 +1717,14 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
         paid = own_new or loose_new
         got = _units_paid(paid)
         per = _per_unit([x for x in paid if x.status in PRIMARY_STATUSES] or paid, exp / max(a.billed_units, 1) or None)
+        corrected = _corrective(r.claim, arch) or any(_corrective(x.claim, arch) for x in paid)
+        billed_now = _corrected_units(a, arch) if corrected else None
+        if own_new and billed_now is not None and billed_now < a.billed_units <= need and got >= billed_now:
+            # the practice's corrected claim billed fewer units of the code than this line did, and the payer paid all of them
+            hint = (f"{who} reversed this answer on {r.paid_on} for the practice's corrected claim, which bills {_units_text(billed_now)} of "
+                    f"{a.billed_code} where this line billed {a.billed_units:g}, and paid them ({_usd(sum(x.standing for x in paid))}): the units "
+                    "left out were dropped, and nothing is left to work unless one was dropped by mistake.")
+            return _reclass(R_SAME_DAY, f, "dropped_on_correction", "Dropped on the corrected claim", hint, 0, "done", proof)
         if own_new:
             left = max(a.billed_units - got, 0) or a.billed_units
             size = _cap(per * left, f) if per else f.get("shortfall_cents")
@@ -1710,7 +1732,7 @@ def _replaced(f: Mapping, a: Ans, r: Ans, ans: list[Ans], cancelled: dict, open_
                     f"what is left is {'the unit' if left == 1 else f'{left:g} units'}"
                     + (f", worth about {_usd(size)} at its own rate per unit." if per else "."))
             return _reclass(R_SAME_DAY, f, "units_on_reanswer", "Reversed and partly paid", hint, size, "work_now", proof)
-        if _corrective(r.claim, arch) or any(_corrective(x.claim, arch) for x in paid):
+        if corrected:
             if a.lcn and a.lcn in _kept_lcns(a, arch) and got >= a.billed_units:
                 # the corrected claim kept this very line (its line number), and the payer paid the units it kept
                 amt = sum(x.standing for x in paid)
