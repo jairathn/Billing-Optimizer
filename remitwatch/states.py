@@ -8,7 +8,9 @@ The one place an item's state is decided (amendment 13.1). Every item is in exac
               work_now on that date when the payer has not answered by then
   done        paid, or settled by the patient or a second payer, with the proof
   accepted    a loss someone accepted: the owner's write-off policy, a hide rule, or a person who let it go or marked it lost
-  expired     past every window, plus 30 days, with no work pending
+  expired     past every window (the latest of the item's own deadline, the payer's own limit, its dispute window, the
+              corrected-claim clock where a corrected claim can fix it, a Medicare reopening where a clerical fix can, the
+              first-filing limit of a claim), with no work pending
   cant_check  the money never reaches any source RemitWatch reads (a remittance that goes to another payee, a payer whose
               answers reach neither the 835s nor EMA's postings): a data gap, never counted as fine
 
@@ -77,9 +79,24 @@ ACTION_KINDS = (("appeal", re.compile(r"APPEAL", re.I)), ("corrected", re.compil
                 ("records", re.compile(r"RECORDS", re.I)), ("reprocess", re.compile(r"REPROCESS|ADJUSTMENT REQUEST", re.I)),
                 ("secondary", re.compile(r"SECONDARY|TERTIARY", re.I)),
                 ("call", re.compile(r"CLAIM IN PROCESS|PENDING REMIT", re.I)))
-WORK_WORDS = {"appeal": "an appeal", "corrected": "a corrected claim", "records": "records sent", "reprocess": "a reprocessing request",
-              "secondary": "the claim billed to the next payer", "call": "a call or portal check", "sent": "sent to the payer",
-              "fax": "a fax to the payer", "resubmitted": "a resubmission", "started": "started", "follow_up": "a follow-up date"}
+# the work, as a noun that reads in "follow up on <it>", "ask whether it received <it>" and "a billing note about <it>"
+WORK_WORDS = {"appeal": "the appeal", "corrected": "the corrected claim", "records": "the records sent", "reprocess": "the reprocessing request",
+              "secondary": "the claim billed to the next payer", "call": "the call or portal check", "sent": "the appeal or claim marked Sent",
+              "fax": "the faxed appeal", "resubmitted": "the resubmitted claim", "started": "the work started", "billed": "the claim billed to the next payer",
+              "follow_up": "the follow-up date set in EMA", "note": "the billing note in EMA", "packet": "the appeal packet",
+              "no_appeal": "a decision not to appeal", "write_off": "a write-off"}
+# work that holds an item (it waits for the payer's answer to it, or a person must read it first)
+WORK_KINDS = ("sent", "fax", "appeal", "corrected", "records", "reprocess", "secondary", "call", "resubmitted", "billed", "note", "follow_up")
+# denials whose route can be a corrected claim (an authorization number, a modifier, a code): its clock counts too
+CORRECTABLE_SIGNALS = ("DENIED_AUTH", "DENIED_MISSING_MODIFIER", "DENIED_CODING", "EM_BUNDLED_NO_MODIFIER", "EM_BUNDLED_MOD57_MINOR",
+                       "DENIED_MISSING_INFO", "DENIED_REFERRAL")
+AUTH_CARCS = frozenset({"197", "198", "243", "288", "15", "62", "39"})
+# remarks naming a code, a modifier or a diagnosis that is missing or wrong: a Medicare reopening can fix those (a clerical
+# error); a wrong diagnosis behind a medical-necessity denial is one too (C24), and so is a drug's code (C59, M51)
+CLERICAL_RARCS = frozenset({"M51", "M76", "M81", "MA63", "M20", "M67", "M77"})
+REOPENING_DAYS = 365
+# what EMA's current claim action says is pending at the payer (an item past every window still waits on it)
+PENDING_ACTIONS = ("appeal", "corrected", "records", "reprocess")
 
 
 # ------------------------------------------------------------------------------------------------------------ helpers
@@ -611,7 +628,9 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     for b, fs in want.items():
         recs = []
         for r in rows_by_bill.get(b, []):
+            # 'trace': the check's whole number, kept only to match EMA's postings of the same check (never shown)
             recs.append({"claim_key": r[1], "pcn": r[2], "status": str(r[3] or ""), "payer": r[4], "date": r[5], "check_tail": tail(r[6]),
+                         "trace": r[6],
                          "method": r[7], "received": r[8], "freq": r[9], "pccn": r[10], "crossover": r[11], "claim_charge": r[12],
                          "claim_paid": r[13], "claim_pr": r[14], "line_key": r[15], "svc": r[16], "code": r[17], "ocode": r[18],
                          "modifiers": r[19], "charge": r[20], "paid": r[21], "allowed": r[22], "units": r[23], "ounits": r[24],

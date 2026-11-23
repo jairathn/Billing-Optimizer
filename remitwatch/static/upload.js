@@ -421,8 +421,20 @@
     return h.hex();
   }
 
+  // What became of a file the cycle (or run) has looked at, from the server's 'applied': a report's catalog status, the
+  // hand-off's result word, or 'read'. Only a file RemitWatch read is green; one kept and not read yet is amber; one it
+  // did not read (refused, too large, none of its files, failed, discarded) is red. A word this page does not know is
+  // amber, never green.
+  const OUTCOME = {current: 'applied', partly_replaced: 'applied', replaced: 'applied', superseded: 'applied', applied: 'applied', read: 'applied',
+    already: 'already', held: 'held', waiting: 'unread', reread: 'unread',
+    not_read: 'notread', too_large: 'notread', failed: 'notread', refused: 'notread', discarded: 'notread'};
+  const outcomeChip = applied => OUTCOME[applied] || 'unread';
+  // the chip of an upload as the server describes it (a finish's answer, a status, a row of the recent list)
+  const uploadChip = u => u.state === 'finished' ? (u.applied ? outcomeChip(u.applied) : 'waiting') : u.state;
+
   const api = {Sha256, sha256Hex, norm, detectReport, findReportHeader, reportColumns, headerRowIndex, detectFamily, lookAtRows,
-    decodeHead, csvRecords, textRows, zipEntries, readXlsxRows, lookAtFile, cutPieces, sourceStream, sha256File, CHUNK, CHUNK_FROM};
+    decodeHead, csvRecords, textRows, zipEntries, readXlsxRows, lookAtFile, cutPieces, sourceStream, sha256File, CHUNK, CHUNK_FROM,
+    OUTCOME, outcomeChip, uploadChip};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.RemitUpload = api;
   if (typeof document === 'undefined' || !document.getElementById('exports')) return;
@@ -475,16 +487,6 @@
     receiving: ['unfinished', 'warn'], finished: ['received', 'ok'], stopped: ['not sent', 'no'], overdue: ['overdue', 'no'], fresh: ['up to date', 'ok']};
   const chip = s => { const c = CHIP[s] || [s, '']; return `<span class="chip ${c[1]}">${esc(c[0])}</span>`; };
   const linesHtml = ls => (ls || []).length ? `<ul>${ls.map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : '';
-  // What became of a file the cycle (or run) has looked at, from the server's 'applied': a report's catalog status, the
-  // hand-off's result word, or 'read'. Only a file RemitWatch read is green; one kept and not read yet is amber; one it
-  // did not read (refused, too large, none of its files, failed, discarded) is red. A word this page does not know is
-  // amber, never green.
-  const OUTCOME = {current: 'applied', partly_replaced: 'applied', replaced: 'applied', superseded: 'applied', applied: 'applied', read: 'applied',
-    already: 'already', held: 'held', waiting: 'unread', reread: 'unread',
-    not_read: 'notread', too_large: 'notread', failed: 'notread', refused: 'notread', discarded: 'notread'};
-  const outcomeChip = applied => OUTCOME[applied] || 'unread';
-  // the chip of an upload as the server describes it (a finish's answer, a status, a row of the recent list)
-  const uploadChip = u => u.state === 'finished' ? (u.applied ? outcomeChip(u.applied) : 'waiting') : u.state;
 
   // ----------------------------------------------------------------------------------- the checklist of exports
   function exportRow(e) {

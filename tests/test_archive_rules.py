@@ -971,3 +971,207 @@ def test_a_likely_closure_never_closes_an_item():
     got = det.findings["F1"]
     assert got["auto_status"] is None and got["hint"] == "probably paid" and got["shortfall_cents"] == 500
     assert json.loads(got["evidence"])["archive_rule"]["state_hint"] == "done"
+
+
+# ---- rule 8: one listing per service, coverage after another plan, sizes (review regression mediums; money low)
+def test_rule8_does_not_list_one_service_twice(store):
+    """C14's shape: the payer denied the visit for missing information (an item lists it), then answered the refiled claim
+    with a missing referral (PR-288). One service, one listing: the raised item carries the older one, folded into it."""
+    from remitwatch.detect import _fid
+    lk1 = remit(store, "2026-03-20", [cl("CB0003001C017", [ln("99214", 205.80, 0, None, [("CO", "16", 205.80)], rem=["N255"])])])[0]
+    remit(store, "2026-09-20", [cl("CB0003001C017", [ln("99214", 205.80, 0, None, [("PR", "288", 205.80)], lcn="7")])])
+    f1 = item(store, lk1, "DENIED_MISSING_INFO", expected=9996)
+    res = ar.evaluate(store.conn, [f1], rate=lambda g, c, y: 5032, hide_rules=[])
+    raised = only([a for a in res["actions"] if a["action"] == "raise_item"])
+    fold = only([a for a in res["actions"] if a["action"] == "fold_into"])
+    assert fold["finding_id"] == f1["finding_id"] and fold["into"] == _fid(raised["signal"], raised["line_key"])
+    assert raised["evidence"]["replaces"] == [f1["finding_id"]]
+
+
+def test_rule8_a_medicaid_plans_refiled_claim_does_not_list_the_service_twice(store):
+    old = remit(store, "2026-01-01", [cl("CB0003002C017", [ln("99214", 205.80, 0, None, [("CO", "16", 205.80)], rem=["N255"])], cfi="MC")],
+                **BIG_MA)
+    remit(store, "2026-07-20", [cl("CB0003002C017", [ln("99214", 205.80, 0, None, [("PR", "288", 205.80)], lcn="1")], cfi="MC", icn="PCN-G")],
+          **BIG_MA)
+    f = item(store, old[0], "DENIED_MISSING_INFO", expected=9996)
+    res = ar.evaluate(store.conn, [f], rate=lambda g, c, y: 5032, hide_rules=[])
+    assert [a["action"] for a in res["actions"]].count("raise_item") == 1
+    assert only([a for a in res["actions"] if a.get("finding_id") == f["finding_id"]])["action"] == "fold_into"
+
+
+def test_rule8_a_worked_older_listing_stays_the_one_listing(store):
+    """A person worked the older listing: nothing is raised beside it; it stays the listing, with the payer's new answer
+    (the missing referral, who should pay, what to fix) as its reading."""
+    ensure_schema(store.conn)
+    lk1 = remit(store, "2026-03-20", [cl("CB0003003C017", [ln("99214", 205.80, 0, None, [("CO", "16", 205.80)])])])[0]
+    remit(store, "2026-09-20", [cl("CB0003003C017", [ln("99214", 205.80, 0, None, [("PR", "288", 205.80)], lcn="7")])])
+    f1 = item(store, lk1, "DENIED_MISSING_INFO", expected=9996)
+    store.conn.execute("INSERT INTO findings (finding_id, status, notes) VALUES (?, 'in_progress', 'called the plan')", (f1["finding_id"],))
+    res = ar.evaluate(store.conn, [f1], rate=lambda g, c, y: 5032, hide_rules=[])
+    assert not [a for a in res["actions"] if a["action"] in ("raise_item", "fold_into")]
+    a = only([a for a in res["actions"] if a.get("finding_id") == f1["finding_id"]])
+    assert (a["action"], a["rule"], a["reclass"], a["shortfall_cents"]) == ("reclassify", ar.R_PR, "replaced", None)
+    assert "referral" in a["hint"] and a["new_reason"] == "PR-288"
+
+
+def test_rule8_no_coverage_item_once_another_plan_answered_the_service(store):
+    """ACME said its coverage had not started (PR-26). BETA, the plan that covered the day, answered the service since (an
+    authorization denial, listed): the coverage item's fix is done already."""
+    remit(store, "2026-03-20", [cl("CB0003004C017", [ln("G6001", 152.98, 0, None, [("PR", "26", 152.98)], mods=("59",), rem=["N30"])])], **ACME)
+    lk2 = remit(store, "2026-04-15", [cl("CB0003004C024", [ln("G6001", 152.98, 0, None, [("CO", "197", 152.98)], mods=("59",), lcn="3")])],
+                **BETA)[0]
+    res = ar.evaluate(store.conn, [item(store, lk2, "DENIED_AUTH", expected=10709)], rate=lambda g, c, y: 15298, hide_rules=[])
+    assert [a for a in res["actions"] if a["action"] == "raise_item"] == []
+    # with no other plan's answer, the coverage item is raised
+    remit(store, "2026-03-20", [cl("CB0003005C017", [ln("G6001", 152.98, 0, None, [("PR", "26", 152.98)], mods=("59",))])], **ACME)
+    assert [a["signal"] for a in ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: 15298)
+            if a["action"] == "raise_item" and a["claim_key"].startswith("TX")] == ["DENIED_COVERAGE_DATES"]
+
+
+def test_rule8_size_counts_the_units_and_never_tops_the_charge(store):
+    """As detect.py sizes a denied line: the usual rate times the units billed, and never above the charge."""
+    remit(store, "2026-03-20", [cl("CB0003006C017", [ln("17003", 41.86, 0, None, [("PR", "204", 41.86)], units=7)])])
+    a = only(ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: 675))
+    assert a["shortfall_cents"] == 4186 and "x 7 units billed" in a["evidence"]["basis"] and "capped" in a["evidence"]["basis"]
+    remit(store, "2026-03-21", [cl("CB0003007C017", [ln("96372", 13.04, 0, None, [("PR", "204", 13.04)])])])
+    b = only([x for x in ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: 1326) if x["procedure_code"] == "96372"])
+    assert b["shortfall_cents"] == 1304
+
+
+def test_raise_item_evidence_names_the_rule_as_a_dict_like_every_other_action(store):
+    remit(store, "2026-03-20", [cl("CB0003008C017", [ln("11900", 93.75, 0, None, [("PR", "204", 93.75)])])])
+    a = only(ar.pr_group_denials(store.conn, [], rate=lambda g, c, y: 3767))
+    assert a["evidence"]["archive_rule"] == {"rule": ar.R_PR, "action": "raise_item", "strength": "proven"}
+
+
+class _RateDet:
+    """The parts of a Detector _det_rate reads: its lines, usual_rate (the payer's own rate record, or a fallback with
+    none), expected_allowed and billed_units."""
+    def __init__(self, line, own=None, fallback=None):
+        self.lines_by_claim = {line["claim_key"]: [line]}
+        self.own, self.fallback = own, fallback
+
+    def usual_rate(self, l, code):
+        if self.own:
+            return self.own, f"{l['payer_group']} usual {l['year']} rate for {code} ({l['provider_tier']}, n=11)", {"n": 11}
+        if self.fallback:
+            return self.fallback, f"Medicare {l['year']} rate for {code} (physician)", None
+        return None, "no baseline", None
+
+    def expected_allowed(self, l, code):
+        cents, basis, _r = self.usual_rate(l, code)
+        return cents, basis
+
+    @staticmethod
+    def billed_units(l):
+        return 1
+
+
+def test_rule8_a_medicaid_plan_is_sized_from_its_own_rates_only():
+    """C14: the Detector's reading of the line (its tier: a nonphysician's rate) sizes the raised item; a Medicaid plan with
+    no rate of its own is not sized from Medicare's fee schedule."""
+    line = {"claim_key": "C1", "line_key": "L1", "payer_group": "Bigco Health Medicaid", "payer_kind": "medicaid", "year": "2026",
+            "provider_tier": "nonphysician", "pos_class": "office"}
+    own = ar._det_rate(_RateDet(line, own=5032)).by_line("C1", "L1", "99214")
+    assert own[0] == 5032 and "nonphysician" in own[1]
+    none = ar._det_rate(_RateDet(line, fallback=11760)).by_line("C1", "L1", "99214")
+    assert none[0] is None and "Medicaid plan" in none[1]
+    commercial = dict(line, payer_kind="commercial", payer_group="Acme Health Plan")
+    assert ar._det_rate(_RateDet(commercial, fallback=11760)).by_line("C1", "L1", "99214")[0] == 11760
+    assert ar._det_rate(_RateDet(line, own=5032)).by_line("C1", "NOPE", "99214") is None
+
+
+@pytest.mark.parametrize("kind", ["file", "compact"])
+def test_wired_rule8_raises_one_listing_of_the_service(tmp_path, monkeypatch, kind):
+    """Through the real Detector: the CO-16 item folds into the raised referral item, which lists it."""
+    s = Store(str(tmp_path / "s.sqlite")) if kind == "file" else Store(":memory:", compact=True)
+    remit(s, "2026-03-20", [cl("CB0003009C017", [ln("99214", 205.80, 0, None, [("CO", "16", 205.80)], rem=["N255"])])])
+    remit(s, "2026-09-20", [cl("CB0003009C017", [ln("99214", 205.80, 0, None, [("PR", "288", 205.80)], lcn="7")])])
+    _wire(monkeypatch)
+    Detector(s, run_id="r1", today="2026-10-01").run()
+    rows = [dict(zip(("signal", "stale", "evidence"), r)) for r in
+            s.conn.execute("SELECT signal, COALESCE(stale, 0), evidence FROM findings WHERE patient_control_number = 'CB0003009C017'")]
+    s.close()
+    live = [r for r in rows if not r["stale"]]
+    assert [r["signal"] for r in live] == ["DENIED_REFERRAL"], rows
+    ev = json.loads(live[0]["evidence"])
+    assert [x["rule"] for x in ev["folded"]] == [ar.R_PR] and ev["archive_rule"]["action"] == "raise_item"
+
+
+# ---- rule 9: the SQL form and hide_match agree on a line answered under another code (review regression, low)
+def test_rule9_a_code_family_is_the_answered_codes_in_both_forms(store):
+    ensure_schema(store.conn)
+    rows = [("R1", "Acme Health Plan", "DENIED_NONCOVERED", "70621010101", "J7345", "other"),      # answered as an NDC, billed J7345
+            ("R2", "Acme Health Plan", "DENIED_NONCOVERED", "J7345", None, "drug")]
+    store.conn.executemany("INSERT INTO findings (finding_id, payer_group, signal, procedure_code, original_procedure_code, code_category) "
+                           "VALUES (?,?,?,?,?,?)", rows)
+    rule = ar.hide_rule("Acme Health Plan", code="@drug")
+    cond, params = ar.hide_sql(rule, "f")
+    got = {r[0] for r in store.conn.execute(f"SELECT f.finding_id FROM findings f WHERE {cond}", params)}
+    want = {r[0] for r in rows if ar.hide_match(rule, {"payer_group": r[1], "signal": r[2], "procedure_code": r[3],
+                                                      "original_procedure_code": r[4], "billed_code": r[4] or r[3]})}
+    assert got == want == {"R2"}
+
+
+# ---- rule 10: one value per service (review regression, medium)
+def test_rule10_gives_no_amount_to_a_duplicate_copys_denial(store):
+    """A copy of the drug line was denied as a duplicate (OA-18); the line itself was paid, the payment taken back and the
+    line denied (CO-50). The CO-50 item carries the line's value; the copy's denial does not carry it again."""
+    _paid_j7345(store, 3, 1.79)
+    dup = remit(store, "2026-03-05", [cl("CB0003101C017", [ln("J7345", 358.00, 0, None, [("OA", "18", 358.00)], units=200, lcn="2")])])[0]
+    paid = ln("J7345", 358.00, 358.00, 358.00, units=200, lcn="2")
+    remit(store, "2026-03-20", [cl("CB0003101C017", [paid])])
+    keys = remit(store, "2026-09-20", [cl("CB0003101C017", [neg(paid)], status="22"),
+                                       cl("CB0003101C017", [ln("J7345", 358.00, 0, None, [("CO", "50", 358.00)], units=200, lcn="LX#08")])])
+    f_dup, f_den = item(store, dup, "DENIED_DUPLICATE_UNPAID"), item(store, keys[1], "DENIED_MEDICAL_NECESSITY")
+    valued = {a["finding_id"] for a in ar.drug_expected(store.conn, [f_dup, f_den])}
+    assert valued == {f_den["finding_id"]}
+
+
+def test_rule10_gives_no_amount_to_a_wrong_payers_denial_of_a_service_another_payer_answered(store):
+    _paid_j7345(store, 3, 1.79)
+    wrong = remit(store, "2026-03-05", [cl("CB0003102C017", [ln("J7345", 358.00, 0, None, [("OA", "109", 358.00)], units=200)])],
+                  payer="MEDICARE OF KENTUCKY", payer_id="MCRKY")[0]
+    right = remit(store, "2026-03-20", [cl("CB0003102C017", [ln("J7345", 358.00, 0, None, [("CO", "16", 358.00)], units=200)])])[0]
+    f_wrong, f_right = item(store, wrong, "DENIED_COB"), item(store, right, "DENIED_MISSING_INFO")
+    assert {a["finding_id"] for a in ar.drug_expected(store.conn, [f_wrong, f_right])} == {f_right["finding_id"]}
+    # with no other payer's answer, a 'not ours' denial is still the only listing of the service and gets its value
+    alone = remit(store, "2026-03-05", [cl("CB0003103C017", [ln("J7345", 358.00, 0, None, [("OA", "109", 358.00)], units=200)])],
+                  payer="MEDICARE OF KENTUCKY", payer_id="MCRKY")[0]
+    assert len(ar.drug_expected(store.conn, [item(store, alone, "DENIED_COB")])) == 1
+
+
+def test_rule10_values_one_listing_of_a_billed_line(store):
+    """Two open denials of one billed line (CO-16, then CO-50 on the resubmission): only the newest is valued."""
+    _paid_j7345(store, 3, 1.79)
+    a1 = remit(store, "2026-03-05", [cl("CB0003104C017", [ln("J7345", 358.00, 0, None, [("CO", "16", 358.00)], units=200, lcn="1")])])[0]
+    a2 = remit(store, "2026-04-05", [cl("CB0003104C018", [ln("J7345", 358.00, 0, None, [("CO", "50", 358.00)], units=200, lcn="1")])])[0]
+    f1, f2 = item(store, a1, "DENIED_MISSING_INFO"), item(store, a2, "DENIED_MEDICAL_NECESSITY")
+    assert {a["finding_id"] for a in ar.drug_expected(store.conn, [f1, f2])} == {f2["finding_id"]}
+
+
+# ---- memory: the archive is released before the hooks return (review regression, medium)
+def test_evaluate_and_the_drug_rule_release_the_archive(store):
+    """The archive's answers and claims refer to each other; left alone they wait for the cycle collector while the
+    Detector's run goes on. evaluate() and drug_expected() release them: none is alive after the call, even with the cycle
+    collector off."""
+    import gc
+    _paid_j7345(store, 3, 1.79)
+    items = []
+    for i in range(4):
+        lks = remit(store, "2026-03-20", [cl(f"CB00032{i:02d}C017", [ln("77401", 36.50, 25.04, 25.55, [("CO", "45", 10.95)], lcn="1"),
+                                                                    ln("77401", 36.50, 0, None, [("CO", "151", 36.50)], mods=("59",), lcn="2"),
+                                                                    ln("J7345", 358.00, 0, None, [("CO", "114", 358.00)], units=200, lcn="3")])])
+        items += [item(store, lks[1], "DENIED_FREQUENCY", expected=3650), item(store, lks[2], "DENIED_NONCOVERED")]
+    gc.collect()
+    alive = lambda: sum(1 for o in gc.get_objects() if type(o) in (ar.Ans, ar.Claim))  # noqa: E731
+    before = alive()
+    gc.disable()
+    try:
+        res = ar.evaluate(store.conn, items, hide_rules=[])
+        mid = alive()
+        drugs = ar.drug_expected(store.conn, items)
+        after = alive()
+    finally:
+        gc.enable()
+    assert res["actions"] and drugs and (mid, after) == (before, before)
