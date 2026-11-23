@@ -738,8 +738,9 @@ CHECKS: dict[str, tuple] = {
                         "For each example, the 835 archive or EMA shows a later payment for the same bill, date and code; "
                         "detection should have closed it (resolve_elsewhere, the EMA outcomes) or states.py made it done."),
     "past_window": ("critical", "hold", 0, "No item to work is past every window",
-                    "Nothing nobody has worked stays Work now more than the grace period past the payer's last window.",
-                    "states.py expires an item 30 days past its last window: compare the example's deadlines and state_basis."),
+                    "Nothing nobody has worked stays Work now past the payer's last window (states.EXPIRE_GRACE_DAYS after it; "
+                    "the owner's decision 1: none).",
+                    "states.py expires an item the day its last window closes: compare the example's deadlines and state_basis."),
     "vanished": ("critical", "keep", 0, "No open item disappeared without a reason",
                  "An item people were shown as work leaves the list only by a closure, a replacement for its line, a fold "
                  "into another item, or its remittance being superseded.",
@@ -3070,16 +3071,18 @@ def _held_as(entries: list) -> tuple[str, str | None]:
     return (str(e[1]) if e[1] else "not_listed"), e[0]
 
 
-def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = False, why: str = "weekly",
-               ledger: Any = None) -> dict:
+def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = False, why: str = "weekly") -> dict:
     """Once a week (or on demand): (a) coverage: every 2025+ line with recoverable dollars inside a window (a denial, an
     automatic write-off still appealable, an unanswered claim, a short payment, an 835 payment EMA never posted, a second
-    payer never billed, an open insurance balance) must have an item in Work now or Waiting or a recorded reason; every one
-    that does not is a coverage gap with its dollars; (b) precision: every Work now item with evidence it is settled (paid
+    payer never billed, an open insurance balance) must have an item in Work now or Waiting or a person's (or the owner's
+    policy) decision; every one that does not is a coverage gap with its dollars, named with the item RemitWatch closed,
+    expired or set aside by itself when there is one; (b) precision: every Work now item with evidence it is settled (paid
     after or before, the patient's share, worked and waiting, a duplicate listing, a facility twin, past every window) is
-    possible wasted work; (c) the confusion matrix by count and dollars, kept week by week; (d) the alert when new gaps over
-    $500 or more than 10 new wasted items appear. Its rules are its own (the answer keys' rules, simplified), never the
-    detection code. Returns the summary."""
+    possible wasted work; (c) the confusion matrix by count and dollars, kept week by week; (d) the alert when any new gap
+    (no dollar floor) or more than 10 new wasted items appear. Its rules are its own (the answer keys' rules, simplified),
+    never the detection code. It reads the 835 archive and the store's own EMA lines (the lean keep rule keeps every line
+    its rules look at: a non-routine write-off, a line not paid, a second payer with a balance), the same on both hosts, so
+    it takes no ledger. Returns the summary."""
     ensure_tables(conn)
     t = today_of(today)
     if not force and not audit_due(conn, t):
@@ -3101,6 +3104,10 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
     listed = [x for x in uniq if x["held"] == "listed"]
     reasons = [x for x in uniq if x["held"] == "reason"]
     gaps = [x for x in uniq if x["held"] is None]
+    for g in gaps:
+        parts = tuple(str(g["key"]).split("|"))
+        ents = idx["service"].get(parts) or (idx["bill"].get(parts[0]) if g["category"] == "unanswered_in_filing_limit" else None)
+        g["held_as"], g["finding_id"] = _held_as(ents or [])
     wasted = _precision(conn, t)
     prev_id = conn.execute("SELECT audit_id FROM selfcheck_audits ORDER BY today DESC, at DESC LIMIT 1").fetchone()
     prev_keys: dict[str, set] = defaultdict(set)
@@ -3111,8 +3118,8 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
     conn.execute("DELETE FROM selfcheck_audit_items WHERE audit_id = ?", (audit_id,))
     items = []
     for g in gaps:
-        items.append((audit_id, "gap", g["key"], None, g["category"], g.get("reason"), g.get("payer_group"), g.get("month"),
-                      int(g["cents"]), g.get("deadline"), int(bool(prev_id) and g["key"] not in prev_keys["gap"])))
+        items.append((audit_id, "gap", g["key"], g.get("finding_id"), g["category"], g.get("reason"), g.get("payer_group"),
+                      g.get("month"), int(g["cents"]), g.get("deadline"), int(bool(prev_id) and g["key"] not in prev_keys["gap"])))
     for w in wasted:
         items.append((audit_id, "wasted", w["finding_id"], w["finding_id"], w.get("category"), w["reason"], w.get("payer_group"),
                       w.get("month"), int(w["cents"]), w.get("deadline"), int(bool(prev_id) and w["finding_id"] not in prev_keys["wasted"])))
@@ -3134,13 +3141,12 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
               "held_by_reason": {"n": len(reasons), "cents": sum(int(x["cents"]) for x in reasons)}}
     new_gaps = [g for g in gaps if prev_id and g["key"] not in prev_keys["gap"]]
     new_wasted = [w for w in wasted if prev_id and w["finding_id"] not in prev_keys["wasted"]]
-    gap_alert = _int_setting("REMITWATCH_AUDIT_GAP_CENTS", AUDIT_GAP_ALERT_CENTS)
     wasted_alert = _int_setting("REMITWATCH_AUDIT_WASTED_ITEMS", AUDIT_WASTED_ALERT)
-    big_new = [g for g in new_gaps if g["cents"] > gap_alert]
+    big_new = list(new_gaps)                    # the owner's decision 9: any new gap, whatever its dollars
     # coverage: of the lines that needed work (and had no reason to be left), the share the worklist listed; precision: of
     # the items in Work now, the share the audit found no sign of being already paid or settled
     coverage = {"lines": len(uniq), "listed": len(listed), "held_by_reason": len(reasons), "missed": len(gaps),
-                "missed_cents": sum(int(x["cents"]) for x in gaps),
+                "missed_cents": sum(int(x["cents"]) for x in gaps), "missed_by": dict(Counter(g["held_as"] for g in gaps)),
                 "share": round(len(listed) / (len(listed) + len(gaps)), 4) if (listed or gaps) else None}
     precision = {"work_now": wn_n, "possible_waste": w_n, "possible_waste_cents": w_cents,
                  "share": round(1 - w_n / wn_n, 4) if wn_n else None}
@@ -3148,6 +3154,7 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
                "coverage": coverage, "precision": precision,
                "gaps_n": len(gaps), "gaps_cents": sum(int(x["cents"]) for x in gaps),
                "gaps_by_category": _by(gaps, "category"), "gaps_by_payer": _by(gaps, "payer_group")[:12],
+               "gaps_by_holding": _by(gaps, "held_as"),
                "wasted_n": w_n, "wasted_cents": w_cents, "wasted_by_reason": _by(wasted, "reason"),
                "wasted_by_signal": _by(wasted, "signal")[:12], "matrix": matrix,
                "covered_by_category": {c: {"lines": sum(1 for x in uniq if x["category"] == c),
@@ -3157,7 +3164,7 @@ def self_audit(conn: sqlite3.Connection, *, today: Any = None, force: bool = Fal
                "new_gaps_n": len(new_gaps), "new_gaps_cents": sum(int(x["cents"]) for x in new_gaps), "new_big_gaps": len(big_new),
                "new_wasted_n": len(new_wasted), "first": not bool(prev_id), "notes": notes,
                "alert": bool(big_new) or len(new_wasted) > wasted_alert,
-               "thresholds": {"gap_cents": gap_alert, "wasted_items": wasted_alert}}
+               "thresholds": {"gap_cents": 0, "wasted_items": wasted_alert}}
     conn.execute("INSERT OR REPLACE INTO selfcheck_audits (audit_id, at, today, why, summary) VALUES (?,?,?,?,?)",
                  (audit_id, summary["at"], t, why, json.dumps(summary, default=str)))
     keep = [r[0] for r in conn.execute("SELECT audit_id FROM selfcheck_audits ORDER BY today DESC, at DESC LIMIT 3")]
@@ -4004,9 +4011,20 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
                     "detail": {"checks": safe.get("checks"), "since": safe.get("since"), "runs_held": safe.get("runs_held")}})
     last = meta_get(conn, K_LAST, {}) or {}
     for c in last.get("checks") or []:
-        if c.get("severity") == "critical" and c.get("status") == "fail" and not safe.get("on"):
+        if c.get("severity") != "critical":
+            continue
+        if c.get("status") == "error":
+            # a check that cannot run is a guard that is off: said every run until it runs again (never a hold: a check that
+            # crashes every run would freeze the worklist for good)
+            out.append({"kind": "CHECK_FAILED", "severity": "high", "payer_group": None, "key": ("CHECK_FAILED", c["id"]),
+                        "n": None, "cents": None,
+                        "title": f"Self-check: the check '{c['title'].lower()}' could not run "
+                                 f"({(c.get('info') or {}).get('error') or 'an error'}). The guard it gives is off until it runs again: "
+                                 "download the diagnostic bundle from the Data tab for the maintainer.",
+                        "detail": {"check": c["id"], "info": c.get("info")}})
+        elif c.get("status") == "fail" and not safe.get("on"):
             out.append({"kind": "CHECK_FAILED", "severity": "high" if c["id"] in ("money_conservation", "ledger_store", "closure_proof",
-                                                                                 "vanished") else "medium",
+                                                                                 "vanished", "posted_money") else "medium",
                         "payer_group": None, "key": ("CHECK_FAILED", c["id"]), "n": c.get("n"), "cents": c.get("cents"),
                         "title": f"Self-check: {c['title'].lower()} failed for {_n(int(c.get('n') or 0), 'item')} ({usd0(c.get('cents'))}). "
                                  f"{c.get('what_to_check') or ''}",
@@ -4023,8 +4041,8 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
         if au.get("new_big_gaps"):
             out.append({"kind": "AUDIT_GAPS", "severity": "high", "payer_group": None, "key": ("AUDIT_GAPS", au.get("audit_id")),
                         "n": au.get("new_gaps_n"), "cents": au.get("new_gaps_cents"),
-                        "title": f"The weekly self-audit found {_n(int(au.get('new_gaps_n') or 0), 'new line')} with money to recover and no "
-                                 f"item ({usd0(au.get('new_gaps_cents'))}); {au.get('new_big_gaps')} over {usd0(au.get('thresholds', {}).get('gap_cents'))}.",
+                        "title": f"The weekly self-audit found {_n(int(au.get('new_gaps_n') or 0), 'new line')} with money to recover that "
+                                 f"no item is working ({usd0(au.get('new_gaps_cents'))}). The Data tab lists them.",
                         "detail": {"by_category": au.get("gaps_by_category"), "audit_id": au.get("audit_id")}})
         if (au.get("new_wasted_n") or 0) > (au.get("thresholds") or {}).get("wasted_items", AUDIT_WASTED_ALERT):
             out.append({"kind": "WASTED_WORK", "severity": "medium", "payer_group": None, "key": ("WASTED_WORK", au.get("audit_id")),
@@ -4042,7 +4060,7 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
                         "detail": v})
     gu = meta_get(conn, K_GIVEN_UP, {}) or {}
     weeks = gu.get("weeks") or []
-    if len(weeks) >= 2 and weeks[-1]["cents"] - weeks[-2]["cents"] > GIVEN_UP_ALERT_CENTS:
+    if len(weeks) >= 2 and int(weeks[-1].get("cents") or 0) > int(weeks[-2].get("cents") or 0):     # any rise (decision 9)
         out.append({"kind": "GIVEN_UP_RISING", "severity": "medium", "payer_group": None, "key": ("GIVEN_UP_RISING", weeks[-1]["week"]),
                     "n": gu.get("items"), "cents": weeks[-1]["cents"],
                     "title": f"Money written off with no decision rose to {usd0(weeks[-1]['cents'])} this week (from "
@@ -4210,9 +4228,15 @@ def panel(conn: sqlite3.Connection) -> dict:
     if safe.get("on"):
         lines.append(safe.get("text") or "Safe mode is on.")
     failing = [c for c in checks if c["status"] == "fail"]
-    lines.append("Every check passed." if checks and not failing else
+    broken = [c for c in checks if c["status"] == "error"]
+    lines.append("Every check passed." if checks and not failing and not broken else
                  (f"{_n(len(failing), 'check')} failing: " + "; ".join(c["title"] for c in failing[:4]) + "." if failing else
-                  "The checks have not run yet."))
+                  "The checks have not run yet." if not checks else ""))
+    if broken:
+        lines.append(f"{_n(len(broken), 'check')} could not run: " + "; ".join(c["title"] for c in broken[:4]) + ".")
+    if last.get("kept"):
+        lines.append(f"{_n(int(last['kept']), 'item')} the newest analysis no longer lists, with no reason found, kept on the "
+                     "worklist until a person accepts the change.")
     la = audit.get("latest") or {}
     if la:
         lines.append(f"Self-audit of {la.get('today')}: {_n(int(la.get('gaps_n') or 0), 'line')} with money and no item "
@@ -4220,12 +4244,16 @@ def panel(conn: sqlite3.Connection) -> dict:
     if gu.get("cents") is not None:
         lines.append(f"Written off with no decision (2025 on): {usd0(gu.get('cents'))}, of which {usd0(gu.get('recoverable_cents'))} can "
                      "still be appealed.")
+    gaps = (money.get("gaps") or {}) if isinstance(money, dict) else {}
+    if gaps.get("total_cents"):
+        lines.append(f"Money the checks could not tie to the cent: {usd0(gaps['total_cents'])} (the Data tab shows each part).")
     if blind.get("blind"):
         lines.append(blind.get("banner") or "")
     return {"title": "Running on its own", "lines": [x for x in lines if x], "regulation": reg, "safe_mode": safe,
             "last_check": {k: last.get(k) for k in ("run_id", "at", "today", "held", "first", "kept", "version")},
-            "checks": checks, "audit": audit, "track": track, "patterns": pats, "money": {k: money.get(k) for k in ("at", "ledger_seq",
-                                                                                                                  "conservation", "ar_balance")},
+            "checks": checks, "audit": audit, "track": track, "patterns": pats,
+            "money": {k: money.get(k) for k in ("at", "ledger_seq", "conservation", "ar_balance", "posted", "gaps")},
+            "acceptances": (meta_get(conn, K_ACCEPTED, []) or [])[-10:],
             "given_up": gu, "blind": blind, "housekeeping": house, "rates": rates}
 
 
@@ -4247,15 +4275,16 @@ def banner(conn: sqlite3.Connection) -> dict | None:
 REQUESTS = ("audit", "accept")
 
 
-def apply_request(conn: sqlite3.Connection, action: dict, *, ledger: Any = None, today: Any = None) -> dict:
+def apply_request(conn: sqlite3.Connection, action: dict, *, today: Any = None) -> dict:
     """A person's request from the Data tab, applied by the run (on a serverless host the page journals it; on a server
     the route may call this itself): {'kind': 'selfcheck_request', 'what': 'audit'} runs the self-audit now;
-    {'what': 'accept', 'checks': [...], 'user': ...} accepts what the latest checks found (accept_findings)."""
+    {'what': 'accept', 'checks': [...], 'user': ..., 'run_id': the run the page showed} accepts exactly what that run found
+    (accept_findings)."""
     what = (action or {}).get("what")
     if what == "audit":
-        return {"audit": self_audit(conn, today=today, force=True, why="on demand", ledger=ledger)}
+        return {"audit": self_audit(conn, today=today, force=True, why="on demand")}
     if what == "accept":
-        return accept_findings(conn, str(action.get("user") or "a person"), action.get("checks"))
+        return accept_findings(conn, str(action.get("user") or "a person"), action.get("checks"), run_id=action.get("run_id"))
     return {"skipped": f"unknown request {what!r}"}
 
 
@@ -4273,11 +4302,12 @@ def data_health(conn: sqlite3.Connection, today: Any = None) -> list[dict]:
                     "detail": safe.get("text") or "", "who": "Owner: download the diagnostic bundle from the Data tab for the maintainer."})
     last = meta_get(conn, K_LAST, {}) or {}
     for c in last.get("checks") or []:
-        if c.get("status") != "fail" or c.get("id") in ("feed_835", "feed_ema"):
+        if c.get("status") not in ("fail", "error") or c.get("id") in ("feed_835", "feed_ema"):
             continue
         out.append({"key": f"selfcheck_{c['id']}", "ok": False, "severity": c.get("severity"),
                     "title": c.get("text") or c.get("title"), "detail": c.get("sentence") or "",
-                    "who": "Maintainer: " + (c.get("what_to_check") or "see the diagnostic bundle")})
+                    "who": "Maintainer: " + ("the check could not run; the diagnostic bundle has its error" if c.get("status") == "error"
+                                             else (c.get("what_to_check") or "see the diagnostic bundle"))})
     la = (meta_get(conn, K_AUDIT, {}) or {}).get("latest") or {}
     if la.get("gaps_n"):
         out.append({"key": "selfcheck_audit", "ok": False,

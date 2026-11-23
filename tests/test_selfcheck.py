@@ -181,7 +181,8 @@ def status(started: str, peak: int, seconds: float = 60, budget: float = 240, tm
 
 def test_budgets_follow_the_host(monkeypatch):
     b = sc.budgets("serverless", budget_s=240)
-    assert (b["memory_mb"], b["seconds"], b["tmp_mb"]) == (1600, 240.0, 512)
+    assert (b["memory_mb"], b["seconds"], b["tmp_mb"]) == (2188, 240.0, 512)
+    assert round(b["memory_mb"] * b["share"]) == sc.GATE_MEMORY_MB          # acting at release gate 3's 1.75 GB
     s = sc.budgets("server")
     assert s["memory_mb"] is None and s["tmp_mb"] is None and s["seconds"] == 3600.0
     monkeypatch.setenv("REMITWATCH_MEMORY_BUDGET_MB", "3000")
@@ -192,15 +193,15 @@ def test_a_run_past_80_percent_makes_the_next_run_spread_then_archive_then_shed_
     c = store.conn
     plan = sc.plan_next(c, status("2026-11-01T10:00:00+00:00", 900), mode="serverless")
     assert plan["level"] == 0 and not plan["spread"]
-    plan = sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1400), mode="serverless")      # 87% of 1,600 MB
+    plan = sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1800), mode="serverless")      # past release gate 3 (1,750 MB)
     assert plan["level"] == 1 and plan["spread"] and not plan["archive_tight"] and plan["pressure"]["worst"] == "memory"
     assert any("one report file per run" in a for a in plan["actions"])
-    plan = sc.plan_next(c, status("2026-11-03T10:00:00+00:00", 1350), mode="serverless")
+    plan = sc.plan_next(c, status("2026-11-03T10:00:00+00:00", 1780), mode="serverless")
     assert plan["level"] == 2 and plan["archive_tight"] and plan["skip"] == []
     assert sc.archive_budget_state(plan)["share"] >= 0.8         # unit E's archive takes the tighter horizon
-    plan = sc.plan_next(c, status("2026-11-04T10:00:00+00:00", 1300), mode="serverless")
+    plan = sc.plan_next(c, status("2026-11-04T10:00:00+00:00", 1760), mode="serverless")
     assert plan["level"] == 3 and set(plan["skip"]) == set(sc.OPTIONAL_STEPS) and not plan["alert"]
-    plan = sc.plan_next(c, status("2026-11-05T10:00:00+00:00", 1500), mode="serverless")
+    plan = sc.plan_next(c, status("2026-11-05T10:00:00+00:00", 1900), mode="serverless")
     assert plan["level"] == 4 and plan["alert"]
     kinds = {a["kind"]: a for a in sc.alert_candidates(c, today=TODAY)}
     assert "NEAR_LIMIT" in kinds and "Nothing was lost" in kinds["NEAR_LIMIT"]["title"]
@@ -210,8 +211,8 @@ def test_a_run_past_80_percent_makes_the_next_run_spread_then_archive_then_shed_
 
 def test_calm_runs_step_the_level_down_after_three_and_a_status_counts_once(store):
     c = store.conn
-    sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1400), mode="serverless")
-    again = sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1400), mode="serverless")      # the same run read twice
+    sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1800), mode="serverless")
+    again = sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1800), mode="serverless")      # the same run read twice
     assert again["level"] == 1
     for day in (3, 4):
         assert sc.plan_next(c, status(f"2026-11-0{day}T10:00:00+00:00", 600), mode="serverless")["level"] == 1
@@ -338,17 +339,23 @@ def test_the_precision_guard_catches_work_now_items_a_later_payment_covers(kind)
     assert sorted(r["examples"]) == ["F-ema", "F-paid"]
 
 
-def test_an_unworked_item_past_every_window_and_its_grace_is_caught(store):
+def test_an_unworked_item_past_every_window_and_its_grace_is_caught(store, monkeypatch):
+    from remitwatch import states
     c = store.conn
     add_item(c, "F-late", appeal_deadline="2026-09-01")                                     # 82 days past, nobody worked it
-    add_item(c, "F-grace", appeal_deadline="2026-11-10")                                    # inside the 30-day grace
+    add_item(c, "F-grace", appeal_deadline="2026-11-10")                                    # 12 days past
     add_item(c, "F-legal", appeal_deadline="2026-09-01", legal_deadline="2027-03-01")       # the payer's own limit is later
     add_item(c, "F-work", appeal_deadline="2026-09-01", state_basis="Anthem received a new claim; no answer by Oct 1: ask")
     add_item(c, "F-rule", appeal_deadline="2026-09-01", state_basis="whatever the words", state_rule="open") \
         if "state_rule" in sc._cols(c, "findings") else None
+    # the owner's decision 1: expired the day the last window closes (states.EXPIRE_GRACE_DAYS = 0)
+    monkeypatch.setattr(states, "EXPIRE_GRACE_DAYS", 0)
     r = sc.check_past_window(c, TODAY)
-    assert "F-late" in r["examples"] and not {"F-grace", "F-legal", "F-work"} & set(r["examples"])
-    assert r["info"]["past_last_window_in_grace"] == 1
+    assert {"F-late", "F-grace"} <= set(r["examples"]) and not {"F-legal", "F-work"} & set(r["examples"])
+    assert r["info"]["grace_days"] == 0 and r["info"]["past_last_window_in_grace"] == 0
+    monkeypatch.setattr(states, "EXPIRE_GRACE_DAYS", 30)                                    # a grace, where one is set
+    r = sc.check_past_window(c, TODAY)
+    assert "F-late" in r["examples"] and "F-grace" not in r["examples"] and r["info"]["past_last_window_in_grace"] == 1
 
 
 def test_items_to_work_without_a_deadline_are_a_warning(store):
@@ -639,8 +646,9 @@ def test_an_ar_line_above_what_its_postings_leave_does_not_reconcile(ledger_worl
     c.commit()
     out = sc.check_ledger(c, lg, today=TODAY)
     lb = check_of(out["checks"], "line_balance")
-    assert lb["severity"] == "warning" and lb["n"] == 1 and lb["cents"] == 15000
-    assert out["ar_balance"]["postings_leave_more"] == 1          # the patient's $20 share, paid on no line: not a gap
+    assert lb["severity"] == "warning" and lb["n"] == 1 and lb["cents"] == 15000 and out["ar_balance"]["ar_above"] == 1
+    # the patient's $20, paid with no claim number, is joined to the line first: the line agrees with the A/R
+    assert out["ar_balance"]["equal"] == 1 and out["ar_balance"]["postings_above"] == 0
 
 
 def test_given_up_counts_write_offs_at_posting_with_no_decision_or_policy(store):
@@ -886,7 +894,7 @@ def test_the_panel_and_data_health_read_only_meta_so_the_copy_shows_the_same(sto
     add_item(c, "F-1")
     add_item(c, "F-2", work_state=None)
     run(c, None, "r1")
-    sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1400), mode="serverless")
+    sc.plan_next(c, status("2026-11-02T10:00:00+00:00", 1800), mode="serverless")
     p = sc.panel(c)
     assert p["title"] == "Running on its own" and p["regulation"]["level"] == 1
     assert check_of(p["checks"], "state_valid")["status"] == "fail" and p["checks"][0]["history"]
@@ -1343,7 +1351,10 @@ def test_a_line_the_ar_shows_settled_while_its_postings_leave_money_open_is_a_ga
         er.ingest_file(s, F.write(str(tmp_path / "p1.csv"), F.production_csv(rows)), via="test", ledger=lg, log=lambda *a: None)
         el.refresh(s, lg, log=lambda *a: None)
         rows2 = [r for r in rows if r.get("Insurance Payments") != 90.0]
-        er.ingest_file(s, F.write(str(tmp_path / "p2.csv"), F.production_csv(rows2)), via="test", ledger=lg, log=lambda *a: None)
+        rows2.append(F.production_row(posted=F.D(2026, 4, 2), svc=F.D(2026, 3, 9), cpt="99212", link=None, pat_adj=5.0,
+                                      payer="Patient", patient=1))           # a newer export: it reaches past the first one
+        r2 = er.ingest_file(s, F.write(str(tmp_path / "p2.csv"), F.production_csv(rows2)), via="test", ledger=lg, log=lambda *a: None)
+        assert r2["status"] == "current" and r2["replaced"]
         el.refresh(s, lg, log=lambda *a: None)
         s.conn.execute("""INSERT INTO ema_ar (file_id, row_no, as_of, link, svc, cpt, party, balance_cents, facility)
                           VALUES ('ar1', 1, '2026-11-20', ?, '2026-03-02', '99213', 'Insurance', 0, 0)""", (F.link_no(1),))

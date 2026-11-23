@@ -921,7 +921,8 @@ def policy_table(c: sqlite3.Connection) -> dict:
         # for the other two (nothing is accepted by default, PLAN decision 14)
         p["decision"] = d.get("decision") or ("pursue" if kind == "write_off" else "decide")
         p["decided_by"], p["decided_at"] = d.get("by"), d.get("at")
-        p["pending"] = bool(d.get("at")) and (not run_at or str(d.get("at")) > str(run_at))
+        # saved at or after the start of the newest run (the same second included): the next run applies it
+        p["pending"] = bool(d.get("at")) and (not run_at or not _after(run_at, d.get("at")))
         p["basis"] = BASIS["policy" if kind == "write_off" else kind]
         out.append(p)
     first = {"decide": 0}

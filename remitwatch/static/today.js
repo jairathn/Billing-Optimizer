@@ -89,6 +89,9 @@ async function todayTab(v){
   const day = new Date().toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric'});
   const alerts = (state.alertsNew||[]).filter(a=>!['DEADLINE','STALE_FEED','PROVIDER_TARGETED'].includes(a.kind) && a.severity!=='info').slice(0,3);
   const missed = b.missed || {};
+  // a phone: the scoreboard and the counts by state stay above the plan; the lines after them (what is not on today's
+  // list, what else waits, the exports' ages) come right below it, so the plan's first step is on the first screen
+  const narrow = tdNarrow(), side = '<div id="tdMoreSlot"></div><div id="tdEmaSlot"></div>';
   v.innerHTML = `${guideSeen() ? '' : guideHtml(b)}
     <div id="tdBlind"></div>
     <div id="tdHealth">${tdHealthHtml(b, look.blind)}</div>
@@ -96,8 +99,9 @@ async function todayTab(v){
       <div class="donebox"><span>Moved on today <b>${done.today_n||0}</b></span><span>This week <b>${pl(done.week_n, 'item')}</b>, ${money(done.week_cents||0)} sent or paid</span>${(b.recovered||{}).year_cents ? `<span>Paid back in ${esc(b.recovered.year)} <b>${money(b.recovered.year_cents)}</b></span>` : ''}</div></div>
     <div id="tdScoreSlot"></div>
     <div id="tdCountsSlot"></div>
-    <div id="tdEmaSlot"></div>
+    ${narrow ? '' : side}
     <div class="plan" id="tdPlan">${tdPlanHtml(tdSteps(b, look))}</div>
+    ${narrow ? side : ''}
     <div class="panel"><div class="panel-head"><h2>Batches</h2><span class="muted small">One kind of work for one payer, so one person can clear a pile in one sitting. ${b.batches.length} batches, ${money(w.cents)} inside a filing window.</span></div>
       <div class="batches" id="batchList">${batchRows(b, b.batches.slice(0, 8))}</div>
       ${b.batches.length > 8 ? `<button class="ghost" id="allBatches">Show all ${b.batches.length} batches</button>` : ''}</div>
@@ -122,6 +126,7 @@ async function todayTab(v){
       const el = v.querySelector('#tdCountsSlot'), bb = v.querySelector('#tdBlind');
       if(td){
         if(el){ el.innerHTML = tdStatesHtml(td); tdBindCounts(el, td); }
+        const more = v.querySelector('#tdMoreSlot'); if(more){ more.innerHTML = tdMoreHtml(td); tdBindCounts(more, td); }
         if(bb){ bb.innerHTML = tdBlindHtml(td.blind); tdBindLinks(bb); }
         seen(!!(td.blind && td.blind.blind));
         return;
@@ -179,7 +184,7 @@ function tdBindPlan(v, b, look, redraw){
 // banner does not say it a second time (and holds those checks back until the blind spot is known)
 function tdHealthHtml(b, blind){
   const bad = (b.health||[]).filter(h=>!h.ok && !((blind === true || blind === undefined) && TD_BLIND_KEYS.has(h.key)));
-  return bad.length ? `<div class="banner"><b>Before you start:</b> ${esc(bad[0].title)}. ${esc(bad[0].detail||'')} <a href="#data" class="go-data">How to fix</a>${bad.length>1?` · <a href="#data" class="go-data">${bad.length-1} more data ${bad.length-1===1?'check':'checks'}</a>`:''}</div>` : '';
+  return bad.length ? `<div class="banner"><b>Before you start:</b> ${esc(bad[0].title)}.${tdNarrow() ? '' : ' ' + esc(bad[0].detail||'')} <a href="#data" class="go-data">How to fix</a>${bad.length>1?` · <a href="#data" class="go-data">${bad.length-1} more data ${bad.length-1===1?'check':'checks'}</a>`:''}</div>` : '';
 }
 
 // ---------------------------------------------------------------- Today: the blind spot, the scoreboard, the counts by state
@@ -251,26 +256,31 @@ function tdScoreHtml(sb){
 function tdStatesHtml(td){
   if(!td.ready) return '';
   const st = td.states || {}, aw = td.auto_written_off, un = td.unworked, bs = td.basis || {};
+  const aT = ["EMA's posting rule wrote the denial off the day it posted, nobody worked it, and its safe date to appeal has not passed", bs.auto_written_off || ''].join(' ');
+  const uT = `No work in EMA or here in the 21 days to ${longDate(un ? un.data_through : '')}. ${bs.unworked || ''}`;
+  if(tdNarrow()){
+    const one = (key, label, x) => x ? `<a href="#" data-td="${key}" title="${esc(key === 'unworked' ? uT : key === 'auto_written_off' ? aT : (bs.shortfall || ''))}">${esc(label)} <b>${Number(x.n||0).toLocaleString()}</b>${x.n ? ' ' + short$(x.cents) + ' est.' : ''}</a>` : '';
+    const cells = TD_STATES.map(([k, label]) => one(k, label, st[k])).concat([one('auto_written_off', 'Auto write-offs still appealable', aw), one('unworked', 'Nobody has worked these', un)]).filter(Boolean);
+    return `<div class="oneline td-compact" id="tdStates" aria-label="Items by state">${cells.join(' · ')}</div>`;
+  }
+  return `<div class="tiles" id="tdStates" aria-label="Items by state">
+      ${TD_STATES.map(([k, label, hint, more]) => tdTile(k, label, hint, st[k], k==='followup_due' && (st[k]||{}).n ? 't-amber' : '', more, bs.shortfall)).join('')}
+      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', "written off by EMA's rule, unworked", aw, aw.n ? 't-red' : '', aT) : ''}
+      ${un ? tdTile('unworked', 'Nobody has worked these', 'of Work now, nothing done in 21 days', un, '', uT) : ''}
+    </div>`;
+}
+// what is not on today's list, the money that is not claim work, and the patterns that wait for the owner: one line
+function tdMoreHtml(td){
+  if(!td.ready) return '';
+  const st = td.states || {}, bs = td.basis || {};
   const quiet = TD_QUIET.filter(([k]) => (st[k]||{}).n).map(([k, word]) => `<a href="#" data-td="${k}">${Number(st[k].n).toLocaleString()} ${esc(word)}</a>`);
   const other = td.other || {}, post = other.post || {}, refund = other.refund || {}, dc = td.decide || {};
   const also = [post.n ? `<a href="#" data-td="post" title="${esc(bs.post || '')}">${esc(pl(post.n, 'payment'))} to post in EMA</a>` : '',
     refund.n ? `<a href="#" data-td="refund" title="${esc(bs.refund || '')}">${esc(pl(refund.n, 'credit'))} to refund</a>` : ''].filter(Boolean);
   // codes a payer almost never pays: out of Work now until the owner decides (PLAN decision 14), never out of sight
   const decide = dc.patterns ? `<a href="#policy" class="go-policy" title="${esc(bs.payer_policy || '')}">${esc(pl(dc.patterns, 'write-off pattern'))} worth ${money(dc.cents)} (est.) ${dc.patterns===1?'waits':'wait'} for the owner's decision</a>` : '';
-  const aT = ["EMA's posting rule wrote the denial off the day it posted, nobody worked it, and its safe date to appeal has not passed", bs.auto_written_off || ''].join(' ');
-  const uT = `No work in EMA or here in the 21 days to ${longDate(un ? un.data_through : '')}. ${bs.unworked || ''}`;
-  if(tdNarrow()){
-    const one = (key, label, x) => x ? `<a href="#" data-td="${key}" title="${esc(key === 'unworked' ? uT : key === 'auto_written_off' ? aT : (bs.shortfall || ''))}">${esc(label)} <b>${Number(x.n||0).toLocaleString()}</b>${x.n ? ' ' + short$(x.cents) + ' est.' : ''}</a>` : '';
-    const cells = TD_STATES.map(([k, label]) => one(k, label, st[k])).concat([one('auto_written_off', 'Auto write-offs still appealable', aw), one('unworked', 'Nobody has worked these', un)]).filter(Boolean);
-    return `<div class="oneline td-compact" id="tdStates" aria-label="Items by state">${cells.join(' · ')}</div>
-      ${quiet.length || also.length || decide ? `<div class="oneline">${quiet.length ? 'Not on today\'s list: ' + quiet.join(', ') + '.' : ''}${also.length ? ' Also: ' + also.join(', ') + '.' : ''}${decide ? ' ' + decide + '.' : ''}</div>` : ''}`;
-  }
-  return `<div class="tiles" id="tdStates" aria-label="Items by state">
-      ${TD_STATES.map(([k, label, hint, more]) => tdTile(k, label, hint, st[k], k==='followup_due' && (st[k]||{}).n ? 't-amber' : '', more, bs.shortfall)).join('')}
-      ${aw ? tdTile('auto_written_off', 'Auto write-offs still appealable', "written off by EMA's rule, unworked", aw, aw.n ? 't-red' : '', aT) : ''}
-      ${un ? tdTile('unworked', 'Nobody has worked these', 'of Work now, nothing done in 21 days', un, '', uT) : ''}
-    </div>
-    ${quiet.length || also.length || decide ? `<div class="oneline">${quiet.length ? 'Not on today\'s list: ' + quiet.join(', ') + '.' : ''}${also.length ? ' Also: ' + also.join(', ') + '.' : ''}${decide ? ' ' + decide + '.' : ''}</div>` : ''}`;
+  if(!quiet.length && !also.length && !decide) return '';
+  return `<div class="oneline">${quiet.length ? 'Not on today\'s list: ' + quiet.join(', ') + '.' : ''}${also.length ? ' Also: ' + also.join(', ') + '.' : ''}${decide ? ' ' + decide + '.' : ''}</div>`;
 }
 function tdEmaLine(td, ex){
   const parts = [];
