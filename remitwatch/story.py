@@ -2109,10 +2109,12 @@ def _next(conn: sqlite3.Connection, fx: dict, story: dict, st: dict, verdict: di
                             f"{usd(un['paid'])}; {', '.join(f'{g}-{c} {usd(a)}' for g, c, a in un['adj']) or 'no reasons'}): EMA has not posted "
                             "it, so EMA's A/R still shows the claim as pending.")
             buttons.append("mark_posted")
-        if o.get("outcome") in WRITE_OFFS and route in ("appeal", "corrected", "call") and f.get("category") in ("denial", "bundling") \
+        if o.get("outcome") in WRITE_OFFS and route in ("appeal", "corrected", "call", "decide") and f.get("category") in ("denial", "bundling") \
                 and (o.get("written_off") or o.get("contractual_routine")):
-            steps.append(f"When you send it, reverse EMA's write-off of {usd(o.get('written_off') or o.get('contractual_routine'))} "
-                         f"({', '.join(o.get('carcs') or []) or 'the denial'}) so the line shows open until the payer answers.")
+            # a decision may end in a request to the payer (an authorization found, a reprocess): the same reversal, said as a condition
+            steps.append(f"{'If' if route == 'decide' else 'When'} you send it, reverse EMA's write-off of "
+                         f"{usd(o.get('written_off') or o.get('contractual_routine'))} ({', '.join(o.get('carcs') or []) or 'the denial'}) "
+                         "so the line shows open until the payer answers.")
         rs = _recovery_step(f, rec) if route in ("appeal", "corrected", "rate", "decide") and rule not in S.CHECK_RULES else None
         if rs and not (rec.get("paid") == 0 and route == "appeal" and _payer_paid_like(conn, f)):
             steps.append(rs)

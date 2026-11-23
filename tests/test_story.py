@@ -532,7 +532,16 @@ def test_a_write_off_decision_goes_through_the_policy_table_or_a_persons_let_go(
     assert any("Accept this pattern" in s_ and "A single item is let go only by a person, with a reason." in s_ for s_ in n["steps"])
     # the button accepts the pattern in one click: the next step carries the owner's policy key (needs_C1 1)
     assert n["pattern"] == f"{BCBS}|99213||CO-197"
-    assert any(s_.startswith("When you send it, reverse EMA's write-off of $150.00 (CO-197)") for s_ in n["steps"])
+    # an authorization denial is decided first (find the authorization): the reversal is said as a condition
+    assert n["route"] == "decide"
+    assert any(s_.startswith("If you send it, reverse EMA's write-off of $150.00 (CO-197)") for s_ in n["steps"])
+
+
+def test_an_appealed_write_off_is_reversed_when_the_appeal_goes_out(store, ledger, tmp_path):
+    auto_writeoff_world(store, ledger, tmp_path, reason=("CO", "50"), signal="DENIED_MEDICAL_NECESSITY", carc="50")
+    n = story.next_step(store.conn, "F1", ledger=ledger, today=TODAY)
+    assert n["route"] == "appeal" and n["pattern"] == f"{BCBS}|99213||CO-50"
+    assert any(s_.startswith("When you send it, reverse EMA's write-off of $150.00 (CO-50)") for s_ in n["steps"])
 
 
 def test_never_an_appeal_for_a_line_paid_credited_reprocessed_or_waiting(store, ledger, tmp_path):
