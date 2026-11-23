@@ -159,6 +159,7 @@ _NAME_WORD = re.compile(r"[^\W\d_](?:[^\W\d_]|['\-])+")    # a word of a name as
 # two-letter words a store's name never adds to the names masked: English words every message starts with, and
 # RemitWatch's own codes (claim adjustment groups, A/R): masking them would leave the logs unreadable
 _TWO_LETTER_KEEP = frozenset("of to in is it on at by or as an be we he me my no so up us if go am ok id co pr oa pi cr ar".split())
+_NAME_GAPS = (" ", ", ", ",", "  ")     # what stands between the words of one name ("Last, First", "First Last")
 _ALNUM_OK = frozenset({"sha256", "x86-64", "utf-16", "utf-32", "base64", "py313", "py312", "py311"})
 _ID_QUOTED = re.compile(r"^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+|"
                         r"%[-A-Za-z%/ :.]*|[A-Z][a-z]+(?:[A-Z][a-z]+)+(?:Error|Exception|Warning))$")
@@ -282,7 +283,7 @@ class Scrubber:
         """Names that reached the text unquoted: a word the store's patients carry (learn; one of two letters only when
         it is written with a capital, so "to do" stays), an ALL-CAPS word of four letters or more (an 835 name), or two
         capitalized words side by side ("Last, First" or "First Last"), unless the word is one of RemitWatch's own
-        (code_words)."""
+        (code_words); and a capitalized word of two letters beside any of those ("NGUYEN, AN")."""
         toks = list(_WORD.finditer(s))
         names = self.names
         short = [m for m in _WORD2.finditer(s) if not m.group(0).islower() and m.group(0).lower() in names] if names else []
@@ -307,17 +308,30 @@ class Scrubber:
             if i + 1 < len(toks) and cap(w):
                 nxt = toks[i + 1].group(0)
                 gap = s[m.end():toks[i + 1].start()]
-                if cap(nxt) and gap in (" ", ", ", ",", "  ") and not (known(w) and known(nxt)):
+                if cap(nxt) and gap in _NAME_GAPS and not (known(w) and known(nxt)):
                     # the unknown word goes; a known one beside it goes too unless it is an ALL-CAPS word of the code's
                     # own (ERROR, EMA): "John Smith" loses both, "ERROR Smith" keeps ERROR
                     for j, x in ((i, w), (i + 1, nxt)):
                         if not known(x) or not x.isupper():
                             mask[j] = True
-        spans = sorted([(m.start(), m.end()) for m, hide in zip(toks, mask) if hide] + [(m.start(), m.end()) for m in short])
+        spans = {(m.start(), m.end()) for m, hide in zip(toks, mask) if hide} | {(m.start(), m.end()) for m in short}
         if not spans:
             return s
+        # a capitalized word of two letters beside a masked name is part of it ("ZORVATHIQ, AN", "My He Quillbrandt"):
+        # the English words _TWO_LETTER_KEEP keeps out of the names learned are given names and surnames too (An, My,
+        # He, No, Go), so they go with the name they stand beside, and only there
+        two = [(m.start(), m.end()) for m in _WORD2.finditer(s) if m.group(0)[:1].isupper() and (m.start(), m.end()) not in spans]
+        while two:
+            starts, ends = {a for a, _ in spans}, {b for _, b in spans}
+            near = [(a, b) for a, b in two
+                    if any((s[b:b + len(g)] == g and b + len(g) in starts) or (a >= len(g) and s[a - len(g):a] == g and a - len(g) in ends)
+                           for g in _NAME_GAPS)]
+            if not near:
+                break
+            spans.update(near)
+            two = [t for t in two if t not in spans]
         out, at = [], 0
-        for start, end in spans:
+        for start, end in sorted(spans):
             if start < at:
                 continue
             out.append(s[at:start])

@@ -1583,6 +1583,25 @@ def test_an_open_item_with_no_state_is_listed_as_the_lists_show_it(store):
     assert out["kept"] == 1 and "F-x" in _listed(c), (out["kept"], _listed(c))
 
 
+def test_the_banner_and_the_alerts_name_a_check_as_it_is_written(store):
+    """A check named after EMA keeps its capitals in the safe-mode sentence and in the alerts: "money posted in ema" reads
+    as a typo to the people the banner is for (found on the real world's held run)."""
+    c = store.conn
+    add_item(c, "F-1")
+    run(c, None, "r1")
+    sc.meta_set(c, sc.K_MONEY, {"checks": [sc._result("ledger_store", [("cell-1", 500, None)])]})       # a cell off by $5
+    out = run(c, None, "r2")
+    assert out["held"] and out["hold_checks"] == ["ledger_store"], out
+    text = sc.safe_mode(c)["text"]
+    assert "the store's EMA money equals the posting ledger's" in text and "ema money" not in text, text
+    sc.meta_set(c, sc.K_MONEY, {"checks": []})
+    sc.meta_set(c, sc.K_POSTED, {"check": sc._check_error("posted_money", RuntimeError("invented"))})
+    assert not run(c, None, "r3")["held"]
+    titles = [a["title"] for a in sc.alert_candidates(c, today=TODAY) if a["kind"] == "CHECK_FAILED"]
+    assert any("money posted in EMA never disappears" in t for t in titles), titles
+    assert not any("posted in ema" in t for t in titles), titles
+
+
 def test_any_new_coverage_gap_and_any_rise_in_money_given_up_raise_their_alerts(store):
     """The owner's decision 9: no dollar floor. A new $3 coverage gap raises AUDIT_GAPS; money given up rising by $1
     raises GIVEN_UP_RISING."""

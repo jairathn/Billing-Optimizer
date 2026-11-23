@@ -355,13 +355,18 @@ def _apply_settings(rec: dict, values: dict, who: str, at: str) -> dict:
     return {"values": merged, "history": hist[-SETTINGS_HISTORY:], "at": at, "by": who}
 
 
-def read_settings(conn: sqlite3.Connection | None = None, state: Any = None) -> dict:
+def read_settings(conn: sqlite3.Connection | None = None, state: Any = None, files: Any = None) -> dict:
     """The owner's figures: on a serverless host the state folder's copy first (what the page saved last), else what the
-    run copied into meta, else the defaults."""
+    run copied into meta, else the defaults. files: the page load's reader (StateFiles), so the file is read once."""
     if state is not None:
-        raw = state.get(STATE_SETTINGS)
-        if raw:
-            return settings_record(_json(raw.decode() if isinstance(raw, bytes) else raw))
+        if files is not None:
+            got = files.read(STATE_SETTINGS)
+            if got:
+                return settings_record(got)
+        else:
+            raw = state.get(STATE_SETTINGS)
+            if raw:
+                return settings_record(_json(raw.decode() if isinstance(raw, bytes) else raw))
     return settings_record(_meta(conn, SETTINGS_KEY, {}) if conn is not None else {})
 
 
@@ -2649,7 +2654,49 @@ def _state_spot_name(day: str) -> str:
     return STATE_SPOT.format(year=day[:4])
 
 
+_OLD_FILES: dict = {}           # (folder, name) -> (read at, data): a past year's spot-check file, which nothing writes any more
+OLD_FILE_SECONDS = 600
+
+
+class StateFiles:
+    """One page load's reads of the state folder (on a serverless host each read is one Dropbox call, made while the
+    person waits): every file read once, with a plain read (no separate look at its revision), and a past year's
+    spot-check file, which no answer changes any more, kept by the instance for OLD_FILE_SECONDS."""
+
+    def __init__(self, state: Any, today: Any = None):
+        self.state = state
+        self.year = _today(today)[:4]
+        self.got: dict[str, dict] = {}
+
+    def _folder(self) -> str:
+        return str(getattr(self.state, "base", None) or getattr(self.state, "root", None) or id(self.state))
+
+    def read(self, name: str) -> dict:
+        if name in self.got:
+            return self.got[name]
+        m = re.fullmatch(r"results/spot_checks_(\d{4})\.json", name)
+        past = bool(m) and m.group(1) < self.year
+        key = (self._folder(), name)
+        import time
+        hit = _OLD_FILES.get(key) if past else None
+        if hit and time.time() - hit[0] < OLD_FILE_SECONDS:
+            data = json.loads(json.dumps(hit[1]))
+        else:
+            raw = self.state.get(name)
+            data = _json(raw.decode() if isinstance(raw, bytes) else raw) if raw else {}
+            if past:
+                if len(_OLD_FILES) > 32:
+                    _OLD_FILES.clear()
+                _OLD_FILES[key] = (time.time(), json.loads(json.dumps(data)))
+        self.got[name] = data
+        return data
+
+    def wrote(self, name: str, data: dict) -> None:
+        self.got[name] = data
+
+
 def _read_state_spot(state: Any, year_day: str) -> tuple[dict, dict | None]:
+    """The year's file with its revision, for a write that must not overwrite another person's."""
     name = _state_spot_name(year_day)
     meta = state.meta(name)
     raw = state.get(name) if meta else None
@@ -2678,18 +2725,23 @@ def _write_state_spot(state: Any, day: str, change: Callable[[dict], dict | None
     raise ResultsError("Someone else saved at the same moment several times. Press the button again.", 409)
 
 
-def spot_day_state(conn: sqlite3.Connection, state: Any, day: Any = None) -> list[dict]:
+def _files(state: Any, files: StateFiles | None, today: Any = None) -> StateFiles:
+    return files if files is not None else StateFiles(state, today)
+
+
+def spot_day_state(conn: sqlite3.Connection, state: Any, day: Any = None, files: StateFiles | None = None) -> list[dict]:
     """Serverless: the day's picks with their answers, kept in the state folder; picked from the dashboard copy on the
     first ask of the day (every instance picks the same items from the same copy; the first one written wins)."""
     d = _today(day)
-    data, _meta_ = _read_state_spot(state, d)
-    rec = (data.get("days") or {}).get(d)
+    fl = _files(state, files, d)
+    name = _state_spot_name(d)
+    rec = (fl.read(name).get("days") or {}).get(d)
     if not rec:
         recent = set()
-        for y in {d[:4], _add(d, -SPOT_REPEAT_DAYS)[:4]}:
-            old, _m = _read_state_spot(state, y + "-01-01")
-            for od, orec in (old.get("days") or {}).items():
-                if od >= _add(d, -SPOT_REPEAT_DAYS):
+        since = _add(d, -SPOT_REPEAT_DAYS)
+        for y in sorted({d[:4], since[:4]}):
+            for od, orec in (fl.read(_state_spot_name(y)).get("days") or {}).items():
+                if od >= since:
                     recent.update(p.get("finding_id") for p in orec.get("picks") or [])
         picks = pick_spot_checks(conn, d, _salt(conn, state), recent)
 
@@ -2699,6 +2751,7 @@ def spot_day_state(conn: sqlite3.Connection, state: Any, day: Any = None) -> lis
             data["days"][d] = {"picks": picks, "answers": {}}
             return data
         data = _write_state_spot(state, d, add)
+        fl.wrote(name, data)
         rec = data["days"][d]
     answers = rec.get("answers") or {}
     return [dict(p, day=d, **{k: (answers.get(p["finding_id"]) or {}).get(k) for k in ("answer", "reason", "note", "who", "answered_at")})
@@ -2722,14 +2775,16 @@ def record_spot_check_state(state: Any, day: str, finding_id: str, answer: str, 
     return {"ok": True, "answered_at": at}
 
 
-def spot_rows_all(conn: sqlite3.Connection | None = None, state: Any = None, today: Any = None, years: int = 2) -> list[dict]:
+def spot_rows_all(conn: sqlite3.Connection | None = None, state: Any = None, today: Any = None, years: int = 2,
+                  files: StateFiles | None = None) -> list[dict]:
     """Every pick with its answer: the store's table (a server, and a serverless run after merge_state), or the state
     folder's files (a serverless page)."""
     rows: list[dict] = []
     if state is not None:
+        fl = _files(state, files, today)
         y = int(_today(today)[:4])
         for yr in range(y - years + 1, y + 1):
-            data, _m = _read_state_spot(state, f"{yr}-01-01")
+            data = fl.read(_state_spot_name(f"{yr}-01-01"))
             for d, rec in sorted((data.get("days") or {}).items()):
                 ans = rec.get("answers") or {}
                 for p in rec.get("picks") or []:

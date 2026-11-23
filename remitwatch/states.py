@@ -659,20 +659,33 @@ def _r835(conn: sqlite3.Connection, items: list[dict]) -> dict[str, dict]:
     return out
 
 
+def _same_payer_name(a: dict, b: dict) -> bool:
+    """The same payer by its name alone (a company that reprocessed a claim under another of its products, a Medicare
+    Advantage plan say, reverses the first answer under the new product's filing indicator)."""
+    from .codes import normalize_payer
+    if not a.get("payer") or not b.get("payer"):
+        return False
+    na, nb = normalize_payer(a["payer"])[0], normalize_payer(b["payer"])[0]
+    return na == nb and na != "Unknown"
+
+
 def _pair_reversals(recs: list[dict]) -> None:
     """Mark each status-22 line with the line it reverses, and that line as reversed. A reversal repeats the received
     date of the claim it reverses (or a later one, the date the payer received the request to reprocess), so a line the
     payer received after the reversal's received date is never its pair (the new answer that often comes on the same
     remittance); among the rest (same payer, code and charge, answered on or before the reversal): the same received
     date first, then the line whose reasons the reversal negates exactly, then the opposite payment, then an earlier
-    remittance, then the newest. A reversal of a claim the archive does not hold stays unpaired."""
+    remittance, then the newest. The same payer by name counts too when the filing indicator moved the claim to another of
+    its products (a reversal then carries the new product's indicator), the same group preferred after the reasons and the
+    amount, as Results pairs them (results._pair_group). A reversal of a claim the archive does not hold stays unpaired."""
     for x in recs:
         x.setdefault("reversed_by", None)
         x.setdefault("reverses", None)
     for x in sorted((r for r in recs if r["status"] == "22"), key=lambda r: r["date"] or ""):
         rx = x.get("received")
+        gx = row_group(x)[0]
         cands = [o for o in recs if o is not x and o["status"] != "22" and not o.get("reversed_by")
-                 and (o["date"] or "") <= (x["date"] or "") and _same_payer(row_group(o)[0], row_group(x)[0])
+                 and (o["date"] or "") <= (x["date"] or "") and (_same_payer(row_group(o)[0], gx) or _same_payer_name(o, x))
                  and o["code"] == x["code"] and abs(o["charge"] or 0) == abs(x["charge"] or 0)
                  and (o["pccn"] == x["pccn"] or not o["pccn"] or not x["pccn"] or o["pcn"] == x["pcn"])
                  and not (rx and o.get("received") and o["received"] > rx)]
@@ -682,8 +695,8 @@ def _pair_reversals(recs: list[dict]) -> None:
 
         def score(o: dict) -> tuple:
             return (bool(rx) and o.get("received") == rx, bool(mirror) and sorted(o["adj"]) == mirror,
-                    (o["paid"] or 0) == -(x["paid"] or 0), (o["date"] or "") < (x["date"] or ""), o["date"] or "",
-                    o["line_key"] or "")
+                    (o["paid"] or 0) == -(x["paid"] or 0), _same_payer(row_group(o)[0], gx), (o["date"] or "") < (x["date"] or ""),
+                    o["date"] or "", o["line_key"] or "")
         pick = max(cands, key=score)
         pick["reversed_by"] = x["line_key"] or x["claim_key"]
         x["reverses"] = pick["line_key"] or pick["claim_key"]
@@ -2034,7 +2047,8 @@ def route_of(fx: dict, st: dict, conn: sqlite3.Connection | None = None) -> str:
         return "bill_patient"
     if sig == "SECONDARY_NOT_BILLED" and rule in ("open", "open_late", "stored"):
         return "bill_secondary"         # a stored state on the dashboard's copy keeps the signal's own work
-    if rule in ("work_answered", "work_stale", "follow_up_due", "forwarded_late", "person_billed_paid", "stored_person"):
+    if rule in ("work_answered", "work_stale", "follow_up_due", "forwarded_late", "person_billed_paid", "stored_person",
+                "payment_never_arrived"):
         return "call"
     if rule in ("check_first", "settled_in_ema", "patient_paid_co", "decided_no_appeal", "note_unread"):
         return "decide"
@@ -2177,6 +2191,24 @@ def _decide(fx: dict, today: str) -> dict:
         work = "sent_claim" if (f.get("actionable") == "correct_and_resubmit") else "sent"
         return _follow(res, fx, ev, anchor, work, f"Marked Sent by {who} on {day(anchor)}", today, deadline, confirmed=True,
                        conflict=conflict, person=True, put=put)
+    # ------------------------------------------------------------------ a person reopened what RemitWatch closed on its own
+    # (needs_B 0a.2): the person's 'open' wins over the payment that closed it (detection passes it as rejected_payment,
+    # or it is the same proof again); the item stays work now with that payment named, never done and never kept out as
+    # paid. A payment that came after the reopen closes it as usual.
+    o_ = fx.get("outcome") or {}
+    rejected = o_.get("rejected_payment") if o_.get("person_reopened") else None
+    reopen_at = str((last_manual or {}).get("at") or "")[:10]
+    auto_reopened = (st == "open" and last_manual is not None and last_manual.get("to") == "open"
+                     and last_manual.get("from") in ("resolved", "dismissed", "lost"))
+    same_proof = bool(proof) and auto_reopened and (proof.get("date") or "") <= reopen_at
+    if rejected or same_proof:
+        res["person"] = True
+        r_ = rejected if isinstance(rejected, dict) else {}
+        what = (f"EMA shows {usd(r_.get('cents'))} by {r_.get('payer') or 'a payer'} on {day(r_.get('date'))}" if r_ else
+                (proof or {}).get("text") or "a payment RemitWatch read as this line's")
+        res["proof"], res["appeal_block"] = None, None
+        return put("work_now", "person_reopened", f"Reopened by {who} on {day(reopen_at or when)} after RemitWatch closed it: {what}; "
+                   "the person said it does not pay this line, so it is worked as open", [])
     # ------------------------------------------------------------------ no longer listed (a person's status above wins)
     if f.get("stale"):
         return put("done", "stale", "No longer listed: the rules that raised it no longer find it on the newest data; its notes are kept")
@@ -2198,6 +2230,12 @@ def _decide(fx: dict, today: str) -> dict:
         return put("work_now", "fees", "A takeback to match to the payer's overpayment letter, and to dispute if it was not owed"
                    if sig == "TAKEBACK" else "A payment fee the payer's vendor took: ask for standard EFT with no fee")
     if sig == "REMIT_NOT_POSTED":
+        if _ev(f).get("informational"):
+            # an informational remittance (BPR04 'NON' or a $0 deposit) reported it paid and no money came with it or after
+            # it (C54): money to ask the payer for, never a posting
+            res["appeal_block"] = "call"
+            return put("work_now", "payment_never_arrived", "The payer's informational remittance reported this paid, but no payment "
+                       f"came with it or after it: ask {f.get('payer_group') or 'the payer'} for it")
         res["appeal_block"] = "post"
         return put("work_now", "post_payment", "The 835 paid this and EMA never posted it")
     if sig == "CREDIT_BALANCE":

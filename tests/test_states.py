@@ -260,6 +260,19 @@ def test_a_reversal_pairs_with_the_answer_it_reverses_not_the_new_answer_on_the_
     assert [x["line_key"] for x in states.standing_rows(recs)] == ["B", "C"]
 
 
+def test_a_reversal_under_another_product_of_the_same_payer_pairs_with_the_answer_it_cancels():
+    """needs_R section 8: the payer moved the claim to its Medicare Advantage product: the reversal carries the new filing
+    indicator (16) and comes with the new answer on its own remittance. It cancels the first answer (the same payer by
+    name, the reasons it negates exactly), never the new one, as Results pairs it."""
+    first = dict(_rec("A", "2026-04-01", "1", 5000, [("CO", "45", 10000)]), cfi="12")
+    rev = dict(_rec("R", "2026-05-20", "22", -5000, [("CO", "45", -10000)]), cfi="16")
+    new = dict(_rec("B", "2026-05-20", "1", 6000, [("CO", "45", 9000)]), cfi="16", pcn=F.claim_id(1, sub=3))
+    assert states.row_group(first)[0] != states.row_group(rev)[0]
+    recs = [first, rev, new]
+    states._pair_reversals(recs)
+    assert rev["reverses"] == "A" and first["reversed_by"] == "R" and new["reversed_by"] is None
+
+
 def test_a_reversal_of_a_claim_the_archive_lacks_stays_unpaired():
     """The reversal repeats the received date of the claim it reverses; a line received after it is a new claim."""
     deny = _rec("A", "2026-03-28", "1", 0, [("CO", "226", 150)], received="2026-03-20")
@@ -693,6 +706,32 @@ def test_a_persons_started_status_wins_over_proof_of_payment_and_says_so(store):
     st = state(store)
     assert (st["work_state"], st["rule"], st["person"]) == ("work_now", "person_started", True)
     assert "Started by Biller One on Apr 22, 2026" in st["state_basis"] and "mark it Paid" in st["state_basis"]
+
+
+def test_a_person_who_reopens_an_automatic_closure_keeps_it_open_until_a_newer_payment(store):
+    """needs_B 0a.2: RemitWatch closed the item on a later 835 payment; a person reopened it (that payment is not this
+    line's). The same payment never closes it again: work now, the payment named, never kept out as paid. Detection may
+    also hand the rejected EMA payment over as the outcome's rejected_payment. A payment after the reopen closes it."""
+    tk = denied(store, reason=("CO", "50"))
+    remit(store, trace=F.check_no(2), paid_on="2026-04-10", claims=[{"pcn": F.claim_id(1, sub=2), "pccn": "PCN-B", "received": "2026-04-01",
+          "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    item(store, signal="DENIED_MEDICAL_NECESSITY", carc="50", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         status="open", status_changed_at="2026-04-20")
+    assert state(store)["work_state"] == "done"                       # no person yet: the payment closes it
+    event(store, "F1", "manual", at="2026-04-20T09:00:00", frm="resolved", to="open", actor="Biller One", note="not this line")
+    st = state(store)
+    assert (st["work_state"], st["rule"], st["appeal_block"]) == ("work_now", "person_reopened", None), st["state_basis"]
+    assert st["state_basis"].startswith("Reopened by Biller One on Apr 20, 2026 after RemitWatch closed it: Paid on a later remittance: "
+                                        "$90.00 by BLUE CROSS TEST on Apr 10, 2026")
+    assert st["state_basis"].endswith("the person said it does not pay this line, so it is worked as open")
+    f = dict(store.conn.execute("SELECT * FROM findings").fetchone())
+    oc = {"F1": {"outcome": "open", "person_reopened": True, "paid_after_same": 0, "paid_after_other": 0,
+                 "rejected_payment": {"date": "2026-04-18", "payer": "Testcare Health", "cents": 4000, "check_tail": "0007"}}}
+    st = states.states_of(store.conn, [f], outcomes=oc, today=TODAY)["F1"]
+    assert st["rule"] == "person_reopened" and "EMA shows $40.00 by Testcare Health on Apr 18, 2026" in st["state_basis"]
+    remit(store, trace=F.check_no(3), paid_on="2026-04-28", claims=[{"pcn": F.claim_id(1, sub=3), "pccn": "PCN-C", "received": "2026-04-22",
+          "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    assert state(store)["work_state"] == "done"                       # a payment after the reopen
 
 
 def test_a_person_marking_paid_is_done_and_a_stale_item_is_done(store):

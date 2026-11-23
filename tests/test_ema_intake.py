@@ -1983,3 +1983,46 @@ def test_what_the_intake_contains_is_in_the_runs_log_as_a_warning_never_a_notes_
                                                and not p.name.endswith(".gz"))
     for piece in ("Pat Invented", "Spoke to", "1234567", "invented.csv"):
         assert piece not in logged
+
+
+@pytest.mark.parametrize("host", ["server", "serverless"])
+def test_two_analyses_that_finished_in_the_same_second_are_told_apart_by_the_one_written_last(host, tmp_path, request):
+    """The newest analysis is the one that finished last. Two that finished within the same second (a re-analysis right
+    after the first, on a fast machine) are told apart by the one written last: an older run's version or start never
+    asks for another analysis (the cycle test in test_features failed this way once on a loaded machine)."""
+    from remitwatch.detect import DETECT_VERSION
+    from tests.test_remitwatch import CLAIM_DOWNCODE, remit
+    era = remit(CLAIM_DOWNCODE, "77.60", seg_count=20, isa_ctrl="000000601")
+
+    def tie(conn):
+        rid = conn.execute("SELECT run_id FROM detection_runs ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+        conn.execute("DELETE FROM detection_runs")
+        cols = "(run_id, started_at, finished_at, version, lines, findings, summary)"
+        # an older release's run, then the newest one, both finished in the same second (leap day, a second to midnight)
+        conn.execute(f"INSERT INTO detection_runs {cols} VALUES ('older', '2028-02-29T23:59:50+00:00', '2028-02-29T23:59:59+00:00', '0.9', 0, 0, '{{}}')")
+        conn.execute(f"INSERT INTO detection_runs {cols} VALUES (?, '2028-02-29T23:59:55+00:00', '2028-02-29T23:59:59+00:00', ?, 0, 0, '{{}}')",
+                     (rid, DETECT_VERSION))
+        # a person's status set between the two starts: the newest run saw it
+        fid = conn.execute("SELECT finding_id FROM findings ORDER BY finding_id LIMIT 1").fetchone()[0]
+        conn.execute("INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, actor) "
+                     "VALUES (?, '2028-02-29T23:59:52+00:00', 'manual', 'open', 'dismissed', 'staff')", (fid,))
+        conn.commit()
+    if host == "server":
+        db = str(tmp_path / "data" / "remitwatch.sqlite")
+        write(tmp_path / "drop" / "ERA 1.RMT", era)
+        assert "detect" in run(db, sync=False, local=str(tmp_path / "drop"))
+        s = open_store(db)
+        try:
+            tie(s.conn)
+        finally:
+            s.close()
+        out = run(db, sync=False)
+    else:
+        root, client, state = request.getfixturevalue("vercel")
+        write(root / DATA / "Trizetto" / "ERA 1.RMT", era)
+        assert "detect" in cycle(state, client)
+        store, _ = cloud.load_raw(state)
+        tie(store.conn)
+        cloud.save_raw(state, store)
+        out = cycle(state, client)
+    assert "detect" not in out and not out.get("people_changed"), out

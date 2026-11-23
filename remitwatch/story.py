@@ -1234,6 +1234,9 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
         ns = _decide_rows(rows, [r["n"] for r in void] + _mark(rows, "own_remit"))
         return done(f"Check first: EMA reversed this charge on {day(void[0]['date'])} {_refs(ns)}, so the claim was voided or re-created and the "
                     "service may be billed and paid on another claim" + (f" ({hint})" if hint else "") + ".", ns)
+    if rule == "person_reopened":
+        ns = _mark(rows, "own_remit")
+        return done(f"{st.get('state_basis')}" + (f" {_refs(ns)}" if ns else "") + ".", ns)
     if rule == "check_first":
         h = S._archive_hint(f) or {}
         ns = _mark(rows, "own_remit")
@@ -1301,6 +1304,11 @@ def _work_now_sentence(conn: sqlite3.Connection, fx: dict, story: dict, st: dict
             usual = f"{f.get('payer_group') or 'This payer'} answers 95% of claims within {tat} days"
         return done(f"Unanswered: no answer from any payer in {waited} days; {usual} {_refs(ns)}.", ns,
                     "proven" if both and fx["ema"]["lines"] else "one_source")
+    if rule == "payment_never_arrived":
+        ns = _mark(rows, "own_remit")
+        paid = f.get("paid_cents") or f.get("shortfall_cents")
+        return done(f"The 835 reported {usd(paid)} paid on an informational remittance {_refs(ns)}, and no money came with it or after "
+                    "it.", ns, "proven" if ns else "one_source")
     if sig == "REMIT_NOT_POSTED" or rule == "post_payment":
         ns = _mark(rows, "own_remit")
         paid = f.get("paid_cents") or f.get("shortfall_cents")
@@ -2383,6 +2391,12 @@ def _call_step(conn: sqlite3.Connection, f: dict, fx: dict, st: dict, today: str
     fallback = _work_fallback(conn, f, fx, st)
     if st.get("work_state") == "cant_check":
         return _cant_check_step(f, fx, st, facts)
+    if rule == "payment_never_arrived":
+        paid = f.get("paid_cents") or f.get("shortfall_cents")
+        return (f"Ask {grp} for the {usd(paid)} its informational remittance of {day(f.get('payment_date'))} reported paid: was the payment "
+                "issued, on what date, for how much, under what EFT trace or check number?",
+                [facts, "Issued: find it on the bank statement and post it in EMA under that trace. Not issued: ask them to send it.",
+                 "Post nothing until the money arrives."], "A/R follow-up biller")
     if rule == "person_billed_paid":
         p = st.get("proof") or {}
         return (f"Mark it Paid: {p.get('text') or 'the second payer paid'}. Log what happened > The payer paid, with that amount.", [facts],

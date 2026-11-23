@@ -228,6 +228,36 @@ def test_a_two_letter_surname_is_masked_once_the_store_holds_it(tmp_path):
     store.close()
 
 
+def test_a_two_letter_word_beside_a_masked_name_goes_with_it(tmp_path):
+    """The two-letter English words the scrubber keeps readable (an, my, he, no, go) are given names and surnames too.
+    The store's names never add them, so beside a masked name they are part of it and go with it; elsewhere they stay."""
+    store = file_store(tmp_path)
+    feed = tmp_path / "feed"
+    os.makedirs(feed)
+    claims = clean_visits(1, 3, "99214", "223.65", "127.80", cfi="16")
+    claims.append(named_claim(300, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="ZORVATHIQ", first="AN"))
+    claims.append(named_claim(301, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~"), last="QUILLBRANDT", first="MY HE"))
+    p = feed / "r001.RMT"
+    p.write_bytes(remit("".join(claims), "100.00", seg_count=99, isa_ctrl="000000001", pay_date="20260415"))
+    store.ingest_835_paths([str(p)])
+    runlog.SCRUB.names.clear()
+    runlog.SCRUB.learn(store.conn)
+    assert "zorvathiq" in runlog.SCRUB.names and "an" not in runlog.SCRUB.names       # the keep list held them back
+    for text in ("row for ZORVATHIQ, AN was held", "row for An Zorvathiq was held", "row for My He Quillbrandt was held",
+                 "row for QUILLBRANDT, MY  HE was held", "row for He,My Quillbrandt was held"):
+        out = runlog.scrub_text(text)
+        assert out.startswith("row for ") and out.endswith(" was held"), out
+        middle = out[len("row for "):-len(" was held")]
+        for planted in ("ZORVATHIQ", "Zorvathiq", "AN", "An", "QUILLBRANDT", "Quillbrandt", "My", "MY", "He", "HE"):
+            assert planted not in middle, (planted, out)
+    # beside nothing masked, or past a colon or a full stop, they stay as they are
+    out = runlog.scrub_text("An item is held. Zorvathiq: OK to retry. Go to the Data tab; No run is going. Zorvathiq. No")
+    for kept in ("An item is held", "OK to retry", "Go to the Data tab", "No run is going", ". No"):
+        assert kept in out, (kept, out)
+    assert "Zorvathiq" not in out, out
+    store.close()
+
+
 def test_a_structured_value_under_a_word_key_loses_names_dates_and_ids():
     """A key that says what its value is (status, result, source, how, action, rule...) does not make free text safe:
     a value is kept as it is only where the scrubber would keep it anyway, or where its key has a strict shape (a

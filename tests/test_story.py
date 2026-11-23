@@ -1519,3 +1519,21 @@ def test_a_patients_payment_settles_a_line_the_payer_never_put_on_the_practice(s
     assert (out["verdict"]["state"], out["state"]["rule"]) == ("done", "moved_to_patient"), out["verdict"]["sentence"]
     assert out["state"]["state_basis"].startswith("Settled by the patient:") and words in out["state"]["state_basis"], out["state"]["state_basis"]
     assert out["next_step"]["route"] == "nothing" and not out["next_step"]["appeal_ok"]
+
+
+def test_an_informational_remittance_whose_money_never_came_is_asked_for_never_posted(store):
+    """needs_B 0a.1, C54: the payer's remittance only informed (no deposit came with it or after it): ask the payer for the
+    payment; never 'post it', and never a payment EMA failed to post."""
+    tk = remit(store, trace=F.check_no(3), paid_on="2026-03-28", method="NON", claims=[{"pcn": F.claim_id(1), "pccn": "PCN-A",
+               "received": "2026-03-05", "lines": [ln("99213", 150, 90, [("CO", "45", 60)], lcn="1")]}])
+    item(store, signal="REMIT_NOT_POSTED", category="posting", actionable="review", carc=None, paid_cents=9000, shortfall_cents=9000,
+         title="Paid on the 835, not posted in EMA", line_key=line_key(store, tk), claim_key=f"{tk}-0", transaction_key=tk,
+         evidence={"informational": True})
+    out = story.explain(store.conn, "F1", today=TODAY)
+    n = out["next_step"]
+    assert (out["state"]["rule"], out["state"]["appeal_block"], n["route"]) == ("payment_never_arrived", "call", "call")
+    assert out["verdict"]["sentence"].startswith("The 835 reported $90.00 paid on an informational remittance")
+    assert "never posted" not in out["verdict"]["sentence"]
+    assert n["action"].startswith(f"Ask {BCBS} for the $90.00 its informational remittance of Mar 28, 2026 reported paid")
+    assert "mark_posted" not in n["buttons"] and not n["appeal_ok"]
+    plain(out)

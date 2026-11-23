@@ -1659,7 +1659,9 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         has_lines = conn.execute("SELECT 1 FROM lines LIMIT 1").fetchone() is not None
         # a release that changed the rules re-analyses the archive once, even when no new file has arrived
         from .detect import DETECT_VERSION
-        last_version = conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone() if has_run else None
+        # the newest run; of two that finished within the same second, the one written last
+        last_version = conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC, rowid DESC LIMIT 1").fetchone() \
+            if has_run else None
         rules_changed = bool(last_version) and last_version[0] != DETECT_VERSION
         # a status, hide or write-off policy a person set since the last run (the journal above): the stored states catch up
         from .pipeline import people_changed_since_detection

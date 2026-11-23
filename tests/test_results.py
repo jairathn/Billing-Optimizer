@@ -268,8 +268,9 @@ def test_a_reversal_cancels_the_earlier_answer_not_the_new_one_on_its_own_remitt
                   {"pcn": F.claim_id(1, sub=4), "status": "1", "cfi": "16", "received": "2026-06-01", "lines": [ln("99213", 150, 60, [("CO", "45", 90)])]}])
     run(store)
     d = money_of(store, fid)
-    # after the flag: 50 of the money before it taken back, 60 paid and taken back, 60 paid again: 10 dollars net
-    assert (d["returned"], d["taken_back"]) == (6000, 5000)
+    # after the flag: 50 of the money before it taken back, 60 paid and taken back, 60 paid again: 10 dollars net, and
+    # nothing is left taken back (the later money paid it back)
+    assert (d["returned"], d["taken_back"]) == (1000, 0)
 
 
 def test_a_reversal_of_money_no_835_shows_takes_back_emas_check_or_money_paid_before_the_flag(store):
@@ -477,12 +478,18 @@ def test_hours_saved_use_the_owners_minutes_and_the_history_keeps_each_version(s
     item(store, finding_id="CARRIER", evidence={"folded": [{"finding_id": "x1"}, {"finding_id": "x2"}]})
     run(store)
     counts = dash(store)["hours_counts"]
-    assert counts == {"investigate": 1, "packet": 1, "fax": 2, "duplicate": 2}
+    assert {k: counts[k] for k in results.HOUR_KINDS} == {"investigate": 1, "packet": 1, "fax": 2, "duplicate": 2}
+    assert counts["items"] == {"investigate": 1, "packet": 1, "fax": 1, "duplicate": 1}      # two faxes on one item
     s0 = results.read_settings(store.conn)
     assert s0["version"] == "" and results.hours_saved(counts, s0)["hours"] == round((12 + 20 + 2 * 10 + 2 * 5) / 60, 1)
     s1 = results.save_settings({"minutes": {"investigate": 30, "fax": 15}}, who="The Owner", base_version="", conn=store.conn)
     assert s1["values"]["minutes"] == {"investigate": 30.0, "packet": 20.0, "fax": 15.0, "duplicate": 5.0}
-    assert results.hours_saved(counts, s1)["hours"] == round((30 + 20 + 30 + 10) / 60, 1)
+    # everything counted so far happened before the owner's edit: it keeps the minutes in force then
+    assert results.hours_saved(counts, s1)["hours"] == round((12 + 20 + 2 * 10 + 2 * 5) / 60, 1)
+    # a fax sent after the edit is priced at the new minutes; the older ones keep theirs
+    later = {"at": "2026-05-01T00:00:00+00:00", "by": "The Owner", "values": s1["values"]}
+    dated = dict(s1, history=[later])
+    assert results.hours_saved(counts, dated)["hours"] == round((12 + 20 + 10 + 15 + 2 * 5) / 60, 1)
     with pytest.raises(results.ResultsError) as stale:
         results.save_settings({"minutes": {"packet": 1}}, who="Someone", base_version="", conn=store.conn)
     assert stale.value.status == 409
@@ -508,10 +515,17 @@ def test_roi_is_money_returned_over_cost_by_month_with_the_lift_adjusted_return_
     april = next(x for x in r["months"] if x["month"] == "2026-04")
     assert april["cost_cents"] == 5000 + 100 + 50 and april["returned_cents"] == 20000
     assert april["roi"] == round(20000 / 5150, 2) and april["fax_pages"] == 10 and april["ai_calls"] == 1
-    lf = dash(store)["lift"]
-    factor = max(0.0, min(1.0, lf["incremental_cents"] / lf["worked"]["returned_cents"]))
-    assert april["conservative_cents"] == round(15000 * factor) and r["costs_set"] is True
+    # two items are not enough cases to measure what the work added: no lift-adjusted return is stated
+    assert dash(store)["lift"]["enough"] is False and r["costs_set"] is True
+    assert (april["conservative_cents"], april["roi_conservative"], r["roi_conservative"], r["conservative_cents"]) == (None, None, None, None)
+    assert "not enough cases yet" in r["basis"]
     assert results.roi(dash(store), results.read_settings(None), TODAY)["roi"] is None      # no costs set: no ROI, not infinity
+    # with enough cases on both sides, the lift-adjusted return is the share the unworked rate does not explain, plus found
+    enough = dict(dash(store), lift=dict(dash(store)["lift"], enough=True))
+    lf = enough["lift"]
+    factor = max(0.0, min(1.0, lf["incremental_cents"] / lf["worked"]["returned_cents"]))
+    april2 = next(x for x in results.roi(enough, rec, TODAY)["months"] if x["month"] == "2026-04")
+    assert april2["conservative_cents"] == round(15000 * factor)
 
 
 # ================================================================================================ denials
@@ -663,14 +677,29 @@ def test_the_scoreboard_gives_todays_four_figures_and_dashes_before_the_first_ru
     assert sb["weeks"][-1]["week"] == results.week_of(TODAY) and sb["weeks"][-1]["at_risk_cents"] == 9000
 
 
-def test_the_scoreboard_shows_the_self_checks_given_up_figure_when_the_run_stores_it(store):
+def test_the_given_up_figure_and_the_list_it_opens_come_from_one_source(store):
     denial(store, 1, written_off_cents=4000, written_off_on="2026-04-02")
     run(store)
     assert results.scoreboard(store.conn, TODAY)["given_up_source"] == "results"
+    # the self-check stores its own figure without the items behind it: ours stays the clickable figure, its own is a
+    # cross-check beside it that opens nothing
     store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('selfcheck:given_up', ?)", (json.dumps({"cents": 5000, "n": 2}),))
     store.conn.commit()
     sb = results.scoreboard(store.conn, TODAY)
-    assert (sb["given_up_cents"], sb["given_up_source"]) == (5000, "selfcheck")
+    entries = results.list_entries(store.conn, "given_up", TODAY)
+    assert (sb["given_up_cents"], sb["counts"]["given_up"], sb["given_up_source"]) == (4000, 1, "results")
+    assert (sb["given_up_cents"], sb["counts"]["given_up"]) == (sum(c for _f, c in entries), len(entries))
+    assert sb["given_up_check"] == {"cents": 5000, "n": 2, "at": None, "source": "selfcheck"}
+    # when it stores the items it counted, its figure is the one shown and opens exactly those items, week by week its own
+    store.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('selfcheck:given_up', ?)",
+                       (json.dumps({"cents": 5000, "n": 2, "ids": [["F1", 4000], ["G9", 1000]],
+                                    "weeks": [{"week": "2026-06-29", "cents": 5000}]}),))
+    store.conn.commit()
+    sb = results.scoreboard(store.conn, TODAY)
+    entries = results.list_entries(store.conn, "given_up", TODAY)
+    assert (sb["given_up_cents"], sb["counts"]["given_up"], sb["given_up_source"]) == (5000, 2, "selfcheck")
+    assert entries == [["F1", 4000], ["G9", 1000]] and "given_up_check" not in sb
+    assert next(w for w in sb["weeks"] if w["week"] == "2026-06-29")["given_up_cents"] == 5000
 
 
 def test_the_self_checks_ranking_columns_when_the_run_writes_them_show_what_at_risk_items_are_likely_worth(store):
@@ -698,7 +727,7 @@ def test_the_self_checks_ranking_columns_when_the_run_writes_them_show_what_at_r
     assert rows[fid]["expected_value_cents"] == 3150 and rows[fid]["recovery_basis"].endswith("40 cases")
     assert rows["F2"]["expected_value_cents"] is None
     text = results.list_csv(store.conn, "at_risk", today=TODAY)
-    assert "expected_value_cents" in text.splitlines()[0] and ",3150," in text
+    assert "Likely worth" in text.splitlines()[0] and ",31.50," in text
 
 
 # ================================================================================================ work done and outcomes
@@ -948,12 +977,18 @@ def test_the_server_routes_work_the_figures_out_after_an_analysis_and_counts_equ
     csv_text = tc.get("/api/results/list.csv", params={"key": "returned"})
     assert csv_text.headers["content-type"].startswith("text/csv") and "TESTPATIENT" not in csv_text.text
     assert len(d["spot"]["today"]) == 5
-    # a new analysis makes the page work the figures out again; nothing new does not
+    # a new analysis makes the page work the figures out again, in the background: the page answers at once with the
+    # stored figures and says they are being updated; the next load has the new ones
+    from remitwatch import api_results
     c = sqlite3.connect(path)
     c.execute("INSERT INTO detection_runs (run_id, started_at, finished_at) VALUES ('r2', '2026-06-30T01:00:00', '2026-06-30T01:05:00')")
     c.commit()
     c.close()
-    assert tc.get("/api/results").json()["detect_run"] == "2026-06-30T01:05:00"
+    first = tc.get("/api/results").json()
+    assert first["ready"] and first["money"] == d["money"]
+    api_results.wait_background()
+    again = tc.get("/api/results").json()
+    assert again["detect_run"] == "2026-06-30T01:05:00" and again["updating"] is False
 
 
 def test_the_server_routes_record_spot_checks_and_the_owner_sets_the_figures(server_api, monkeypatch):

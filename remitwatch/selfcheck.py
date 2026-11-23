@@ -1233,6 +1233,13 @@ def _check_error(cid: str, exc: BaseException) -> dict:
     return r
 
 
+def _title_in(title: str) -> str:
+    """A check's title inside a sentence: its first word in lower case when it is an ordinary word ("Every ...", "The
+    ..."), never a name ("EMA's reports ..."), and nothing else changed ("money posted in EMA", not "ema")."""
+    t = str(title or "")
+    return t[:1].lower() + t[1:] if t[1:2].islower() else t
+
+
 # ---------------------------------------------------------------------------------------------- the run: before and after
 SNAPSHOT = "sc_before"
 # what a person (or a hide rule a person made) records in an item's history: put back on a held worklist
@@ -1807,7 +1814,8 @@ def _safe_state(conn, held, hold_ids, results, rid, at, held_info, first, can_ho
                              "examples": r["examples"][:EXAMPLES], "what_to_check": r["what_to_check"]} for r in why],
                  **held_info,
                  "text": ("RemitWatch kept the worklist as it was before this run and held the run's automatic closures, "
-                          f"because {', '.join(r['title'].lower() for r in why)} failed. "
+                          f"because {'this check' if len(why) == 1 else 'these checks'} failed: "
+                          f"{'; '.join(_title_in(r['title']) for r in why)}. "
                           + (f"It still lists the {_n(n_new, 'new item')} to work the run found. " if n_new else "")
                           + (f"It held the {_n(int(held_info.get('new_items_held') or 0), 'new item')} the run found as well: "
                              "more than one run usually brings. " if held_info.get("new_items_held") else "")
@@ -4045,7 +4053,7 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
             # crashes every run would freeze the worklist for good)
             out.append({"kind": "CHECK_FAILED", "severity": "high", "payer_group": None, "key": ("CHECK_FAILED", c["id"]),
                         "n": None, "cents": None,
-                        "title": f"Self-check: the check '{c['title'].lower()}' could not run "
+                        "title": f"Self-check: the check '{_title_in(c['title'])}' could not run "
                                  f"({(c.get('info') or {}).get('error') or 'an error'}). The guard it gives is off until it runs again: "
                                  "download the diagnostic bundle from the Data tab for the maintainer.",
                         "detail": {"check": c["id"], "info": c.get("info")}})
@@ -4053,7 +4061,8 @@ def alert_candidates(conn: sqlite3.Connection, *, today: Any = None, active: dic
             out.append({"kind": "CHECK_FAILED", "severity": "high" if c["id"] in ("money_conservation", "ledger_store", "closure_proof",
                                                                                  "vanished", "posted_money") else "medium",
                         "payer_group": None, "key": ("CHECK_FAILED", c["id"]), "n": c.get("n"), "cents": c.get("cents"),
-                        "title": f"Self-check: {c['title'].lower()} failed for {_n(int(c.get('n') or 0), 'item')} ({usd0(c.get('cents'))}). "
+                        "title": f"Self-check: the check '{_title_in(c['title'])}' failed for {_n(int(c.get('n') or 0), 'item')} "
+                                 f"({usd0(c.get('cents'))}). "
                                  f"{c.get('what_to_check') or ''}",
                         "detail": {"check": c["id"], "examples": c.get("examples"), "info": c.get("info")}})
     reg = regulation(conn)

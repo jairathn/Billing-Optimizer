@@ -356,7 +356,7 @@ def people_changed_since_detection(conn) -> bool:
     are behind it until detection runs again (the review of unit C1: a person's status must take the item off Work
     now). Detection's own status changes are stamped with its start, so they never ask for another run."""
     try:
-        row = conn.execute("SELECT started_at FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
+        row = conn.execute("SELECT started_at FROM detection_runs ORDER BY finished_at DESC, rowid DESC LIMIT 1").fetchone()
     except sqlite3.Error:       # no runs table yet: detection runs for that reason anyway
         return False
     last = row[0] if row else None
@@ -564,7 +564,8 @@ def run_cycle(db_path: str, *, sync: bool = True, full: bool = False, local: str
         people = False
         if has_run:
             from .detect import DETECT_VERSION
-            last = store.conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
+            # the newest run; of two that finished within the same second, the one written last
+            last = store.conn.execute("SELECT version FROM detection_runs ORDER BY finished_at DESC, rowid DESC LIMIT 1").fetchone()
             rules_changed = bool(last) and last[0] != DETECT_VERSION     # a release that changed the rules re-analyses once
             # a status, hide or write-off policy a person set since the last run: the stored states catch up with it
             people = people_changed_since_detection(store.conn)
