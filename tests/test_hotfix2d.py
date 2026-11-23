@@ -1056,3 +1056,72 @@ def test_an_appeal_being_prepared_when_its_item_gets_a_new_id_gives_it_an_heir(t
     assert actions.apply_event(c, {"finding_id": old, "event": "note_check", "note": "The biller opened the note.", "actor": "biller",
                                    "at": "2026-11-20T15:00:05+00:00"})
     assert c.execute("SELECT COUNT(*) FROM finding_events WHERE finding_id=? AND kind='note_check'", (pair[0],)).fetchone()[0] == 1
+
+
+# --------------------------------------------------------------------------- a store image saved whose answer was lost (review mr-5)
+
+def _finish_answer_lost(client, commit: bool = True) -> None:
+    """The fake Dropbox's next upload of the store image ends as a lost answer: the finish call raises (retried after a 5xx,
+    or a timeout), after Dropbox wrote the file (commit) or before anything was written."""
+    real, lose = client.upload_chunks, [1]
+
+    def upload_chunks(path, chunks, part=32 << 20):
+        if lose[0] and path.endswith("/" + cloud.RAW):
+            lose[0] = 0
+            if commit:
+                real(path, chunks, part)
+            else:
+                b"".join(chunks)            # every part went up; the finish fails before the file is written
+            raise RuntimeError("Dropbox files/upload_session/finish: no answer")
+        return real(path, chunks, part)
+    client.upload_chunks = upload_chunks
+
+
+def test_serverless_an_image_whose_save_lost_its_answer_is_taken_by_the_next_run(tmp_path, monkeypatch):
+    """Review mr-5: Dropbox commits the store image but the answer is lost. The run that saved it fails, but status.json
+    already names the image it was writing (a pending record, written before the commit), so the next run takes that
+    image and records it as the last save, instead of every run stopping until a person accepts it. An older copy put back
+    afterwards is still refused."""
+    import hashlib
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    folder = _two_runs_folder(root)
+    assert "error" not in _cycle(state, client)
+    before = state.get(cloud.RAW)
+    (folder / "b.RMT").write_bytes(_era([_visit(3)], "100.00", "000000372"))
+    _finish_answer_lost(client)
+    with pytest.raises(RuntimeError):
+        _cycle(state, client)
+    written = state.get(cloud.RAW)
+    assert written != before                                        # Dropbox has the new image
+    rec = json.loads(state.get(cloud.STATUS))[cloud.IMAGE_KEY]
+    assert rec["sha256"] == hashlib.sha256(before).hexdigest()      # the last save confirmed
+    assert (rec.get("pending") or {}).get("sha256") == hashlib.sha256(written).hexdigest(), rec
+    out = _cycle(state, client)
+    assert "error" not in out, out
+    rec = json.loads(state.get(cloud.STATUS))[cloud.IMAGE_KEY]
+    assert rec["sha256"] == hashlib.sha256(state.get(cloud.RAW)).hexdigest() and "pending" not in rec, rec
+    assert "error" not in _cycle(state, client)
+    state.put(cloud.RAW, before)                                    # an older copy put back: refused, as before
+    assert "not the one the last run saved" in (_cycle(state, client).get("error") or "")
+
+
+def test_serverless_an_image_upload_that_failed_before_its_commit_leaves_the_last_one(tmp_path, monkeypatch):
+    """The other side of review mr-5: the finish fails before Dropbox writes anything. The image in the folder is still the
+    last one confirmed, and the next run loads it. And on a new site's first save, whose answer is lost, the next run takes
+    the image it finds, as before (no record of an earlier image to hold it against)."""
+    root, client, state = _cloud_box(tmp_path, monkeypatch)
+    folder = _two_runs_folder(root)
+    assert "error" not in _cycle(state, client)
+    before = state.get(cloud.RAW)
+    (folder / "b.RMT").write_bytes(_era([_visit(3)], "100.00", "000000372"))
+    _finish_answer_lost(client, commit=False)
+    with pytest.raises(RuntimeError):
+        _cycle(state, client)
+    assert state.get(cloud.RAW) == before
+    assert "error" not in _cycle(state, client)
+    root2, client2, state2 = _cloud_box(tmp_path / "new-site", monkeypatch)
+    _two_runs_folder(root2)
+    _finish_answer_lost(client2)
+    with pytest.raises(RuntimeError):
+        _cycle(state2, client2)
+    assert state2.get(cloud.RAW) is not None and "error" not in _cycle(state2, client2)

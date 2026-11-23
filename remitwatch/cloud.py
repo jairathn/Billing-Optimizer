@@ -203,18 +203,23 @@ class StoreImageProblem(RuntimeError):
     """The state folder's store image cannot be taken as the practice's store: the run stops before changing anything."""
 
 
-def _counted(chunks: Iterable[bytes], h, size: list) -> Iterator[bytes]:
-    """The chunks as they pass, added to a sha256 and a byte count (size[0])."""
+def _counted(chunks: Iterable[bytes], h, size: list, then=None) -> Iterator[bytes]:
+    """The chunks as they pass, added to a sha256 and a byte count (size[0]); then(), when given, once the last one has
+    been taken (an upload has every byte by then and has not committed it yet)."""
     for c in chunks:
         h.update(c)
         size[0] += len(c)
         yield c
+    if then is not None:
+        then()
 
 
-def load_raw(state, check: bool = True):
+def load_raw(state, check: bool = True, status: dict | None = None):
     """The store from the state folder, and whether there was one. check (every run does): with no image while
     status.json or cursor.json show earlier runs, or with an image other than the one the last save recorded, this
-    raises StoreImageProblem. A first load needs both files absent."""
+    raises StoreImageProblem. A first load needs both files absent. The image a save was writing when its answer was
+    lost (the pending record save_raw writes before the commit) is the last save too: with status (the run's own,
+    which holds the cycle lock) it is recorded as the last save, in status.json and in status."""
     from .store import Store
     chunks = state.get_chunks(RAW)
     if chunks is None:
@@ -230,9 +235,15 @@ def load_raw(state, check: bool = True):
     data = gunzip_chunks(_counted(chunks, h, size))
     want = (_read_json(state, STATUS).get(IMAGE_KEY) or {}) if check else {}
     if isinstance(want, dict) and want.get("sha256") and (want["sha256"] != h.hexdigest() or want.get("size") != size[0]):
-        del data
-        gc.collect()
-        raise StoreImageProblem(IMAGE_OTHER)
+        pend = want.get("pending")
+        if not (isinstance(pend, dict) and pend.get("sha256") == h.hexdigest() and pend.get("size") == size[0]):
+            del data
+            gc.collect()
+            raise StoreImageProblem(IMAGE_OTHER)
+        if status is not None:
+            # Dropbox committed the last save although its answer was lost: from now on it is the image to load
+            status[IMAGE_KEY] = dict(pend, promoted=_now())
+            record_image(state, status[IMAGE_KEY])
     store = Store.from_bytes(data)
     del data
     gc.collect()
@@ -260,19 +271,36 @@ def _saved_before(state) -> bool:
                 or (isinstance(totals, dict) and totals.get("remit_files")))
 
 
-def save_raw(state, store, log=print) -> dict:
+def save_raw(state, store, log=print, status: dict | None = None) -> dict:
     """Save the store image, and record it at once (record_image). The result carries IMAGE_KEY: the saved file's size and
-    sha256."""
+    sha256. Before the upload is committed, status.json names the image as pending (and so does status, the run's own,
+    when given): an upload Dropbox commits but whose answer is lost is then the image the next run loads (load_raw)."""
     data = store.to_bytes()
     h, size = hashlib.sha256(), [0]
+
+    def pending() -> None:
+        record_pending(state, {"size": size[0], "sha256": h.hexdigest(), "saved": _now()}, status)
     try:
-        meta = dict(state.put_chunks(RAW, _counted(gzip_chunks(data), h, size)) or {})
+        meta = dict(state.put_chunks(RAW, _counted(gzip_chunks(data), h, size, then=pending)) or {})
     finally:
         del data
         gc.collect()
     meta[IMAGE_KEY] = {"size": size[0], "sha256": h.hexdigest(), "saved": _now()}
     record_image(state, meta[IMAGE_KEY], log)
     return meta
+
+
+def record_pending(state, image: dict, status: dict | None = None) -> None:
+    """The image a save is about to commit, beside the record of the last one in status.json (a failure here stops the
+    save before its commit). Only where an image is recorded: without one, load_raw checks none."""
+    cur = _read_json(state, STATUS)
+    last = cur.get(IMAGE_KEY)
+    if not (isinstance(last, dict) and last.get("sha256")):
+        return
+    cur[IMAGE_KEY] = dict(last, pending=image)
+    _write_json(state, STATUS, cur)
+    if status is not None:
+        status[IMAGE_KEY] = cur[IMAGE_KEY]
 
 
 def record_image(state, image: dict | None, log=print) -> None:
@@ -1041,7 +1069,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
         if prev_status.get(IMAGE_KEY):
             out[IMAGE_KEY] = prev_status[IMAGE_KEY]        # the record of the last save, kept by a run that saves nothing
         try:
-            store, existed = load_raw(state)
+            store, existed = load_raw(state, status=out)
         except StoreImageProblem as exc:
             # the store is missing or is not the one last saved: stop before anything is read, folded or saved. The status
             # this run writes keeps the proof that a store existed, so the next run stops too until the image is back
@@ -1181,7 +1209,7 @@ def run_cloud_cycle(state, client=None, *, budget_s: int | None = None, trigger:
             conn.commit()
         if shown_changed or progressed or "deferred" in out or ingest.get("seen_changed") or tz.get("seen_changed"):
             t2 = time.time()
-            meta = save_raw(state, store, log)
+            meta = save_raw(state, store, log, status=out)      # a lost answer leaves its pending record in this run's status
             out["store"] = {"gz_bytes": (meta or {}).get("size"), "save_seconds": round(time.time() - t2, 1)}
             out[IMAGE_KEY] = meta.get(IMAGE_KEY)        # recorded in status.json at the save; the run's status keeps it
         if shown_changed or serving_stale:
