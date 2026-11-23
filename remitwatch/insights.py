@@ -234,6 +234,24 @@ def newest_payment(conn: sqlite3.Connection) -> str | None:
     return None
 
 
+def feed_day(conn: sqlite3.Connection, today: str) -> str | None:
+    """The day the remittances reach for most payers (detect.feed_date), never after `today`: one stray newer file does not
+    move it. Worked out from the store on a server. A serverless host's copy holds only the lines behind items, so there it
+    is the date the last analysis worked out on the full store, else the newest payment that is a day on the calendar.
+    What the fax hold (api._feed_day), the Data tab's feed check and the warning line on the pages all go by."""
+    from . import runtime
+    from .detect import FEED_META, feed_date, real_day
+    if "transactions" not in _tables(conn):
+        return None
+    if not runtime.serverless():
+        return feed_date(conn, today)
+    saved = _meta(conn, FEED_META)
+    d = saved.get("date") if isinstance(saved, dict) else None
+    if not real_day(d):         # no analysis saved it (or saved a day no calendar has, before that was checked)
+        d = newest_payment(conn)
+    return min(str(d)[:10], today) if d else None
+
+
 def work(conn: sqlite3.Connection, today: str) -> dict:
     """Work still to do (not yet sent to the payer) inside its filing window, by the kind of work it takes, with what
     falls due in 7 and 30 days, and what is sent and waiting on the payer. A routine-rate pattern counts its claims by
@@ -542,21 +560,30 @@ def trizetto_health(conn: sqlite3.Connection, today: str, env: dict | None = Non
     return out
 
 
-def data_health(conn: sqlite3.Connection, newest: str | None, today: str) -> list[dict]:
-    """What in the data is hiding money, most urgent first. Each item says what to do and who does it."""
+def data_health(conn: sqlite3.Connection, newest: str | None, today: str, feed: str | None = None) -> list[dict]:
+    """What in the data is hiding money, most urgent first. Each item says what to do and who does it. The feed check goes
+    by the day the remittances reach for most payers (`feed`, else feed_day's), not the newest payment: one stray newer
+    file, or the newest week put in after weeks that are missing, does not make the payments current."""
     items = []
-    if newest:
-        age = (date.fromisoformat(today) - date.fromisoformat(newest[:10])).days
+    reach = (feed or feed_day(conn, today) or newest or "")[:10]
+    if reach:
+        age = (date.fromisoformat(today) - date.fromisoformat(reach)).days
         got = None
         try:
             got = conn.execute("SELECT MAX(ingested_at) FROM files WHERE kind IN ('835','remit','rmt')").fetchone()[0]
         except sqlite3.Error:
             pass
         recent = bool(got) and (date.fromisoformat(today) - date.fromisoformat(got[:10])).days <= 10
-        items.append({"key": "feed", "ok": age <= 10, "days": age, "newest": newest[:10], "last_file": (got or "")[:10] or None,
-                      "title": "Payments are current" if age <= 10 else f"No payment newer than {newest[:10]} ({age} days ago)",
-                      "detail": "" if age <= 10 else ("Payments after that date are not in the site, so items worked and paid since then still show as open."
-                                                       + (f" Files did arrive on {got[:10]}, but none holds a later payment." if recent else "")),
+        later = (newest or "")[:10] > reach         # newer payments are in, from a few payers or after weeks that are missing
+        items.append({"key": "feed", "ok": age <= 10, "days": age, "newest": (newest or reach)[:10], "feed": reach,
+                      "last_file": (got or "")[:10] or None,
+                      "title": "Payments are current" if age <= 10 else (f"The remittances reach {reach} for most payers ({age} days ago)" if later
+                                                                         else f"No payment newer than {reach} ({age} days ago)"),
+                      "detail": "" if age <= 10 else (
+                          "Newer payments are in for only a few payers, or after weeks of files that are missing, so items worked and paid "
+                          "since then may still show as open." if later else
+                          "Payments after that date are not in the site, so items worked and paid since then still show as open."
+                          + (f" Files did arrive on {got[:10]}, but none holds a later payment." if recent else "")),
                       "who": ("Billing lead, with TriZetto: ask whether newer remittances exist and why they are not in the downloads." if recent
                               else "Billing lead: put the latest TriZetto downloads in the Dropbox folder.")})
     items += trizetto_health(conn, today)
@@ -763,10 +790,11 @@ def brief(conn: sqlite3.Connection, today: str | None = None) -> dict:
     if "findings" not in tables:
         return {"ready": False}
     newest = newest_payment(conn)
-    return {"ready": True, "today": today, "newest_payment": newest, "work": work(conn, today), "recovered": recovered(conn, today),
+    feed = feed_day(conn, today)        # how far the remittances reach for most payers: the feed check and the warning line
+    return {"ready": True, "today": today, "newest_payment": newest, "feed_date": feed, "work": work(conn, today), "recovered": recovered(conn, today),
             "batches": batches(conn, today), "decide": to_decide(conn, newest, today=today), "missed": missed(conn, today), "done": done(conn, today),
-            "follow_ups": follow_ups(conn, newest, today=today), "contracts": contract_levers(conn, newest), "fees": fee_levers(conn, newest),
-            "causes": denial_causes(conn, newest), "health": data_health(conn, newest, today), "work_types": WORK_TYPES,
+            "follow_ups": follow_ups(conn, newest, today=today), "contracts": contract_levers(conn, feed or newest), "fees": fee_levers(conn, feed or newest),
+            "causes": denial_causes(conn, feed or newest), "health": data_health(conn, newest, today, feed), "work_types": WORK_TYPES,
             "labels": {k: {"label": v[0], "next": v[1], "work": SIGNAL_WORK.get(k), "short": SHORT_LABELS.get(k, v[0])} for k, v in SIGNAL_LABELS.items()},
             "statuses": STATUS_LABELS,
             "claim_kinds": {k: sorted(v) for k, v in CLAIM_KIND_CARCS.items()}}

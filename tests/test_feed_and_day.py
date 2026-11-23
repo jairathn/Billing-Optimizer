@@ -1,13 +1,21 @@
 """The day the remittances reach, and the day it is (review of the live hotfix).
 
 mr-1   a payment date no calendar has (BPR16 20260931, 20270229) never stops the analysis, the alerts or a page
+mr-2   the Data tab's feed check, Today's banner, the brief and the warning line go by the day the feed reaches
 Both hosts: the server's store file and the serverless site (the compact store image its cycle keeps, the dashboard's
 copy). Invented data only: payers, claim numbers and amounts are made up."""
 from __future__ import annotations
 
 import base64
 import json
+import os
+import shutil
+import socket
 import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
 from datetime import date, timedelta
 
 import pytest
@@ -217,3 +225,107 @@ def test_both_hosts_keep_working_over_payment_dates_no_calendar_has(host):
         st = c.get("/api/sync/status", headers=h)
         assert st.status_code == 200 and st.json()["feed_date"] == "2026-11-20", st.text
         assert c.get("/api/brief", headers=h).status_code == 200
+
+
+# =========================================================================== mr-2: the feed check, the banner, the brief
+def _three(pay: str) -> dict[str, bytes]:
+    """Three payers whose remittances all stop on one day, 25 visits each."""
+    return {f"p{k}.RMT": remit("".join(clean_visits(20000 + 100 * k, 25, "99214", "223.65", "117.60")), "100.00", payer=payer,
+                               seg_count=99, isa_ctrl=f"{700000000 + k:09d}", pay_date=pay)
+            for k, payer in enumerate(("ANTHEM", "KY MEDICARE", "HUMANA"))}
+
+
+def _stray(when: str) -> str:
+    """A stray remittance's day as its file writes it: two days ago where the practice is, or far in the future."""
+    return (date.fromisoformat(runtime.practice_today()) - timedelta(days=2)).strftime("%Y%m%d") if when == "recent" else "20991231"
+
+
+def _denied(pay: str) -> dict[str, bytes]:
+    """One Anthem visit denied for want of an authorization, paid (at $0) on `pay`: a cause the home screen counts."""
+    return {"denied.RMT": remit(claim(950, svc("99214", "223.65", "0.00", None, "CAS*CO*197*223.65~")), "0.00", seg_count=99,
+                                isa_ctrl="000000950", pay_date=pay)}
+
+
+@pytest.mark.parametrize("host", HOSTS, indirect=True)
+@pytest.mark.parametrize("when", ["recent", "future"])
+def test_the_feed_check_and_the_brief_go_by_the_day_the_feed_reaches(host, when):
+    """Three payers whose remittances stop on September 1, 2026 and one stray file from a fourth, small one (dated two days
+    ago, or in 2099). The Data tab's feed check fails with the day the feed reaches (it said "Payments are current"),
+    Today's banner leads with it, and the brief carries that day for the warning line; the newest payment stays the
+    newest payment. The home screen's windows end there too: the 12 full months of payment fees (the same on the Fees
+    page), the last full year of payer rates, and the 90 days of denial causes."""
+    stray = _stray(when)
+    c, h = host({**_three("20260901"), **_denied("20260901"), **_one("stray.RMT", stray)})
+    b = c.get("/api/brief", headers=h).json()
+    assert b.get("feed_date") == "2026-09-01" and b["newest_payment"] == f"{stray[:4]}-{stray[4:6]}-{stray[6:]}", b.get("feed_date")
+    bad = [x for x in b["health"] if not x["ok"]]
+    assert bad and bad[0]["key"] == "feed", [x["key"] for x in bad]          # the first check Today's banner shows
+    feed = bad[0]
+    assert feed.get("feed") == "2026-09-01" and feed["title"].startswith("The remittances reach 2026-09-01 for most payers ("), feed["title"]
+    assert feed["days"] == (date.fromisoformat(b["today"]) - date(2026, 9, 1)).days
+    assert "only a few payers" in feed["detail"] and "Payments are current" not in json.dumps(b["health"])
+    months = insights.fee_months("2026-09-01")
+    assert (b["fees"]["payment_fee12_from"], b["fees"]["payment_fee12_to"]) == months == ("2025-09", "2026-08")
+    fp = c.get("/api/fees/payers", headers=h).json()
+    assert (fp["from"], fp["to"]) == months
+    assert b["contracts"]["year"] == "2025"
+    assert "DENIED_AUTH" in [x["signal"] for x in b["causes"]], b["causes"]
+
+
+def _browser_ready() -> bool:
+    return bool(shutil.which("node")) and subprocess.run(["node", "-e", "require('playwright')"], capture_output=True).returncode == 0
+
+
+def _pages(env_extra: dict) -> dict:
+    """Serve the app (uvicorn, as both hosts do) and read Today's banner and the Worklist's warning line in a browser
+    (tests/feed_page.js)."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DROPBOX_", "TRIZETTO_", "SRFAX_", "ANTHROPIC_", "SMTP_", "MODMED_"))
+           and k not in ("REPORT_TO", "ALERT_WEBHOOK_URL", "REMITWATCH_MODE", "REMITWATCH_OWNER_PASSWORD", "REMITWATCH_SHOW_PHI",
+                         "REMITWATCH_SYNC_INTERVAL_MINUTES", "REMITWATCH_ALLOW_OPEN", "REMITWATCH_DB", "REMITWATCH_STATE_DIR")}
+    env.update(REMITWATCH_PASSWORD=PW, REMITWATCH_USER="oda", PYTHONDONTWRITEBYTECODE="1", **env_extra)
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    srv = subprocess.Popen([sys.executable, "-B", "-m", "uvicorn", "remitwatch.api:app", "--host", "127.0.0.1", "--port", str(port),
+                            "--log-level", "warning"], cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        got = subprocess.run(["node", os.path.join(repo, "tests", "feed_page.js"), str(port), "oda", PW], capture_output=True, text=True,
+                             timeout=240)
+        assert got.returncode == 0, got.stderr[-2000:]
+        return json.loads(got.stdout.strip().splitlines()[-1])
+    finally:
+        srv.terminate()
+        srv.wait(timeout=10)
+
+
+@pytest.mark.skipif(not _browser_ready(), reason="needs node and Playwright for node")
+@pytest.mark.parametrize("on", HOSTS)
+def test_the_pages_say_how_far_the_remittances_reach(tmp_path, box, on):  # noqa: F811
+    """In a browser, on both hosts: Today's banner leads with the day the feed reaches, and the Worklist's warning line says
+    payments after that day are not all in (before, one stray file hid both)."""
+    files = {**_three("20260901"), **_one("stray.RMT", _stray("recent"))}
+    if on == "server":
+        s = _store(tmp_path, files)
+        Detector(s, run_id="t").run()
+        s.close()
+        env = {"REMITWATCH_DB": str(tmp_path / "s.sqlite")}
+    else:
+        root, client, state = box
+        (root / DATA).mkdir(parents=True, exist_ok=True)
+        for name, data in files.items():
+            (root / DATA / name).write_bytes(data)
+        cycle(state, client)
+        env = {"REMITWATCH_MODE": "serverless", "REMITWATCH_STATE_DIR": str(root / "RemitWatch-state"),
+               "REMITWATCH_TMP": str(root.parent / "site-scratch")}
+    seen = _pages(env)
+    assert seen["errors"] == [] and seen["failed"] == [], (seen["errors"], seen["failed"])
+    assert seen["banner"].startswith("Before you start: The remittances reach 2026-09-01 for most payers ("), seen["banner"]
+    assert "Payments after Sep 1, 2026 are not all in yet; some items may already be paid." in seen["line"], seen["line"]

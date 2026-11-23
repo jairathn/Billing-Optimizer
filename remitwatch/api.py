@@ -1688,12 +1688,13 @@ def _fee_vendors(evidence: list) -> list[str]:
 
 def _fee_payers(statuses: tuple = ("open", "in_progress"), payer_name: str | None = None) -> dict:
     """Payment fees by payer as the remittance names it (the one a request goes to): the last 12 full months before the
-    newest payment's month, everything since the first fee, the months with a fee, the vendors named, and the ids of
-    its fee items (one per payer and month), so asking can mark them all at once."""
-    from .insights import fee_months, newest_payment
+    month the remittances reach for most payers (the home screen's months: one stray newer file does not move them),
+    everything since the first fee, the months with a fee, the vendors named, and the ids of its fee items (one per payer
+    and month), so asking can mark them all at once."""
+    from .insights import feed_day, fee_months, newest_payment
     conn = db()
     try:
-        newest = newest_payment(conn)
+        newest = feed_day(conn, _day(0)) or newest_payment(conn)
     finally:
         conn.close()
     lo, hi = fee_months(newest)
@@ -3326,27 +3327,15 @@ STALE_APPEAL_DAYS = int(os.environ.get("REMITWATCH_STALE_APPEAL_DAYS", "14"))
 
 
 def _feed_day() -> str | None:
-    """The day the remittance feed reaches for most payers (detect.feed_date): worked out from the store on a server. A
-    serverless host's copy holds only the lines behind items, so it reads the date the last analysis worked out on the
-    full store, else the newest payment that is a day on the calendar, never after today."""
+    """The day the remittance feed reaches for most payers (insights.feed_day, the one the Data tab's feed check and the
+    pages' warning line show): worked out from the store on a server; on a serverless host's copy the date the last
+    analysis worked out on the full store. Never after today where the practice is (a future-dated file counts as today)."""
     if not has_table("transactions"):
         return None
-    from .detect import FEED_META, feed_date, real_day
-    from .insights import newest_payment
-    today = _day(0)                         # never after today where the practice is (a future-dated file counts as today)
+    from .insights import feed_day
     conn = db()
     try:
-        if not runtime.serverless():
-            return feed_date(conn, today)
-        r = conn.execute("SELECT value FROM meta WHERE key=?", (FEED_META,)).fetchone() if \
-            conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() else None
-        try:
-            d = json.loads(r[0]).get("date") if r else None
-        except (TypeError, ValueError, AttributeError):
-            d = None
-        if not real_day(d):         # no analysis saved it (or saved a day no calendar has, before this check)
-            d = newest_payment(conn)
-        return min(str(d)[:10], today) if d else None
+        return feed_day(conn, _day(0))
     finally:
         conn.close()
 

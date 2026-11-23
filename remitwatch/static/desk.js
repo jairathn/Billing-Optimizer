@@ -56,10 +56,11 @@ function viewName(f){
   const d = (WL_DEADLINES.find(x=>x[0]===(f.deadline||''))||['',''])[1], s = (WL_STATUSES.find(x=>x[0]===f.status)||['',f.status])[1];
   return [d, f.status === 'open,in_progress' ? '' : s].filter(Boolean).join(' · ');
 }
-// one line while the payment feed is behind: an item on the list may already be paid
+// one line while the payment feed is behind: an item on the list may already be paid. The day is how far the remittances
+// reach for most payers (the Data tab's feed check), not the newest payment of any one: one stray file does not move it
 function dataLine(b){
-  const h = (b.health||[]).find(x=>!x.ok && /No payment newer/.test(x.title||''));
-  return h ? `<div class="oneline"><span class="sev-medium">●</span> Payments after ${esc(longDate((b.newest_payment||'').slice(0,10)))} are not in yet; some items may already be paid. <a href="#data" class="go-data">Data</a></div>` : '';
+  const h = (b.health||[]).find(x=>!x.ok && x.key==='feed');
+  return h ? `<div class="oneline"><span class="sev-medium">●</span> Payments after ${esc(longDate((h.feed||b.feed_date||b.newest_payment||'').slice(0,10)))} are not all in yet; some items may already be paid. <a href="#data" class="go-data">Data</a></div>` : '';
 }
 async function payerList(){
   if(!state.payerList){ try { state.payerList = [...new Set((await api('/api/payers')).map(r=>r.payer_group).filter(Boolean))].sort(); } catch(e){ state.payerList = []; } }
