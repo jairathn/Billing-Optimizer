@@ -461,7 +461,9 @@ def cmd_send_appeals(args: argparse.Namespace) -> int:
     n: Counter = Counter()
     for it in q["items"]:
         if not it["ready"]:
-            n["by_hand" if it.get("by_hand") else "no_number"] += 1     # a group of many insurers: faxed by hand
+            # a payer that files no faxed first-level appeal (filed on its portal or by mail); a group of many insurers (faxed
+            # by hand); or no number saved yet
+            n["no_fax_route" if it.get("no_fax") else "by_hand" if it.get("by_hand") else "no_number"] += 1
             continue
         try:
             r = api.appeals_send({"finding_id": it["finding_id"]}, "cli")
