@@ -225,7 +225,8 @@ function bindFaxDrawer(id, d, seq, what){
       msg.className = e.code === 'in_flight' ? 'small sev-medium' : 'small sev-high'; msg.textContent = e.message; b.disabled = false; return; }
     busy = false;
     if(r.status === 'sent'){ state.brief = null; state.dirty = true;
-      if(here()) openDetail(id); else if(typeof notice === 'function') notice(`Faxed: ${what || 'an item'}${r.number ? ' to ' + r.number : ''}. It is marked Sent.`);
+      // kept: the item changed while the fax went out (the run's Paid, a hide), so it was not marked Sent; its history says so
+      if(here()) openDetail(id); else if(typeof notice === 'function') notice(`Faxed: ${what || 'an item'}${r.number ? ' to ' + r.number : ''}. ${r.kept || 'It is marked Sent.'}`);
       return; }
     if(!here()){ if(typeof notice === 'function') notice(`Not faxed (${what || 'an item'}): ${r.reason || 'Not sent.'} Open it again to finish.`); return; }
     msg.className = 'small sev-medium';

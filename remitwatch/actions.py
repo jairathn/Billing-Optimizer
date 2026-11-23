@@ -211,11 +211,12 @@ def hide_candidates(conn: sqlite3.Connection, payer_group: str, signal: str, at:
                                            AND COALESCE(stale,0)=0 {touched}""", tuple(params))]
 
 
-def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str) -> int:
-    """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands) and any
-    whose status was decided after `at` (an entry applied again must not undo what came after it)."""
+def _hide_matching(conn: sqlite3.Connection, payer_group: str, signal: str, note: str, at: str, skip: list | None = None) -> int:
+    """Move the open items of one rule to Let go, leaving out any a person has changed (their decision stands), any
+    whose status was decided after `at` (an entry applied again must not undo what came after it), and those in `skip`
+    (a fax was going out for them when the rule was added: api.hide_add)."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    ids = hide_candidates(conn, payer_group, signal, at)
+    ids = [i for i in hide_candidates(conn, payer_group, signal, at) if i not in set(skip or ())]
     for fid in ids:
         conn.execute("UPDATE findings SET status='dismissed', status_changed_at=? WHERE finding_id=?", (at, fid))
         if "finding_events" in have:
@@ -250,7 +251,7 @@ def apply_hide_rule(conn: sqlite3.Connection, a: dict) -> None:
     note = (a.get("note") or "").strip()[:300] or f"Hidden: {pg} is not expected to pay these"
     conn.execute("INSERT OR REPLACE INTO hide_rules (payer_group, signal, actor, at, note, removed_at) VALUES (?,?,?,?,?,NULL)",
                  (pg, sig, a.get("actor") or "", at, note))
-    _hide_matching(conn, pg, sig, note, at)
+    _hide_matching(conn, pg, sig, note, at, a.get("skip") if isinstance(a.get("skip"), list) else None)
 
 
 def apply_hide_rules(conn: sqlite3.Connection) -> int:

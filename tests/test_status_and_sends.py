@@ -12,18 +12,23 @@ Invented data only: claim ids, member numbers, amounts and dates are made up (te
 from __future__ import annotations
 
 import base64
+import json
+import threading
 import time
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from remitwatch import cloud
+from remitwatch import cloud, fax
 from remitwatch.store import Store
+from tests.fake_fax import FakeLine
 from tests.test_cloud import DATA, PW, box, cycle, raw_conn  # noqa: F401  (box is a fixture)
-from tests.test_features import claim, clean_visits, svc
+from tests.test_features import build_store, claim, clean_visits, svc
 from tests.test_remitwatch import remit
 
 XHR = {"X-Requested-With": "remitwatch"}
+PAYER_FAX = "(800) 555-0142"
 PRACTICE = {"name": "Test Dermatology", "address": "1 Main St, Anytown KY", "tin": "61-0000000", "npi": "1999999999",
             "phone": "(270) 555-0100", "fax": "(270) 555-0101", "email": "billing@example.org"}
 
@@ -221,3 +226,189 @@ def test_ch1_the_fold_keeps_a_runs_paid_against_a_page_drawn_before_it(tmp_path,
                                                      "at": "2026-11-21T15:02:00+00:00", "entry": "e5"})])
     assert s.conn.execute("SELECT status FROM findings WHERE finding_id=?", (fid,)).fetchone()[0] == "appealed"
     s.close()
+
+
+# =========================================================================== CH-4: a send that finishes after a change
+KEPT_PAID = "It was Paid by the time the fax went out, so its status was left as it was. Look at it: the payer has this appeal now."
+
+
+def _under(n: int) -> list[str]:
+    """Clean visits at the payer's usual rate ($117.60 for 99214) and `n` visits allowed less, each by its own amount: each
+    an open item a letter answers (no visit note needed)."""
+    return clean_visits(1, 25, "99214", "223.65", "117.60") + [
+        claim(300 + k, svc("99214", "223.65", f"{110 - k}.00", f"{110 - k}.00", f"CAS*CO*45*{113.65 + k:.2f}~")) for k in range(n)]
+
+
+def _recent() -> str:
+    return (date.today() - timedelta(days=7)).strftime("%Y%m%d")
+
+
+def _paid_by_the_run_now(conn, fid: str) -> None:
+    """What a run writes when it finds the payment that pays an item: Paid, its recovery, its automatic note."""
+    conn.execute("""UPDATE findings SET status='resolved', recovered_cents=760, recovered_date='2026-11-23', prev_status='open',
+                    auto_note='Paid on a later remittance (2026-11-23, trace T9, $7.60)' WHERE finding_id=?""", (fid,))
+    conn.execute("""INSERT INTO finding_events (finding_id, at, kind, from_status, to_status, amount_cents, actor, note)
+                    VALUES (?, '2026-11-23T10:17:00+00:00', 'paid_on_later_remit', 'open', 'resolved', 760, 'system', 'Paid on a later remittance')""",
+                 (fid,))
+    conn.commit()
+
+
+def _while_sending(c, body: dict, headers: dict, line, monkeypatch, during) -> dict:
+    """Appeal by fax for one item, with the fax line taking its time (SRFax's POST with the PDF in it); `during` runs while
+    the line has it. Returns the send's answer."""
+    entered, gate = threading.Event(), threading.Event()
+    real = line.send
+
+    def send(to, pdf, filename):
+        entered.set()
+        assert gate.wait(30)
+        return real(to, pdf, filename)
+    monkeypatch.setattr(line, "send", send)
+    got: dict = {}
+    t = threading.Thread(target=lambda: got.update(r=c.post("/api/appeals/send", json=body, headers=headers)))
+    t.start()
+    try:
+        assert entered.wait(30), "the send never reached the line"
+        during()
+    finally:
+        gate.set()
+        t.join(60)
+    assert got["r"].status_code == 200, got["r"].json()
+    return got["r"].json()
+
+
+def _server(tmp_path, monkeypatch, n: int = 1) -> SimpleNamespace:
+    """The server: a store file with `n` items a letter answers, paid last week, the payer's appeal fax number saved."""
+    import sqlite3
+
+    from remitwatch.detect import Detector
+    from tests.test_hotfix2d import _site
+    s = build_store(tmp_path, _under(n), pay_date=_recent())
+    Detector(s, run_id="t").run()
+    s.close()
+    db = str(tmp_path / "s.sqlite")
+    c, line, api = _site(tmp_path, monkeypatch, db)
+    ids = [i["finding_id"] for i in c.get("/api/findings?signal=UNDERPAID_VS_OWN_RATE&limit=50").json()["items"]]
+    assert len(ids) == n
+    assert c.post("/api/faxes/payer", json={"payer_group": "Anthem / BCBS", "number": PAYER_FAX}, headers=XHR).status_code == 200
+    return SimpleNamespace(c=c, line=line, api=api, db=db, ids=ids, h=XHR, conn=lambda: sqlite3.connect(db))
+
+
+def _serverless(box, monkeypatch, n: int = 1) -> SimpleNamespace:
+    """The serverless site with the same items, loaded by one run; this host sends faxes (a fake line)."""
+    root, client, state = box
+    (root / DATA).mkdir(parents=True, exist_ok=True)
+    claims = _under(n)
+    for k, i in enumerate(range(0, len(claims), 10)):
+        (root / DATA / f"r{k:03d}.RMT").write_bytes(remit("".join(claims[i:i + 10]), "100.00", seg_count=99, isa_ctrl=f"{k + 1:09d}",
+                                                         pay_date=_recent()))
+    assert "error" not in cycle(state, client)
+    c, h, api = _serve(root, monkeypatch)
+    line = FakeLine()
+    monkeypatch.setattr(fax, "provider", lambda env=None: line)
+    ids = [i["finding_id"] for i in c.get("/api/findings?signal=UNDERPAID_VS_OWN_RATE&limit=50", headers=h).json()["items"]]
+    assert len(ids) == n
+    assert c.post("/api/faxes/payer", json={"payer_group": "Anthem / BCBS", "number": PAYER_FAX}, headers=h).status_code == 200
+    return SimpleNamespace(root=root, client=client, state=state, c=c, h=h, api=api, line=line, ids=ids)
+
+
+def _journal(state) -> list[dict]:
+    return [json.loads(state.get(m["name"])) for m in state.list(cloud.ACTIONS)]
+
+
+def test_ch4_a_send_that_finishes_after_the_run_paid_its_item_keeps_the_paid(tmp_path, monkeypatch):
+    """The misuse check's try 8 (t8_races, 2): while SRFax has the appeal, the run closes the item as Paid. The send that
+    then finishes records the fax and says so in the item's history, and leaves the Paid and its recovery as they are."""
+    s = _server(tmp_path, monkeypatch)
+    fid = s.ids[0]
+
+    def during():
+        conn = s.conn()
+        _paid_by_the_run_now(conn, fid)
+        conn.close()
+    r = _while_sending(s.c, {"finding_id": fid, "stale_ok": True}, s.h, s.line, monkeypatch, during)
+    assert r["status"] == "sent" and r.get("kept") == KEPT_PAID, r
+    d = s.c.get(f"/api/findings/{fid}").json()
+    f = d["finding"]
+    assert (f["status"], f["recovered_cents"]) == ("resolved", 760) and f["auto_note"], "the send overwrote the run's Paid"
+    assert [(x["direction"], x["status"]) for x in d["faxes"]] == [("out", "queued")]          # the fax that went out is on record
+    assert not any(e["kind"] == "manual" for e in d["events"])
+    assert [e["note"] for e in d["events"] if e["kind"] == "fax"] == [
+        f"Faxed to Anthem / BCBS at {PAYER_FAX} (fax {r['fax_id']}, {r['pages']} pages). {KEPT_PAID}"]
+
+
+def test_ch4_a_reason_hidden_while_an_appeal_goes_out_leaves_that_item_out_and_says_so(tmp_path, monkeypatch):
+    """The misuse check's try 8 (t8_races, 1): the owner hides the item's reason for its payer while SRFax has its appeal.
+    The preview and the hide leave that item out and say how many were left out; the send then marks it Sent; the other
+    item of that reason goes to Let go."""
+    s = _server(tmp_path, monkeypatch, n=2)
+    going, other = s.ids
+    q = {"payer_group": "Anthem / BCBS", "signal": "UNDERPAID_VS_OWN_RATE"}
+    seen: dict = {}
+
+    def during():
+        seen["preview"] = s.c.get("/api/hide/preview", params=q).json()
+        seen["hide"] = s.c.post("/api/hide", json=dict(q, note="This payer never pays more", confirm=1), headers=XHR)
+        seen["status"] = s.c.get(f"/api/findings/{going}").json()["finding"]["status"]
+    r = _while_sending(s.c, {"finding_id": going, "stale_ok": True}, s.h, s.line, monkeypatch, during)
+    p = seen["preview"]
+    assert (p["n"], p.get("in_flight_n")) == (1, 1), p
+    h = seen["hide"]
+    assert h.status_code == 200 and (h.json()["hidden"], h.json().get("left_out")) == (1, 1), h.json()
+    assert seen["status"] == "open"
+    assert r["status"] == "sent" and "kept" not in r, r
+    assert [s.c.get(f"/api/findings/{i}").json()["finding"]["status"] for i in (going, other)] == ["appealed", "dismissed"]
+
+
+def test_ch4_serverless_a_send_that_finishes_after_the_run_paid_its_item_keeps_the_paid(box, monkeypatch):
+    """The same on the serverless host: a run closes the item as Paid while SRFax has the appeal, and this instance's copy
+    has the Paid by the time the send finishes. Nothing that would mark it Sent is journaled; the fax and a line in its
+    history are, and the next run's fold keeps the Paid and its recovery."""
+    s = _serverless(box, monkeypatch)
+    fid = s.ids[0]
+
+    def during():
+        store, _ = cloud.load_raw(s.state)
+        _paid_by_the_run_now(store.conn, fid)
+        cloud.save_raw(s.state, store, log=lambda *a: None)
+        cloud.save_serving(s.state, store.conn)
+        store.close()
+        cloud.SERVING_COPY.ensure(force=True)                  # the instance's copy is refreshed with the run's Paid
+        assert s.c.get(f"/api/findings/{fid}", headers=s.h).json()["finding"]["status"] == "resolved"
+    r = _while_sending(s.c, {"finding_id": fid, "stale_ok": True}, s.h, s.line, monkeypatch, during)
+    assert r["status"] == "sent" and r.get("kept") == KEPT_PAID, r
+    assert "status" not in [a["kind"] for a in _journal(s.state)]
+    assert s.c.get(f"/api/findings/{fid}", headers=s.h).json()["finding"]["status"] == "resolved"
+    time.sleep(1.05)
+    out = cycle(s.state, s.client)
+    assert "error" not in out and not out.get("actions_waiting"), out
+    conn = raw_conn(s.state)
+    assert tuple(conn.execute("SELECT status, recovered_cents FROM findings WHERE finding_id=?", (fid,)).fetchone()) == ("resolved", 760)
+    assert [tuple(x) for x in conn.execute("SELECT direction, status FROM faxes WHERE finding_id=?", (fid,))] == [("out", "queued")]
+    assert [x[0] for x in conn.execute("SELECT note FROM finding_events WHERE finding_id=? AND kind='fax'", (fid,))] == [
+        f"Faxed to Anthem / BCBS at {PAYER_FAX} (fax {r['fax_id']}, {r['pages']} pages). {KEPT_PAID}"]
+
+
+def test_ch4_serverless_a_reason_hidden_while_an_appeal_goes_out_leaves_that_item_out(box, monkeypatch):
+    """The hide on the serverless host while this host faxes an appeal of that reason: the preview and the hide leave the
+    item out and say so, the journal entry names it, and the run's fold leaves it out too; the send marks it Sent."""
+    s = _serverless(box, monkeypatch, n=2)
+    going, other = s.ids
+    q = {"payer_group": "Anthem / BCBS", "signal": "UNDERPAID_VS_OWN_RATE"}
+    seen: dict = {}
+
+    def during():
+        seen["preview"] = s.c.get("/api/hide/preview", params=q, headers=s.h).json()
+        seen["hide"] = s.c.post("/api/hide", json=dict(q, note="This payer never pays more", confirm=1), headers=s.h)
+    r = _while_sending(s.c, {"finding_id": going, "stale_ok": True}, s.h, s.line, monkeypatch, during)
+    p = seen["preview"]
+    assert (p["n"], p.get("in_flight_n")) == (1, 1), p
+    h = seen["hide"]
+    assert h.status_code == 200 and (h.json()["hidden"], h.json().get("left_out")) == (1, 1), h.json()
+    assert r["status"] == "sent" and "kept" not in r, r
+    assert [a.get("skip") for a in _journal(s.state) if a["kind"] == "hide_rule"] == [[going]]
+    time.sleep(1.05)
+    out = cycle(s.state, s.client)
+    assert "error" not in out and not out.get("actions_waiting"), out
+    conn = raw_conn(s.state)
+    assert [conn.execute("SELECT status FROM findings WHERE finding_id=?", (i,)).fetchone()[0] for i in (going, other)] == ["appealed", "dismissed"]

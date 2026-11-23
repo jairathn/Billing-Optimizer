@@ -3565,6 +3565,51 @@ def _mark_sent_appeal(r: dict, actor: str) -> bool:
     return True
 
 
+SENT_KEPT = "It was {label} by the time the fax went out, so its status was left as it was. Look at it: the payer has this appeal now."
+
+
+def _sent_once_faxed(fid: str, note: str, actor: str, again: bool) -> str | None:
+    """After an appeal went out: the item is marked Sent only if it is still To do or Started (or, sent again after every try
+    failed, still Sent), the check _mark_sent_appeal makes. One that changed while SRFax had the fax (the run closed it as
+    Paid, a reason hidden for its payer let it go) keeps its status: the fax is on record already (_send_fax), a line in its
+    history says it went out, and a person decides. On a server the check and the write are one step on the store; on a
+    serverless host the check is on the copy it serves, and the journal's fold keeps a run's change too
+    (actions.apply_status). Returns why it was not marked Sent, or None."""
+    from .actions import apply_event, heir_of
+    fine = ("open", "in_progress") + (("appealed",) if again else ())
+
+    def why(row) -> str | None:
+        return None if row is None or row[0] in fine else SENT_KEPT.format(label=STATUS_LABELS.get(row[0], row[0]))
+    if runtime.serverless():
+        conn = db()
+        try:
+            kept = why(conn.execute("SELECT status FROM findings WHERE finding_id=?", (heir_of(conn, fid),)).fetchone())
+        finally:
+            conn.close()
+        if kept:
+            _record_action({"kind": "event", "event": "fax", "finding_id": fid, "actor": actor, "note": f"{note} {kept}"})
+        else:
+            _record_status([fid], "appealed", note, None, actor)
+        return kept
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            kept = why(conn.execute("SELECT status FROM findings WHERE finding_id=?", (heir_of(conn, fid),)).fetchone())
+            if kept:
+                apply_event(conn, {"finding_id": fid, "event": "fax", "actor": actor, "note": f"{note} {kept}"})
+            else:
+                apply_status(conn, fid, "appealed", note, None, actor)
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    return kept
+
+
 # ---- an appeal being prepared and sent: in flight from the first step (the note looked up, Claude's review) to the end of
 # the send, so a person's status change and a second press wait for it instead of undoing it. A row in the store's meta
 # table on a server; on a serverless host that sends, a marker file in the state folder that every instance can see.
@@ -4171,8 +4216,10 @@ def _appeal_after_holds(body: dict, user: str, fid: str, detail: dict, f: dict, 
         return dict(out, status="skipped", reason=str(exc))
     except fax.FaxError as exc:
         return held("fax_error", str(exc))
-    _record_status([fid], "appealed", f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages).", None, user)
-    return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), pages=pages, note=note)
+    # Sent only if nothing changed the item while SRFax had the fax (the run's Paid, a hide): else it keeps its status
+    kept = _sent_once_faxed(fid, f"Faxed to {f.get('payer_group') or 'the payer'} at {fax.pretty(number)} (fax {sent['provider_id']}, {pages} pages).",
+                            user, again)
+    return dict(out, status="sent", fax_id=sent["provider_id"], number=fax.pretty(number), pages=pages, note=note, **({"kept": kept} if kept else {}))
 
 
 def _yes_ai(v: Any) -> bool:
@@ -4926,13 +4973,19 @@ def _rules_in_force() -> str:
         conn.close()
 
 
-def _hide_size(pg: str, sig: str) -> dict:
+def _hide_size(pg: str, sig: str, skip: list | None = None) -> dict:
     """What hiding one reason for one payer lets go now, from the copy the dashboard serves: the open items, their dollars,
-    and how many of them are still inside their filing window."""
+    and how many of them are still inside their filing window. An item with a fax going out now (_sending_now) is left
+    out: let go now, the send would find it let go (or mark it Sent over the hide). They are counted apart (in_flight_n),
+    and their ids added to `skip` when given (the hide's journal entry carries them, so every copy leaves them out)."""
     from .actions import hide_candidates
     conn = db()
     try:
         ids = hide_candidates(conn, pg, sig, _now_iso())
+        flying = _sending_now(conn, ids)
+        if skip is not None:
+            skip.extend(sorted(flying))
+        ids = [i for i in ids if i not in flying]
         n = cents = live_n = live_cents = 0
         today = _day(0)                     # inside its window until midnight where the practice is
         for k in range(0, len(ids), 500):
@@ -4941,7 +4994,7 @@ def _hide_size(pg: str, sig: str) -> dict:
                 n, cents = n + 1, cents + c
                 if dl and dl >= today:
                     live_n, live_cents = live_n + 1, live_cents + c
-        return {"n": n, "cents": cents, "in_window_n": live_n, "in_window_cents": live_cents}
+        return {"n": n, "cents": cents, "in_window_n": live_n, "in_window_cents": live_cents, "in_flight_n": len(flying)}
     finally:
         conn.close()
 
@@ -4994,13 +5047,15 @@ def hide_add(request: Request, body: dict = Body(default={}), user: str = Depend
     confirm = _whole_cents(body.get("confirm"))
     if confirm is None:
         raise HTTPException(400, "Type the number of items it lets go, to confirm.")
-    size = _hide_size(pg, sig)
+    skip: list[str] = []                    # items with a fax going out now: left out of the hide, and named in its entry
+    size = _hide_size(pg, sig, skip)
     if confirm != size["n"]:
         raise Refused(409, "changed", f"The count changed: it lets go {size['n']} items now, not {confirm}. Look at the numbers again.", **size)
     before = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
-    _record_action({"kind": "hide_rule", "op": "add", "payer_group": pg, "signal": sig, "actor": _owner_actor(user), "note": note.strip()})
+    _record_action({"kind": "hide_rule", "op": "add", "payer_group": pg, "signal": sig, "actor": _owner_actor(user), "note": note.strip(),
+                    **({"skip": skip} if skip else {})})
     after = (one("SELECT COUNT(*) n FROM findings WHERE payer_group=? AND signal=? AND status='open'", (pg, sig)) or {}).get("n") or 0
-    return {"ok": True, "hidden": before - after}
+    return {"ok": True, "hidden": before - after, **({"left_out": len(skip)} if skip else {})}
 
 
 # --------------------------------------------------------------------------- suggested templates (remitwatch.lessons)

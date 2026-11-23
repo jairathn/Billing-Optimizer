@@ -573,7 +573,8 @@ async function hideReason(payer, signal, label, after){
   if(!box) return;
   box.insertAdjacentHTML('beforeend', `<div class="small" style="margin:8px 0">It lets go <b>${pl(p.n, 'open item')}</b> now, worth <b>${money2(p.cents)}</b>.
       <b>${pl(p.in_window_n, 'item')}</b> of them (${money2(p.in_window_cents)}) ${p.in_window_n === 1 ? 'is' : 'are'} still inside ${p.in_window_n === 1 ? 'its' : 'their'} filing window.
-      Every future item of this reason for ${esc(payer)} is let go too. Anything someone has worked stays; Show again under Hidden undoes it.</div>
+      Every future item of this reason for ${esc(payer)} is let go too. Anything someone has worked stays; Show again under Hidden undoes it.
+      ${p.in_flight_n ? `<b>${pl(p.in_flight_n, 'item')}</b> with a fax going out now ${p.in_flight_n === 1 ? 'is' : 'are'} left out and stay${p.in_flight_n === 1 ? 's' : ''} on the list.` : ''}</div>
     <label class="small" style="display:block;margin:6px 0">Why this payer does not pay these (shown on each item)<br><textarea id="hdNote" rows="2" maxlength="300" style="width:100%"></textarea></label>
     <label class="small" style="display:block;margin:6px 0">Type the number of items it lets go (${esc(String(p.n))}) to confirm<br><input id="hdCount" inputmode="numeric" autocomplete="off" style="width:120px"></label>
     <div class="actions"><button class="primary" id="hdGo">Hide them</button><button id="hdNo">Cancel</button></div><div id="hdMsg" class="small"></div>`);
@@ -592,7 +593,8 @@ async function hideReason(payer, signal, label, after){
     $('#modal').classList.remove('open');
     state.brief = null; state.dirty = true;
     if(after) after(); else render();
-    setTimeout(() => alert(`${pl(r.hidden, 'item')} hidden. New ones will be hidden too.`), 50);
+    setTimeout(() => alert(`${pl(r.hidden, 'item')} hidden. New ones will be hidden too.`
+      + (r.left_out ? ` ${pl(r.left_out, 'item')} with a fax going out ${r.left_out === 1 ? 'was' : 'were'} left out and stay${r.left_out === 1 ? 's' : ''} on the list.` : '')), 50);
   };
   box.querySelector('#hdNote').focus();
 }
