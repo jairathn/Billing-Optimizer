@@ -36,7 +36,10 @@ person); nothing is closed by EMA's claim status alone; a person's decision is n
 - Logs and bundles use finding ids (24 hex characters), the store's own keys (line, claim and transaction keys made
   from file hashes), payer groups, codes, counts and dollars. Every log writer goes through the scrubber in
   remitwatch/runlog.py (Scrubber, scrub, scrub_text); never write a log line, an exception message or an event detail
-  any other way. Never put a value read from a file into an exception message.
+  any other way. Never put a value read from a file into an exception message. A key does not make free text safe:
+  only keys with a strict shape (timestamps, run and finding ids, the store's keys, codes, versions, repair targets:
+  runlog.KEY_SHAPES) keep a value as it is; under any other key (status, source, how, rule...) it is scrubbed like any
+  text. The scrubber learns the names the store holds, two-letter ones too (Le, Ng, Wu).
 - Tests use invented data only (tests/ema_fixtures.py, tests/fakes.py, the builders in tests/test_features.py and
   tests/test_remitwatch.py). tests/test_runlog.py plants invented names, birth dates, member ids and record numbers in
   a full cycle on each host and checks that no byte of any log, manifest or bundle holds them; keep it green.
@@ -143,6 +146,9 @@ run's status (Vercel: status.json in the state folder; the server: the Data tab)
 - Skip a test environment, mark a failing test to be skipped, or delete a test to make the suite pass.
 - Catch an exception without logging it (`runlog.caught(exc, step)` in the except block), or close an item without
   its proof rows.
+- Retry anything but a read. remitwatch/repair.py tries network calls again (retry_call, resilient); a callback that
+  runs inside a retried call (trizetto.pull's ingest) goes in `repair.not_retried(...)`, so a code bug in it is raised
+  at once instead of repeating the whole call. A send, an upload, a move or a delete is never wrapped.
 - Let AI decide a state, an outcome or a closure.
 
 ## House style
